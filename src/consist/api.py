@@ -59,7 +59,7 @@ from consist.integrations.ibis import (
     ibis_connection as _ibis_connection,
     ibis_view as _ibis_view,
 )
-from consist.models.artifact import Artifact, get_tracker_ref
+from consist.models.artifact import Artifact, ArchivedOutputs, get_tracker_ref
 from consist.models.run import ConsistRecord, Run, RunResult, resolve_run_result_output
 from consist.models.run_config_kv import RunConfigKV
 from consist.core.tracker import Tracker
@@ -1488,12 +1488,17 @@ def archive_run_outputs(
     mode: Literal["copy", "move"] = "copy",
     append: bool = True,
     tracker: Optional["Tracker"] = None,
-) -> dict[str, Path]:
+) -> ArchivedOutputs:
     """
     Archive one or more historical run outputs into a stable recovery root.
 
     This is the bulk form of ``archive_artifact(...)`` for iteration/archive
     workflows that promote all or a subset of outputs after a run completes.
+
+    Returns an :class:`ArchivedOutputs` mapping that behaves as a read-only
+    ``Mapping[str, Path]`` for backward compatibility.  Access ``.outputs`` to
+    get refreshed :class:`Artifact` objects with the new recovery root set,
+    ready to pass into downstream ``sc.run(inputs=...)`` calls.
     """
     return _resolve_tracker(tracker).archive_run_outputs(
         run_id,
@@ -1511,13 +1516,16 @@ def archive_current_run_outputs(
     mode: Literal["copy", "move"] = "copy",
     append: bool = True,
     tracker: Optional["Tracker"] = None,
-) -> dict[str, Path]:
+) -> ArchivedOutputs:
     """
     Archive outputs for the currently active run into a stable recovery root.
 
     This is the convenience form of ``archive_run_outputs(...)`` for workflows
     that archive outputs immediately after logging them, without separately
     pulling ``result.run.id`` or ``tracker.current_consist.run.id``.
+
+    Returns an :class:`ArchivedOutputs` mapping.  Access ``.outputs`` to get
+    refreshed :class:`Artifact` objects with the new recovery root set.
     """
     return _resolve_tracker(tracker).archive_current_run_outputs(
         archive_root,

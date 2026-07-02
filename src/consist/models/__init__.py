@@ -5,7 +5,7 @@ used by Consist for tracking runs, artifacts, and their relationships.
 
 from __future__ import annotations
 
-from consist.models.artifact import Artifact
+from consist.models.artifact import Artifact, ArchivedOutputs
 from consist.models.artifact_facet import ArtifactFacet
 from consist.models.artifact_kv import ArtifactKV
 from consist.models.artifact_schema import (
@@ -49,6 +49,7 @@ from consist.models.gtfs import (
 
 __all__ = [
     "Artifact",
+    "ArchivedOutputs",
     "ArtifactSchema",
     "ArtifactFacet",
     "ArtifactKV",

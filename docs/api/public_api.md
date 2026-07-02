@@ -107,6 +107,7 @@ with tracker.scenario("baseline") as sc:
 - [`consist.Tracker`](tracker.md)
 - [`consist.Run`](run.md)
 - [`consist.Artifact`](artifact.md)
+- [`consist.ArchivedOutputs`](artifact.md#archived-outputs)
 - [`consist.HydratedRunOutput`](materialize.md#consist.core.materialize.HydratedRunOutput)
 - [`consist.HydratedRunOutputsResult`](materialize.md#consist.core.materialize.HydratedRunOutputsResult)
 - [`consist.MaterializedArtifact`](materialize.md#consist.core.materialize.MaterializedArtifact)

@@ -110,7 +110,7 @@ from consist.core.settings import ConsistSettings
 from consist.core.stores import HotDataStore, MetadataStore
 from consist.core.workflow import OutputCapture, ScenarioContext
 from consist.models.gtfs import GTFS_SCHEMAS
-from consist.models.artifact import Artifact, set_tracker_ref
+from consist.models.artifact import Artifact, ArchivedOutputs, set_tracker_ref
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
 from consist.models.run import (
     ConsistRecord,
@@ -1563,38 +1563,62 @@ class Tracker:
         keys: Sequence[str] | None = None,
         mode: Literal["copy", "move"] = "copy",
         append: bool = True,
-    ) -> dict[str, Path]:
+    ) -> ArchivedOutputs:
         """
         Archive one or more historical run outputs into a stable recovery root.
 
         Each archived output retains its canonical artifact identity and gains
         ``archive_root`` as an advisory recovery root.
+
+        Returns an :class:`ArchivedOutputs` mapping that behaves as a
+        read-only ``Mapping[str, Path]`` for backward compatibility.  The
+        ``.outputs`` attribute exposes refreshed :class:`Artifact` objects
+        whose recovery metadata reflects the newly registered archive root,
+        so callers can pass them directly into downstream
+        ``sc.run(inputs=...)`` calls without a second ``get_run_outputs(...)``
+        call.
         """
         normalized_keys = normalize_materialize_output_keys(
             keys,
             caller="archive_run_outputs",
         )
         outputs = self.get_run_outputs(run_id)
-        if normalized_keys is not None:
-            missing = [key for key in normalized_keys if key not in outputs]
-            if missing:
-                raise KeyError(
-                    "Requested output keys were not found for run "
-                    f"{run_id!r}: {', '.join(repr(key) for key in missing)}"
-                )
-            selected = {key: outputs[key] for key in normalized_keys}
-        else:
-            selected = outputs
+        selected = self._select_required_output_keys(
+            outputs, normalized_keys, run_id=run_id
+        )
 
-        archived: dict[str, Path] = {}
+        archived_paths: dict[str, Path] = {}
         for key, artifact in selected.items():
-            archived[key] = self.archive_artifact(
+            archived_paths[key] = self.archive_artifact(
                 artifact,
                 archive_root,
                 mode=mode,
                 append=append,
             )
-        return archived
+
+        refreshed_outputs = self.get_run_outputs(run_id)
+        refreshed_selected = self._select_required_output_keys(
+            refreshed_outputs, normalized_keys, run_id=run_id
+        )
+
+        return ArchivedOutputs(paths=archived_paths, outputs=refreshed_selected)
+
+    @staticmethod
+    def _select_required_output_keys(
+        outputs: Dict[str, Artifact],
+        normalized_keys: tuple[str, ...] | None,
+        *,
+        run_id: str,
+    ) -> Dict[str, Artifact]:
+        if normalized_keys is None:
+            return outputs
+        missing = [key for key in normalized_keys if key not in outputs]
+        if missing:
+            raise KeyError(
+                "Requested output keys were not found for run "
+                f"{run_id!r}: {', '.join(repr(key) for key in missing)}"
+            )
+        return {key: outputs[key] for key in normalized_keys}
 
     def archive_current_run_outputs(
         self,
@@ -1603,7 +1627,7 @@ class Tracker:
         keys: Sequence[str] | None = None,
         mode: Literal["copy", "move"] = "copy",
         append: bool = True,
-    ) -> dict[str, Path]:
+    ) -> ArchivedOutputs:
         """
         Archive outputs for the currently active run into a stable recovery root.
 

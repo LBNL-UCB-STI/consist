@@ -7,7 +7,7 @@ the Tracker for managing runs, logging artifacts, and ingesting data.
 
 # Models
 from consist.models.run import Run, RunResult
-from consist.models.artifact import Artifact
+from consist.models.artifact import Artifact, ArchivedOutputs
 from consist.models.gtfs import (
     GTFS_SCHEMA_BY_TABLE_NAME,
     GTFS_SCHEMAS,
@@ -185,6 +185,7 @@ __all__ = [
     "Run",
     "RunResult",
     "Artifact",
+    "ArchivedOutputs",
     "RunSet",
     "AlignedPair",
     "GtfsSchema",
