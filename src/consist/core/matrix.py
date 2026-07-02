@@ -151,8 +151,8 @@ class MatrixViewFactory:
         # 2. Lazy Open & Stack
         datasets = []
         for _, row in df.iterrows():
+            container_uri = str(row["container_uri"])
             try:
-                container_uri = row["container_uri"]
                 path = self.tracker.resolve_uri(container_uri)
 
                 ds = xr.open_zarr(path, consolidated=False)

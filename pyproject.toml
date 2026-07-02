@@ -133,6 +133,10 @@ markers = [
 target-version = "py311"
 line-length = 88
 
+[tool.pyright]
+include = ["src/consist"]
+exclude = ["examples", "tests-temp", "scripts/benchmarks"]
+
 [tool.ty.environment]
 extra-paths = ["src"]
 
