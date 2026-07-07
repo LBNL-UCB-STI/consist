@@ -31,7 +31,8 @@ a tracker object to every call.
   `consist.find_latest_run`, `consist.find_matching_run`,
   `consist.find_matching_runs`, `consist.run_query`, `consist.run_set`,
   `consist.get_run_result`, `consist.config_run_query`,
-  `consist.config_run_rows`
+  `consist.config_run_rows`, `consist.ibis_connection`, `consist.ibis_view`,
+  `consist.ibis_grouped_view`
 
 `consist.find_runs(...)`, `consist.find_run(...)`, and
 `consist.find_latest_run(...)` forward standard run filters, including
@@ -121,6 +122,9 @@ For class-level equivalents, see [Tracker](tracker.md) and
         - load
         - load_df
         - load_relation
+        - ibis_connection
+        - ibis_view
+        - ibis_grouped_view
         - hydrate_run_outputs
         - materialize_run_outputs
         - materialize_artifact
