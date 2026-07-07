@@ -111,6 +111,7 @@ dev = [
     "pre-commit",
 ]
 docs = [
+    "markdown-exec[ansi]>=1.12.3",
     "mkdocs-material>=9.7.0",
     "mkdocstrings[python]>=1.0.0",
     "mkdocstrings-python>=2.0.0",

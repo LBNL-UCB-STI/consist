@@ -2313,6 +2313,21 @@ def artifacts(
     db_path: Optional[str] = typer.Option(
         None, help="Path to the Consist DuckDB database."
     ),
+    run_dir: Optional[str] = typer.Option(
+        None,
+        "--run-dir",
+        help=RUN_DIR_RESOLUTION_HELP,
+    ),
+    trust_db: bool = typer.Option(
+        False,
+        "--trust-db",
+        help=TRUST_DB_RESOLUTION_HELP,
+    ),
+    mount: Optional[List[str]] = typer.Option(
+        None,
+        "--mount",
+        help=MOUNT_OVERRIDE_HELP,
+    ),
     expand_sets: bool = typer.Option(
         False,
         "--expand-sets",
@@ -2320,7 +2335,12 @@ def artifacts(
     ),
 ) -> None:
     """Display run artifacts or query artifacts by indexed facet parameters."""
-    tracker = get_tracker(db_path)
+    mount_overrides = _resolve_mount_overrides_or_exit(mount)
+    tracker = get_tracker(
+        db_path,
+        run_dir=run_dir,
+        mounts=mount_overrides or None,
+    )
     query_mode = bool(param or key_prefix or family_prefix)
     if not query_mode:
         if not run_id:
@@ -2332,7 +2352,13 @@ def artifacts(
         if not run:
             console.print(f"[red]Run with ID '{run_id}' not found.[/red]")
             raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
-        _render_artifacts_table(tracker, run_id, expand_sets=expand_sets)
+        _render_artifacts_table(
+            tracker,
+            run_id,
+            expand_sets=expand_sets,
+            trust_db=trust_db,
+            archive_base=run_dir,
+        )
         return
 
     if run_id is not None:

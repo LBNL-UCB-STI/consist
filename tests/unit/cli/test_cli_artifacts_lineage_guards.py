@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from typer.testing import CliRunner
 
+from consist import Tracker
 from consist.cli import app
 
 
@@ -246,3 +247,40 @@ def test_artifacts_run_mode_shows_accessibility_status(
     assert result.exit_code == 0
     assert "Access" in result.stdout
     assert "recovery" in result.stdout
+
+
+def test_artifacts_accepts_run_dir_for_moved_run_roots(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`artifacts --run-dir` should resolve relative output URIs from that root."""
+    repo_root = tmp_path / "repo"
+    archive_root = tmp_path / "archive" / "cli-demo"
+    db_dir = repo_root / "db"
+    db_dir.mkdir(parents=True)
+    archive_root.mkdir(parents=True)
+    db_path = db_dir / "provenance.duckdb"
+
+    tracker = Tracker(run_dir=archive_root, db_path=str(db_path))
+    with tracker.start_run("moved_run", "demo"):
+        output_path = tracker.run_artifact_dir() / "results.csv"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text("a,b\n1,2\n", encoding="utf-8")
+        tracker.log_output(output_path, key="results")
+    tracker.engine.dispose()
+
+    monkeypatch.chdir(repo_root)
+    result = runner.invoke(
+        app,
+        [
+            "artifacts",
+            "moved_run",
+            "--db-path",
+            "db/provenance.duckdb",
+            "--run-dir",
+            str(archive_root),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "results" in result.stdout
+    assert "primary" in result.stdout

@@ -292,6 +292,9 @@ code = "Jetbrains Mono"
 
 
 
+[project.plugins.markdown-exec]
+
+
 [project.plugins.mkdocstrings.handlers.python]
 inventories = ["https://docs.python.org/3/objects.inv"]
 paths = ["src"]
