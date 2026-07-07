@@ -111,10 +111,11 @@ dev = [
     "pre-commit",
 ]
 docs = [
+    "markdown-exec[ansi]>=1.12.3",
     "mkdocs-material>=9.7.0",
     "mkdocstrings[python]>=1.0.0",
     "mkdocstrings-python>=2.0.0",
-    "zensical>=0.0.39",
+    "zensical>=0.0.47",
     "mike>=2.2.0",
 ]
 typecheck = [

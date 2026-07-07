@@ -4,11 +4,74 @@ Consist provides command-line tools to inspect, query, and compare runs and arti
 
 This is especially useful when you are SSH’d into a remote server or working in a headless environment: you can quickly explore runs, artifacts, and lineage from the shell without starting a Python session.
 
-In particular, the `consist shell` command creates a persistent `Tracker` object linked to a database and allows you to query run inputs and outputs and artifact metadata, producing nicely formatted tables and summaries in the terminal.
+Use the one-shot commands for quick inspection and scripts. Use
+`consist shell` when you want a persistent `Tracker` object linked to a
+database, cached run and artifact shortcuts, and repeated queries without
+typing the same paths every time.
+
+## CLI Quick Tour
+
+The examples below use a tiny generated provenance database. The fixture is
+rebuilt during docs generation, so the terminal output is produced by the real
+CLI instead of copied by hand.
+
+```bash exec="1" result="text"
+python docs/fixtures/cli-demo/create_fixture.py # markdown-exec: hide
+```
+
+Start with a database summary to orient yourself.
+
+```console exec="1" source="console" width="100" title="Summarize a provenance database"
+$ consist summary --db-path docs/fixtures/cli-demo/.generated/provenance.duckdb
+```
+
+`summary` gives you the database shape before you pick individual runs: total
+runs, artifact count, date range, and model names.
+
+Then list recent runs to find the run ID you want to inspect.
+
+```console exec="1" source="console" width="100" title="List recent runs"
+$ consist runs --db-path docs/fixtures/cli-demo/.generated/provenance.duckdb --limit 3
+```
+
+Use the `ID` column as the handle for follow-up commands such as `show`,
+`artifacts`, `lineage`, and run-scoped schema inspection.
+
+Inspect one run's artifacts to see what it read and wrote. `demo_summarize`
+consumes `cleaned` and writes `summary`, so the output shows both `Input` and
+`Output` directions.
+
+```console exec="1" source="console" width="100" title="Inspect run artifacts"
+$ consist artifacts demo_summarize --db-path docs/fixtures/cli-demo/.generated/provenance.duckdb --run-dir docs/fixtures/cli-demo/.generated/runs
+```
+
+`Access: primary` means the stored artifact URI resolves to an existing file
+under the supplied `--run-dir`.
+
+For tabular outputs, preview a few rows without opening Python.
+
+```console exec="1" source="console" width="100" title="Preview a tabular artifact"
+$ consist preview cleaned --db-path docs/fixtures/cli-demo/.generated/provenance.duckdb --run-dir docs/fixtures/cli-demo/.generated/runs --rows 5
+```
+
+`preview` resolves the `cleaned` CSV under `--run-dir` and prints only the
+requested rows.
+
+## Common CLI Tasks
+
+| Task | Start with | Notes |
+| --- | --- | --- |
+| Find recent runs | `consist runs` | Add `--model`, `--status`, or `--tag` when the database is busy. |
+| Inspect one run's outputs | `consist artifacts <run_id>` | Use `--expand-sets` for logical output sets. |
+| Preview data | `consist preview <artifact_key>` | Works for tabular artifacts such as CSV and Parquet. |
+| Script against provenance | `--json` | Supported by common inspection commands for `jq` or Python scripts. |
+| Debug moved files | `--run-dir`, `--mount`, `--trust-db` | Keep explicit path settings authoritative; use trusted metadata fallback only when needed. |
+| Explore repeatedly | `consist shell` | Caches recent run and artifact shortcuts inside the session. |
 
 ## Database Discovery
 
 The CLI looks for the provenance database in this order:
+
 1. Explicit `--db-path` argument
 2. `CONSIST_DB` environment variable
 3. `provenance.duckdb` in the current directory
@@ -18,9 +81,10 @@ The CLI looks for the provenance database in this order:
 
 Artifacts may be stored with workspace-relative URIs such as
 `workspace://outputs/table.parquet` or relative URIs such as `./outputs/...`.
-For commands that load, validate, or profile artifact files (`preview`,
-`validate`, `schema capture-file`, and shell `preview`/`schema_profile`),
-Consist resolves paths with this precedence:
+For commands that inspect, load, validate, or profile artifact files
+(`artifacts`, `preview`, `validate`, `schema capture-file`, and shell
+`artifacts`/`preview`/`schema_profile`), Consist resolves paths with this
+precedence:
 
 1. Explicit `--mount NAME=PATH` values
 2. Explicit `--run-dir` plus persisted `archive_mounts[NAME]` entries when
@@ -80,11 +144,10 @@ consist preview lccm_long \
 resolves the artifact under `/data/archive/pilates-run/beam/input/...` without
 requiring `--mount beam_input=...`.
 
-## Global Options
+## Global Help
 
-```bash
-consist --help
-consist --version
+```console exec="1" source="console" width="100" title="CLI help output"
+$ consist --help
 ```
 
 Shell completion helpers:
@@ -174,6 +237,9 @@ Inspect artifacts in two modes:
 ```bash
 consist artifacts <run_id>
 consist artifacts <run_id> --expand-sets
+consist artifacts <run_id> --run-dir /path/to/archive_run_root
+consist artifacts <run_id> --mount workspace=/path/to/archive_run_root
+consist artifacts <run_id> --trust-db  # Metadata fallback only
 
 # Query by artifact facet params (repeat --param)
 consist artifacts --param beam.phys_sim_iteration=2
@@ -193,6 +259,13 @@ Query-mode options:
 - `--key-prefix`: prefix filter on artifact key
 - `--family-prefix`: prefix filter on indexed `artifact_family` facet
 - `--limit`: maximum results (default `100`)
+- `--run-dir PATH`: explicit base directory for `workspace://` artifacts and
+  relative artifact paths
+- `--trust-db`: allow database metadata fallback for missing mounts,
+  historical run dirs, and recovery roots; explicit `--run-dir` and `--mount`
+  values take precedence
+- `--mount NAME=PATH`: explicit mount override; repeat for multiple schemes.
+  Explicit mounts override `--run-dir` and trusted DB metadata for that scheme.
 - `--expand-sets`: show member artifacts for logical output sets. By default,
   run mode shows the parent output-set artifact and hides member/manifest rows.
 
