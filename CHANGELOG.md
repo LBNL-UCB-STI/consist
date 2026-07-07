@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog], and this project adheres to
 [Semantic Versioning].
 
+## [0.2.3] - 2026-07-07
+
+### Added
+
+- Add `ArchivedOutputs`, a dict-like return type for
+  `archive_run_outputs(...)` and `archive_current_run_outputs(...)`, and
+  expose it from the public `consist` and `consist.models` namespaces by
+  @zneedell ([#166](https://github.com/LBNL-UCB-STI/consist/pull/166)).
+- Add `driver="geoparquet"` support for spatial artifacts, including
+  GeoPandas-backed loading, metadata-only spatial ingestion, and docs for
+  cold-file DuckDB Spatial querying by @zneedell
+  ([#169](https://github.com/LBNL-UCB-STI/consist/pull/169)).
+- Add `FilenamePattern` and typed capture specs for `OutputSet`
+  declarations so filename wildcards can be captured as queryable facets in a
+  fail-closed way by @zneedell
+  ([#168](https://github.com/LBNL-UCB-STI/consist/pull/168)).
+
+### Changed
+
+- Refresh the docs surface around CLI discoverability and onboarding with a
+  fixture-backed CLI Quick Tour, a common task map, corrected
+  path-resolution guidance, real rendered examples, and navigation updates for
+  RunSet/grouped views and API helper entries. This also adds
+  `--run-dir`, `--mount`, and `--trust-db` support to `consist artifacts` by
+  @zneedell ([#170](https://github.com/LBNL-UCB-STI/consist/pull/170)).
+- Clean up internal contracts and typing noise across the tracker, CLI,
+  workflow, and model layers without changing core runtime behavior by
+  @zneedell ([#167](https://github.com/LBNL-UCB-STI/consist/pull/167)).
+
+### Fixed
+
+- Fix `exclude` ordering in `OutputSet` wildcard faceting so excluded files
+  are skipped before typed capture validation by @zneedell
+  ([#168](https://github.com/LBNL-UCB-STI/consist/pull/168)).
+- Fix `consist artifacts --run-dir` resolving moved or archived relative
+  artifact paths by @zneedell
+  ([#170](https://github.com/LBNL-UCB-STI/consist/pull/170)).
+
 ## [0.2.2] - 2026-06-29
 
 ### Added
