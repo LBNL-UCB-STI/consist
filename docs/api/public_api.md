@@ -120,6 +120,8 @@ with tracker.scenario("baseline") as sc:
 - [`consist.AlignedPair`](runset.md#consist.runset.AlignedPair)
 - `consist.ArtifactSpec` / `consist.OutputArtifactSpec` (rich declared-output
   metadata for `Tracker.run(output_paths=...)`)
+- `consist.FilenamePattern`, `consist.IntCapture`, and `consist.EnumCapture`
+  (capture-aware output-set declarations for `OutputSet(include=...)`)
 - `consist.CacheOptions`, `consist.OutputPolicyOptions`, `consist.ExecutionOptions`
 - `consist.BindingResult` (execution envelope for orchestrator-resolved scenario inputs)
 - `consist.H5ChildSpec` (typed child-artifact customization for HDF5 containers)

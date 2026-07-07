@@ -10,9 +10,10 @@ These are intentionally minimal and dependency-tolerant:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
+import re
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -127,6 +128,119 @@ ArtifactSpec = OutputArtifactSpec
 OutputPathRef: TypeAlias = Union[ArtifactRef, OutputArtifactSpec]
 
 
+_SAFE_CAPTURE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_FILENAME_PATTERN_RESERVED_NAMES = {
+    "artifact_set",
+    "manifest_artifact_id",
+    "member_count",
+    "output_set_key",
+    "output_set_kind",
+    "output_set_member",
+    "output_set_relative_path",
+    "schema_name",
+    "total_size_bytes",
+}
+
+
+def _validate_capture_name(name: str) -> None:
+    if not _SAFE_CAPTURE_NAME_RE.fullmatch(name):
+        raise ValueError(f"capture name must be a safe identifier (got {name!r})")
+    if name in _FILENAME_PATTERN_RESERVED_NAMES:
+        raise ValueError(f"capture name {name!r} is reserved")
+
+
+@dataclass(frozen=True, slots=True)
+class IntCapture:
+    name: str
+    wildcard: int
+
+    def __post_init__(self) -> None:
+        _validate_capture_name(self.name)
+        if self.wildcard < 1:
+            raise ValueError(f"wildcard must be 1-indexed (got {self.wildcard})")
+
+
+@dataclass(frozen=True, slots=True)
+class EnumCapture:
+    name: str
+    allowed: frozenset[str] | Iterable[str]
+    wildcard: int
+
+    def __post_init__(self) -> None:
+        _validate_capture_name(self.name)
+        if self.wildcard < 1:
+            raise ValueError(f"wildcard must be 1-indexed (got {self.wildcard})")
+        allowed_values = frozenset(str(value) for value in self.allowed)
+        if not allowed_values:
+            raise ValueError("enum capture must define at least one allowed value")
+        object.__setattr__(self, "allowed", allowed_values)
+
+
+FilenameCapture: TypeAlias = Union[IntCapture, EnumCapture]
+
+
+@dataclass(frozen=True, slots=True)
+class FilenamePattern:
+    pattern: str
+    captures: tuple[FilenameCapture, ...] = ()
+
+    def __post_init__(self) -> None:
+        _validate_filename_pattern_glob(self.pattern)
+        if self.captures:
+            _validate_filename_pattern_captures(self)
+
+    @classmethod
+    def glob(cls, pattern: str) -> "FilenamePattern":
+        return cls(pattern=pattern)
+
+    def with_captures(self, *captures: FilenameCapture) -> "FilenamePattern":
+        return replace(self, captures=tuple(captures))
+
+
+def _validate_filename_pattern_glob(pattern: str) -> None:
+    if not pattern:
+        raise ValueError("filename pattern must not be empty")
+    if "/" in pattern or "\\" in pattern:
+        raise ValueError("capture-aware filename patterns must match basenames only")
+    if "**" in pattern:
+        raise ValueError("capture-aware filename patterns cannot contain '**'")
+    if any(token in pattern for token in ("?", "[", "]")):
+        raise ValueError(
+            "capture-aware filename patterns only support literal text and '*'"
+        )
+
+
+def _validate_filename_pattern_captures(pattern: FilenamePattern) -> None:
+    wildcard_count = pattern.pattern.count("*")
+    if not pattern.captures:
+        raise ValueError("filename patterns must declare at least one capture")
+    if wildcard_count != len(pattern.captures):
+        raise ValueError(
+            f"filename pattern has {wildcard_count} wildcard(s) but "
+            f"{len(pattern.captures)} capture(s)"
+        )
+
+    seen_names: set[str] = set()
+    seen_wildcards: set[int] = set()
+    for capture in pattern.captures:
+        if capture.name in seen_names:
+            raise ValueError(f"duplicate capture name {capture.name!r}")
+        if capture.wildcard in seen_wildcards:
+            raise ValueError(
+                f"duplicate wildcard index {capture.wildcard} is not allowed"
+            )
+        if capture.wildcard < 1 or capture.wildcard > wildcard_count:
+            raise ValueError(
+                f"wildcard index {capture.wildcard} is out of range for pattern "
+                f"with {wildcard_count} wildcard(s)"
+            )
+        seen_names.add(capture.name)
+        seen_wildcards.add(capture.wildcard)
+
+    if seen_wildcards != set(range(1, wildcard_count + 1)):
+        raise ValueError("every wildcard must be bound exactly once")
+
+
 @dataclass(frozen=True, slots=True)
 class OutputSet:
     """
@@ -148,10 +262,11 @@ class OutputSet:
         Directory containing the member files. Relative roots are resolved under
         the run's output directory, so ``root="annual"`` means
         ``<run-output-dir>/annual``.
-    include : str | Sequence[str]
+    include : str | Sequence[str] | FilenamePattern
         Glob-style filename pattern or patterns for files to include. Matching
         is against each path relative to ``root``. For recursive sets, include
         subdirectories in the pattern, for example ``"**/*.csv"``.
+        A ``FilenamePattern`` object may be used for capture-aware matching.
     exclude : str | Sequence[str] | None, optional
         Glob-style pattern or patterns to remove from the included files.
     recursive : bool, default False
@@ -191,7 +306,7 @@ class OutputSet:
     """
 
     root: PathLike
-    include: str | Sequence[str]
+    include: str | Sequence[str] | FilenamePattern
     exclude: str | Sequence[str] | None = None
     recursive: bool = False
     kind: str | None = None

@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pandas as pd
 import pytest
+from pydantic import BaseModel
 from sqlmodel import SQLModel
 
 import consist
@@ -23,8 +24,10 @@ from consist.types import (
     ArtifactSpec,
     CacheOptions,
     ExecutionOptions,
+    FilenamePattern,
     OutputPolicyOptions,
     OutputSet,
+    IntCapture,
 )
 
 
@@ -1653,3 +1656,62 @@ def test_tracker_run_logs_output_set_parent_members_and_manifest(tracker):
     assert manifest is not None
     assert manifest.driver == "json"
     assert manifest.meta["output_set_manifest"] is True
+
+
+def test_tracker_run_logs_typed_output_set_facets_as_queryable_ints(tracker):
+    def step(ctx) -> None:
+        annual_dir = ctx.run_dir / "annual"
+        annual_dir.mkdir(parents=True)
+        (annual_dir / "output_2030.parquet").write_text("year\n2030\n")
+        (annual_dir / "output_2035.parquet").write_text("year\n2035\n")
+
+    result = tracker.run(
+        fn=step,
+        name="annual_forecast",
+        output_sets={
+            "annual_outputs": OutputSet(
+                root="annual",
+                include=FilenamePattern.glob("output_*.parquet").with_captures(
+                    IntCapture(name="year", wildcard=1)
+                ),
+            )
+        },
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    assert set(result.outputs) == {"annual_outputs"}
+    matches = tracker.find_artifacts_by_params(
+        params=["year>=2035"],
+        key_prefix="annual_outputs",
+    )
+    assert len(matches) == 1
+    assert matches[0].meta["output_set_relative_path"] == "output_2035.parquet"
+
+
+def test_tracker_run_output_sets_preserve_pydantic_config_facets(tracker) -> None:
+    class Cfg(BaseModel):
+        year: int
+
+        def to_consist_facet(self):
+            return {"year": self.year}
+
+    def step(ctx) -> None:
+        annual_dir = ctx.run_dir / "annual"
+        annual_dir.mkdir(parents=True)
+        (annual_dir / "summary.csv").write_text("year\n2030\n")
+
+    result = tracker.run(
+        fn=step,
+        name="annual_facet",
+        config=Cfg(year=2030),
+        output_sets={"annual": OutputSet(root="annual", include="*.csv")},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    run = tracker.get_run(result.run.id)
+    assert run is not None
+    facet_id = run.meta["config_facet_id"]
+    facet = tracker.get_config_facet(facet_id)
+    assert facet is not None
+    assert facet.facet_json["year"] == 2030
+    assert run.meta["config_facet_schema"] == "Cfg"

@@ -23,7 +23,13 @@ from consist.models.artifact_schema import (
 from consist.models.config_facet import ConfigFacet
 from consist.models.run import ConsistRecord, Run, RunArtifactLink, RunArtifacts
 from consist.models.run_config_kv import RunConfigKV
-from consist.types import CacheOptions, ExecutionOptions, OutputSet
+from consist.types import (
+    CacheOptions,
+    EnumCapture,
+    ExecutionOptions,
+    FilenamePattern,
+    OutputSet,
+)
 
 
 def _init_core_tables(tracker: Tracker) -> None:
@@ -147,6 +153,74 @@ def test_tracker_run_output_set_cache_hit_validates_expected_members(
             cache_options=CacheOptions(cache_hydration="outputs-requested"),
             execution_options=ExecutionOptions(inject_context="ctx"),
         )
+
+
+def test_tracker_run_output_set_cache_hit_changes_when_capture_allowlist_changes(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "provenance.db")
+    run_dir_a = tmp_path / "runs_a"
+    run_dir_b = tmp_path / "runs_b"
+    calls: list[str] = []
+
+    tracker_a = Tracker(run_dir=run_dir_a, db_path=db_path)
+    _init_core_tables(tracker_a)
+
+    def step_a(ctx) -> None:
+        calls.append("a")
+        output_set_root = ctx.run_dir / "trips"
+        output_set_root.mkdir(parents=True, exist_ok=True)
+        (output_set_root / "trip_home.csv").write_text("purpose\nhome\n")
+
+    first = tracker_a.run(
+        fn=step_a,
+        name="trip_step",
+        output_sets={
+            "trips": OutputSet(
+                root="trips",
+                include=FilenamePattern.glob("trip_*.csv").with_captures(
+                    EnumCapture(
+                        name="purpose",
+                        allowed={"home", "work"},
+                        wildcard=1,
+                    )
+                ),
+            )
+        },
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    assert first.cache_hit is False
+
+    tracker_b = Tracker(run_dir=run_dir_b, db_path=db_path)
+    _init_core_tables(tracker_b)
+
+    def step_b(ctx) -> None:
+        calls.append("b")
+        output_set_root = ctx.run_dir / "trips"
+        output_set_root.mkdir(parents=True, exist_ok=True)
+        (output_set_root / "trip_home.csv").write_text("purpose\nhome\n")
+
+    second = tracker_b.run(
+        fn=step_b,
+        name="trip_step",
+        output_sets={
+            "trips": OutputSet(
+                root="trips",
+                include=FilenamePattern.glob("trip_*.csv").with_captures(
+                    EnumCapture(
+                        name="purpose",
+                        allowed={"home", "work", "shopping"},
+                        wildcard=1,
+                    )
+                ),
+            )
+        },
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    assert second.cache_hit is False
+    assert calls == ["a", "b"]
 
 
 def test_cache_hydration_policies_end_to_end(
