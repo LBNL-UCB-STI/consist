@@ -193,7 +193,14 @@ class SpatialArtifact(ArtifactLike, Protocol):
     """Artifact that loads as GeoDataFrame (spatial formats)."""
 
     @property
-    def driver(self) -> Literal["geojson", "shapefile", "geopackage"]: ...
+    def driver(
+        self,
+    ) -> Literal[
+        "geojson",
+        "geoparquet",
+        "shapefile",
+        "geopackage",
+    ]: ...
 
 
 def view(model: Type[T], name: Optional[str] = None) -> Type[T]:
@@ -2814,7 +2821,7 @@ def is_spatial_artifact(artifact: ArtifactLike) -> TypeGuard[SpatialArtifact]:
     Returns
     -------
     bool
-        True if artifact driver is geojson, shapefile, or geopackage.
+        True if artifact driver is geojson, geoparquet, shapefile, or geopackage.
     """
     return artifact.driver in DriverType.spatial_drivers()
 
@@ -3038,6 +3045,16 @@ def load(
                 f"Invalid db_fallback={db_fallback!r}. Expected 'inputs-only', 'always', or 'never'."
             )
 
+        if artifact.driver == DriverType.GEOPARQUET.value:
+            raise FileNotFoundError(
+                f"GeoParquet artifact '{artifact.key}' (ID: {artifact.id}) not found.\n"
+                f" - Disk Path: {path} (Missing)\n"
+                " - Database: Ingested metadata only; GeoParquet geometry rows "
+                "cannot be reconstructed from the Consist database.\n"
+                "Hint: restore the GeoParquet file from the original artifact copy, "
+                "a recovery root, or rerun the producing workflow."
+            )
+
         if db_fallback == "never":
             raise FileNotFoundError(
                 f"Artifact '{artifact.key}' (ID: {artifact.id}) not found.\n"
@@ -3151,9 +3168,14 @@ def _load_from_disk(path: str, driver: str, **kwargs: Any) -> LoadResult:
             schema_id=None,
         )
         return ARRAY_DRIVERS.get(driver).load(info)
-    elif driver in ("geojson", "shapefile", "geopackage"):
+    elif driver in DriverType.spatial_drivers():
         if gpd is None:
-            raise ImportError("geopandas required for spatial formats")
+            raise ImportError(
+                "geopandas is required for spatial formats. "
+                'Install with `pip install "consist[spatial]"`.'
+            )
+        if driver == DriverType.GEOPARQUET.value:
+            return gpd.read_parquet(path, **kwargs)
         return gpd.read_file(path, **kwargs)
     elif driver in ("h5", "hdf5"):
         if not tables:

@@ -2518,6 +2518,7 @@ def _print_optional_dependency_hint(driver: str) -> None:
         "hdf5": "hdf5",
         "h5_table": "hdf5",
         "geojson": "spatial",
+        "geoparquet": "spatial",
         "shapefile": "spatial",
         "geopackage": "spatial",
     }

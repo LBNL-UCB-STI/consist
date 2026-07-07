@@ -248,6 +248,62 @@ Use `consist.load_relation(...)` to manage DuckDB Relation lifecycle explicitly.
 
 ---
 
+## GeoParquet and Spatial Artifacts
+
+GeoParquet is supported only when you log it explicitly:
+
+```python
+artifact = tracker.log_artifact(
+    "outputs/parcels.parquet",
+    key="parcels",
+    driver="geoparquet",
+)
+```
+
+Without an explicit driver, Consist keeps the existing generic `.parquet`
+behavior. The artifact is inferred as `driver="parquet"`, `load(...)` returns a
+DuckDB relation, and `is_spatial_artifact(...)` returns `False`.
+
+Spatial ingestion records lightweight metadata only: bounds, CRS, geometry
+types, geometry column, feature count, and columns. It does not ingest geometry
+rows into hot database storage, and it does not reconstruct GeoParquet from hot
+DB state.
+
+For direct cold-file spatial queries in DuckDB, load the spatial extension
+after it is installed locally, then read the file from its path:
+
+```python
+from pathlib import Path
+
+import duckdb
+
+path = artifact.as_path(tracker)
+
+con = duckdb.connect()
+con.sql("LOAD spatial")
+nearby = con.sql(
+    """
+    SELECT
+        parcel_id,
+        ST_Distance_Sphere(
+            ST_Centroid(geometry),
+            ST_Point(-122.3321, 47.6062)
+        ) AS distance_m
+    FROM read_parquet(?)
+    WHERE distance_m < 1000
+    ORDER BY distance_m
+    """,
+    params=[str(path)],
+)
+```
+
+Use the returned relation for SQL exploration against the file on disk. In this
+example, DuckDB Spatial reads the GeoParquet geometry column and computes each
+parcel centroid's spherical distance from a reference point. The pattern stays
+explicit: Consist tracks the artifact and DuckDB queries the cold file directly.
+
+---
+
 ## Schema Export Workflow
 
 For curated schemas with explicit PK/FK constraints: ingest tabular data, run schema export to generate a SQLModel stub, then edit and register the stub for views. See [schema-export.md](../schema-export.md) for details.

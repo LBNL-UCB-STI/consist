@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from consist import is_spatial_artifact
 from consist.core.artifacts import ArtifactManager
 from consist.core.persistence import DatabaseManager
 from consist.models.artifact import Artifact
@@ -36,6 +37,26 @@ def test_create_artifact_stateless(mock_tracker):
     assert art.run_id == "run_ABC"
     assert art.key == "test"
     assert art.hash == "mock_hash"
+
+
+def test_create_artifact_keeps_parquet_inference_non_spatial(tmp_path):
+    tracker = MagicMock()
+    tracker.resolve_uri = lambda uri: f"/abs/{uri}"
+    tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
+    tracker.mounts = {}
+    tracker.identity.compute_file_checksum.return_value = "mock_hash"
+    tracker.db = MagicMock()
+    tracker.db.get_or_create_artifact_content.return_value = ArtifactContent(
+        content_hash="mock_hash", driver="parquet"
+    )
+
+    path = tmp_path / "tiny.parquet"
+    path.write_bytes(b"not a real parquet file")
+
+    artifact = ArtifactManager(tracker).create_artifact(path=path, key="tiny")
+
+    assert artifact.driver == "parquet"
+    assert is_spatial_artifact(artifact) is False
 
 
 def test_create_artifact_uses_precomputed_hash(mock_tracker):
