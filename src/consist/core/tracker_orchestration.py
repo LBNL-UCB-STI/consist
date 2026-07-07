@@ -36,6 +36,7 @@ from pydantic import BaseModel
 
 from consist.core.error_messages import format_problem_cause_fix
 from consist.core.output_sets import register_output_sets, validate_cached_output_sets
+from consist.core.output_sets import build_output_set_captures_identity
 from consist.core.run_invocation import resolve_run_invocation
 from consist.core.run_options import resolve_runtime_kwargs_alias
 from consist.core.workflow import RunContext
@@ -315,6 +316,7 @@ class RunTraceCoordinator:
         materialize_cached_output_set_roots: Optional[Dict[str, Path]] = None,
         materialize_cached_outputs_dir: Optional[Path] = None,
         materialize_cached_outputs_source_root: Optional[Path] = None,
+        output_sets: Optional[Mapping[str, OutputSet]] = None,
         requested_input_paths: Optional[Mapping[str, Any]] = None,
         requested_input_materialization: Optional[str] = None,
         requested_input_materialization_mode: Optional[str] = None,
@@ -355,6 +357,11 @@ class RunTraceCoordinator:
             start_kwargs["requested_input_paths"] = {
                 str(key): str(Path(value))
                 for key, value in requested_input_paths.items()
+            }
+        capture_identity = build_output_set_captures_identity(output_sets)
+        if capture_identity is not None:
+            start_kwargs["_consist_identity_config_overrides"] = {
+                "__consist_output_set_captures__": capture_identity
             }
         requested_mode = requested_input_materialization_mode or (
             "copy" if requested_input_materialization == "requested" else None
@@ -688,6 +695,7 @@ class RunTraceCoordinator:
                 if invocation.materialize_cached_outputs_source_root is not None
                 else None
             ),
+            output_sets=invocation.output_sets,
             requested_input_paths=requested_input_paths,
             requested_input_materialization=requested_input_materialization,
             requested_input_materialization_mode=(requested_input_materialization_mode),
@@ -1894,6 +1902,7 @@ class RunTraceCoordinator:
                 is not None
                 else None
             ),
+            output_sets=resolved_invocation.output_sets,
         )
 
         def _handle_missing_outputs(label: str, missing: List[str]) -> None:

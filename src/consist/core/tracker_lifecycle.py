@@ -260,6 +260,9 @@ class RunLifecycleCoordinator:
             requested_input_materialization_mode = kwargs.pop(
                 "requested_input_materialization_mode", None
             )
+            identity_config_overrides = kwargs.pop(
+                "_consist_identity_config_overrides", None
+            )
 
             requested_input_paths: Optional[Dict[str, Path]] = None
             if requested_input_paths_raw is not None:
@@ -328,6 +331,21 @@ class RunLifecycleCoordinator:
                 config_dict = config.model_dump()
             else:
                 config_dict = config
+
+            if identity_config_overrides is not None:
+                if not isinstance(identity_config_overrides, MappingABC):
+                    raise TypeError(
+                        "_consist_identity_config_overrides must be a mapping."
+                    )
+                config_dict = dict(config_dict)
+                for key, value in identity_config_overrides.items():
+                    if key in config_dict:
+                        logging.warning(
+                            "[Consist] Overwriting user-provided %r in config for run %s.",
+                            key,
+                            run_id,
+                        )
+                    config_dict[key] = value
 
             normalized_hash_inputs = _normalize_identity_inputs(hash_inputs)
             if normalized_hash_inputs:

@@ -167,8 +167,9 @@ rerun or change the cache version/epoch when you need that metadata recorded.
 ### When to use `output_sets`
 
 Use `output_sets` when one logical output is written as multiple files, such as
-annual partitions, thread chunks, or diagnostic bundles. The smallest useful
-declaration only needs a root directory and an include pattern:
+annual partitions, thread chunks, or diagnostic bundles. For discovery-only
+sets, the smallest useful declaration still only needs a root directory and an
+include pattern:
 
 ``` python
 from consist import OutputSet
@@ -188,6 +189,62 @@ Here `run_forecast` should write files such as `annual/annual_2030.csv` under
 the run output directory. Consist discovers every file matching `include`, sorts
 the members by relative path, records one logical parent artifact named
 `annual_outputs`, and records each file as a child artifact.
+
+If a filename segment should become queryable metadata, use a
+capture-aware `FilenamePattern` instead of a raw glob string. In v1, each
+capture binds to a numbered wildcard explicitly, so the filename layout stays
+fail-closed and discovery-only patterns remain unchanged:
+
+``` python
+from consist import EnumCapture, FilenamePattern, IntCapture, OutputSet
+
+yearly = OutputSet(
+    root="annual",
+    include=FilenamePattern.glob("annual_*.parquet").with_captures(
+        IntCapture(name="year", wildcard=1)
+    ),
+)
+
+purpose = OutputSet(
+    root="trip_outputs",
+    include=FilenamePattern.glob("trip_*.csv").with_captures(
+        EnumCapture(
+            name="purpose",
+            allowed={"home", "work", "shopping"},
+            wildcard=1,
+        )
+    ),
+)
+```
+
+Capture-aware patterns match the output-set relative path, reject `**`, and
+require every wildcard to be bound. Captured values are stored with their real
+types on member artifacts, so `year` is queryable as an integer rather than a
+string.
+
+The current capture surface is intentionally narrow: integer and enum-style
+captures cover the supported v1 cases. If you need another typed capture, open
+an issue first so the extension can be designed deliberately instead of growing
+ad hoc.
+
+If a filename repeats the same facet more than once, bind both wildcards to the
+same capture name. Consist will keep one facet value and require the repeated
+values to match:
+
+``` python
+events = OutputSet(
+    root="output",
+    recursive=True,
+    include=FilenamePattern.glob("IT.*/*.events.parquet").with_captures(
+        IntCapture(name="iteration", wildcard=1),
+        IntCapture(name="iteration", wildcard=2),
+    ),
+)
+```
+
+This matches paths like `output/IT.3/3.events.parquet` and yields one
+`iteration=3` facet. If the two occurrences disagree, Consist raises during
+discovery instead of guessing which one to keep.
 
 The optional `expected_members` and `expected_count` fields turn discovery into
 a completeness check. They are not required. Use them when the config tells you
@@ -226,6 +283,11 @@ Output-set fields fall into two groups:
 - Optional metadata: `kind`, `schema`, `partition_key`, `facet`,
   `member_facets`.
 - Optional validation: `expected_count`, `expected_members`, `validate`.
+
+For capture-aware sets, `include` accepts a `FilenamePattern` object. The
+`wildcard=` binding is the v1 mechanism for mapping each wildcard to exactly one
+capture; if the filename matches discovery but fails the typed capture, Consist
+raises during registration rather than silently skipping the file.
 
 For v1, `validate="manifest"` is the default and applies the optional
 `expected_*` checks when provided. `validate="exists"` also requires at least one

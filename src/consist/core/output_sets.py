@@ -12,7 +12,14 @@ from typing import Any, Callable, Literal, Mapping, Protocol, Sequence, cast
 from sqlmodel import SQLModel
 
 from consist.models.artifact import Artifact
-from consist.types import FacetLike, OutputSet
+from consist.types import (
+    EnumCapture,
+    FacetLike,
+    FilenameCapture,
+    FilenamePattern,
+    IntCapture,
+    OutputSet,
+)
 
 
 _OUTPUT_SET_MANIFEST_VERSION = 1
@@ -63,6 +70,121 @@ class OutputSetMember:
     content_hash: str
 
 
+@dataclass(frozen=True, slots=True)
+class _CompiledFilenamePattern:
+    regex: re.Pattern[str]
+    captures_by_wildcard: dict[int, FilenameCapture]
+    group_names_by_wildcard: dict[int, str]
+
+
+def _compile_filename_pattern(
+    filename_pattern: FilenamePattern,
+) -> _CompiledFilenamePattern:
+    pattern = filename_pattern.pattern
+    wildcard_count = pattern.count("*")
+    if wildcard_count < 1:
+        raise ValueError("filename patterns must include at least one wildcard")
+    if not filename_pattern.captures:
+        raise ValueError("filename patterns must declare at least one capture")
+    if wildcard_count != len(filename_pattern.captures):
+        raise ValueError(
+            f"filename pattern has {wildcard_count} wildcard(s) but "
+            f"{len(filename_pattern.captures)} capture(s)"
+        )
+
+    # v1 keeps the pattern language intentionally tiny: every wildcard must be
+    # explicitly bound and no greedy catch-all segment is ever emitted.
+    segments = pattern.split("*")
+    if any(segment == "" for segment in segments[1:-1]):
+        raise ValueError(
+            "capture-aware filename patterns cannot contain adjacent wildcards"
+        )
+
+    captures_by_wildcard: dict[int, FilenameCapture] = {}
+    for capture in filename_pattern.captures:
+        if capture.wildcard < 1 or capture.wildcard > wildcard_count:
+            raise ValueError(
+                f"wildcard index {capture.wildcard} is out of range for pattern "
+                f"with {wildcard_count} wildcard(s)"
+            )
+        if capture.wildcard in captures_by_wildcard:
+            raise ValueError(
+                f"duplicate wildcard index {capture.wildcard} is not allowed"
+            )
+        captures_by_wildcard[capture.wildcard] = capture
+
+    regex_parts: list[str] = ["^"]
+    group_names_by_wildcard: dict[int, str] = {}
+    for index, literal in enumerate(segments):
+        regex_parts.append(re.escape(literal))
+        if index < wildcard_count:
+            capture = captures_by_wildcard[index + 1]
+            group_name = f"__capture_{index + 1}"
+            group_names_by_wildcard[index + 1] = group_name
+            if isinstance(capture, IntCapture):
+                capture_regex = rf"(?P<{group_name}>\d+)"
+            elif isinstance(capture, EnumCapture):
+                allowed = sorted(
+                    capture.allowed, key=lambda value: (-len(value), value)
+                )
+                capture_regex = (
+                    rf"(?P<{group_name}>"
+                    rf"(?:{'|'.join(re.escape(value) for value in allowed)})"
+                    rf")"
+                )
+            else:  # pragma: no cover - defensive for future capture kinds
+                raise TypeError(f"unsupported capture type: {type(capture)!r}")
+            regex_parts.append(capture_regex)
+    regex_parts.append("$")
+    return _CompiledFilenamePattern(
+        regex=re.compile("".join(regex_parts)),
+        captures_by_wildcard=captures_by_wildcard,
+        group_names_by_wildcard=group_names_by_wildcard,
+    )
+
+
+def _extract_filename_pattern_facets(
+    *,
+    filename_pattern: FilenamePattern,
+    member_relative_path: str,
+) -> dict[str, Any]:
+    compiled = _compile_filename_pattern(filename_pattern)
+    match = compiled.regex.fullmatch(member_relative_path)
+    if match is None:
+        raise ValueError(
+            f"output-set member {member_relative_path} did not match capture pattern "
+            f"{filename_pattern.pattern!r}"
+        )
+
+    facets: dict[str, Any] = {}
+    captured_values: dict[str, Any] = {}
+    for wildcard_index in range(1, len(compiled.captures_by_wildcard) + 1):
+        capture = compiled.captures_by_wildcard[wildcard_index]
+        group_name = compiled.group_names_by_wildcard[wildcard_index]
+        captured_value = match.group(group_name)
+        if isinstance(capture, IntCapture):
+            value: Any = int(captured_value)
+        elif isinstance(capture, EnumCapture):
+            if captured_value not in capture.allowed:
+                raise ValueError(
+                    f"output-set member {member_relative_path} produced invalid value "
+                    f"{captured_value!r} for capture {capture.name!r}"
+                )
+            value = captured_value
+        else:  # pragma: no cover - defensive for future capture kinds
+            raise TypeError(f"unsupported capture type: {type(capture)!r}")
+        previous_value = captured_values.get(capture.name)
+        if previous_value is None:
+            captured_values[capture.name] = value
+        elif previous_value != value:
+            raise ValueError(
+                f"output-set member {member_relative_path} produced incompatible repeated "
+                f"capture {capture.name!r}"
+            )
+    facets.update(captured_values)
+    return facets
+
+
 def discover_output_set_members(output_set: OutputSet) -> list[OutputSetMember]:
     """Discover output-set member files in deterministic relative-path order.
 
@@ -76,7 +198,20 @@ def discover_output_set_members(output_set: OutputSet) -> list[OutputSetMember]:
     if not root.is_dir():
         raise ValueError(f"Output set root must be a directory: {root}")
 
-    include_patterns = _normalize_patterns(output_set.include)
+    include_value = output_set.include
+    filename_pattern = (
+        include_value if isinstance(include_value, FilenamePattern) else None
+    )
+    include_patterns = (
+        []
+        if filename_pattern is not None
+        else _normalize_patterns(cast(str | Sequence[str] | None, include_value))
+    )
+    compiled_filename_pattern = (
+        _compile_filename_pattern(filename_pattern)
+        if filename_pattern is not None
+        else None
+    )
     exclude_patterns = _normalize_patterns(output_set.exclude)
     candidates = root.rglob("*") if output_set.recursive else root.glob("*")
     members: list[OutputSetMember] = []
@@ -86,10 +221,26 @@ def discover_output_set_members(output_set: OutputSet) -> list[OutputSetMember]:
         if not path.is_file():
             continue
         relative_path = _normalize_output_set_relative_path(path.relative_to(root))
-        if not _matches_any(relative_path, include_patterns):
-            continue
         if exclude_patterns and _matches_any(relative_path, exclude_patterns):
             continue
+        if compiled_filename_pattern is not None:
+            assert filename_pattern is not None
+            if not fnmatch.fnmatchcase(relative_path, filename_pattern.pattern):
+                continue
+            if compiled_filename_pattern.regex.fullmatch(relative_path) is None:
+                raise ValueError(
+                    f"output-set member {path} matched discovery pattern "
+                    f"{filename_pattern.pattern!r} but failed typed capture"
+                )
+            # Validate and coerce capture values during discovery so the set
+            # fails closed before any artifacts are logged.
+            _extract_filename_pattern_facets(
+                filename_pattern=filename_pattern,
+                member_relative_path=relative_path,
+            )
+        else:
+            if not _matches_any(relative_path, include_patterns):
+                continue
         members.append(
             OutputSetMember(
                 path=path,
@@ -207,7 +358,7 @@ def build_output_set_manifest(
         "output_set_key": key,
         "kind": output_set.kind,
         "root_uri": str(output_set.root),
-        "include": _normalize_patterns(output_set.include),
+        "include": _manifest_include_value(output_set.include),
         "exclude": _normalize_patterns(output_set.exclude),
         "recursive": output_set.recursive,
         "schema": _schema_manifest(output_set.schema),
@@ -518,23 +669,93 @@ def _member_facets(
     config: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     facets: dict[str, Any] = {"output_set_key": key}
+    if isinstance(output_set.include, FilenamePattern):
+        capture_facets = _extract_filename_pattern_facets(
+            filename_pattern=output_set.include,
+            member_relative_path=member.relative_path,
+        )
+        facets.update(capture_facets)
     if output_set.member_facets is not None:
-        facets.update(
-            dict(
-                output_set.member_facets(
-                    member.path,
-                    member.relative_path,
-                    config or {},
-                )
+        extra_facets = dict(
+            output_set.member_facets(
+                member.path,
+                member.relative_path,
+                config or {},
             )
         )
+        overlap = set(facets).intersection(extra_facets)
+        if overlap:
+            raise ValueError(
+                "output-set member facets conflict with captured filename facets: "
+                + ", ".join(sorted(overlap))
+            )
+        facets.update(extra_facets)
     return facets
+
+
+def _capture_identity_value(output_set: OutputSet) -> dict[str, Any]:
+    return {
+        "root": str(output_set.root),
+        "include": _manifest_include_value(output_set.include),
+        "exclude": sorted(_normalize_patterns(output_set.exclude)),
+        "recursive": output_set.recursive,
+        "kind": output_set.kind,
+    }
+
+
+def build_output_set_captures_identity(
+    output_sets: Mapping[str, OutputSet] | None,
+) -> dict[str, Any] | None:
+    """Build a canonical payload for capture-aware output-set identity.
+
+    This intentionally only includes ``FilenamePattern``-based declarations in
+    v1 so capture binding changes invalidate cache identity without expanding
+    the public identity contract for discovery-only output sets.
+    """
+    if not output_sets:
+        return None
+
+    identity: dict[str, Any] = {}
+    for key in sorted(output_sets):
+        output_set = output_sets[key]
+        if isinstance(output_set.include, FilenamePattern):
+            identity[key] = _capture_identity_value(output_set)
+    return identity or None
 
 
 def _schema_manifest(schema: type[SQLModel] | None) -> dict[str, str] | None:
     if schema is None:
         return None
     return {"name": schema.__name__}
+
+
+def _manifest_include_value(
+    include: str | Sequence[str] | FilenamePattern,
+) -> list[str] | dict[str, Any]:
+    if isinstance(include, FilenamePattern):
+        captures: list[dict[str, Any]] = []
+        for capture in sorted(
+            include.captures, key=lambda capture: (capture.wildcard, capture.name)
+        ):
+            if isinstance(capture, IntCapture):
+                capture_kind = "int"
+                payload = {
+                    "kind": capture_kind,
+                    "name": capture.name,
+                    "wildcard": capture.wildcard,
+                }
+            elif isinstance(capture, EnumCapture):
+                payload = {
+                    "kind": "enum",
+                    "name": capture.name,
+                    "wildcard": capture.wildcard,
+                    "allowed": sorted(capture.allowed),
+                }
+            else:  # pragma: no cover - defensive for future capture kinds
+                raise TypeError(f"unsupported capture type: {type(capture)!r}")
+            captures.append(payload)
+        return {"pattern": include.pattern, "captures": captures}
+    return _normalize_patterns(include)
 
 
 def _parent_metadata(
