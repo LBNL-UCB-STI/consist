@@ -251,6 +251,26 @@ def test_filename_pattern_capture_extracts_typed_facets(tmp_path: Path) -> None:
     )
 
 
+def test_filename_pattern_exclude_precedes_typed_capture_validation(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "annual"
+    root.mkdir()
+    (root / "output_final.parquet").write_text("final\n")
+
+    output_set = OutputSet(
+        root=root,
+        include=FilenamePattern.glob("output_*.parquet").with_captures(
+            IntCapture(name="year", wildcard=1)
+        ),
+        exclude=["output_final.parquet"],
+    )
+
+    members = discover_output_set_members(output_set)
+
+    assert members == []
+
+
 def test_filename_pattern_rejects_double_star() -> None:
     with pytest.raises(ValueError, match="\\*\\*"):
         FilenamePattern.glob("output_**.parquet")

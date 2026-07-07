@@ -221,6 +221,8 @@ def discover_output_set_members(output_set: OutputSet) -> list[OutputSetMember]:
         if not path.is_file():
             continue
         relative_path = _normalize_output_set_relative_path(path.relative_to(root))
+        if exclude_patterns and _matches_any(relative_path, exclude_patterns):
+            continue
         if compiled_filename_pattern is not None:
             assert filename_pattern is not None
             if not fnmatch.fnmatchcase(relative_path, filename_pattern.pattern):
@@ -239,8 +241,6 @@ def discover_output_set_members(output_set: OutputSet) -> list[OutputSetMember]:
         else:
             if not _matches_any(relative_path, include_patterns):
                 continue
-        if exclude_patterns and _matches_any(relative_path, exclude_patterns):
-            continue
         members.append(
             OutputSetMember(
                 path=path,
