@@ -96,6 +96,11 @@ The ingested rows include Consist provenance columns. You can filter or group by
 `consist_run_id`, `consist_scenario_id`, `consist_year`, and related runtime
 metadata exposed by the view before aggregating.
 
+For spatial artifacts, the DLT-backed path stays metadata-only. Consist records
+bounds, CRS, geometry types, geometry column, feature count, and columns, but
+it does not ingest geometry rows into DuckDB. GeoParquet follows the same
+metadata-only path.
+
 ## Ingesting Files
 
 For tabular files, log and ingest with a schema when you want the rows in
@@ -219,6 +224,7 @@ table name before registering it.
 | Validate column names and types | DLT with SQLModel schema |
 | Export a SQLModel stub later | DLT ingestion or file schema profiling |
 | Record a non-tabular artifact such as Zarr/NetCDF | Direct artifact logging plus any separate metadata table you create |
+| Record a spatial file without ingesting geometry rows | DLT metadata-only spatial logging |
 
 ## See Also
 

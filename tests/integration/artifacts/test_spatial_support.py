@@ -1,37 +1,64 @@
 """Integration tests for spatial artifact support."""
 
+import importlib
 from pathlib import Path
+from typing import Any
 
+import pandas as pd
 import pytest
 
+from consist import is_spatial_artifact
 from consist.core.tracker import Tracker
 
-gpd = pytest.importorskip("geopandas")
 
+def _write_geoparquet_fixture(tmp_path: Path, gpd):
+    shapely_geometry: Any = importlib.import_module("shapely.geometry")
+    Point = shapely_geometry.Point
+    Polygon = shapely_geometry.Polygon
 
-def test_spatial_load_and_metadata_ingestion(tracker: Tracker) -> None:
-    """
-    Tests loading and metadata ingestion for spatial artifacts.
-
-    Verifies:
-    1. load() returns GeoDataFrame for geojson driver
-    2. Spatial metadata is ingested and queryable
-    """
-    geojson_path = (
-        Path(__file__).resolve().parents[2] / "resources/spatial/tiny.geojson"
+    gdf = gpd.GeoDataFrame(
+        {
+            "name": ["point", "polygon"],
+            "value": [1, 2],
+            "geometry": [
+                Point(-122.3321, 47.6062),
+                Polygon(
+                    [
+                        (-122.34, 47.60),
+                        (-122.30, 47.60),
+                        (-122.30, 47.63),
+                        (-122.34, 47.63),
+                    ]
+                ),
+            ],
+        },
+        crs="EPSG:4326",
     )
+    parquet_path = tmp_path / "tiny.parquet"
+    gdf.to_parquet(parquet_path)
+    return gdf, parquet_path
+
+
+def test_spatial_load_and_metadata_ingestion_for_geoparquet(
+    tracker: Tracker, tmp_path: Path
+) -> None:
+    """GeoParquet should load through geopandas and ingest spatial metadata."""
+    gpd = pytest.importorskip("geopandas")
+    pytest.importorskip("pyarrow")
+    expected_gdf, parquet_path = _write_geoparquet_fixture(tmp_path, gpd)
 
     with tracker.start_run("run_spatial", model="test_model"):
         artifact = tracker.log_artifact(
-            str(geojson_path),
+            str(parquet_path),
             key="tiny_spatial",
-            driver="geojson",
+            driver="geoparquet",
             direction="output",
         )
 
         loaded = tracker.load(artifact)
         assert isinstance(loaded, gpd.GeoDataFrame)
-        assert len(loaded) == 2
+        assert list(loaded["name"]) == list(expected_gdf["name"])
+        assert len(loaded) == len(expected_gdf)
 
         tracker.ingest(artifact)
 
@@ -44,6 +71,29 @@ def test_spatial_load_and_metadata_ingestion(tracker: Tracker) -> None:
     assert row.crs == "EPSG:4326"
     assert "Point" in row.geometry_types
     assert "Polygon" in row.geometry_types
+    assert row.geometry_column == "geometry"
+    assert "geometry" in row.column_names
+
+
+def test_parquet_inference_remains_non_spatial(
+    tracker: Tracker, tmp_path: Path
+) -> None:
+    """A plain .parquet artifact should still infer the generic parquet driver."""
+    pytest.importorskip("pyarrow")
+    parquet_path = tmp_path / "tiny.parquet"
+    pd.DataFrame({"name": ["point", "polygon"], "value": [1, 2]}).to_parquet(
+        parquet_path
+    )
+
+    with tracker.start_run("run_parquet", model="test_model"):
+        artifact = tracker.log_artifact(
+            str(parquet_path),
+            key="tiny_parquet",
+            direction="output",
+        )
+
+    assert artifact.driver == "parquet"
+    assert is_spatial_artifact(artifact) is False
 
 
 def test_spatial_metadata_filters_by_run_ids_and_year(tracker: Tracker) -> None:
@@ -53,6 +103,7 @@ def test_spatial_metadata_filters_by_run_ids_and_year(tracker: Tracker) -> None:
     This serves as living documentation for how `SpatialMetadataView.get_metadata`
     narrows results in end-to-end usage after artifact ingestion.
     """
+    pytest.importorskip("geopandas")
     geojson_path = (
         Path(__file__).resolve().parents[2] / "resources/spatial/tiny.geojson"
     )

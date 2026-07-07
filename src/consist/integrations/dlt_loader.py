@@ -378,14 +378,33 @@ def _handle_openmatrix_metadata(path: str) -> Iterable[Dict[str, Any]]:
         raise ValueError(f"Failed to extract OpenMatrix metadata from {path}: {e}")
 
 
-def _handle_spatial_metadata(path: str) -> Iterable[Dict[str, Any]]:
+def _format_spatial_crs(crs: Any) -> str | None:
+    if crs is None:
+        return None
+
+    try:
+        pyproj = importlib.import_module("pyproj")
+        normalized_crs = pyproj.CRS.from_user_input(crs)
+        authority = normalized_crs.to_authority()
+        if authority is not None:
+            return f"{authority[0]}:{authority[1]}"
+        return normalized_crs.to_string()
+    except (ImportError, TypeError, ValueError):
+        return str(crs)
+
+
+def _handle_spatial_metadata(
+    path: str, driver: str = "geojson"
+) -> Iterable[Dict[str, Any]]:
     """
     Extracts and yields basic metadata from spatial files.
 
     Parameters
     ----------
     path : str
-        Path to a spatial file (GeoJSON, Shapefile, GeoPackage).
+        Path to a spatial file (GeoJSON, GeoParquet, Shapefile, GeoPackage).
+    driver : str
+        Spatial driver name that selects the appropriate geopandas reader.
 
     Yields
     ------
@@ -400,10 +419,16 @@ def _handle_spatial_metadata(path: str) -> Iterable[Dict[str, Any]]:
         If metadata extraction fails.
     """
     if geopandas is None:
-        raise ImportError("geopandas is required for spatial ingestion.")
+        raise ImportError(
+            "geopandas is required for spatial ingestion. "
+            'Install with `pip install "consist[spatial]"`.'
+        )
 
     try:
-        gdf = geopandas.read_file(path)
+        if driver == "geoparquet":
+            gdf = geopandas.read_parquet(path)
+        else:
+            gdf = geopandas.read_file(path)
         geometry_name = gdf.geometry.name
         geometry_series = gdf.geometry if geometry_name else None
         geometry_types = []
@@ -412,7 +437,7 @@ def _handle_spatial_metadata(path: str) -> Iterable[Dict[str, Any]]:
 
         yield {
             "bounds": gdf.total_bounds.tolist(),
-            "crs": str(gdf.crs) if gdf.crs else None,
+            "crs": _format_spatial_crs(gdf.crs),
             "feature_count": len(gdf),
             "geometry_types": geometry_types,
             "geometry_column": geometry_name,
@@ -614,6 +639,19 @@ def ingest_artifact(
         elif artifact.driver == "openmatrix":
             data_source = _handle_openmatrix_metadata(file_path)
 
+        elif artifact.driver == "geoparquet":
+            spatial_mode = None
+            if isinstance(artifact.meta, dict):
+                spatial_mode = artifact.meta.get("spatial_ingest_mode")
+
+            if spatial_mode == "wkt":
+                raise ValueError(
+                    "GeoParquet does not support spatial_ingest_mode='wkt'. "
+                    "Use the default metadata ingestion or convert geometry to WKT before logging."
+                )
+
+            data_source = _handle_spatial_metadata(file_path, artifact.driver)
+
         elif artifact.driver in {"geojson", "shapefile", "geopackage"}:
             spatial_mode = None
             if isinstance(artifact.meta, dict):
@@ -621,7 +659,10 @@ def ingest_artifact(
 
             if spatial_mode == "wkt":
                 if geopandas is None:
-                    raise ImportError("geopandas is required for spatial ingestion.")
+                    raise ImportError(
+                        "geopandas is required for spatial ingestion. "
+                        'Install with `pip install "consist[spatial]"`.'
+                    )
 
                 gdf = geopandas.read_file(file_path)
                 geometry_name = gdf.geometry.name
@@ -639,7 +680,7 @@ def ingest_artifact(
                 table_df = table_df.drop(columns=[geometry_name])
                 data_source = [table_df]
             else:
-                data_source = _handle_spatial_metadata(file_path)
+                data_source = _handle_spatial_metadata(file_path, artifact.driver)
 
         else:
             raise ValueError(f"Ingestion not supported for driver: {artifact.driver}")

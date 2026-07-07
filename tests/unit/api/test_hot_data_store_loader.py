@@ -5,6 +5,8 @@ from types import SimpleNamespace
 from typing import cast
 from uuid import uuid4
 
+import pytest
+
 from consist.api import _load_from_db, load
 from consist.core.tracker import Tracker
 from consist.models.artifact import Artifact
@@ -88,6 +90,40 @@ def test_load_allows_hot_data_store_without_tracker_engine(
     result = load(artifact, tracker=tracker, db_fallback="always")
 
     assert result is sentinel
+
+
+def test_load_does_not_reconstruct_ingested_geoparquet_from_db(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    resolved_path = str(tmp_path / "missing.parquet")
+    artifact = Artifact(
+        id=uuid4(),
+        key="parcels",
+        container_uri=resolved_path,
+        driver="geoparquet",
+        meta={"is_ingested": True, "dlt_table_name": "parcels"},
+    )
+    tracker = cast(
+        Tracker,
+        SimpleNamespace(
+            hot_data_store=SimpleNamespace(
+                db_path=str(tmp_path / "hot.duckdb"),
+            ),
+            engine=None,
+            db_path=None,
+            current_consist=None,
+            resolve_uri=lambda _uri: resolved_path,
+        ),
+    )
+
+    def _unexpected_db_load(*_args, **_kwargs):
+        raise AssertionError("GeoParquet should not load from metadata-only DB rows")
+
+    monkeypatch.setattr("consist.api._load_from_db", _unexpected_db_load)
+
+    with pytest.raises(FileNotFoundError, match="GeoParquet"):
+        load(artifact, tracker=tracker, db_fallback="always")
 
 
 def test_load_falls_back_to_tracker_db_path_when_hot_store_absent(

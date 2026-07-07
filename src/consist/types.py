@@ -410,6 +410,7 @@ DriverLiteral: TypeAlias = Literal[
     "netcdf",
     "openmatrix",
     "geojson",
+    "geoparquet",
     "shapefile",
     "geopackage",
     "json",
@@ -455,6 +456,7 @@ class DriverType(str, Enum):
     NETCDF = "netcdf"
     OPENMATRIX = "openmatrix"
     GEOJSON = "geojson"
+    GEOPARQUET = "geoparquet"
     SHAPEFILE = "shapefile"
     GEOPACKAGE = "geopackage"
     JSON = "json"
@@ -506,7 +508,14 @@ class DriverType(str, Enum):
     @classmethod
     def spatial_drivers(cls) -> frozenset[str]:
         """Drivers that load as GeoDataFrame (geospatial formats)."""
-        return frozenset({cls.GEOJSON.value, cls.SHAPEFILE.value, cls.GEOPACKAGE.value})
+        return frozenset(
+            {
+                cls.GEOJSON.value,
+                cls.GEOPARQUET.value,
+                cls.SHAPEFILE.value,
+                cls.GEOPACKAGE.value,
+            }
+        )
 
     @classmethod
     def hdf_drivers(cls) -> frozenset[str]:

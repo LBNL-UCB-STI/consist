@@ -95,6 +95,32 @@ def _fake_dlt_module(
     return fake_dlt, fake_pipeline, captured
 
 
+def _fake_geo_dataframe() -> object:
+    class _GeomTypeSeries:
+        def dropna(self):
+            return self
+
+        def unique(self):
+            return self
+
+        def tolist(self):
+            return ["Point", "Polygon"]
+
+    class _FakeGeoDataFrame:
+        def __init__(self) -> None:
+            self.geometry = SimpleNamespace(
+                name="geometry", geom_type=_GeomTypeSeries()
+            )
+            self.total_bounds = SimpleNamespace(tolist=lambda: [0.0, 0.0, 1.0, 1.0])
+            self.crs = "EPSG:4326"
+            self.columns = ["name", "geometry"]
+
+        def __len__(self) -> int:
+            return 2
+
+    return _FakeGeoDataFrame()
+
+
 def test_ingest_artifact_raises_when_no_data_iterable_or_path_is_provided(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -140,6 +166,60 @@ def test_ingest_artifact_unsupported_driver_raises_value_error(
             run_context=_run_context(),
             db_path="/tmp/provenance.duckdb",
             data_iterable="/tmp/input.unsupported",
+        )
+
+
+def test_handle_spatial_metadata_uses_read_parquet_for_geoparquet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_gdf = _fake_geo_dataframe()
+    observed: dict[str, str] = {}
+
+    class _FakeGeoPandas:
+        def read_parquet(self, path):
+            observed["path"] = path
+            return fake_gdf
+
+        def read_file(self, path):
+            raise AssertionError("read_file should not be used for GeoParquet")
+
+    monkeypatch.setattr(dlt_loader, "geopandas", _FakeGeoPandas())
+
+    result = list(
+        dlt_loader._handle_spatial_metadata("/tmp/tiny.parquet", driver="geoparquet")
+    )
+
+    assert observed["path"] == "/tmp/tiny.parquet"
+    assert result == [
+        {
+            "bounds": [0.0, 0.0, 1.0, 1.0],
+            "crs": "EPSG:4326",
+            "feature_count": 2,
+            "geometry_types": ["Point", "Polygon"],
+            "geometry_column": "geometry",
+            "column_names": ["name", "geometry"],
+        }
+    ]
+
+
+def test_ingest_artifact_geoparquet_wkt_mode_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dlt_loader, "dlt", object())
+    monkeypatch.setattr(dlt_loader, "geopandas", object())
+
+    artifact = _artifact(
+        key="spatial_rows",
+        driver="geoparquet",
+    )
+    artifact.meta["spatial_ingest_mode"] = "wkt"
+
+    with pytest.raises(ValueError, match="GeoParquet does not support"):
+        dlt_loader.ingest_artifact(
+            artifact=artifact,
+            run_context=_run_context(),
+            db_path="/tmp/provenance.duckdb",
+            data_iterable="/tmp/tiny.parquet",
         )
 
 
@@ -409,9 +489,10 @@ def test_handle_spatial_metadata_raises_when_geopandas_missing(
     monkeypatch.setattr(dlt_loader, "geopandas", None)
 
     with pytest.raises(
-        ImportError, match="geopandas is required for spatial ingestion"
+        ImportError,
+        match=r"geopandas is required for spatial ingestion.*consist\[spatial\]",
     ):
-        list(dlt_loader._handle_spatial_metadata("/tmp/data.geojson"))
+        list(dlt_loader._handle_spatial_metadata("/tmp/data.geojson", driver="geojson"))
 
 
 def test_handle_spatial_metadata_wraps_reader_errors_in_value_error(
@@ -425,4 +506,4 @@ def test_handle_spatial_metadata_wraps_reader_errors_in_value_error(
     monkeypatch.setattr(dlt_loader, "geopandas", _FakeGeoPandas())
 
     with pytest.raises(ValueError, match="Failed to extract spatial metadata .* boom"):
-        list(dlt_loader._handle_spatial_metadata("/tmp/data.geojson"))
+        list(dlt_loader._handle_spatial_metadata("/tmp/data.geojson", driver="geojson"))
