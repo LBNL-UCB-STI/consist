@@ -217,10 +217,34 @@ purpose = OutputSet(
 )
 ```
 
-Capture-aware patterns match basenames only, reject `**` and path separators,
-and require every wildcard to be bound. Captured values are stored with their
-real types on member artifacts, so `year` is queryable as an integer rather than
-a string.
+Capture-aware patterns match the output-set relative path, reject `**`, and
+require every wildcard to be bound. Captured values are stored with their real
+types on member artifacts, so `year` is queryable as an integer rather than a
+string.
+
+The current capture surface is intentionally narrow: integer and enum-style
+captures cover the supported v1 cases. If you need another typed capture, open
+an issue first so the extension can be designed deliberately instead of growing
+ad hoc.
+
+If a filename repeats the same facet more than once, bind both wildcards to the
+same capture name. Consist will keep one facet value and require the repeated
+values to match:
+
+``` python
+events = OutputSet(
+    root="output",
+    recursive=True,
+    include=FilenamePattern.glob("IT.*/*.events.parquet").with_captures(
+        IntCapture(name="iteration", wildcard=1),
+        IntCapture(name="iteration", wildcard=2),
+    ),
+)
+```
+
+This matches paths like `output/IT.3/3.events.parquet` and yields one
+`iteration=3` facet. If the two occurrences disagree, Consist raises during
+discovery instead of guessing which one to keep.
 
 The optional `expected_members` and `expected_count` fields turn discovery into
 a completeness check. They are not required. Use them when the config tells you

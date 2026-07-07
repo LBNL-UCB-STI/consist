@@ -121,7 +121,9 @@ with tracker.scenario("baseline") as sc:
 - `consist.ArtifactSpec` / `consist.OutputArtifactSpec` (rich declared-output
   metadata for `Tracker.run(output_paths=...)`)
 - `consist.FilenamePattern`, `consist.IntCapture`, and `consist.EnumCapture`
-  (capture-aware output-set declarations for `OutputSet(include=...)`)
+  (capture-aware output-set declarations for `OutputSet(include=...)`; the
+  capture set is intentionally narrow in v1, and future typed captures can be
+  added by design if there is demand)
 - `consist.CacheOptions`, `consist.OutputPolicyOptions`, `consist.ExecutionOptions`
 - `consist.BindingResult` (execution envelope for orchestrator-resolved scenario inputs)
 - `consist.H5ChildSpec` (typed child-artifact customization for HDF5 containers)

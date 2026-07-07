@@ -74,6 +74,7 @@ class OutputSetMember:
 class _CompiledFilenamePattern:
     regex: re.Pattern[str]
     captures_by_wildcard: dict[int, FilenameCapture]
+    group_names_by_wildcard: dict[int, str]
 
 
 def _compile_filename_pattern(
@@ -100,10 +101,7 @@ def _compile_filename_pattern(
         )
 
     captures_by_wildcard: dict[int, FilenameCapture] = {}
-    seen_names: set[str] = set()
     for capture in filename_pattern.captures:
-        if capture.name in seen_names:
-            raise ValueError(f"duplicate capture name {capture.name!r}")
         if capture.wildcard < 1 or capture.wildcard > wildcard_count:
             raise ValueError(
                 f"wildcard index {capture.wildcard} is out of range for pattern "
@@ -114,21 +112,23 @@ def _compile_filename_pattern(
                 f"duplicate wildcard index {capture.wildcard} is not allowed"
             )
         captures_by_wildcard[capture.wildcard] = capture
-        seen_names.add(capture.name)
 
     regex_parts: list[str] = ["^"]
+    group_names_by_wildcard: dict[int, str] = {}
     for index, literal in enumerate(segments):
         regex_parts.append(re.escape(literal))
         if index < wildcard_count:
             capture = captures_by_wildcard[index + 1]
+            group_name = f"__capture_{index + 1}"
+            group_names_by_wildcard[index + 1] = group_name
             if isinstance(capture, IntCapture):
-                capture_regex = rf"(?P<{capture.name}>\d+)"
+                capture_regex = rf"(?P<{group_name}>\d+)"
             elif isinstance(capture, EnumCapture):
                 allowed = sorted(
                     capture.allowed, key=lambda value: (-len(value), value)
                 )
                 capture_regex = (
-                    rf"(?P<{capture.name}>"
+                    rf"(?P<{group_name}>"
                     rf"(?:{'|'.join(re.escape(value) for value in allowed)})"
                     rf")"
                 )
@@ -139,38 +139,49 @@ def _compile_filename_pattern(
     return _CompiledFilenamePattern(
         regex=re.compile("".join(regex_parts)),
         captures_by_wildcard=captures_by_wildcard,
+        group_names_by_wildcard=group_names_by_wildcard,
     )
 
 
 def _extract_filename_pattern_facets(
     *,
     filename_pattern: FilenamePattern,
-    member_path: Path,
+    member_relative_path: str,
 ) -> dict[str, Any]:
     compiled = _compile_filename_pattern(filename_pattern)
-    basename = member_path.name
-    match = compiled.regex.fullmatch(basename)
+    match = compiled.regex.fullmatch(member_relative_path)
     if match is None:
         raise ValueError(
-            f"output-set member {member_path} did not match capture pattern "
+            f"output-set member {member_relative_path} did not match capture pattern "
             f"{filename_pattern.pattern!r}"
         )
 
     facets: dict[str, Any] = {}
+    captured_values: dict[str, Any] = {}
     for wildcard_index in range(1, len(compiled.captures_by_wildcard) + 1):
         capture = compiled.captures_by_wildcard[wildcard_index]
-        captured_value = match.group(capture.name)
+        group_name = compiled.group_names_by_wildcard[wildcard_index]
+        captured_value = match.group(group_name)
         if isinstance(capture, IntCapture):
-            facets[capture.name] = int(captured_value)
+            value: Any = int(captured_value)
         elif isinstance(capture, EnumCapture):
             if captured_value not in capture.allowed:
                 raise ValueError(
-                    f"output-set member {member_path} produced invalid value "
+                    f"output-set member {member_relative_path} produced invalid value "
                     f"{captured_value!r} for capture {capture.name!r}"
                 )
-            facets[capture.name] = captured_value
+            value = captured_value
         else:  # pragma: no cover - defensive for future capture kinds
             raise TypeError(f"unsupported capture type: {type(capture)!r}")
+        previous_value = captured_values.get(capture.name)
+        if previous_value is None:
+            captured_values[capture.name] = value
+        elif previous_value != value:
+            raise ValueError(
+                f"output-set member {member_relative_path} produced incompatible repeated "
+                f"capture {capture.name!r}"
+            )
+    facets.update(captured_values)
     return facets
 
 
@@ -212,9 +223,9 @@ def discover_output_set_members(output_set: OutputSet) -> list[OutputSetMember]:
         relative_path = _normalize_output_set_relative_path(path.relative_to(root))
         if compiled_filename_pattern is not None:
             assert filename_pattern is not None
-            if not fnmatch.fnmatchcase(path.name, filename_pattern.pattern):
+            if not fnmatch.fnmatchcase(relative_path, filename_pattern.pattern):
                 continue
-            if compiled_filename_pattern.regex.fullmatch(path.name) is None:
+            if compiled_filename_pattern.regex.fullmatch(relative_path) is None:
                 raise ValueError(
                     f"output-set member {path} matched discovery pattern "
                     f"{filename_pattern.pattern!r} but failed typed capture"
@@ -223,7 +234,7 @@ def discover_output_set_members(output_set: OutputSet) -> list[OutputSetMember]:
             # fails closed before any artifacts are logged.
             _extract_filename_pattern_facets(
                 filename_pattern=filename_pattern,
-                member_path=path,
+                member_relative_path=relative_path,
             )
         else:
             if not _matches_any(relative_path, include_patterns):
@@ -661,7 +672,7 @@ def _member_facets(
     if isinstance(output_set.include, FilenamePattern):
         capture_facets = _extract_filename_pattern_facets(
             filename_pattern=output_set.include,
-            member_path=member.path,
+            member_relative_path=member.relative_path,
         )
         facets.update(capture_facets)
     if output_set.member_facets is not None:

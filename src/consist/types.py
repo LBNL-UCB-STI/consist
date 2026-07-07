@@ -149,6 +149,14 @@ def _validate_capture_name(name: str) -> None:
         raise ValueError(f"capture name {name!r} is reserved")
 
 
+def _capture_signature(capture: "FilenameCapture") -> tuple[str, tuple[str, ...]]:
+    if isinstance(capture, IntCapture):
+        return ("int", ())
+    if isinstance(capture, EnumCapture):
+        return ("enum", tuple(sorted(capture.allowed)))
+    raise TypeError(f"unsupported capture type: {type(capture)!r}")
+
+
 @dataclass(frozen=True, slots=True)
 class IntCapture:
     name: str
@@ -200,8 +208,10 @@ class FilenamePattern:
 def _validate_filename_pattern_glob(pattern: str) -> None:
     if not pattern:
         raise ValueError("filename pattern must not be empty")
-    if "/" in pattern or "\\" in pattern:
-        raise ValueError("capture-aware filename patterns must match basenames only")
+    if "\\" in pattern:
+        raise ValueError(
+            "capture-aware filename patterns must use '/' as the path separator"
+        )
     if "**" in pattern:
         raise ValueError("capture-aware filename patterns cannot contain '**'")
     if any(token in pattern for token in ("?", "[", "]")):
@@ -220,11 +230,13 @@ def _validate_filename_pattern_captures(pattern: FilenamePattern) -> None:
             f"{len(pattern.captures)} capture(s)"
         )
 
-    seen_names: set[str] = set()
+    seen_signatures: dict[str, tuple[str, tuple[str, ...]]] = {}
     seen_wildcards: set[int] = set()
     for capture in pattern.captures:
-        if capture.name in seen_names:
-            raise ValueError(f"duplicate capture name {capture.name!r}")
+        signature = _capture_signature(capture)
+        previous_signature = seen_signatures.get(capture.name)
+        if previous_signature is not None and previous_signature != signature:
+            raise ValueError(f"incompatible repeated capture {capture.name!r}")
         if capture.wildcard in seen_wildcards:
             raise ValueError(
                 f"duplicate wildcard index {capture.wildcard} is not allowed"
@@ -234,7 +246,7 @@ def _validate_filename_pattern_captures(pattern: FilenamePattern) -> None:
                 f"wildcard index {capture.wildcard} is out of range for pattern "
                 f"with {wildcard_count} wildcard(s)"
             )
-        seen_names.add(capture.name)
+        seen_signatures[capture.name] = signature
         seen_wildcards.add(capture.wildcard)
 
     if seen_wildcards != set(range(1, wildcard_count + 1)):

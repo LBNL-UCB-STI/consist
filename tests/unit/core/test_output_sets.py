@@ -251,12 +251,61 @@ def test_filename_pattern_capture_extracts_typed_facets(tmp_path: Path) -> None:
     )
 
 
-def test_filename_pattern_rejects_path_separators_and_double_star() -> None:
-    with pytest.raises(ValueError, match="basename"):
-        FilenamePattern.glob("annual/output_*.parquet")
-
+def test_filename_pattern_rejects_double_star() -> None:
     with pytest.raises(ValueError, match="\\*\\*"):
         FilenamePattern.glob("output_**.parquet")
+
+
+def test_filename_pattern_capture_extracts_repeated_relative_path_facet(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "output"
+    (root / "IT.3").mkdir(parents=True)
+    (root / "IT.3" / "3.events.parquet").write_text("event\n")
+
+    output_set = OutputSet(
+        root=root,
+        recursive=True,
+        include=FilenamePattern.glob("IT.*/*.events.parquet").with_captures(
+            IntCapture(name="iteration", wildcard=1),
+            IntCapture(name="iteration", wildcard=2),
+        ),
+    )
+
+    members = discover_output_set_members(output_set)
+    manifest = build_output_set_manifest(
+        key="events",
+        output_set=output_set,
+        members=members,
+        config={},
+        logged_members=[],
+    )
+
+    assert [member.relative_path for member in members] == ["IT.3/3.events.parquet"]
+    assert manifest["members"][0]["facets"] == {
+        "output_set_key": "events",
+        "iteration": 3,
+    }
+
+
+def test_filename_pattern_rejects_repeated_capture_value_mismatch(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "output"
+    (root / "IT.3").mkdir(parents=True)
+    (root / "IT.3" / "4.events.parquet").write_text("event\n")
+
+    output_set = OutputSet(
+        root=root,
+        recursive=True,
+        include=FilenamePattern.glob("IT.*/*.events.parquet").with_captures(
+            IntCapture(name="iteration", wildcard=1),
+            IntCapture(name="iteration", wildcard=2),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="repeated capture"):
+        discover_output_set_members(output_set)
 
 
 def test_filename_pattern_rejects_capture_binding_errors() -> None:
@@ -271,10 +320,10 @@ def test_filename_pattern_rejects_capture_binding_errors() -> None:
             IntCapture(name="iteration", wildcard=1),
         )
 
-    with pytest.raises(ValueError, match="duplicate capture name"):
+    with pytest.raises(ValueError, match="incompatible repeated capture"):
         FilenamePattern.glob("output_*_*.parquet").with_captures(
-            IntCapture(name="year", wildcard=1),
-            IntCapture(name="year", wildcard=2),
+            IntCapture(name="purpose", wildcard=1),
+            EnumCapture(name="purpose", allowed={"home"}, wildcard=2),
         )
 
 
