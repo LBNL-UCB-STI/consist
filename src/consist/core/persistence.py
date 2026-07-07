@@ -33,7 +33,7 @@ from sqlalchemy.pool import NullPool
 from sqlmodel import create_engine, Session, select, SQLModel, col, delete
 
 from consist.core.db_runtime import DatabaseRuntimeOps
-from consist.core.db_snapshot import DatabaseSnapshotOps
+from consist.core.db_snapshot import DatabaseSnapshotOps, snapshot_sidecar_path
 from consist.core._performance_attribution import _track_begin_run_phase
 from consist.core.provenance_writer import ProvenanceWriter
 from consist.core.schema_compat import (
@@ -658,11 +658,7 @@ class DatabaseManager:
 
         Example: provenance.duckdb -> provenance.snapshot_meta.json
         """
-        snapshot_ops = getattr(self, "_snapshot_ops", None)
-        if snapshot_ops is None:
-            snapshot_ops = DatabaseSnapshotOps(self)
-            self._snapshot_ops = snapshot_ops
-        return snapshot_ops._snapshot_sidecar_path(destination)
+        return snapshot_sidecar_path(destination)
 
     def snapshot_to(
         self,

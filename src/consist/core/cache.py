@@ -591,9 +591,9 @@ def hydrate_cache_hit_outputs(
                             run_id = str(art.run_id)
                             if run_id not in run_cache:
                                 run_cache[run_id] = db.get_run(run_id)
-                            run: Run | None = run_cache.get(run_id)
-                            if run is not None:
-                                historical_run = run
+                            cached_run_record: Run | None = run_cache.get(run_id)
+                            if cached_run_record is not None:
+                                historical_run = cached_run_record
                         _, source, _ = find_existing_recovery_source_path(
                             cast("Tracker", tracker),
                             artifact=art,
@@ -634,9 +634,9 @@ def hydrate_cache_hit_outputs(
                             run_id = str(art.run_id)
                             if run_id not in run_cache:
                                 run_cache[run_id] = db.get_run(run_id)
-                            run: Run | None = run_cache.get(run_id)
-                            if run is not None:
-                                historical_run = run
+                            cached_run_record: Run | None = run_cache.get(run_id)
+                            if cached_run_record is not None:
+                                historical_run = cached_run_record
                         relative_path, source, _ = find_existing_recovery_source_path(
                             cast("Tracker", tracker),
                             artifact=art,

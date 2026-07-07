@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, Mapping, Optional, TYPE_CHECKING
+from typing import Any, Iterable, Mapping, MutableMapping, Optional, TYPE_CHECKING
 
 from consist.core._coupler_shared import CouplerMapMixin
 from consist.models.artifact import Artifact
@@ -181,11 +181,11 @@ class Coupler(CouplerMapMixin[Artifact, DeclaredOutput]):
 
     def __init__(self, tracker: Optional["Tracker"] = None) -> None:
         self.tracker = tracker
-        self._artifacts: Dict[str, Artifact] = {}
-        self._declared_outputs: Dict[str, DeclaredOutput] = {}
+        self._artifacts: MutableMapping[str, Artifact] = {}
+        self._declared_outputs: MutableMapping[str, DeclaredOutput] = {}
         self._warn_undefined = False
         self._undefined_keys: set[str] = set()
-        self._output_descriptions: Dict[str, str] = {}
+        self._output_descriptions: MutableMapping[str, str] = {}
 
     def _validate_artifact_key(self, key: str) -> None:
         validate_artifact_key(key)

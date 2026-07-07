@@ -60,6 +60,7 @@ from sqlmodel import Session, col, select
 
 from consist import Tracker
 from consist.core.gtfs import GTFS_CORE_TABLE_NAMES, discover_gtfs_members
+from consist.core.db_snapshot import snapshot_sidecar_path
 from consist.core.maintenance import DatabaseMaintenance
 from consist.core.persistence import DatabaseManager
 from consist.core.run_ordering import recent_run_order_by
@@ -326,11 +327,7 @@ def _maintenance_service(db_path: Optional[str]) -> DatabaseMaintenance:
 
 
 def _resolve_snapshot_sidecar_path(db: DatabaseManager, snapshot_path: Path) -> Path:
-    sidecar_path_fn = getattr(db, "_snapshot_sidecar_path", None)
-    if callable(sidecar_path_fn):
-        return sidecar_path_fn(snapshot_path)
-    base_name = snapshot_path.stem if snapshot_path.suffix else snapshot_path.name
-    return snapshot_path.with_name(f"{base_name}.snapshot_meta.json")
+    return snapshot_sidecar_path(snapshot_path)
 
 
 @db_app.command("inspect")

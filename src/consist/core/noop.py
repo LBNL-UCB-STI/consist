@@ -5,7 +5,16 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 import inspect
 import logging
-from typing import Any, Dict, Iterator, Mapping, Optional, Sequence, Union
+from typing import (
+    Any,
+    Dict,
+    Iterator,
+    Mapping,
+    MutableMapping,
+    Optional,
+    Sequence,
+    Union,
+)
 import uuid
 
 from consist.core._coupler_shared import CouplerMapMixin
@@ -70,11 +79,11 @@ class NoopCoupler(CouplerMapMixin[Any, DeclaredOutput]):
     """
 
     def __init__(self) -> None:
-        self._artifacts: Dict[str, Any] = {}
-        self._declared_outputs: Dict[str, DeclaredOutput] = {}
+        self._artifacts: MutableMapping[str, Any] = {}
+        self._declared_outputs: MutableMapping[str, DeclaredOutput] = {}
         self._warn_undefined = False
         self._undefined_keys: set[str] = set()
-        self._output_descriptions: Dict[str, str] = {}
+        self._output_descriptions: MutableMapping[str, str] = {}
 
     def _validate_artifact_key(self, key: str) -> None:
         validate_artifact_key(key)

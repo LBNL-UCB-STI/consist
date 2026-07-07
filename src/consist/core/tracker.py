@@ -448,16 +448,24 @@ class Tracker:
 
             project_root_path = Path(project_root) if project_root else Path.cwd()
             namespace = openlineage_namespace or project_root_path.resolve().name
-            schema_resolver = None
+            schema_resolver: (
+                Callable[
+                    [Artifact],
+                    Optional[tuple[ArtifactSchema, List[ArtifactSchemaField]]],
+                ]
+                | None
+            ) = None
             db = metadata_db
             if db is not None:
 
-                def schema_resolver(
+                def _schema_resolver(
                     artifact: Artifact,
                     *,
                     _db: DatabaseManager = db,
                 ) -> Optional[tuple[ArtifactSchema, List[ArtifactSchemaField]]]:
                     return _db.get_artifact_schema_for_artifact(artifact_id=artifact.id)
+
+                schema_resolver = _schema_resolver
 
             openlineage_emitter = OpenLineageEmitter(
                 OpenLineageOptions(
@@ -5943,5 +5951,3 @@ _TRACKER_WRAPPER_DOCS = {
 
 for _name, _source in _TRACKER_WRAPPER_DOCS.items():
     getattr(Tracker, _name).__doc__ = _source.__doc__
-
-del _name, _source

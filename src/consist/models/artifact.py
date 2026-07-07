@@ -13,7 +13,16 @@ from dataclasses import dataclass
 from collections.abc import Iterator, Mapping as MappingABC, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Literal, Optional, Protocol, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    ClassVar,
+    Dict,
+    Literal,
+    Optional,
+    Protocol,
+    cast,
+)
 
 from pydantic import PrivateAttr
 from sqlalchemy import JSON, Column, UniqueConstraint
@@ -227,7 +236,7 @@ class Artifact(SQLModel, table=True):
         created_at (datetime): The timestamp when the artifact was first logged.
     """
 
-    __tablename__ = "artifact"
+    __tablename__: ClassVar[str] = "artifact"  # pyright: ignore[reportIncompatibleVariableOverride]
 
     # Core Identity
     id: uuid.UUID = Field(
@@ -595,7 +604,7 @@ class ArtifactContent(SQLModel, table=True):
     occurrences can reference.
     """
 
-    __tablename__ = "artifact_content"
+    __tablename__: ClassVar[str] = "artifact_content"  # pyright: ignore[reportIncompatibleVariableOverride]
     __table_args__ = (UniqueConstraint("content_hash", "driver"),)
 
     id: uuid.UUID = Field(

@@ -3132,7 +3132,10 @@ def _load_from_disk(path: str, driver: str, **kwargs: Any) -> LoadResult:
             driver=driver,
             schema_id=None,
         )
-        relation = TABLE_DRIVERS.get(driver).load(info, conn, **load_kwargs)
+        relation = cast(
+            duckdb.DuckDBPyRelation,
+            TABLE_DRIVERS.get(driver).load(info, conn, **load_kwargs),
+        )
         if nrows is not None:
             relation = relation.limit(int(nrows))
         # Keep the connection alive for downstream relation materialization.

@@ -12,6 +12,7 @@ class PhaseProfiler(Protocol):
 
     def track(self, label: str) -> ContextManager[None]:
         """Return a context manager that records elapsed time for ``label``."""
+        ...
 
 
 _BEGIN_RUN_PHASE_PROFILER: ContextVar[PhaseProfiler | None] = ContextVar(
