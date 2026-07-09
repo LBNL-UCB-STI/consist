@@ -8,7 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from consist.core.admission import AdmissionReport, check_artifact_identity
+from consist.core.admission import (
+    AdmissionReport,
+    check_artifact_identity,
+    hash_semantics_for_new_artifact,
+)
 from consist.models.artifact import Artifact
 from consist.models.run import RunArtifactLink
 
@@ -74,6 +78,54 @@ def test_public_package_exports_admission_api() -> None:
 
     assert consist.AdmissionReport is AdmissionReport
     assert consist.check_artifact_identity is check_artifact_identity
+
+
+def test_caller_hash_override_does_not_retain_cloned_full_hash_semantics(
+    tracker, tmp_path: Path
+) -> None:
+    source = tmp_path / "feed.zip"
+    source.write_bytes(b"trusted bytes")
+    candidate = tmp_path / "caller-candidate.zip"
+    candidate.write_bytes(b"caller-controlled bytes")
+    with tracker.start_run("full-hash", "admission_contract"):
+        original = tracker.log_artifact(source, key="raw_gtfs", direction="input")
+    assert original.meta["hash_semantics"]["source"] == "computed_full"
+
+    caller_hash = _sha256(candidate.read_bytes())
+    with tracker.start_run("caller-override", "admission_contract"):
+        overridden = tracker.log_artifact(
+            original,
+            key="raw_gtfs",
+            direction="input",
+            content_hash=caller_hash,
+            force_hash_override=True,
+        )
+
+    assert overridden.hash == caller_hash
+    assert overridden.meta["hash_semantics"]["source"] == "caller_supplied"
+    report = check_artifact_identity(
+        tracker,
+        execution_path=candidate,
+        expected_run_id="caller-override",
+        artifact_key="raw_gtfs",
+    )
+    assert report.outcome == "unverified"
+
+
+def test_directory_hash_semantics_distinguish_full_from_fast(tmp_path: Path) -> None:
+    directory = tmp_path / "inputs"
+    directory.mkdir()
+
+    full = hash_semantics_for_new_artifact(
+        path=directory, hashing_strategy="full", source="computed"
+    )
+    fast = hash_semantics_for_new_artifact(
+        path=directory, hashing_strategy="fast", source="computed"
+    )
+
+    assert full["source"] == "computed_full_directory"
+    assert fast["source"] == "computed_fast_directory"
+    assert full["digest_contract"] != fast["digest_contract"]
 
 
 def test_future_full_file_metadata_admits_matching_candidate_with_fast_tracker(

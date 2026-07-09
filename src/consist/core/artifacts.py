@@ -56,6 +56,7 @@ class _ContentHashState:
     effective_hash: Optional[str]
     computed_hash: Optional[str] = None
     attempted_compute: bool = False
+    caller_supplied_override_applied: bool = False
 
 
 def _infer_driver_from_path(path: Path) -> str:
@@ -481,6 +482,7 @@ class ArtifactManager:
                 )
                 return
             artifact.hash = hash_state.effective_hash
+            hash_state.caller_supplied_override_applied = True
 
         _warn_output_reuse_deprecated()
 
@@ -598,6 +600,12 @@ class ArtifactManager:
                     if content_hash is not None
                     else "computed"
                 ),
+            )
+        elif hash_state.caller_supplied_override_applied:
+            artifact_obj.meta["hash_semantics"] = hash_semantics_for_new_artifact(
+                path=None,
+                hashing_strategy=self.tracker.identity.hashing_strategy,
+                source="caller_supplied",
             )
         if mount_scheme and "mount_scheme" not in artifact_obj.meta:
             artifact_obj.meta["mount_scheme"] = mount_scheme

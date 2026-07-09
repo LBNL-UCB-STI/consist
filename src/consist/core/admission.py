@@ -67,7 +67,7 @@ class AdmissionReport(BaseModel):
 
 def hash_semantics_for_new_artifact(
     *,
-    path: Path,
+    path: Path | None,
     hashing_strategy: str,
     source: Literal["computed", "caller_supplied"],
 ) -> dict[str, object]:
@@ -81,6 +81,7 @@ def hash_semantics_for_new_artifact(
             "source": "caller_supplied",
         }
 
+    assert path is not None
     if path.is_file() and hashing_strategy == "full":
         return {
             "version": 1,
@@ -97,13 +98,21 @@ def hash_semantics_for_new_artifact(
             "digest_contract": "file_metadata",
             "source": "computed_fast",
         }
+    if path.is_dir() and hashing_strategy == "full":
+        return {
+            "version": 1,
+            "algorithm": "sha256",
+            "kind": "directory",
+            "digest_contract": "legacy_directory_content",
+            "source": "computed_full_directory",
+        }
     if path.is_dir():
         return {
             "version": 1,
             "algorithm": "sha256",
             "kind": "directory",
-            "digest_contract": "directory_aggregate",
-            "source": "computed_directory",
+            "digest_contract": "legacy_directory_metadata",
+            "source": "computed_fast_directory",
         }
     return {
         "version": 1,
