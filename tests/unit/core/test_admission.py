@@ -35,6 +35,7 @@ def _complete_run(tracker, run_id: str, *, status: str = "completed") -> None:
         run.status = status
         with tracker.db.session_scope() as session:
             session.add(run)
+            session.commit()
 
 
 def _record_input(
@@ -61,10 +62,18 @@ def _record_input(
                 run_id=run_id, artifact_id=artifact.id, direction=direction
             )
         )
+        session.commit()
 
 
 def _assert_observation(report: AdmissionReport, text: str) -> None:
     assert any(text in item.lower() for item in report.observations), report.observations
+
+
+def test_public_package_exports_admission_api() -> None:
+    import consist
+
+    assert consist.AdmissionReport is AdmissionReport
+    assert consist.check_artifact_identity is check_artifact_identity
 
 
 def test_future_full_file_metadata_admits_matching_candidate_with_fast_tracker(
@@ -138,7 +147,7 @@ def test_historical_bare_hash_is_unverified_without_expected_bytes(
     )
 
     assert report.outcome == "unverified"
-    _assert_observation(report, "hash")
+    _assert_observation(report, "unverifiable")
 
 
 def test_distinct_expected_bytes_reverify_a_historical_bare_hash(
@@ -201,7 +210,7 @@ def test_legacy_expected_bytes_must_be_distinct_from_candidate(
     )
 
     assert report.outcome == "unverified"
-    _assert_observation(report, "distinct")
+    _assert_observation(report, "expected_bytes_not_distinct")
 
 
 def test_changed_candidate_mismatches_a_forward_full_file_identity(

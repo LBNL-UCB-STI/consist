@@ -18,6 +18,7 @@ from typing import (
 
 from sqlmodel import SQLModel
 
+from consist.core.admission import hash_semantics_for_new_artifact
 from consist.core.container_policy import (
     ChildRecoveryPolicy,
     ContainerRecoveryUnit,
@@ -332,7 +333,9 @@ class ArtifactManager:
             meta["recovery_roots"] = self.tracker.fs.normalize_recovery_roots(
                 meta["recovery_roots"]
             )
+        meta.pop("hash_semantics", None)
         artifact_obj = None
+        is_new_artifact = False
         resolved_abs_path = None
         mount_scheme: Optional[str] = None
         mount_root: Optional[str] = None
@@ -570,6 +573,7 @@ class ArtifactManager:
                     parent_artifact_id=parent_artifact_id,
                     meta=meta,
                 )
+                is_new_artifact = True
 
         if artifact_obj.hash and hash_state.effective_hash is None:
             hash_state.effective_hash = artifact_obj.hash
@@ -585,6 +589,16 @@ class ArtifactManager:
 
         if artifact_obj.meta is None:
             artifact_obj.meta = {}
+        if is_new_artifact and artifact_obj.hash is not None and resolved_abs_path:
+            artifact_obj.meta["hash_semantics"] = hash_semantics_for_new_artifact(
+                path=Path(resolved_abs_path),
+                hashing_strategy=self.tracker.identity.hashing_strategy,
+                source=(
+                    "caller_supplied"
+                    if content_hash is not None
+                    else "computed"
+                ),
+            )
         if mount_scheme and "mount_scheme" not in artifact_obj.meta:
             artifact_obj.meta["mount_scheme"] = mount_scheme
         if mount_root and "mount_root" not in artifact_obj.meta:
