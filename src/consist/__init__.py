@@ -47,8 +47,8 @@ from consist.core.indexing import (
 
 # API
 from consist.api import (
-    AdmissionReport,
-    check_artifact_identity,
+    AdmissionReport,  # noqa: F401
+    check_artifact_identity,  # noqa: F401
     load,
     load_df,
     load_relation,
