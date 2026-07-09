@@ -64,6 +64,7 @@ requested rows.
 | Find recent runs | `consist runs` | Add `--model`, `--status`, or `--tag` when the database is busy. |
 | Inspect one run's outputs | `consist artifacts <run_id>` | Use `--expand-sets` for logical output sets. |
 | Preview data | `consist preview <artifact_key>` | Works for tabular artifacts such as CSV and Parquet. |
+| Diagnose one input file | `consist admission doctor` | Compare it to one explicit input from a completed baseline run. |
 | Script against provenance | `--json` | Supported by common inspection commands for `jq` or Python scripts. |
 | Debug moved files | `--run-dir`, `--mount`, `--trust-db` | Keep explicit path settings authoritative; use trusted metadata fallback only when needed. |
 | Explore repeatedly | `consist shell` | Caches recent run and artifact shortcuts inside the session. |
@@ -201,6 +202,48 @@ consist db merge shard.duckdb --conflict skip --db-path ./provenance.duckdb
 Notes:
 - Merge conflict mode values are `error` and `skip`.
 - `--prune-cache` only applies when `--delete-ingested-data` is enabled.
+
+### consist admission doctor
+
+Diagnose whether one resolved regular file matches exactly one named input on an
+explicit, **completed** baseline run. This is a file-admission diagnostic: it
+does not change run status, copy files, or apply policy on its own.
+
+```bash
+consist admission doctor \
+  --db-path ./provenance.duckdb \
+  --expected-run BASELINE_RUN_ID \
+  --artifact-key gtfs_feed \
+  --file ./inputs/gtfs.zip
+```
+
+The baseline must have exactly one `input` link with `--artifact-key`. When its
+stored identity is an explicitly recorded full-file SHA-256, Consist compares
+the supplied `--file` directly to it. Historical hashes and cache fingerprints
+without those semantics are deliberately not promoted to admission identities.
+
+For a historical baseline, provide `--expected-file` only when it is a distinct,
+immutable copy of the expected bytes:
+
+```bash
+consist admission doctor \
+  --db-path ./provenance.duckdb \
+  --expected-run BASELINE_RUN_ID \
+  --artifact-key gtfs_feed \
+  --file ./inputs/gtfs.zip \
+  --expected-file /archive/baselines/gtfs.zip
+```
+
+`--expected-file` must resolve to a different readable regular file than
+`--file`. The command never treats the candidate path, a stored artifact URI,
+or recovery-root lookup as expected bytes. It reports its verdict and digest
+facts first, then supporting evidence. `--output report.json` writes the
+canonical JSON report while leaving the human diagnostic on stdout.
+
+By default, all structured outcomes (`verified`, `mismatched`, `unverified`,
+and `unreadable`) exit successfully so callers can apply their own policy. Add
+`--require-verified` when a script should exit 1 unless the result is
+`verified`.
 
 ### consist runs
 

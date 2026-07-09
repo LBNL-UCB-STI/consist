@@ -1,5 +1,18 @@
 # Identity Manager
 
+## Admission identity
+
+`Artifact.hash` remains Consist's cache and provenance fingerprint. It can
+represent fast metadata, a directory aggregate, or other valid cache identity,
+so it is not automatically a proof that a supplied file has the same bytes.
+
+`check_artifact_identity()` is the separate prior-run admission API. It accepts
+only a full regular-file SHA-256 whose forward metadata explicitly records raw
+file-byte semantics. For older or otherwise ambiguous stored hashes, callers
+may supply a distinct immutable expected file; Consist hashes that file directly
+instead of resolving the stored artifact URI or recovery roots. The result is a
+versioned, policy-neutral `AdmissionReport` with a deterministic JSON form.
+
 ::: consist.core.identity.IdentityManager
     options:
       show_source: false
