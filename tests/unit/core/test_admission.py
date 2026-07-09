@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -44,6 +45,7 @@ def _record_input(
     source_path: Path,
     digest: str | None,
     semantics: dict[str, object] | None,
+    direction: str = "input",
 ) -> None:
     artifact = Artifact(
         key=key,
@@ -56,7 +58,7 @@ def _record_input(
         session.add(artifact)
         session.add(
             RunArtifactLink(
-                run_id=run_id, artifact_id=artifact.id, direction="input"
+                run_id=run_id, artifact_id=artifact.id, direction=direction
             )
         )
 
@@ -94,6 +96,49 @@ def test_future_full_file_metadata_admits_matching_candidate_with_fast_tracker(
 
     assert isinstance(report, AdmissionReport)
     assert report.outcome == "verified"
+    canonical_json = report.canonical_json()
+    payload = json.loads(canonical_json)
+    assert canonical_json == json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    assert payload["input_role"] == "raw_gtfs"
+    assert payload["execution_path"] == str(candidate)
+    assert payload["physical_target_path"] == str(candidate.resolve())
+    for field in (
+        "config_key",
+        "config_reference_key",
+        "feed_key",
+        "raw_config_value",
+        "canonical_value",
+        "configured_path",
+    ):
+        assert payload[field] is None
+
+
+def test_historical_bare_hash_is_unverified_without_expected_bytes(
+    tracker, tmp_path: Path
+):
+    source = tmp_path / "archive-feed.zip"
+    source.write_bytes(b"immutable bytes")
+    candidate = tmp_path / "runtime-feed.zip"
+    candidate.write_bytes(source.read_bytes())
+    _complete_run(tracker, "legacy-run")
+    _record_input(
+        tracker,
+        run_id="legacy-run",
+        key="raw_gtfs",
+        source_path=source,
+        digest=_sha256(source.read_bytes()),
+        semantics=None,
+    )
+
+    report = check_artifact_identity(
+        tracker,
+        execution_path=candidate,
+        expected_run_id="legacy-run",
+        artifact_key="raw_gtfs",
+    )
+
+    assert report.outcome == "unverified"
+    _assert_observation(report, "hash")
 
 
 def test_distinct_expected_bytes_reverify_a_historical_bare_hash(
@@ -124,6 +169,41 @@ def test_distinct_expected_bytes_reverify_a_historical_bare_hash(
     assert report.outcome == "verified"
 
 
+@pytest.mark.parametrize("alias_kind", ["same", "symlink", "hardlink"])
+def test_legacy_expected_bytes_must_be_distinct_from_candidate(
+    tracker, tmp_path: Path, alias_kind: str
+):
+    candidate = tmp_path / "runtime-feed.zip"
+    candidate.write_bytes(b"candidate bytes")
+    expected_path = candidate
+    if alias_kind == "symlink":
+        expected_path = tmp_path / "candidate-symlink.zip"
+        expected_path.symlink_to(candidate)
+    elif alias_kind == "hardlink":
+        expected_path = tmp_path / "candidate-hardlink.zip"
+        expected_path.hardlink_to(candidate)
+    _complete_run(tracker, "legacy-run")
+    _record_input(
+        tracker,
+        run_id="legacy-run",
+        key="raw_gtfs",
+        source_path=candidate,
+        digest=_sha256(candidate.read_bytes()),
+        semantics=None,
+    )
+
+    report = check_artifact_identity(
+        tracker,
+        execution_path=candidate,
+        expected_run_id="legacy-run",
+        artifact_key="raw_gtfs",
+        expected_bytes_path=expected_path,
+    )
+
+    assert report.outcome == "unverified"
+    _assert_observation(report, "distinct")
+
+
 def test_changed_candidate_mismatches_a_forward_full_file_identity(
     tracker, tmp_path: Path
 ):
@@ -149,6 +229,143 @@ def test_changed_candidate_mismatches_a_forward_full_file_identity(
     )
 
     assert report.outcome == "mismatched"
+
+
+def test_same_key_output_link_does_not_make_a_single_input_ambiguous(
+    tracker, tmp_path: Path
+):
+    source = tmp_path / "archive-feed.zip"
+    source.write_bytes(b"expected bytes")
+    output = tmp_path / "output-feed.zip"
+    output.write_bytes(b"different output bytes")
+    candidate = tmp_path / "runtime-feed.zip"
+    candidate.write_bytes(source.read_bytes())
+    _complete_run(tracker, "completed-run")
+    _record_input(
+        tracker,
+        run_id="completed-run",
+        key="raw_gtfs",
+        source_path=source,
+        digest=_sha256(source.read_bytes()),
+        semantics=FULL_FILE_SHA256,
+    )
+    _record_input(
+        tracker,
+        run_id="completed-run",
+        key="raw_gtfs",
+        source_path=output,
+        digest=_sha256(output.read_bytes()),
+        semantics=FULL_FILE_SHA256,
+        direction="output",
+    )
+
+    report = check_artifact_identity(
+        tracker,
+        execution_path=candidate,
+        expected_run_id="completed-run",
+        artifact_key="raw_gtfs",
+        input_role="gtfs_feed",
+    )
+
+    assert report.outcome == "verified"
+    assert json.loads(report.canonical_json())["input_role"] == "gtfs_feed"
+
+
+def test_git_lfs_candidate_is_unverified_with_targeted_observation(
+    tracker, tmp_path: Path
+):
+    source = tmp_path / "archive-feed.zip"
+    source.write_bytes(b"real feed bytes")
+    candidate = tmp_path / "runtime-feed.zip"
+    candidate.write_text(
+        "version https://git-lfs.github.com/spec/v1\n"
+        "oid sha256:0123456789abcdef\nsize 123\n",
+        encoding="utf-8",
+    )
+    _complete_run(tracker, "completed-run")
+    _record_input(
+        tracker,
+        run_id="completed-run",
+        key="raw_gtfs",
+        source_path=source,
+        digest=_sha256(source.read_bytes()),
+        semantics=FULL_FILE_SHA256,
+    )
+
+    report = check_artifact_identity(
+        tracker,
+        execution_path=candidate,
+        expected_run_id="completed-run",
+        artifact_key="raw_gtfs",
+    )
+
+    assert report.outcome == "unverified"
+    _assert_observation(report, "lfs")
+
+
+def test_git_lfs_expected_fallback_is_unverified_with_targeted_observation(
+    tracker, tmp_path: Path
+):
+    source = tmp_path / "legacy-feed.zip"
+    source.write_bytes(b"legacy bytes")
+    candidate = tmp_path / "runtime-feed.zip"
+    candidate.write_bytes(b"legacy bytes")
+    expected_pointer = tmp_path / "archive-pointer.zip"
+    expected_pointer.write_text(
+        "version https://git-lfs.github.com/spec/v1\n"
+        "oid sha256:0123456789abcdef\nsize 123\n",
+        encoding="utf-8",
+    )
+    _complete_run(tracker, "legacy-run")
+    _record_input(
+        tracker,
+        run_id="legacy-run",
+        key="raw_gtfs",
+        source_path=source,
+        digest=_sha256(source.read_bytes()),
+        semantics=None,
+    )
+
+    report = check_artifact_identity(
+        tracker,
+        execution_path=candidate,
+        expected_run_id="legacy-run",
+        artifact_key="raw_gtfs",
+        expected_bytes_path=expected_pointer,
+    )
+
+    assert report.outcome == "unverified"
+    _assert_observation(report, "lfs")
+
+
+@pytest.mark.parametrize("path_kind", ["directory", "missing"])
+def test_non_regular_or_missing_candidate_is_file_unreadable(
+    tracker, tmp_path: Path, path_kind: str
+):
+    source = tmp_path / "archive-feed.zip"
+    source.write_bytes(b"expected bytes")
+    candidate = tmp_path / "candidate"
+    if path_kind == "directory":
+        candidate.mkdir()
+    _complete_run(tracker, "completed-run")
+    _record_input(
+        tracker,
+        run_id="completed-run",
+        key="raw_gtfs",
+        source_path=source,
+        digest=_sha256(source.read_bytes()),
+        semantics=FULL_FILE_SHA256,
+    )
+
+    report = check_artifact_identity(
+        tracker,
+        execution_path=candidate,
+        expected_run_id="completed-run",
+        artifact_key="raw_gtfs",
+    )
+
+    assert report.outcome == "unreadable"
+    _assert_observation(report, "file_unreadable")
 
 
 @pytest.mark.parametrize(
