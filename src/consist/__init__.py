@@ -39,6 +39,7 @@ from consist.runset import AlignedPair, RunSet
 from consist.core.tracker import Tracker
 from consist.core.coupler import Coupler
 from consist.core.config_canonicalization import (
+    CanonicalizationArtifactMember,
     CanonicalizationReference,
     CanonicalizationSnapshot,
 )
@@ -193,6 +194,7 @@ __all__ = [
     "Tracker",
     "Coupler",
     "RunContext",
+    "CanonicalizationArtifactMember",
     "CanonicalizationReference",
     "CanonicalizationSnapshot",
     "Run",

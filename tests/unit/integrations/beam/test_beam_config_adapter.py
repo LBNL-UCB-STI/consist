@@ -399,12 +399,32 @@ def test_beam_canonicalize_selects_first_top_level_r5_osm_source(
         if item.reference.config_key == "beam.routing.r5.directory"
     )
     assert osm_spec.key in r5_reference.artifact_keys
+    osm_member = next(
+        member
+        for member in r5_reference.artifact_members
+        if member.role == "r5_osm_source"
+    )
+    assert osm_member.resolved_path == selected_osm.resolve()
+    assert osm_member.artifact_key == osm_spec.key
+    assert osm_member.artifact_key in r5_reference.artifact_keys
+    assert dict(osm_member.metadata) == {
+        "selection_rule": "r5_top_level_osm_v1",
+        "selected_filename": "001-network.VEX",
+        "ignored_candidate_filenames": ("002-network.pbf",),
+    }
+    with pytest.raises(TypeError):
+        osm_member.metadata["selection_rule"] = "other"
     gtfs_feed_keys = {
         spec.key
         for spec in result.artifacts
         if spec.meta.get("config_role") == "gtfs_feed"
     }
     assert gtfs_feed_keys <= set(r5_reference.artifact_keys)
+    assert tuple(
+        member
+        for member in r5_reference.artifact_members
+        if member.role == "r5_osm_source"
+    ) == (osm_member,)
 
 
 def test_beam_canonicalize_does_not_select_r5_osm_without_top_level_candidate(
@@ -436,6 +456,13 @@ def test_beam_canonicalize_does_not_select_r5_osm_without_top_level_candidate(
     assert not any(
         spec.meta.get("config_role") == "r5_osm_source" for spec in result.artifacts
     )
+    assert result.canonicalization is not None
+    r5_reference = next(
+        item
+        for item in result.canonicalization.references
+        if item.reference.config_key == "beam.routing.r5.directory"
+    )
+    assert r5_reference.artifact_members == ()
 
 
 def test_beam_canonicalize_ignores_r5_sidecar_csv_and_discovers_zip_feeds(

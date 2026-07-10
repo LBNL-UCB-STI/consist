@@ -111,6 +111,12 @@ translation remain downstream responsibilities. Likewise, an empty
 `item.artifact_keys` tuple accurately means Consist did not log an artifact for
 that reference; it does not authorize consumers to guess one from a filename.
 
+When an adapter selects one semantically distinct artifact under a broader
+reference, `item.artifact_members` records its role, exact persisted artifact
+key, observed local path, and narrow selection metadata. Each member key is
+also present in `item.artifact_keys`. Member paths remain canonicalization-time
+observations, not portable identities or final execution paths.
+
 This view is available only to Python callables with injected context. Cache
 hits do not execute the callable, and native container runs do not receive a
 Python context or a serialized snapshot.

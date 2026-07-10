@@ -25,6 +25,7 @@ from consist.core.config_canonicalization import (
     ArtifactSpec,
     CanonicalConfig,
     CanonicalConfigIdentity,
+    CanonicalizationArtifactMember,
     CanonicalizationReference,
     CanonicalizationResult,
     CanonicalizationSnapshot,
@@ -1499,6 +1500,22 @@ def _build_beam_canonicalization_snapshot(
         for spec in artifacts_by_path.values()
         if spec.meta.get("config_role") == "r5_osm_source"
     )
+    r5_osm_source_members = tuple(
+        CanonicalizationArtifactMember(
+            role="r5_osm_source",
+            resolved_path=spec.path.resolve(),
+            artifact_key=spec.key,
+            metadata={
+                "selection_rule": spec.meta["selection_rule"],
+                "selected_filename": spec.meta["selected_filename"],
+                "ignored_candidate_filenames": tuple(
+                    spec.meta["ignored_candidate_filenames"]
+                ),
+            },
+        )
+        for spec in artifacts_by_path.values()
+        if spec.meta.get("config_role") == "r5_osm_source"
+    )
     resolved_r5_directory = r5_directory.resolve() if r5_directory is not None else None
     references: list[CanonicalizationReference] = []
     for reference in identity.references:
@@ -1509,6 +1526,7 @@ def _build_beam_canonicalization_snapshot(
             else None
         )
         artifact_keys: list[str] = []
+        artifact_members: list[CanonicalizationArtifactMember] = []
         if observed_path is not None and reference.identity_policy not in {
             "ignored",
             "output_or_runtime_ignored",
@@ -1524,11 +1542,13 @@ def _build_beam_canonicalization_snapshot(
             if observed_path == resolved_r5_directory:
                 artifact_keys.extend(gtfs_keys)
                 artifact_keys.extend(r5_osm_source_keys)
+                artifact_members.extend(r5_osm_source_members)
         references.append(
             CanonicalizationReference(
                 reference=reference,
                 resolved_path=observed_path,
                 artifact_keys=tuple(dict.fromkeys(artifact_keys)),
+                artifact_members=tuple(artifact_members),
             )
         )
     return CanonicalizationSnapshot(

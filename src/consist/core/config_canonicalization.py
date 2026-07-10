@@ -5,6 +5,7 @@ import json
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import (
     Any,
     Callable,
@@ -184,6 +185,46 @@ class ConfigReference:
         return {key: value for key, value in data.items() if value not in (None, [])}
 
 
+def _freeze_snapshot_metadata(value: Any) -> Any:
+    """Recursively freeze runtime observation metadata."""
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {str(key): _freeze_snapshot_metadata(item) for key, item in value.items()}
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_snapshot_metadata(item) for item in value)
+    return value
+
+
+@dataclass(frozen=True)
+class CanonicalizationArtifactMember:
+    """
+    Represent one exact artifact selected under a config reference.
+
+    Parameters
+    ----------
+    role : str
+        Adapter-defined semantic role for the selected artifact.
+    resolved_path : pathlib.Path
+        Local path observed during canonicalization. This is not a portable
+        identity or a final staged/container execution path.
+    artifact_key : str
+        Exact persisted key of the emitted adapter artifact.
+    metadata : Mapping[str, Any]
+        Immutable, adapter-defined selection facts. Nested mappings and
+        sequences are frozen when the observation is created.
+    """
+
+    role: str
+    resolved_path: Path
+    artifact_key: str
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Freeze metadata so runtime observations cannot be mutated in place."""
+        object.__setattr__(self, "metadata", _freeze_snapshot_metadata(self.metadata))
+
+
 @dataclass(frozen=True)
 class CanonicalizationReference:
     """
@@ -199,11 +240,15 @@ class CanonicalizationReference:
     artifact_keys : tuple[str, ...]
         Exact artifact keys logged for this reference. A reference can map to
         zero, one, or many artifacts.
+    artifact_members : tuple[CanonicalizationArtifactMember, ...]
+        Exact member-level observations for artifacts whose semantic role and
+        local observed path must remain associated with this reference.
     """
 
     reference: ConfigReference
     resolved_path: Optional[Path]
     artifact_keys: tuple[str, ...] = ()
+    artifact_members: tuple[CanonicalizationArtifactMember, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -637,7 +682,21 @@ def _resolve_canonicalization_snapshot(
             "canonical config identity references."
         )
 
-    artifact_keys = {artifact.key for artifact in artifacts}
+    artifacts_by_key = {artifact.key: artifact for artifact in artifacts}
+    artifact_keys = set(artifacts_by_key)
+    unlisted_member_keys = sorted(
+        {
+            member.artifact_key
+            for item in snapshot.references
+            for member in item.artifact_members
+            if member.artifact_key not in item.artifact_keys
+        }
+    )
+    if unlisted_member_keys:
+        raise ValueError(
+            "CanonicalizationSnapshot member artifact keys are not listed on "
+            f"its parent reference: {unlisted_member_keys}."
+        )
     missing_keys = sorted(
         {
             key
@@ -650,6 +709,20 @@ def _resolve_canonicalization_snapshot(
         raise ValueError(
             "CanonicalizationSnapshot references unknown artifact keys: "
             f"{missing_keys}."
+        )
+    path_mismatches = sorted(
+        {
+            member.artifact_key
+            for item in snapshot.references
+            for member in item.artifact_members
+            if member.resolved_path
+            != artifacts_by_key[member.artifact_key].path.resolve()
+        }
+    )
+    if path_mismatches:
+        raise ValueError(
+            "CanonicalizationSnapshot member paths do not match emitted "
+            f"artifacts: {path_mismatches}."
         )
     return snapshot
 
@@ -810,6 +883,7 @@ __all__ = [
     "ConfigPathAlias",
     "ConfigReference",
     "CanonicalizationReference",
+    "CanonicalizationArtifactMember",
     "CanonicalizationSnapshot",
     "ConfigReferenceStatus",
     "ConfigReferenceIdentityPolicy",
