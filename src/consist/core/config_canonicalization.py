@@ -185,6 +185,51 @@ class ConfigReference:
 
 
 @dataclass(frozen=True)
+class CanonicalizationReference:
+    """
+    Runtime facts observed for one canonicalized configuration reference.
+
+    Parameters
+    ----------
+    reference : ConfigReference
+        Portable identity facts for the configuration reference.
+    resolved_path : Optional[Path]
+        Local path observed during canonicalization, if one was resolved. This
+        is not an execution path and must not be used as portable identity.
+    artifact_keys : tuple[str, ...]
+        Exact artifact keys logged for this reference. A reference can map to
+        zero, one, or many artifacts.
+    """
+
+    reference: ConfigReference
+    resolved_path: Optional[Path]
+    artifact_keys: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CanonicalizationSnapshot:
+    """
+    Immutable runtime view of one adapter canonicalization result.
+
+    Parameters
+    ----------
+    adapter_name : str
+        Name of the adapter that produced the snapshot.
+    adapter_version : Optional[str]
+        Adapter version, when declared by the adapter.
+    identity_hash : str
+        Existing portable canonical identity hash.
+    references : tuple[CanonicalizationReference, ...]
+        Ordered reference observations from the same canonicalization pass.
+    """
+
+    adapter_name: str
+    adapter_version: Optional[str]
+    identity_hash: str
+    references: tuple[CanonicalizationReference, ...] = ()
+
+
+@dataclass(frozen=True)
 class DirectoryIdentity:
     canonical_value: str
     role: Optional[str]
@@ -398,11 +443,15 @@ class CanonicalizationResult(NamedTuple):
         Table ingestion specs for queryable config slices.
     identity : CanonicalConfigIdentity
         Structured adapter identity manifest.
+    canonicalization : Optional[CanonicalizationSnapshot]
+        Immutable runtime reference observations from the same canonicalization
+        pass.
     """
 
     artifacts: list[ArtifactSpec]
     ingestables: list[IngestSpec]
     identity: CanonicalConfigIdentity
+    canonicalization: Optional[CanonicalizationSnapshot] = None
 
 
 class _IngestableDataFrameMixin:
@@ -472,6 +521,8 @@ class ConfigContribution(_IngestableDataFrameMixin):
         Optional facet schema version.
     meta : Optional[dict[str, Any]]
         Optional metadata for the contribution.
+    canonicalization : Optional[CanonicalizationSnapshot]
+        Immutable runtime reference observations preserved from the config plan.
     """
 
     identity: CanonicalConfigIdentity
@@ -482,6 +533,7 @@ class ConfigContribution(_IngestableDataFrameMixin):
     facet_schema_name: Optional[str] = None
     facet_schema_version: Optional[Union[str, int]] = None
     meta: Optional[dict[str, Any]] = None
+    canonicalization: Optional[CanonicalizationSnapshot] = None
 
     @property
     def identity_hash(self) -> str:
@@ -521,6 +573,8 @@ class ConfigPlan(_IngestableDataFrameMixin):
         Optional diagnostics produced by validation.
     adapter : Optional[ConfigAdapter]
         Adapter instance for run-scoped artifacts, if available.
+    canonicalization : Optional[CanonicalizationSnapshot]
+        Immutable runtime reference observations produced by the adapter.
     """
 
     adapter_name: str
@@ -536,6 +590,7 @@ class ConfigPlan(_IngestableDataFrameMixin):
     meta: Optional[dict[str, Any]] = None
     diagnostics: Optional[ConfigDiagnostics] = None
     adapter: Optional["ConfigAdapter"] = None
+    canonicalization: Optional[CanonicalizationSnapshot] = None
 
     @property
     def identity_hash(self) -> str:
@@ -544,6 +599,59 @@ class ConfigPlan(_IngestableDataFrameMixin):
     @property
     def signature(self) -> str:
         return self.identity_hash
+
+
+def _resolve_canonicalization_snapshot(
+    *,
+    identity: CanonicalConfigIdentity,
+    artifacts: Sequence[ArtifactSpec],
+    snapshot: Optional[CanonicalizationSnapshot],
+) -> CanonicalizationSnapshot:
+    """Validate or synthesize the runtime view for a canonicalization result."""
+    if snapshot is None:
+        if identity.references:
+            raise ValueError(
+                "ConfigAdapter.canonicalize() must provide a "
+                "CanonicalizationSnapshot when identity.references is non-empty."
+            )
+        return CanonicalizationSnapshot(
+            adapter_name=identity.adapter_name,
+            adapter_version=identity.adapter_version,
+            identity_hash=identity.identity_hash,
+        )
+
+    if (
+        snapshot.adapter_name != identity.adapter_name
+        or snapshot.adapter_version != identity.adapter_version
+        or snapshot.identity_hash != identity.identity_hash
+    ):
+        raise ValueError(
+            "CanonicalizationSnapshot adapter metadata must match the canonical "
+            "config identity."
+        )
+
+    references = tuple(item.reference for item in snapshot.references)
+    if references != identity.references:
+        raise ValueError(
+            "CanonicalizationSnapshot references must exactly match the ordered "
+            "canonical config identity references."
+        )
+
+    artifact_keys = {artifact.key for artifact in artifacts}
+    missing_keys = sorted(
+        {
+            key
+            for item in snapshot.references
+            for key in item.artifact_keys
+            if key not in artifact_keys
+        }
+    )
+    if missing_keys:
+        raise ValueError(
+            "CanonicalizationSnapshot references unknown artifact keys: "
+            f"{missing_keys}."
+        )
+    return snapshot
 
 
 class ConfigAdapter(Protocol):
@@ -701,6 +809,8 @@ __all__ = [
     "CanonicalConfigIdentity",
     "ConfigPathAlias",
     "ConfigReference",
+    "CanonicalizationReference",
+    "CanonicalizationSnapshot",
     "ConfigReferenceStatus",
     "ConfigReferenceIdentityPolicy",
     "DirectoryIdentity",

@@ -25,7 +25,9 @@ from consist.core.config_canonicalization import (
     ArtifactSpec,
     CanonicalConfig,
     CanonicalConfigIdentity,
+    CanonicalizationReference,
     CanonicalizationResult,
+    CanonicalizationSnapshot,
     ConfigAdapterOptions,
     ConfigReference,
     ConfigReferenceIdentityPolicy,
@@ -341,11 +343,22 @@ class BeamConfigAdapter:
             ingestables.extend(gtfs_result.ingestables)
 
         artifacts = list(artifacts_by_path.values())
+        canonicalization = _build_beam_canonicalization_snapshot(
+            identity=reference_identity,
+            artifacts_by_path=artifacts_by_path,
+            root_dirs=config.root_dirs,
+            gtfs_root=(
+                _resolve_gtfs_bundle_root(config_tree, config.root_dirs)
+                if gtfs_result is not None
+                else None
+            ),
+        )
 
         return CanonicalizationResult(
             artifacts=artifacts,
             ingestables=ingestables,
             identity=reference_identity,
+            canonicalization=canonicalization,
         )
 
     def materialize(
@@ -1433,6 +1446,57 @@ def _add_artifact(
         direction="input",
         meta=data,
         driver=driver,
+    )
+
+
+def _build_beam_canonicalization_snapshot(
+    *,
+    identity: CanonicalConfigIdentity,
+    artifacts_by_path: Mapping[Path, ArtifactSpec],
+    root_dirs: Sequence[Path],
+    gtfs_root: Optional[Path],
+) -> CanonicalizationSnapshot:
+    """Build per-reference facts from BEAM's existing canonicalization pass."""
+    artifacts_by_resolved_path = {
+        path.resolve(): spec for path, spec in artifacts_by_path.items()
+    }
+    gtfs_keys = tuple(
+        spec.key
+        for spec in artifacts_by_path.values()
+        if spec.meta.get("config_role") in {"gtfs_bundle", "gtfs_feed"}
+    )
+    resolved_gtfs_root = gtfs_root.resolve() if gtfs_root is not None else None
+    references: list[CanonicalizationReference] = []
+    for reference in identity.references:
+        resolved = _resolve_reference(reference.raw_value, root_dirs)
+        observed_path = (
+            resolved.resolve()
+            if resolved is not None and _path_exists(resolved)
+            else None
+        )
+        artifact_keys: list[str] = []
+        if observed_path is not None and reference.identity_policy not in {
+            "ignored",
+            "output_or_runtime_ignored",
+        }:
+            artifact = artifacts_by_resolved_path.get(observed_path)
+            if artifact is not None:
+                artifact_keys.append(artifact.key)
+            artifact_keys.extend(reference.delegated_artifact_keys)
+            if observed_path == resolved_gtfs_root:
+                artifact_keys.extend(gtfs_keys)
+        references.append(
+            CanonicalizationReference(
+                reference=reference,
+                resolved_path=observed_path,
+                artifact_keys=tuple(dict.fromkeys(artifact_keys)),
+            )
+        )
+    return CanonicalizationSnapshot(
+        adapter_name=identity.adapter_name,
+        adapter_version=identity.adapter_version,
+        identity_hash=identity.identity_hash,
+        references=tuple(references),
     )
 
 

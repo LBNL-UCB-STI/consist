@@ -247,6 +247,16 @@ def test_beam_canonicalize_artifacts_and_rows(tracker, tmp_path: Path, caplog):
     assert "beam_config_ingest_run_link" in ingest_tables
     assert result.identity.adapter_name == "beam"
     assert result.identity.identity_hash
+    assert result.canonicalization is not None
+    assert (
+        tuple(item.reference for item in result.canonicalization.references)
+        == result.identity.references
+    )
+    assert all(
+        key in artifact_keys
+        for item in result.canonicalization.references
+        for key in item.artifact_keys
+    )
     refs_by_key = {ref.config_key: ref for ref in result.identity.references}
     assert refs_by_key["beam.inputDirectory"].identity_policy == "path_alias"
     assert refs_by_key["beam.inputDirectory"].delegated_artifact_keys
@@ -476,6 +486,15 @@ def test_beam_canonicalize_normalizes_path_aliases(tracker, tmp_path: Path):
     assert alias_ref.identity_policy == "content_hash"
     assert alias_ref.canonical_value == "local_inputs/scenario.csv"
     assert alias_ref.hash
+    assert result.canonicalization is not None
+    alias_item = next(
+        item
+        for item in result.canonicalization.references
+        if item.reference.config_key == "beam.agentsim.aliasInput"
+    )
+    assert alias_item.reference is alias_ref
+    assert alias_item.resolved_path == data_path
+    assert alias_item.artifact_keys
     assert result.identity.scalars["options"]["path_aliases"] == {
         "local_inputs": external_root.resolve().as_posix()
     }

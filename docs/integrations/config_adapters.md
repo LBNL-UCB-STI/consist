@@ -74,6 +74,47 @@ for cache-miss explanations — so misses can report exactly which config
 references were added, removed, or changed, rather than falling back to a
 generic "config changed" message.
 
+## Read canonicalization facts inside a wrapped step
+
+When a Python step needs to stage or inspect the files that its configuration
+references, request a `RunContext`. After Consist applies the config plan and
+before it calls the step, `ctx.canonicalization` exposes the immutable facts
+from the same canonicalization pass:
+
+```python
+from consist import ExecutionOptions, RunContext
+
+
+def launch_model(ctx: RunContext) -> None:
+    snapshot = ctx.canonicalization
+    if snapshot is None:  # no adapter was configured for this run
+        return
+
+    for item in snapshot.references:
+        reference = item.reference
+        print(reference.config_key, item.resolved_path, item.artifact_keys)
+
+
+tracker.run(
+    fn=launch_model,
+    name="model",
+    adapter=adapter,
+    execution_options=ExecutionOptions(inject_context="ctx"),
+)
+```
+
+`reference.raw_value` is the value found in the model configuration and
+`reference.canonical_value` is Consist's portable identity value.
+`item.resolved_path` is only the local path observed during canonicalization.
+It is not an execution path: staging, copying, rewriting, and container mount
+translation remain downstream responsibilities. Likewise, an empty
+`item.artifact_keys` tuple accurately means Consist did not log an artifact for
+that reference; it does not authorize consumers to guess one from a filename.
+
+This view is available only to Python callables with injected context. Cache
+hits do not execute the callable, and native container runs do not receive a
+Python context or a serialized snapshot.
+
 ---
 
 ## See Also

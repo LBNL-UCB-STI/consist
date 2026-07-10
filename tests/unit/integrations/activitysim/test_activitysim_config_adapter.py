@@ -78,6 +78,15 @@ def test_canonicalize_builds_ingestables_and_constants(tracker, tmp_path: Path):
     assert "stop_frequency_coeffs.csv" in artifact_names
     assert "trip_scheduling_coefficients.csv.gz" in artifact_names
     assert any("config_bundle" in name for name in artifact_names)
+    assert result.canonicalization is not None
+    assert (
+        tuple(item.reference for item in result.canonicalization.references)
+        == result.identity.references
+    )
+    assert all(
+        item.resolved_path is not None for item in result.canonicalization.references
+    )
+    assert any(not item.artifact_keys for item in result.canonicalization.references)
 
     constants_spec = _find_ingestable(result.ingestables, "activitysim_constants_cache")
     assert constants_spec is not None

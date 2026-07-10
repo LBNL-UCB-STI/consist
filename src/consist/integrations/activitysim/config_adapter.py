@@ -32,7 +32,9 @@ from consist.core.config_canonicalization import (
     ArtifactSpec,
     CanonicalConfig,
     CanonicalConfigIdentity,
+    CanonicalizationReference,
     CanonicalizationResult,
+    CanonicalizationSnapshot,
     ConfigAdapterOptions,
     ConfigReference,
     DirectoryIdentity,
@@ -487,7 +489,7 @@ class ActivitySimConfigAdapter:
         for csv_path in referenced:
             add_artifact(csv_path, role="csv")
 
-        identity = _build_activitysim_config_identity(
+        identity, reference_paths = _build_activitysim_config_identity(
             adapter_name=self.model_name,
             adapter_version=self.adapter_version,
             config=config,
@@ -521,6 +523,11 @@ class ActivitySimConfigAdapter:
             artifacts_by_path[bundle_path].meta["content_hash"] = identity.identity_hash
 
         artifacts = list(artifacts_by_path.values())
+        canonicalization = _build_activitysim_canonicalization_snapshot(
+            identity=identity,
+            artifacts_by_path=artifacts_by_path,
+            reference_paths=reference_paths,
+        )
 
         builder = _IngestSpecBuilder(
             plan_only=plan_only, run_id=run.id if run else None
@@ -590,6 +597,7 @@ class ActivitySimConfigAdapter:
             artifacts=artifacts,
             ingestables=ingestables,
             identity=identity,
+            canonicalization=canonicalization,
         )
 
     def _build_probabilities_ingest_specs(
@@ -2655,9 +2663,10 @@ def _build_activitysim_config_identity(
     referenced_csvs: Sequence[Path],
     options: Mapping[str, Any],
     runtime_options: Mapping[str, Any],
-) -> CanonicalConfigIdentity:
+) -> tuple[CanonicalConfigIdentity, dict[str, Path]]:
     file_entries: list[dict[str, Any]] = []
     references: list[ConfigReference] = []
+    reference_paths: dict[str, Path] = {}
 
     def add_file(path: Path, *, role: str) -> None:
         key = _logical_config_key(path, config.root_dirs)
@@ -2667,6 +2676,7 @@ def _build_activitysim_config_identity(
         if root_index is not None:
             entry["root_index"] = root_index
         file_entries.append(entry)
+        reference_paths[key] = path
         references.append(
             ConfigReference(
                 config_key=key,
@@ -2722,7 +2732,7 @@ def _build_activitysim_config_identity(
             "directory_hash": directory_hash,
         }
     )
-    return CanonicalConfigIdentity(
+    identity = CanonicalConfigIdentity(
         adapter_name=adapter_name,
         adapter_version=adapter_version,
         primary_config=primary_config,
@@ -2757,6 +2767,7 @@ def _build_activitysim_config_identity(
             for item in directory_entries
         ),
     )
+    return identity, reference_paths
 
 
 def _config_root_index(path: Path, config_dirs: Sequence[Path]) -> int | None:
@@ -2775,6 +2786,46 @@ def _logical_config_key(path: Path, config_dirs: Sequence[Path]) -> str:
         if resolved.is_relative_to(root):
             return f"root:{index}:{resolved.relative_to(root).as_posix()}"
     return f"external:{resolved.name}"
+
+
+def _build_activitysim_canonicalization_snapshot(
+    *,
+    identity: CanonicalConfigIdentity,
+    artifacts_by_path: Mapping[Path, ArtifactSpec],
+    reference_paths: Mapping[str, Path],
+) -> CanonicalizationSnapshot:
+    """Build exact runtime observations from ActivitySim's active file specs."""
+    artifacts_by_reference = {
+        path.resolve(): spec
+        for path, spec in artifacts_by_path.items()
+        if spec.meta.get("config_role") in {"yaml", "csv"}
+    }
+    references: list[CanonicalizationReference] = []
+    for reference in identity.references:
+        if reference.canonical_value is None:
+            raise ValueError(
+                "ActivitySim config references must have a canonical value."
+            )
+        path = reference_paths.get(reference.canonical_value)
+        if path is None:
+            raise ValueError(
+                "ActivitySim canonicalization did not retain a resolved path for "
+                f"reference {reference.config_key!r}."
+            )
+        artifact = artifacts_by_reference.get(path.resolve())
+        references.append(
+            CanonicalizationReference(
+                reference=reference,
+                resolved_path=path,
+                artifact_keys=(artifact.key,) if artifact is not None else (),
+            )
+        )
+    return CanonicalizationSnapshot(
+        adapter_name=identity.adapter_name,
+        adapter_version=identity.adapter_version,
+        identity_hash=identity.identity_hash,
+        references=tuple(references),
+    )
 
 
 def _collect_active_yaml_files(
