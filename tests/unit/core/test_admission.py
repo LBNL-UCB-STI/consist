@@ -128,6 +128,47 @@ def test_directory_hash_semantics_distinguish_full_from_fast(tmp_path: Path) -> 
     assert full["digest_contract"] != fast["digest_contract"]
 
 
+def test_logged_artifact_semantics_admit_full_but_not_fast_inputs(
+    tracker, tmp_path: Path
+) -> None:
+    full_source = tmp_path / "full-source.zip"
+    full_source.write_bytes(b"full bytes")
+    full_candidate = tmp_path / "full-candidate.zip"
+    full_candidate.write_bytes(full_source.read_bytes())
+    with tracker.start_run("full-run", "admission_contract"):
+        full_artifact = tracker.log_artifact(
+            full_source, key="full_feed", direction="input"
+        )
+    assert full_artifact.meta["hash_semantics"]["source"] == "computed_full"
+
+    full_report = check_artifact_identity(
+        tracker,
+        execution_path=full_candidate,
+        expected_run_id="full-run",
+        artifact_key="full_feed",
+    )
+    assert full_report.outcome == "verified"
+
+    tracker.identity.hashing_strategy = "fast"
+    fast_source = tmp_path / "fast-source.zip"
+    fast_source.write_bytes(b"fast bytes")
+    fast_candidate = tmp_path / "fast-candidate.zip"
+    fast_candidate.write_bytes(fast_source.read_bytes())
+    with tracker.start_run("fast-run", "admission_contract"):
+        fast_artifact = tracker.log_artifact(
+            fast_source, key="fast_feed", direction="input"
+        )
+    assert fast_artifact.meta["hash_semantics"]["source"] == "computed_fast"
+
+    fast_report = check_artifact_identity(
+        tracker,
+        execution_path=fast_candidate,
+        expected_run_id="fast-run",
+        artifact_key="fast_feed",
+    )
+    assert fast_report.outcome == "unverified"
+
+
 def test_future_full_file_metadata_admits_matching_candidate_with_fast_tracker(
     tracker, tmp_path: Path
 ):
