@@ -202,7 +202,10 @@ def _expected_input_artifact(
     tracker: "Tracker", *, expected_run_id: str, artifact_key: str
 ) -> tuple[Artifact | None, str | None]:
     """Resolve one exact expected input without key-collapsing history helpers."""
-    with tracker.db.session_scope() as session:
+    database = tracker.db
+    if database is None:
+        raise RuntimeError("Artifact admission requires a provenance database.")
+    with database.session_scope() as session:
         run = session.get(Run, expected_run_id)
         if run is None:
             return None, "expected_prior_run_absent"
