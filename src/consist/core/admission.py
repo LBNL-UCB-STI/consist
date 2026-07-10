@@ -75,7 +75,7 @@ def hash_semantics_for_new_artifact(
     if source == "caller_supplied":
         return {
             "version": 1,
-            "algorithm": "sha256",
+            "algorithm": "unknown",
             "kind": "unknown",
             "digest_contract": "unknown",
             "source": "caller_supplied",
@@ -309,6 +309,7 @@ def check_artifact_identity(
     expected_source: Literal["explicit_immutable_path"] | None = None
     expected_audit_path: str | None = None
     if expected_identity is None and expected_bytes_path is not None:
+        expected_source = "explicit_immutable_path"
         expected_path = Path(expected_bytes_path).expanduser()
         expected_audit_path = _resolved_path(expected_path)
         if not expected_path.is_file() or _paths_are_same(candidate, expected_path):
@@ -320,6 +321,8 @@ def check_artifact_identity(
                 artifact_key=artifact_key,
                 input_role=role,
                 observed_artifact_id=observed_identity,
+                expected_bytes_source=expected_source,
+                expected_bytes_path=expected_audit_path,
                 observations=(
                     "expected_artifact_unverifiable",
                     "expected_bytes_not_distinct",
@@ -336,6 +339,8 @@ def check_artifact_identity(
                     artifact_key=artifact_key,
                     input_role=role,
                     observed_artifact_id=observed_identity,
+                    expected_bytes_source=expected_source,
+                    expected_bytes_path=expected_audit_path,
                     observations=("looks_like_git_lfs_pointer",),
                     recommended_action="Run git lfs pull to materialize the expected bytes.",
                 )
@@ -349,10 +354,35 @@ def check_artifact_identity(
                 artifact_key=artifact_key,
                 input_role=role,
                 observed_artifact_id=observed_identity,
+                expected_bytes_source=expected_source,
+                expected_bytes_path=expected_audit_path,
                 observations=("expected_artifact_unverifiable",),
                 reason=str(exc),
             )
-        expected_source = "explicit_immutable_path"
+        stored_hash = artifact.hash
+        if (
+            not isinstance(stored_hash, str)
+            or not _SHA256_HEX.fullmatch(stored_hash)
+            or expected_identity != f"sha256:file:{stored_hash}"
+        ):
+            return _report(
+                outcome="unverified",
+                execution_path=candidate,
+                physical_target_path=physical_target_path,
+                expected_run_id=expected_run_id,
+                artifact_key=artifact_key,
+                input_role=role,
+                observed_artifact_id=observed_identity,
+                expected_bytes_source=expected_source,
+                expected_bytes_path=expected_audit_path,
+                observations=(
+                    "expected_artifact_unverifiable",
+                    "expected_bytes_not_correlated",
+                ),
+                reason=(
+                    "Expected bytes did not corroborate the historical artifact hash."
+                ),
+            )
 
     if expected_identity is None:
         return _report(

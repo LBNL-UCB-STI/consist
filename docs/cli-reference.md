@@ -236,9 +236,12 @@ consist admission doctor \
 
 `--expected-file` must resolve to a different readable regular file than
 `--file`. The command never treats the candidate path, a stored artifact URI,
-or recovery-root lookup as expected bytes. It reports its verdict and digest
-facts first, then supporting evidence. `--output report.json` writes the
-canonical JSON report while leaving the human diagnostic on stdout.
+or recovery-root lookup as expected bytes. For a legacy row, its full-file
+digest must also equal the stored 64-character historical fingerprint before
+Consist treats it as evidence for that prior run; otherwise the result remains
+`unverified`. It reports its verdict and digest facts first, then supporting
+evidence. `--output report.json` writes the canonical JSON report while leaving
+the human diagnostic on stdout.
 
 By default, all structured outcomes (`verified`, `mismatched`, `unverified`,
 and `unreadable`) exit successfully so callers can apply their own policy. Add

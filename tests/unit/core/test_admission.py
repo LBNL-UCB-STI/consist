@@ -128,6 +128,16 @@ def test_directory_hash_semantics_distinguish_full_from_fast(tmp_path: Path) -> 
     assert full["digest_contract"] != fast["digest_contract"]
 
 
+def test_caller_supplied_hash_semantics_do_not_claim_sha256() -> None:
+    semantics = hash_semantics_for_new_artifact(
+        path=None,
+        hashing_strategy="full",
+        source="caller_supplied",
+    )
+
+    assert semantics["algorithm"] == "unknown"
+
+
 def test_logged_artifact_semantics_admit_full_but_not_fast_inputs(
     tracker, tmp_path: Path
 ) -> None:
@@ -269,6 +279,41 @@ def test_distinct_expected_bytes_reverify_a_historical_bare_hash(
     )
 
     assert report.outcome == "verified"
+    assert report.expected_bytes_source == "explicit_immutable_path"
+    assert report.expected_bytes_path == str(source.resolve())
+
+
+def test_expected_bytes_must_correlate_with_historical_bare_hash(
+    tracker, tmp_path: Path
+):
+    historical_source = tmp_path / "historical-feed.zip"
+    historical_source.write_bytes(b"historical bytes")
+    candidate = tmp_path / "runtime-feed.zip"
+    candidate.write_bytes(b"unrelated bytes")
+    operator_expected = tmp_path / "operator-expected.zip"
+    operator_expected.write_bytes(candidate.read_bytes())
+    _complete_run(tracker, "legacy-run")
+    _record_input(
+        tracker,
+        run_id="legacy-run",
+        key="raw_gtfs",
+        source_path=historical_source,
+        digest=_sha256(historical_source.read_bytes()),
+        semantics=None,
+    )
+
+    report = check_artifact_identity(
+        tracker,
+        execution_path=candidate,
+        expected_run_id="legacy-run",
+        artifact_key="raw_gtfs",
+        expected_bytes_path=operator_expected,
+    )
+
+    assert report.outcome == "unverified"
+    _assert_observation(report, "expected_bytes_not_correlated")
+    assert report.expected_bytes_source == "explicit_immutable_path"
+    assert report.expected_bytes_path == str(operator_expected.resolve())
 
 
 @pytest.mark.parametrize("alias_kind", ["same", "symlink", "hardlink"])
@@ -304,6 +349,8 @@ def test_legacy_expected_bytes_must_be_distinct_from_candidate(
 
     assert report.outcome == "unverified"
     _assert_observation(report, "expected_bytes_not_distinct")
+    assert report.expected_bytes_source == "explicit_immutable_path"
+    assert report.expected_bytes_path == str(expected_path.resolve())
 
 
 def test_changed_candidate_mismatches_a_forward_full_file_identity(
@@ -438,6 +485,41 @@ def test_git_lfs_expected_fallback_is_unverified_with_targeted_observation(
 
     assert report.outcome == "unverified"
     _assert_observation(report, "lfs")
+    assert report.expected_bytes_source == "explicit_immutable_path"
+    assert report.expected_bytes_path == str(expected_pointer.resolve())
+
+
+def test_non_regular_expected_fallback_retains_source_audit_fields(
+    tracker, tmp_path: Path
+):
+    source = tmp_path / "legacy-feed.zip"
+    source.write_bytes(b"legacy bytes")
+    candidate = tmp_path / "runtime-feed.zip"
+    candidate.write_bytes(source.read_bytes())
+    expected_directory = tmp_path / "archive-directory"
+    expected_directory.mkdir()
+    _complete_run(tracker, "legacy-run")
+    _record_input(
+        tracker,
+        run_id="legacy-run",
+        key="raw_gtfs",
+        source_path=source,
+        digest=_sha256(source.read_bytes()),
+        semantics=None,
+    )
+
+    report = check_artifact_identity(
+        tracker,
+        execution_path=candidate,
+        expected_run_id="legacy-run",
+        artifact_key="raw_gtfs",
+        expected_bytes_path=expected_directory,
+    )
+
+    assert report.outcome == "unverified"
+    _assert_observation(report, "unverifiable")
+    assert report.expected_bytes_source == "explicit_immutable_path"
+    assert report.expected_bytes_path == str(expected_directory.resolve())
 
 
 @pytest.mark.parametrize("path_kind", ["directory", "missing"])

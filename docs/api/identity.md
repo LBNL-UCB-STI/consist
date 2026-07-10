@@ -10,7 +10,8 @@ so it is not automatically a proof that a supplied file has the same bytes.
 only a full regular-file SHA-256 whose forward metadata explicitly records raw
 file-byte semantics. For older or otherwise ambiguous stored hashes, callers
 may supply a distinct immutable expected file; Consist hashes that file directly
-instead of resolving the stored artifact URI or recovery roots. The result is a
+instead of resolving the stored artifact URI or recovery roots, then requires it
+to corroborate the stored 64-character historical fingerprint. The result is a
 versioned, policy-neutral `AdmissionReport` with a deterministic JSON form.
 
 ::: consist.core.identity.IdentityManager
