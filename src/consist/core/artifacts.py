@@ -595,11 +595,7 @@ class ArtifactManager:
             artifact_obj.meta["hash_semantics"] = hash_semantics_for_new_artifact(
                 path=Path(resolved_abs_path),
                 hashing_strategy=self.tracker.identity.hashing_strategy,
-                source=(
-                    "caller_supplied"
-                    if content_hash is not None
-                    else "computed"
-                ),
+                source=("caller_supplied" if content_hash is not None else "computed"),
             )
         elif hash_state.caller_supplied_override_applied:
             artifact_obj.meta["hash_semantics"] = hash_semantics_for_new_artifact(

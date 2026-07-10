@@ -99,7 +99,9 @@ def test_admission_doctor_writes_canonical_json_and_prints_verdict_first(
     assert output_path.read_text() == report.canonical_json() + "\n"
 
 
-def test_admission_doctor_defaults_to_success_for_non_verified_outcome(monkeypatch) -> None:
+def test_admission_doctor_defaults_to_success_for_non_verified_outcome(
+    monkeypatch,
+) -> None:
     monkeypatch.setattr(cli, "get_tracker", lambda db_path: object())
     monkeypatch.setattr(
         cli, "check_artifact_identity", lambda *args, **kwargs: _report("unverified")

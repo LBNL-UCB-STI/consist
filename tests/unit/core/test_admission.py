@@ -62,15 +62,15 @@ def _record_input(
     with tracker.db.session_scope() as session:
         session.add(artifact)
         session.add(
-            RunArtifactLink(
-                run_id=run_id, artifact_id=artifact.id, direction=direction
-            )
+            RunArtifactLink(run_id=run_id, artifact_id=artifact.id, direction=direction)
         )
         session.commit()
 
 
 def _assert_observation(report: AdmissionReport, text: str) -> None:
-    assert any(text in item.lower() for item in report.observations), report.observations
+    assert any(text in item.lower() for item in report.observations), (
+        report.observations
+    )
 
 
 def test_public_package_exports_admission_api() -> None:
@@ -571,7 +571,9 @@ def test_unresolvable_expected_input_is_unverified(
     run_id = "expected-run"
 
     if case != "missing_run":
-        _complete_run(tracker, run_id, status="failed" if case == "non_completed" else "completed")
+        _complete_run(
+            tracker, run_id, status="failed" if case == "non_completed" else "completed"
+        )
     if case in {"non_completed", "ambiguous_input"}:
         _record_input(
             tracker,
