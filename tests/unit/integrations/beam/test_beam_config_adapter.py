@@ -11,9 +11,17 @@ import pandas as pd
 from sqlalchemy import func, select
 from sqlmodel import Session, SQLModel
 
-from consist.core.config_canonicalization import ConfigAdapterOptions
+from consist.core.config_canonicalization import (
+    ArtifactSpec,
+    CanonicalConfigIdentity,
+    ConfigAdapterOptions,
+    ConfigReference,
+)
 from consist.integrations.beam import BeamConfigAdapter, BeamConfigOverrides
 from consist.integrations.beam.config_adapter import BeamReferencePolicy
+from consist.integrations.beam.config_adapter import (
+    _build_beam_canonicalization_snapshot,
+)
 from consist.integrations.beam.config_adapter import _load_config_tree
 from consist.integrations.beam.config_adapter import _resolve_reference
 from consist.integrations.beam.config_adapter import _resolves_under_config_root
@@ -417,6 +425,61 @@ def test_beam_canonicalize_ingests_gtfs_tables(gtfs_tracker, tmp_path: Path):
             "SELECT COUNT(*) FROM global_tables.trips"
         ).scalar_one()
     assert count == 2
+
+
+def test_beam_canonicalization_snapshot_omits_unlogged_gtfs_directory_delegate(
+    tmp_path: Path,
+):
+    root_dir = tmp_path / "beam_case"
+    gtfs_root = root_dir / "inputs" / "r5"
+    feed_path = gtfs_root / "Caltrain.zip"
+    gtfs_root.mkdir(parents=True)
+    feed_path.write_bytes(b"feed")
+
+    reference = ConfigReference(
+        config_key="beam.routing.r5.directory",
+        raw_value=str(gtfs_root),
+        canonical_value="config:inputs/r5",
+        status="resolved",
+        required=True,
+        identity_policy="delegated_to_artifacts",
+        delegated_artifact_keys=("config:beam_case/inputs/r5",),
+    )
+    identity = CanonicalConfigIdentity(
+        adapter_name="beam",
+        adapter_version="0.1",
+        primary_config=None,
+        identity_hash="identity",
+        references=(reference,),
+    )
+    artifacts = {
+        gtfs_root: ArtifactSpec(
+            path=gtfs_root,
+            key="consist_gtfs_bundle",
+            direction="input",
+            meta={"config_role": "gtfs_bundle"},
+            driver="gtfs",
+        ),
+        feed_path: ArtifactSpec(
+            path=feed_path,
+            key="config:inputs/r5/Caltrain.zip",
+            direction="input",
+            meta={"config_role": "gtfs_feed"},
+            driver="gtfs",
+        ),
+    }
+
+    snapshot = _build_beam_canonicalization_snapshot(
+        identity=identity,
+        artifacts_by_path=artifacts,
+        root_dirs=[root_dir],
+        gtfs_root=gtfs_root,
+    )
+
+    assert snapshot.references[0].artifact_keys == (
+        "consist_gtfs_bundle",
+        "config:inputs/r5/Caltrain.zip",
+    )
 
 
 def test_beam_canonicalize_prefers_directory_root_gtfs_bundle(

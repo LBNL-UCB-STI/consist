@@ -1460,6 +1460,7 @@ def _build_beam_canonicalization_snapshot(
     artifacts_by_resolved_path = {
         path.resolve(): spec for path, spec in artifacts_by_path.items()
     }
+    emitted_artifact_keys = {spec.key for spec in artifacts_by_path.values()}
     gtfs_keys = tuple(
         spec.key
         for spec in artifacts_by_path.values()
@@ -1482,7 +1483,11 @@ def _build_beam_canonicalization_snapshot(
             artifact = artifacts_by_resolved_path.get(observed_path)
             if artifact is not None:
                 artifact_keys.append(artifact.key)
-            artifact_keys.extend(reference.delegated_artifact_keys)
+            artifact_keys.extend(
+                key
+                for key in reference.delegated_artifact_keys
+                if key in emitted_artifact_keys
+            )
             if observed_path == resolved_gtfs_root:
                 artifact_keys.extend(gtfs_keys)
         references.append(
