@@ -203,17 +203,35 @@ class BeamConfigAdapter:
             self.path_aliases,
             options.path_aliases if options is not None else None,
         )
+        r5_directory = _resolve_gtfs_bundle_root(config_tree, config.root_dirs)
+        r5_osm_source, ignored_osm_candidate_filenames = _select_r5_osm_source(
+            r5_directory
+        )
+        if r5_osm_source is not None:
+            _add_artifact(
+                artifacts_by_path,
+                r5_osm_source,
+                config.root_dirs,
+                role="r5_osm_source",
+                meta={
+                    "config_reference_key": "beam.routing.r5.directory",
+                    "selection_rule": "r5_top_level_osm_v1",
+                    "selected_filename": r5_osm_source.name,
+                    "ignored_candidate_filenames": list(
+                        ignored_osm_candidate_filenames
+                    ),
+                },
+            )
         gtfs_result = _canonicalize_gtfs_inputs(
             config_tree=config_tree,
             root_dirs=config.root_dirs,
             tracker=tracker,
         )
         if gtfs_result is not None:
-            gtfs_root = _resolve_gtfs_bundle_root(config_tree, config.root_dirs)
-            if gtfs_root is not None:
+            if r5_directory is not None:
                 _add_artifact(
                     artifacts_by_path,
-                    gtfs_root,
+                    r5_directory,
                     config.root_dirs,
                     role="gtfs_bundle",
                     key=GTFS_BUNDLE_SOURCE_KEY,
@@ -347,11 +365,7 @@ class BeamConfigAdapter:
             identity=reference_identity,
             artifacts_by_path=artifacts_by_path,
             root_dirs=config.root_dirs,
-            gtfs_root=(
-                _resolve_gtfs_bundle_root(config_tree, config.root_dirs)
-                if gtfs_result is not None
-                else None
-            ),
+            r5_directory=r5_directory,
         )
 
         return CanonicalizationResult(
@@ -1029,6 +1043,20 @@ def _policy_for_candidate(
         return explicit
 
     key_lower = candidate.config_key.lower()
+    if candidate.config_key == "beam.routing.r5.osmFile":
+        return BeamReferencePolicy(
+            identity_policy="ignored",
+            role="legacy_r5_osm_metadata",
+            required=False,
+            reason="legacy_r5_osm_file_not_used_by_current_r5_launch",
+        )
+    if candidate.config_key == "beam.routing.r5.osmMapdbFile":
+        return BeamReferencePolicy(
+            identity_policy="output_or_runtime_ignored",
+            role="r5_generated_cache_destination",
+            required=False,
+            reason="r5_generated_osm_mapdb_cache_destination",
+        )
     if key_lower.endswith("inputdirectory"):
         return BeamReferencePolicy(
             identity_policy="path_alias",
@@ -1454,7 +1482,7 @@ def _build_beam_canonicalization_snapshot(
     identity: CanonicalConfigIdentity,
     artifacts_by_path: Mapping[Path, ArtifactSpec],
     root_dirs: Sequence[Path],
-    gtfs_root: Optional[Path],
+    r5_directory: Optional[Path],
 ) -> CanonicalizationSnapshot:
     """Build per-reference facts from BEAM's existing canonicalization pass."""
     artifacts_by_resolved_path = {
@@ -1466,7 +1494,12 @@ def _build_beam_canonicalization_snapshot(
         for spec in artifacts_by_path.values()
         if spec.meta.get("config_role") in {"gtfs_bundle", "gtfs_feed"}
     )
-    resolved_gtfs_root = gtfs_root.resolve() if gtfs_root is not None else None
+    r5_osm_source_keys = tuple(
+        spec.key
+        for spec in artifacts_by_path.values()
+        if spec.meta.get("config_role") == "r5_osm_source"
+    )
+    resolved_r5_directory = r5_directory.resolve() if r5_directory is not None else None
     references: list[CanonicalizationReference] = []
     for reference in identity.references:
         resolved = _resolve_reference(reference.raw_value, root_dirs)
@@ -1488,8 +1521,9 @@ def _build_beam_canonicalization_snapshot(
                 for key in reference.delegated_artifact_keys
                 if key in emitted_artifact_keys
             )
-            if observed_path == resolved_gtfs_root:
+            if observed_path == resolved_r5_directory:
                 artifact_keys.extend(gtfs_keys)
+                artifact_keys.extend(r5_osm_source_keys)
         references.append(
             CanonicalizationReference(
                 reference=reference,
@@ -1682,6 +1716,22 @@ def _resolve_gtfs_bundle_root(
     if resolved is None or not resolved.exists():
         return None
     return resolved
+
+
+def _select_r5_osm_source(
+    root: Optional[Path],
+) -> tuple[Optional[Path], tuple[str, ...]]:
+    """Select the raw R5 OSM member using R5's top-level lexical rule."""
+    if root is None or not root.is_dir():
+        return None, ()
+    candidates = [
+        entry
+        for entry in sorted(root.iterdir(), key=lambda path: path.name)
+        if entry.is_file() and entry.suffix.lower() in {".pbf", ".vex"}
+    ]
+    if not candidates:
+        return None, ()
+    return candidates[0], tuple(candidate.name for candidate in candidates[1:])
 
 
 def _resolve_beam_service_date(config_tree: dict[str, Any]) -> Optional[date]:

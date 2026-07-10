@@ -340,6 +340,104 @@ def test_beam_canonicalize_discovers_gtfs_bundle_from_r5_directory(
     } == {"gtfs"}
 
 
+def test_beam_canonicalize_selects_first_top_level_r5_osm_source(
+    gtfs_tracker, tmp_path: Path
+):
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    r5_root = case_dir / "inputs" / "r5" / "sfbay-cbg5500-weakConn-network"
+    r5_root.mkdir(parents=True)
+    selected_osm = r5_root / "001-network.VEX"
+    ignored_osm = r5_root / "002-network.pbf"
+    selected_osm.write_bytes(b"selected osm")
+    ignored_osm.write_bytes(b"ignored osm")
+    nested_osm = r5_root / "nested" / "000-network.pbf"
+    nested_osm.parent.mkdir()
+    nested_osm.write_bytes(b"nested osm")
+    _write_gtfs_zip_feed(
+        r5_root / "Caltrain.zip",
+        route_short_name="CT",
+        service_id="S1",
+    )
+    legacy_osm = case_dir / "inputs" / "legacy-network.pbf"
+    legacy_osm.write_bytes(b"legacy osm")
+    mapdb_path = case_dir / "inputs" / "r5" / "osm.mapdb"
+    mapdb_path.write_bytes(b"generated cache")
+    overlay_conf.write_text(
+        overlay_conf.read_text(encoding="utf-8")
+        + '\nbeam.routing.baseDate = "2024-01-01"\n'
+        + '\nbeam.routing.r5.directory = ${beam.inputDirectory}"/r5/sfbay-cbg5500-weakConn-network"\n'
+        + '\nbeam.routing.r5.osmFile = ${beam.inputDirectory}"/legacy-network.pbf"\n'
+        + '\nbeam.routing.r5.osmMapdbFile = ${beam.inputDirectory}"/r5/osm.mapdb"\n',
+        encoding="utf-8",
+    )
+
+    adapter = BeamConfigAdapter(primary_config=overlay_conf)
+    canonical = adapter.discover([case_dir], identity=gtfs_tracker.identity)
+    run = gtfs_tracker.begin_run("beam_r5_osm_source_unit", "beam")
+    result = adapter.canonicalize(canonical, run=run, tracker=gtfs_tracker)
+
+    osm_spec = next(
+        spec
+        for spec in result.artifacts
+        if spec.meta.get("config_role") == "r5_osm_source"
+    )
+    assert osm_spec.path == selected_osm
+    assert osm_spec.meta == {
+        "config_role": "r5_osm_source",
+        "config_reference_key": "beam.routing.r5.directory",
+        "selection_rule": "r5_top_level_osm_v1",
+        "selected_filename": "001-network.VEX",
+        "ignored_candidate_filenames": ["002-network.pbf"],
+    }
+    assert all(spec.path != legacy_osm for spec in result.artifacts)
+    assert all(spec.path != mapdb_path for spec in result.artifacts)
+
+    assert result.canonicalization is not None
+    r5_reference = next(
+        item
+        for item in result.canonicalization.references
+        if item.reference.config_key == "beam.routing.r5.directory"
+    )
+    assert osm_spec.key in r5_reference.artifact_keys
+    gtfs_feed_keys = {
+        spec.key
+        for spec in result.artifacts
+        if spec.meta.get("config_role") == "gtfs_feed"
+    }
+    assert gtfs_feed_keys <= set(r5_reference.artifact_keys)
+
+
+def test_beam_canonicalize_does_not_select_r5_osm_without_top_level_candidate(
+    gtfs_tracker, tmp_path: Path
+):
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    r5_root = case_dir / "inputs" / "r5" / "sfbay-cbg5500-weakConn-network"
+    r5_root.mkdir(parents=True)
+    nested_osm = r5_root / "nested" / "network.pbf"
+    nested_osm.parent.mkdir()
+    nested_osm.write_bytes(b"nested osm")
+    _write_gtfs_zip_feed(
+        r5_root / "Caltrain.zip",
+        route_short_name="CT",
+        service_id="S1",
+    )
+    overlay_conf.write_text(
+        overlay_conf.read_text(encoding="utf-8")
+        + '\nbeam.routing.baseDate = "2024-01-01"\n'
+        + '\nbeam.routing.r5.directory = ${beam.inputDirectory}"/r5/sfbay-cbg5500-weakConn-network"\n',
+        encoding="utf-8",
+    )
+
+    adapter = BeamConfigAdapter(primary_config=overlay_conf)
+    canonical = adapter.discover([case_dir], identity=gtfs_tracker.identity)
+    run = gtfs_tracker.begin_run("beam_r5_no_osm_source_unit", "beam")
+    result = adapter.canonicalize(canonical, run=run, tracker=gtfs_tracker)
+
+    assert not any(
+        spec.meta.get("config_role") == "r5_osm_source" for spec in result.artifacts
+    )
+
+
 def test_beam_canonicalize_ignores_r5_sidecar_csv_and_discovers_zip_feeds(
     gtfs_tracker, tmp_path: Path
 ):
@@ -473,7 +571,7 @@ def test_beam_canonicalization_snapshot_omits_unlogged_gtfs_directory_delegate(
         identity=identity,
         artifacts_by_path=artifacts,
         root_dirs=[root_dir],
-        gtfs_root=gtfs_root,
+        r5_directory=gtfs_root,
     )
 
     assert snapshot.references[0].artifact_keys == (
