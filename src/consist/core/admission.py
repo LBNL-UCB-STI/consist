@@ -1,4 +1,11 @@
-"""Prior-run file admission without coupling to cache hash strategy."""
+"""
+Verify external files against identities recorded by completed prior runs.
+
+Admission identity is deliberately separate from Consist's cache fingerprinting.
+It always uses a full SHA-256 digest of a regular file's raw bytes and returns a
+policy-neutral report; callers such as PILATES decide whether an observation is
+fatal. Version 1 resolves expected identities from one explicit prior run.
+"""
 
 from __future__ import annotations
 
@@ -28,7 +35,68 @@ AdmissionOutcome = Literal["verified", "mismatched", "unverified", "unreadable"]
 
 
 class AdmissionReport(BaseModel):
-    """Versioned, policy-neutral result of checking one external file."""
+    """
+    Represent the policy-neutral result of checking one external file.
+
+    Attributes
+    ----------
+    report_schema_version : int
+        Version of the serialized admission-report schema.
+    outcome : {"verified", "mismatched", "unverified", "unreadable"}
+        High-level result. ``verified`` means the observed and expected byte
+        identities match; ``mismatched`` means both identities are known and
+        differ; ``unverified`` means Consist could not establish a trusted
+        expected identity; and ``unreadable`` means the observed file could not
+        be read as a regular file.
+    input_role : str
+        Logical role supplied by the caller, defaulting to ``artifact_key``.
+    artifact_key : str
+        Exact persisted input-artifact key selected on the expected run.
+    config_key : str or None
+        Source configuration key when supplied by a future runtime adapter.
+    config_reference_key : str or None
+        Canonical configuration-reference key when distinct from ``config_key``.
+    feed_key : str or None
+        Feed selector associated with the input, when available.
+    raw_config_value : str or None
+        Unmodified value read from workflow configuration.
+    canonical_value : str or None
+        Portable canonical value produced by configuration canonicalization.
+    configured_path : str or None
+        Path derived from configuration before execution-path resolution.
+    execution_path : str
+        File path supplied for admission and intended for workflow execution.
+    physical_target_path : str or None
+        Resolved physical target used for path-audit and alias detection.
+    expected_source : {"prior_run"}
+        Source used to resolve the expected identity in the V1 contract.
+    expected_run_id : str
+        Explicit completed run supplying the expected input artifact.
+    expected_artifact_id : str or None
+        Trusted self-describing expected identity, such as
+        ``sha256:file:<hex>``.
+    observed_artifact_id : str or None
+        Full-file identity computed from ``execution_path`` when readable.
+    digest_algorithm : {"sha256"}
+        Digest algorithm used by the admission identity contract.
+    expected_bytes_source : {"explicit_immutable_path"} or None
+        Evidence source used to reverify a historical hash with unknown
+        semantics.
+    expected_bytes_path : str or None
+        Resolved audit path for the expected-byte evidence.
+    observations : tuple[str, ...]
+        Stable machine-readable facts supporting ``outcome``.
+    recommended_action : str or None
+        Workflow-independent remediation, used only when Consist can identify
+        a generally valid action.
+    reason : str or None
+        Human-readable explanation for the outcome.
+
+    Notes
+    -----
+    Reports are frozen Pydantic models. They describe evidence but do not assign
+    workflow severity or mutate run state.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -56,7 +124,19 @@ class AdmissionReport(BaseModel):
     reason: str | None = None
 
     def canonical_json(self) -> str:
-        """Serialize the report deterministically for sidecars and automation."""
+        """
+        Serialize the report deterministically for sidecars and automation.
+
+        Returns
+        -------
+        str
+            Compact JSON with sorted keys and all schema fields represented.
+
+        Notes
+        -----
+        The returned string has no trailing newline or ephemeral timestamp.
+        Identical report values therefore produce identical serialized text.
+        """
         return json.dumps(
             self.model_dump(mode="json"),
             ensure_ascii=False,
@@ -71,7 +151,37 @@ def hash_semantics_for_new_artifact(
     hashing_strategy: str,
     source: Literal["computed", "caller_supplied"],
 ) -> dict[str, object]:
-    """Describe a newly logged fingerprint without changing its public value."""
+    """
+    Describe the semantics of a newly logged artifact fingerprint.
+
+    Parameters
+    ----------
+    path : pathlib.Path or None
+        Resolved artifact path. Required when ``source="computed"`` and ignored
+        when the hash was supplied by the caller.
+    hashing_strategy : {"full", "fast"}
+        Tracker hashing strategy active when the fingerprint was computed.
+    source : {"computed", "caller_supplied"}
+        Whether Consist computed the fingerprint or accepted it from a caller.
+
+    Returns
+    -------
+    dict[str, object]
+        Versioned metadata containing ``algorithm``, ``kind``,
+        ``digest_contract``, and ``source``. Caller-supplied hashes remain
+        explicitly unknown unless another operation validates their semantics.
+
+    Raises
+    ------
+    AssertionError
+        If ``source="computed"`` is used without a path.
+
+    Notes
+    -----
+    This helper describes the existing ``Artifact.hash`` value; it does not
+    compute or replace that value. Admission trusts only the exact full-file
+    SHA-256 semantics emitted for a regular file under the ``full`` strategy.
+    """
     if source == "caller_supplied":
         return {
             "version": 1,
@@ -124,7 +234,31 @@ def hash_semantics_for_new_artifact(
 
 
 def admission_file_identity(path: str | Path) -> str:
-    """Return the fixed raw-byte admission identity for one regular file."""
+    """
+    Compute the canonical admission identity for one regular file.
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        File whose raw bytes should be hashed.
+
+    Returns
+    -------
+    str
+        Self-describing identity in the form ``sha256:file:<hex>``.
+
+    Raises
+    ------
+    ValueError
+        If ``path`` is missing or is not a regular file.
+    OSError
+        If the file cannot be opened or read.
+
+    Notes
+    -----
+    This function always hashes full file contents and does not consult or
+    modify a tracker's cache hashing strategy.
+    """
     file_path = Path(path)
     if not file_path.is_file():
         raise ValueError(f"Admission only supports regular files: {file_path}")
@@ -248,7 +382,63 @@ def check_artifact_identity(
     expected_bytes_path: str | Path | None = None,
     input_role: str | None = None,
 ) -> AdmissionReport:
-    """Compare a resolved file against one explicit completed prior-run input."""
+    """
+    Compare a resolved file with one input from an explicit completed run.
+
+    Parameters
+    ----------
+    tracker : Tracker
+        Tracker whose provenance database contains the expected run and input
+        artifact.
+    execution_path : str or pathlib.Path
+        Resolved regular file that the receiving workflow intends to consume.
+    expected_run_id : str
+        Exact completed run ID supplying the expected input identity. Consist
+        does not select or infer a baseline run automatically.
+    artifact_key : str
+        Exact artifact key that must identify one ``direction="input"`` link on
+        the expected run.
+    expected_bytes_path : str or pathlib.Path or None, optional
+        Distinct immutable copy of the historical bytes used only when the
+        stored artifact hash lacks explicit full-file semantics. Its full-file
+        digest must corroborate the historical 64-character hash, and it must
+        not resolve to the observed file through a path, symlink, or hardlink.
+    input_role : str or None, optional
+        Stronger logical role to record in the report. Defaults to
+        ``artifact_key`` and does not alter expected-artifact lookup.
+
+    Returns
+    -------
+    AdmissionReport
+        Versioned report containing the outcome, expected and observed
+        identities, audit paths, and supporting observations.
+
+    Raises
+    ------
+    RuntimeError
+        If ``tracker`` has no configured provenance database.
+
+    Notes
+    -----
+    Missing files, placeholder files, unresolved expectations, and byte
+    mismatches are represented in the returned report rather than raised as
+    policy exceptions. This function does not copy files, change run status, or
+    decide whether an observation should stop a workflow.
+
+    Examples
+    --------
+    Check a resolved feed against one exact input from a pinned baseline run::
+
+        report = check_artifact_identity(
+            tracker,
+            execution_path="inputs/gtfs.zip",
+            expected_run_id="baseline-beam-run",
+            artifact_key="config:seattle/r5/seattle_gtfs.zip",
+        )
+
+        if report.outcome != "verified":
+            raise RuntimeError(report.canonical_json())
+    """
     candidate = Path(execution_path).expanduser()
     physical_target_path = _resolved_path(candidate)
     role = input_role or artifact_key

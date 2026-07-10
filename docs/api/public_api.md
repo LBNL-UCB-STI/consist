@@ -118,6 +118,10 @@ with tracker.scenario("baseline") as sc:
 - [`consist.StagedInputsResult`](materialize.md#consist.core.materialize.StagedInputsResult)
 - [`consist.RunSet`](runset.md#consist.runset.RunSet)
 - [`consist.AlignedPair`](runset.md#consist.runset.AlignedPair)
+- [`consist.AdmissionReport`](admission.md#consist.core.admission.AdmissionReport)
+  (policy-neutral evidence returned by prior-run artifact admission)
+- [`consist.check_artifact_identity`](admission.md#consist.core.admission.check_artifact_identity)
+  (compare one resolved file with an exact input from a completed run)
 - `consist.ArtifactSpec` / `consist.OutputArtifactSpec` (rich declared-output
   metadata for `Tracker.run(output_paths=...)`)
 - `consist.FilenamePattern`, `consist.IntCapture`, and `consist.EnumCapture`

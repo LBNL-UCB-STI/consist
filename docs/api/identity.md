@@ -12,7 +12,9 @@ file-byte semantics. For older or otherwise ambiguous stored hashes, callers
 may supply a distinct immutable expected file; Consist hashes that file directly
 instead of resolving the stored artifact URI or recovery roots, then requires it
 to corroborate the stored 64-character historical fingerprint. The result is a
-versioned, policy-neutral `AdmissionReport` with a deterministic JSON form.
+versioned, policy-neutral `AdmissionReport` with a deterministic JSON form. See
+[Artifact Admission](admission.md) for the complete API and developer helper
+reference.
 
 ::: consist.core.identity.IdentityManager
     options:
