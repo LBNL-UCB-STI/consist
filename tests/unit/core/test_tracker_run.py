@@ -14,6 +14,7 @@ from sqlmodel import SQLModel
 import consist
 from consist.core.config_canonicalization import (
     CanonicalConfig,
+    CanonicalizationSnapshot,
     ConfigPlan,
     canonical_identity_from_config,
 )
@@ -67,6 +68,22 @@ def test_tracker_run_loads_inputs_and_injects_context(tracker, sample_csv):
 
     assert "filtered" in result.outputs
     assert result.outputs["filtered"].path.exists()
+
+
+def test_tracker_run_context_has_no_canonicalization_without_adapter(tracker) -> None:
+    observed = []
+
+    def step(ctx) -> None:
+        observed.append(ctx.canonicalization)
+
+    tracker.run(
+        fn=step,
+        name="no_adapter_snapshot",
+        cache_options=CacheOptions(cache_mode="overwrite"),
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    assert observed == [None]
 
 
 def test_tracker_run_output_path_spec_tags_schema_and_profiles_output(
@@ -1524,6 +1541,87 @@ def test_tracker_run_container_forwards_output_path_spec_log_kwargs(
     assert log_kwargs["driver"] == "csv"
     assert log_kwargs["profile_file_schema"] is True
     assert log_kwargs["strict_schema"] is False
+
+
+def test_tracker_run_container_applies_snapshot_without_forwarding_it(
+    tracker, tmp_path: Path, monkeypatch
+) -> None:
+    from types import SimpleNamespace
+
+    from consist.integrations import containers
+
+    config_root = tmp_path / "container_config"
+    config_root.mkdir()
+    canonical = CanonicalConfig(
+        root_dirs=[config_root],
+        primary_config=None,
+        config_files=[],
+        external_files=[],
+        content_hash="container",
+    )
+    identity = canonical_identity_from_config(
+        adapter_name="container_adapter",
+        adapter_version="1",
+        config=canonical,
+    )
+    snapshot = CanonicalizationSnapshot(
+        adapter_name="container_adapter",
+        adapter_version="1",
+        identity_hash=identity.identity_hash,
+    )
+    plan = ConfigPlan(
+        adapter_name="container_adapter",
+        adapter_version="1",
+        canonical=canonical,
+        artifacts=[],
+        ingestables=[],
+        identity=identity,
+        canonicalization=snapshot,
+    )
+
+    class Adapter:
+        root_dirs = [config_root]
+
+    monkeypatch.setattr(tracker, "prepare_config", lambda **_: plan)
+    applied = []
+    original_apply = tracker.apply_config_plan
+
+    def _apply(*args, **kwargs):
+        contribution = original_apply(*args, **kwargs)
+        applied.append(contribution.canonicalization)
+        return contribution
+
+    captured: dict[str, Any] = {}
+
+    def _fake_run_container(**kwargs):
+        assert applied == [snapshot]
+        captured.update(kwargs)
+        return SimpleNamespace(artifacts={}, cache_hit=False)
+
+    monkeypatch.setattr(tracker, "apply_config_plan", _apply)
+    monkeypatch.setattr(containers, "run_container", _fake_run_container)
+
+    tracker.run(
+        fn=None,
+        name="container_snapshot",
+        adapter=Adapter(),
+        output_paths={"out": "out.txt"},
+        output_policy=OutputPolicyOptions(output_missing="ignore"),
+        execution_options=ExecutionOptions(
+            executor="container",
+            container={
+                "image": "ghcr.io/example/test:latest",
+                "command": ["python", "-V"],
+                "environment": {"MODE": "test"},
+                "volumes": {"/host": {"bind": "/container", "mode": "ro"}},
+            },
+        ),
+    )
+
+    assert captured["command"] == ["python", "-V"]
+    assert captured["environment"] == {"MODE": "test"}
+    assert captured["volumes"] == {"/host": {"bind": "/container", "mode": "ro"}}
+    assert "canonicalization" not in captured
 
 
 def test_tracker_run_delegates_invocation_defaults_and_validation(tracker, monkeypatch):

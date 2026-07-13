@@ -59,7 +59,11 @@ from consist.types import (
 )
 
 if TYPE_CHECKING:
-    from consist.core.config_canonicalization import ConfigAdapter, ConfigPlan
+    from consist.core.config_canonicalization import (
+        CanonicalizationSnapshot,
+        ConfigAdapter,
+        ConfigPlan,
+    )
     from consist.core.run_invocation import ResolvedRunInvocation
     from consist.core.tracker import Tracker
 
@@ -1186,6 +1190,7 @@ class RunTraceCoordinator:
         requested_input_paths: Optional[Mapping[str, Path]],
         capture_dir: Optional[Path],
         capture_pattern: str,
+        canonicalization: Optional["CanonicalizationSnapshot"] = None,
     ) -> tuple[Any, Dict[str, Artifact]]:
         runtime_kwargs = dict(runtime_kwargs_dict or {})
         required_runtime = getattr(fn, "__consist_runtime_required__", ())
@@ -1317,7 +1322,10 @@ class RunTraceCoordinator:
             )
             if ctx_name not in call_kwargs:
                 if ctx_name in params or has_var_kw:
-                    call_kwargs[ctx_name] = RunContext(tracker)
+                    call_kwargs[ctx_name] = RunContext(
+                        tracker,
+                        canonicalization=canonicalization,
+                    )
                 else:
                     raise ValueError(
                         format_problem_cause_fix(
@@ -1591,13 +1599,15 @@ class RunTraceCoordinator:
                     cache_hit=True,
                 )
 
+            canonicalization = None
             if config_plan is not None:
-                tracker.apply_config_plan(
+                contribution = tracker.apply_config_plan(
                     config_plan,
                     run=current_consist.run,
                     ingest=config_plan_ingest,
                     profile_schema=config_plan_profile_schema,
                 )
+                canonicalization = contribution.canonicalization
 
             if executor == "container":
                 return self._execute_container_run(
@@ -1621,6 +1631,7 @@ class RunTraceCoordinator:
                 inputs=inputs,
                 runtime_kwargs_dict=runtime_kwargs_dict,
                 inject_context=inject_context,
+                canonicalization=canonicalization,
                 input_binding=input_binding,
                 input_artifacts_by_key=input_artifacts_by_key,
                 requested_input_paths=requested_input_paths,

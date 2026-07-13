@@ -38,6 +38,11 @@ from consist.runset import AlignedPair, RunSet
 # Core
 from consist.core.tracker import Tracker
 from consist.core.coupler import Coupler
+from consist.core.config_canonicalization import (
+    CanonicalizationArtifactMember,
+    CanonicalizationReference,
+    CanonicalizationSnapshot,
+)
 from consist.core.indexing import (
     FacetIndex,
     RunFieldIndex,
@@ -48,6 +53,7 @@ from consist.core.indexing import (
 # API
 from consist.api import (
     AdmissionReport,  # noqa: F401
+    RunContext,
     check_artifact_identity,  # noqa: F401
     load,
     load_df,
@@ -187,6 +193,10 @@ __all__ = [
     # Core objects
     "Tracker",
     "Coupler",
+    "RunContext",
+    "CanonicalizationArtifactMember",
+    "CanonicalizationReference",
+    "CanonicalizationSnapshot",
     "Run",
     "RunResult",
     "Artifact",
