@@ -54,7 +54,10 @@ from consist.types import (
 from pathlib import Path
 
 if TYPE_CHECKING:
-    from consist.core.config_canonicalization import ConfigAdapter
+    from consist.core.config_canonicalization import (
+        CanonicalizationSnapshot,
+        ConfigAdapter,
+    )
     from consist.core.tracker import Tracker
 
 
@@ -102,8 +105,31 @@ class RunContext:
     ```
     """
 
-    def __init__(self, tracker: "Tracker") -> None:
+    def __init__(
+        self,
+        tracker: "Tracker",
+        *,
+        canonicalization: Optional["CanonicalizationSnapshot"] = None,
+    ) -> None:
         self._tracker = tracker
+        self._canonicalization = canonicalization
+
+    @property
+    def canonicalization(self) -> Optional["CanonicalizationSnapshot"]:
+        """
+        Immutable facts from the applied config canonicalization, if any.
+
+        This snapshot describes references observed while Consist
+        canonicalized configuration. It does not identify the final paths a
+        staged or containerized model will consume.
+
+        Returns
+        -------
+        Optional[CanonicalizationSnapshot]
+            The applied canonicalization snapshot, or ``None`` when the run
+            did not configure an adapter.
+        """
+        return self._canonicalization
 
     @property
     def run_dir(self) -> Path:

@@ -43,6 +43,7 @@ from consist.core.context import (
     set_default_tracker,
     use_tracker as _use_tracker,
 )
+from consist.core.admission import AdmissionReport, check_artifact_identity  # noqa: F401
 from consist.core.decorators import (
     define_step as define_step_decorator,
     require_runtime_kwargs as require_runtime_kwargs_decorator,

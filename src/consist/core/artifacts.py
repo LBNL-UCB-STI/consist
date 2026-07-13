@@ -18,6 +18,7 @@ from typing import (
 
 from sqlmodel import SQLModel
 
+from consist.core.admission import hash_semantics_for_new_artifact
 from consist.core.container_policy import (
     ChildRecoveryPolicy,
     ContainerRecoveryUnit,
@@ -55,6 +56,7 @@ class _ContentHashState:
     effective_hash: Optional[str]
     computed_hash: Optional[str] = None
     attempted_compute: bool = False
+    caller_supplied_override_applied: bool = False
 
 
 def _infer_driver_from_path(path: Path) -> str:
@@ -332,7 +334,9 @@ class ArtifactManager:
             meta["recovery_roots"] = self.tracker.fs.normalize_recovery_roots(
                 meta["recovery_roots"]
             )
+        meta.pop("hash_semantics", None)
         artifact_obj = None
+        is_new_artifact = False
         resolved_abs_path = None
         mount_scheme: Optional[str] = None
         mount_root: Optional[str] = None
@@ -478,6 +482,7 @@ class ArtifactManager:
                 )
                 return
             artifact.hash = hash_state.effective_hash
+            hash_state.caller_supplied_override_applied = True
 
         _warn_output_reuse_deprecated()
 
@@ -570,6 +575,7 @@ class ArtifactManager:
                     parent_artifact_id=parent_artifact_id,
                     meta=meta,
                 )
+                is_new_artifact = True
 
         if artifact_obj.hash and hash_state.effective_hash is None:
             hash_state.effective_hash = artifact_obj.hash
@@ -585,6 +591,18 @@ class ArtifactManager:
 
         if artifact_obj.meta is None:
             artifact_obj.meta = {}
+        if is_new_artifact and artifact_obj.hash is not None and resolved_abs_path:
+            artifact_obj.meta["hash_semantics"] = hash_semantics_for_new_artifact(
+                path=Path(resolved_abs_path),
+                hashing_strategy=self.tracker.identity.hashing_strategy,
+                source=("caller_supplied" if content_hash is not None else "computed"),
+            )
+        elif hash_state.caller_supplied_override_applied:
+            artifact_obj.meta["hash_semantics"] = hash_semantics_for_new_artifact(
+                path=None,
+                hashing_strategy=self.tracker.identity.hashing_strategy,
+                source="caller_supplied",
+            )
         if mount_scheme and "mount_scheme" not in artifact_obj.meta:
             artifact_obj.meta["mount_scheme"] = mount_scheme
         if mount_root and "mount_root" not in artifact_obj.meta:

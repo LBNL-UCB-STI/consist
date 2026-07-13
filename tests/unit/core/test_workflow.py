@@ -7,6 +7,7 @@ import consist
 from consist.core.coupler import Coupler
 from consist.core.config_canonicalization import (
     CanonicalConfig,
+    CanonicalizationSnapshot,
     ConfigPlan,
     canonical_identity_from_config,
 )
@@ -549,6 +550,58 @@ def test_run_adapter_includes_adapter_version(
     hash_v2 = record_v2.run.config_hash
 
     assert hash_v1 != hash_v2
+
+
+def test_run_injects_applied_canonicalization_snapshot(
+    tracker: Tracker, tmp_path: Path, monkeypatch
+) -> None:
+    config_root = tmp_path / "snapshot_config"
+    config_root.mkdir()
+    canonical = CanonicalConfig(
+        root_dirs=[config_root],
+        primary_config=None,
+        config_files=[],
+        external_files=[],
+        content_hash="snapshot",
+    )
+    identity = canonical_identity_from_config(
+        adapter_name="snapshot_adapter",
+        adapter_version="1",
+        config=canonical,
+    )
+    snapshot = CanonicalizationSnapshot(
+        adapter_name="snapshot_adapter",
+        adapter_version="1",
+        identity_hash=identity.identity_hash,
+    )
+    plan = ConfigPlan(
+        adapter_name="snapshot_adapter",
+        adapter_version="1",
+        canonical=canonical,
+        artifacts=[],
+        ingestables=[],
+        identity=identity,
+        canonicalization=snapshot,
+    )
+
+    class Adapter:
+        root_dirs = [config_root]
+
+    monkeypatch.setattr(tracker, "prepare_config", lambda **_: plan)
+    observed = []
+
+    def step(ctx: RunContext) -> None:
+        observed.append(ctx.canonicalization)
+
+    tracker.run(
+        fn=step,
+        name="snapshot_run",
+        adapter=Adapter(),
+        cache_options=CacheOptions(cache_mode="overwrite"),
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    assert observed == [snapshot]
 
 
 def test_scenario_run_with_adapter(tracker: Tracker, tmp_path: Path, monkeypatch):

@@ -58,7 +58,7 @@ from rich.text import Text
 from sqlalchemy import and_, or_
 from sqlmodel import Session, col, select
 
-from consist import Tracker
+from consist import AdmissionReport, Tracker, check_artifact_identity
 from consist.core.gtfs import GTFS_CORE_TABLE_NAMES, discover_gtfs_members
 from consist.core.db_snapshot import snapshot_sidecar_path
 from consist.core.maintenance import DatabaseMaintenance
@@ -83,6 +83,7 @@ app = typer.Typer(rich_markup_mode="markdown")
 schema_app = typer.Typer(rich_markup_mode="markdown")
 views_app = typer.Typer(rich_markup_mode="markdown")
 db_app = typer.Typer(rich_markup_mode="markdown")
+admission_app = typer.Typer(rich_markup_mode="markdown")
 console = Console()
 
 
@@ -113,6 +114,11 @@ app.add_typer(
     db_app,
     name="db",
     help="Database maintenance and recovery commands.",
+)
+app.add_typer(
+    admission_app,
+    name="admission",
+    help="Check files against explicit completed prior-run inputs.",
 )
 
 MAX_CLI_LIMIT = 1_000_000
@@ -302,6 +308,68 @@ def get_tracker(
         db_path=resolved_path,
         mounts=tracker_mounts or None,
     )
+
+
+def _render_admission_report(report: AdmissionReport) -> None:
+    """Render the diagnostic verdict before supporting evidence."""
+    typer.echo(f"Outcome: {report.outcome}")
+    typer.echo(f"Expected digest: {report.expected_artifact_id or 'unknown'}")
+    typer.echo(f"Observed digest: {report.observed_artifact_id or 'unknown'}")
+    typer.echo(f"Expected run: {report.expected_run_id}")
+    typer.echo(f"Artifact key: {report.artifact_key}")
+    typer.echo(f"Execution path: {report.execution_path}")
+    if report.physical_target_path is not None:
+        typer.echo(f"Physical target: {report.physical_target_path}")
+    if report.expected_bytes_path is not None:
+        typer.echo(f"Expected bytes path: {report.expected_bytes_path}")
+    if report.observations:
+        typer.echo(f"Observations: {', '.join(report.observations)}")
+    if report.reason is not None:
+        typer.echo(f"Reason: {report.reason}")
+    if report.recommended_action is not None:
+        typer.echo(f"Recommended action: {report.recommended_action}")
+
+
+@admission_app.command("doctor")
+def admission_doctor(
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
+    expected_run_id: str = typer.Option(
+        ..., "--expected-run", help="Completed run supplying the expected input."
+    ),
+    artifact_key: str = typer.Option(
+        ..., "--artifact-key", help="Exact input artifact key on the expected run."
+    ),
+    file: str = typer.Option(..., "--file", help="Resolved execution file to check."),
+    expected_file: Optional[str] = typer.Option(
+        None,
+        "--expected-file",
+        help="Distinct immutable expected file when the stored hash is not legible.",
+    ),
+    output: Optional[Path] = typer.Option(
+        None, "--output", help="Write canonical JSON report to this path."
+    ),
+    require_verified: bool = typer.Option(
+        False,
+        "--require-verified",
+        help="Exit 1 unless the diagnostic outcome is verified.",
+    ),
+) -> None:
+    """Diagnose one file against an explicit completed prior-run input."""
+    tracker = get_tracker(db_path)
+    report = check_artifact_identity(
+        tracker,
+        execution_path=file,
+        expected_run_id=expected_run_id,
+        artifact_key=artifact_key,
+        expected_bytes_path=expected_file,
+    )
+    _render_admission_report(report)
+
+    if output is not None:
+        output.write_text(report.canonical_json() + "\n", encoding="utf-8")
+
+    if require_verified and report.outcome != "verified":
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
 
 
 @contextmanager

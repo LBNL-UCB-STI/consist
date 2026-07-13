@@ -26,6 +26,7 @@ from consist.core.config_canonicalization import (
     ConfigAdapterOptions,
     ConfigContribution,
     ConfigPlan,
+    _resolve_canonicalization_snapshot,
     validate_config_plan,
 )
 from consist.core.stores import get_hot_data_store
@@ -185,6 +186,11 @@ class TrackerConfigPlanService(_TrackerServiceBase):
             plan_only=False,
             options=options,
         )
+        canonicalization = _resolve_canonicalization_snapshot(
+            identity=result.identity,
+            artifacts=result.artifacts,
+            snapshot=result.canonicalization,
+        )
 
         contribution = ConfigContribution(
             identity=result.identity,
@@ -195,6 +201,7 @@ class TrackerConfigPlanService(_TrackerServiceBase):
                 "adapter": adapter.model_name,
                 "config_dirs": [str(p) for p in config_dir_paths],
             },
+            canonicalization=canonicalization,
         )
 
         self._apply_config_contribution(
@@ -241,6 +248,11 @@ class TrackerConfigPlanService(_TrackerServiceBase):
             plan_only=True,
             options=options,
         )
+        canonicalization = _resolve_canonicalization_snapshot(
+            identity=result.identity,
+            artifacts=result.artifacts,
+            snapshot=result.canonicalization,
+        )
         facet_data = None
         if facet_spec is not None:
             if hasattr(adapter, "build_facet"):
@@ -268,6 +280,7 @@ class TrackerConfigPlanService(_TrackerServiceBase):
                 "config_dirs": [str(p) for p in config_dir_paths],
             },
             adapter=adapter,
+            canonicalization=canonicalization,
         )
         if validate_only:
             diagnostics = validate_config_plan(plan)
@@ -389,6 +402,12 @@ class TrackerConfigPlanService(_TrackerServiceBase):
                 if bundle_spec is not None:
                     artifacts.append(bundle_spec)
 
+        canonicalization = _resolve_canonicalization_snapshot(
+            identity=plan.identity,
+            artifacts=artifacts,
+            snapshot=plan.canonicalization,
+        )
+
         contribution = ConfigContribution(
             identity=plan.identity,
             adapter_version=plan.adapter_version,
@@ -398,6 +417,7 @@ class TrackerConfigPlanService(_TrackerServiceBase):
             facet_schema_name=plan.facet_schema_name,
             facet_schema_version=plan.facet_schema_version,
             meta=dict(plan.meta or {}),
+            canonicalization=canonicalization,
         )
 
         self._apply_config_contribution(
