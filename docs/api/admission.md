@@ -31,6 +31,36 @@ the requested artifact key. Historical hashes without explicit full-file
 semantics remain unverified unless a distinct immutable `expected_bytes_path`
 corroborates the stored historical fingerprint.
 
+## Runtime-resolved inputs
+
+Applications that already prove the consumer's host/container mapping should
+pass that evidence through `AdmissionReference`. Consist hashes only
+`execution_path`; it records `consumer_path` but does not recreate mount or
+configuration resolution. The report's `physical_target_path` always comes
+from resolving `execution_path`; callers cannot replace that audit value.
+
+```python
+from consist import AdmissionReference, check_admission_reference
+
+report = check_admission_reference(
+    tracker,
+    expected_run_id="baseline-beam-run",
+    reference=AdmissionReference(
+        artifact_key="linkstats_warmstart",
+        execution_path="workspace/beam/input/seattle/warmstart.csv.gz",
+        consumer_path="/app/input/seattle/warmstart.csv.gz",
+    ),
+)
+```
+
+## Report schema compatibility
+
+New reports use schema version 2, which adds `consumer_path` to the serialized
+payload. Sidecars retain their own `report_schema_version`; consumers that read
+both historical and new sidecars should branch on that field, treating a
+missing `consumer_path` in version 1 as unavailable rather than as a path
+claim. Consist does not rewrite existing sidecars.
+
 ## Public API
 
 ::: consist.core.admission.AdmissionReport
@@ -40,6 +70,18 @@ corroborates the stored historical fingerprint.
       show_root_toc_entry: true
 
 ::: consist.core.admission.check_artifact_identity
+    options:
+      show_source: false
+      show_root_heading: true
+      show_root_toc_entry: true
+
+::: consist.core.admission.AdmissionReference
+    options:
+      show_source: false
+      show_root_heading: true
+      show_root_toc_entry: true
+
+::: consist.core.admission.check_admission_reference
     options:
       show_source: false
       show_root_heading: true

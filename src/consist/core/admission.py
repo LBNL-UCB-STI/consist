@@ -27,11 +27,36 @@ if TYPE_CHECKING:
     from consist.core.tracker import Tracker
 
 
-ADMISSION_REPORT_SCHEMA_VERSION = 1
+ADMISSION_REPORT_SCHEMA_VERSION = 2
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 _GIT_LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1\n"
 
 AdmissionOutcome = Literal["verified", "mismatched", "unverified", "unreadable"]
+
+
+class AdmissionReference(BaseModel):
+    """Runtime evidence for one input after a consumer has resolved its path.
+
+    ``execution_path`` is the host-readable file Consist hashes. ``consumer_path``
+    is the final path supplied to the consumer and may be in another namespace,
+    such as a container. Consist derives ``physical_target_path`` from
+    ``execution_path`` and does not accept caller control over that audit value.
+    The calling workflow is responsible for proving that execution and consumer
+    paths describe the same staged bytes before it creates this value.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    artifact_key: str
+    execution_path: str | Path
+    input_role: str | None = None
+    config_key: str | None = None
+    config_reference_key: str | None = None
+    feed_key: str | None = None
+    raw_config_value: str | None = None
+    canonical_value: str | None = None
+    configured_path: str | Path | None = None
+    consumer_path: str | None = None
 
 
 class AdmissionReport(BaseModel):
@@ -68,6 +93,8 @@ class AdmissionReport(BaseModel):
         File path supplied for admission and intended for workflow execution.
     physical_target_path : str or None
         Resolved physical target used for path-audit and alias detection.
+    consumer_path : str or None
+        Final path supplied to the consumer, such as a container path.
     expected_source : {"prior_run"}
         Source used to resolve the expected identity in the V1 contract.
     expected_run_id : str
@@ -112,6 +139,7 @@ class AdmissionReport(BaseModel):
     configured_path: str | None = None
     execution_path: str
     physical_target_path: str | None = None
+    consumer_path: str | None = None
     expected_source: Literal["prior_run"] = "prior_run"
     expected_run_id: str
     expected_artifact_id: str | None = None
@@ -606,4 +634,42 @@ def check_artifact_identity(
             if outcome == "verified"
             else "Resolved file does not match the expected prior-run artifact."
         ),
+    )
+
+
+def check_admission_reference(
+    tracker: "Tracker",
+    *,
+    reference: AdmissionReference,
+    expected_run_id: str,
+    expected_bytes_path: str | Path | None = None,
+) -> AdmissionReport:
+    """Check a runtime-resolved input without recreating consumer path logic.
+
+    The byte comparison delegates to :func:`check_artifact_identity`; this
+    wrapper only attaches caller-proven runtime path evidence to its report.
+    """
+    report = check_artifact_identity(
+        tracker,
+        execution_path=reference.execution_path,
+        expected_run_id=expected_run_id,
+        artifact_key=reference.artifact_key,
+        expected_bytes_path=expected_bytes_path,
+        input_role=reference.input_role,
+    )
+    return AdmissionReport.model_validate(
+        {
+            **report.model_dump(),
+            "config_key": reference.config_key,
+            "config_reference_key": reference.config_reference_key,
+            "feed_key": reference.feed_key,
+            "raw_config_value": reference.raw_config_value,
+            "canonical_value": reference.canonical_value,
+            "configured_path": (
+                str(reference.configured_path)
+                if reference.configured_path is not None
+                else None
+            ),
+            "consumer_path": reference.consumer_path,
+        }
     )

@@ -120,8 +120,12 @@ with tracker.scenario("baseline") as sc:
 - [`consist.AlignedPair`](runset.md#consist.runset.AlignedPair)
 - [`consist.AdmissionReport`](admission.md#consist.core.admission.AdmissionReport)
   (policy-neutral evidence returned by prior-run artifact admission)
+- [`consist.AdmissionReference`](admission.md#consist.core.admission.AdmissionReference)
+  (caller-proven runtime host/consumer path evidence for admission)
 - [`consist.check_artifact_identity`](admission.md#consist.core.admission.check_artifact_identity)
   (compare one resolved file with an exact input from a completed run)
+- [`consist.check_admission_reference`](admission.md#consist.core.admission.check_admission_reference)
+  (compare a runtime-resolved input without recreating consumer path logic)
 - `consist.ArtifactSpec` / `consist.OutputArtifactSpec` (rich declared-output
   metadata for `Tracker.run(output_paths=...)`)
 - `consist.FilenamePattern`, `consist.IntCapture`, and `consist.EnumCapture`
