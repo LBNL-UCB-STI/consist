@@ -85,6 +85,18 @@ def test_public_package_exports_admission_api() -> None:
     assert consist.check_artifact_identity is check_artifact_identity
 
 
+def test_admission_report_rejects_non_v2_schema_version() -> None:
+    with pytest.raises(ValidationError, match="report_schema_version"):
+        AdmissionReport(
+            report_schema_version=1,
+            outcome="verified",
+            input_role="raw_gtfs",
+            artifact_key="raw_gtfs",
+            execution_path="workspace/runtime/feed.zip",
+            expected_run_id="completed-run",
+        )
+
+
 def test_caller_hash_override_does_not_retain_cloned_full_hash_semantics(
     tracker, tmp_path: Path
 ) -> None:
@@ -217,8 +229,10 @@ def test_future_full_file_metadata_admits_matching_candidate_with_fast_tracker(
     payload = json.loads(canonical_json)
     assert canonical_json == json.dumps(payload, sort_keys=True, separators=(",", ":"))
     assert payload["input_role"] == "raw_gtfs"
+    assert payload["report_schema_version"] == 2
     assert payload["execution_path"] == str(candidate)
     assert payload["physical_target_path"] == str(candidate.resolve())
+    assert payload["consumer_path"] is None
     for field in (
         "config_key",
         "config_reference_key",

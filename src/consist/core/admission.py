@@ -127,7 +127,7 @@ class AdmissionReport(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    report_schema_version: int = ADMISSION_REPORT_SCHEMA_VERSION
+    report_schema_version: Literal[2] = ADMISSION_REPORT_SCHEMA_VERSION
     outcome: AdmissionOutcome
     input_role: str
     artifact_key: str
