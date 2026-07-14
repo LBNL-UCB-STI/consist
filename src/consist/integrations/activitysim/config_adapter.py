@@ -302,6 +302,12 @@ class ActivitySimConfigAdapter:
         Optional shared bundle cache directory; defaults to `<run_dir>/config_bundles`.
     check_probabilities : bool
         Whether to warn when probability rows do not sum to 1.0.
+    root_dirs : list[pathlib.Path], optional
+        Default ordered config roots for override-driven execution.
+    allow_out_of_root_yaml_includes : bool, default False
+        Whether YAML includes may resolve outside the configured roots.
+    allow_out_of_root_csv_refs : bool, default False
+        Whether CSV references may resolve outside the configured roots.
     """
 
     model_name: str = "activitysim"
@@ -430,7 +436,8 @@ class ActivitySimConfigAdapter:
         Returns
         -------
         CanonicalizationResult
-            Artifact specs and ingest specs to apply to the run.
+            Artifact specs, ingest specs, canonical identity, and an immutable
+            snapshot of observed YAML and CSV reference facts.
 
         Raises
         ------
@@ -2794,7 +2801,36 @@ def _build_activitysim_canonicalization_snapshot(
     artifacts_by_path: Mapping[Path, ArtifactSpec],
     reference_paths: Mapping[str, Path],
 ) -> CanonicalizationSnapshot:
-    """Build exact runtime observations from ActivitySim's active file specs."""
+    """
+    Build immutable runtime observations from ActivitySim active file specs.
+
+    Parameters
+    ----------
+    identity : CanonicalConfigIdentity
+        Portable identity and ordered references emitted for active config.
+    artifacts_by_path : Mapping[pathlib.Path, ArtifactSpec]
+        Adapter artifacts keyed by observed local path.
+    reference_paths : Mapping[str, pathlib.Path]
+        Resolved local path for each canonical configuration value.
+
+    Returns
+    -------
+    CanonicalizationSnapshot
+        Ordered reference observations linked to emitted YAML and CSV artifact
+        keys when an artifact was logged.
+
+    Raises
+    ------
+    ValueError
+        If an identity reference lacks a canonical value or corresponding local
+        path observation.
+
+    Notes
+    -----
+    These paths are canonicalization-time observations. ActivitySim staging or
+    execution code must not treat them as final consumer paths without its own
+    launch-time proof.
+    """
     artifacts_by_reference = {
         path.resolve(): spec
         for path, spec in artifacts_by_path.items()

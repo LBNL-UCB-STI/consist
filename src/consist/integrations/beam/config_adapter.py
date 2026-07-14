@@ -123,6 +123,36 @@ class _BeamPathCandidate:
 
 @dataclass
 class BeamConfigAdapter:
+    """
+    Canonicalize BEAM HOCON configuration into Consist artifacts and facts.
+
+    Parameters
+    ----------
+    root_dirs : list[pathlib.Path], optional
+        Default ordered roots used by callers that do not supply config dirs.
+    primary_config : pathlib.Path, optional
+        Primary HOCON file when discovery should not infer one from the roots.
+    resolve_substitutions : bool, default True
+        Whether HOCON substitutions are resolved while loading configuration.
+    env_overrides : dict[str, str], optional
+        Environment values applied while resolving substitutions.
+    ingest_specs : list[BeamIngestSpec]
+        Optional tabular config inputs to ingest with canonicalization.
+    path_aliases : dict[str, str or pathlib.Path], optional
+        Portable-to-local mappings used only while observing configuration
+        references.
+    allow_heuristic_refs : bool, default False
+        Whether to inspect heuristic path-like configuration references.
+    reference_policies : dict[str, BeamReferencePolicy or dict[str, Any]]
+        Per-reference identity and materialization policy overrides.
+
+    Notes
+    -----
+    Canonicalization records observed local paths and portable identity facts.
+    It does not prepare the final staged HOCON or container mount mapping that
+    a BEAM launch will use.
+    """
+
     model_name: str = "beam"
     adapter_version: str = "0.1"
     root_dirs: Optional[list[Path]] = None
@@ -144,6 +174,34 @@ class BeamConfigAdapter:
         strict: bool = False,
         options: Optional[ConfigAdapterOptions] = None,
     ) -> CanonicalConfig:
+        """
+        Discover BEAM configuration files and their canonical content hash.
+
+        Parameters
+        ----------
+        root_dirs : list[pathlib.Path]
+            Ordered roots containing the primary HOCON and included files.
+        identity : IdentityManager
+            Identity helper used to normalize and hash the config tree.
+        strict : bool, default False
+            Reserved adapter strictness forwarded by the planning service.
+        options : ConfigAdapterOptions, optional
+            Structured adapter options. Discovery currently uses them only as
+            part of the common adapter contract.
+
+        Returns
+        -------
+        CanonicalConfig
+            Discovered roots, primary config, included config files, and a
+            canonical content hash.
+
+        Raises
+        ------
+        ImportError
+            If ``pyhocon`` is unavailable.
+        FileNotFoundError
+            If no primary configuration can be resolved from the supplied roots.
+        """
         if ConfigFactory is None:
             raise ImportError("pyhocon is required for BEAM canonicalization.")
         config_path = self._resolve_primary_config(root_dirs)
@@ -178,6 +236,46 @@ class BeamConfigAdapter:
         plan_only: bool = False,
         options: Optional[ConfigAdapterOptions] = None,
     ) -> CanonicalizationResult:
+        """
+        Convert discovered BEAM config into artifacts, ingestion specs, and facts.
+
+        Parameters
+        ----------
+        config : CanonicalConfig
+            Configuration discovered from the BEAM roots.
+        run : Run, optional
+            Active run used for run-linked ingest rows. Required unless
+            ``plan_only`` is true.
+        tracker : Tracker, optional
+            Tracker used for adapter-specific artifact identity work.
+        strict : bool, default False
+            Whether unresolved required references should raise.
+        plan_only : bool, default False
+            Whether to return reusable specs without requiring an active run.
+        options : ConfigAdapterOptions, optional
+            Structured strictness, path-alias, and heuristic-reference options.
+
+        Returns
+        -------
+        CanonicalizationResult
+            Artifact specs, ingest specs, canonical identity, and an immutable
+            snapshot of observed reference and selected-member facts.
+
+        Raises
+        ------
+        ImportError
+            If ``pyhocon`` is unavailable.
+        RuntimeError
+            If no run is supplied outside plan-only mode.
+        FileNotFoundError
+            If strict mode encounters a missing required reference.
+
+        Notes
+        -----
+        The returned snapshot identifies canonicalization-time observations,
+        including a selected R5 OSM source when applicable. It is not proof of
+        the final BEAM launch path.
+        """
         resolved_strict = options.strict if options is not None else strict
         if ConfigFactory is None:
             raise ImportError("pyhocon is required for BEAM canonicalization.")
@@ -1485,7 +1583,32 @@ def _build_beam_canonicalization_snapshot(
     root_dirs: Sequence[Path],
     r5_directory: Optional[Path],
 ) -> CanonicalizationSnapshot:
-    """Build per-reference facts from BEAM's existing canonicalization pass."""
+    """
+    Build immutable per-reference facts from BEAM canonicalization.
+
+    Parameters
+    ----------
+    identity : CanonicalConfigIdentity
+        Portable identity and ordered references emitted for the HOCON tree.
+    artifacts_by_path : Mapping[pathlib.Path, ArtifactSpec]
+        Artifact specs emitted while canonicalizing those references.
+    root_dirs : Sequence[pathlib.Path]
+        Roots used to resolve raw BEAM configuration values.
+    r5_directory : pathlib.Path, optional
+        Resolved R5 directory whose selected OSM and GTFS members should remain
+        associated with its configuration reference.
+
+    Returns
+    -------
+    CanonicalizationSnapshot
+        Immutable observed paths, emitted keys, and selected member metadata.
+
+    Notes
+    -----
+    The snapshot records what the adapter observed. Downstream code must still
+    prove that staging and launch preparation map those observations to the
+    bytes a BEAM process will read.
+    """
     artifacts_by_resolved_path = {
         path.resolve(): spec for path, spec in artifacts_by_path.items()
     }
@@ -1741,7 +1864,25 @@ def _resolve_gtfs_bundle_root(
 def _select_r5_osm_source(
     root: Optional[Path],
 ) -> tuple[Optional[Path], tuple[str, ...]]:
-    """Select the raw R5 OSM member using R5's top-level lexical rule."""
+    """
+    Select the raw R5 OSM member using R5's top-level lexical rule.
+
+    Parameters
+    ----------
+    root : pathlib.Path, optional
+        R5 directory to inspect for top-level ``.pbf`` or ``.vex`` files.
+
+    Returns
+    -------
+    tuple[pathlib.Path or None, tuple[str, ...]]
+        Lexically first eligible member, if any, followed by the ignored
+        eligible candidate filenames in lexical order.
+
+    Notes
+    -----
+    This selects one source member for canonicalization metadata. It does not
+    claim to represent a complete R5 directory admission contract.
+    """
     if root is None or not root.is_dir():
         return None, ()
     candidates = [

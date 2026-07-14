@@ -35,7 +35,8 @@ AdmissionOutcome = Literal["verified", "mismatched", "unverified", "unreadable"]
 
 
 class AdmissionReference(BaseModel):
-    """Runtime evidence for one input after a consumer has resolved its path.
+    """
+    Represent caller-proven runtime context for one admitted input.
 
     ``execution_path`` is the host-readable file Consist hashes. ``consumer_path``
     is the final path supplied to the consumer and may be in another namespace,
@@ -43,6 +44,36 @@ class AdmissionReference(BaseModel):
     ``execution_path`` and does not accept caller control over that audit value.
     The calling workflow is responsible for proving that execution and consumer
     paths describe the same staged bytes before it creates this value.
+
+    Attributes
+    ----------
+    artifact_key : str
+        Exact persisted input-artifact key to resolve on the expected run.
+    execution_path : str or pathlib.Path
+        Host-readable regular file whose bytes Consist checks.
+    input_role : str, optional
+        Stronger logical role to record without changing artifact lookup.
+    config_key : str, optional
+        Source configuration key that selected the input.
+    config_reference_key : str, optional
+        Canonical configuration-reference key when it differs from
+        ``config_key``.
+    feed_key : str, optional
+        Adapter-defined feed selector associated with the input.
+    raw_config_value : str, optional
+        Unmodified configuration value before canonicalization.
+    canonical_value : str, optional
+        Portable configuration value produced during canonicalization.
+    configured_path : str or pathlib.Path, optional
+        Path derived from configuration before launch-time resolution.
+    consumer_path : str, optional
+        Final path provided to the consumer, such as a container path.
+
+    Notes
+    -----
+    The model is frozen and forbids unknown fields. It records runtime context
+    but does not validate a mount, staging, or container mapping; that proof is
+    owned by the calling workflow.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -311,6 +342,25 @@ def _resolved_path(path: Path) -> str | None:
 
 
 def _known_admission_identity(artifact: Artifact) -> str | None:
+    """
+    Return a trusted full-file identity only when artifact semantics prove it.
+
+    Parameters
+    ----------
+    artifact : Artifact
+        Persisted artifact from the explicitly selected expected run.
+
+    Returns
+    -------
+    str or None
+        ``sha256:file:<hex>`` when the artifact records Consist-computed raw
+        regular-file SHA-256 semantics, otherwise ``None``.
+
+    Notes
+    -----
+    Admission intentionally rejects cache fingerprints, directory hashes, and
+    caller-supplied hashes even when they happen to be hexadecimal SHA-256 text.
+    """
     semantics = artifact.meta.get("hash_semantics") if artifact.meta else None
     if not isinstance(semantics, Mapping):
         return None
@@ -343,6 +393,30 @@ def _report(
     recommended_action: str | None = None,
     reason: str | None = None,
 ) -> AdmissionReport:
+    """
+    Construct one policy-neutral admission report from normalized evidence.
+
+    Parameters
+    ----------
+    outcome : AdmissionOutcome
+        Classified evidence result.
+    execution_path : pathlib.Path
+        Candidate path supplied for admission.
+    physical_target_path : str, optional
+        Resolved audit path derived from the candidate.
+    expected_run_id, artifact_key, input_role
+        Explicit expected-run selector and report role fields.
+    observations : tuple[str, ...]
+        Stable machine-readable facts supporting the outcome.
+    expected_artifact_id, observed_artifact_id, expected_bytes_source,
+    expected_bytes_path, recommended_action, reason
+        Optional expected, observed, fallback, and human-facing evidence fields.
+
+    Returns
+    -------
+    AdmissionReport
+        Frozen schema-v2 report ready for caller policy handling or serialization.
+    """
     return AdmissionReport(
         outcome=outcome,
         input_role=input_role,
@@ -363,7 +437,36 @@ def _report(
 def _expected_input_artifact(
     tracker: "Tracker", *, expected_run_id: str, artifact_key: str
 ) -> tuple[Artifact | None, str | None]:
-    """Resolve one exact expected input without key-collapsing history helpers."""
+    """
+    Resolve one exact expected input without key-collapsing history helpers.
+
+    Parameters
+    ----------
+    tracker : Tracker
+        Tracker whose provenance database stores the expected run.
+    expected_run_id : str
+        Explicit run ID that must identify a completed run.
+    artifact_key : str
+        Exact key that must select one ``direction="input"`` artifact link.
+
+    Returns
+    -------
+    tuple[Artifact or None, str or None]
+        The uniquely selected input artifact and no error code, or ``None`` and
+        a stable observation code describing an absent, non-completed, or
+        ambiguous expectation.
+
+    Raises
+    ------
+    RuntimeError
+        If the tracker has no provenance database.
+
+    Notes
+    -----
+    This helper deliberately does not use convenience lookups that collapse
+    duplicate keys across history. Admission must retain ambiguity rather than
+    selecting an arbitrary prior input.
+    """
     database = tracker.db
     if database is None:
         raise RuntimeError("Artifact admission requires a provenance database.")
@@ -393,6 +496,28 @@ def _expected_input_artifact(
 
 
 def _paths_are_same(candidate: Path, expected: Path) -> bool:
+    """
+    Determine whether two candidate paths name the same filesystem object.
+
+    Parameters
+    ----------
+    candidate : pathlib.Path
+        Observed file proposed for admission.
+    expected : pathlib.Path
+        Caller-supplied immutable expected-byte file.
+
+    Returns
+    -------
+    bool
+        ``True`` when resolved paths match or the operating system reports the
+        paths as the same file, including hardlink aliases.
+
+    Notes
+    -----
+    The expected-byte fallback must be distinct from observed bytes, so this
+    check treats either lexical resolution or ``os.path.samefile`` equality as
+    non-distinct.
+    """
     if _resolved_path(candidate) == _resolved_path(expected):
         return True
     try:
@@ -644,10 +769,40 @@ def check_admission_reference(
     expected_run_id: str,
     expected_bytes_path: str | Path | None = None,
 ) -> AdmissionReport:
-    """Check a runtime-resolved input without recreating consumer path logic.
+    """
+    Check a runtime-resolved input without recreating consumer path logic.
 
     The byte comparison delegates to :func:`check_artifact_identity`; this
     wrapper only attaches caller-proven runtime path evidence to its report.
+
+    Parameters
+    ----------
+    tracker : Tracker
+        Tracker whose provenance database contains the expected prior run.
+    reference : AdmissionReference
+        Frozen runtime context containing the host execution path and optional
+        configuration and consumer-path evidence.
+    expected_run_id : str
+        Explicit completed run that supplies the expected input identity.
+    expected_bytes_path : str or pathlib.Path, optional
+        Distinct immutable expected-byte fallback for a historical artifact
+        whose stored hash lacks explicit full-file semantics.
+
+    Returns
+    -------
+    AdmissionReport
+        The base identity report enriched with validated reference context.
+
+    Raises
+    ------
+    RuntimeError
+        If the tracker has no configured provenance database.
+
+    Notes
+    -----
+    ``physical_target_path`` remains derived by the underlying checker from
+    ``reference.execution_path``. This API records a final consumer path but
+    intentionally does not infer or validate host/container mapping itself.
     """
     report = check_artifact_identity(
         tracker,
