@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, Literal, Mapping, Sequence
 
@@ -30,7 +30,18 @@ _FILE_HASH_CHUNK_SIZE = 8 * 1024 * 1024
 
 
 def _compute_file_sha256(path: Path) -> str:
-    """Compute a full content SHA-256 for one regular file."""
+    """Compute a full-content SHA-256 digest.
+
+    Parameters
+    ----------
+    path : Path
+        Regular file whose bytes are hashed.
+
+    Returns
+    -------
+    str
+        Lowercase hexadecimal SHA-256 digest.
+    """
     sha256 = hashlib.sha256()
     with path.open("rb") as file:
         while True:
@@ -41,8 +52,37 @@ def _compute_file_sha256(path: Path) -> str:
     return sha256.hexdigest()
 
 
+@dataclass(frozen=True, slots=True)
+class _ArchiveFileCandidate:
+    """One requested file output and its canonical archive destination.
+
+    Attributes
+    ----------
+    key : str
+        Run-output key selected for archival.
+    artifact : Artifact
+        Output artifact whose URI-relative layout determines the target.
+    target_path : Path
+        Canonical destination below the requested recovery root.
+    source_path : Path | None
+        Resolved source file, once source discovery has succeeded.
+    """
+
+    key: str
+    artifact: Artifact
+    target_path: Path
+    source_path: Path | None = None
+
+
 class TrackerArchiveService(_TrackerServiceBase):
-    """Archive bytes and persist their advisory recovery-root metadata."""
+    """Archive bytes and persist advisory recovery-root metadata.
+
+    Notes
+    -----
+    This internal service is the implementation source for the corresponding
+    :class:`Tracker` façade methods. Recovery roots are alternate byte sources;
+    they do not change an artifact's canonical URI or identity.
+    """
 
     def set_artifact_recovery_roots(
         self,
@@ -53,11 +93,32 @@ class TrackerArchiveService(_TrackerServiceBase):
     ) -> Artifact:
         """Persist advisory filesystem recovery roots for an artifact.
 
-        Recovery roots are ordered fallback locations used during historical
-        rematerialization and cache-hit output hydration when canonical cold
-        bytes are no longer available at their original location. The
-        artifact's ``container_uri`` remains canonical; recovery roots are
-        alternate byte sources only.
+        Parameters
+        ----------
+        artifact : Artifact
+            Artifact whose recovery metadata should be updated.
+        roots : path-like or sequence of path-like
+            Ordered filesystem roots to store after normalization.
+        append : bool, default False
+            If ``True``, append roots after existing distinct roots; otherwise
+            replace them. An empty normalized list clears the metadata field.
+
+        Returns
+        -------
+        Artifact
+            The supplied artifact with its in-memory metadata refreshed.
+
+        Raises
+        ------
+        TypeError
+            If ``artifact`` is not an :class:`Artifact`.
+        RuntimeError
+            If the tracker has no metadata database.
+
+        Notes
+        -----
+        Recovery roots are ordered fallback locations during historical
+        rematerialization. ``container_uri`` remains canonical.
         """
         if not isinstance(artifact, Artifact):
             raise TypeError("artifact must be an Artifact instance.")
@@ -102,10 +163,34 @@ class TrackerArchiveService(_TrackerServiceBase):
     ) -> Path:
         """Archive a rematerializable artifact into a stable recovery root.
 
-        The archived copy preserves the artifact's URI-relative layout under
-        ``archive_root`` and records that root in
-        ``artifact.meta["recovery_roots"]`` without changing artifact identity
-        or ``container_uri``.
+        Parameters
+        ----------
+        artifact : Artifact
+            Artifact whose source bytes will be copied or moved.
+        archive_root : path-like
+            Root below which the artifact's URI-relative layout is recreated.
+        mode : {"copy", "move"}, default "copy"
+            Filesystem operation used when the destination is absent.
+        append : bool, default True
+            Whether to append ``archive_root`` to existing recovery roots.
+
+        Returns
+        -------
+        Path
+            Archive destination containing the artifact bytes.
+
+        Raises
+        ------
+        ValueError
+            If the artifact is not rematerializable or ``mode`` is invalid.
+        FileNotFoundError
+            If source bytes cannot be found.
+        FileExistsError
+            If a distinct archive destination already exists.
+
+        Notes
+        -----
+        The archive preserves canonical identity and ``container_uri``.
         """
         if not isinstance(artifact, Artifact):
             raise TypeError("artifact must be an Artifact instance.")
@@ -215,13 +300,28 @@ class TrackerArchiveService(_TrackerServiceBase):
     ) -> ArtifactRecoveryCopyRegistration:
         """Verify and record an externally copied artifact recovery location.
 
-        This helper never copies bytes. It verifies the file already located
-        at ``recovery_root / <uri-relative-path>`` and then appends or replaces
-        ``artifact.meta["recovery_roots"]``. Directory artifacts and HDF5 child
-        table artifacts remain blocked until they have an independent recovery
-        equivalence contract. A supplied ``content_hash`` takes precedence;
-        otherwise ``artifact.hash`` is only a byte proof with full content
-        hashing. ``append`` defaults to True to match ``archive_artifact``.
+        Parameters
+        ----------
+        artifact : Artifact
+            Artifact represented by the existing recovery copy.
+        recovery_root : path-like
+            Root containing the artifact at its URI-relative path.
+        verify : bool, default True
+            Whether to verify the copy's full-file SHA-256 digest.
+        content_hash : str | None, optional
+            Expected SHA-256 digest, taking precedence over ``artifact.hash``.
+        append : bool, default True
+            Whether to append instead of replace recovery-root metadata.
+
+        Returns
+        -------
+        ArtifactRecoveryCopyRegistration
+            Per-artifact verification and metadata-persistence outcome.
+
+        Notes
+        -----
+        This method never copies bytes. It blocks directory artifacts and HDF5
+        child tables until they have an independent recovery contract.
         """
         return self._register_artifact_recovery_copy(
             artifact,
@@ -242,7 +342,29 @@ class TrackerArchiveService(_TrackerServiceBase):
         append: bool,
         persist: bool,
     ) -> ArtifactRecoveryCopyRegistration:
-        """Validate a recovery copy and optionally persist recovery metadata."""
+        """Validate one recovery copy and optionally persist its metadata.
+
+        Parameters
+        ----------
+        artifact : Artifact
+            Artifact represented by the existing copy.
+        recovery_root : path-like
+            Root containing the URI-relative copy.
+        verify : bool
+            Whether to require a matching full-file hash.
+        content_hash : str | None
+            Optional caller-supplied expected hash.
+        append : bool
+            Whether a successful update appends the recovery root.
+        persist : bool
+            Whether to write recovery-root metadata after validation.
+
+        Returns
+        -------
+        ArtifactRecoveryCopyRegistration
+            Validation result, including whether bytes were verified and
+            metadata was committed.
+        """
         if not isinstance(artifact, Artifact):
             raise TypeError("artifact must be an Artifact instance.")
         if self.db is None:
@@ -405,6 +527,28 @@ class TrackerArchiveService(_TrackerServiceBase):
         *,
         append: bool,
     ) -> None:
+        """Persist recovery roots for artifacts in one database transaction.
+
+        Parameters
+        ----------
+        artifacts : sequence of Artifact
+            Persisted artifacts receiving the same recovery roots.
+        roots : path-like or sequence of path-like
+            Roots to normalize and store.
+        append : bool
+            Whether to append roots to each artifact's current metadata.
+
+        Raises
+        ------
+        RuntimeError
+            If no metadata database is configured.
+        TypeError
+            If an item is not an artifact.
+        ValueError
+            If an artifact has no persistent identifier.
+        KeyError
+            If an artifact is no longer present in the database.
+        """
         if self.db is None:
             raise RuntimeError(
                 "Cannot update artifact recovery roots: tracker has no database configured."
@@ -468,10 +612,35 @@ class TrackerArchiveService(_TrackerServiceBase):
     ) -> RunOutputRecoveryCopiesRegistration:
         """Verify and record externally copied recovery locations for run outputs.
 
-        Unknown requested keys raise before work begins. Per-artifact blockers,
-        including missing files and hash mismatches, remain in the keyed report
-        without aborting the other selected outputs. Verified roots are appended
-        by default; pass ``append=False`` to replace prior recovery roots.
+        Parameters
+        ----------
+        run_id : str
+            Completed run whose outputs are being registered.
+        recovery_root : path-like
+            Root containing URI-relative recovery copies.
+        keys : sequence of str | None, optional
+            Outputs to register; ``None`` selects all outputs.
+        verify : bool, default True
+            Whether every selected copy must have a verified full-file hash.
+        append : bool, default True
+            Whether to append recovery-root metadata for successful outputs.
+        content_hashes : mapping of str to str | None, optional
+            Optional per-key SHA-256 proofs for artifacts without full hashes.
+
+        Returns
+        -------
+        RunOutputRecoveryCopiesRegistration
+            Mapping-style result with a real outcome for every selected key.
+
+        Raises
+        ------
+        KeyError
+            If requested output or content-hash keys are unknown.
+
+        Notes
+        -----
+        Unknown keys fail before filesystem or metadata work. Per-key blockers
+        do not prevent other outputs from being registered.
         """
         normalized_keys = normalize_materialize_output_keys(
             keys, caller="register_run_output_recovery_copies"
@@ -541,6 +710,353 @@ class TrackerArchiveService(_TrackerServiceBase):
                     )
         return RunOutputRecoveryCopiesRegistration(outputs=registered)
 
+    @staticmethod
+    def _archive_result(
+        candidate: _ArchiveFileCandidate,
+        copy_status: ArchiveRunOutputFileStatus,
+        verification_status: ArchiveRunOutputVerificationStatus,
+        *,
+        message: str | None = None,
+    ) -> ArchivedRunOutputFile:
+        """Build one immutable entry in an archive-output report.
+
+        Parameters
+        ----------
+        candidate : _ArchiveFileCandidate
+            Output and paths represented by the result.
+        copy_status : ArchiveRunOutputFileStatus
+            Outcome of destination inspection or byte copying.
+        verification_status : ArchiveRunOutputVerificationStatus
+            Outcome of the requested byte-verification policy.
+        message : str | None, optional
+            Human-readable diagnostic for a non-happy-path result.
+
+        Returns
+        -------
+        ArchivedRunOutputFile
+            Report entry with metadata initially uncommitted.
+        """
+        return ArchivedRunOutputFile(
+            artifact=candidate.artifact,
+            key=candidate.key,
+            source_path=candidate.source_path,
+            target_path=candidate.target_path,
+            copy_status=copy_status,
+            verification_status=verification_status,
+            message=message,
+        )
+
+    @staticmethod
+    def _has_symlink_component(path: Path) -> bool:
+        """Return whether a path or any of its ancestors is a symlink.
+
+        Parameters
+        ----------
+        path : Path
+            Path to inspect without resolving it.
+
+        Returns
+        -------
+        bool
+            ``True`` when a symlink component is present.
+        """
+        return any(component.is_symlink() for component in (path, *path.parents))
+
+    def _inspect_existing_archive_target(
+        self,
+        candidate: _ArchiveFileCandidate,
+        *,
+        preserve_existing: bool,
+        verify: bool,
+    ) -> ArchivedRunOutputFile | None:
+        """Evaluate a pre-existing archive destination without changing bytes.
+
+        Parameters
+        ----------
+        candidate : _ArchiveFileCandidate
+            Output and target path being archived.
+        preserve_existing : bool
+            Whether a matching existing regular file may be retained.
+        verify : bool
+            Whether a retained file must match the artifact's full hash.
+
+        Returns
+        -------
+        ArchivedRunOutputFile | None
+            Terminal result for an existing target, or ``None`` when copying
+            should proceed.
+        """
+        if not candidate.target_path.exists():
+            return None
+        if not preserve_existing:
+            return self._archive_result(
+                candidate,
+                "destination_exists",
+                "failed",
+                message="Archive destination already exists.",
+            )
+        if not candidate.target_path.is_file():
+            return self._archive_result(
+                candidate,
+                "destination_exists",
+                "failed",
+                message="Archive destination is not a regular file.",
+            )
+        if not verify:
+            return self._archive_result(
+                candidate, "preserved_existing", "not_requested"
+            )
+        try:
+            matches = (
+                _compute_file_sha256(candidate.target_path) == candidate.artifact.hash
+            )
+        except OSError as exc:
+            return self._archive_result(
+                candidate,
+                "destination_exists",
+                "failed",
+                message=f"Could not hash archive destination: {exc}",
+            )
+        if not matches:
+            return self._archive_result(
+                candidate,
+                "destination_exists",
+                "hash_mismatch",
+                message="Archive destination hash did not match artifact hash.",
+            )
+        return self._archive_result(candidate, "preserved_existing", "verified")
+
+    def _resolve_archive_source(
+        self,
+        candidate: _ArchiveFileCandidate,
+        *,
+        producing_run: Any,
+    ) -> tuple[_ArchiveFileCandidate | None, ArchivedRunOutputFile | None]:
+        """Locate and validate a regular source file for archival.
+
+        Parameters
+        ----------
+        candidate : _ArchiveFileCandidate
+            Output awaiting source-path discovery.
+        producing_run : Run | None
+            Historical run used to discover canonical and recovery sources.
+
+        Returns
+        -------
+        tuple[_ArchiveFileCandidate | None, ArchivedRunOutputFile | None]
+            Resolved candidate and ``None`` on success; otherwise ``None`` and
+            a terminal report entry.
+
+        Notes
+        -----
+        Raw source paths are retained long enough to reject symlink components
+        instead of resolving through them.
+        """
+        source_path: Path | None = None
+
+        def reject_symlink(path: Path) -> bool:
+            if self._has_symlink_component(path):
+                raise ValueError(f"Symlink source is not supported: {path}")
+            return True
+
+        if producing_run is not None:
+            try:
+                from consist.core.materialize import find_existing_recovery_source_path
+
+                _, source_path, _ = find_existing_recovery_source_path(
+                    self.tracker,
+                    artifact=candidate.artifact,
+                    run=producing_run,
+                    source_root=None,
+                    source_validator=reject_symlink,
+                    preserve_raw_paths=True,
+                )
+            except ValueError as exc:
+                return None, self._archive_result(
+                    candidate, "symlink_source", "failed", message=str(exc)
+                )
+        if source_path is None:
+            return None, self._archive_result(
+                candidate,
+                "missing_source",
+                "failed",
+                message="Source bytes are unavailable.",
+            )
+
+        resolved = replace(candidate, source_path=source_path)
+        if source_path.is_dir():
+            return None, self._archive_result(
+                resolved,
+                "unsupported_directory",
+                "failed",
+                message="Directory output archival is not supported.",
+            )
+        if not source_path.is_file():
+            return None, self._archive_result(
+                resolved,
+                "failed",
+                "failed",
+                message="Source is not a regular file.",
+            )
+        return resolved, None
+
+    def _copy_and_verify_archive_target(
+        self,
+        candidate: _ArchiveFileCandidate,
+        *,
+        verify: bool,
+    ) -> ArchivedRunOutputFile:
+        """Copy a resolved source atomically and apply the hash policy.
+
+        Parameters
+        ----------
+        candidate : _ArchiveFileCandidate
+            Candidate with a non-null regular ``source_path``.
+        verify : bool
+            Whether the destination must match the artifact's full hash.
+
+        Returns
+        -------
+        ArchivedRunOutputFile
+            Copy and verification result. Existing bytes are never replaced.
+        """
+        source_path = candidate.source_path
+        if source_path is None:
+            raise ValueError("Archive copy requires a resolved source path.")
+        try:
+            candidate.target_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return self._archive_result(
+                candidate,
+                "failed",
+                "failed",
+                message=f"Could not create destination: {exc}",
+            )
+        if self._has_symlink_component(candidate.target_path):
+            return self._archive_result(
+                candidate,
+                "symlink_destination",
+                "failed",
+                message="Symlink detected in recovery destination.",
+            )
+
+        try:
+            from consist.core.materialize import _copy_file_atomic
+
+            copied = _copy_file_atomic(source_path, candidate.target_path)
+            if not copied:
+                return self._archive_result(
+                    candidate,
+                    "destination_exists",
+                    "failed",
+                    message="Archive destination already exists.",
+                )
+            if (
+                verify
+                and _compute_file_sha256(candidate.target_path)
+                != candidate.artifact.hash
+            ):
+                return self._archive_result(
+                    candidate,
+                    "hash_mismatch",
+                    "hash_mismatch",
+                    message="Copied archive bytes did not match artifact hash.",
+                )
+        except FileExistsError:
+            return self._archive_result(
+                candidate,
+                "destination_exists",
+                "failed",
+                message="Archive destination already exists.",
+            )
+        except OSError as exc:
+            return self._archive_result(
+                candidate,
+                "failed",
+                "failed",
+                message=f"Could not copy archive bytes: {exc}",
+            )
+        return self._archive_result(
+            candidate, "copied", "verified" if verify else "not_requested"
+        )
+
+    @staticmethod
+    def _registration_eligible(output: ArchivedRunOutputFile) -> bool:
+        """Return whether an archive result is safe to register as a recovery root.
+
+        Parameters
+        ----------
+        output : ArchivedRunOutputFile
+            Copy-stage outcome to evaluate.
+
+        Returns
+        -------
+        bool
+            ``True`` for copied or policy-satisfying retained file outputs.
+        """
+        return output.copy_status in {
+            "copied",
+            "preserved_existing",
+        } and output.verification_status in {"verified", "not_requested"}
+
+    def _register_archived_outputs(
+        self,
+        *,
+        run_id: str,
+        recovery_root: Path,
+        verify: bool,
+        append: bool,
+        report: dict[str, ArchivedRunOutputFile],
+    ) -> None:
+        """Bulk-register archive results that passed the copy-stage policy.
+
+        Parameters
+        ----------
+        run_id : str
+            Run owning the outputs.
+        recovery_root : Path
+            Root to register for eligible outputs.
+        verify : bool
+            Verification policy forwarded to registration.
+        append : bool
+            Metadata merge policy forwarded to registration.
+        report : dict[str, ArchivedRunOutputFile]
+            Mutable report updated with actual registration outcomes.
+
+        Notes
+        -----
+        A copied-and-verified file remains visible even when metadata persistence
+        fails so callers can retry registration without recopying bytes.
+        """
+        eligible = [
+            key for key, output in report.items() if self._registration_eligible(output)
+        ]
+        if not eligible:
+            return
+        registrations = self.tracker.register_run_output_recovery_copies(
+            run_id, recovery_root, keys=eligible, verify=verify, append=append
+        )
+        for key in eligible:
+            registration = registrations[key]
+            prior = report[key]
+            verification_status = prior.verification_status
+            if registration.status == "hash_mismatch":
+                verification_status = "hash_mismatch"
+            elif registration.status == "unverifiable_hash":
+                verification_status = "unverifiable_hash"
+            elif not registration.verification_succeeded:
+                verification_status = "failed"
+            report[key] = replace(
+                prior,
+                verification_status=verification_status,
+                metadata_committed=registration.metadata_updated,
+                message=(
+                    registration.message
+                    if registration.status != "registered"
+                    else prior.message
+                ),
+            )
+
     def archive_run_output_files(
         self,
         run_id: str,
@@ -553,9 +1069,37 @@ class TrackerArchiveService(_TrackerServiceBase):
     ) -> ArchivedRunOutputFilesReport:
         """Copy regular output files to a recovery root and report each outcome.
 
-        This additive helper is file-only and never overwrites a destination.
-        It copies or validates bytes first, then uses
-        ``register_run_output_recovery_copies(...)`` for metadata persistence.
+        Parameters
+        ----------
+        run_id : str
+            Completed run whose outputs should be archived.
+        recovery_root : path-like
+            Root below which canonical URI-relative output paths are created.
+        keys : sequence of str | None, optional
+            Output keys to archive; ``None`` selects all outputs.
+        preserve_existing : bool, default True
+            Whether a matching target file may be retained without replacement.
+        verify : bool, default True
+            Whether copied or retained files must match full artifact hashes.
+        append : bool, default True
+            Whether successful registrations append recovery-root metadata.
+
+        Returns
+        -------
+        ArchivedRunOutputFilesReport
+            Mapping-style per-key copy, verification, and metadata outcome.
+
+        Raises
+        ------
+        KeyError
+            If a requested output key is not present. This happens before
+            target directories are created or bytes are copied.
+
+        Notes
+        -----
+        This additive API is file-only and never overwrites a target. It copies
+        or retains bytes before bulk registration. ``report.complete`` describes
+        this invocation, not durable archive-workflow state.
         """
         normalized_keys = normalize_materialize_output_keys(
             keys, caller="archive_run_output_files"
@@ -566,45 +1110,18 @@ class TrackerArchiveService(_TrackerServiceBase):
         )
         recovery_root_path = Path(recovery_root).absolute()
         report: dict[str, ArchivedRunOutputFile] = {}
-        eligible: list[str] = []
         producing_run = self.get_run(run_id)
-
-        def result(
-            artifact: Artifact,
-            key: str,
-            copy_status: ArchiveRunOutputFileStatus,
-            verification_status: ArchiveRunOutputVerificationStatus,
-            *,
-            source_path: Path | None = None,
-            target_path: Path | None = None,
-            message: str | None = None,
-        ) -> None:
-            report[key] = ArchivedRunOutputFile(
-                artifact=artifact,
-                key=key,
-                source_path=source_path,
-                target_path=target_path,
-                copy_status=copy_status,
-                verification_status=verification_status,
-                message=message,
-            )
-
-        def has_symlink_component(path: Path) -> bool:
-            return any(component.is_symlink() for component in (path, *path.parents))
-
-        def reject_symlink(path: Path) -> bool:
-            if has_symlink_component(path):
-                raise ValueError(f"Symlink source is not supported: {path}")
-            return True
 
         for key, artifact in selected.items():
             output_set_kind = _output_set_hydration_kind(self.tracker, artifact)
             if output_set_kind is not None:
-                result(
-                    artifact,
-                    key,
-                    "unsupported_directory",
-                    "failed",
+                report[key] = ArchivedRunOutputFile(
+                    artifact=artifact,
+                    key=key,
+                    source_path=None,
+                    target_path=None,
+                    copy_status="unsupported_directory",
+                    verification_status="failed",
                     message=(
                         "OutputSet "
                         f"{output_set_kind} archival is not supported by the "
@@ -614,264 +1131,63 @@ class TrackerArchiveService(_TrackerServiceBase):
                 continue
             relative_path = self.fs.get_remappable_relative_path(artifact.container_uri)
             if relative_path is None:
-                result(
-                    artifact,
-                    key,
-                    "skipped_unmapped",
-                    "failed",
+                report[key] = ArchivedRunOutputFile(
+                    artifact=artifact,
+                    key=key,
+                    source_path=None,
+                    target_path=None,
+                    copy_status="skipped_unmapped",
+                    verification_status="failed",
                     message="Artifact does not have a rematerializable URI layout.",
                 )
                 continue
-            target_path = recovery_root_path / relative_path
+            candidate = _ArchiveFileCandidate(
+                key, artifact, recovery_root_path / relative_path
+            )
             if verify and not (
                 artifact.hash and self.identity.hashing_strategy == "full"
             ):
-                result(
-                    artifact,
-                    key,
+                report[key] = self._archive_result(
+                    candidate,
                     "unverifiable_hash",
                     "unverifiable_hash",
-                    target_path=target_path,
                     message="Verification requested, but no full file hash is available.",
                 )
                 continue
 
-            if has_symlink_component(target_path):
-                result(
-                    artifact,
-                    key,
+            if self._has_symlink_component(candidate.target_path):
+                report[key] = self._archive_result(
+                    candidate,
                     "symlink_destination",
                     "failed",
-                    target_path=target_path,
                     message="Symlink detected in recovery destination.",
                 )
                 continue
 
-            if target_path.exists():
-                if not preserve_existing:
-                    result(
-                        artifact,
-                        key,
-                        "destination_exists",
-                        "failed",
-                        target_path=target_path,
-                        message="Archive destination already exists.",
-                    )
-                    continue
-                if not target_path.is_file():
-                    result(
-                        artifact,
-                        key,
-                        "destination_exists",
-                        "failed",
-                        target_path=target_path,
-                        message="Archive destination is not a regular file.",
-                    )
-                    continue
-                if verify:
-                    try:
-                        matches = _compute_file_sha256(target_path) == artifact.hash
-                    except OSError as exc:
-                        result(
-                            artifact,
-                            key,
-                            "destination_exists",
-                            "failed",
-                            target_path=target_path,
-                            message=f"Could not hash archive destination: {exc}",
-                        )
-                        continue
-                    if not matches:
-                        result(
-                            artifact,
-                            key,
-                            "destination_exists",
-                            "hash_mismatch",
-                            target_path=target_path,
-                            message="Archive destination hash did not match artifact hash.",
-                        )
-                        continue
-                    result(
-                        artifact,
-                        key,
-                        "preserved_existing",
-                        "verified",
-                        target_path=target_path,
-                    )
-                else:
-                    result(
-                        artifact,
-                        key,
-                        "preserved_existing",
-                        "not_requested",
-                        target_path=target_path,
-                    )
-                eligible.append(key)
-                continue
-
-            source_path: Path | None = None
-            if producing_run is not None:
-                try:
-                    from consist.core.materialize import (
-                        find_existing_recovery_source_path,
-                    )
-
-                    _, source_path, _ = find_existing_recovery_source_path(
-                        self.tracker,
-                        artifact=artifact,
-                        run=producing_run,
-                        source_root=None,
-                        source_validator=reject_symlink,
-                        preserve_raw_paths=True,
-                    )
-                except ValueError as exc:
-                    result(
-                        artifact,
-                        key,
-                        "symlink_source",
-                        "failed",
-                        target_path=target_path,
-                        message=str(exc),
-                    )
-                    continue
-            if source_path is None:
-                result(
-                    artifact,
-                    key,
-                    "missing_source",
-                    "failed",
-                    target_path=target_path,
-                    message="Source bytes are unavailable.",
-                )
-                continue
-            if source_path.is_dir():
-                result(
-                    artifact,
-                    key,
-                    "unsupported_directory",
-                    "failed",
-                    source_path=source_path,
-                    target_path=target_path,
-                    message="Directory output archival is not supported.",
-                )
-                continue
-            if not source_path.is_file():
-                result(
-                    artifact,
-                    key,
-                    "failed",
-                    "failed",
-                    source_path=source_path,
-                    target_path=target_path,
-                    message="Source is not a regular file.",
-                )
-                continue
-
-            try:
-                target_path.parent.mkdir(parents=True, exist_ok=True)
-            except OSError as exc:
-                result(
-                    artifact,
-                    key,
-                    "failed",
-                    "failed",
-                    source_path=source_path,
-                    target_path=target_path,
-                    message=f"Could not create destination: {exc}",
-                )
-                continue
-            if has_symlink_component(target_path):
-                result(
-                    artifact,
-                    key,
-                    "symlink_destination",
-                    "failed",
-                    source_path=source_path,
-                    target_path=target_path,
-                    message="Symlink detected in recovery destination.",
-                )
-                continue
-
-            try:
-                from consist.core.materialize import _copy_file_atomic
-
-                copied = _copy_file_atomic(source_path, target_path)
-                if not copied:
-                    result(
-                        artifact,
-                        key,
-                        "destination_exists",
-                        "failed",
-                        source_path=source_path,
-                        target_path=target_path,
-                        message="Archive destination already exists.",
-                    )
-                    continue
-                if verify and _compute_file_sha256(target_path) != artifact.hash:
-                    result(
-                        artifact,
-                        key,
-                        "hash_mismatch",
-                        "hash_mismatch",
-                        source_path=source_path,
-                        target_path=target_path,
-                        message="Copied archive bytes did not match artifact hash.",
-                    )
-                    continue
-            except FileExistsError:
-                result(
-                    artifact,
-                    key,
-                    "destination_exists",
-                    "failed",
-                    source_path=source_path,
-                    target_path=target_path,
-                    message="Archive destination already exists.",
-                )
-                continue
-            except OSError as exc:
-                result(
-                    artifact,
-                    key,
-                    "failed",
-                    "failed",
-                    source_path=source_path,
-                    target_path=target_path,
-                    message=f"Could not copy archive bytes: {exc}",
-                )
-                continue
-            result(
-                artifact,
-                key,
-                "copied",
-                "verified" if verify else "not_requested",
-                source_path=source_path,
-                target_path=target_path,
+            existing = self._inspect_existing_archive_target(
+                candidate, preserve_existing=preserve_existing, verify=verify
             )
-            eligible.append(key)
+            if existing is not None:
+                report[key] = existing
+                continue
 
-        if eligible:
-            registrations = self.tracker.register_run_output_recovery_copies(
-                run_id, recovery_root_path, keys=eligible, verify=verify, append=append
+            resolved, source_failure = self._resolve_archive_source(
+                candidate, producing_run=producing_run
             )
-            for key in eligible:
-                registration = registrations[key]
-                prior = report[key]
-                verification_status = prior.verification_status
-                if registration.status == "hash_mismatch":
-                    verification_status = "hash_mismatch"
-                elif registration.status == "unverifiable_hash":
-                    verification_status = "unverifiable_hash"
-                elif not registration.verification_succeeded:
-                    verification_status = "failed"
-                report[key] = replace(
-                    prior,
-                    verification_status=verification_status,
-                    metadata_committed=registration.metadata_updated,
-                    message=registration.message
-                    if registration.status != "registered"
-                    else prior.message,
-                )
+            if source_failure is not None:
+                report[key] = source_failure
+                continue
+            if resolved is None:
+                raise RuntimeError("Archive source resolution returned no outcome.")
+            report[key] = self._copy_and_verify_archive_target(resolved, verify=verify)
+
+        self._register_archived_outputs(
+            run_id=run_id,
+            recovery_root=recovery_root_path,
+            verify=verify,
+            append=append,
+            report=report,
+        )
         return ArchivedRunOutputFilesReport(outputs=report)
 
     def archive_run_outputs(
@@ -885,11 +1201,29 @@ class TrackerArchiveService(_TrackerServiceBase):
     ) -> ArchivedOutputs:
         """Archive one or more historical run outputs into a stable recovery root.
 
-        Each output retains its canonical identity and gains ``archive_root``
-        as an advisory recovery root. The returned ``ArchivedOutputs`` remains
-        a read-only mapping of keys to paths, while ``.outputs`` contains
-        refreshed artifacts whose recovery metadata is ready for downstream
-        ``sc.run(inputs=...)`` calls.
+        Parameters
+        ----------
+        run_id : str
+            Completed run whose outputs should be archived.
+        archive_root : path-like
+            Root below which URI-relative output paths are recreated.
+        keys : sequence of str | None, optional
+            Output keys to archive; ``None`` selects all outputs.
+        mode : {"copy", "move"}, default "copy"
+            Filesystem operation used by the legacy archive API.
+        append : bool, default True
+            Whether to append the archive root to existing recovery roots.
+
+        Returns
+        -------
+        ArchivedOutputs
+            Read-only key-to-path mapping and refreshed output artifacts.
+
+        Notes
+        -----
+        This compatibility API retains its sequential-copy semantics. Use
+        :meth:`archive_run_output_files` for report-oriented, no-overwrite
+        regular-file archival.
         """
         normalized_keys = normalize_materialize_output_keys(
             keys, caller="archive_run_outputs"
@@ -916,6 +1250,27 @@ class TrackerArchiveService(_TrackerServiceBase):
         *,
         run_id: str,
     ) -> Dict[str, Artifact]:
+        """Select output artifacts and reject unknown keys before side effects.
+
+        Parameters
+        ----------
+        outputs : dict[str, Artifact]
+            All outputs available for the run.
+        normalized_keys : tuple[str, ...] | None
+            Normalized requested keys, or ``None`` to select all outputs.
+        run_id : str
+            Run identifier used in error messages.
+
+        Returns
+        -------
+        dict[str, Artifact]
+            Selected artifacts in requested-key order.
+
+        Raises
+        ------
+        KeyError
+            If any requested key is not present.
+        """
         if normalized_keys is None:
             return outputs
         missing = [key for key in normalized_keys if key not in outputs]
@@ -934,10 +1289,28 @@ class TrackerArchiveService(_TrackerServiceBase):
         mode: Literal["copy", "move"] = "copy",
         append: bool = True,
     ) -> ArchivedOutputs:
-        """Archive outputs for the currently active run into a stable recovery root.
+        """Archive outputs for the currently active run into a recovery root.
 
-        This convenience wrapper calls ``archive_run_outputs(...)`` for the
-        active run without requiring callers to extract its ID first.
+        Parameters
+        ----------
+        archive_root : path-like
+            Root below which URI-relative output paths are recreated.
+        keys : sequence of str | None, optional
+            Output keys to archive; ``None`` selects all active-run outputs.
+        mode : {"copy", "move"}, default "copy"
+            Filesystem operation used by the legacy archive API.
+        append : bool, default True
+            Whether to append the archive root to existing recovery roots.
+
+        Returns
+        -------
+        ArchivedOutputs
+            Archived paths and refreshed artifacts for the active run.
+
+        Raises
+        ------
+        RuntimeError
+            If no run is active in the current tracker context.
         """
         if not self.current_consist or self.current_consist.run is None:
             raise RuntimeError(

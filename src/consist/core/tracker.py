@@ -5479,6 +5479,15 @@ _TRACKER_WRAPPER_DOCS = {
     "archive_run_output_files": TrackerArchiveService.archive_run_output_files,
     "archive_run_outputs": TrackerArchiveService.archive_run_outputs,
     "archive_current_run_outputs": TrackerArchiveService.archive_current_run_outputs,
+    "materialize": TrackerRecoveryService.materialize,
+    "stage_artifact": TrackerRecoveryService.stage_artifact,
+    "materialize_artifact": TrackerRecoveryService.materialize_artifact,
+    "stage_inputs": TrackerRecoveryService.stage_inputs,
+    "materialize_run_outputs": TrackerRecoveryService.materialize_run_outputs,
+    "hydrate_run_outputs": TrackerRecoveryService.hydrate_run_outputs,
+    "hydrate_run_outputs_to_destinations": (
+        TrackerRecoveryService.hydrate_run_outputs_to_destinations
+    ),
 }
 
 for _name, _source in _TRACKER_WRAPPER_DOCS.items():
