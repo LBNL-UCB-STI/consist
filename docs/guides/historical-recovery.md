@@ -233,6 +233,45 @@ artifacts directly into a later `inputs={...}` mapping instead of calling
 `get_run_outputs(...)`
 again.
 
+### Verified File-Only Archive Reports
+
+Use `archive_run_output_files(...)` when a completed run needs a conservative,
+auditable archive pass for ordinary files:
+
+```python
+report = tracker.archive_run_output_files(
+    "prior_run_id",
+    Path("/archive/iteration_004"),
+    keys=["persons", "households"],
+    preserve_existing=True,
+    verify=True,
+    append=True,
+)
+
+for key, result in report.items():
+    print(key, result.copy_status, result.verification_status)
+
+if not report.complete:
+    print(report.summary)
+```
+
+The report is a read-only mapping from output key to an immutable result with
+the source artifact, known source and target paths, copy status, verification
+status, metadata-commit state, and message. It is intentionally file-only:
+directory artifacts and output sets are not archived by this helper. Symlinked
+sources or destinations, unmappable URIs, missing sources, and files without a
+full content hash remain explicit per-key outcomes.
+
+The helper never overwrites an existing target. With `preserve_existing=True`,
+it can retain an existing matching file after the requested verification;
+otherwise it leaves the target unchanged and reports the reason. If copying and
+verification succeed but recovery-root metadata cannot be committed, rerun the
+same call to retain and re-verify the target before retrying registration.
+`report.complete` only means every selected key satisfied the requested
+verification policy and committed metadata in this invocation. It is not a
+durable workflow-state claim, nor evidence that a downstream application has
+used the archive.
+
 If bytes were already copied by another system, verify the archive-side file
 and then record the root:
 
@@ -371,6 +410,7 @@ including `recovery_roots`, but do not create a new run.
 | Restore one already-resolved artifact into a workspace | `materialize_artifact(...)` |
 | Copy or move current run outputs into an archive and record the root | `archive_current_run_outputs(...)` |
 | Copy or move selected prior run outputs into an archive and record the root | `archive_run_outputs(...)` |
+| Copy, verify, and register selected regular-file outputs with per-key outcomes | `archive_run_output_files(...)` |
 | Copy or move one artifact into an archive and record the root | `archive_artifact(...)` |
 | Verify an externally copied artifact file and record the root | `register_artifact_recovery_copy(...)` |
 | Verify externally copied run outputs and record the root | `register_run_output_recovery_copies(...)` |

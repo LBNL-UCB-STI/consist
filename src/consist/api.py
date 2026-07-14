@@ -84,6 +84,7 @@ from consist.types import (
 if TYPE_CHECKING:
     from consist.core.config_canonicalization import ConfigAdapter
     from consist.core.materialize import (
+        ArchivedRunOutputFilesReport,
         ArtifactRecoveryCopyRegistration,
         HydratedRunOutputsResult,
         MaterializedArtifact,
@@ -1568,6 +1569,32 @@ def archive_run_outputs(
         archive_root,
         keys=keys,
         mode=mode,
+        append=append,
+    )
+
+
+def archive_run_output_files(
+    run_id: str,
+    recovery_root: str | Path,
+    *,
+    keys: Sequence[str] | None = None,
+    preserve_existing: bool = True,
+    verify: bool = True,
+    append: bool = True,
+    tracker: Optional["Tracker"] = None,
+) -> "ArchivedRunOutputFilesReport":
+    """Archive regular run-output files with per-key copy and metadata status.
+
+    Unlike ``archive_run_outputs(...)``, this helper never overwrites an
+    existing target and returns partial outcomes rather than raising for an
+    individual unavailable or unsupported output.
+    """
+    return _resolve_tracker(tracker).archive_run_output_files(
+        run_id,
+        recovery_root,
+        keys=keys,
+        preserve_existing=preserve_existing,
+        verify=verify,
         append=append,
     )
 

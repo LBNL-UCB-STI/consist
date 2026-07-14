@@ -109,6 +109,35 @@ that already carry the new recovery root. Pass those refreshed artifacts
 directly into a later `inputs={...}` mapping when you want the next run to
 consume the archive.
 
+When an application needs an auditable, no-replacement archive pass for files
+only, use `tracker.archive_run_output_files(...)` instead:
+
+```python
+report = tracker.archive_run_output_files(
+    "prior_run_id",
+    Path("/archive/pilates/iteration_004"),
+    keys=["persons", "households"],
+    preserve_existing=True,
+    verify=True,
+    append=True,
+)
+
+if not report.complete:
+    for key, result in report.items():
+        if not result.metadata_committed:
+            print(key, result.copy_status, result.verification_status, result.message)
+```
+
+`ArchivedRunOutputFilesReport` is a read-only mapping of selected output keys
+to immutable per-key results. Each result includes the source artifact, known
+source and target paths, copy and verification statuses, metadata-commit state,
+and a message. The helper supports regular file artifacts only; directories,
+output sets, symlinks, and artifacts lacking a full-file hash are reported per
+key rather than copied. It never replaces archive bytes. A rerun can retain a
+previously verified target and retry only the recovery-root metadata commit.
+`report.complete` means every selected key met the requested verification policy
+and committed metadata in this call; it is not a durable workflow-state claim.
+
 Use the lower-level helpers when you want to manage archival yourself:
 
 - `tracker.set_artifact_recovery_roots(...)` records one or more archive roots
@@ -123,6 +152,9 @@ Use the lower-level helpers when you want to manage archival yourself:
   archive root and records that root.
 - `tracker.archive_run_outputs(...)` applies the same pattern to all or a
   selected subset of outputs for a run.
+- `tracker.archive_run_output_files(...)` copies or conservatively retains
+  selected regular files, verifies them when requested, and bulk-registers
+  recovery roots while retaining per-key outcomes for retries.
 
 For HDF5 containers, verified recovery-copy adoption respects the parent
 container policy. Parent H5 files with
@@ -263,6 +295,8 @@ signatures and attribute details, use the generated reference below.
         - StagedInputsResult
         - ArtifactRecoveryCopyRegistration
         - RunOutputRecoveryCopiesRegistration
+        - ArchivedRunOutputFile
+        - ArchivedRunOutputFilesReport
         - HydratedRunOutput
         - HydratedRunOutputsResult
         - MaterializationResult

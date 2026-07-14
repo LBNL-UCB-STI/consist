@@ -203,6 +203,8 @@ class FileSystemManager:
     @staticmethod
     def normalize_recovery_roots(
         roots: str | os.PathLike[str] | Sequence[str | os.PathLike[str]] | None,
+        *,
+        resolve: bool = True,
     ) -> list[str]:
         """
         Normalize advisory recovery roots into a deduped ordered list.
@@ -229,10 +231,11 @@ class FileSystemManager:
                 raise ValueError(
                     "recovery_roots entries must be strings or pathlib.Path values."
                 )
-            resolved = str(Path(root).resolve())
-            if resolved not in seen:
-                seen.add(resolved)
-                normalized.append(resolved)
+            normalized_root = Path(root).resolve() if resolve else Path(root).absolute()
+            root_string = str(normalized_root)
+            if root_string not in seen:
+                seen.add(root_string)
+                normalized.append(root_string)
         return normalized
 
     @staticmethod
@@ -286,6 +289,7 @@ class FileSystemManager:
         original_run_dir: Optional[str],
         mounts_snapshot: Optional[Mapping[str, str]] = None,
         artifact_mount_root: Optional[str] = None,
+        resolve: bool = True,
     ) -> Optional[Path]:
         """
         Resolve the most specific historical root recorded for a URI.
@@ -293,7 +297,8 @@ class FileSystemManager:
         if uri.startswith("workspace://") or uri.startswith("./"):
             if not original_run_dir:
                 return None
-            return Path(original_run_dir).resolve()
+            path = Path(original_run_dir)
+            return path.resolve() if resolve else path.absolute()
 
         if "://" not in uri:
             return None
@@ -303,10 +308,12 @@ class FileSystemManager:
             return None
 
         if mounts_snapshot and isinstance(mounts_snapshot.get(scheme), str):
-            return Path(mounts_snapshot[scheme]).resolve()
+            path = Path(mounts_snapshot[scheme])
+            return path.resolve() if resolve else path.absolute()
 
         if artifact_mount_root:
-            return Path(artifact_mount_root).resolve()
+            path = Path(artifact_mount_root)
+            return path.resolve() if resolve else path.absolute()
 
         return None
 

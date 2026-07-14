@@ -102,6 +102,7 @@ from consist.api import (
     set_artifact_recovery_roots,
     register_artifact_recovery_copy,
     register_run_output_recovery_copies,
+    archive_run_output_files,
     archive_artifact,
     archive_run_outputs,
     archive_current_run_outputs,
@@ -156,6 +157,8 @@ from consist.core.noop import (
     NoopTracker,
 )
 from consist.core.materialize import (
+    ArchivedRunOutputFile,
+    ArchivedRunOutputFilesReport,
     ArtifactRecoveryCopyRegistration,
     HydratedRunOutput,
     HydratedRunOutputsResult,
@@ -255,6 +258,8 @@ __all__ = [
     "MaterializedArtifact",
     "ArtifactRecoveryCopyRegistration",
     "RunOutputRecoveryCopiesRegistration",
+    "ArchivedRunOutputFile",
+    "ArchivedRunOutputFilesReport",
     "MaterializationResult",
     "StagedInput",
     "StagedInputsResult",
@@ -316,6 +321,7 @@ __all__ = [
     "set_artifact_recovery_roots",
     "register_artifact_recovery_copy",
     "register_run_output_recovery_copies",
+    "archive_run_output_files",
     "archive_artifact",
     "archive_run_outputs",
     "archive_current_run_outputs",

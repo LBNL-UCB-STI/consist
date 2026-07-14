@@ -27,7 +27,8 @@ a tracker object to every call.
   `consist.stage_artifact`, `consist.stage_inputs`,
   `consist.set_artifact_recovery_roots`, `consist.register_artifact_recovery_copy`,
   `consist.register_run_output_recovery_copies`, `consist.archive_artifact`,
-  `consist.archive_run_outputs`, `consist.archive_current_run_outputs`
+  `consist.archive_run_outputs`, `consist.archive_current_run_outputs`,
+  `consist.archive_run_output_files`
 - Querying: `consist.find_run`, `consist.find_runs`,
   `consist.find_latest_run`, `consist.find_matching_run`,
   `consist.find_matching_runs`, `consist.run_query`, `consist.run_set`,
@@ -46,6 +47,15 @@ restart-friendly semantic matcher with optional `cache_epoch=` and caller-owned
 `consist.archive_current_run_outputs(...)` return `ArchivedOutputs`, a
 dict-like mapping of archived paths whose `.outputs` attribute exposes the
 refreshed artifacts for downstream `inputs=...` reuse.
+
+`consist.archive_run_output_files(...)` is the conservative, file-only archive
+helper for a completed run. It returns an `ArchivedRunOutputFilesReport`, a
+read-only mapping of per-key results. It never overwrites an existing archive
+target: with `preserve_existing=True`, a matching target can be verified and
+registered; otherwise that key remains a reported outcome. Inspect `.complete`
+and each result before treating the archive as ready. `.complete` reports this
+call's selected files and metadata registration; it does not establish durable
+workflow state or prove that another application consumed the archive.
 
 ## Minimal runnable helper workflow
 
@@ -138,6 +148,7 @@ For class-level equivalents, see [Tracker](tracker.md) and
         - archive_artifact
         - archive_run_outputs
         - archive_current_run_outputs
+        - archive_run_output_files
         - to_df
         - active_relation_count
         - set_current_tracker

@@ -90,6 +90,28 @@ RecoveryCopyStatus = Literal[
     "failed",
 ]
 
+ArchiveRunOutputFileStatus = Literal[
+    "copied",
+    "preserved_existing",
+    "destination_exists",
+    "missing_source",
+    "skipped_unmapped",
+    "unsupported_directory",
+    "symlink_source",
+    "symlink_destination",
+    "unverifiable_hash",
+    "hash_mismatch",
+    "failed",
+]
+
+ArchiveRunOutputVerificationStatus = Literal[
+    "verified",
+    "not_requested",
+    "unverifiable_hash",
+    "hash_mismatch",
+    "failed",
+]
+
 _FILE_HASH_CHUNK_SIZE = 8 * 1024 * 1024
 
 
@@ -333,6 +355,7 @@ class ArtifactRecoveryCopyRegistration:
     status: RecoveryCopyStatus
     message: str | None = None
     metadata_updated: bool = False
+    verification_succeeded: bool = False
 
 
 @dataclass(slots=True)
@@ -389,6 +412,68 @@ class RunOutputRecoveryCopiesRegistration(
         return " ".join(
             f"{status}={counts[status]}" for status in known_statuses + extra_statuses
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ArchivedRunOutputFile:
+    """Outcome for archiving one regular run-output file."""
+
+    artifact: Artifact
+    key: str
+    source_path: Path | None
+    target_path: Path | None
+    copy_status: ArchiveRunOutputFileStatus
+    verification_status: ArchiveRunOutputVerificationStatus
+    metadata_committed: bool = False
+    message: str | None = None
+
+
+@dataclass(slots=True)
+class ArchivedRunOutputFilesReport(MappingABC[str, ArchivedRunOutputFile]):
+    """Key-indexed report for ``Tracker.archive_run_output_files(...)``.
+
+    ``complete`` is a result for this invocation only; it does not represent a
+    durable archive-workflow state.
+    """
+
+    outputs: dict[str, ArchivedRunOutputFile] = field(default_factory=dict)
+
+    def __getitem__(self, key: str) -> ArchivedRunOutputFile:
+        return self.outputs[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.outputs)
+
+    def __len__(self) -> int:
+        return len(self.outputs)
+
+    def items(self):
+        return self.outputs.items()
+
+    def keys(self):
+        return self.outputs.keys()
+
+    def values(self):
+        return self.outputs.values()
+
+    @property
+    def complete(self) -> bool:
+        return all(
+            output.metadata_committed
+            and output.verification_status in {"verified", "not_requested"}
+            for output in self.outputs.values()
+        )
+
+    @property
+    def summary(self) -> str:
+        copy_counts = Counter(output.copy_status for output in self.outputs.values())
+        verification_counts = Counter(
+            output.verification_status for output in self.outputs.values()
+        )
+        committed = sum(output.metadata_committed for output in self.outputs.values())
+        copied = copy_counts["copied"]
+        verified = verification_counts["verified"]
+        return f"copied={copied} verified={verified} metadata_committed={committed}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1015,6 +1100,7 @@ def _derive_historical_root(
     *,
     artifact: Artifact,
     run,
+    preserve_raw_paths: bool = False,
 ) -> Path | None:
     meta = run.meta if isinstance(run.meta, dict) else {}
     artifact_meta = artifact.meta if isinstance(artifact.meta, dict) else {}
@@ -1024,6 +1110,7 @@ def _derive_historical_root(
         original_run_dir=meta.get("_physical_run_dir"),
         mounts_snapshot=meta.get("mounts"),
         artifact_mount_root=artifact_meta.get("mount_root"),
+        resolve=not preserve_raw_paths,
     )
 
 
@@ -1031,12 +1118,13 @@ def _artifact_recovery_roots(
     tracker: "Tracker",
     *,
     artifact: Artifact,
+    preserve_raw_paths: bool = False,
 ) -> tuple[Path, ...]:
     artifact_meta = artifact.meta if isinstance(artifact.meta, dict) else {}
     return tuple(
         Path(root)
         for root in tracker.fs.normalize_recovery_roots(
-            artifact_meta.get("recovery_roots")
+            artifact_meta.get("recovery_roots"), resolve=not preserve_raw_paths
         )
     )
 
@@ -1046,6 +1134,7 @@ def _ordered_candidate_roots(
     source_root: Path | None,
     historical_root: Path | None,
     recovery_roots: Sequence[Path],
+    preserve_raw_paths: bool = False,
 ) -> tuple[Path, ...]:
     ordered: list[Path] = []
     seen: set[str] = set()
@@ -1054,11 +1143,12 @@ def _ordered_candidate_roots(
         + ([historical_root] if historical_root is not None else [])
         + list(recovery_roots)
     ):
-        resolved = str(root.resolve())
-        if resolved in seen:
+        candidate = root.absolute() if preserve_raw_paths else root.resolve()
+        identity = str(candidate)
+        if identity in seen:
             continue
-        seen.add(resolved)
-        ordered.append(Path(resolved))
+        seen.add(identity)
+        ordered.append(candidate)
     return tuple(ordered)
 
 
@@ -1069,6 +1159,7 @@ def find_existing_recovery_source_path(
     run,
     source_root: Path | None,
     source_validator: Callable[[Path], bool] | None = None,
+    preserve_raw_paths: bool = False,
 ) -> tuple[Path | None, Path | None, bool]:
     """
     Return the rematerializable relative path and first existing filesystem source.
@@ -1080,7 +1171,9 @@ def find_existing_recovery_source_path(
     3. ordered artifact ``recovery_roots``
 
     If ``source_validator`` is provided, existing candidates that return
-    ``False`` are skipped and later recovery roots are still probed. The boolean
+    ``False`` are skipped and later recovery roots are still probed. Set
+    ``preserve_raw_paths=True`` when a validator must inspect symlinked root
+    components before any path resolution. The boolean
     return value reports whether any filesystem roots were available to probe
     for that artifact.
     """
@@ -1088,19 +1181,28 @@ def find_existing_recovery_source_path(
     if relative_path is None:
         return None, None, False
 
-    historical_root = _derive_historical_root(tracker, artifact=artifact, run=run)
-    recovery_roots = _artifact_recovery_roots(tracker, artifact=artifact)
+    historical_root = _derive_historical_root(
+        tracker,
+        artifact=artifact,
+        run=run,
+        preserve_raw_paths=preserve_raw_paths,
+    )
+    recovery_roots = _artifact_recovery_roots(
+        tracker, artifact=artifact, preserve_raw_paths=preserve_raw_paths
+    )
     candidate_roots = _ordered_candidate_roots(
         source_root=source_root,
         historical_root=historical_root,
         recovery_roots=recovery_roots,
+        preserve_raw_paths=preserve_raw_paths,
     )
     for root in candidate_roots:
-        candidate = (root / relative_path).resolve()
+        candidate = root / relative_path
+        validator_path = candidate if preserve_raw_paths else candidate.resolve()
         if candidate.exists() and (
-            source_validator is None or source_validator(candidate)
+            source_validator is None or source_validator(validator_path)
         ):
-            return relative_path, candidate, True
+            return relative_path, candidate.resolve(), True
 
     return relative_path, None, bool(candidate_roots)
 
