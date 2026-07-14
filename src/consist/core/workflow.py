@@ -88,21 +88,30 @@ class OutputCapture:
 
 class RunContext:
     """
-    A lightweight helper object injected into user functions.
-    When you execute a run with `inject_context=True`, Consist passes a `RunContext`
-    to your function. This allows you to access run-aware helpers—like the run's
-    dedicated artifact directory and artifact logging methods—without needing to
-    reference a global tracker instance directly.
+    Provide run-aware helpers to a Python callable.
+
+    Consist injects this object when ``inject_context`` is enabled. It exposes
+    output locations, artifact logging helpers, and canonicalization facts
+    without requiring application code to access a global tracker.
+
+    Parameters
+    ----------
+    tracker : Tracker
+        Active tracker for the executing run.
+    canonicalization : CanonicalizationSnapshot, optional
+        Immutable observations from the applied config plan. These are
+        canonicalization-time facts, not final staged or container paths.
+
+    Notes
+    -----
+    Cache hits and native container executions do not invoke the Python
+    callable, so they do not receive this context.
 
     Examples
     --------
-    ```python
-    def my_step(ctx: RunContext):
-        # Access the run's dedicated directory
-        output_path = ctx.run_dir / "results.csv"
-        # ... generate file ...
-        ctx.log_artifact(output_path, "results")
-    ```
+    >>> def my_step(ctx: RunContext):
+    ...     output_path = ctx.run_dir / "results.csv"
+    ...     ctx.log_artifact(output_path, "results")
     """
 
     def __init__(

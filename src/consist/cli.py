@@ -354,7 +354,38 @@ def admission_doctor(
         help="Exit 1 unless the diagnostic outcome is verified.",
     ),
 ) -> None:
-    """Diagnose one file against an explicit completed prior-run input."""
+    """
+    Diagnose one file against an explicit completed prior-run input.
+
+    Parameters
+    ----------
+    db_path : str, optional
+        DuckDB provenance database to inspect.
+    expected_run_id : str
+        Explicit completed run supplying the expected input artifact.
+    artifact_key : str
+        Exact input artifact key on the expected run.
+    file : str
+        Resolved regular file whose bytes should be checked.
+    expected_file : str, optional
+        Distinct immutable expected-byte file for a historical hash without
+        explicit full-file semantics.
+    output : pathlib.Path, optional
+        Destination for canonical JSON report output.
+    require_verified : bool, default False
+        Exit nonzero unless the resulting outcome is ``verified``.
+
+    Raises
+    ------
+    typer.Exit
+        With a nonzero status when ``require_verified`` is enabled and the
+        diagnostic outcome is not verified.
+
+    Notes
+    -----
+    By default every admission outcome exits successfully so shell callers can
+    apply their own policy. The command does not copy files or mutate run state.
+    """
     tracker = get_tracker(db_path)
     report = check_artifact_identity(
         tracker,

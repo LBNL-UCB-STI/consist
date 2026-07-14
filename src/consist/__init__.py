@@ -52,8 +52,10 @@ from consist.core.indexing import (
 
 # API
 from consist.api import (
+    AdmissionReference,  # noqa: F401
     AdmissionReport,  # noqa: F401
     RunContext,
+    check_admission_reference,  # noqa: F401
     check_artifact_identity,  # noqa: F401
     load,
     load_df,
@@ -194,6 +196,8 @@ __all__ = [
     "Tracker",
     "Coupler",
     "RunContext",
+    "AdmissionReference",
+    "AdmissionReport",
     "CanonicalizationArtifactMember",
     "CanonicalizationReference",
     "CanonicalizationSnapshot",
@@ -272,6 +276,8 @@ __all__ = [
     "RelationConnectionLeakWarning",
     "to_df",
     "run",
+    "check_admission_reference",
+    "check_artifact_identity",
     "ref",
     "refs",
     "trace",

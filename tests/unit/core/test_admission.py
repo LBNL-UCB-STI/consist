@@ -7,9 +7,12 @@ import json
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from consist.core.admission import (
+    AdmissionReference,
     AdmissionReport,
+    check_admission_reference,
     check_artifact_identity,
     hash_semantics_for_new_artifact,
 )
@@ -76,8 +79,22 @@ def _assert_observation(report: AdmissionReport, text: str) -> None:
 def test_public_package_exports_admission_api() -> None:
     import consist
 
+    assert consist.AdmissionReference is AdmissionReference
     assert consist.AdmissionReport is AdmissionReport
+    assert consist.check_admission_reference is check_admission_reference
     assert consist.check_artifact_identity is check_artifact_identity
+
+
+def test_admission_report_rejects_non_v2_schema_version() -> None:
+    with pytest.raises(ValidationError, match="report_schema_version"):
+        AdmissionReport(
+            report_schema_version=1,
+            outcome="verified",
+            input_role="raw_gtfs",
+            artifact_key="raw_gtfs",
+            execution_path="workspace/runtime/feed.zip",
+            expected_run_id="completed-run",
+        )
 
 
 def test_caller_hash_override_does_not_retain_cloned_full_hash_semantics(
@@ -212,8 +229,10 @@ def test_future_full_file_metadata_admits_matching_candidate_with_fast_tracker(
     payload = json.loads(canonical_json)
     assert canonical_json == json.dumps(payload, sort_keys=True, separators=(",", ":"))
     assert payload["input_role"] == "raw_gtfs"
+    assert payload["report_schema_version"] == 2
     assert payload["execution_path"] == str(candidate)
     assert payload["physical_target_path"] == str(candidate.resolve())
+    assert payload["consumer_path"] is None
     for field in (
         "config_key",
         "config_reference_key",
@@ -223,6 +242,129 @@ def test_future_full_file_metadata_admits_matching_candidate_with_fast_tracker(
         "configured_path",
     ):
         assert payload[field] is None
+
+
+def test_runtime_reference_preserves_launch_path_evidence(
+    tracker, tmp_path: Path
+) -> None:
+    source = tmp_path / "archive" / "linkstats.csv.gz"
+    source.parent.mkdir()
+    source.write_bytes(b"linkstats")
+    staged = tmp_path / "beam" / "input" / "seattle" / "_pilates" / "linkstats.csv.gz"
+    staged.parent.mkdir(parents=True)
+    staged.write_bytes(source.read_bytes())
+    _complete_run(tracker, "baseline-run")
+    _record_input(
+        tracker,
+        run_id="baseline-run",
+        key="linkstats_warmstart",
+        source_path=source,
+        digest=_sha256(source.read_bytes()),
+        semantics=FULL_FILE_SHA256,
+    )
+
+    report = check_admission_reference(
+        tracker,
+        expected_run_id="baseline-run",
+        reference=AdmissionReference(
+            artifact_key="linkstats_warmstart",
+            input_role="beam_linkstats_warmstart",
+            config_key="beam.warmStart.initialLinkstatsFilePath",
+            config_reference_key="beam.warmStart.initialLinkstatsFilePath",
+            feed_key="seattle",
+            raw_config_value='${beam.inputDirectory}"/_pilates/linkstats.csv.gz"',
+            canonical_value=str(staged),
+            configured_path=staged,
+            execution_path=staged,
+            consumer_path="/app/input/seattle/_pilates/linkstats.csv.gz",
+        ),
+    )
+
+    assert report.outcome == "verified"
+    assert report.input_role == "beam_linkstats_warmstart"
+    assert report.config_key == "beam.warmStart.initialLinkstatsFilePath"
+    assert report.consumer_path == "/app/input/seattle/_pilates/linkstats.csv.gz"
+    assert report.execution_path == str(staged)
+    assert report.physical_target_path == str(staged.resolve())
+    payload = json.loads(report.canonical_json())
+    assert payload["report_schema_version"] == 2
+    assert payload["config_key"] == "beam.warmStart.initialLinkstatsFilePath"
+    assert payload["config_reference_key"] == "beam.warmStart.initialLinkstatsFilePath"
+    assert payload["feed_key"] == "seattle"
+    assert (
+        payload["raw_config_value"]
+        == '${beam.inputDirectory}"/_pilates/linkstats.csv.gz"'
+    )
+    assert payload["canonical_value"] == str(staged)
+    assert payload["consumer_path"] == "/app/input/seattle/_pilates/linkstats.csv.gz"
+    assert payload["configured_path"] == str(staged)
+
+
+def test_runtime_reference_rejects_caller_control_of_physical_target_path(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValidationError, match="physical_target_path"):
+        AdmissionReference.model_validate(
+            {
+                "artifact_key": "linkstats_warmstart",
+                "execution_path": tmp_path / "staged.csv.gz",
+                "physical_target_path": tmp_path / "unrelated.csv.gz",
+            }
+        )
+
+
+def test_runtime_reference_validates_context_fields(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError, match="consumer_path"):
+        AdmissionReference(
+            artifact_key="linkstats_warmstart",
+            execution_path=tmp_path / "staged.csv.gz",
+            consumer_path=123,
+        )
+
+
+def test_runtime_reference_is_immutable(tmp_path: Path) -> None:
+    reference = AdmissionReference(
+        artifact_key="linkstats_warmstart",
+        execution_path=tmp_path / "staged.csv.gz",
+    )
+
+    with pytest.raises(ValidationError, match="frozen"):
+        reference.consumer_path = "/app/input/seattle/_pilates/linkstats.csv.gz"
+
+
+def test_runtime_reference_retains_context_for_unverified_input(
+    tracker, tmp_path: Path
+) -> None:
+    source = tmp_path / "archive" / "linkstats.csv.gz"
+    source.parent.mkdir()
+    source.write_bytes(b"linkstats")
+    staged = tmp_path / "beam" / "input" / "linkstats.csv.gz"
+    staged.parent.mkdir(parents=True)
+    staged.write_bytes(source.read_bytes())
+    _complete_run(tracker, "baseline-run")
+    _record_input(
+        tracker,
+        run_id="baseline-run",
+        key="linkstats_warmstart",
+        source_path=source,
+        digest=_sha256(source.read_bytes()),
+        semantics=None,
+    )
+
+    report = check_admission_reference(
+        tracker,
+        expected_run_id="baseline-run",
+        reference=AdmissionReference(
+            artifact_key="linkstats_warmstart",
+            execution_path=staged,
+            config_key="beam.warmStart.initialLinkstatsFilePath",
+            consumer_path="/app/input/linkstats.csv.gz",
+        ),
+    )
+
+    assert report.outcome == "unverified"
+    assert report.config_key == "beam.warmStart.initialLinkstatsFilePath"
+    assert report.consumer_path == "/app/input/linkstats.csv.gz"
 
 
 def test_historical_bare_hash_is_unverified_without_expected_bytes(

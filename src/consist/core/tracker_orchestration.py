@@ -1192,6 +1192,42 @@ class RunTraceCoordinator:
         capture_pattern: str,
         canonicalization: Optional["CanonicalizationSnapshot"] = None,
     ) -> tuple[Any, Dict[str, Artifact]]:
+        """
+        Execute one Python callable inside prepared run context.
+
+        Parameters
+        ----------
+        tracker, active_tracker : Tracker
+            Run tracker and tracker currently installed for the callable.
+        fn : callable, optional
+            Python function selected by the run invocation. It must be present
+            for this executor.
+        resolved_name : str
+            Resolved run name used in diagnostics and output handling.
+        config, inputs, runtime_kwargs_dict, inject_context, input_binding,
+        input_artifacts_by_key, requested_input_paths, capture_dir,
+        capture_pattern
+            Resolved invocation settings, inputs, and output-capture controls.
+        canonicalization : CanonicalizationSnapshot, optional
+            Immutable facts from the config plan to expose only through an
+            injected ``RunContext``.
+
+        Returns
+        -------
+        tuple[Any, dict[str, Artifact]]
+            Callable return value and artifacts logged from captured outputs.
+
+        Raises
+        ------
+        ValueError
+            If no callable is supplied or required runtime arguments are absent.
+
+        Notes
+        -----
+        Canonicalization observations are injected into Python context only;
+        they are not serialized into container commands, environment variables,
+        or mounts.
+        """
         runtime_kwargs = dict(runtime_kwargs_dict or {})
         required_runtime = getattr(fn, "__consist_runtime_required__", ())
         if required_runtime:
