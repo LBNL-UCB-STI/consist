@@ -230,3 +230,79 @@ class TrackerRecoveryService(_TrackerServiceBase):
             on_missing=on_missing,
             db_fallback=db_fallback,
         )
+
+    def hydrate_run_outputs_to_destinations(
+        self,
+        run_id: str,
+        *,
+        destinations_by_key: Mapping[str, str | Path],
+        source_root: str | Path | None = None,
+        preserve_existing: bool = True,
+        on_missing: Literal["warn", "raise"] = "warn",
+        db_fallback: Literal["never", "if_ingested"] = "if_ingested",
+    ) -> "HydratedRunOutputsResult":
+        if not isinstance(destinations_by_key, Mapping):
+            raise TypeError(
+                "destinations_by_key must be a mapping of output keys to paths."
+            )
+
+        normalized_destinations: dict[str, Path] = {}
+        for key, destination in destinations_by_key.items():
+            if not isinstance(key, str):
+                raise TypeError(
+                    "destinations_by_key must contain only string output keys."
+                )
+            if not isinstance(destination, (str, Path)):
+                raise TypeError(
+                    "destinations_by_key values must be str or Path instances."
+                )
+            normalized_destinations[key] = Path(destination).resolve()
+
+        validate_materialize_option(
+            name="on_missing",
+            value=on_missing,
+            allowed=_VALID_MATERIALIZE_ON_MISSING,
+        )
+        validate_materialize_option(
+            name="db_fallback",
+            value=db_fallback,
+            allowed=_VALID_MATERIALIZE_DB_FALLBACK,
+        )
+
+        if self.db is None:
+            raise RuntimeError(
+                "Cannot materialize run outputs: tracker has no database configured."
+            )
+
+        run = self.get_run(run_id)
+        if run is None:
+            raise KeyError(f"Run {run_id!r} was not found.")
+
+        from consist.core import materialize as materialize_core
+
+        allowed_roots = materialize_core.build_allowed_materialization_roots(
+            run_dir=self.run_dir,
+            mounts=self.mounts,
+            allow_external_paths=self.allow_external_paths,
+        )
+        for destination in normalized_destinations.values():
+            materialize_core.validate_allowed_materialization_destination(
+                destination, allowed_roots
+            )
+
+        source_root_override = (
+            Path(source_root).resolve() if source_root is not None else None
+        )
+
+        from consist.core import tracker as tracker_module
+
+        return tracker_module.hydrate_run_outputs_to_destinations_core(
+            tracker=self._tracker,
+            run=run,
+            destinations_by_key=normalized_destinations,
+            source_root=source_root_override,
+            allowed_base=allowed_roots,
+            preserve_existing=preserve_existing,
+            on_missing=on_missing,
+            db_fallback=db_fallback,
+        )

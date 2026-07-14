@@ -6,7 +6,9 @@ outputs in a fresh workspace, or an archive mirror now holds the durable copy.
 
 The short version:
 
-- Use `hydrate_run_outputs(...)` for prior run outputs.
+- Use `hydrate_run_outputs(...)` for layout-preserving prior run output recovery.
+- Use `hydrate_run_outputs_to_destinations(...)` when an external tool requires
+  particular file or directory paths.
 - Use run-level requested input materialization for inputs needed by a callable.
 - Use `CacheOptions(cache_hydration="inputs-missing",
   validate_materialized_inputs=True)` when a cache-miss run must replace a
@@ -111,6 +113,37 @@ possible. Other destinations require `allow_external_paths=True`.
 
 `hydrate_run_outputs(...)` returns keyed results, so each requested output
 carries its own status, path, and detached artifact view.
+
+## Exact-Destination Output Recovery
+
+When the consumer expects unrelated filesystem locations, use
+`hydrate_run_outputs_to_destinations(...)`. Its mapping is the complete
+requested-output set: every key must be an output of the caller-selected run,
+and each value is the exact destination for that output.
+
+```python
+from pathlib import Path
+
+hydrated = tracker.hydrate_run_outputs_to_destinations(
+    "prior_run_id",
+    destinations_by_key={
+        "persons": tracker.run_dir / "tool_inputs" / "persons.csv",  # one file
+        "skims": tracker.run_dir / "shared" / "skims",  # one directory
+    },
+    source_root=Path("/archive/outputs_mirror"),  # optional
+)
+```
+
+Consist recovers bytes; it does not choose the prior run or prove that an
+external executable consumed the staged paths. The caller owns both decisions.
+Inspect each keyed result because a warning-mode call can have structured
+partial outcomes such as `materialized_from_filesystem`, `preserved_existing`,
+or `missing_source`.
+
+Each requested destination must be under `tracker.run_dir` or a configured
+mount root unless the tracker was created with `allow_external_paths=True`.
+Persisted `OutputSet` hydration is intentionally deferred; this API supports
+ordinary file and directory artifacts only.
 
 ## Compatibility Output Recovery
 

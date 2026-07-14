@@ -246,6 +246,7 @@ class HydratedRunOutputsResult(MappingABC[str, HydratedRunOutput]):
     """
 
     outputs: dict[str, HydratedRunOutput] = field(default_factory=dict)
+    source_run_id: str | None = None
 
     def __getitem__(self, key: str) -> HydratedRunOutput:
         return self.outputs[key]
@@ -638,6 +639,8 @@ def _make_staged_output(
 def _ordered_hydrated_results(
     key_order: Sequence[str],
     outputs: Mapping[str, HydratedRunOutput],
+    *,
+    source_run_id: str | None = None,
 ) -> HydratedRunOutputsResult:
     ordered: dict[str, HydratedRunOutput] = {}
     for key in key_order:
@@ -647,7 +650,10 @@ def _ordered_hydrated_results(
     for key, output in outputs.items():
         if key not in ordered:
             ordered[key] = output
-    return HydratedRunOutputsResult(outputs=ordered)
+    return HydratedRunOutputsResult(
+        outputs=ordered,
+        source_run_id=source_run_id,
+    )
 
 
 def _ordered_staged_results(
@@ -954,6 +960,29 @@ def _get_artifact_owning_run(
         return selected_run
     producing_run = db.get_run(str(artifact_run_id))
     return producing_run or selected_run
+
+
+def _output_set_hydration_kind(tracker: "Tracker", artifact: Artifact) -> str | None:
+    """Return the persisted OutputSet role when Slice 1 must reject it."""
+    artifact_meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+    if artifact.driver == "artifact_set" or artifact_meta.get("artifact_set") is True:
+        return "parent"
+    if artifact_meta.get("output_set_manifest") is True:
+        return "manifest"
+    if artifact_meta.get("output_set_member") is True:
+        return "member"
+    if artifact.parent_artifact_id is None:
+        return None
+
+    parent = tracker.get_parent_artifact(artifact)
+    parent_meta = (
+        parent.meta if parent is not None and isinstance(parent.meta, dict) else {}
+    )
+    if parent is not None and (
+        parent.driver == "artifact_set" or parent_meta.get("artifact_set") is True
+    ):
+        return "member"
+    return None
 
 
 def _derive_historical_remap(
@@ -1749,7 +1778,8 @@ def plan_run_output_hydration(
     tracker: "Tracker",
     run,
     *,
-    target_root: Path,
+    target_root: Path | None,
+    destinations_by_key: Mapping[str, Path] | None = None,
     source_root: Path | None,
     keys: Sequence[str] | None,
     preserve_existing: bool,
@@ -1775,8 +1805,12 @@ def plan_run_output_hydration(
         Tracker providing DB access, filesystem remapping, and mount policy.
     run
         Historical run record whose outputs are being restored.
-    target_root : Path
+    target_root : Path | None
         Root directory under which historical relative layout is recreated.
+        Mutually exclusive with ``destinations_by_key``.
+    destinations_by_key : Mapping[str, Path] | None
+        Exact destination for each requested output key. Its keys define the
+        complete requested-output selection.
     source_root : Path | None
         Optional override root to probe before the original historical source.
     keys : Sequence[str] | None
@@ -1787,6 +1821,11 @@ def plan_run_output_hydration(
         Whether ingested CSV/Parquet artifacts may be exported from DuckDB when
         cold bytes are unavailable.
     """
+    if (target_root is None) == (destinations_by_key is None):
+        raise ValueError(
+            "Provide exactly one of target_root or destinations_by_key for run output hydration."
+        )
+
     outputs: dict[str, HydratedRunOutput] = {}
     raw_outputs = _get_output_artifacts_for_run(tracker, run.id)
 
@@ -1802,7 +1841,26 @@ def plan_run_output_hydration(
 
     outputs_by_key = {artifact.key: artifact for artifact in raw_outputs}
     key_order: tuple[str, ...]
-    if keys is not None:
+    normalized_destinations: dict[str, Path] | None = None
+    if destinations_by_key is not None:
+        if keys is not None:
+            raise ValueError(
+                "keys cannot be combined with destinations_by_key; destination keys select outputs."
+            )
+        normalized_destinations = {
+            key: Path(destination).resolve()
+            for key, destination in destinations_by_key.items()
+        }
+        requested_keys = list(normalized_destinations)
+        missing_keys = [key for key in requested_keys if key not in outputs_by_key]
+        if missing_keys:
+            raise KeyError(
+                "Requested output keys were not found for run "
+                f"{run.id!r}: {', '.join(repr(key) for key in missing_keys)}"
+            )
+        selected_outputs = [outputs_by_key[key] for key in requested_keys]
+        key_order = tuple(requested_keys)
+    elif keys is not None:
         requested_keys = list(keys)
         missing_keys = [key for key in requested_keys if key not in outputs_by_key]
         if missing_keys:
@@ -1816,10 +1874,48 @@ def plan_run_output_hydration(
         selected_outputs = list(raw_outputs)
         key_order = tuple(artifact.key for artifact in selected_outputs)
 
+    if normalized_destinations is not None:
+        unsupported_output_sets = [
+            (artifact.key, kind)
+            for artifact in selected_outputs
+            if (kind := _output_set_hydration_kind(tracker, artifact)) is not None
+        ]
+        if unsupported_output_sets:
+            details = ", ".join(
+                f"{key!r} ({kind})" for key, kind in unsupported_output_sets
+            )
+            raise ValueError(
+                "OutputSet hydration is deferred for Slice 1; "
+                f"requested OutputSet artifacts: {details}."
+            )
+
+    destination_collisions: set[Path] = set()
+    if normalized_destinations is not None:
+        destination_counts = Counter(normalized_destinations.values())
+        destination_collisions = {
+            destination
+            for destination, count in destination_counts.items()
+            if count > 1
+        }
+
     planned_by_destination: dict[Path, PlannedMaterialization] = {}
     conflicted_destinations: set[Path] = set()
 
+    if normalized_destinations is not None:
+        for artifact in selected_outputs:
+            destination = normalized_destinations[artifact.key]
+            if destination in destination_collisions:
+                outputs[artifact.key] = _make_hydrated_output(
+                    artifact,
+                    status="failed",
+                    path=destination,
+                    message=f"destination collision at {destination}",
+                    resolvable=False,
+                )
+
     for artifact in selected_outputs:
+        if artifact.key in outputs:
+            continue
         owning_run = _get_artifact_owning_run(
             tracker, selected_run=run, artifact=artifact
         )
@@ -1840,7 +1936,21 @@ def plan_run_output_hydration(
             )
             continue
 
-        destination = target_root / relative_path
+        destination = (
+            normalized_destinations[artifact.key]
+            if normalized_destinations is not None
+            else cast(Path, target_root) / relative_path
+        )
+
+        if destination in destination_collisions:
+            outputs[artifact.key] = _make_hydrated_output(
+                artifact,
+                status="failed",
+                path=destination,
+                message=f"destination collision at {destination}",
+                resolvable=False,
+            )
+            continue
 
         source_kind: Literal["filesystem", "db_export"]
         planned_source_path: Path | None
@@ -1989,6 +2099,7 @@ def build_run_output_materialize_plan(
         tracker,
         run,
         target_root=target_root,
+        destinations_by_key=None,
         source_root=source_root,
         keys=keys,
         preserve_existing=preserve_existing,
@@ -2171,6 +2282,7 @@ def hydrate_run_outputs(
         tracker,
         run,
         target_root=target_root,
+        destinations_by_key=None,
         source_root=source_root,
         keys=keys,
         preserve_existing=preserve_existing,
@@ -2185,7 +2297,56 @@ def hydrate_run_outputs(
     )
     merged = dict(planned.preflight_results.items())
     merged.update(executed.items())
-    return _ordered_hydrated_results(planned.key_order, merged)
+    return _ordered_hydrated_results(
+        planned.key_order,
+        merged,
+        source_run_id=run.id,
+    )
+
+
+def hydrate_run_outputs_to_destinations(
+    tracker: "Tracker",
+    run,
+    *,
+    destinations_by_key: Mapping[str, Path],
+    source_root: Path | None,
+    allowed_base: Path | Sequence[Path] | None,
+    preserve_existing: bool,
+    on_missing: Literal["warn", "raise"],
+    db_fallback: Literal["never", "if_ingested"],
+) -> HydratedRunOutputsResult:
+    """Hydrate selected run outputs to exact caller-provided destinations."""
+    normalized_destinations = {
+        key: Path(destination).resolve()
+        for key, destination in destinations_by_key.items()
+    }
+    for destination in normalized_destinations.values():
+        validate_allowed_materialization_destination(destination, allowed_base)
+
+    planned = plan_run_output_hydration(
+        tracker,
+        run,
+        target_root=None,
+        destinations_by_key=normalized_destinations,
+        source_root=source_root,
+        keys=None,
+        preserve_existing=preserve_existing,
+        db_fallback=db_fallback,
+    )
+    executed = execute_planned_output_hydration(
+        planned.plan,
+        tracker=tracker,
+        allowed_base=allowed_base,
+        on_missing=on_missing,
+        preserve_existing=preserve_existing,
+    )
+    merged = dict(planned.preflight_results.items())
+    merged.update(executed.items())
+    return _ordered_hydrated_results(
+        planned.key_order,
+        merged,
+        source_run_id=run.id,
+    )
 
 
 def materialize_artifacts(

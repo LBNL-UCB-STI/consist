@@ -125,6 +125,32 @@ def test_hydrate_run_outputs_across_shared_db_workspaces(tmp_path):
     assert restored_path.exists()
 
 
+def test_hydrate_run_outputs_to_destinations_across_shared_db_workspaces(tmp_path):
+    db_path = str(tmp_path / "shared.destinations.duckdb")
+
+    tracker_a = Tracker(run_dir=tmp_path / "runs_a", db_path=db_path)
+    output_path = tracker_a.run_dir / "outputs" / "results.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("a,b\n1,2\n", encoding="utf-8")
+
+    with tracker_a.start_run("historical_destination_run", "model_outputs"):
+        tracker_a.log_artifact(output_path, key="results", direction="output")
+
+    tracker_b = Tracker(run_dir=tmp_path / "runs_b", db_path=db_path)
+    destination = tracker_b.run_dir / "staged" / "external-tool-input.csv"
+    hydrated = tracker_b.hydrate_run_outputs_to_destinations(
+        "historical_destination_run",
+        destinations_by_key={"results": destination},
+    )
+
+    result = hydrated["results"]
+    assert hydrated.source_run_id == "historical_destination_run"
+    assert result.status == "materialized_from_filesystem"
+    assert result.path == destination.resolve()
+    assert result.artifact.as_path() == destination.resolve()
+    assert destination.read_text(encoding="utf-8") == "a,b\n1,2\n"
+
+
 def test_artifact_accessor_helpers_support_attached_and_explicit_tracker(
     tracker: Tracker, run_dir
 ):

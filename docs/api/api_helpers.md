@@ -22,6 +22,7 @@ a tracker object to every call.
   `consist.load`, `consist.load_df`
 - Transit feeds: `consist.canonicalize_gtfs`
 - Recovery/staging/archive: `consist.hydrate_run_outputs`,
+  `consist.hydrate_run_outputs_to_destinations`,
   `consist.materialize_run_outputs`, `consist.materialize_artifact`,
   `consist.stage_artifact`, `consist.stage_inputs`,
   `consist.set_artifact_recovery_roots`, `consist.register_artifact_recovery_copy`,
@@ -126,6 +127,7 @@ For class-level equivalents, see [Tracker](tracker.md) and
         - ibis_view
         - ibis_grouped_view
         - hydrate_run_outputs
+        - hydrate_run_outputs_to_destinations
         - materialize_run_outputs
         - materialize_artifact
         - stage_artifact

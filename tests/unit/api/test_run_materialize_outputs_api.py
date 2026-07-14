@@ -11,6 +11,9 @@ import pytest
 import consist
 import consist.core.materialize as consist_materialize
 from consist.api import hydrate_run_outputs as hydrate_run_outputs_api
+from consist.api import (
+    hydrate_run_outputs_to_destinations as hydrate_run_outputs_to_destinations_api,
+)
 from consist.api import materialize_run_outputs as materialize_run_outputs_api
 from consist.api import archive_artifact as archive_artifact_api
 from consist.api import archive_current_run_outputs as archive_current_run_outputs_api
@@ -1840,5 +1843,51 @@ def test_api_hydrate_run_outputs_passes_invalid_runtime_options_to_tracker(
             "db_fallback": (
                 "if_ingested" if field_name != "db_fallback" else field_value
             ),
+        },
+    }
+
+
+def test_api_hydrate_run_outputs_to_destinations_delegates_and_is_exported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
+
+    class _FakeTracker:
+        def hydrate_run_outputs_to_destinations(self, run_id: str, **kwargs):
+            calls["run_id"] = run_id
+            calls["kwargs"] = kwargs
+            return "hydrated-destinations-result"
+
+    fake_tracker = _FakeTracker()
+    monkeypatch.setattr(
+        "consist.api._resolve_tracker", lambda tracker=None: fake_tracker
+    )
+
+    destinations = {
+        "persons": "/tmp/staged/persons.csv",
+        "skims": "/tmp/staged/skims",
+    }
+    result = hydrate_run_outputs_to_destinations_api(
+        "run_1",
+        destinations_by_key=destinations,
+        source_root="/tmp/archive",
+        preserve_existing=False,
+        on_missing="raise",
+        db_fallback="never",
+    )
+
+    assert result == "hydrated-destinations-result"
+    assert (
+        consist.hydrate_run_outputs_to_destinations
+        is hydrate_run_outputs_to_destinations_api
+    )
+    assert calls == {
+        "run_id": "run_1",
+        "kwargs": {
+            "destinations_by_key": destinations,
+            "source_root": "/tmp/archive",
+            "preserve_existing": False,
+            "on_missing": "raise",
+            "db_fallback": "never",
         },
     }

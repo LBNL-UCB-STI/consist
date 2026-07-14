@@ -6,13 +6,16 @@ ingested artifacts provide a fallback byte source.
 
 Consist has three related filesystem recovery and staging stories:
 
-- historical output recovery, which starts with `hydrate_run_outputs(...)`
+- historical output recovery, which starts with `hydrate_run_outputs(...)` or
+  `hydrate_run_outputs_to_destinations(...)`
 - single-artifact recovery, which starts with `materialize_artifact(...)`
 - canonical input staging, which starts with
   `ExecutionOptions(input_materialization="requested", input_paths={...})` on
   `run(...)` and `ScenarioContext.run(...)`
 
-For historical output recovery, start with `hydrate_run_outputs(...)`.
+For layout-preserving historical output recovery, start with
+`hydrate_run_outputs(...)`. When a consumer needs exact, unrelated paths,
+use `hydrate_run_outputs_to_destinations(...)`.
 
 It is the clearest API for restart, archive-mirror recovery, and
 cross-workspace reuse because it answers the practical questions in one call:
@@ -26,6 +29,29 @@ but returns the older aggregate
 [`MaterializationResult`](#consist.core.materialize.MaterializationResult).
 Keep it for compatibility or summary-style reporting; use
 `hydrate_run_outputs(...)` for new workflows.
+
+### Exact destinations
+
+`hydrate_run_outputs_to_destinations(...)` makes the caller-provided mapping
+the complete requested-output set. It supports ordinary artifact files and
+directories, including unrelated destinations:
+
+```python
+hydrated = tracker.hydrate_run_outputs_to_destinations(
+    "prior_run_id",
+    destinations_by_key={
+        "persons": tracker.run_dir / "tool_inputs" / "persons.csv",
+        "skims": tracker.run_dir / "shared" / "skims",
+    },
+)
+```
+
+The caller selects the historical run and is responsible for verifying that an
+external tool consumes these staged paths. Results are keyed and can be partial
+in warning mode, so inspect each status before invoking that tool. Every
+destination must be inside the tracker's run directory or a configured mount
+root unless `allow_external_paths=True`. Persisted `OutputSet` hydration is
+deferred from this slice.
 
 Use `materialize_artifact(...)` when you already have one artifact object and
 need Consist to recover its bytes into a target workspace root. It is the
