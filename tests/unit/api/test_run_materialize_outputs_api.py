@@ -1272,6 +1272,7 @@ def test_archive_run_output_files_retry_repairs_failed_metadata(
             "producer_archive_retry_metadata", archive_root
         )
 
+    output_path.unlink()
     second = tracker.archive_run_output_files(
         "producer_archive_retry_metadata", archive_root
     )
@@ -1280,6 +1281,36 @@ def test_archive_run_output_files_retry_repairs_failed_metadata(
     assert first["retry_metadata"].metadata_committed is False
     assert second["retry_metadata"].copy_status == "preserved_existing"
     assert second["retry_metadata"].metadata_committed is True
+
+
+def test_archive_run_output_files_reports_existing_target_without_source_when_not_preserving(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "existing_without_source.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n11\n", encoding="utf-8")
+    archive_root = tmp_path / "archive_existing_without_source"
+    target = archive_root / "outputs" / "existing_without_source.csv"
+    target.parent.mkdir(parents=True)
+    target.write_text("value\n11\n", encoding="utf-8")
+
+    with tracker.start_run(
+        "producer_archive_existing_without_source", model="producer"
+    ):
+        tracker.log_artifact(
+            output_path, key="existing_without_source", direction="output"
+        )
+
+    output_path.unlink()
+    report = tracker.archive_run_output_files(
+        "producer_archive_existing_without_source",
+        archive_root,
+        preserve_existing=False,
+    )
+
+    assert report["existing_without_source"].copy_status == "destination_exists"
+    assert report["existing_without_source"].metadata_committed is False
 
 
 def test_archive_run_output_files_reports_one_fallback_metadata_failure(

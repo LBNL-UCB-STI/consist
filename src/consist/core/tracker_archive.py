@@ -636,6 +636,79 @@ class TrackerArchiveService(_TrackerServiceBase):
                 )
                 continue
 
+            if has_symlink_component(target_path):
+                result(
+                    artifact,
+                    key,
+                    "symlink_destination",
+                    "failed",
+                    target_path=target_path,
+                    message="Symlink detected in recovery destination.",
+                )
+                continue
+
+            if target_path.exists():
+                if not preserve_existing:
+                    result(
+                        artifact,
+                        key,
+                        "destination_exists",
+                        "failed",
+                        target_path=target_path,
+                        message="Archive destination already exists.",
+                    )
+                    continue
+                if not target_path.is_file():
+                    result(
+                        artifact,
+                        key,
+                        "destination_exists",
+                        "failed",
+                        target_path=target_path,
+                        message="Archive destination is not a regular file.",
+                    )
+                    continue
+                if verify:
+                    try:
+                        matches = _compute_file_sha256(target_path) == artifact.hash
+                    except OSError as exc:
+                        result(
+                            artifact,
+                            key,
+                            "destination_exists",
+                            "failed",
+                            target_path=target_path,
+                            message=f"Could not hash archive destination: {exc}",
+                        )
+                        continue
+                    if not matches:
+                        result(
+                            artifact,
+                            key,
+                            "destination_exists",
+                            "hash_mismatch",
+                            target_path=target_path,
+                            message="Archive destination hash did not match artifact hash.",
+                        )
+                        continue
+                    result(
+                        artifact,
+                        key,
+                        "preserved_existing",
+                        "verified",
+                        target_path=target_path,
+                    )
+                else:
+                    result(
+                        artifact,
+                        key,
+                        "preserved_existing",
+                        "not_requested",
+                        target_path=target_path,
+                    )
+                eligible.append(key)
+                continue
+
             source_path: Path | None = None
             if producing_run is not None:
                 try:
@@ -694,17 +767,6 @@ class TrackerArchiveService(_TrackerServiceBase):
                 )
                 continue
 
-            if has_symlink_component(target_path):
-                result(
-                    artifact,
-                    key,
-                    "symlink_destination",
-                    "failed",
-                    source_path=source_path,
-                    target_path=target_path,
-                    message="Symlink detected in recovery destination.",
-                )
-                continue
             try:
                 target_path.parent.mkdir(parents=True, exist_ok=True)
             except OSError as exc:
@@ -728,74 +790,6 @@ class TrackerArchiveService(_TrackerServiceBase):
                     target_path=target_path,
                     message="Symlink detected in recovery destination.",
                 )
-                continue
-
-            if target_path.exists():
-                if not preserve_existing:
-                    result(
-                        artifact,
-                        key,
-                        "destination_exists",
-                        "failed",
-                        source_path=source_path,
-                        target_path=target_path,
-                        message="Archive destination already exists.",
-                    )
-                    continue
-                if not target_path.is_file():
-                    result(
-                        artifact,
-                        key,
-                        "destination_exists",
-                        "failed",
-                        source_path=source_path,
-                        target_path=target_path,
-                        message="Archive destination is not a regular file.",
-                    )
-                    continue
-                if verify:
-                    try:
-                        matches = _compute_file_sha256(target_path) == artifact.hash
-                    except OSError as exc:
-                        result(
-                            artifact,
-                            key,
-                            "destination_exists",
-                            "failed",
-                            source_path=source_path,
-                            target_path=target_path,
-                            message=f"Could not hash archive destination: {exc}",
-                        )
-                        continue
-                    if not matches:
-                        result(
-                            artifact,
-                            key,
-                            "destination_exists",
-                            "hash_mismatch",
-                            source_path=source_path,
-                            target_path=target_path,
-                            message="Archive destination hash did not match artifact hash.",
-                        )
-                        continue
-                    result(
-                        artifact,
-                        key,
-                        "preserved_existing",
-                        "verified",
-                        source_path=source_path,
-                        target_path=target_path,
-                    )
-                else:
-                    result(
-                        artifact,
-                        key,
-                        "preserved_existing",
-                        "not_requested",
-                        source_path=source_path,
-                        target_path=target_path,
-                    )
-                eligible.append(key)
                 continue
 
             try:
