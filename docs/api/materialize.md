@@ -41,7 +41,7 @@ hydrated = tracker.hydrate_run_outputs_to_destinations(
     "prior_run_id",
     destinations_by_key={
         "persons": tracker.run_dir / "tool_inputs" / "persons.csv",
-        "skims": tracker.run_dir / "shared" / "skims",
+        "skims": tracker.run_dir / "shared" / "skims.zarr",
     },
 )
 ```
@@ -51,7 +51,20 @@ external tool consumes these staged paths. Results are keyed and can be partial
 in warning mode, so inspect each status before invoking that tool. Every
 destination must be inside the tracker's run directory or a configured mount
 root unless `allow_external_paths=True`. Persisted `OutputSet` hydration is
-deferred from this slice.
+deferred from this slice. Newly logged Zarr outputs are immutable directory
+artifacts automatically; other directory trees require
+`log_output(..., artifact_kind="directory")`. Newly logged Shapefile outputs
+are immutable file bundles automatically: Consist records the `.shp`, `.shx`,
+and `.dbf` files plus every same-stem regular sidecar. Zarr and Shapefile
+artifacts retain their native drivers for `consist.load(...)`.
+
+For strict archive recovery, pair `db_fallback="never"` with an explicit
+`source_root`; Consist uses only that archive root and atomically publishes a
+verified tree. A Shapefile destination is a clean bundle-root directory, not a
+shared `.shp` parent: the returned item's `path` is that root and `entry_path`
+is the loadable `.shp` inside it. Legacy Zarr and Shapefile rows without their
+respective persisted manifests cannot use exact archive or hydration and must
+be re-logged under this contract.
 
 Use `materialize_artifact(...)` when you already have one artifact object and
 need Consist to recover its bytes into a target workspace root. It is the

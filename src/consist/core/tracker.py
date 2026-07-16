@@ -2805,6 +2805,10 @@ class Tracker:
         facet: Optional[FacetLike] = None,
         facet_schema_version: Optional[Union[str, int]] = None,
         facet_index: bool = False,
+        *,
+        artifact_kind: Literal["file", "directory"] = "file",
+        schema: Optional[Type[SQLModel]] = None,
+        driver: Optional[str] = None,
         **meta: Any,
     ) -> Artifact:
         """
@@ -2816,6 +2820,15 @@ class Tracker:
             A file path (str/Path) or an existing `Artifact` reference to be logged.
         key : Optional[str], optional
             A semantic, human-readable name for the artifact.
+        artifact_kind : {"file", "directory"}, default "file"
+            Declare an immutable logical directory artifact. Directory outputs
+            persist a complete member manifest while retaining their content
+            driver for archive-safe recovery and format-aware loading.
+        schema : Optional[Type[SQLModel]], optional
+            Optional schema metadata for the output artifact.
+        driver : Optional[str], optional
+            Explicit content driver. Zarr directories infer ``"zarr"`` when
+            the path ends in ``.zarr``.
         content_hash : Optional[str], optional
             Precomputed artifact fingerprint to use instead of hashing the path
             on disk. When provided, Consist stores it on the canonical public
@@ -2844,10 +2857,41 @@ class Tracker:
         Artifact
             The created or updated `Artifact` object.
         """
+        if artifact_kind not in {"file", "directory"}:
+            raise ValueError("artifact_kind must be 'file' or 'directory'.")
+
+        if artifact_kind == "directory":
+            if isinstance(path, Artifact) or not isinstance(path, (str, Path)):
+                raise TypeError("directory outputs must be logged from a path.")
+            if driver == "artifact_directory":
+                raise ValueError(
+                    "artifact_directory is not a content driver; use a format driver "
+                    "such as 'zarr' or let Consist infer one."
+                )
+            return self.log_artifact(
+                path,
+                key=key,
+                direction="output",
+                schema=schema,
+                driver=driver,
+                content_hash=content_hash,
+                force_hash_override=force_hash_override,
+                validate_content_hash=validate_content_hash,
+                reuse_if_unchanged=reuse_if_unchanged,
+                reuse_scope=reuse_scope,
+                facet=facet,
+                facet_schema_version=facet_schema_version,
+                facet_index=facet_index,
+                directory_artifact=True,
+                **meta,
+            )
+
         return self.log_artifact(
             path,
             key=key,
             direction="output",
+            schema=schema,
+            driver=driver,
             content_hash=content_hash,
             force_hash_override=force_hash_override,
             validate_content_hash=validate_content_hash,

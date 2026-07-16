@@ -41,6 +41,13 @@ from sqlalchemy import MetaData, Table, select
 from sqlalchemy.exc import SQLAlchemyError
 
 from consist.core.container_policy import validate_recovery_registration_policy
+from consist.core.directory_artifacts import (
+    materialize_directory_tree,
+    materialize_shapefile_bundle,
+    validate_directory_destination,
+    validate_directory_manifest,
+    validate_shapefile_bundle_destination,
+)
 from consist.core.stores import get_hot_data_engine
 from consist.models.artifact import Artifact
 
@@ -49,6 +56,8 @@ if TYPE_CHECKING:
 
 HydrationStatus = Literal[
     "materialized_from_filesystem",
+    "materialized_directory_from_filesystem",
+    "materialized_file_bundle_from_filesystem",
     "materialized_from_db",
     "preserved_existing",
     "skipped_unmapped",
@@ -227,6 +236,8 @@ class HydratedRunOutput:
     artifact: Artifact
     path: Path | None
     status: HydrationStatus
+    artifact_kind: Literal["file", "directory", "file_bundle"] = "file"
+    entry_path: Path | None = None
     message: str | None = None
     resolvable: bool = False
 
@@ -348,6 +359,8 @@ class HydratedRunOutputsResult(MappingABC[str, HydratedRunOutput]):
         """Return deterministic per-status hydration counts."""
         counts: dict[str, int] = {
             "materialized_from_filesystem": 0,
+            "materialized_directory_from_filesystem": 0,
+            "materialized_file_bundle_from_filesystem": 0,
             "materialized_from_db": 0,
             "preserved_existing": 0,
             "skipped_unmapped": 0,
@@ -358,6 +371,8 @@ class HydratedRunOutputsResult(MappingABC[str, HydratedRunOutput]):
             counts[output.status] += 1
         return (
             f"materialized_fs={counts['materialized_from_filesystem']} "
+            f"materialized_directory_fs={counts['materialized_directory_from_filesystem']} "
+            f"materialized_file_bundle_fs={counts['materialized_file_bundle_from_filesystem']} "
             f"materialized_db={counts['materialized_from_db']} "
             f"preserved_existing={counts['preserved_existing']} "
             f"skipped_unmapped={counts['skipped_unmapped']} "
@@ -744,22 +759,89 @@ def _make_hydrated_output(
     *,
     status: HydrationStatus,
     path: Path | None,
+    entry_path: Path | None = None,
     message: str | None = None,
     resolvable: bool,
 ) -> HydratedRunOutput:
     normalized_path = path.resolve() if path is not None else None
+    normalized_entry_path = entry_path.resolve() if entry_path is not None else None
     detached = _detach_artifact_for_hydration(
         artifact,
-        hydrated_path=normalized_path if resolvable else None,
+        hydrated_path=(normalized_entry_path or normalized_path)
+        if resolvable
+        else None,
     )
     return HydratedRunOutput(
         key=artifact.key,
         artifact=detached,
         path=normalized_path,
         status=status,
+        artifact_kind=(
+            "directory"
+            if _is_directory_artifact(artifact)
+            else "file_bundle"
+            if _is_file_bundle_artifact(artifact)
+            else "file"
+        ),
+        entry_path=normalized_entry_path,
         message=message,
         resolvable=resolvable,
     )
+
+
+def _is_directory_artifact(artifact: Artifact) -> bool:
+    """Return whether an artifact has the strict directory-artifact contract."""
+    meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+    return meta.get("directory_artifact") is True
+
+
+def _is_file_bundle_artifact(artifact: Artifact) -> bool:
+    """Return whether an artifact has the strict Shapefile bundle contract."""
+    meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+    return meta.get("file_bundle_artifact") is True
+
+
+def _shapefile_bundle_metadata(artifact: Artifact) -> tuple[str, dict[str, object]]:
+    meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+    entry = meta.get("file_bundle_entry")
+    manifest = meta.get("file_bundle_manifest")
+    if not isinstance(entry, str) or Path(entry).name != entry:
+        raise ValueError(
+            f"shapefile bundle artifact {artifact.key!r} has no valid entry"
+        )
+    if not isinstance(manifest, Mapping):
+        raise ValueError(f"shapefile bundle artifact {artifact.key!r} has no manifest")
+    normalized = validate_directory_manifest(manifest)
+    if artifact.hash != normalized["tree_hash"]:
+        raise ValueError(
+            f"shapefile bundle artifact {artifact.key!r} manifest does not match artifact identity"
+        )
+    return entry, normalized
+
+
+def _is_legacy_zarr_artifact(artifact: Artifact) -> bool:
+    """Return whether a Zarr artifact predates immutable-tree manifests."""
+    return artifact.driver == "zarr" and not _is_directory_artifact(artifact)
+
+
+def _is_legacy_shapefile_artifact(artifact: Artifact) -> bool:
+    """Return whether a Shapefile artifact predates immutable bundle manifests."""
+    return artifact.driver == "shapefile" and not _is_file_bundle_artifact(artifact)
+
+
+def _directory_artifact_manifest(artifact: Artifact) -> dict[str, object]:
+    meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+    manifest = meta.get("directory_manifest")
+    if not isinstance(manifest, Mapping):
+        raise ValueError(
+            f"directory artifact {artifact.key!r} has no persisted manifest"
+        )
+    normalized = validate_directory_manifest(manifest)
+    if artifact.hash != normalized["tree_hash"]:
+        raise ValueError(
+            f"directory artifact {artifact.key!r} manifest does not match artifact identity"
+        )
+    return normalized
 
 
 def _make_materialized_artifact(
@@ -866,7 +948,15 @@ def fold_hydrated_run_outputs_result(
     """
     folded = MaterializationResult()
     for key, output in result.items():
-        if output.status == "materialized_from_filesystem" and output.path is not None:
+        if (
+            output.status
+            in {
+                "materialized_from_filesystem",
+                "materialized_directory_from_filesystem",
+                "materialized_file_bundle_from_filesystem",
+            }
+            and output.path is not None
+        ):
             folded.materialized_from_filesystem[key] = str(output.path)
         elif output.status == "materialized_from_db" and output.path is not None:
             folded.materialized_from_db[key] = str(output.path)
@@ -1392,7 +1482,11 @@ def find_existing_recovery_source_path(
         if candidate.exists() and (
             source_validator is None or source_validator(validator_path)
         ):
-            return relative_path, candidate.resolve(), True
+            return (
+                relative_path,
+                candidate if preserve_raw_paths else candidate.resolve(),
+                True,
+            )
 
     return relative_path, None, bool(candidate_roots)
 
@@ -2187,17 +2281,18 @@ def plan_run_output_hydration(
 
     outputs_by_key = {artifact.key: artifact for artifact in raw_outputs}
     key_order: tuple[str, ...]
+    requested_destinations: dict[str, Path] | None = None
     normalized_destinations: dict[str, Path] | None = None
     if destinations_by_key is not None:
         if keys is not None:
             raise ValueError(
                 "keys cannot be combined with destinations_by_key; destination keys select outputs."
             )
-        normalized_destinations = {
-            key: Path(destination).resolve()
+        requested_destinations = {
+            key: Path(destination).expanduser().absolute()
             for key, destination in destinations_by_key.items()
         }
-        requested_keys = list(normalized_destinations)
+        requested_keys = list(requested_destinations)
         missing_keys = [key for key in requested_keys if key not in outputs_by_key]
         if missing_keys:
             raise KeyError(
@@ -2219,6 +2314,30 @@ def plan_run_output_hydration(
     else:
         selected_outputs = list(raw_outputs)
         key_order = tuple(artifact.key for artifact in selected_outputs)
+
+    if requested_destinations is not None:
+        normalized_destinations = {
+            artifact.key: (
+                requested_destinations[artifact.key]
+                if _is_directory_artifact(artifact)
+                or _is_file_bundle_artifact(artifact)
+                else requested_destinations[artifact.key].resolve()
+            )
+            for artifact in selected_outputs
+        }
+
+    if (
+        db_fallback == "never"
+        and source_root is None
+        and any(
+            _is_directory_artifact(artifact) or _is_file_bundle_artifact(artifact)
+            for artifact in selected_outputs
+        )
+    ):
+        raise ValueError(
+            "immutable directory and file-bundle hydration with db_fallback='never' "
+            "requires source_root"
+        )
 
     if normalized_destinations is not None:
         unsupported_output_sets = [
@@ -2262,17 +2381,129 @@ def plan_run_output_hydration(
     for artifact in selected_outputs:
         if artifact.key in outputs:
             continue
-        owning_run = _get_artifact_owning_run(
-            tracker, selected_run=run, artifact=artifact
-        )
-        relative_path, source_path, has_candidate_roots = (
-            find_existing_recovery_source_path(
-                tracker,
-                artifact=artifact,
-                run=owning_run,
-                source_root=source_root,
+        if _is_legacy_zarr_artifact(artifact):
+            outputs[artifact.key] = _make_hydrated_output(
+                artifact,
+                status="failed",
+                path=(
+                    normalized_destinations[artifact.key]
+                    if normalized_destinations is not None
+                    else None
+                ),
+                message=(
+                    "legacy Zarr artifacts without an immutable directory manifest "
+                    "cannot be hydrated; re-log the output under the current contract."
+                ),
+                resolvable=False,
             )
-        )
+            continue
+        if _is_legacy_shapefile_artifact(artifact):
+            outputs[artifact.key] = _make_hydrated_output(
+                artifact,
+                status="failed",
+                path=(
+                    normalized_destinations[artifact.key]
+                    if normalized_destinations is not None
+                    else None
+                ),
+                message=(
+                    "legacy Shapefile artifacts without an immutable bundle manifest "
+                    "cannot be hydrated; re-log the output under the current contract."
+                ),
+                resolvable=False,
+            )
+            continue
+        if _is_directory_artifact(artifact) and normalized_destinations is not None:
+            destination = normalized_destinations[artifact.key]
+            try:
+                preserved = validate_directory_destination(
+                    destination,
+                    _directory_artifact_manifest(artifact),
+                    preserve_existing=preserve_existing,
+                )
+            except ValueError as exc:
+                outputs[artifact.key] = _make_hydrated_output(
+                    artifact,
+                    status="failed",
+                    path=destination,
+                    message=str(exc),
+                    resolvable=False,
+                )
+                continue
+            if preserved:
+                outputs[artifact.key] = _make_hydrated_output(
+                    artifact,
+                    status="preserved_existing",
+                    path=destination,
+                    resolvable=True,
+                )
+                continue
+        if _is_file_bundle_artifact(artifact) and normalized_destinations is not None:
+            destination = normalized_destinations[artifact.key]
+            try:
+                entry, manifest = _shapefile_bundle_metadata(artifact)
+                preserved = validate_shapefile_bundle_destination(
+                    destination,
+                    entry,
+                    manifest,
+                    preserve_existing=preserve_existing,
+                )
+            except ValueError as exc:
+                outputs[artifact.key] = _make_hydrated_output(
+                    artifact,
+                    status="failed",
+                    path=destination,
+                    message=str(exc),
+                    resolvable=False,
+                )
+                continue
+            if preserved:
+                outputs[artifact.key] = _make_hydrated_output(
+                    artifact,
+                    status="preserved_existing",
+                    path=destination,
+                    entry_path=destination / entry,
+                    resolvable=True,
+                )
+                continue
+        if _is_directory_artifact(artifact) and db_fallback == "never":
+            _directory_artifact_manifest(artifact)
+            relative_path = tracker.fs.get_remappable_relative_path(
+                artifact.container_uri
+            )
+            source_path = (
+                Path(source_root) / relative_path
+                if source_root is not None and relative_path is not None
+                else None
+            )
+            has_candidate_roots = relative_path is not None
+        elif _is_file_bundle_artifact(artifact) and db_fallback == "never":
+            _shapefile_bundle_metadata(artifact)
+            relative_path = tracker.fs.get_remappable_relative_path(
+                artifact.container_uri
+            )
+            source_path = (
+                Path(source_root) / relative_path
+                if source_root is not None and relative_path is not None
+                else None
+            )
+            has_candidate_roots = relative_path is not None
+        else:
+            owning_run = _get_artifact_owning_run(
+                tracker, selected_run=run, artifact=artifact
+            )
+            relative_path, source_path, has_candidate_roots = (
+                find_existing_recovery_source_path(
+                    tracker,
+                    artifact=artifact,
+                    run=owning_run,
+                    source_root=source_root,
+                )
+            )
+            if _is_file_bundle_artifact(artifact) and source_path is not None:
+                source_path = (
+                    source_path if source_path.is_dir() else source_path.parent
+                )
         if relative_path is None:
             outputs[artifact.key] = _make_hydrated_output(
                 artifact,
@@ -2401,7 +2632,12 @@ def plan_run_output_hydration(
         planned_by_destination.values(),
         key=lambda item: (str(item.destination), item.keys),
     ):
-        if preserve_existing and item.destination.exists():
+        if (
+            preserve_existing
+            and item.destination.exists()
+            and not _is_directory_artifact(item.artifact)
+            and not _is_file_bundle_artifact(item.artifact)
+        ):
             if item.destination.is_symlink():
                 for key in item.keys:
                     artifact = cast(Mapping[str, Artifact], item.artifacts_by_key)[key]
@@ -2511,6 +2747,58 @@ def execute_planned_output_hydration(
     for item in plan:
         try:
             _validate_allowed_base(item.destination, allowed_base)
+
+            if _is_directory_artifact(item.artifact):
+                if item.source_path is None or not item.source_path.exists():
+                    raise FileNotFoundError(f"source path missing ({item.source_path})")
+                manifest = _directory_artifact_manifest(item.artifact)
+                materialized = materialize_directory_tree(
+                    item.source_path,
+                    item.destination,
+                    manifest,
+                    preserve_existing=preserve_existing,
+                )
+                status: HydrationStatus = (
+                    "materialized_directory_from_filesystem"
+                    if materialized
+                    else "preserved_existing"
+                )
+                for key in item.keys:
+                    artifact = cast(Mapping[str, Artifact], item.artifacts_by_key)[key]
+                    outputs[key] = _make_hydrated_output(
+                        artifact,
+                        status=status,
+                        path=item.destination,
+                        resolvable=True,
+                    )
+                continue
+
+            if _is_file_bundle_artifact(item.artifact):
+                if item.source_path is None or not item.source_path.exists():
+                    raise FileNotFoundError(f"source path missing ({item.source_path})")
+                entry, manifest = _shapefile_bundle_metadata(item.artifact)
+                materialized = materialize_shapefile_bundle(
+                    item.source_path,
+                    item.destination,
+                    entry,
+                    manifest,
+                    preserve_existing=preserve_existing,
+                )
+                status: HydrationStatus = (
+                    "materialized_file_bundle_from_filesystem"
+                    if materialized
+                    else "preserved_existing"
+                )
+                for key in item.keys:
+                    artifact = cast(Mapping[str, Artifact], item.artifacts_by_key)[key]
+                    outputs[key] = _make_hydrated_output(
+                        artifact,
+                        status=status,
+                        path=item.destination,
+                        entry_path=item.destination / entry,
+                        resolvable=True,
+                    )
+                continue
 
             if item.source_kind == "filesystem":
                 if item.source_path is None or not item.source_path.exists():
@@ -2746,7 +3034,7 @@ def hydrate_run_outputs_to_destinations(
         Per-key results using the supplied exact destinations.
     """
     normalized_destinations = {
-        key: Path(destination).resolve()
+        key: Path(destination).expanduser().absolute()
         for key, destination in destinations_by_key.items()
     }
     for destination in normalized_destinations.values():

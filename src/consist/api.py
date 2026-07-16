@@ -2122,6 +2122,7 @@ def log_output(
     path: ArtifactRef,
     key: Optional[str] = None,
     *,
+    artifact_kind: Literal["file", "directory"] = "file",
     schema: Optional[Type[SQLModel]] = None,
     driver: Optional[str] = None,
     content_hash: Optional[str] = None,
@@ -2145,6 +2146,10 @@ def log_output(
     key : Optional[str]
         Semantic name for the artifact (e.g. "processed_results"). Required if `path`
         is a file path.
+    artifact_kind : {"file", "directory"}, default "file"
+        Declare an immutable directory artifact with a complete persisted tree
+        manifest. The artifact retains its content driver (for example,
+        ``"zarr"``) for loading and type narrowing.
     schema : Optional[Type[SQLModel]]
         Optional SQLModel class defining the data structure.
     driver : Optional[str]
@@ -2178,6 +2183,25 @@ def log_output(
     ArtifactLike
         The logged artifact reference.
     """
+    if artifact_kind not in {"file", "directory"}:
+        raise ValueError("artifact_kind must be 'file' or 'directory'.")
+    if artifact_kind == "directory" and enabled:
+        return get_active_tracker().log_output(
+            path,
+            key=key,
+            artifact_kind=artifact_kind,
+            schema=schema,
+            driver=driver,
+            content_hash=content_hash,
+            force_hash_override=force_hash_override,
+            validate_content_hash=validate_content_hash,
+            reuse_if_unchanged=reuse_if_unchanged,
+            reuse_scope=reuse_scope,
+            facet=facet,
+            facet_schema_version=facet_schema_version,
+            facet_index=facet_index,
+            **meta,
+        )
     return log_artifact(
         path=path,
         key=key,

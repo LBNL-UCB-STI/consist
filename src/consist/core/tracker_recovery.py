@@ -425,7 +425,7 @@ class TrackerRecoveryService(_TrackerServiceBase):
                 "destinations_by_key must be a mapping of output keys to paths."
             )
 
-        normalized_destinations: dict[str, Path] = {}
+        requested_destinations: dict[str, Path] = {}
         for key, destination in destinations_by_key.items():
             if not isinstance(key, str):
                 raise TypeError(
@@ -435,7 +435,7 @@ class TrackerRecoveryService(_TrackerServiceBase):
                 raise TypeError(
                     "destinations_by_key values must be str or Path instances."
                 )
-            normalized_destinations[key] = Path(destination).resolve()
+            requested_destinations[key] = Path(destination).expanduser().absolute()
 
         validate_materialize_option(
             name="on_missing",
@@ -457,6 +457,21 @@ class TrackerRecoveryService(_TrackerServiceBase):
         if run is None:
             raise KeyError(f"Run {run_id!r} was not found.")
 
+        requested_outputs = self.get_run_outputs(run_id)
+        strict_tree_keys = {
+            key
+            for key, artifact in requested_outputs.items()
+            if isinstance(artifact.meta, dict)
+            and (
+                artifact.meta.get("directory_artifact") is True
+                or artifact.meta.get("file_bundle_artifact") is True
+            )
+        }
+        normalized_destinations = {
+            key: (destination if key in strict_tree_keys else destination.resolve())
+            for key, destination in requested_destinations.items()
+        }
+
         from consist.core import materialize as materialize_core
 
         allowed_roots = materialize_core.build_allowed_materialization_roots(
@@ -469,9 +484,14 @@ class TrackerRecoveryService(_TrackerServiceBase):
                 destination, allowed_roots
             )
 
-        source_root_override = (
-            Path(source_root).resolve() if source_root is not None else None
-        )
+        source_root_override = None
+        if source_root is not None:
+            source_root_path = Path(source_root).expanduser().absolute()
+            source_root_override = (
+                source_root_path
+                if strict_tree_keys and db_fallback == "never"
+                else source_root_path.resolve()
+            )
 
         from consist.core import tracker as tracker_module
 
