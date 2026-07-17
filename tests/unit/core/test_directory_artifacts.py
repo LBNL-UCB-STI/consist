@@ -12,6 +12,8 @@ import consist.core.directory_artifacts as directory_artifacts
 from consist.core.directory_artifacts import (
     build_directory_manifest,
     build_shapefile_bundle_manifest,
+    materialize_directory_tree,
+    materialize_shapefile_bundle,
     validate_directory_manifest,
     validate_directory_tree,
     validate_shapefile_bundle_root,
@@ -72,6 +74,141 @@ def test_shapefile_bundle_manifest_is_stable_and_exact(tmp_path: Path) -> None:
     (tmp_path / "roads.cpg").write_text("UTF-8")
     with pytest.raises(ValueError, match="unexpected"):
         validate_shapefile_bundle_root(shapefile.parent, shapefile.name, manifest)
+
+
+def test_materializers_preserve_verified_destinations_without_source_bytes(
+    tmp_path: Path,
+) -> None:
+    """Exact destinations are reusable without consulting unavailable sources."""
+    directory_source = tmp_path / "directory_source"
+    (directory_source / "nested").mkdir(parents=True)
+    (directory_source / "nested" / "0.0").write_bytes(b"skim")
+    directory_manifest = build_directory_manifest(directory_source)
+    directory_destination = tmp_path / "directory_destination"
+    shutil.copytree(directory_source, directory_destination)
+    shutil.rmtree(directory_source)
+
+    assert (
+        materialize_directory_tree(
+            directory_source,
+            directory_destination,
+            directory_manifest,
+            preserve_existing=True,
+        )
+        is False
+    )
+    with pytest.raises(ValueError, match="preserve_existing=False"):
+        materialize_directory_tree(
+            directory_source,
+            directory_destination,
+            directory_manifest,
+            preserve_existing=False,
+        )
+
+    bundle_source_root = tmp_path / "bundle_source"
+    bundle_source = bundle_source_root / "roads.shp"
+    _write_shapefile_bundle(bundle_source)
+    bundle_manifest = build_shapefile_bundle_manifest(bundle_source)
+    bundle_destination = tmp_path / "bundle_destination"
+    shutil.copytree(bundle_source_root, bundle_destination)
+    shutil.rmtree(bundle_source_root)
+
+    assert (
+        materialize_shapefile_bundle(
+            bundle_source_root,
+            bundle_destination,
+            "roads.shp",
+            bundle_manifest,
+            preserve_existing=True,
+        )
+        is False
+    )
+    with pytest.raises(ValueError, match="preserve_existing=False"):
+        materialize_shapefile_bundle(
+            bundle_source_root,
+            bundle_destination,
+            "roads.shp",
+            bundle_manifest,
+            preserve_existing=False,
+        )
+
+
+@pytest.mark.parametrize("kind", ["directory", "shapefile"])
+def test_materializers_clean_staging_when_destination_appears_during_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    """A destination-creation race must retain existing bytes and remove staging."""
+    if kind == "directory":
+        source = tmp_path / "directory_source"
+        source.mkdir()
+        (source / "0.0").write_bytes(b"skim")
+        manifest = build_directory_manifest(source)
+        destination = tmp_path / "directory_destination"
+
+        def materialize() -> bool:
+            return materialize_directory_tree(
+                source, destination, manifest, preserve_existing=True
+            )
+
+        staging_prefix = ".consist-directory-directory_destination-"
+    else:
+        source = tmp_path / "bundle_source"
+        shapefile = source / "roads.shp"
+        _write_shapefile_bundle(shapefile)
+        manifest = build_shapefile_bundle_manifest(shapefile)
+        destination = tmp_path / "bundle_destination"
+
+        def materialize() -> bool:
+            return materialize_shapefile_bundle(
+                source, destination, "roads.shp", manifest, preserve_existing=True
+            )
+
+        staging_prefix = ".consist-shapefile-bundle_destination-"
+
+    def destination_wins_race(_staging: str | Path, target: str | Path) -> None:
+        target_path = Path(target)
+        target_path.mkdir()
+        (target_path / "sentinel").write_text("existing", encoding="utf-8")
+        raise FileExistsError("destination appeared during publish")
+
+    monkeypatch.setattr(directory_artifacts.os, "rename", destination_wins_race)
+
+    with pytest.raises(FileExistsError, match="destination appeared"):
+        materialize()
+
+    assert (destination / "sentinel").read_text(encoding="utf-8") == "existing"
+    assert not list(destination.parent.glob(f"{staging_prefix}*"))
+
+
+@pytest.mark.parametrize(
+    "mutate_manifest",
+    [
+        lambda manifest: manifest["entries"].append(dict(manifest["entries"][0])),
+        lambda manifest: manifest["entries"].__setitem__(
+            0, {**manifest["entries"][0], "path": "../escape"}
+        ),
+        lambda manifest: manifest["entries"].__setitem__(
+            0, {**manifest["entries"][0], "sha256": ""}
+        ),
+    ],
+    ids=["duplicate-path", "traversal-path", "missing-file-hash"],
+)
+def test_directory_manifest_rejects_malformed_persisted_entries(
+    tmp_path: Path,
+    mutate_manifest,
+) -> None:
+    """Persisted manifests reject malformed members before filesystem work."""
+    root = tmp_path / "raw_od_skims.zarr"
+    root.mkdir()
+    (root / "0.0").write_bytes(b"skim")
+    manifest = build_directory_manifest(root)
+
+    mutate_manifest(manifest)
+
+    with pytest.raises(ValueError):
+        validate_directory_manifest(manifest)
 
 
 def test_log_archive_and_strictly_hydrate_shapefile_bundle(
