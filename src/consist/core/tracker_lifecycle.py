@@ -246,6 +246,7 @@ class RunLifecycleCoordinator:
 
             (
                 cache_hydration,
+                cache_hydration_failure,
                 materialize_cached_output_paths,
                 materialize_cached_output_set_roots,
                 materialize_cached_outputs_dir,
@@ -472,6 +473,7 @@ class RunLifecycleCoordinator:
             tracker._active_run_cache_options = ActiveRunCacheOptions(
                 cache_mode=cache_mode,
                 cache_hydration=cache_hydration,
+                cache_hydration_failure=cache_hydration_failure,
                 materialize_cached_output_paths=materialize_cached_output_paths,
                 materialize_cached_output_set_roots=(
                     materialize_cached_output_set_roots
@@ -653,6 +655,7 @@ class RunLifecycleCoordinator:
                 elif debug_cache:
                     logging.info("[Consist][cache] miss: no matching completed run.")
 
+            cache_admitted = False
             if cached_run and cache_valid:
                 with _track_begin_run_phase("cache.hydrate_outputs"):
                     t0 = time.perf_counter()
@@ -663,18 +666,20 @@ class RunLifecycleCoordinator:
                         options=tracker._active_run_cache_options,
                         link_outputs=False,
                     )
-                    cached_output_ids = [
-                        art.id for art in cached_items.outputs.values()
-                    ]
+                    if cached_items is not None:
+                        cached_output_ids = [
+                            art.id for art in cached_items.outputs.values()
+                        ]
+                        cache_admitted = True
                     _log_timing("hydrate_cache_hit_outputs", t0)
-                if debug_cache:
+                if cached_items is not None and debug_cache:
                     logging.info(
                         "[Consist][cache] hit: cached_run=%s outputs=%d hydration=%s",
                         cached_run.id,
                         len(cached_items.outputs),
                         tracker._active_run_cache_options.cache_hydration,
                     )
-            else:
+            if not cache_admitted:
                 with _track_begin_run_phase("cache.explain_miss"):
                     explanation = CacheMissExplainer(
                         cast(CacheMissExplainerContext, tracker)

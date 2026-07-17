@@ -46,12 +46,60 @@ LEGACY_POLICY_KWARGS: Final[frozenset[str]] = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class ResolvedRunOptions:
-    """
-    Flattened run options derived from option objects.
+    """Flatten cache, output-policy, and execution options for one run.
+
+    This immutable value preserves unset options as ``None`` so downstream
+    invocation code can apply active defaults consistently.
+
+    Attributes
+    ----------
+    cache_mode : str | None
+        Requested cache lookup policy.
+    cache_hydration : str | None
+        Requested cache-hit hydration policy.
+    cache_hydration_failure : {"warn", "miss"}
+        Requested-output hydration failure policy.
+    cache_version : int | None
+        Optional cache-version candidate discriminator.
+    cache_epoch : int | None
+        Optional cache-epoch candidate discriminator.
+    validate_cached_outputs : str | None
+        Cached-output validation policy.
+    validate_materialized_inputs : bool | None
+        Whether materialized inputs must be validated.
+    materialize_cached_outputs_source_root : PathLike | None
+        Source-root override for cached-output recovery.
+    code_identity : CodeIdentityMode | None
+        Callable code-identity policy.
+    code_identity_extra_deps : list[str] | None
+        Additional dependency paths included in code identity.
+    output_mismatch : str | None
+        Policy applied when declared outputs differ from returned outputs.
+    output_missing : str | None
+        Policy applied when a declared output is absent after execution.
+    input_binding : InputBindingMode | None
+        Input-to-callable binding policy.
+    load_inputs : bool | None
+        Whether to load input artifacts before invoking the callable.
+    input_paths : Mapping[str, Any] | None
+        Explicit input artifact paths for the invocation.
+    input_materialization : {"requested"} | None
+        Input-materialization selection policy.
+    input_materialization_mode : {"copy"} | None
+        Input-materialization transfer mode.
+    executor : str | None
+        Requested execution backend.
+    container : Mapping[str, Any] | None
+        Container execution configuration.
+    runtime_kwargs : Mapping[str, Any] | None
+        Additional runtime keyword arguments for the callable.
+    inject_context : bool | str | None
+        Whether and how to inject Consist run context into the callable.
     """
 
     cache_mode: Optional[str]
     cache_hydration: Optional[str]
+    cache_hydration_failure: Literal["warn", "miss"]
     cache_version: Optional[int]
     cache_epoch: Optional[int]
     validate_cached_outputs: Optional[str]
@@ -157,6 +205,7 @@ def merge_run_options(
     return ResolvedRunOptions(
         cache_mode=cache_obj.cache_mode,
         cache_hydration=cache_obj.cache_hydration,
+        cache_hydration_failure=cache_obj.cache_hydration_failure,
         cache_version=cache_obj.cache_version,
         cache_epoch=cache_obj.cache_epoch,
         validate_cached_outputs=cache_obj.validate_cached_outputs,

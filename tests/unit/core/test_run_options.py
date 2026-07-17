@@ -15,6 +15,7 @@ def test_merge_run_options_merges_options_objects() -> None:
         cache_options=CacheOptions(
             cache_mode="reuse",
             cache_hydration="metadata",
+            cache_hydration_failure="warn",
             validate_materialized_inputs=True,
             materialize_cached_outputs_source_root="/tmp/archive",
             code_identity="callable_module",
@@ -32,6 +33,7 @@ def test_merge_run_options_merges_options_objects() -> None:
 
     assert merged.cache_mode == "reuse"
     assert merged.cache_hydration == "metadata"
+    assert merged.cache_hydration_failure == "warn"
     assert merged.validate_materialized_inputs is True
     assert merged.materialize_cached_outputs_source_root == "/tmp/archive"
     assert merged.code_identity == "callable_module"
@@ -49,6 +51,7 @@ def test_merge_run_options_defaults_to_empty_options() -> None:
 
     assert merged.cache_mode is None
     assert merged.cache_hydration is None
+    assert merged.cache_hydration_failure == "warn"
     assert merged.cache_version is None
     assert merged.cache_epoch is None
     assert merged.validate_cached_outputs is None

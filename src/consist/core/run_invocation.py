@@ -135,6 +135,7 @@ class ResolvedRunInvocation:
     output_sets: Optional[Mapping[str, OutputSet]]
     cache_mode: str
     cache_hydration: Optional[str]
+    cache_hydration_failure: Literal["warn", "miss"]
     cache_version: Optional[int]
     cache_epoch: Optional[int]
     validate_cached_outputs: str
@@ -360,6 +361,7 @@ def resolve_run_invocation(
 
     cache_mode = merged_options.cache_mode
     cache_hydration = merged_options.cache_hydration
+    cache_hydration_failure = merged_options.cache_hydration_failure
     cache_version = merged_options.cache_version
     cache_epoch = merged_options.cache_epoch
     validate_cached_outputs = merged_options.validate_cached_outputs
@@ -577,6 +579,16 @@ def resolve_run_invocation(
         resolved_cache_mode = "reuse"
     if resolved_validate_cached_outputs is None:
         resolved_validate_cached_outputs = "lazy"
+    if cache_hydration_failure not in {"warn", "miss"}:
+        raise ValueError("cache_hydration_failure must be one of: 'warn', 'miss'")
+    if (
+        cache_hydration_failure == "miss"
+        and resolved.cache_hydration != "outputs-requested"
+    ):
+        raise ValueError(
+            "cache_hydration_failure='miss' requires "
+            "cache_hydration='outputs-requested'"
+        )
     resolved_validate_materialized_inputs = (
         False if validate_materialized_inputs is None else validate_materialized_inputs
     )
@@ -725,6 +737,7 @@ def resolve_run_invocation(
         ),
         cache_mode=resolved_cache_mode,
         cache_hydration=resolved.cache_hydration,
+        cache_hydration_failure=cache_hydration_failure,
         cache_version=resolved.cache_version,
         cache_epoch=cache_epoch,
         validate_cached_outputs=resolved_validate_cached_outputs,

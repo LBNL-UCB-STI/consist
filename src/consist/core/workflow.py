@@ -1106,6 +1106,7 @@ class ScenarioContext:
             cache_options=CacheOptions(
                 cache_mode=resolved_cache_mode,
                 cache_hydration=effective_cache_hydration,
+                cache_hydration_failure=resolved_invocation.cache_hydration_failure,
                 cache_version=resolved_cache_version,
                 cache_epoch=resolved_cache_epoch,
                 validate_cached_outputs=resolved_validate_cached_outputs,
