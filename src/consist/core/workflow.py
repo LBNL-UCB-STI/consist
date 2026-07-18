@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 import inspect
 import uuid
 import functools
@@ -36,6 +36,7 @@ from consist.core.orchestration import (
     BatchResult,
 )
 from consist.core.error_messages import format_problem_cause_fix
+from consist.core.metadata_resolver import MetadataResolver, ResolvedStepIdentity
 from consist.core.resolved_binding import (
     ArtifactIdentity,
     ResolvedBinding,
@@ -76,6 +77,31 @@ def _raise_unexpected_kwargs(kwargs: Mapping[str, Any]) -> None:
         raise TypeError(f"unexpected keyword argument '{names[0]}'")
     joined = "', '".join(names)
     raise TypeError(f"unexpected keyword arguments '{joined}'")
+
+
+@dataclass(frozen=True, slots=True)
+class StepIdentity:
+    """One Scenario-owned, pre-resolved Python step identity.
+
+    Obtain this value from :meth:`ScenarioContext.resolve_step_identity` and
+    pass it back to :meth:`ScenarioContext.run`. The public fields are stable
+    inputs for a strict binding; the remaining fields prevent that preflight
+    result from being reused for a different Scenario invocation.
+    """
+
+    name: str
+    model: str
+    step_contract_identity: str
+    _resolved_identity: ResolvedStepIdentity = field(repr=False, compare=False)
+    _owner_token: object = field(repr=False, compare=False)
+    _fn: Callable[..., Any] = field(repr=False, compare=False)
+    _name_argument: Optional[str] = field(repr=False, compare=False)
+    _model_argument: Optional[str] = field(repr=False, compare=False)
+    _year: Optional[int] = field(repr=False, compare=False)
+    _iteration: Optional[int] = field(repr=False, compare=False)
+    _phase: Optional[str] = field(repr=False, compare=False)
+    _stage: Optional[str] = field(repr=False, compare=False)
+    _runtime_kwargs: Mapping[str, Any] | None = field(repr=False, compare=False)
 
 
 class OutputCapture:
@@ -454,6 +480,7 @@ class ScenarioContext:
         self._inputs: Dict[str, Artifact] = {}
         self._first_step_started: bool = False
         self._last_step_name: Optional[str] = None
+        self._step_identity_owner = object()
 
         # ARTIFACT STORAGE ARCHITECTURE
         # ==============================
@@ -830,6 +857,73 @@ class ScenarioContext:
                 resolved_output_paths[str(key)] = ref
         return resolved_output_paths
 
+    def resolve_step_identity(
+        self,
+        fn: Callable[..., Any],
+        *,
+        name: Optional[str] = None,
+        model: Optional[str] = None,
+        year: Optional[int] = None,
+        iteration: Optional[int] = None,
+        phase: Optional[str] = None,
+        stage: Optional[str] = None,
+        execution_options: Optional[ExecutionOptions] = None,
+    ) -> StepIdentity:
+        """Resolve a Python step identity once for strict-binding preflight.
+
+        ``execution_options.runtime_kwargs`` supplies the runtime metadata
+        context. Pass the resulting value to ``run(step_identity=...)`` with
+        the same runtime kwargs; ``run`` reuses this name/model resolution and
+        rejects a different callable or dynamic context.
+        """
+        if not self._header_record:
+            raise RuntimeError("Scenario not active. Use within 'with' block.")
+        runtime_kwargs = (
+            dict(execution_options.runtime_kwargs)
+            if execution_options is not None
+            and execution_options.runtime_kwargs is not None
+            else None
+        )
+        resolver = MetadataResolver(
+            default_name_template=self.name_template,
+            allow_template=True,
+            apply_step_defaults=True,
+        )
+        resolved = resolver.resolve_identity(
+            fn=fn,
+            name=name,
+            model=model,
+            year=year,
+            iteration=iteration,
+            phase=phase,
+            stage=stage,
+            consist_settings=self.tracker.settings,
+            consist_workspace=self.tracker.run_dir,
+            consist_state=self._header_record,
+            runtime_kwargs=runtime_kwargs,
+            missing_name_error="ScenarioContext.run requires a run name.",
+        )
+        frozen_runtime_kwargs = (
+            MappingProxyType(dict(runtime_kwargs))
+            if runtime_kwargs is not None
+            else None
+        )
+        return StepIdentity(
+            name=resolved.name,
+            model=resolved.model,
+            step_contract_identity=step_contract_identity(fn, resolved.name),
+            _resolved_identity=resolved,
+            _owner_token=self._step_identity_owner,
+            _fn=fn,
+            _name_argument=name,
+            _model_argument=model,
+            _year=year,
+            _iteration=iteration,
+            _phase=phase,
+            _stage=stage,
+            _runtime_kwargs=frozen_runtime_kwargs,
+        )
+
     def run(
         self,
         fn: Optional[Callable[..., Any]] = None,
@@ -837,6 +931,7 @@ class ScenarioContext:
         *,
         run_id: Optional[str] = None,
         model: Optional[str] = None,
+        step_identity: StepIdentity | None = None,
         description: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
         adapter: Optional["ConfigAdapter"] = None,
@@ -931,10 +1026,62 @@ class ScenarioContext:
             raise RuntimeError("Scenario not active. Use within 'with' block.")
 
         func_name = getattr(fn, "__name__", None) if fn is not None else None
-        if fn is not None and func_name is None and name is None:
+        if (
+            fn is not None
+            and func_name is None
+            and name is None
+            and step_identity is None
+        ):
             raise ValueError("ScenarioContext.run requires a run name.")
         if fn is None and name is None:
             raise ValueError("ScenarioContext.run requires name when fn is None.")
+
+        if step_identity is not None:
+            if step_identity._owner_token is not self._step_identity_owner:
+                raise ValueError(
+                    "Step identity belongs to a different ScenarioContext."
+                )
+            if fn is not step_identity._fn:
+                raise ValueError("Step identity was resolved for a different callable.")
+            if name is not None or model is not None:
+                raise ValueError(
+                    "step_identity cannot be combined with name or model overrides."
+                )
+            supplied_dynamic_values = {
+                "year": year,
+                "iteration": iteration,
+                "phase": phase,
+                "stage": stage,
+            }
+            preflight_dynamic_values = {
+                "year": step_identity._year,
+                "iteration": step_identity._iteration,
+                "phase": step_identity._phase,
+                "stage": step_identity._stage,
+            }
+            mismatched_values = [
+                key
+                for key, value in supplied_dynamic_values.items()
+                if value is not None and value != preflight_dynamic_values[key]
+            ]
+            if mismatched_values:
+                raise ValueError(
+                    "Step identity dynamic context differs for: "
+                    + ", ".join(mismatched_values)
+                )
+            runtime_kwargs = (
+                execution_options.runtime_kwargs
+                if execution_options is not None
+                else None
+            )
+            if dict(runtime_kwargs or {}) != dict(step_identity._runtime_kwargs or {}):
+                raise ValueError("Step identity runtime kwargs differ from preflight.")
+            name = step_identity._name_argument
+            model = step_identity._model_argument
+            year = step_identity._year
+            iteration = step_identity._iteration
+            phase = step_identity._phase
+            stage = step_identity._stage
 
         strict_binding = binding if isinstance(binding, ResolvedBinding) else None
         if binding is not None:
@@ -1041,6 +1188,9 @@ class ScenarioContext:
             consist_state=self._header_record,
             missing_name_error="ScenarioContext.run requires a run name.",
             python_missing_fn_error="Tracker.run requires a callable fn.",
+            pre_resolved_step_identity=(
+                step_identity._resolved_identity if step_identity is not None else None
+            ),
         )
 
         resolved_name = resolved_invocation.name
@@ -1091,10 +1241,12 @@ class ScenarioContext:
                 raise ValueError(
                     "Resolved binding step name does not match the run name."
                 )
-            if (
-                step_contract_identity(fn, resolved_name)
-                != strict_binding.step_contract_identity
-            ):
+            resolved_contract_identity = (
+                step_identity.step_contract_identity
+                if step_identity is not None
+                else step_contract_identity(fn, resolved_name)
+            )
+            if resolved_contract_identity != strict_binding.step_contract_identity:
                 raise ValueError(
                     "Resolved binding step contract does not match callable."
                 )

@@ -236,6 +236,94 @@ def test_bind_tracked_artifact_derives_the_strict_artifact_contract() -> None:
     assert str(resolved.artifact.identity) == f"sha256:file:{'a' * 64}"
 
 
+def test_strict_binding_accepts_a_scenario_preflight_identity(
+    tracker, tmp_path: Path
+) -> None:
+    from consist import ExecutionOptions
+    from consist.core.resolved_binding import ResolvedBindingBuilder
+
+    source = tmp_path / "raw.txt"
+    source.write_text("accepted\n", encoding="utf-8")
+    with tracker.start_run("seed", "test"):
+        artifact = tracker.log_artifact(source, key="raw", direction="input")
+
+    @tracker.define_step(name_template="{func_name}__y{year}__{phase}")
+    def consume(raw: Path) -> None:
+        assert raw.read_text(encoding="utf-8") == "accepted\n"
+
+    with tracker.scenario("strict_preflight") as scenario:
+        identity = scenario.resolve_step_identity(
+            consume,
+            year=2040,
+            phase="warmstart",
+            execution_options=ExecutionOptions(input_binding="paths"),
+        )
+        binding = (
+            ResolvedBindingBuilder(
+                step_name=identity.name,
+                step_contract_identity=identity.step_contract_identity,
+            )
+            .bind_tracked_artifact(
+                parameter="raw",
+                artifact=artifact,
+                destination=Path("inputs/raw.txt"),
+                source="external_admitted",
+            )
+            .freeze()
+        )
+
+        result = scenario.run(
+            consume,
+            binding=binding,
+            step_identity=identity,
+            execution_options=ExecutionOptions(input_binding="paths"),
+        )
+
+    assert result.cache_hit is False
+
+
+def test_strict_binding_rejects_a_preflight_identity_name_mismatch(
+    tracker, tmp_path: Path
+) -> None:
+    from consist import ExecutionOptions
+    from consist.core.resolved_binding import ResolvedBindingBuilder
+
+    source = tmp_path / "raw.txt"
+    source.write_text("accepted\n", encoding="utf-8")
+    with tracker.start_run("seed", "test"):
+        artifact = tracker.log_artifact(source, key="raw", direction="input")
+
+    def consume(raw: Path) -> None:
+        return None
+
+    with tracker.scenario("strict_preflight_name_mismatch") as scenario:
+        identity = scenario.resolve_step_identity(
+            consume,
+            execution_options=ExecutionOptions(input_binding="paths"),
+        )
+        binding = (
+            ResolvedBindingBuilder(
+                step_name=f"{identity.name}-wrong",
+                step_contract_identity=identity.step_contract_identity,
+            )
+            .bind_tracked_artifact(
+                parameter="raw",
+                artifact=artifact,
+                destination=Path("inputs/raw.txt"),
+                source="external_admitted",
+            )
+            .freeze()
+        )
+
+        with pytest.raises(ValueError, match="step name"):
+            scenario.run(
+                consume,
+                binding=binding,
+                step_identity=identity,
+                execution_options=ExecutionOptions(input_binding="paths"),
+            )
+
+
 def test_resolved_binding_rejects_locator_for_a_different_artifact() -> None:
     from consist.core.resolved_binding import (
         ArtifactIdentity,

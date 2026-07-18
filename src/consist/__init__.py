@@ -57,6 +57,7 @@ from consist.core.resolved_binding import (
     ResolvedBindingBuilder,
     TrackedArtifactLocator,
 )
+from consist.core.workflow import StepIdentity
 
 # API
 from consist.api import (
@@ -216,6 +217,7 @@ __all__ = [
     "ResolvedBinding",
     "ResolvedBindingBuilder",
     "TrackedArtifactLocator",
+    "StepIdentity",
     "CanonicalizationArtifactMember",
     "CanonicalizationReference",
     "CanonicalizationSnapshot",

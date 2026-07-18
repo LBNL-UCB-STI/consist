@@ -49,6 +49,14 @@ class ResolvedStepMetadata:
     facet_schema_version: Optional[Union[str, int]]
 
 
+@dataclass(frozen=True, slots=True)
+class ResolvedStepIdentity:
+    """Resolved name and model reused by one preflighted Python step."""
+
+    name: str
+    model: str
+
+
 class MetadataResolver:
     def __init__(
         self,
@@ -60,6 +68,129 @@ class MetadataResolver:
         self._default_name_template = default_name_template
         self._allow_template = allow_template
         self._apply_step_defaults = apply_step_defaults
+
+    def _step_definition_and_context(
+        self,
+        *,
+        fn: Optional[Any],
+        model: Optional[str],
+        year: Optional[int],
+        iteration: Optional[int],
+        phase: Optional[str],
+        stage: Optional[str],
+        consist_settings: Optional[Any],
+        consist_workspace: Optional[Path],
+        consist_state: Optional[Any],
+        runtime_kwargs: Optional[Dict[str, Any]],
+    ) -> tuple[StepDefinition, StepContext | None, str | None]:
+        func_name = getattr(fn, "__name__", None) if fn is not None else None
+        step_def = StepDefinition()
+        if self._apply_step_defaults and fn is not None:
+            step_def = getattr(fn, "__consist_step__", StepDefinition())
+
+        ctx: StepContext | None = None
+        if fn is not None:
+            runtime_map = runtime_kwargs or {}
+            ctx = StepContext(
+                func_name=func_name or "",
+                model=model,
+                year=year,
+                iteration=iteration,
+                phase=phase,
+                stage=stage,
+                consist_settings=consist_settings,
+                consist_workspace=consist_workspace,
+                consist_state=consist_state,
+                runtime_settings=runtime_map.get("settings"),
+                runtime_workspace=runtime_map.get("workspace"),
+                runtime_state=runtime_map.get("state"),
+                runtime_kwargs=runtime_map,
+            )
+        return step_def, ctx, func_name
+
+    def _resolve_step_identity(
+        self,
+        *,
+        step_def: StepDefinition,
+        ctx: StepContext | None,
+        func_name: str | None,
+        name: Optional[str],
+        model: Optional[str],
+        missing_name_error: str,
+    ) -> ResolvedStepIdentity:
+        resolved_model = model
+        if self._apply_step_defaults and model is None and ctx is not None:
+            resolved_model = cast(Optional[str], resolve_metadata(step_def.model, ctx))
+        if ctx is not None:
+            ctx.model = resolved_model
+
+        if name is not None:
+            resolved_name = name
+        else:
+            name_template = None
+            if self._allow_template:
+                if self._apply_step_defaults and step_def.name_template is not None:
+                    if ctx is None:
+                        raise RuntimeError(
+                            "Step context unavailable for metadata resolution."
+                        )
+                    name_template = resolve_metadata(step_def.name_template, ctx)
+                elif self._default_name_template is not None:
+                    name_template = self._default_name_template
+
+            if name_template:
+                if ctx is None:
+                    raise RuntimeError("Step context unavailable for name formatting.")
+                resolved_name = format_step_name(str(name_template), ctx)
+            else:
+                resolved_name = func_name
+
+        if resolved_name is None:
+            raise ValueError(missing_name_error)
+
+        if resolved_model is None:
+            resolved_model = resolved_name
+        if ctx is not None:
+            ctx.model = resolved_model
+        return ResolvedStepIdentity(name=resolved_name, model=resolved_model)
+
+    def resolve_identity(
+        self,
+        *,
+        fn: Optional[Any],
+        name: Optional[str],
+        model: Optional[str],
+        year: Optional[int],
+        iteration: Optional[int],
+        phase: Optional[str],
+        stage: Optional[str],
+        consist_settings: Optional[Any],
+        consist_workspace: Optional[Path],
+        consist_state: Optional[Any],
+        runtime_kwargs: Optional[Dict[str, Any]],
+        missing_name_error: str,
+    ) -> ResolvedStepIdentity:
+        """Resolve only the metadata that determines one step's identity."""
+        step_def, ctx, func_name = self._step_definition_and_context(
+            fn=fn,
+            model=model,
+            year=year,
+            iteration=iteration,
+            phase=phase,
+            stage=stage,
+            consist_settings=consist_settings,
+            consist_workspace=consist_workspace,
+            consist_state=consist_state,
+            runtime_kwargs=runtime_kwargs,
+        )
+        return self._resolve_step_identity(
+            step_def=step_def,
+            ctx=ctx,
+            func_name=func_name,
+            name=name,
+            model=model,
+            missing_name_error=missing_name_error,
+        )
 
     def resolve(
         self,
@@ -97,62 +228,34 @@ class MetadataResolver:
         missing_name_error: str,
         adapter: Optional["ConfigAdapter"] = None,
         identity_inputs: IdentityInputs = None,
+        pre_resolved_identity: ResolvedStepIdentity | None = None,
     ) -> ResolvedStepMetadata:
-        func_name = getattr(fn, "__name__", None) if fn is not None else None
-        step_def = StepDefinition()
-        if self._apply_step_defaults and fn is not None:
-            step_def = getattr(fn, "__consist_step__", StepDefinition())
-
-        ctx: StepContext | None = None
-        if fn is not None:
-            runtime_map = runtime_kwargs or {}
-            ctx = StepContext(
-                func_name=func_name or "",
+        step_def, ctx, func_name = self._step_definition_and_context(
+            fn=fn,
+            model=model,
+            year=year,
+            iteration=iteration,
+            phase=phase,
+            stage=stage,
+            consist_settings=consist_settings,
+            consist_workspace=consist_workspace,
+            consist_state=consist_state,
+            runtime_kwargs=runtime_kwargs,
+        )
+        resolved_identity = (
+            pre_resolved_identity
+            if pre_resolved_identity is not None
+            else self._resolve_step_identity(
+                step_def=step_def,
+                ctx=ctx,
+                func_name=func_name,
+                name=name,
                 model=model,
-                year=year,
-                iteration=iteration,
-                phase=phase,
-                stage=stage,
-                consist_settings=consist_settings,
-                consist_workspace=consist_workspace,
-                consist_state=consist_state,
-                runtime_settings=runtime_map.get("settings"),
-                runtime_workspace=runtime_map.get("workspace"),
-                runtime_state=runtime_map.get("state"),
-                runtime_kwargs=runtime_map,
+                missing_name_error=missing_name_error,
             )
-
-        resolved_model = model
-        if self._apply_step_defaults and model is None and ctx is not None:
-            resolved_model = cast(Optional[str], resolve_metadata(step_def.model, ctx))
-        if ctx is not None:
-            ctx.model = resolved_model
-
-        name_template = None
-        if self._allow_template:
-            if self._apply_step_defaults and step_def.name_template is not None:
-                if ctx is None:
-                    raise RuntimeError(
-                        "Step context unavailable for metadata resolution."
-                    )
-                name_template = resolve_metadata(step_def.name_template, ctx)
-            elif self._default_name_template is not None:
-                name_template = self._default_name_template
-
-        if name is not None:
-            resolved_name = name
-        elif name_template:
-            if ctx is None:
-                raise RuntimeError("Step context unavailable for name formatting.")
-            resolved_name = format_step_name(str(name_template), ctx)
-        else:
-            resolved_name = func_name
-
-        if resolved_name is None:
-            raise ValueError(missing_name_error)
-
-        if resolved_model is None:
-            resolved_model = resolved_name
+        )
+        resolved_name = resolved_identity.name
+        resolved_model = resolved_identity.model
         if ctx is not None:
             ctx.model = resolved_model
 

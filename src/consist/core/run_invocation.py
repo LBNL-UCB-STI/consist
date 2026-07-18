@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Union, cast
 
 from consist.core.error_messages import format_problem_cause_fix
-from consist.core.metadata_resolver import MetadataResolver
+from consist.core.metadata_resolver import MetadataResolver, ResolvedStepIdentity
 from consist.core.run_options import merge_run_options
 from consist.core.settings import ConsistSettings
 from consist.models.run import ConsistRecord
@@ -255,6 +255,7 @@ def resolve_run_invocation(
     missing_name_error: str,
     python_missing_fn_error: str,
     allow_python_without_fn: bool = False,
+    pre_resolved_step_identity: ResolvedStepIdentity | None = None,
 ) -> ResolvedRunInvocation:
     """
     Resolve and validate a run invocation into a normalized internal contract.
@@ -584,6 +585,7 @@ def resolve_run_invocation(
         input_binding=input_binding,
         load_inputs=load_inputs,
         missing_name_error=missing_name_error,
+        pre_resolved_identity=pre_resolved_step_identity,
     )
 
     resolved_cache_mode = resolved.cache_mode

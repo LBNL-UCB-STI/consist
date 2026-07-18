@@ -918,3 +918,82 @@ def test_scenario_run_metadata_resolution_matches_tracker_run(tracker):
     assert tracker_run.tags == scenario_run.tags == ["stage:model"]
     assert "step__y2040" in tracker_run.id
     assert "step__y2040" in scenario_run.id
+
+
+def test_scenario_preflight_identity_reuses_dynamic_metadata_once(tracker) -> None:
+    calls = {"model": 0, "name": 0, "description": 0}
+
+    def dynamic_model(ctx) -> str:
+        calls["model"] += 1
+        return f"demand-{ctx.runtime_kwargs['scenario']}"
+
+    def dynamic_name(ctx) -> str:
+        calls["name"] += 1
+        return "{func_name}__{model}__y{year}__{phase}"
+
+    def dynamic_description(ctx) -> str:
+        calls["description"] += 1
+        return f"scenario:{ctx.runtime_kwargs['scenario']}"
+
+    @tracker.define_step(
+        model=dynamic_model,
+        name_template=dynamic_name,
+        description=dynamic_description,
+    )
+    def step(scenario: str) -> None:
+        assert scenario == "baseline"
+        return None
+
+    execution_options = ExecutionOptions(runtime_kwargs={"scenario": "baseline"})
+    with tracker.scenario("preflight_identity") as scenario:
+        identity = scenario.resolve_step_identity(
+            step,
+            year=2040,
+            phase="warmstart",
+            execution_options=execution_options,
+        )
+
+        assert isinstance(identity, consist.StepIdentity)
+        assert identity.name == "step__demand-baseline__y2040__warmstart"
+        assert identity.model == "demand-baseline"
+        scenario.run(
+            step,
+            step_identity=identity,
+            execution_options=execution_options,
+        )
+
+    assert calls == {"model": 1, "name": 1, "description": 1}
+
+
+def test_scenario_preflight_identity_rejects_a_different_callable(tracker) -> None:
+    def first() -> None:
+        return None
+
+    def other() -> None:
+        return None
+
+    with tracker.scenario("preflight_identity_mismatch") as scenario:
+        identity = scenario.resolve_step_identity(first)
+
+        with pytest.raises(ValueError, match="different callable"):
+            scenario.run(other, step_identity=identity)
+
+
+def test_scenario_preflight_identity_rejects_changed_runtime_kwargs(tracker) -> None:
+    def step(scenario: str) -> None:
+        return None
+
+    with tracker.scenario("preflight_identity_runtime_mismatch") as scenario:
+        identity = scenario.resolve_step_identity(
+            step,
+            execution_options=ExecutionOptions(runtime_kwargs={"scenario": "first"}),
+        )
+
+        with pytest.raises(ValueError, match="runtime kwargs"):
+            scenario.run(
+                step,
+                step_identity=identity,
+                execution_options=ExecutionOptions(
+                    runtime_kwargs={"scenario": "second"}
+                ),
+            )

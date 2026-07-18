@@ -131,6 +131,45 @@ Build these bindings in orchestration code with `ResolvedBindingBuilder`; do
 not construct them from unverified paths or use them to replace the normal
 Coupler-based workflow.
 
+When a planner must construct a binding before `run(...)`, ask the Scenario for
+the final identity rather than reproducing decorator or scenario naming rules:
+
+```python
+execution = ExecutionOptions(input_binding="paths", runtime_kwargs=runtime)
+identity = scenario.resolve_step_identity(
+    run_beam,
+    year=year,
+    iteration=iteration,
+    phase="warmstart",
+    execution_options=execution,
+)
+
+binding = (
+    consist.ResolvedBindingBuilder(
+        step_name=identity.name,
+        step_contract_identity=identity.step_contract_identity,
+    )
+    .bind_tracked_artifact(
+        parameter="linkstats_warmstart",
+        artifact=admitted_linkstats,
+        destination=Path("inputs/linkstats.parquet"),
+        source="external_admitted",
+    )
+    .freeze()
+)
+scenario.run(
+    run_beam,
+    binding=binding,
+    step_identity=identity,
+    execution_options=execution,
+)
+```
+
+`StepIdentity` is an opaque, Scenario-owned preflight result. `run(...)`
+reuses it without re-evaluating dynamic name/model metadata and rejects a
+different callable, Scenario, dynamic context, or runtime kwargs. Do not pass
+`name=` or `model=` again when supplying `step_identity=`.
+
 For an artifact already admitted through Consist, use the tracked-artifact
 bridge rather than reconstructing an identity or locator in downstream code:
 

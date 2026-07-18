@@ -136,6 +136,8 @@ with tracker.scenario("baseline") as sc:
   added by design if there is demand)
 - `consist.CacheOptions`, `consist.OutputPolicyOptions`, `consist.ExecutionOptions`
 - `consist.BindingResult` (execution envelope for orchestrator-resolved scenario inputs)
+- `consist.StepIdentity` (Scenario-owned resolved name, model, and strict
+  callable contract for preflighted advanced bindings)
 - `consist.ResolvedBindingBuilder` / `consist.ResolvedBinding`
   (advanced immutable execution contract for a previously verified artifact
   selection; `bind_tracked_artifact(...)` derives the trusted identity and
