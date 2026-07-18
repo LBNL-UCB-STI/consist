@@ -5,6 +5,7 @@ import shutil
 import tempfile
 import uuid
 import weakref
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,10 @@ from typing import (
     runtime_checkable,
 )
 
+from consist.core.directory_artifacts import (
+    validate_directory_manifest,
+    validate_directory_tree,
+)
 from consist.core.error_messages import format_problem_cause_fix
 from consist.core.output_sets import build_output_set_child_destinations
 from consist.models.artifact import Artifact
@@ -1181,6 +1186,19 @@ def materialize_requested_inputs(
     def _artifact_hash_matches_path(artifact: Artifact, path: Path) -> bool:
         if not artifact.hash:
             return False
+        meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+        if meta.get("directory_artifact") is True:
+            manifest = meta.get("directory_manifest")
+            if not isinstance(manifest, Mapping):
+                return False
+            try:
+                normalized_manifest = validate_directory_manifest(manifest)
+                if artifact.hash != normalized_manifest["tree_hash"]:
+                    return False
+                validate_directory_tree(path, normalized_manifest)
+            except (OSError, ValueError):
+                return False
+            return True
         return tracker.identity.compute_file_checksum(path) == artifact.hash
 
     def _paths_match(source: Path, destination: Path) -> bool:
@@ -1286,6 +1304,23 @@ def materialize_requested_inputs(
                 staged[key] = str(destination_path)
                 continue
             if source_path is not None and _paths_match(source_path, destination_path):
+                if (
+                    active_options.requested_input_validate_content_hash == "if-present"
+                    and artifact.hash
+                    and not _artifact_hash_matches_path(artifact, destination_path)
+                ):
+                    raise ValueError(
+                        format_problem_cause_fix(
+                            problem=f"Hash mismatch for existing input {key!r}.",
+                            cause=(
+                                "The existing input bytes do not match the artifact hash."
+                            ),
+                            fix=(
+                                "Verify the existing input or disable hash validation for "
+                                "this staging request."
+                            ),
+                        )
+                    )
                 artifact.abs_path = str(destination_path)
                 staged[key] = str(destination_path)
                 continue
