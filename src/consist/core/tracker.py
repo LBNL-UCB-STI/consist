@@ -115,6 +115,7 @@ from consist.models.run import (
     ConsistRecord,
     Run,
     RunArtifacts,
+    RunBindingInvocation,
     RunResult,
 )
 from consist.types import (
@@ -5178,7 +5179,13 @@ class Tracker:
         if self._last_consist is not None and self._last_consist.run.id == run.id:
             self.persistence.flush_record_json(self._last_consist)
 
-    def _sync_run_to_db(self, run: Run) -> None:
+    def _sync_run_to_db(
+        self,
+        run: Run,
+        *,
+        binding_invocation: Optional[RunBindingInvocation] = None,
+        require_success: bool = False,
+    ) -> None:
         """
         Synchronizes the state of a `Run` object to the DuckDB database.
 
@@ -5196,7 +5203,14 @@ class Tracker:
         run : Run
             The `Run` object whose state needs to be synchronized with the database.
         """
-        self.persistence.sync_run(run)
+        if binding_invocation is None:
+            self.persistence.sync_run(run)
+        else:
+            self.persistence.sync_run(
+                run,
+                binding_invocation=binding_invocation,
+                require_success=require_success,
+            )
 
     def _sync_artifact_to_db(
         self,

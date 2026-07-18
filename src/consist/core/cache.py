@@ -27,6 +27,10 @@ from consist.core.directory_artifacts import (
 )
 from consist.core.error_messages import format_problem_cause_fix
 from consist.core.output_sets import build_output_set_child_destinations
+from consist.core.resolved_binding import (
+    ArtifactIdentity,
+    create_execution_snapshot,
+)
 from consist.models.artifact import Artifact
 from consist.models.run import ConsistRecord, Run, RunArtifacts
 
@@ -185,6 +189,8 @@ class ActiveRunCacheOptions:
         Requested input-materialization selection policy.
     requested_input_materialization_mode : str | None
         Requested input-materialization transfer mode.
+    requested_input_artifact_ids : dict[str, str] | None
+        Optional parameter-to-artifact handle mapping for strict bindings.
     requested_input_validate_content_hash : str
         Content-hash validation policy for materialized requested inputs.
     """
@@ -201,6 +207,7 @@ class ActiveRunCacheOptions:
     requested_input_paths: Optional[Dict[str, Path]] = None
     requested_input_materialization: Optional[str] = None
     requested_input_materialization_mode: Optional[str] = None
+    requested_input_artifact_ids: Optional[Dict[str, str]] = None
     requested_input_validate_content_hash: str = "if-present"
 
 
@@ -1138,6 +1145,7 @@ def materialize_requested_inputs(
 
     requested_mode = active_options.requested_input_materialization_mode or "copy"
     requested_paths = active_options.requested_input_paths or {}
+    requested_artifact_ids = active_options.requested_input_artifact_ids or {}
     if not requested_paths:
         return {}
 
@@ -1247,7 +1255,17 @@ def materialize_requested_inputs(
         return None
 
     for key, destination in requested_paths.items():
-        matches = inputs_by_key.get(key, [])
+        is_strict_snapshot = key in requested_artifact_ids
+        requested_artifact_id = requested_artifact_ids.get(key)
+        matches = (
+            [
+                artifact
+                for artifact in tracker.current_consist.inputs
+                if str(artifact.id) == requested_artifact_id
+            ]
+            if requested_artifact_id is not None
+            else inputs_by_key.get(key, [])
+        )
         if not matches:
             raise ValueError(
                 format_problem_cause_fix(
@@ -1295,6 +1313,8 @@ def materialize_requested_inputs(
 
         source_path = _resolve_source(artifact)
         if destination_path.exists():
+            if is_strict_snapshot:
+                raise ValueError("Resolved binding snapshot destination must be fresh.")
             if (
                 source_path is None
                 and artifact.hash
@@ -1340,6 +1360,10 @@ def materialize_requested_inputs(
             _remove_existing(destination_path)
 
         if source_path is None:
+            if is_strict_snapshot:
+                raise FileNotFoundError(
+                    f"[Consist] Cannot stage strict input {artifact.key!r}: source path missing."
+                )
             if artifact.meta.get("is_ingested", False):
                 staged_path = Path(
                     materialize_ingested_artifact_from_db(
@@ -1376,6 +1400,23 @@ def materialize_requested_inputs(
             )
 
         if source_path.resolve() == destination_path:
+            artifact.abs_path = str(destination_path)
+            staged[key] = str(destination_path)
+            continue
+
+        if is_strict_snapshot:
+            meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
+            directory_manifest = meta.get("directory_manifest")
+            create_execution_snapshot(
+                source=source_path,
+                destination=destination_path,
+                identity=ArtifactIdentity.from_artifact(artifact),
+                directory_manifest=(
+                    directory_manifest
+                    if isinstance(directory_manifest, Mapping)
+                    else None
+                ),
+            )
             artifact.abs_path = str(destination_path)
             staged[key] = str(destination_path)
             continue

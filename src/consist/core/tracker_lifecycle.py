@@ -44,7 +44,7 @@ from consist.core.validation import (
     validate_run_strings,
 )
 from consist.models.artifact import Artifact
-from consist.models.run import ConsistRecord, Run
+from consist.models.run import ConsistRecord, Run, RunBindingInvocation
 from consist.types import (
     ArtifactRef,
     CodeIdentityMode,
@@ -261,6 +261,10 @@ class RunLifecycleCoordinator:
             requested_input_materialization_mode = kwargs.pop(
                 "requested_input_materialization_mode", None
             )
+            requested_input_artifact_ids_raw = kwargs.pop(
+                "requested_input_artifact_ids", None
+            )
+            strict_binding_json = kwargs.pop("_consist_strict_binding_json", None)
             identity_config_overrides = kwargs.pop(
                 "_consist_identity_config_overrides", None
             )
@@ -270,6 +274,12 @@ class RunLifecycleCoordinator:
                 requested_input_paths = {
                     str(key): Path(value)
                     for key, value in dict(requested_input_paths_raw).items()
+                }
+            requested_input_artifact_ids: Optional[Dict[str, str]] = None
+            if requested_input_artifact_ids_raw is not None:
+                requested_input_artifact_ids = {
+                    str(key): str(value)
+                    for key, value in dict(requested_input_artifact_ids_raw).items()
                 }
             if (
                 requested_input_materialization_mode is not None
@@ -494,6 +504,7 @@ class RunLifecycleCoordinator:
                         else None
                     )
                 ),
+                requested_input_artifact_ids=requested_input_artifact_ids,
             )
 
         with _track_begin_run_phase("lifecycle.persist_config_facet"):
@@ -722,15 +733,54 @@ class RunLifecycleCoordinator:
                     run.meta["staged_inputs"] = staged_inputs
 
         with _track_begin_run_phase("lifecycle.final_persist_and_emit"):
-            tracker._flush_json()
-            if cached_output_ids and tracker.db:
-                tracker.persistence.sync_run_with_links(
-                    run,
-                    artifact_ids=cached_output_ids,
-                    direction="output",
+            binding_invocation = None
+            if strict_binding_json is not None:
+                if not isinstance(strict_binding_json, str):
+                    raise TypeError("_consist_strict_binding_json must be a string.")
+                binding_invocation = RunBindingInvocation(
+                    requested_run_id=run.id,
+                    execution_run_id=(
+                        run.meta["cache_source"]
+                        if isinstance(run.meta, dict)
+                        and isinstance(run.meta.get("cache_source"), str)
+                        else run.id
+                    ),
+                    cache_source_run_id=(
+                        run.meta.get("cache_source")
+                        if isinstance(run.meta, dict)
+                        and isinstance(run.meta.get("cache_source"), str)
+                        else None
+                    ),
+                    cache_outcome=(
+                        "hit"
+                        if isinstance(run.meta, dict)
+                        and run.meta.get("cache_hit") is True
+                        else "miss"
+                    ),
+                    binding_json=strict_binding_json,
                 )
-            else:
-                tracker._sync_run_to_db(run)
+            tracker._flush_json()
+            try:
+                if cached_output_ids and tracker.db:
+                    tracker.persistence.sync_run_with_links(
+                        run,
+                        artifact_ids=cached_output_ids,
+                        direction="output",
+                        binding_invocation=binding_invocation,
+                        require_success=binding_invocation is not None,
+                    )
+                else:
+                    tracker._sync_run_to_db(
+                        run,
+                        binding_invocation=binding_invocation,
+                        require_success=binding_invocation is not None,
+                    )
+            except Exception:
+                pop_tracker()
+                tracker._last_consist = tracker.current_consist
+                tracker.current_consist = None
+                tracker._active_run_cache_options = ActiveRunCacheOptions()
+                raise
             tracker._emit_run_start(run)
 
         return run

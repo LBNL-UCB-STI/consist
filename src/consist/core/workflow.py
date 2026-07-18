@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import replace
+import inspect
 import uuid
 import functools
 import concurrent.futures
@@ -35,6 +36,12 @@ from consist.core.orchestration import (
     BatchResult,
 )
 from consist.core.error_messages import format_problem_cause_fix
+from consist.core.resolved_binding import (
+    ArtifactIdentity,
+    ResolvedBinding,
+    TrackedArtifactLocator,
+    step_contract_identity,
+)
 from consist.core.run_invocation import resolve_run_invocation
 from consist.types import (
     ArtifactRef,
@@ -840,7 +847,7 @@ class ScenarioContext:
         ] = None,
         input_keys: Optional[Iterable[str] | str] = None,
         optional_input_keys: Optional[Iterable[str] | str] = None,
-        binding: Optional[BindingResult] = None,
+        binding: Optional[BindingResult | ResolvedBinding] = None,
         depends_on: Optional[List[RunInputRef]] = None,
         tags: Optional[List[str]] = None,
         facet: Optional[FacetLike] = None,
@@ -929,6 +936,7 @@ class ScenarioContext:
         if fn is None and name is None:
             raise ValueError("ScenarioContext.run requires name when fn is None.")
 
+        strict_binding = binding if isinstance(binding, ResolvedBinding) else None
         if binding is not None:
             if (
                 inputs is not None
@@ -952,9 +960,35 @@ class ScenarioContext:
                         ),
                     )
                 )
-            invocation_inputs = binding.inputs
-            input_keys = binding.input_keys
-            optional_input_keys = binding.optional_input_keys
+            if strict_binding is not None:
+                bound_inputs: dict[str, Artifact] = {}
+                for parameter, resolved_input in strict_binding.inputs.items():
+                    locator = resolved_input.artifact.locator
+                    if not isinstance(locator, TrackedArtifactLocator):
+                        raise ValueError(
+                            f"Resolved binding locator is unsupported for {parameter!r}."
+                        )
+                    artifact = self.tracker.get_artifact(locator.artifact_id)
+                    if artifact is None:
+                        raise ValueError(
+                            f"Resolved binding artifact is unavailable for {parameter!r}."
+                        )
+                    if (
+                        ArtifactIdentity.from_artifact(artifact)
+                        != resolved_input.artifact.identity
+                    ):
+                        raise ValueError(
+                            f"Resolved binding artifact identity changed for {parameter!r}."
+                        )
+                    bound_inputs[parameter] = artifact
+                invocation_inputs = bound_inputs
+                input_keys = None
+                optional_input_keys = None
+            else:
+                assert isinstance(binding, BindingResult)
+                invocation_inputs = binding.inputs
+                input_keys = binding.input_keys
+                optional_input_keys = binding.optional_input_keys
         else:
             invocation_inputs = inputs
 
@@ -1045,6 +1079,56 @@ class ScenarioContext:
         if parent_run_id is None:
             parent_run_id = self.run_id
 
+        strict_snapshot_paths: dict[str, Path] | None = None
+        if strict_binding is not None:
+            if self.tracker.db is None:
+                raise RuntimeError(
+                    "ResolvedBinding requires metadata persistence for invocation evidence."
+                )
+            if fn is None:
+                raise ValueError("ResolvedBinding requires a Python callable.")
+            if strict_binding.step_name != resolved_name:
+                raise ValueError(
+                    "Resolved binding step name does not match the run name."
+                )
+            if (
+                step_contract_identity(fn, resolved_name)
+                != strict_binding.step_contract_identity
+            ):
+                raise ValueError(
+                    "Resolved binding step contract does not match callable."
+                )
+            if resolved_input_binding != "paths":
+                raise ValueError(
+                    "Resolved binding destinations require input_binding='paths'."
+                )
+            parameters = inspect.signature(fn).parameters
+            unexpected = sorted(set(strict_binding.inputs) - set(parameters))
+            if unexpected:
+                raise ValueError(
+                    "Resolved binding parameters are absent from callable: "
+                    + ", ".join(unexpected)
+                )
+            strict_snapshot_paths = {}
+            for parameter, resolved_input in strict_binding.inputs.items():
+                destination = resolved_input.destination
+                if (
+                    destination is None
+                    or destination.is_absolute()
+                    or ".." in destination.parts
+                ):
+                    raise ValueError(
+                        "Resolved binding destinations must be relative run-owned paths."
+                    )
+                snapshot_path = (
+                    self.tracker.run_dir / ".resolved-bindings" / run_id / destination
+                )
+                if snapshot_path.exists():
+                    raise ValueError(
+                        "Resolved binding snapshot destination must be fresh."
+                    )
+                strict_snapshot_paths[parameter] = snapshot_path
+
         self._first_step_started = True
         self._last_step_name = resolved_name
 
@@ -1122,10 +1206,36 @@ class ScenarioContext:
             ),
             execution_options=ExecutionOptions(
                 input_binding=resolved_input_binding,
-                input_paths=resolved_invocation.input_paths,
-                input_materialization=resolved_invocation.input_materialization,
+                input_paths=(
+                    strict_snapshot_paths
+                    if strict_snapshot_paths is not None
+                    else resolved_invocation.input_paths
+                ),
+                input_materialization=(
+                    "requested"
+                    if strict_snapshot_paths is not None
+                    else resolved_invocation.input_materialization
+                ),
                 input_materialization_mode=(
                     resolved_invocation.input_materialization_mode
+                ),
+                requested_input_artifact_ids=(
+                    {
+                        parameter: str(resolved_input.artifact.artifact_id)
+                        for parameter, resolved_input in strict_binding.inputs.items()
+                    }
+                    if strict_binding is not None
+                    else None
+                ),
+                strict_binding_identity=(
+                    strict_binding.identity_digest()
+                    if strict_binding is not None
+                    else None
+                ),
+                strict_binding_json=(
+                    strict_binding.evidence_json()
+                    if strict_binding is not None
+                    else None
                 ),
                 executor=resolved_executor,
                 container=resolved_container,

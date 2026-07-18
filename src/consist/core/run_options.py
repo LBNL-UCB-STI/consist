@@ -87,6 +87,12 @@ class ResolvedRunOptions:
         Input-materialization selection policy.
     input_materialization_mode : {"copy"} | None
         Input-materialization transfer mode.
+    requested_input_artifact_ids : Mapping[str, str] | None
+        Internal parameter-to-artifact mapping for strict input staging.
+    strict_binding_identity : str | None
+        Internal immutable strict-binding cache discriminator.
+    strict_binding_json : str | None
+        Internal canonical binding evidence for lifecycle persistence.
     executor : str | None
         Requested execution backend.
     container : Mapping[str, Any] | None
@@ -114,6 +120,9 @@ class ResolvedRunOptions:
     input_paths: Optional[Mapping[str, Any]]
     input_materialization: Optional[Literal["requested"]]
     input_materialization_mode: Optional[Literal["copy"]]
+    requested_input_artifact_ids: Optional[Mapping[str, str]]
+    strict_binding_identity: Optional[str]
+    strict_binding_json: Optional[str]
     executor: Optional[str]
     container: Optional[Mapping[str, Any]]
     runtime_kwargs: Optional[Mapping[str, Any]]
@@ -181,6 +190,9 @@ def resolve_runtime_kwargs_alias(
         input_paths=execution_options.input_paths,
         input_materialization=execution_options.input_materialization,
         input_materialization_mode=execution_options.input_materialization_mode,
+        requested_input_artifact_ids=execution_options.requested_input_artifact_ids,
+        strict_binding_identity=execution_options.strict_binding_identity,
+        strict_binding_json=execution_options.strict_binding_json,
         executor=execution_options.executor,
         container=execution_options.container,
         runtime_kwargs=runtime_kwargs,
@@ -222,6 +234,9 @@ def merge_run_options(
         input_paths=exec_obj.input_paths,
         input_materialization=exec_obj.input_materialization,
         input_materialization_mode=exec_obj.input_materialization_mode,
+        requested_input_artifact_ids=exec_obj.requested_input_artifact_ids,
+        strict_binding_identity=exec_obj.strict_binding_identity,
+        strict_binding_json=exec_obj.strict_binding_json,
         executor=exec_obj.executor,
         container=exec_obj.container,
         runtime_kwargs=exec_obj.runtime_kwargs,

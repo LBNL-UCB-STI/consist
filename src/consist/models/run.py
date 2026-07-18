@@ -85,6 +85,31 @@ class RunArtifactLink(SQLModel, table=True):
     is_implicit: bool = Field(default=False)
 
 
+class RunBindingInvocation(SQLModel, table=True):
+    """Immutable evidence for one resolved-binding execution attempt.
+
+    A cache hit reuses a producer ``Run`` and therefore cannot safely store
+    per-invocation input intent on that historical row. This ledger keeps the
+    requested run identifier, the run that actually supplied the result, and
+    the canonical resolved binding as distinct durable facts.
+    """
+
+    __tablename__ = "run_binding_invocation"
+
+    id: uuid.UUID = Field(
+        default_factory=uuid.uuid4,
+        primary_key=True,
+        sa_type=UUIDType,
+        sa_column_kwargs={"autoincrement": False},
+    )
+    requested_run_id: str = Field(index=True)
+    execution_run_id: str = Field(index=True)
+    cache_source_run_id: Optional[str] = Field(default=None, index=True)
+    cache_outcome: str = Field(index=True)
+    binding_json: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
 class Run(SQLModel, table=True):
     """
     Primary run table in the Consist database.

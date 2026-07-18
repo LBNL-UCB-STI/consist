@@ -110,6 +110,73 @@ For direct step-to-step workflow code, `consist.ref(...)` and `consist.refs(...)
 remain the recommended default. Reach for `BindingResult` when a planner or
 external orchestrator has already compiled the binding decision.
 
+## Immutable resolved bindings (advanced)
+
+`ResolvedBinding` is a stricter, opt-in contract for an external planner that
+must replay one already-admitted artifact choice exactly. It is not the normal
+Coupler workflow: use `inputs=`, `consist.ref(...)`, and `BindingResult` for
+ordinary scenario composition.
+
+A `ResolvedBinding` contains typed artifact identities, tracked-artifact
+locators, the callable's step-contract identity, and optional admission
+evidence. `ScenarioContext.run(...)` accepts it only with
+`ExecutionOptions(input_binding="paths")`. Before invoking the callable,
+Consist verifies the artifact identity and stages a fresh, run-owned copy at
+each declared destination; it refuses an unsafe destination or a mismatched
+callable. Every strict invocation is written to the `run_binding_invocation`
+ledger. Cache hits keep their producer run immutable and record that producer
+as `cache_source_run_id` on the new invocation record.
+
+Build these bindings in orchestration code with `ResolvedBindingBuilder`; do
+not construct them from unverified paths or use them to replace the normal
+Coupler-based workflow.
+
+For an artifact already admitted through Consist, use the tracked-artifact
+bridge rather than reconstructing an identity or locator in downstream code:
+
+```python
+binding = (
+    consist.ResolvedBindingBuilder(
+        step_name="beam",
+        step_contract_identity=step_contract_identity(run_beam, "beam"),
+    )
+    .bind_tracked_artifact(
+        parameter="linkstats_warmstart",
+        artifact=admitted_linkstats,
+        destination=Path("inputs/linkstats.parquet"),
+        source="external_admitted",
+    )
+    .with_diagnostics({"selection": {"reason": "approved warm start"}})
+    .freeze()
+)
+```
+
+The strict contract has two serializations. `identity_json()` contains the
+step contract plus each parameter's typed identity and destination; its digest
+partitions cache reuse. `evidence_json()` adds tracked locators, selection
+details, metadata, admission evidence, and diagnostics. The latter is written
+to `run_binding_invocation`, so explaining why a fallback was selected never
+changes cache reuse.
+
+### Snapshot and callable-path invariant
+
+For `input_binding="paths"`, a strict input parameter receives the fresh
+run-owned snapshot under `.resolved-bindings/<run-id>/<destination>`, not the
+original admitted path. A model that reads a workspace path or a
+container-mapped path must be configured so that its final visible path resolves
+to those snapshot bytes. A separately staged workspace copy is not equivalent
+merely because it has the same intended filename; it must resolve to the strict
+snapshot (or be independently verified against its typed identity).
+
+### V1 scope limitation
+
+Every V1 strict input must correspond to a named callable parameter. Consist
+does not yet model a strict `staged_artifact` that participates in identity and
+staging while being accessed only through a workspace destination or
+`RunContext`. Do not hide dynamic artifacts behind fake parameters or omit them
+from strict identity; keep those restart closures on the ordinary workflow path
+until that explicit artifact mode exists.
+
 ## Parallel sweep runs
 
 `ScenarioContext.map_runs(...)` is the scenario-level fan-out helper for
