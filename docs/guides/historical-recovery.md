@@ -128,7 +128,7 @@ hydrated = tracker.hydrate_run_outputs_to_destinations(
     "prior_run_id",
     destinations_by_key={
         "persons": tracker.run_dir / "tool_inputs" / "persons.csv",  # one file
-        "skims": tracker.run_dir / "shared" / "skims",  # one directory
+        "skims": tracker.run_dir / "shared" / "skims.zarr",  # one directory
     },
     source_root=Path("/archive/outputs_mirror"),  # optional
 )
@@ -138,12 +138,36 @@ Consist recovers bytes; it does not choose the prior run or prove that an
 external executable consumed the staged paths. The caller owns both decisions.
 Inspect each keyed result because a warning-mode call can have structured
 partial outcomes such as `materialized_from_filesystem`, `preserved_existing`,
-or `missing_source`.
+`materialized_directory_from_filesystem`,
+`materialized_file_bundle_from_filesystem`, or `missing_source`.
 
 Each requested destination must be under `tracker.run_dir` or a configured
 mount root unless the tracker was created with `allow_external_paths=True`.
-Persisted `OutputSet` hydration is intentionally deferred; this API supports
-ordinary file and directory artifacts only.
+Persisted `OutputSet` hydration is intentionally deferred. Newly logged Zarr
+outputs are immutable directory artifacts automatically, retaining
+`driver="zarr"` for `consist.load(...)`:
+
+```python
+tracker.log_output(
+    beam_zarr_root,
+    key="raw_od_skims_zarr_2018_0_sub0",
+)
+```
+
+For a non-Zarr directory tree, declare `artifact_kind="directory"` explicitly.
+Consist persists a complete tree manifest. Directory hydration with
+`db_fallback="never"` requires `source_root` and reads only the corresponding
+URI-relative tree below that root. It validates every member, stages the copy,
+and publishes it atomically. With `preserve_existing=False`, the destination
+root must not already exist. Shapefile outputs also opt into strict recovery
+automatically. Their bundle manifest includes required `.shp`, `.shx`, and
+`.dbf` files plus every same-stem regular sidecar. Archive and hydrate them
+through a clean bundle root, so the full bundle is atomically published; the
+hydration result exposes that root as `path` and the native `.shp` member as
+`entry_path` (and on the detached artifact's `as_path()`). Zarr and Shapefile
+artifacts logged before their manifest contracts remain loadable from bytes but
+cannot be archived or hydrated exactly; re-log them to create a new
+recovery-capable artifact.
 
 ## Compatibility Output Recovery
 

@@ -63,7 +63,8 @@ def test_preview_shows_driver_specific_hint_for_missing_optional_dependency(
     `preview` should guide users to the right extras when optional deps are missing.
     """
     artifact_path = tmp_path / "artifact.zarr"
-    artifact_path.write_text("placeholder", encoding="utf-8")
+    artifact_path.mkdir()
+    (artifact_path / "0.0").write_text("placeholder", encoding="utf-8")
 
     with tracker.start_run("run_preview_zarr", "model"):
         tracker.log_artifact(

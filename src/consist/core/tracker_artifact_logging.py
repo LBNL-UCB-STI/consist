@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from pathlib import Path
 from typing import Any, Dict, Literal, Optional, TYPE_CHECKING, Type, Union, cast
 
 from sqlmodel import SQLModel
@@ -17,6 +18,10 @@ from consist.core.cache_output_logging import (
     maybe_return_cached_output_or_demote_cache_hit,
 )
 from consist.core._performance_attribution import _track_begin_run_phase
+from consist.core.directory_artifacts import (
+    build_directory_manifest,
+    build_shapefile_bundle_manifest,
+)
 from consist.models.artifact import Artifact, set_tracker_ref
 from consist.types import ArtifactRef, FacetLike, HasFacetSchemaVersion
 
@@ -221,6 +226,62 @@ class ArtifactLoggingCoordinator:
                 if tracker._active_coupler is not None and cached.key:
                     tracker._active_coupler.set(cached.key, cached)
                 return cached
+
+        if driver == "artifact_directory":
+            raise ValueError(
+                "artifact_directory is not a content driver; use artifact_kind='directory'."
+            )
+
+        is_path_output = direction == "output" and isinstance(path, (str, Path))
+        inferred_zarr = is_path_output and (
+            driver == "zarr" or Path(path).suffix.lower() == ".zarr"
+        )
+        inferred_shapefile = is_path_output and (
+            driver == "shapefile" or Path(path).suffix.lower() == ".shp"
+        )
+        requested_directory = meta.get("directory_artifact") is True
+        if inferred_zarr or requested_directory:
+            if not is_path_output:
+                raise TypeError(
+                    "immutable directory outputs must be logged from a path."
+                )
+            manifest = build_directory_manifest(Path(path))
+            if content_hash is not None and content_hash != manifest["tree_hash"]:
+                raise ValueError(
+                    "directory output content_hash must match its manifest tree hash."
+                )
+            if inferred_zarr:
+                driver = "zarr"
+            content_hash = manifest["tree_hash"]
+            force_hash_override = True
+            validate_content_hash = False
+            meta = {
+                **meta,
+                "directory_artifact": True,
+                "directory_manifest": manifest,
+                "directory_manifest_version": manifest["version"],
+            }
+        elif inferred_shapefile:
+            if not is_path_output:
+                raise TypeError(
+                    "immutable shapefile outputs must be logged from a path."
+                )
+            manifest = build_shapefile_bundle_manifest(Path(path))
+            if content_hash is not None and content_hash != manifest["tree_hash"]:
+                raise ValueError(
+                    "shapefile output content_hash must match its bundle tree hash."
+                )
+            driver = "shapefile"
+            content_hash = manifest["tree_hash"]
+            force_hash_override = True
+            validate_content_hash = False
+            meta = {
+                **meta,
+                "file_bundle_artifact": True,
+                "file_bundle_entry": Path(path).name,
+                "file_bundle_manifest": manifest,
+                "file_bundle_manifest_version": manifest["version"],
+            }
 
         run_id = tracker.current_consist.run.id if direction == "output" else None
 

@@ -13,6 +13,11 @@ from sqlmodel import col, select
 
 from consist.core._tracker_service_base import _TrackerServiceBase
 from consist.core.container_policy import validate_recovery_registration_policy
+from consist.core.directory_artifacts import (
+    materialize_directory_tree,
+    materialize_shapefile_bundle,
+    validate_directory_manifest,
+)
 from consist.core.materialize import (
     ArchivedRunOutputFile,
     ArchivedRunOutputFilesReport,
@@ -27,6 +32,49 @@ from consist.core.materialize_options import normalize_materialize_output_keys
 from consist.models.artifact import Artifact, ArchivedOutputs
 
 _FILE_HASH_CHUNK_SIZE = 8 * 1024 * 1024
+
+
+def _is_directory_artifact(artifact: Artifact) -> bool:
+    meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+    return meta.get("directory_artifact") is True
+
+
+def _is_file_bundle_artifact(artifact: Artifact) -> bool:
+    meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+    return meta.get("file_bundle_artifact") is True
+
+
+def _directory_artifact_manifest(artifact: Artifact) -> dict[str, Any]:
+    meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+    manifest = meta.get("directory_manifest")
+    if not isinstance(manifest, Mapping):
+        raise ValueError(
+            f"directory artifact {artifact.key!r} has no persisted manifest"
+        )
+    normalized = validate_directory_manifest(manifest)
+    if artifact.hash != normalized["tree_hash"]:
+        raise ValueError(
+            f"directory artifact {artifact.key!r} manifest does not match artifact identity"
+        )
+    return normalized
+
+
+def _shapefile_bundle_metadata(artifact: Artifact) -> tuple[str, dict[str, Any]]:
+    meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+    entry = meta.get("file_bundle_entry")
+    manifest = meta.get("file_bundle_manifest")
+    if not isinstance(entry, str) or Path(entry).name != entry:
+        raise ValueError(
+            f"shapefile bundle artifact {artifact.key!r} has no valid entry"
+        )
+    if not isinstance(manifest, Mapping):
+        raise ValueError(f"shapefile bundle artifact {artifact.key!r} has no manifest")
+    normalized = validate_directory_manifest(manifest)
+    if artifact.hash != normalized["tree_hash"]:
+        raise ValueError(
+            f"shapefile bundle artifact {artifact.key!r} manifest does not match artifact identity"
+        )
+    return entry, normalized
 
 
 def _compute_file_sha256(path: Path) -> str:
@@ -200,6 +248,30 @@ class TrackerArchiveService(_TrackerServiceBase):
             raise RuntimeError(
                 "Cannot archive artifact: tracker has no database configured."
             )
+        if _is_directory_artifact(artifact):
+            return self._archive_directory_artifact(
+                artifact,
+                archive_root,
+                mode=mode,
+                append=append,
+            )
+        if _is_file_bundle_artifact(artifact):
+            return self._archive_shapefile_bundle_artifact(
+                artifact,
+                archive_root,
+                mode=mode,
+                append=append,
+            )
+        if artifact.driver == "shapefile":
+            raise ValueError(
+                "legacy Shapefile artifacts without an immutable bundle manifest "
+                "cannot be archived; re-log the output under the current contract."
+            )
+        if artifact.driver == "zarr":
+            raise ValueError(
+                "legacy Zarr artifacts without an immutable directory manifest "
+                "cannot be archived; re-log the output under the current contract."
+            )
 
         relative_path = self.fs.get_remappable_relative_path(artifact.container_uri)
         if relative_path is None:
@@ -235,6 +307,10 @@ class TrackerArchiveService(_TrackerServiceBase):
         if source_path is None or not source_path.exists():
             raise FileNotFoundError(
                 f"Cannot archive artifact {artifact.key!r}: source bytes are unavailable."
+            )
+        if source_path.is_dir():
+            raise ValueError(
+                "Directory archival requires an explicitly declared directory artifact."
             )
 
         destination_preexisted = destination.exists()
@@ -287,6 +363,114 @@ class TrackerArchiveService(_TrackerServiceBase):
 
         if mode == "move":
             artifact.abs_path = str(destination.resolve())
+        return destination
+
+    def _archive_directory_artifact(
+        self,
+        artifact: Artifact,
+        archive_root: str | os.PathLike[str],
+        *,
+        mode: Literal["copy", "move"],
+        append: bool,
+    ) -> Path:
+        """Archive a manifest-verified immutable directory artifact."""
+        manifest = _directory_artifact_manifest(artifact)
+        relative_path = self.fs.get_remappable_relative_path(artifact.container_uri)
+        if relative_path is None:
+            raise ValueError(
+                f"Artifact {artifact.key!r} does not have a rematerializable URI layout."
+            )
+        producing_run = self.get_run(str(artifact.run_id)) if artifact.run_id else None
+        source_path: Path | None = None
+        if producing_run is not None:
+            from consist.core.materialize import find_existing_recovery_source_path
+
+            _, source_path, _ = find_existing_recovery_source_path(
+                self.tracker,
+                artifact=artifact,
+                run=producing_run,
+                source_root=None,
+                preserve_raw_paths=True,
+            )
+        if source_path is None or not source_path.exists():
+            raise FileNotFoundError(
+                f"Cannot archive artifact {artifact.key!r}: source bytes are unavailable."
+            )
+
+        archive_root_path = Path(archive_root).expanduser().absolute()
+        destination = archive_root_path / relative_path
+        published = materialize_directory_tree(
+            source_path,
+            destination,
+            manifest,
+            preserve_existing=True,
+        )
+        try:
+            self.tracker.set_artifact_recovery_roots(
+                artifact, [archive_root_path], append=append
+            )
+        except Exception:
+            if published and destination.exists():
+                shutil.rmtree(destination)
+            raise
+        if mode == "move" and source_path.resolve() != destination.resolve():
+            shutil.rmtree(source_path)
+            artifact.abs_path = str(destination.resolve())
+        return destination
+
+    def _archive_shapefile_bundle_artifact(
+        self,
+        artifact: Artifact,
+        archive_root: str | os.PathLike[str],
+        *,
+        mode: Literal["copy", "move"],
+        append: bool,
+    ) -> Path:
+        """Archive a verified Shapefile sidecar bundle as one atomic directory."""
+        entry, manifest = _shapefile_bundle_metadata(artifact)
+        relative_path = self.fs.get_remappable_relative_path(artifact.container_uri)
+        if relative_path is None:
+            raise ValueError(
+                f"Artifact {artifact.key!r} does not have a rematerializable URI layout."
+            )
+        producing_run = self.get_run(str(artifact.run_id)) if artifact.run_id else None
+        source_path: Path | None = None
+        if producing_run is not None:
+            from consist.core.materialize import find_existing_recovery_source_path
+
+            _, source_path, _ = find_existing_recovery_source_path(
+                self.tracker,
+                artifact=artifact,
+                run=producing_run,
+                source_root=None,
+                preserve_raw_paths=True,
+            )
+        if source_path is None or not source_path.exists():
+            raise FileNotFoundError(
+                f"Cannot archive artifact {artifact.key!r}: source bytes are unavailable."
+            )
+
+        archive_root_path = Path(archive_root).expanduser().absolute()
+        destination = archive_root_path / relative_path
+        published = materialize_shapefile_bundle(
+            source_path.parent,
+            destination,
+            entry,
+            manifest,
+            preserve_existing=True,
+        )
+        try:
+            self.tracker.set_artifact_recovery_roots(
+                artifact, [archive_root_path], append=append
+            )
+        except Exception:
+            if published and destination.exists():
+                shutil.rmtree(destination)
+            raise
+        if mode == "move" and source_path.parent.resolve() != destination.resolve():
+            for member in manifest["entries"]:
+                (source_path.parent / member["path"]).unlink()
+            artifact.abs_path = str((destination / entry).resolve())
         return destination
 
     def register_artifact_recovery_copy(
