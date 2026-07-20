@@ -198,6 +198,7 @@ These models are returned by, or support, `ScenarioContext.map_runs(...)`:
 - [`consist.capture_outputs`](api_helpers.md#consist.api.capture_outputs)
 - [`consist.get_artifact`](api_helpers.md#consist.api.get_artifact)
 - [`consist.hydrate_run_outputs`](api_helpers.md#consist.api.hydrate_run_outputs) (recommended historical output recovery API)
+- [`consist.hydrate_run_outputs_to_destinations`](api_helpers.md#consist.api.hydrate_run_outputs_to_destinations) (historical recovery to exact caller-chosen paths)
 - [`consist.materialize_run_outputs`](api_helpers.md#consist.api.materialize_run_outputs) (aggregate compatibility wrapper)
 - [`consist.materialize_artifact`](api_helpers.md#consist.api.materialize_artifact) (single-artifact recovery)
 - [`consist.stage_artifact`](api_helpers.md#consist.api.stage_artifact) (low-level canonical input staging)
@@ -274,7 +275,8 @@ to Consist, start with the **Core** and **Logging/Loading** groups and reach for
 - `find_artifacts`, `get_artifact`, `get_child_artifacts`, `get_parent_artifact`, `get_artifacts_for_run`
 - `find_artifacts_by_params`, `get_artifact_kv`, `register_artifact_facet_parser`
 - `get_run`, `get_run_config`, `get_run_inputs`, `get_run_outputs`
-- `hydrate_run_outputs`, `materialize_run_outputs`, `materialize_artifact`
+- `hydrate_run_outputs`, `hydrate_run_outputs_to_destinations`,
+  `materialize_run_outputs`, `materialize_artifact`
 - `stage_artifact`, `stage_inputs`
 - `set_artifact_recovery_roots`, `register_artifact_recovery_copy`,
   `register_run_output_recovery_copies`, `archive_artifact`, `archive_run_outputs`,

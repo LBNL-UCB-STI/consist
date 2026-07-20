@@ -99,6 +99,7 @@ from consist.core.materialize import (
     RecoveryCopyStatus,
     RunOutputRecoveryCopiesRegistration,
     hydrate_run_outputs as hydrate_run_outputs_core,  # noqa: F401
+    hydrate_run_outputs_to_destinations as hydrate_run_outputs_to_destinations_core,  # noqa: F401
 )
 from consist.core.materialize_options import normalize_materialize_output_keys
 from consist.core.matrix import MatrixViewFactory
@@ -5282,6 +5283,32 @@ class Tracker:
             target_root=target_root,
             source_root=source_root,
             keys=keys,
+            preserve_existing=preserve_existing,
+            on_missing=on_missing,
+            db_fallback=db_fallback,
+        )
+
+    def hydrate_run_outputs_to_destinations(
+        self,
+        run_id: str,
+        *,
+        destinations_by_key: Mapping[str, str | Path],
+        source_root: str | Path | None = None,
+        preserve_existing: bool = True,
+        on_missing: Literal["warn", "raise"] = "warn",
+        db_fallback: Literal["never", "if_ingested"] = "if_ingested",
+    ) -> "HydratedRunOutputsResult":
+        """Hydrate selected historical outputs to exact destinations by key.
+
+        ``destinations_by_key`` is both the requested-output selection and the
+        exact destination mapping. Every destination must be inside the
+        tracker's configured run or mount roots unless external paths are
+        explicitly enabled.
+        """
+        return self._recovery_service.hydrate_run_outputs_to_destinations(
+            run_id,
+            destinations_by_key=destinations_by_key,
+            source_root=source_root,
             preserve_existing=preserve_existing,
             on_missing=on_missing,
             db_fallback=db_fallback,

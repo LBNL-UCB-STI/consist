@@ -1277,6 +1277,56 @@ def hydrate_run_outputs(
     )
 
 
+def hydrate_run_outputs_to_destinations(
+    run_id: str,
+    *,
+    destinations_by_key: Mapping[str, str | Path],
+    source_root: str | Path | None = None,
+    preserve_existing: bool = True,
+    on_missing: Literal["warn", "raise"] = "warn",
+    db_fallback: Literal["never", "if_ingested"] = "if_ingested",
+    tracker: Optional["Tracker"] = None,
+) -> "HydratedRunOutputsResult":
+    """Hydrate selected historical outputs to caller-chosen destinations.
+
+    ``destinations_by_key`` is the complete requested output set: each key is
+    restored exactly to its corresponding path. Destinations must be under the
+    tracker's run directory or configured mount roots unless external paths are
+    enabled on the tracker. The returned keyed result can describe a mixture of
+    successful, preserved, and unavailable outputs.
+
+    Parameters
+    ----------
+    run_id : str
+        Identifier of the historical run whose outputs should be restored.
+    destinations_by_key : Mapping[str, str | Path]
+        Exact destination path for each requested output key.
+    source_root : str | Path | None, optional
+        Optional alternate source root for filesystem-backed recovery.
+    preserve_existing : bool, default True
+        If True, existing destinations are preserved and reported as reusable.
+    on_missing : {"warn", "raise"}, default "warn"
+        Missing-source handling policy forwarded to the tracker.
+    db_fallback : {"never", "if_ingested"}, default "if_ingested"
+        DB export fallback policy forwarded to the tracker.
+    tracker : Optional[Tracker], optional
+        Tracker instance to use. If omitted, resolves the active/default tracker.
+
+    Returns
+    -------
+    HydratedRunOutputsResult
+        Keyed hydration outcome for the requested outputs.
+    """
+    return _resolve_tracker(tracker).hydrate_run_outputs_to_destinations(
+        run_id,
+        destinations_by_key=destinations_by_key,
+        source_root=source_root,
+        preserve_existing=preserve_existing,
+        on_missing=on_missing,
+        db_fallback=db_fallback,
+    )
+
+
 def stage_artifact(
     artifact: Artifact,
     *,
