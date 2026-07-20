@@ -373,6 +373,8 @@ class RunTraceCoordinator:
             start_kwargs["requested_input_artifact_ids"] = dict(
                 requested_input_artifact_ids
             )
+        if strict_binding_identity is not None:
+            start_kwargs["requested_input_strict_snapshot"] = True
         identity_overrides: dict[str, Any] = {}
         if strict_binding_identity is not None:
             identity_overrides["__consist_resolved_binding__"] = strict_binding_identity
@@ -655,6 +657,10 @@ class RunTraceCoordinator:
                         ),
                     )
                 )
+            requested_input_artifact_ids = {
+                key: str(input_artifacts_by_key[key].id)
+                for key in requested_input_paths
+            }
 
         if run_id is None:
             run_id = f"{resolved_name}_{uuid.uuid4().hex[:8]}"
