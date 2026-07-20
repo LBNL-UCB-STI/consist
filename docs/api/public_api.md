@@ -136,6 +136,13 @@ with tracker.scenario("baseline") as sc:
   added by design if there is demand)
 - `consist.CacheOptions`, `consist.OutputPolicyOptions`, `consist.ExecutionOptions`
 - `consist.BindingResult` (execution envelope for orchestrator-resolved scenario inputs)
+- `consist.StepIdentity` (Scenario-owned resolved name, model, and strict
+  callable contract for preflighted advanced bindings)
+- `consist.ResolvedBindingBuilder` / `consist.ResolvedBinding`
+  (advanced immutable execution contract for a previously verified artifact
+  selection; `bind_tracked_artifact(...)` derives the trusted identity and
+  locator from a Consist artifact; ordinary workflows should continue to use
+  Coupler refs or `BindingResult`)
 - `consist.H5ChildSpec` (typed child-artifact customization for HDF5 containers)
 - `consist.GtfsCanonicalizationResult` and `consist.GtfsFeedSnapshot`
   (GTFS selected-service identity results)
@@ -160,6 +167,7 @@ with tracker.scenario("baseline") as sc:
 - [`ScenarioContext`](workflow.md#scenario-context) (returned by `consist.scenario(...)`)
   - `run_id`, `config`, `inputs`, `add_input`, `declare_outputs`, `require_outputs`, `collect_by_keys`, `run`, `map_runs`, `trace`
   - `run(..., binding=BindingResult(...))` for resolved orchestrator plans
+    or `binding=ResolvedBinding(...)` for verified execution-exact plans
   - `map_runs(...)` for independent process-backed sweep rows
 - [`RunContext`](workflow.md#run-context) (injected via `execution_options=ExecutionOptions(inject_context=True)`)
   - `run_dir`, `output_dir`, `output_path`, `inputs`, `load`, `log_artifact`, `log_artifacts`, `log_input`, `log_output`, `log_meta`, `capture_outputs`

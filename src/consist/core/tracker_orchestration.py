@@ -152,6 +152,9 @@ class RunInvocationContext:
     requested_input_paths: Optional[Dict[str, Path]]
     requested_input_materialization: Optional[str]
     requested_input_materialization_mode: Optional[str]
+    requested_input_artifact_ids: Optional[Mapping[str, str]]
+    strict_binding_identity: Optional[str]
+    strict_binding_json: Optional[str]
     run_id: str
     start_kwargs: Dict[str, Any]
 
@@ -324,6 +327,9 @@ class RunTraceCoordinator:
         requested_input_paths: Optional[Mapping[str, Any]] = None,
         requested_input_materialization: Optional[str] = None,
         requested_input_materialization_mode: Optional[str] = None,
+        requested_input_artifact_ids: Optional[Mapping[str, str]] = None,
+        strict_binding_identity: Optional[str] = None,
+        strict_binding_json: Optional[str] = None,
         profile_file_schema: bool | Literal["if_changed"] | None = None,
     ) -> Dict[str, Any]:
         """Build the kwargs payload passed into ``tracker.start_run``."""
@@ -363,11 +369,20 @@ class RunTraceCoordinator:
                 str(key): str(Path(value))
                 for key, value in requested_input_paths.items()
             }
+        if requested_input_artifact_ids is not None:
+            start_kwargs["requested_input_artifact_ids"] = dict(
+                requested_input_artifact_ids
+            )
+        identity_overrides: dict[str, Any] = {}
+        if strict_binding_identity is not None:
+            identity_overrides["__consist_resolved_binding__"] = strict_binding_identity
+        if strict_binding_json is not None:
+            start_kwargs["_consist_strict_binding_json"] = strict_binding_json
         capture_identity = build_output_set_captures_identity(output_sets)
         if capture_identity is not None:
-            start_kwargs["_consist_identity_config_overrides"] = {
-                "__consist_output_set_captures__": capture_identity
-            }
+            identity_overrides["__consist_output_set_captures__"] = capture_identity
+        if identity_overrides:
+            start_kwargs["_consist_identity_config_overrides"] = identity_overrides
         requested_mode = requested_input_materialization_mode or (
             "copy" if requested_input_materialization == "requested" else None
         )
@@ -562,6 +577,9 @@ class RunTraceCoordinator:
         requested_input_paths = invocation.input_paths
         requested_input_materialization = invocation.input_materialization
         requested_input_materialization_mode = invocation.input_materialization_mode
+        requested_input_artifact_ids = invocation.requested_input_artifact_ids
+        strict_binding_identity = invocation.strict_binding_identity
+        strict_binding_json = invocation.strict_binding_json
         if (
             input_binding != "none"
             and invocation.inputs is not None
@@ -704,6 +722,9 @@ class RunTraceCoordinator:
             requested_input_paths=requested_input_paths,
             requested_input_materialization=requested_input_materialization,
             requested_input_materialization_mode=(requested_input_materialization_mode),
+            requested_input_artifact_ids=requested_input_artifact_ids,
+            strict_binding_identity=strict_binding_identity,
+            strict_binding_json=strict_binding_json,
             profile_file_schema=profile_file_schema,
         )
 
@@ -732,6 +753,9 @@ class RunTraceCoordinator:
             ),
             requested_input_materialization=requested_input_materialization,
             requested_input_materialization_mode=(requested_input_materialization_mode),
+            requested_input_artifact_ids=requested_input_artifact_ids,
+            strict_binding_identity=strict_binding_identity,
+            strict_binding_json=strict_binding_json,
             run_id=run_id,
             start_kwargs=start_kwargs,
         )

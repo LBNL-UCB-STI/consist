@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Union, cast
 
 from consist.core.error_messages import format_problem_cause_fix
-from consist.core.metadata_resolver import MetadataResolver
+from consist.core.metadata_resolver import MetadataResolver, ResolvedStepIdentity
 from consist.core.run_options import merge_run_options
 from consist.core.settings import ConsistSettings
 from consist.models.run import ConsistRecord
@@ -106,6 +106,13 @@ class ResolvedRunInvocation:
         Requested input-staging policy.
     input_materialization_mode : Optional[Literal["copy"]]
         Requested staging transport mode.
+    requested_input_artifact_ids : Optional[Mapping[str, str]]
+        Internal strict-binding mapping from callable parameter to tracked
+        artifact identifier for requested input staging.
+    strict_binding_identity : Optional[str]
+        Internal immutable strict-binding cache discriminator.
+    strict_binding_json : Optional[str]
+        Internal canonical binding evidence for lifecycle persistence.
     executor : Literal["python", "container"]
         Effective execution backend.
     container : Optional[Mapping[str, Any]]
@@ -150,6 +157,9 @@ class ResolvedRunInvocation:
     input_paths: Optional[Mapping[str, PathLike]]
     input_materialization: Optional[Literal["requested"]]
     input_materialization_mode: Optional[Literal["copy"]]
+    requested_input_artifact_ids: Optional[Mapping[str, str]]
+    strict_binding_identity: Optional[str]
+    strict_binding_json: Optional[str]
     executor: Literal["python", "container"]
     container: Optional[Mapping[str, Any]]
     runtime_kwargs: Optional[Dict[str, Any]]
@@ -245,6 +255,7 @@ def resolve_run_invocation(
     missing_name_error: str,
     python_missing_fn_error: str,
     allow_python_without_fn: bool = False,
+    pre_resolved_step_identity: ResolvedStepIdentity | None = None,
 ) -> ResolvedRunInvocation:
     """
     Resolve and validate a run invocation into a normalized internal contract.
@@ -378,6 +389,9 @@ def resolve_run_invocation(
     requested_input_paths = merged_options.input_paths
     requested_input_materialization = merged_options.input_materialization
     requested_input_materialization_mode = merged_options.input_materialization_mode
+    requested_input_artifact_ids = merged_options.requested_input_artifact_ids
+    strict_binding_identity = merged_options.strict_binding_identity
+    strict_binding_json = merged_options.strict_binding_json
     executor = merged_options.executor
     container = merged_options.container
     runtime_kwargs = merged_options.runtime_kwargs
@@ -571,6 +585,7 @@ def resolve_run_invocation(
         input_binding=input_binding,
         load_inputs=load_inputs,
         missing_name_error=missing_name_error,
+        pre_resolved_identity=pre_resolved_step_identity,
     )
 
     resolved_cache_mode = resolved.cache_mode
@@ -758,6 +773,13 @@ def resolve_run_invocation(
         ),
         input_materialization=requested_input_materialization,
         input_materialization_mode=requested_input_materialization_mode,
+        requested_input_artifact_ids=(
+            dict(requested_input_artifact_ids)
+            if requested_input_artifact_ids is not None
+            else None
+        ),
+        strict_binding_identity=strict_binding_identity,
+        strict_binding_json=strict_binding_json,
         executor=cast(Literal["python", "container"], executor),
         container=container,
         runtime_kwargs=runtime_kwargs_dict,

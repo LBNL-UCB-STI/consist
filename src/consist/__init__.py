@@ -49,6 +49,15 @@ from consist.core.indexing import (
     index_by_facet,
     index_by_field,
 )
+from consist.core.resolved_binding import (
+    AdmissionEvidence,
+    ArtifactIdentity,
+    BoundArtifact,
+    ResolvedBinding,
+    ResolvedBindingBuilder,
+    TrackedArtifactLocator,
+)
+from consist.core.workflow import StepIdentity
 
 # API
 from consist.api import (
@@ -202,6 +211,13 @@ __all__ = [
     "RunContext",
     "AdmissionReference",
     "AdmissionReport",
+    "AdmissionEvidence",
+    "ArtifactIdentity",
+    "BoundArtifact",
+    "ResolvedBinding",
+    "ResolvedBindingBuilder",
+    "TrackedArtifactLocator",
+    "StepIdentity",
     "CanonicalizationArtifactMember",
     "CanonicalizationReference",
     "CanonicalizationSnapshot",
