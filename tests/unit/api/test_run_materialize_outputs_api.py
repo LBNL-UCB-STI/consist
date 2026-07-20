@@ -4,6 +4,7 @@ from collections.abc import Mapping
 import hashlib
 import os
 from pathlib import Path
+from typing import Sequence
 import uuid
 
 import pytest
@@ -18,6 +19,7 @@ from consist.api import materialize_run_outputs as materialize_run_outputs_api
 from consist.api import archive_artifact as archive_artifact_api
 from consist.api import archive_current_run_outputs as archive_current_run_outputs_api
 from consist.api import archive_run_outputs as archive_run_outputs_api
+from consist.api import archive_run_output_files as archive_run_output_files_api
 from consist.api import (
     register_artifact_recovery_copy as register_artifact_recovery_copy_api,
 )
@@ -28,6 +30,50 @@ from consist.api import set_artifact_recovery_roots as set_artifact_recovery_roo
 from consist.core.tracker import Tracker
 from consist.models.artifact import Artifact, ArchivedOutputs
 from consist.models.run import Run
+
+
+def test_tracker_forwards_file_output_archiving_to_archive_service(
+    tmp_path: Path,
+) -> None:
+    """Tracker keeps the public archive API while the service owns its behavior."""
+
+    class ArchiveService:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+            self.result = object()
+
+        def archive_run_output_files(
+            self,
+            run_id: str,
+            recovery_root: Path,
+            *,
+            keys: Sequence[str] | None,
+            preserve_existing: bool,
+            verify: bool,
+            append: bool,
+        ) -> object:
+            self.calls.append(
+                (run_id, recovery_root, keys, preserve_existing, verify, append)
+            )
+            return self.result
+
+    tracker = Tracker(run_dir=tmp_path)
+    service = ArchiveService()
+    tracker._archive_service = service
+
+    result = tracker.archive_run_output_files(
+        "producer",
+        tmp_path / "archive",
+        keys=["result"],
+        preserve_existing=False,
+        verify=False,
+        append=False,
+    )
+
+    assert result is service.result
+    assert service.calls == [
+        ("producer", tmp_path / "archive", ["result"], False, False, False)
+    ]
 
 
 def _hydrated_result(
@@ -823,6 +869,582 @@ def test_archive_run_outputs_archives_selected_keys(
     outputs = tracker.get_run_outputs("producer_archive_bulk")
     assert outputs["a"].meta["recovery_roots"] == [str(archive_root.resolve())]
     assert "recovery_roots" not in outputs["b"].meta
+
+
+def test_archive_run_output_files_copies_verifies_and_registers_selected_file(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "reported.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n1\n", encoding="utf-8")
+    archive_root = tmp_path / "archive_reported"
+
+    with tracker.start_run("producer_archive_reported", model="producer"):
+        tracker.log_artifact(output_path, key="reported", direction="output")
+
+    report = archive_run_output_files_api(
+        "producer_archive_reported", archive_root, tracker=tracker
+    )
+
+    result = report["reported"]
+    assert result.copy_status == "copied"
+    assert result.verification_status == "verified"
+    assert result.metadata_committed is True
+    assert result.source_path == output_path.resolve()
+    assert result.target_path == (archive_root / "outputs" / "reported.csv").resolve()
+    assert result.target_path.read_text(encoding="utf-8") == "value\n1\n"
+    assert report.complete is True
+    assert report.summary == "copied=1 verified=1 metadata_committed=1"
+
+
+def test_archive_run_output_files_validates_unknown_keys_before_creating_root(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "known.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n1\n", encoding="utf-8")
+    archive_root = tmp_path / "missing_key_archive"
+
+    with tracker.start_run("producer_archive_missing_key", model="producer"):
+        tracker.log_artifact(output_path, key="known", direction="output")
+
+    with pytest.raises(KeyError, match="Requested output keys were not found"):
+        tracker.archive_run_output_files(
+            "producer_archive_missing_key", archive_root, keys=["missing"]
+        )
+
+    assert not archive_root.exists()
+
+
+def test_archive_run_output_files_preserves_matching_existing_target(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "retained.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n2\n", encoding="utf-8")
+    archive_root = tmp_path / "archive_retained"
+
+    with tracker.start_run("producer_archive_retained", model="producer"):
+        tracker.log_artifact(output_path, key="retained", direction="output")
+
+    target = archive_root / "outputs" / "retained.csv"
+    target.parent.mkdir(parents=True)
+    target.write_text("value\n2\n", encoding="utf-8")
+
+    report = tracker.archive_run_output_files("producer_archive_retained", archive_root)
+
+    assert report["retained"].copy_status == "preserved_existing"
+    assert report["retained"].verification_status == "verified"
+    assert report["retained"].metadata_committed is True
+    assert target.read_text(encoding="utf-8") == "value\n2\n"
+
+
+def test_archive_run_output_files_rejects_symlink_destination(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "linked.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n3\n", encoding="utf-8")
+    archive_root = tmp_path / "archive_linked" / "nested"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    archive_root.parent.symlink_to(outside, target_is_directory=True)
+
+    with tracker.start_run("producer_archive_linked", model="producer"):
+        tracker.log_artifact(output_path, key="linked", direction="output")
+
+    report = tracker.archive_run_output_files("producer_archive_linked", archive_root)
+
+    assert report["linked"].copy_status == "symlink_destination"
+    assert report["linked"].metadata_committed is False
+    assert not (outside / "nested" / "outputs" / "linked.csv").exists()
+
+
+def test_archive_run_output_files_rejects_symlink_source_ancestor(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    external_outputs = tmp_path / "external_outputs"
+    output_dir = tracker.run_dir / "outputs"
+    output_path = output_dir / "source_linked.csv"
+    output_dir.mkdir(parents=True)
+    output_path.write_text("value\n4\n", encoding="utf-8")
+
+    with tracker.start_run("producer_archive_source_linked", model="producer"):
+        tracker.log_artifact(output_path, key="source_linked", direction="output")
+
+    output_dir.rename(external_outputs)
+    output_dir.symlink_to(external_outputs, target_is_directory=True)
+
+    report = tracker.archive_run_output_files(
+        "producer_archive_source_linked", tmp_path / "archive_source_linked"
+    )
+
+    assert report["source_linked"].copy_status == "symlink_source"
+    assert report["source_linked"].metadata_committed is False
+
+
+def test_find_existing_recovery_source_path_default_validator_receives_resolved_path(
+    tracker: Tracker,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "validator.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n", encoding="utf-8")
+    with tracker.start_run("producer_validator_path", model="producer"):
+        artifact = tracker.log_artifact(
+            output_path, key="validator", direction="output"
+        )
+    run = tracker.get_run("producer_validator_path")
+    assert run is not None
+    seen: list[Path] = []
+
+    _, source, _ = consist_materialize.find_existing_recovery_source_path(
+        tracker,
+        artifact=artifact,
+        run=run,
+        source_root=None,
+        source_validator=lambda candidate: seen.append(candidate) or True,
+    )
+
+    assert seen == [output_path.resolve()]
+    assert source == output_path.resolve()
+
+
+def test_archive_run_output_files_rejects_symlink_recovery_root_before_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "root_linked.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n5\n", encoding="utf-8")
+    external_root = tmp_path / "external_root"
+    (external_root / "outputs").mkdir(parents=True)
+    (external_root / "outputs" / "root_linked.csv").write_text(
+        "value\n5\n", encoding="utf-8"
+    )
+    linked_root = tmp_path / "linked_recovery_root"
+    linked_root.symlink_to(external_root, target_is_directory=True)
+
+    with tracker.start_run("producer_archive_root_linked", model="producer"):
+        artifact = tracker.log_artifact(
+            output_path, key="root_linked", direction="output"
+        )
+
+    output_path.unlink()
+    artifact.meta = {"recovery_roots": [str(linked_root)]}
+    monkeypatch.setattr(
+        tracker, "get_run_outputs", lambda _run_id: {"root_linked": artifact}
+    )
+    report = tracker.archive_run_output_files(
+        "producer_archive_root_linked", tmp_path / "archive_root_linked"
+    )
+
+    assert report["root_linked"].copy_status == "symlink_source"
+    assert report["root_linked"].metadata_committed is False
+
+
+def test_archive_run_output_files_rejects_symlinked_historical_root_before_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "historical_linked.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n11\n", encoding="utf-8")
+    external_root = tmp_path / "external_historical_root"
+    (external_root / "outputs").mkdir(parents=True)
+    (external_root / "outputs" / "historical_linked.csv").write_text(
+        "value\n11\n", encoding="utf-8"
+    )
+    linked_root = tmp_path / "linked_historical_root"
+    linked_root.symlink_to(external_root, target_is_directory=True)
+
+    with tracker.start_run("producer_archive_historical_linked", model="producer"):
+        artifact = tracker.log_artifact(
+            output_path, key="historical_linked", direction="output"
+        )
+    historical_run = tracker.get_run("producer_archive_historical_linked")
+    assert historical_run is not None
+    historical_run.meta = {"_physical_run_dir": str(linked_root)}
+    monkeypatch.setattr(tracker, "get_run", lambda _run_id: historical_run)
+    monkeypatch.setattr(
+        tracker,
+        "get_run_outputs",
+        lambda _run_id: {"historical_linked": artifact},
+    )
+
+    report = tracker.archive_run_output_files(
+        "producer_archive_historical_linked", tmp_path / "archive_historical_linked"
+    )
+
+    assert report["historical_linked"].copy_status == "symlink_source"
+
+
+def test_archive_run_output_files_rejects_output_set_roles_before_copy(
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    artifact = Artifact(
+        id=uuid.uuid4(),
+        key="set",
+        container_uri="./outputs/set",
+        driver="artifact_set",
+        meta={"artifact_set": True},
+    )
+    monkeypatch.setattr(tracker, "get_run_outputs", lambda _run_id: {"set": artifact})
+
+    report = tracker.archive_run_output_files("output_set_run", tmp_path / "archive")
+
+    assert report["set"].copy_status == "unsupported_directory"
+    assert report["set"].metadata_committed is False
+    assert not (tmp_path / "archive").exists()
+
+
+@pytest.mark.parametrize(
+    ("key", "meta"),
+    [
+        ("manifest", {"output_set_manifest": True}),
+        ("member", {"output_set_member": True}),
+    ],
+)
+def test_archive_run_output_files_rejects_output_set_manifest_and_member(
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
+    tmp_path: Path,
+    key: str,
+    meta: dict[str, bool],
+) -> None:
+    artifact = Artifact(
+        id=uuid.uuid4(),
+        key=key,
+        container_uri=f"./outputs/{key}.json",
+        driver="json",
+        meta=meta,
+    )
+    monkeypatch.setattr(tracker, "get_run_outputs", lambda _run_id: {key: artifact})
+
+    report = tracker.archive_run_output_files("output_set_run", tmp_path / "archive")
+
+    assert report[key].copy_status == "unsupported_directory"
+
+
+def test_archive_run_output_files_reports_existing_target_blockers(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "existing.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n6\n", encoding="utf-8")
+    archive_root = tmp_path / "archive_existing"
+    target = archive_root / "outputs" / "existing.csv"
+    target.parent.mkdir(parents=True)
+    target.write_text("different\n", encoding="utf-8")
+    with tracker.start_run("producer_archive_existing", model="producer"):
+        tracker.log_artifact(output_path, key="existing", direction="output")
+
+    mismatch = tracker.archive_run_output_files(
+        "producer_archive_existing", archive_root
+    )
+    no_preserve = tracker.archive_run_output_files(
+        "producer_archive_existing", archive_root, preserve_existing=False
+    )
+
+    assert mismatch["existing"].copy_status == "destination_exists"
+    assert mismatch["existing"].verification_status == "hash_mismatch"
+    assert no_preserve["existing"].copy_status == "destination_exists"
+    assert target.read_text(encoding="utf-8") == "different\n"
+
+
+def test_archive_run_output_files_can_register_without_verification(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "unverified.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n7\n", encoding="utf-8")
+    with tracker.start_run("producer_archive_unverified", model="producer"):
+        tracker.log_artifact(output_path, key="unverified", direction="output")
+
+    report = tracker.archive_run_output_files(
+        "producer_archive_unverified", tmp_path / "archive_unverified", verify=False
+    )
+
+    assert report["unverified"].verification_status == "not_requested"
+    assert report["unverified"].metadata_committed is True
+    assert report.complete is True
+
+
+def test_archive_run_output_files_trusts_preexisting_target_without_verification(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "trusted_existing.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n12\n", encoding="utf-8")
+    archive_root = tmp_path / "archive_trusted_existing"
+    target = archive_root / "outputs" / "trusted_existing.csv"
+    target.parent.mkdir(parents=True)
+    target.write_text("unverified but retained\n", encoding="utf-8")
+    with tracker.start_run("producer_archive_trusted_existing", model="producer"):
+        tracker.log_artifact(output_path, key="trusted_existing", direction="output")
+
+    report = tracker.archive_run_output_files(
+        "producer_archive_trusted_existing", archive_root, verify=False
+    )
+
+    assert report["trusted_existing"].copy_status == "preserved_existing"
+    assert report["trusted_existing"].verification_status == "not_requested"
+    assert report["trusted_existing"].metadata_committed is True
+
+
+def test_archive_run_output_files_reports_missing_source_and_fast_hash(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    missing_path = tracker.run_dir / "outputs" / "missing.csv"
+    fast_path = tracker.run_dir / "outputs" / "fast.csv"
+    missing_path.parent.mkdir(parents=True, exist_ok=True)
+    missing_path.write_text("value\n8\n", encoding="utf-8")
+    fast_path.write_text("value\n9\n", encoding="utf-8")
+    with tracker.start_run("producer_archive_blocked", model="producer"):
+        tracker.log_artifact(missing_path, key="missing", direction="output")
+        tracker.log_artifact(fast_path, key="fast", direction="output")
+    missing_path.unlink()
+    missing_report = tracker.archive_run_output_files(
+        "producer_archive_blocked", tmp_path / "archive_blocked", keys=["missing"]
+    )
+    tracker.identity.hashing_strategy = "fast"
+    fast_report = tracker.archive_run_output_files(
+        "producer_archive_blocked", tmp_path / "archive_blocked", keys=["fast"]
+    )
+
+    assert missing_report["missing"].copy_status == "missing_source"
+    assert fast_report["fast"].verification_status == "unverifiable_hash"
+
+
+def test_archive_run_output_files_rejects_directory_output(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "directory_output"
+    output_path.mkdir(parents=True)
+    (output_path / "member.txt").write_text("value\n", encoding="utf-8")
+    with tracker.start_run("producer_archive_directory", model="producer"):
+        tracker.log_artifact(output_path, key="directory_output", direction="output")
+
+    report = tracker.archive_run_output_files(
+        "producer_archive_directory", tmp_path / "archive_directory", verify=False
+    )
+
+    assert report["directory_output"].copy_status == "unsupported_directory"
+
+
+def test_archive_run_output_files_retry_repairs_failed_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "retry_metadata.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n10\n", encoding="utf-8")
+    archive_root = tmp_path / "archive_retry_metadata"
+    with tracker.start_run("producer_archive_retry_metadata", model="producer"):
+        tracker.log_artifact(output_path, key="retry_metadata", direction="output")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            tracker,
+            "_set_artifact_recovery_roots_bulk",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("bulk")),
+        )
+        patch.setattr(
+            tracker,
+            "set_artifact_recovery_roots",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("single")),
+        )
+        first = tracker.archive_run_output_files(
+            "producer_archive_retry_metadata", archive_root
+        )
+
+    output_path.unlink()
+    second = tracker.archive_run_output_files(
+        "producer_archive_retry_metadata", archive_root
+    )
+
+    assert first["retry_metadata"].copy_status == "copied"
+    assert first["retry_metadata"].metadata_committed is False
+    assert second["retry_metadata"].copy_status == "preserved_existing"
+    assert second["retry_metadata"].metadata_committed is True
+
+
+def test_archive_run_output_files_reports_existing_target_without_source_when_not_preserving(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "existing_without_source.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n11\n", encoding="utf-8")
+    archive_root = tmp_path / "archive_existing_without_source"
+    target = archive_root / "outputs" / "existing_without_source.csv"
+    target.parent.mkdir(parents=True)
+    target.write_text("value\n11\n", encoding="utf-8")
+
+    with tracker.start_run(
+        "producer_archive_existing_without_source", model="producer"
+    ):
+        tracker.log_artifact(
+            output_path, key="existing_without_source", direction="output"
+        )
+
+    output_path.unlink()
+    report = tracker.archive_run_output_files(
+        "producer_archive_existing_without_source",
+        archive_root,
+        preserve_existing=False,
+    )
+
+    assert report["existing_without_source"].copy_status == "destination_exists"
+    assert report["existing_without_source"].metadata_committed is False
+
+
+def test_archive_run_output_files_reports_one_fallback_metadata_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    paths = {
+        key: tracker.run_dir / "outputs" / f"fallback_{key}.csv" for key in ("a", "b")
+    }
+    for index, path in enumerate(paths.values()):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"value\n{index}\n", encoding="utf-8")
+    with tracker.start_run("producer_archive_fallback", model="producer"):
+        for key, path in paths.items():
+            tracker.log_artifact(path, key=key, direction="output")
+
+    monkeypatch.setattr(
+        tracker,
+        "_set_artifact_recovery_roots_bulk",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("bulk")),
+    )
+    original = tracker.set_artifact_recovery_roots
+
+    def fail_one(artifact: Artifact, *args, **kwargs):
+        if artifact.key == "b":
+            raise RuntimeError("single b")
+        return original(artifact, *args, **kwargs)
+
+    monkeypatch.setattr(tracker, "set_artifact_recovery_roots", fail_one)
+    report = tracker.archive_run_output_files(
+        "producer_archive_fallback", tmp_path / "archive_fallback"
+    )
+
+    assert report["a"].metadata_committed is True
+    assert report["b"].metadata_committed is False
+    assert report["b"].verification_status == "verified"
+
+
+def test_archive_run_output_files_uses_one_bulk_metadata_update(
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    paths = {key: tracker.run_dir / "outputs" / f"bulk_{key}.csv" for key in ("a", "b")}
+    for index, path in enumerate(paths.values()):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"value\n{index}\n", encoding="utf-8")
+    with tracker.start_run("producer_archive_bulk_once", model="producer"):
+        for key, path in paths.items():
+            tracker.log_artifact(path, key=key, direction="output")
+
+    calls = 0
+    original = tracker._set_artifact_recovery_roots_bulk
+
+    def count_bulk(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(tracker, "_set_artifact_recovery_roots_bulk", count_bulk)
+    report = tracker.archive_run_output_files(
+        "producer_archive_bulk_once", tmp_path / "archive_bulk_once"
+    )
+
+    assert calls == 1
+    assert report.complete is True
+
+
+def test_archive_run_output_files_empty_selection_is_complete_without_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    called = False
+
+    def unexpected_registration(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("empty archive should not register outputs")
+
+    monkeypatch.setattr(
+        tracker, "register_run_output_recovery_copies", unexpected_registration
+    )
+    archive_root = tmp_path / "empty_archive"
+
+    report = tracker.archive_run_output_files("empty_run", archive_root, keys=[])
+
+    assert report.complete is True
+    assert report.summary == "copied=0 verified=0 metadata_committed=0"
+    assert called is False
+    assert not archive_root.exists()
+
+
+def test_archive_run_output_files_keeps_verified_status_for_structured_metadata_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    output_path = tracker.run_dir / "outputs" / "structured_failure.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n13\n", encoding="utf-8")
+    with tracker.start_run("producer_archive_structured_failure", model="producer"):
+        artifact = tracker.log_artifact(
+            output_path, key="structured_failure", direction="output"
+        )
+
+    registration = consist_materialize.ArtifactRecoveryCopyRegistration(
+        artifact=artifact,
+        key="structured_failure",
+        artifact_id=str(artifact.id),
+        recovery_root=tmp_path / "archive_structured_failure",
+        expected_path=tmp_path
+        / "archive_structured_failure"
+        / "outputs"
+        / "structured_failure.csv",
+        status="failed",
+        message="different persistence error wording",
+        verification_succeeded=True,
+    )
+    monkeypatch.setattr(
+        tracker,
+        "register_run_output_recovery_copies",
+        lambda *args, **kwargs: consist_materialize.RunOutputRecoveryCopiesRegistration(
+            outputs={"structured_failure": registration}
+        ),
+    )
+
+    report = tracker.archive_run_output_files(
+        "producer_archive_structured_failure", tmp_path / "archive_structured_failure"
+    )
+
+    assert report["structured_failure"].verification_status == "verified"
+    assert report["structured_failure"].metadata_committed is False
 
 
 def test_archive_run_outputs_returns_archived_outputs_type(

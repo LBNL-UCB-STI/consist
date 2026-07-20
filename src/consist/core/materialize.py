@@ -90,6 +90,28 @@ RecoveryCopyStatus = Literal[
     "failed",
 ]
 
+ArchiveRunOutputFileStatus = Literal[
+    "copied",
+    "preserved_existing",
+    "destination_exists",
+    "missing_source",
+    "skipped_unmapped",
+    "unsupported_directory",
+    "symlink_source",
+    "symlink_destination",
+    "unverifiable_hash",
+    "hash_mismatch",
+    "failed",
+]
+
+ArchiveRunOutputVerificationStatus = Literal[
+    "verified",
+    "not_requested",
+    "unverifiable_hash",
+    "hash_mismatch",
+    "failed",
+]
+
 _FILE_HASH_CHUNK_SIZE = 8 * 1024 * 1024
 
 
@@ -132,6 +154,7 @@ class MaterializationResult:
 
     @property
     def materialized(self) -> dict[str, str]:
+        """Return all successfully materialized key-to-path entries."""
         return {
             **self.materialized_from_filesystem,
             **self.materialized_from_db,
@@ -139,14 +162,17 @@ class MaterializationResult:
 
     @property
     def has_failures(self) -> bool:
+        """Return whether any output encountered a materialization failure."""
         return bool(self.failed)
 
     @property
     def complete(self) -> bool:
+        """Return whether every requested output was materialized or retained."""
         return not (self.skipped_unmapped or self.skipped_missing_source or self.failed)
 
     @property
     def summary(self) -> str:
+        """Return deterministic aggregate materialization counts."""
         return (
             f"materialized_fs={len(self.materialized_from_filesystem)} "
             f"materialized_db={len(self.materialized_from_db)} "
@@ -207,7 +233,27 @@ class HydratedRunOutput:
 
 @dataclass(frozen=True, slots=True)
 class MaterializedArtifact:
-    """Outcome for materializing one artifact into a target root."""
+    """Outcome for materializing one artifact into a target root.
+
+    Attributes
+    ----------
+    artifact : Artifact
+        Detached artifact associated with the result.
+    key : str
+        Artifact key.
+    path : Path | None
+        Usable materialized or preserved destination, when available.
+    source_path : Path | None
+        Filesystem source used for materialization.
+    target_path : Path | None
+        Intended destination even when materialization did not succeed.
+    status : MaterializedArtifactStatus
+        Per-artifact materialization outcome.
+    message : str | None
+        Optional diagnostic for a non-happy-path outcome.
+    resolvable : bool
+        Whether the detached artifact can be used at ``path`` immediately.
+    """
 
     artifact: Artifact
     key: str
@@ -268,6 +314,7 @@ class HydratedRunOutputsResult(MappingABC[str, HydratedRunOutput]):
 
     @property
     def paths(self) -> dict[str, Path]:
+        """Return resolvable output destinations keyed by output key."""
         return {
             key: output.path
             for key, output in self.outputs.items()
@@ -276,18 +323,21 @@ class HydratedRunOutputsResult(MappingABC[str, HydratedRunOutput]):
 
     @property
     def resolvable(self) -> dict[str, HydratedRunOutput]:
+        """Return hydration outcomes with immediately usable artifacts."""
         return {
             key: output for key, output in self.outputs.items() if output.resolvable
         }
 
     @property
     def failed_keys(self) -> list[str]:
+        """Return keys whose hydration status is ``"failed"``."""
         return [
             key for key, output in self.outputs.items() if output.status == "failed"
         ]
 
     @property
     def complete(self) -> bool:
+        """Return whether no output is unmapped, missing, or failed."""
         incomplete_statuses = {"skipped_unmapped", "missing_source", "failed"}
         return all(
             output.status not in incomplete_statuses for output in self.outputs.values()
@@ -295,6 +345,7 @@ class HydratedRunOutputsResult(MappingABC[str, HydratedRunOutput]):
 
     @property
     def summary(self) -> str:
+        """Return deterministic per-status hydration counts."""
         counts: dict[str, int] = {
             "materialized_from_filesystem": 0,
             "materialized_from_db": 0,
@@ -319,10 +370,32 @@ class HydratedRunOutputsResult(MappingABC[str, HydratedRunOutput]):
 class ArtifactRecoveryCopyRegistration:
     """Outcome for adopting one externally copied artifact recovery location.
 
+    Attributes
+    ----------
+    artifact : Artifact
+        Artifact represented by the recovery copy.
+    key : str | None
+        Artifact key when available.
+    artifact_id : str
+        Persistent artifact identifier, or an empty string when unavailable.
+    recovery_root : Path
+        Root supplied for recovery-copy registration.
+    expected_path : Path | None
+        URI-relative path expected beneath ``recovery_root``.
+    status : RecoveryCopyStatus
+        Verification or metadata-persistence outcome.
+    message : str | None
+        Optional diagnostic for a blocked or failed result.
+    metadata_updated : bool
+        Whether recovery-root metadata was committed.
+    verification_succeeded : bool
+        Whether the copy satisfied the requested byte-verification policy.
+
+    Notes
+    -----
     ``registered`` means Consist verified the existing copy according to the
     requested policy and persisted the recovery root. Other statuses are
-    advisory blockers; the artifact identity is unchanged and recovery metadata
-    was not updated.
+    advisory blockers; identity is unchanged and metadata was not updated.
     """
 
     artifact: Artifact
@@ -333,13 +406,20 @@ class ArtifactRecoveryCopyRegistration:
     status: RecoveryCopyStatus
     message: str | None = None
     metadata_updated: bool = False
+    verification_succeeded: bool = False
 
 
 @dataclass(slots=True)
 class RunOutputRecoveryCopiesRegistration(
     MappingABC[str, ArtifactRecoveryCopyRegistration]
 ):
-    """Key-indexed result for adopting externally copied run-output bytes."""
+    """Key-indexed result for adopting externally copied run-output bytes.
+
+    Parameters
+    ----------
+    outputs : dict[str, ArtifactRecoveryCopyRegistration]
+        Per-output registration outcomes, keyed by run-output key.
+    """
 
     outputs: dict[str, ArtifactRecoveryCopyRegistration] = field(default_factory=dict)
 
@@ -363,6 +443,7 @@ class RunOutputRecoveryCopiesRegistration(
 
     @property
     def registered(self) -> dict[str, ArtifactRecoveryCopyRegistration]:
+        """Return outputs whose verified recovery roots were committed."""
         return {
             key: output
             for key, output in self.outputs.items()
@@ -371,6 +452,7 @@ class RunOutputRecoveryCopiesRegistration(
 
     @property
     def blocked(self) -> dict[str, ArtifactRecoveryCopyRegistration]:
+        """Return outputs that were not registered successfully."""
         return {
             key: output
             for key, output in self.outputs.items()
@@ -379,16 +461,112 @@ class RunOutputRecoveryCopiesRegistration(
 
     @property
     def complete(self) -> bool:
+        """Return whether every selected output was registered successfully."""
         return not self.blocked
 
     @property
     def summary(self) -> str:
+        """Return deterministic status counts for the registration results."""
         counts = Counter(output.status for output in self.outputs.values())
         known_statuses = list(get_args(RecoveryCopyStatus))
         extra_statuses = sorted(set(counts) - set(known_statuses))
         return " ".join(
             f"{status}={counts[status]}" for status in known_statuses + extra_statuses
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ArchivedRunOutputFile:
+    """Outcome for archiving one regular run-output file.
+
+    Attributes
+    ----------
+    artifact : Artifact
+        Output artifact selected for archival.
+    key : str
+        Run-output key.
+    source_path : Path | None
+        Source path discovered for a copy attempt.
+    target_path : Path | None
+        Canonical path below the requested recovery root.
+    copy_status : ArchiveRunOutputFileStatus
+        Copy or existing-target outcome.
+    verification_status : ArchiveRunOutputVerificationStatus
+        Outcome of the requested verification policy.
+    metadata_committed : bool
+        Whether recovery-root metadata was persisted for this output.
+    message : str | None
+        Optional diagnostic for a non-happy-path outcome.
+    """
+
+    artifact: Artifact
+    key: str
+    source_path: Path | None
+    target_path: Path | None
+    copy_status: ArchiveRunOutputFileStatus
+    verification_status: ArchiveRunOutputVerificationStatus
+    metadata_committed: bool = False
+    message: str | None = None
+
+
+@dataclass(slots=True)
+class ArchivedRunOutputFilesReport(MappingABC[str, ArchivedRunOutputFile]):
+    """Key-indexed report for ``Tracker.archive_run_output_files(...)``.
+
+    Parameters
+    ----------
+    outputs : dict[str, ArchivedRunOutputFile]
+        Per-output archival outcomes, keyed by requested output key.
+
+    Notes
+    -----
+    ``complete`` is a result for this invocation only; it does not represent a
+    durable archive-workflow state.
+    """
+
+    outputs: dict[str, ArchivedRunOutputFile] = field(default_factory=dict)
+
+    def __getitem__(self, key: str) -> ArchivedRunOutputFile:
+        return self.outputs[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.outputs)
+
+    def __len__(self) -> int:
+        return len(self.outputs)
+
+    def items(self):
+        return self.outputs.items()
+
+    def keys(self):
+        return self.outputs.keys()
+
+    def values(self):
+        return self.outputs.values()
+
+    @property
+    def complete(self) -> bool:
+        """Return whether every output met policy and committed metadata.
+
+        An empty report is complete by convention.
+        """
+        return all(
+            output.metadata_committed
+            and output.verification_status in {"verified", "not_requested"}
+            for output in self.outputs.values()
+        )
+
+    @property
+    def summary(self) -> str:
+        """Return deterministic copy, verification, and commit counts."""
+        copy_counts = Counter(output.copy_status for output in self.outputs.values())
+        verification_counts = Counter(
+            output.verification_status for output in self.outputs.values()
+        )
+        committed = sum(output.metadata_committed for output in self.outputs.values())
+        copied = copy_counts["copied"]
+        verified = verification_counts["verified"]
+        return f"copied={copied} verified={verified} metadata_committed={committed}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -991,6 +1169,22 @@ def _derive_historical_remap(
     artifact: Artifact,
     run,
 ) -> tuple[Path, Path] | None:
+    """Derive a recoverable historical root and URI-relative artifact path.
+
+    Parameters
+    ----------
+    tracker : Tracker
+        Tracker that owns filesystem URI policy.
+    artifact : Artifact
+        Artifact whose canonical URI is being remapped.
+    run : Run
+        Historical producing run containing mount metadata.
+
+    Returns
+    -------
+    tuple[Path, Path] | None
+        Historical root and safe relative path, or ``None`` when unmappable.
+    """
     meta = run.meta if isinstance(run.meta, dict) else {}
     artifact_meta = artifact.meta if isinstance(artifact.meta, dict) else {}
 
@@ -1007,6 +1201,20 @@ def _derive_remappable_relative_path(
     *,
     artifact: Artifact,
 ) -> Path | None:
+    """Derive the safe URI-relative layout for an artifact.
+
+    Parameters
+    ----------
+    tracker : Tracker
+        Tracker that owns filesystem URI policy.
+    artifact : Artifact
+        Artifact whose canonical URI is inspected.
+
+    Returns
+    -------
+    Path | None
+        Portable relative path, or ``None`` for an unmappable URI.
+    """
     return tracker.fs.get_remappable_relative_path(artifact.container_uri)
 
 
@@ -1015,7 +1223,26 @@ def _derive_historical_root(
     *,
     artifact: Artifact,
     run,
+    preserve_raw_paths: bool = False,
 ) -> Path | None:
+    """Derive the historical root that can supply artifact bytes.
+
+    Parameters
+    ----------
+    tracker : Tracker
+        Tracker that owns filesystem URI policy.
+    artifact : Artifact
+        Artifact whose canonical URI is inspected.
+    run : Run
+        Historical producing run containing mount metadata.
+    preserve_raw_paths : bool, default False
+        Whether to retain path components for later symlink validation.
+
+    Returns
+    -------
+    Path | None
+        Historical root, or ``None`` when no remappable root is recorded.
+    """
     meta = run.meta if isinstance(run.meta, dict) else {}
     artifact_meta = artifact.meta if isinstance(artifact.meta, dict) else {}
 
@@ -1024,6 +1251,7 @@ def _derive_historical_root(
         original_run_dir=meta.get("_physical_run_dir"),
         mounts_snapshot=meta.get("mounts"),
         artifact_mount_root=artifact_meta.get("mount_root"),
+        resolve=not preserve_raw_paths,
     )
 
 
@@ -1031,12 +1259,29 @@ def _artifact_recovery_roots(
     tracker: "Tracker",
     *,
     artifact: Artifact,
+    preserve_raw_paths: bool = False,
 ) -> tuple[Path, ...]:
+    """Return ordered recovery roots recorded for an artifact.
+
+    Parameters
+    ----------
+    tracker : Tracker
+        Tracker that normalizes recovery-root metadata.
+    artifact : Artifact
+        Artifact whose advisory roots are requested.
+    preserve_raw_paths : bool, default False
+        Whether to retain path components for later symlink validation.
+
+    Returns
+    -------
+    tuple[Path, ...]
+        Normalized recovery roots in metadata order.
+    """
     artifact_meta = artifact.meta if isinstance(artifact.meta, dict) else {}
     return tuple(
         Path(root)
         for root in tracker.fs.normalize_recovery_roots(
-            artifact_meta.get("recovery_roots")
+            artifact_meta.get("recovery_roots"), resolve=not preserve_raw_paths
         )
     )
 
@@ -1046,7 +1291,26 @@ def _ordered_candidate_roots(
     source_root: Path | None,
     historical_root: Path | None,
     recovery_roots: Sequence[Path],
+    preserve_raw_paths: bool = False,
 ) -> tuple[Path, ...]:
+    """Order and deduplicate recovery source roots.
+
+    Parameters
+    ----------
+    source_root : Path | None
+        Caller-supplied root, with highest precedence.
+    historical_root : Path | None
+        Root recorded with the producing run.
+    recovery_roots : sequence of Path
+        Advisory per-artifact fallback roots.
+    preserve_raw_paths : bool, default False
+        Whether to avoid resolving symlinks during normalization.
+
+    Returns
+    -------
+    tuple[Path, ...]
+        Distinct roots in lookup order.
+    """
     ordered: list[Path] = []
     seen: set[str] = set()
     for root in (
@@ -1054,11 +1318,12 @@ def _ordered_candidate_roots(
         + ([historical_root] if historical_root is not None else [])
         + list(recovery_roots)
     ):
-        resolved = str(root.resolve())
-        if resolved in seen:
+        candidate = root.absolute() if preserve_raw_paths else root.resolve()
+        identity = str(candidate)
+        if identity in seen:
             continue
-        seen.add(resolved)
-        ordered.append(Path(resolved))
+        seen.add(identity)
+        ordered.append(candidate)
     return tuple(ordered)
 
 
@@ -1069,38 +1334,65 @@ def find_existing_recovery_source_path(
     run,
     source_root: Path | None,
     source_validator: Callable[[Path], bool] | None = None,
+    preserve_raw_paths: bool = False,
 ) -> tuple[Path | None, Path | None, bool]:
-    """
-    Return the rematerializable relative path and first existing filesystem source.
+    """Find the first valid filesystem source for historical recovery.
 
-    Filesystem candidates are probed in recovery order:
+    Parameters
+    ----------
+    tracker : Tracker
+        Tracker that owns filesystem URI and recovery-root policy.
+    artifact : Artifact
+        Historical artifact whose bytes are being located.
+    run : Run
+        Producing run used to derive historical roots.
+    source_root : Path | None
+        Optional caller-supplied root tried before recorded locations.
+    source_validator : callable, optional
+        Predicate applied to existing candidates. False candidates are skipped;
+        exceptions are propagated to the caller.
+    preserve_raw_paths : bool, default False
+        Whether the validator should receive unresolved candidate paths for
+        caller-owned symlink validation.
 
-    1. per-call ``source_root``
-    2. the historical root derived from run metadata / mount snapshots
-    3. ordered artifact ``recovery_roots``
+    Returns
+    -------
+    tuple[Path | None, Path | None, bool]
+        URI-relative path, existing source path, and whether any source roots
+        were available to probe. The first two values are ``None`` for an
+        unmappable artifact.
 
-    If ``source_validator`` is provided, existing candidates that return
-    ``False`` are skipped and later recovery roots are still probed. The boolean
-    return value reports whether any filesystem roots were available to probe
-    for that artifact.
+    Notes
+    -----
+    Candidates are probed in order: ``source_root``, historical run/mount root,
+    then the artifact's ordered ``recovery_roots``.
     """
     relative_path = _derive_remappable_relative_path(tracker, artifact=artifact)
     if relative_path is None:
         return None, None, False
 
-    historical_root = _derive_historical_root(tracker, artifact=artifact, run=run)
-    recovery_roots = _artifact_recovery_roots(tracker, artifact=artifact)
+    historical_root = _derive_historical_root(
+        tracker,
+        artifact=artifact,
+        run=run,
+        preserve_raw_paths=preserve_raw_paths,
+    )
+    recovery_roots = _artifact_recovery_roots(
+        tracker, artifact=artifact, preserve_raw_paths=preserve_raw_paths
+    )
     candidate_roots = _ordered_candidate_roots(
         source_root=source_root,
         historical_root=historical_root,
         recovery_roots=recovery_roots,
+        preserve_raw_paths=preserve_raw_paths,
     )
     for root in candidate_roots:
-        candidate = (root / relative_path).resolve()
+        candidate = root / relative_path
+        validator_path = candidate if preserve_raw_paths else candidate.resolve()
         if candidate.exists() and (
-            source_validator is None or source_validator(candidate)
+            source_validator is None or source_validator(validator_path)
         ):
-            return relative_path, candidate, True
+            return relative_path, candidate.resolve(), True
 
     return relative_path, None, bool(candidate_roots)
 
@@ -1259,7 +1551,32 @@ def materialize_artifact(
     on_missing: Literal["warn", "raise"],
     validate_content_hash: Literal["never", "if-present", "always"],
 ) -> MaterializedArtifact:
-    """Materialize one artifact into a target root using recovery metadata."""
+    """Materialize one artifact into a target root using recovery metadata.
+
+    Parameters
+    ----------
+    tracker : Tracker
+        Tracker used for source discovery and policy checks.
+    artifact : Artifact
+        Artifact to materialize.
+    target_root : Path
+        Root below which its URI-relative path is recreated.
+    source_root : Path | None
+        Optional source root tried before recorded recovery locations.
+    allowed_base : Path, sequence of Path, or None
+        Allowed destination root or roots; ``None`` disables that check.
+    preserve_existing : bool
+        Whether an existing compatible destination can be retained.
+    on_missing : {"warn", "raise"}
+        Policy for unavailable bytes and materialization failures.
+    validate_content_hash : {"never", "if-present", "always"}
+        Content-validation policy for source and destination bytes.
+
+    Returns
+    -------
+    MaterializedArtifact
+        Detached artifact, source/target paths, and a recovery outcome.
+    """
     if validate_content_hash not in {"never", "if-present", "always"}:
         raise ValueError(
             "validate_content_hash must be one of 'never', 'if-present', or 'always'."
@@ -1738,8 +2055,25 @@ def stage_artifacts_to_destinations(
 ) -> StagedInputsResult:
     """Stage explicit artifact/destination pairs into a keyed result.
 
-    This is the shared implementation used by both the public low-level
-    staging helpers and run-time requested input materialization.
+    Parameters
+    ----------
+    tracker : Tracker
+        Tracker used for source discovery and destination policy.
+    items : sequence of (str, Artifact, Path)
+        Requested key, resolved artifact, and exact staging destination.
+    mode : {"copy", "hardlink", "symlink"}, default "copy"
+        Requested operation; only ``"copy"`` is currently supported.
+    overwrite : bool, default False
+        Whether existing destinations may be replaced.
+    validate_content_hash : {"never", "if-present", "always"}, default "if-present"
+        Content-validation policy for staged bytes.
+    allow_external_paths : bool | None, optional
+        Override for the tracker's external-destination policy.
+
+    Returns
+    -------
+    StagedInputsResult
+        Per-key staging outcomes in item order.
     """
     if mode != "copy":
         raise ValueError(
@@ -1820,6 +2154,18 @@ def plan_run_output_hydration(
     db_fallback : {"never", "if_ingested"}
         Whether ingested CSV/Parquet artifacts may be exported from DuckDB when
         cold bytes are unavailable.
+
+    Returns
+    -------
+    PlannedRunOutputHydration
+        Executable hydration work and preflight per-key outcomes.
+
+    Raises
+    ------
+    ValueError
+        If destination selection is invalid or output keys are ambiguous.
+    KeyError
+        If a requested output key is unknown.
     """
     if (target_root is None) == (destinations_by_key is None):
         raise ValueError(
@@ -2094,7 +2440,30 @@ def build_run_output_materialize_plan(
     preserve_existing: bool,
     db_fallback: Literal["never", "if_ingested"],
 ) -> tuple[list[PlannedMaterialization], MaterializationResult]:
-    """Build the legacy materialization plan and aggregate preflight result."""
+    """Build the legacy materialization plan and aggregate preflight result.
+
+    Parameters
+    ----------
+    tracker : Tracker
+        Tracker used for output discovery and source planning.
+    run : Run
+        Historical run whose outputs should be materialized.
+    target_root : Path
+        Root below which canonical output paths are recreated.
+    source_root : Path | None
+        Optional source root tried before recorded sources.
+    keys : sequence of str | None
+        Requested output keys; ``None`` selects all outputs.
+    preserve_existing : bool
+        Whether existing targets are retained during planning.
+    db_fallback : {"never", "if_ingested"}
+        Whether eligible ingested data may be exported from the DB.
+
+    Returns
+    -------
+    tuple[list[PlannedMaterialization], MaterializationResult]
+        Executable plan and compatibility aggregate for preflight results.
+    """
     planned = plan_run_output_hydration(
         tracker,
         run,
@@ -2241,7 +2610,26 @@ def materialize_planned_outputs(
     on_missing: Literal["warn", "raise"] = "warn",
     preserve_existing: bool = True,
 ) -> MaterializationResult:
-    """Execute a plan and fold results into ``MaterializationResult``."""
+    """Execute a plan and fold outcomes into ``MaterializationResult``.
+
+    Parameters
+    ----------
+    plan : sequence of PlannedMaterialization
+        Filesystem copies or DB exports to execute.
+    tracker : Tracker
+        Tracker used for DB exports and path policy.
+    allowed_base : Path, sequence of Path, or None
+        Allowed destination roots; ``None`` disables that check.
+    on_missing : {"warn", "raise"}, default "warn"
+        Policy for unavailable source bytes and execution errors.
+    preserve_existing : bool, default True
+        Whether existing destinations should be retained.
+
+    Returns
+    -------
+    MaterializationResult
+        Compatibility aggregate grouped by materialization status.
+    """
     return fold_hydrated_run_outputs_result(
         execute_planned_output_hydration(
             plan,
@@ -2267,16 +2655,32 @@ def hydrate_run_outputs(
 ) -> HydratedRunOutputsResult:
     """Hydrate selected historical outputs into a target workspace root.
 
-    This is the shared core behind ``Tracker.hydrate_run_outputs(...)`` and the
-    top-level ``consist.hydrate_run_outputs(...)`` helper. It performs planning
-    and execution, then returns a keyed result that combines preflight outcomes
-    with executed copy/export work.
+    Parameters
+    ----------
+    tracker : Tracker
+        Tracker used for planning, source discovery, and execution.
+    run : Run
+        Historical run whose outputs are being hydrated.
+    target_root : Path
+        Root below which canonical output paths are recreated.
+    source_root : Path | None
+        Optional source root tried before recorded recovery sources.
+    keys : sequence of str | None
+        Requested output keys; ``None`` selects all outputs.
+    allowed_base : Path, sequence of Path, or None
+        Allowed destination roots; ``None`` disables that check.
+    preserve_existing : bool
+        Whether existing destinations should be retained.
+    on_missing : {"warn", "raise"}
+        Policy for unavailable bytes and execution failures.
+    db_fallback : {"never", "if_ingested"}
+        Whether eligible ingested outputs may be rebuilt from the DB.
 
-    Unlike ``materialize_run_outputs(...)``, this function returns detached
-    artifacts whose runtime ``abs_path`` points at the hydrated destination when
-    the outcome is resolvable. That makes the result suitable for restart and
-    cross-workspace recovery flows that want to use the returned artifact/path
-    directly instead of separately looking it up again.
+    Returns
+    -------
+    HydratedRunOutputsResult
+        Per-key results with detached artifacts whose ``abs_path`` points to a
+        resolvable hydrated destination.
     """
     planned = plan_run_output_hydration(
         tracker,
@@ -2315,7 +2719,32 @@ def hydrate_run_outputs_to_destinations(
     on_missing: Literal["warn", "raise"],
     db_fallback: Literal["never", "if_ingested"],
 ) -> HydratedRunOutputsResult:
-    """Hydrate selected run outputs to exact caller-provided destinations."""
+    """Hydrate selected outputs to exact caller-provided destinations.
+
+    Parameters
+    ----------
+    tracker : Tracker
+        Tracker used for planning, source discovery, and execution.
+    run : Run
+        Historical run whose outputs are being hydrated.
+    destinations_by_key : mapping of str to Path
+        Exact destination for each requested output key.
+    source_root : Path | None
+        Optional source root tried before recorded recovery sources.
+    allowed_base : Path, sequence of Path, or None
+        Allowed destination roots; ``None`` disables that check.
+    preserve_existing : bool
+        Whether existing destinations should be retained.
+    on_missing : {"warn", "raise"}
+        Policy for unavailable bytes and execution failures.
+    db_fallback : {"never", "if_ingested"}
+        Whether eligible ingested outputs may be rebuilt from the DB.
+
+    Returns
+    -------
+    HydratedRunOutputsResult
+        Per-key results using the supplied exact destinations.
+    """
     normalized_destinations = {
         key: Path(destination).resolve()
         for key, destination in destinations_by_key.items()

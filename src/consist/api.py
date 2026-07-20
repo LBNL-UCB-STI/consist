@@ -84,6 +84,7 @@ from consist.types import (
 if TYPE_CHECKING:
     from consist.core.config_canonicalization import ConfigAdapter
     from consist.core.materialize import (
+        ArchivedRunOutputFilesReport,
         ArtifactRecoveryCopyRegistration,
         HydratedRunOutputsResult,
         MaterializedArtifact,
@@ -1447,6 +1448,11 @@ def set_artifact_recovery_roots(
     tracker : Tracker | None, optional
         Tracker used for persistence. If omitted, resolves the active/default
         tracker.
+
+    Returns
+    -------
+    Artifact
+        The supplied artifact with refreshed in-memory recovery metadata.
     """
     return _resolve_tracker(tracker).set_artifact_recovery_roots(
         artifact, roots, append=append
@@ -1462,22 +1468,32 @@ def register_artifact_recovery_copy(
     append: bool = True,
     tracker: Optional["Tracker"] = None,
 ) -> "ArtifactRecoveryCopyRegistration":
-    """
-    Verify and record an externally copied artifact recovery location.
+    """Verify and register an externally copied artifact recovery location.
 
-    The expected copy must already exist at
-    ``recovery_root / <artifact-uri-relative-path>``. Consist verifies the
-    existing file and then records ``recovery_root`` in
-    ``artifact.meta["recovery_roots"]`` without copying bytes itself.
+    Parameters
+    ----------
+    artifact : Artifact
+        Artifact represented by an existing recovery copy.
+    recovery_root : str | Path
+        Root containing the artifact at its URI-relative path.
+    verify : bool, default True
+        Whether to verify the copy's full-file SHA-256 digest.
+    content_hash : str | None, optional
+        Expected SHA-256 digest, taking precedence over ``artifact.hash``.
+    append : bool, default True
+        Whether to append rather than replace recovery-root metadata.
+    tracker : Tracker | None, optional
+        Tracker used for validation and persistence.
 
-    ``content_hash`` is interpreted as a full file SHA-256 and takes precedence
-    when supplied. Without it, ``artifact.hash`` is only used for byte
-    verification when the tracker is using full content hashing. Directory
-    artifacts are intentionally blocked until directory manifest support exists.
-    HDF5 child table artifacts are also blocked unless a future parent
-    container policy explicitly supports independent child recovery.
-    ``append`` defaults to True, like ``archive_artifact(...)``; pass
-    ``append=False`` to replace existing recovery roots.
+    Returns
+    -------
+    ArtifactRecoveryCopyRegistration
+        Per-artifact verification and metadata-persistence outcome.
+
+    Notes
+    -----
+    This function never copies bytes. Directory artifacts and HDF5 child tables
+    are deliberately blocked until they have an independent recovery contract.
     """
     return _resolve_tracker(tracker).register_artifact_recovery_copy(
         artifact,
@@ -1498,15 +1514,34 @@ def register_run_output_recovery_copies(
     content_hashes: Mapping[str, str] | None = None,
     tracker: Optional["Tracker"] = None,
 ) -> "RunOutputRecoveryCopiesRegistration":
-    """
-    Verify and record externally copied recovery locations for run outputs.
+    """Verify and register existing recovery copies for run outputs.
 
-    This is the bulk form of ``register_artifact_recovery_copy(...)`` for
-    workflows where an external archive or HPC process has already copied run
-    outputs into a recovery root. Unknown requested output keys raise
-    immediately; per-artifact blockers are returned in the keyed result.
-    ``append`` defaults to True, like ``archive_run_outputs(...)``; pass
-    ``append=False`` to replace existing recovery roots.
+    Parameters
+    ----------
+    run_id : str
+        Completed run whose outputs are being registered.
+    recovery_root : str | Path
+        Root containing URI-relative recovery copies.
+    keys : sequence of str | None, optional
+        Outputs to register; ``None`` selects all outputs.
+    verify : bool, default True
+        Whether selected copies require a matching full-file hash.
+    append : bool, default True
+        Whether successful registrations append recovery-root metadata.
+    content_hashes : mapping of str to str | None, optional
+        Optional per-key SHA-256 proofs for artifacts without full hashes.
+    tracker : Tracker | None, optional
+        Tracker used for validation and persistence.
+
+    Returns
+    -------
+    RunOutputRecoveryCopiesRegistration
+        Mapping-style result with one registration outcome per selected key.
+
+    Raises
+    ------
+    KeyError
+        If requested output or content-hash keys are unknown.
     """
     return _resolve_tracker(tracker).register_run_output_recovery_copies(
         run_id,
@@ -1526,14 +1561,25 @@ def archive_artifact(
     append: bool = True,
     tracker: Optional["Tracker"] = None,
 ) -> Path:
-    """
-    Archive an artifact into a stable recovery root and record that root.
+    """Archive an artifact into a stable recovery root and register it.
 
-    This helper copies or moves the artifact's bytes to
-    ``archive_root / <uri-relative-path>`` and then records ``archive_root`` in
-    ``artifact.meta["recovery_roots"]``. It is designed for restart/resume
-    workflows where outputs are promoted into long-lived storage but retain
-    their canonical ``container_uri``.
+    Parameters
+    ----------
+    artifact : Artifact
+        Artifact whose bytes will be copied or moved.
+    archive_root : str | Path
+        Root below which its URI-relative layout is recreated.
+    mode : {"copy", "move"}, default "copy"
+        Filesystem operation used when the destination is absent.
+    append : bool, default True
+        Whether to append ``archive_root`` to recovery-root metadata.
+    tracker : Tracker | None, optional
+        Tracker that owns the artifact and metadata database.
+
+    Returns
+    -------
+    Path
+        Archive destination containing the artifact bytes.
     """
     return _resolve_tracker(tracker).archive_artifact(
         artifact,
@@ -1552,22 +1598,92 @@ def archive_run_outputs(
     append: bool = True,
     tracker: Optional["Tracker"] = None,
 ) -> ArchivedOutputs:
-    """
-    Archive one or more historical run outputs into a stable recovery root.
+    """Archive selected historical run outputs using legacy archive semantics.
 
-    This is the bulk form of ``archive_artifact(...)`` for iteration/archive
-    workflows that promote all or a subset of outputs after a run completes.
+    Parameters
+    ----------
+    run_id : str
+        Completed run whose outputs should be archived.
+    archive_root : str | Path
+        Root below which URI-relative output paths are recreated.
+    keys : sequence of str | None, optional
+        Output keys to archive; ``None`` selects all outputs.
+    mode : {"copy", "move"}, default "copy"
+        Filesystem operation used for each output.
+    append : bool, default True
+        Whether to append the root to recovery-root metadata.
+    tracker : Tracker | None, optional
+        Tracker that owns the historical run.
 
-    Returns an :class:`ArchivedOutputs` mapping that behaves as a read-only
-    ``Mapping[str, Path]`` for backward compatibility.  Access ``.outputs`` to
-    get refreshed :class:`Artifact` objects with the new recovery root set,
-    ready to pass into downstream ``sc.run(inputs=...)`` calls.
+    Returns
+    -------
+    ArchivedOutputs
+        Read-only key-to-path mapping plus refreshed output artifacts.
+
+    Notes
+    -----
+    Use :func:`archive_run_output_files` for no-overwrite, per-key report
+    semantics for regular files.
     """
     return _resolve_tracker(tracker).archive_run_outputs(
         run_id,
         archive_root,
         keys=keys,
         mode=mode,
+        append=append,
+    )
+
+
+def archive_run_output_files(
+    run_id: str,
+    recovery_root: str | Path,
+    *,
+    keys: Sequence[str] | None = None,
+    preserve_existing: bool = True,
+    verify: bool = True,
+    append: bool = True,
+    tracker: Optional["Tracker"] = None,
+) -> "ArchivedRunOutputFilesReport":
+    """Archive regular run-output files with per-key copy and metadata status.
+
+    Parameters
+    ----------
+    run_id : str
+        Completed run whose regular output files should be archived.
+    recovery_root : str | Path
+        Root below which canonical URI-relative paths are created.
+    keys : sequence of str | None, optional
+        Output keys to archive; ``None`` selects all outputs.
+    preserve_existing : bool, default True
+        Whether a matching existing target may be retained.
+    verify : bool, default True
+        Whether copied or retained files require full-hash verification.
+    append : bool, default True
+        Whether successful registrations append recovery-root metadata.
+    tracker : Tracker | None, optional
+        Tracker that owns the historical run.
+
+    Returns
+    -------
+    ArchivedRunOutputFilesReport
+        Mapping-style per-key copy, verification, and metadata results.
+
+    Raises
+    ------
+    KeyError
+        If a requested output key is unknown, before target mutation.
+
+    Notes
+    -----
+    This file-only helper never overwrites a target. ``complete`` is an
+    invocation result, not a durable archive-workflow state claim.
+    """
+    return _resolve_tracker(tracker).archive_run_output_files(
+        run_id,
+        recovery_root,
+        keys=keys,
+        preserve_existing=preserve_existing,
+        verify=verify,
         append=append,
     )
 
@@ -1580,15 +1696,30 @@ def archive_current_run_outputs(
     append: bool = True,
     tracker: Optional["Tracker"] = None,
 ) -> ArchivedOutputs:
-    """
-    Archive outputs for the currently active run into a stable recovery root.
+    """Archive outputs for the current active run using legacy semantics.
 
-    This is the convenience form of ``archive_run_outputs(...)`` for workflows
-    that archive outputs immediately after logging them, without separately
-    pulling ``result.run.id`` or ``tracker.current_consist.run.id``.
+    Parameters
+    ----------
+    archive_root : str | Path
+        Root below which URI-relative output paths are recreated.
+    keys : sequence of str | None, optional
+        Output keys to archive; ``None`` selects all active-run outputs.
+    mode : {"copy", "move"}, default "copy"
+        Filesystem operation used for each output.
+    append : bool, default True
+        Whether to append the root to recovery-root metadata.
+    tracker : Tracker | None, optional
+        Tracker that owns the active run context.
 
-    Returns an :class:`ArchivedOutputs` mapping.  Access ``.outputs`` to get
-    refreshed :class:`Artifact` objects with the new recovery root set.
+    Returns
+    -------
+    ArchivedOutputs
+        Read-only key-to-path mapping plus refreshed output artifacts.
+
+    Raises
+    ------
+    RuntimeError
+        If no run is active in the supplied tracker context.
     """
     return _resolve_tracker(tracker).archive_current_run_outputs(
         archive_root,

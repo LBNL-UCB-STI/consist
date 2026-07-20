@@ -108,6 +108,8 @@ with tracker.scenario("baseline") as sc:
 - [`consist.Run`](run.md)
 - [`consist.Artifact`](artifact.md)
 - [`consist.ArchivedOutputs`](artifact.md#archived-outputs)
+- [`consist.ArchivedRunOutputFilesReport`](materialize.md#consist.core.materialize.ArchivedRunOutputFilesReport)
+- [`consist.ArchivedRunOutputFile`](materialize.md#consist.core.materialize.ArchivedRunOutputFile)
 - [`consist.HydratedRunOutput`](materialize.md#consist.core.materialize.HydratedRunOutput)
 - [`consist.HydratedRunOutputsResult`](materialize.md#consist.core.materialize.HydratedRunOutputsResult)
 - [`consist.MaterializedArtifact`](materialize.md#consist.core.materialize.MaterializedArtifact)
@@ -207,6 +209,7 @@ These models are returned by, or support, `ScenarioContext.map_runs(...)`:
 - [`consist.archive_artifact`](api_helpers.md#consist.api.archive_artifact)
 - [`consist.archive_run_outputs`](api_helpers.md#consist.api.archive_run_outputs)
 - [`consist.archive_current_run_outputs`](api_helpers.md#consist.api.archive_current_run_outputs)
+- [`consist.archive_run_output_files`](api_helpers.md#consist.api.archive_run_output_files)
 - [`consist.register_artifact_facet_parser`](api_helpers.md#consist.api.register_artifact_facet_parser)
 - [`consist.cached_output`](api_helpers.md#consist.api.cached_output)
 - [`consist.cached_artifacts`](api_helpers.md#consist.api.cached_artifacts)
@@ -280,7 +283,7 @@ to Consist, start with the **Core** and **Logging/Loading** groups and reach for
 - `stage_artifact`, `stage_inputs`
 - `set_artifact_recovery_roots`, `register_artifact_recovery_copy`,
   `register_run_output_recovery_copies`, `archive_artifact`, `archive_run_outputs`,
-  `archive_current_run_outputs`
+  `archive_current_run_outputs`, `archive_run_output_files`
 - `get_artifact_lineage`, `print_lineage`, `history`
 - `diff_runs`, `get_config_facet`, `get_config_facets`, `get_run_config_kv`
 - `get_config_values`, `get_config_value`, `find_runs_by_facet_kv`
