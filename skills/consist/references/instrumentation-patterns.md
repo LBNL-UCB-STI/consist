@@ -6,6 +6,7 @@
 - Recommended defaults
 - Common integration shapes
 - Legacy and external-tool wrapping
+- Advanced resolved bindings and historical output recovery
 - Embedded end-to-end examples
 
 ## Choose The Execution Surface
@@ -18,6 +19,10 @@
   workflows, repeated sweeps, and explicit step-to-step artifacts.
 - Use `binding=BindingResult(...)` on `sc.run(...)` when an external planner or
   orchestrator has already resolved the step contract.
+- Use `ResolvedBindingBuilder` only when an external planner must replay an
+  already-admitted artifact choice exactly; pair it with the
+  Scenario-owned result of `scenario.resolve_step_identity(...)` and
+  `ExecutionOptions(input_binding="paths")`.
 - Use `use_tracker(tracker)` with top-level `consist.*` helpers in application,
   notebook, and test code.
 - Use explicit `Tracker` ownership in reusable libraries and integration layers
@@ -265,6 +270,87 @@ scenario.run(
 Use this when another layer already decided which upstream artifacts and direct
 inputs belong to the step. Keep `consist.ref(...)` and `consist.refs(...)` as
 the default for direct workflow code.
+
+### Immutable Resolved Bindings (Advanced, Opt-In)
+
+Use this only when an external planner has already admitted a specific artifact
+and must prove that the same typed identity reaches a named callable parameter.
+For ordinary scenario composition, keep using primitive `inputs=`,
+`consist.ref(...)`, `consist.refs(...)`, or `BindingResult`.
+
+Ask the Scenario for the final callable and step identity instead of
+reconstructing naming or contract rules, then build the binding from a tracked
+artifact:
+
+```python
+execution = ExecutionOptions(input_binding="paths", runtime_kwargs=runtime)
+identity = scenario.resolve_step_identity(
+    run_step,
+    year=year,
+    iteration=iteration,
+    execution_options=execution,
+)
+
+binding = (
+    consist.ResolvedBindingBuilder(
+        step_name=identity.name,
+        step_contract_identity=identity.step_contract_identity,
+    )
+    .bind_tracked_artifact(
+        parameter="warmstart",
+        artifact=admitted_artifact,
+        destination=Path("inputs/warmstart.csv"),
+        source="external_admitted",
+    )
+    .freeze()
+)
+
+scenario.run(
+    run_step,
+    binding=binding,
+    step_identity=identity,
+    execution_options=execution,
+)
+```
+
+The artifact must come from a verified Consist artifact/admission path, not an
+unverified filesystem path. This contract validates the callable, artifact
+identity, and destination before execution and records invocation evidence;
+it still does not choose the artifact, rewrite downstream configuration, or
+prove that an external executable consumed the final path. Do not hide
+dynamic restart artifacts behind fake parameters; keep them on the ordinary
+workflow path until the explicit strict contract supports them.
+
+### Exact-Destination Historical Output Recovery (Opt-In)
+
+Use `hydrate_run_outputs_to_destinations(...)` when a caller already knows the
+completed historical run and an external tool requires particular file or
+directory destinations. The mapping is the complete requested-output set:
+
+```python
+hydrated = tracker.hydrate_run_outputs_to_destinations(
+    "prior_run_id",
+    destinations_by_key={
+        "persons": tracker.run_dir / "tool_inputs" / "persons.csv",
+        "skims": tracker.run_dir / "shared" / "skims.zarr",
+    },
+    source_root=Path("/archive/outputs_mirror"),  # optional
+)
+```
+
+Inspect each keyed result because warning-mode recovery can report partial
+outcomes. Consist validates and atomically materializes ordinary files,
+immutable directory trees, Zarr stores, and Shapefile bundles when their
+manifests are present. Legacy Zarr or Shapefile artifacts without immutable
+manifests fail closed and must be re-logged. Consist does not select the prior
+run, translate mounts, stage consumer-specific paths, or decide restart policy;
+those remain downstream responsibilities. Persisted `OutputSet` hydration is
+not implied by this exact-destination API.
+
+Archive reporting is a bounded operational surface: use
+`archive_run_output_files(...)` only when a workflow needs a file-only copy,
+verification, and registration report. It is not a replacement for ordinary
+output declarations or a workflow control plane.
 
 ### Capture A Fixed Output Directory
 

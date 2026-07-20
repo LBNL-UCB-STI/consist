@@ -33,8 +33,15 @@ implementation work inside Consist itself.
   bootstrap reference, then the instrumentation reference.
 - Existing workflow integration or feature work: start with the instrumentation
   reference.
+- External orchestration that must replay an already-admitted artifact choice:
+  read the advanced `ResolvedBindingBuilder` and step-identity guidance in the
+  instrumentation reference; keep ordinary `inputs=`, `consist.ref(...)`,
+  `consist.refs(...)`, and `BindingResult` as the default path.
 - Existing workflow with cache misses, stale outputs, missing files, or weird
   scenario behavior: start with the debugging reference.
+- Prior-run input conformance, requested-output hydration failures, or exact
+  historical recovery problems: start with the debugging reference and use the
+  public admission and recovery APIs before reading source.
 - Run inspection, baseline vs policy comparison, or SQL analysis: start with
   the analysis reference.
 - Multi-file logical outputs: use `OutputSet` guidance in the instrumentation
@@ -63,10 +70,25 @@ implementation work inside Consist itself.
   choosing the API surface.
 - Do not assume scenario header config automatically becomes step identity.
   Repeat identity-relevant config on the step itself.
+- Treat `ResolvedBindingBuilder` and `scenario.resolve_step_identity(...)` as
+  opt-in orchestration surfaces for execution-exact, already-admitted inputs;
+  do not replace ordinary Coupler, `inputs=`, `consist.ref(...)`,
+  `consist.refs(...)`, or `BindingResult` wiring with them by default.
 - Do not hide true dependencies in `runtime_kwargs`, globals, or undeclared
   filesystem reads.
 - Do not debug cached-output problems without checking `cache_hydration`,
-  `output_paths`, `validate_cached_outputs`, and the artifact URI.
+  `cache_hydration_failure`, `output_paths`, `validate_cached_outputs`, and the
+  artifact URI.
+- Treat `cache_hydration_failure="miss"` as an opt-in all-or-miss policy for
+  `cache_hydration="outputs-requested"`; it does not choose a recovery source
+  or decide downstream restart policy.
+- For exact historical recovery, use the caller-selected run and explicit
+  destinations. Consist can validate and materialize bytes, but downstream
+  code owns selection, staging, mount translation, and proving that a consumer
+  actually read the staged path.
+- Legacy Zarr and Shapefile artifacts without their immutable manifests fail
+  closed for exact archive or hydration; re-log them under the current
+  artifact contract instead of weakening validation.
 - Do not treat `cache_hydration="inputs-missing"` as stale-input validation by
   default. Existing input destinations are preserved unless
   `validate_materialized_inputs=True` is explicitly enabled.
@@ -81,11 +103,12 @@ implementation work inside Consist itself.
   choose the first tracker surface, and verify the first cached run.
 - [`references/instrumentation-patterns.md`](references/instrumentation-patterns.md):
   choose the right execution surface, integrate Consist into downstream code,
-  bootstrap first-time instrumentation, and wrap legacy or container-backed
-  steps.
+  bootstrap first-time instrumentation, wrap legacy or container-backed steps,
+  and use advanced resolved bindings or exact historical output recovery only
+  when those contracts are required.
 - [`references/debugging-patterns.md`](references/debugging-patterns.md):
-  debug cache identity, hydration, path resolution, and scenario wiring from a
-  downstream project.
+  debug cache identity, admission, hydration, path resolution, and scenario
+  wiring from a downstream project.
 - [`references/analysis-patterns.md`](references/analysis-patterns.md):
   inspect runs, load artifacts, query views, and compare baseline vs policy
   runs.
