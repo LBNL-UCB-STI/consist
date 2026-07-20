@@ -343,6 +343,7 @@ class RunTraceCoordinator:
             "parent_run_id": parent_run_id,
             "validate_cached_outputs": invocation.validate_cached_outputs,
             "validate_materialized_inputs": invocation.validate_materialized_inputs,
+            "cache_hydration_failure": invocation.cache_hydration_failure,
             "cache_epoch": resolved_cache_epoch,
         }
         if invocation.code_identity is not None:

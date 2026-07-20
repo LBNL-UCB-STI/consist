@@ -75,14 +75,47 @@ class BindingResult:
 
 @dataclass(frozen=True, slots=True)
 class CacheOptions:
-    """
-    Grouped cache behavior options for ``run(...)`` APIs.
+    """Configure cache lookup, hydration, validation, and code identity.
 
-    All fields are optional so callers can set only the knobs they need.
+    All options except ``cache_hydration_failure`` are optional, so callers can
+    set only the cache controls relevant to a run.
+
+    Attributes
+    ----------
+    cache_mode : str | None
+        Cache lookup policy, such as ``"reuse"`` or ``"off"``. ``None`` uses
+        the active run default.
+    cache_hydration : str | None
+        Cache-hit hydration policy. Supported values include metadata-only,
+        requested-output, and all-output hydration modes. ``None`` uses the
+        active run default.
+    cache_hydration_failure : {"warn", "miss"}
+        Response to a requested-output hydration failure. ``"warn"`` retains
+        backward-compatible cache-hit behavior; ``"miss"`` rejects the
+        candidate and requires ``cache_hydration="outputs-requested"``.
+    cache_version : int | None
+        Optional cache-version discriminator used when selecting candidates.
+    cache_epoch : int | None
+        Optional cache-epoch discriminator used to invalidate older candidates.
+    validate_cached_outputs : str | None
+        Validation policy for cached output artifacts, such as ``"lazy"`` or
+        ``"eager"``. This validates candidate artifacts independently of
+        requested-output admission.
+    validate_materialized_inputs : bool | None
+        Whether to validate inputs after Consist materializes them for a run.
+    materialize_cached_outputs_source_root : PathLike | None
+        Optional source-root override used to recover cached output artifacts
+        from an archive or mirror.
+    code_identity : CodeIdentityMode | None
+        Optional policy controlling how callable code contributes to the cache
+        identity.
+    code_identity_extra_deps : list[str] | None
+        Extra dependency paths to include when computing code identity.
     """
 
     cache_mode: Optional[str] = None
     cache_hydration: Optional[str] = None
+    cache_hydration_failure: Literal["warn", "miss"] = "warn"
     cache_version: Optional[int] = None
     cache_epoch: Optional[int] = None
     validate_cached_outputs: Optional[str] = None

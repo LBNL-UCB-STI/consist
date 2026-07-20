@@ -1680,6 +1680,7 @@ def test_tracker_run_propagates_start_run_optional_kwargs(tracker, monkeypatch):
         cache_options=CacheOptions(
             cache_mode="overwrite",
             cache_hydration="outputs-requested",
+            cache_hydration_failure="miss",
             cache_version=7,
             materialize_cached_outputs_source_root=Path("/tmp/archive-root"),
         ),
@@ -1689,6 +1690,7 @@ def test_tracker_run_propagates_start_run_optional_kwargs(tracker, monkeypatch):
 
     assert captured_start_kwargs["cache_version"] == 7
     assert captured_start_kwargs["cache_hydration"] == "outputs-requested"
+    assert captured_start_kwargs["cache_hydration_failure"] == "miss"
     assert captured_start_kwargs["facet_schema_version"] == "facet-v1"
     assert captured_start_kwargs["facet_index"] is False
     assert captured_start_kwargs["_consist_code_identity_callable"] is step
