@@ -4,8 +4,10 @@
 
 - Start with the public surface
 - Identity and cache-miss debugging
+- Prior-run admission debugging
 - Scenario and step wiring
 - Output hydration and missing files
+- Exact historical recovery and bundle validation
 - Cache-miss input hydration
 - Path and mount resolution
 - Inspection surfaces
@@ -49,6 +51,23 @@ CONSIST_CACHE_TIMING=1 CONSIST_CACHE_DEBUG=1 /path/to/python script.py
   records often explain missing inputs, schema/profile behavior, and partial
   output capture.
 
+## Prior-Run Admission Debugging
+
+- Use the public `check_artifact_identity(...)` API or
+  `check_admission_reference(...)` when a receiving workflow must compare one
+  resolved regular file with one exact input from an explicitly selected,
+  completed prior run.
+- Treat `AdmissionReport` as evidence, not workflow policy. The downstream
+  caller decides whether `verified`, `mismatched`, `unverified`, or `unreadable`
+  is fatal, warning-only, or acceptable.
+- Use `consist admission doctor` for a read-only CLI diagnosis. Add
+  `--require-verified` when the caller—not Consist—needs a nonzero exit for any
+  result other than `verified`; use `--expected-file` only for a distinct,
+  immutable corroborating copy.
+- Do not infer consumer mount or configuration resolution from
+  `consumer_path`. `AdmissionReference` records that runtime evidence while
+  Consist hashes and audits the resolved `execution_path`.
+
 ## Scenario And Step Wiring
 
 - Use `scenario(...)` when steps depend on prior artifacts or need shared
@@ -86,6 +105,21 @@ CONSIST_CACHE_TIMING=1 CONSIST_CACHE_DEBUG=1 /path/to/python script.py
 - Auto-captured keys come from filename stems. If nested outputs can repeat the
   same basename, log them manually with stable keys instead of relying on
   automatic capture.
+- When a cache hit must either materialize and validate every requested output
+  or execute as a normal miss, use:
+
+  ```python
+  CacheOptions(
+      cache_hydration="outputs-requested",
+      cache_hydration_failure="miss",
+  )
+  ```
+
+  This opt-in policy rejects the candidate on a missing key, unavailable
+  source, partial materialization, destination failure, or identity mismatch.
+  It is valid only with `outputs-requested`; it is not a substitute for eager
+  validation, recovery-root configuration, or restart policy. The default
+  warning behavior remains unchanged.
 
 ## Cache-Miss Input Hydration
 
@@ -104,6 +138,25 @@ CONSIST_CACHE_TIMING=1 CONSIST_CACHE_DEBUG=1 /path/to/python script.py
   the local path cannot be read safely.
 - DB fallback is for ingested file-like artifacts. Directory inputs and
   non-portable artifacts need a filesystem recovery source.
+
+## Exact Historical Recovery And Bundle Validation
+
+- For a known completed run and caller-chosen destinations, use
+  `hydrate_run_outputs_to_destinations(...)` and inspect every keyed result.
+  Use `hydrate_run_outputs(...)` when a layout-preserving target root is enough.
+- Keep the destination under `tracker.run_dir` or a configured mount root when
+  possible. Use `allow_external_paths=True` only when the downstream workflow
+  explicitly requires an external destination.
+- Immutable directory and Zarr recovery validates a persisted tree manifest,
+  stages the copy, and publishes it atomically. Shapefile recovery validates
+  the complete same-stem bundle and publishes it through a clean bundle root.
+- Legacy Zarr or Shapefile artifacts without those manifests remain loadable
+  from bytes but fail closed for exact archive or hydration. Re-log them under
+  the current artifact contract; do not bypass validation or treat a loose
+  sidecar copy as an equivalent bundle.
+- Consist recovers bytes and validates destinations. The caller owns historical
+  run selection, downstream staging, mount translation, and proving that the
+  external consumer actually read the materialized path.
 
 ## Path And Mount Resolution
 
@@ -128,6 +181,9 @@ consist show RUN_ID --db-path ./provenance.duckdb
 consist artifacts RUN_ID --db-path ./provenance.duckdb
 consist preview persons --db-path ./provenance.duckdb --run-dir ./runs
 consist db doctor --db-path ./provenance.duckdb
+consist admission doctor --db-path ./provenance.duckdb \
+  --expected-run BASELINE_RUN_ID --artifact-key gtfs_feed \
+  --file ./inputs/gtfs.zip
 ```
 
 - Python:
@@ -140,6 +196,13 @@ persons = consist.load_df(artifacts.outputs["persons"], tracker=tracker)
 
 Use the CLI when the task is inspection-heavy and read-only. Use Python when
 the next step is an automated fix, a regression test, or downstream analysis.
+
+`RunContext.canonicalization` and its snapshot/reference values are bounded
+observations of adapter-resolved inputs for wrapped Python steps. They can aid
+diagnosis, but they do not prove final HOCON/container path resolution or that
+an external executable consumed those bytes. Archive output reports are
+similarly operational evidence, not a replacement for artifact declarations or
+restart policy.
 
 ## When To Read Consist Source
 

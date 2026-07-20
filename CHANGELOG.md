@@ -5,6 +5,76 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog], and this project adheres to
 [Semantic Versioning].
 
+## [0.3.0] - 2026-07-20
+
+### Added
+
+- Add receiving-side prior-run artifact admission with full-file SHA-256
+  identity checks, deterministic `AdmissionReport` sidecars, explicit completed
+  run and input selection, historical-hash trust boundaries, and the
+  policy-neutral `consist admission doctor` CLI by @zneedell
+  ([#185](https://github.com/LBNL-UCB-STI/consist/pull/185)).
+- Add immutable `CanonicalizationSnapshot` and `CanonicalizationReference`
+  values on `RunContext`, exposing exact adapter-resolved references to wrapped
+  Python steps while preserving existing identity hashes, cache behavior, and
+  container execution by @zneedell
+  ([#186](https://github.com/LBNL-UCB-STI/consist/pull/186)).
+- Extend artifact admission with immutable runtime and consumer-path evidence,
+  schema-v2 `AdmissionReport` serialization, and
+  `check_admission_reference(...)` while keeping downstream selection,
+  staging, mount translation, and policy decisions outside Consist by
+  @zneedell ([#190](https://github.com/LBNL-UCB-STI/consist/pull/190)).
+- Add exact-destination historical output hydration through
+  `hydrate_run_outputs_to_destinations(...)`, including caller-selected runs,
+  destination validation, collision diagnostics, and keyed partial outcomes for
+  ordinary file and directory artifacts by @zneedell
+  ([#191](https://github.com/LBNL-UCB-STI/consist/pull/191)).
+- Add file-only completed-run archive reporting through
+  `archive_run_output_files(...)`, with per-key copy, verification,
+  registration, and diagnostic results, no-overwrite behavior, and retry-safe
+  metadata registration by @zneedell
+  ([#192](https://github.com/LBNL-UCB-STI/consist/pull/192)).
+- Add immutable directory-artifact recovery for Zarr and explicit directories,
+  plus Shapefile file-bundle manifests, deterministic tree identity, atomic
+  archive/hydration, detached native-driver loading, and fail-closed validation
+  by @zneedell ([#193](https://github.com/LBNL-UCB-STI/consist/pull/193)).
+- Add the advanced opt-in `ResolvedBinding` contract, immutable artifact
+  identities, durable invocation evidence, verified execution snapshots, and
+  `scenario.resolve_step_identity(...)` preflight while preserving ordinary
+  Coupler, `BindingResult`, and cache behavior by @zneedell
+  ([#195](https://github.com/LBNL-UCB-STI/consist/pull/195)).
+
+### Changed
+
+- Add an opt-in `cache_hydration_failure="miss"` policy for
+  `cache_hydration="outputs-requested"`, requiring every requested output to
+  materialize and validate at its exact destination before admitting a cache
+  hit; the default `"warn"` behavior remains unchanged by @zneedell
+  ([#194](https://github.com/LBNL-UCB-STI/consist/pull/194)).
+- Tighten exact archive and hydration validation for legacy Zarr and Shapefile
+  artifacts without immutable manifests: these artifacts now fail closed and
+  must be re-logged before exact recovery can be used by @zneedell
+  ([#193](https://github.com/LBNL-UCB-STI/consist/pull/193)).
+- Update pytest, idna, JupyterLab, mistune, jupyter-server, urllib3, tornado,
+  bleach, msgpack, nbconvert, Pillow, pip, and soupsieve dependency versions
+  through Dependabot by dependabot[bot] ([#172](https://github.com/LBNL-UCB-STI/consist/pull/172),
+  [#173](https://github.com/LBNL-UCB-STI/consist/pull/173),
+  [#174](https://github.com/LBNL-UCB-STI/consist/pull/174),
+  [#175](https://github.com/LBNL-UCB-STI/consist/pull/175),
+  [#176](https://github.com/LBNL-UCB-STI/consist/pull/176),
+  [#177](https://github.com/LBNL-UCB-STI/consist/pull/177),
+  [#178](https://github.com/LBNL-UCB-STI/consist/pull/178),
+  [#179](https://github.com/LBNL-UCB-STI/consist/pull/179),
+  [#180](https://github.com/LBNL-UCB-STI/consist/pull/180),
+  [#181](https://github.com/LBNL-UCB-STI/consist/pull/181),
+  [#182](https://github.com/LBNL-UCB-STI/consist/pull/182),
+  [#183](https://github.com/LBNL-UCB-STI/consist/pull/183),
+  [#187](https://github.com/LBNL-UCB-STI/consist/pull/187),
+  [#188](https://github.com/LBNL-UCB-STI/consist/pull/188),
+  [#189](https://github.com/LBNL-UCB-STI/consist/pull/189)).
+- Configure Dependabot to open at most one dependency update pull request per
+  week by @zneedell ([5a9f653](https://github.com/LBNL-UCB-STI/consist/commit/5a9f653)).
+
 ## [0.2.3] - 2026-07-07
 
 ### Added
