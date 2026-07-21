@@ -1429,6 +1429,7 @@ class Tracker:
         output_policy: Optional[OutputPolicyOptions] = None,
         execution_options: Optional[ExecutionOptions] = None,
         runtime_kwargs: Optional[Mapping[str, Any]] = None,
+        _apply_step_defaults: Optional[bool] = None,
     ) -> RunResult:
         """
         Execute a function-shaped run with caching and output handling.
@@ -1617,6 +1618,7 @@ class Tracker:
             output_policy=output_policy,
             execution_options=execution_options,
             runtime_kwargs=runtime_kwargs,
+            _apply_step_defaults=_apply_step_defaults,
         )
 
     def run_with_config_overrides(

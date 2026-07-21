@@ -1394,6 +1394,7 @@ class ScenarioContext:
                 runtime_kwargs=runtime_kwargs_dict,
                 inject_context=resolved_inject_context,
             ),
+            _apply_step_defaults=False,
         )
 
         if result.outputs:
