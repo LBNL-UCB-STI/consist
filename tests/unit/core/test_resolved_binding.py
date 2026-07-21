@@ -700,6 +700,81 @@ def test_strict_scenario_uses_execution_snapshot_helper(
             )
 
 
+def test_strict_binding_materializes_one_artifact_for_multiple_parameters(
+    tracker, tmp_path: Path
+) -> None:
+    from consist import ExecutionOptions
+    from consist.core.resolved_binding import (
+        ResolvedBindingBuilder,
+        step_contract_identity,
+    )
+
+    source = tmp_path / "raw.txt"
+    source.write_text("accepted\n", encoding="utf-8")
+    with tracker.start_run("seed", "test"):
+        artifact = tracker.log_artifact(source, key="raw", direction="input")
+
+    received: list[Path] = []
+
+    def consume(first: Path, second: Path, third: Path) -> None:
+        received.extend([first, second, third])
+
+    binding = (
+        ResolvedBindingBuilder(
+            step_name="consume",
+            step_contract_identity=step_contract_identity(consume, "consume"),
+        )
+        .bind_tracked_artifact(
+            parameter="first",
+            artifact=artifact,
+            destination=Path("inputs/first.txt"),
+            source="pinned",
+        )
+        .bind_tracked_artifact(
+            parameter="second",
+            artifact=artifact,
+            destination=Path("inputs/second.txt"),
+            source="pinned",
+        )
+        .bind_tracked_artifact(
+            parameter="third",
+            artifact=artifact,
+            destination=Path("inputs/third.txt"),
+            source="pinned",
+        )
+        .freeze()
+    )
+
+    with tracker.scenario("strict_binding_multiple_parameters") as scenario:
+        result = scenario.run(
+            fn=consume,
+            name="consume",
+            binding=binding,
+            execution_options=ExecutionOptions(input_binding="paths"),
+        )
+
+    snapshot_root = (
+        tracker.run_dir / ".resolved-bindings" / result.run.id / "inputs"
+    ).resolve()
+    assert result.cache_hit is False
+    assert received == [
+        snapshot_root / "first.txt",
+        snapshot_root / "second.txt",
+        snapshot_root / "third.txt",
+    ]
+    assert all(path.read_text(encoding="utf-8") == "accepted\n" for path in received)
+    invocation = tracker.db.get_binding_invocations()[0]
+    invocation_inputs = json.loads(invocation.binding_json)["inputs"]
+    assert set(invocation_inputs) == {
+        "first",
+        "second",
+        "third",
+    }
+    assert {item["artifact"]["artifact_id"] for item in invocation_inputs.values()} == {
+        str(artifact.id)
+    }
+
+
 def test_scenario_rejects_resolved_binding_for_wrong_callable(
     tracker, tmp_path: Path
 ) -> None:
