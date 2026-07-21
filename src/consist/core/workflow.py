@@ -970,6 +970,11 @@ class ScenarioContext:
 
         This method wraps ``Tracker.run`` while ensuring the scenario header
         is updated with step metadata and artifacts.
+        Decorator metadata is resolved once by the scenario before it delegates
+        the fully resolved invocation to ``Tracker.run``. In particular,
+        decorated ``input_keys`` and ``optional_input_keys`` are compatibility
+        metadata and do not cause a deprecation warning solely because of this
+        internal handoff.
         Use ``execution_options.runtime_kwargs`` for runtime-only inputs and
         `consist.require_runtime_kwargs` to validate required keys.
         For direct workflow code, prefer primitive `inputs=` kwargs and, when

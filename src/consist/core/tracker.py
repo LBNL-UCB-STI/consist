@@ -1464,9 +1464,13 @@ class Tracker:
               `load_inputs`).
             - List/Iterable: Hashed for cache key but not automatically bound.
         input_keys : Optional[Iterable[str] | str], optional
-            Deprecated. Use `inputs` mapping instead.
+            Deprecated. Use `inputs` mapping instead. Direct ``Tracker.run``
+            calls warn when this is provided, including when it is supplied by
+            the callable's decorated step metadata.
         optional_input_keys : Optional[Iterable[str] | str], optional
-            Deprecated. Use `inputs` mapping instead.
+            Deprecated. Use `inputs` mapping instead. Direct ``Tracker.run``
+            calls warn when this is provided, including when it is supplied by
+            the callable's decorated step metadata.
         depends_on : Optional[List[RunInputRef]], optional
             Additional file paths or artifacts to hash for the cache signature (e.g., config files).
 
