@@ -4954,6 +4954,47 @@ class Tracker:
             signature=signature,
         )
 
+    def _find_matching_cached_runs(
+        self,
+        config_hash: str,
+        input_hash: str,
+        git_hash: str,
+        *,
+        signature: Optional[str] = None,
+    ) -> list[Run]:
+        """Return completed cache candidates for internal hydration admission.
+
+        Parameters
+        ----------
+        config_hash : str
+            Digest of the identity-relevant configuration.
+        input_hash : str
+            Digest of the declared input artifacts.
+        git_hash : str
+            Digest of the code identity.
+        signature : str, optional
+            Composite cache signature used to prioritize matching candidates.
+
+        Returns
+        -------
+        list[Run]
+            Deduplicated completed candidates in cache-preference order. The
+            list is empty when the tracker has no persistent cache history or
+            no candidate matches.
+
+        Notes
+        -----
+        This private wrapper keeps lifecycle orchestration independent of the
+        history-service implementation. It returns candidates only; hydration
+        and validation determine whether any candidate becomes a cache hit.
+        """
+        return self._history_service.find_matching_cached_runs(
+            config_hash,
+            input_hash,
+            git_hash,
+            signature=signature,
+        )
+
     def find_recent_completed_runs_for_model(
         self, model_name: str, *, limit: int = 20
     ) -> list[Run]:

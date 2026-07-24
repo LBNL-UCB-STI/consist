@@ -54,6 +54,167 @@ def _init_core_tables(tracker: Tracker) -> None:
                     tracker.db._ensure_schema_links_view()
 
 
+def test_outputs_requested_selects_complete_same_identity_candidate(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "provenance.db")
+    calls = 0
+
+    def write_outputs(ctx) -> None:
+        nonlocal calls
+        calls += 1
+        (ctx.run_dir / "a.txt").write_text(f"a-{calls}\n", encoding="utf-8")
+        (ctx.run_dir / "b.txt").write_text(f"b-{calls}\n", encoding="utf-8")
+
+    tracker_a = Tracker(run_dir=tmp_path / "runs_a", db_path=db_path)
+    _init_core_tables(tracker_a)
+    incomplete = tracker_a.run(
+        fn=write_outputs,
+        name="candidate_selection",
+        output_paths={"a": "a.txt", "b": "b.txt"},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    incomplete.outputs["b"].path.unlink()
+
+    tracker_b = Tracker(run_dir=tmp_path / "runs_b", db_path=db_path)
+    _init_core_tables(tracker_b)
+    complete = tracker_b.run(
+        fn=write_outputs,
+        name="candidate_selection",
+        output_paths={"a": "a.txt", "b": "b.txt"},
+        cache_options=CacheOptions(cache_mode="overwrite"),
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    tracker_c = Tracker(run_dir=tmp_path / "runs_c", db_path=db_path)
+    _init_core_tables(tracker_c)
+    cache_key = (
+        incomplete.run.config_hash or "",
+        incomplete.run.input_hash or "",
+        incomplete.run.git_hash or "",
+    )
+    tracker_c._local_cache_index[cache_key] = incomplete.run
+
+    result = tracker_c.run(
+        fn=write_outputs,
+        name="candidate_selection",
+        output_paths={"a": "a.txt", "b": "b.txt"},
+        cache_options=CacheOptions(cache_hydration="outputs-requested"),
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    assert calls == 2
+    assert result.cache_hit is True
+    assert result.run.meta["cache_source"] == complete.run.id
+    assert (
+        Path(result.run.meta["materialized_outputs"]["a"]).read_text(encoding="utf-8")
+        == "a-2\n"
+    )
+    assert (
+        Path(result.run.meta["materialized_outputs"]["b"]).read_text(encoding="utf-8")
+        == "b-2\n"
+    )
+
+
+def test_outputs_requested_incomplete_only_candidate_is_a_cache_miss(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "provenance.db")
+    calls = 0
+
+    def write_outputs(ctx) -> None:
+        nonlocal calls
+        calls += 1
+        (ctx.run_dir / "a.txt").write_text(f"a-{calls}\n", encoding="utf-8")
+        (ctx.run_dir / "b.txt").write_text(f"b-{calls}\n", encoding="utf-8")
+
+    tracker_a = Tracker(run_dir=tmp_path / "runs_a", db_path=db_path)
+    _init_core_tables(tracker_a)
+    incomplete = tracker_a.run(
+        fn=write_outputs,
+        name="incomplete_candidate_miss",
+        output_paths={"a": "a.txt", "b": "b.txt"},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    incomplete.outputs["b"].path.unlink()
+
+    tracker_b = Tracker(run_dir=tmp_path / "runs_b", db_path=db_path)
+    _init_core_tables(tracker_b)
+    result = tracker_b.run(
+        fn=write_outputs,
+        name="incomplete_candidate_miss",
+        output_paths={"a": "a.txt", "b": "b.txt"},
+        cache_options=CacheOptions(cache_hydration="outputs-requested"),
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    assert calls == 2
+    assert result.cache_hit is False
+    assert "cache_hit" not in (result.run.meta or {})
+    assert result.outputs["a"].path.read_text(encoding="utf-8") == "a-2\n"
+    assert result.outputs["b"].path.read_text(encoding="utf-8") == "b-2\n"
+
+
+def test_outputs_requested_fallback_replaces_incomplete_local_candidate(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "provenance.db")
+    calls = 0
+
+    def write_outputs(ctx) -> None:
+        nonlocal calls
+        calls += 1
+        (ctx.run_dir / "a.txt").write_text(f"a-{calls}\n", encoding="utf-8")
+        (ctx.run_dir / "b.txt").write_text(f"b-{calls}\n", encoding="utf-8")
+
+    tracker_a = Tracker(run_dir=tmp_path / "runs_a", db_path=db_path)
+    _init_core_tables(tracker_a)
+    incomplete = tracker_a.run(
+        fn=write_outputs,
+        name="fallback_candidate_replacement",
+        output_paths={"a": "a.txt", "b": "b.txt"},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    incomplete.outputs["b"].path.unlink()
+
+    tracker_b = Tracker(run_dir=tmp_path / "runs_b", db_path=db_path)
+    _init_core_tables(tracker_b)
+    cache_key = (
+        incomplete.run.config_hash or "",
+        incomplete.run.input_hash or "",
+        incomplete.run.git_hash or "",
+    )
+    tracker_b._local_cache_index[cache_key] = incomplete.run
+
+    fallback = tracker_b.run(
+        fn=write_outputs,
+        name="fallback_candidate_replacement",
+        output_paths={"a": "a.txt", "b": "b.txt"},
+        cache_options=CacheOptions(cache_hydration="outputs-requested"),
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    replay = tracker_b.run(
+        fn=write_outputs,
+        name="fallback_candidate_replacement",
+        output_paths={"a": "a.txt", "b": "b.txt"},
+        cache_options=CacheOptions(cache_hydration="outputs-requested"),
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    assert calls == 2
+    assert fallback.cache_hit is False
+    assert replay.cache_hit is True
+    assert replay.run.meta["cache_source"] == fallback.run.id
+    assert (
+        Path(replay.run.meta["materialized_outputs"]["a"]).read_text(encoding="utf-8")
+        == "a-2\n"
+    )
+    assert (
+        Path(replay.run.meta["materialized_outputs"]["b"]).read_text(encoding="utf-8")
+        == "b-2\n"
+    )
+
+
 def test_outputs_requested_miss_policy_demotes_missing_requested_key(
     tmp_path: Path,
 ) -> None:
@@ -546,7 +707,6 @@ def test_cache_hydration_policies_end_to_end(
     assert not (tracker_b.run_dir / "b.csv").exists()
 
     # Cache-hydration = outputs-requested: copy only selected outputs on cache hits.
-    # Missing keys should log a warning, not raise.
     caplog.clear()
     requested_dest = tmp_path / "requested_a.csv"
     if requested_dest.exists():
@@ -557,10 +717,7 @@ def test_cache_hydration_policies_end_to_end(
         model="producer",
         cache_mode="reuse",
         cache_hydration="outputs-requested",
-        materialize_cached_output_paths={
-            "a": requested_dest,
-            "missing_key": tmp_path / "missing.txt",
-        },
+        materialize_cached_output_paths={"a": requested_dest},
     ) as t:
         assert t.is_cached
         requested_meta = dict(
@@ -569,7 +726,6 @@ def test_cache_hydration_policies_end_to_end(
     assert requested_dest.exists()
     assert requested_dest.read_text() == "value\n1\n"
     assert not (tmp_path / "requested_b.txt").exists()
-    assert any("missing keys" in record.message for record in caplog.records)
     assert requested_meta == {"a": str(requested_dest.resolve())}
 
     # Cache-hydration = outputs-all: copy all outputs to a requested directory.
@@ -1289,11 +1445,11 @@ def test_outputs_requested_allows_current_mount_root_without_external_paths(
     assert dest.read_text(encoding="utf-8") == "value\n1\n"
 
 
-def test_outputs_requested_warns_on_moved_run_dir(
+def test_outputs_requested_moved_run_dir_is_a_cache_miss(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """
-    Moved run directories should warn and skip materialization in outputs-requested mode.
+    Moved run directories make an outputs-requested candidate ineligible.
     """
     caplog.set_level(logging.WARNING)
     db_path = str(tmp_path / "provenance.db")
@@ -1323,7 +1479,7 @@ def test_outputs_requested_warns_on_moved_run_dir(
         cache_hydration="outputs-requested",
         materialize_cached_output_paths={"out": dest},
     ) as t:
-        assert t.is_cached
+        assert not t.is_cached
 
     assert not dest.exists()
     assert any(

@@ -90,9 +90,11 @@ class CacheOptions:
         requested-output, and all-output hydration modes. ``None`` uses the
         active run default.
     cache_hydration_failure : {"warn", "miss"}
-        Response to a requested-output hydration failure. ``"warn"`` retains
-        backward-compatible cache-hit behavior; ``"miss"`` rejects the
-        candidate and requires ``cache_hydration="outputs-requested"``.
+        Compatibility policy for lower-level requested-output hydration.
+        Cache reuse always rejects an ``outputs-requested`` candidate that
+        cannot materialize every requested output; ``"miss"`` is required
+        outside that lifecycle path and requires
+        ``cache_hydration="outputs-requested"``.
     cache_version : int | None
         Optional cache-version discriminator used when selecting candidates.
     cache_epoch : int | None

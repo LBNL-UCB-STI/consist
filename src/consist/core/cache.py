@@ -169,8 +169,10 @@ class ActiveRunCacheOptions:
     cache_hydration : str
         Active cache-hit hydration policy. Defaults to ``"metadata"``.
     cache_hydration_failure : {"warn", "miss"}
-        Requested-output hydration failure policy. ``"miss"`` is valid only
-        with ``cache_hydration="outputs-requested"``.
+        Lower-level requested-output hydration failure policy. Cache reuse
+        performs strict requested-output candidate admission regardless of
+        this value. ``"miss"`` is valid only with
+        ``cache_hydration="outputs-requested"``.
     materialize_cached_output_paths : dict[str, pathlib.Path] | None
         Exact destination paths requested for individual cached output keys.
     materialize_cached_output_set_roots : dict[str, pathlib.Path] | None
