@@ -413,8 +413,6 @@ class ExecutionOptions:
     input_materialization: Optional[Literal["requested"]] = None
     input_materialization_mode: Optional[Literal["copy"]] = None
     requested_input_artifact_ids: Optional[Mapping[str, str]] = None
-    strict_binding_identity: Optional[str] = None
-    strict_binding_json: Optional[str] = None
     executor: Optional[Literal["python", "container"]] = None
     container: Optional[Mapping[str, Any]] = None
     runtime_kwargs: Optional[Mapping[str, Any]] = None

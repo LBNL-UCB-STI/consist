@@ -321,6 +321,13 @@ prove that an external executable consumed the final path. Do not hide
 dynamic restart artifacts behind fake parameters; keep them on the ordinary
 workflow path until the explicit strict contract supports them.
 
+For Python `ResolvedBinding` runs, immutable typed inputs are content-addressed
+for cache reuse while ordinary `inputs=`, Coupler values, `BindingResult`, and
+legacy directories remain provenance-Merkle. Inspect
+`run.identity_summary["input_identity"]` for the strict/ordinary split and
+`tracker.db.get_binding_invocations(requested_run_id=...)` for selected-artifact
+evidence. Native container execution is excluded from this contract.
+
 ### Exact-Destination Historical Output Recovery (Opt-In)
 
 Use `hydrate_run_outputs_to_destinations(...)` when a caller already knows the

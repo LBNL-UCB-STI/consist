@@ -153,8 +153,6 @@ class RunInvocationContext:
     requested_input_materialization: Optional[str]
     requested_input_materialization_mode: Optional[str]
     requested_input_artifact_ids: Optional[Mapping[str, str]]
-    strict_binding_identity: Optional[str]
-    strict_binding_json: Optional[str]
     run_id: str
     start_kwargs: Dict[str, Any]
 
@@ -328,8 +326,6 @@ class RunTraceCoordinator:
         requested_input_materialization: Optional[str] = None,
         requested_input_materialization_mode: Optional[str] = None,
         requested_input_artifact_ids: Optional[Mapping[str, str]] = None,
-        strict_binding_identity: Optional[str] = None,
-        strict_binding_json: Optional[str] = None,
         profile_file_schema: bool | Literal["if_changed"] | None = None,
     ) -> Dict[str, Any]:
         """Build the kwargs payload passed into ``tracker.start_run``."""
@@ -373,13 +369,7 @@ class RunTraceCoordinator:
             start_kwargs["requested_input_artifact_ids"] = dict(
                 requested_input_artifact_ids
             )
-        if strict_binding_identity is not None:
-            start_kwargs["requested_input_strict_snapshot"] = True
         identity_overrides: dict[str, Any] = {}
-        if strict_binding_identity is not None:
-            identity_overrides["__consist_resolved_binding__"] = strict_binding_identity
-        if strict_binding_json is not None:
-            start_kwargs["_consist_strict_binding_json"] = strict_binding_json
         capture_identity = build_output_set_captures_identity(output_sets)
         if capture_identity is not None:
             identity_overrides["__consist_output_set_captures__"] = capture_identity
@@ -581,8 +571,6 @@ class RunTraceCoordinator:
         requested_input_materialization = invocation.input_materialization
         requested_input_materialization_mode = invocation.input_materialization_mode
         requested_input_artifact_ids = invocation.requested_input_artifact_ids
-        strict_binding_identity = invocation.strict_binding_identity
-        strict_binding_json = invocation.strict_binding_json
         if (
             input_binding != "none"
             and invocation.inputs is not None
@@ -730,8 +718,6 @@ class RunTraceCoordinator:
             requested_input_materialization=requested_input_materialization,
             requested_input_materialization_mode=(requested_input_materialization_mode),
             requested_input_artifact_ids=requested_input_artifact_ids,
-            strict_binding_identity=strict_binding_identity,
-            strict_binding_json=strict_binding_json,
             profile_file_schema=profile_file_schema,
         )
 
@@ -761,8 +747,6 @@ class RunTraceCoordinator:
             requested_input_materialization=requested_input_materialization,
             requested_input_materialization_mode=(requested_input_materialization_mode),
             requested_input_artifact_ids=requested_input_artifact_ids,
-            strict_binding_identity=strict_binding_identity,
-            strict_binding_json=strict_binding_json,
             run_id=run_id,
             start_kwargs=start_kwargs,
         )

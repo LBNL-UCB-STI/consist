@@ -109,10 +109,6 @@ class ResolvedRunInvocation:
     requested_input_artifact_ids : Optional[Mapping[str, str]]
         Internal strict-binding mapping from callable parameter to tracked
         artifact identifier for requested input staging.
-    strict_binding_identity : Optional[str]
-        Internal immutable strict-binding cache discriminator.
-    strict_binding_json : Optional[str]
-        Internal canonical binding evidence for lifecycle persistence.
     executor : Literal["python", "container"]
         Effective execution backend.
     container : Optional[Mapping[str, Any]]
@@ -158,8 +154,6 @@ class ResolvedRunInvocation:
     input_materialization: Optional[Literal["requested"]]
     input_materialization_mode: Optional[Literal["copy"]]
     requested_input_artifact_ids: Optional[Mapping[str, str]]
-    strict_binding_identity: Optional[str]
-    strict_binding_json: Optional[str]
     executor: Literal["python", "container"]
     container: Optional[Mapping[str, Any]]
     runtime_kwargs: Optional[Dict[str, Any]]
@@ -390,8 +384,6 @@ def resolve_run_invocation(
     requested_input_materialization = merged_options.input_materialization
     requested_input_materialization_mode = merged_options.input_materialization_mode
     requested_input_artifact_ids = merged_options.requested_input_artifact_ids
-    strict_binding_identity = merged_options.strict_binding_identity
-    strict_binding_json = merged_options.strict_binding_json
     executor = merged_options.executor
     container = merged_options.container
     runtime_kwargs = merged_options.runtime_kwargs
@@ -778,8 +770,6 @@ def resolve_run_invocation(
             if requested_input_artifact_ids is not None
             else None
         ),
-        strict_binding_identity=strict_binding_identity,
-        strict_binding_json=strict_binding_json,
         executor=cast(Literal["python", "container"], executor),
         container=container,
         runtime_kwargs=runtime_kwargs_dict,

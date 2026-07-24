@@ -37,6 +37,7 @@ _IDENTITY_PATTERN = re.compile(
     r"^(?P<algorithm>sha256):(?P<kind>file|manifest-v1):(?P<digest>[0-9a-f]{64})$"
 )
 _STEP_IDENTITY_PATTERN = re.compile(r"^sha256:step-v1:[0-9a-f]{64}$")
+_STRICT_BINDING_CONTEXT_FACTORY_TOKEN = object()
 
 
 def _freeze_json(value: Any) -> JSONValue:
@@ -434,6 +435,109 @@ class ResolvedBinding:
     def identity_digest(self) -> str:
         """Return the strict contract digest used to partition cache reuse."""
         return hashlib.sha256(self.identity_json().encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class _StrictBindingInvocationContext:
+    """Scenario-created strict-binding facts retained across the run handoff."""
+
+    identity_digest: str
+    evidence_json: str
+    input_artifact_ids: tuple[str, ...]
+    _factory_token: object = field(repr=False, compare=False)
+
+
+def _identity_payload_from_binding_evidence(evidence_json: str) -> dict[str, Any]:
+    """Recover the identity-bearing subset from canonical binding evidence."""
+    try:
+        evidence = json.loads(evidence_json)
+        inputs = evidence["inputs"]
+        identity_inputs = {
+            key: {
+                "parameter": item["parameter"],
+                "identity": item["artifact"]["identity"],
+                "destination": item["destination"],
+            }
+            for key, item in inputs.items()
+        }
+        return {
+            "schema_version": evidence["schema_version"],
+            "step_name": evidence["step_name"],
+            "step_contract_identity": evidence["step_contract_identity"],
+            "inputs": identity_inputs,
+        }
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("strict binding evidence JSON is invalid") from exc
+
+
+def _create_strict_binding_invocation_context(
+    *,
+    strict_binding: ResolvedBinding,
+    identity_digest: str,
+    evidence_json: str,
+    input_artifact_ids: tuple[str, ...],
+) -> _StrictBindingInvocationContext:
+    """Create a verified internal strict-binding handoff value."""
+    if not isinstance(identity_digest, str) or not identity_digest.strip():
+        raise ValueError("strict binding identity digest must not be empty")
+    if not isinstance(evidence_json, str):
+        raise ValueError("strict binding evidence JSON must be a string")
+    binding_artifact_ids: list[str] = []
+    for resolved_input in strict_binding.inputs.values():
+        artifact_id = resolved_input.artifact.artifact_id
+        if artifact_id is None:
+            raise ValueError("strict binding input artifact IDs must not be missing")
+        binding_artifact_ids.append(str(artifact_id))
+    if input_artifact_ids != tuple(binding_artifact_ids):
+        raise ValueError(
+            "strict binding input artifact IDs must match binding mapping order"
+        )
+    if (
+        not isinstance(input_artifact_ids, tuple)
+        or not input_artifact_ids
+        or any(
+            not isinstance(artifact_id, str) or not artifact_id.strip()
+            for artifact_id in input_artifact_ids
+        )
+    ):
+        raise ValueError("strict binding input artifact IDs must not be missing")
+
+    identity_payload = _identity_payload_from_binding_evidence(evidence_json)
+    evidence_digest = hashlib.sha256(
+        json.dumps(
+            identity_payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        ).encode("utf-8")
+    ).hexdigest()
+    if evidence_digest != identity_digest:
+        raise ValueError("strict binding evidence does not match the identity digest")
+
+    evidence = json.loads(evidence_json)
+    evidence_artifact_ids: list[str] = []
+    for item in evidence["inputs"].values():
+        artifact_id = item["artifact"]["artifact_id"]
+        if artifact_id is None:
+            raise ValueError("strict binding input artifact IDs must not be missing")
+        evidence_artifact_ids.append(str(artifact_id))
+    if sorted(evidence_artifact_ids) != sorted(input_artifact_ids):
+        raise ValueError("strict binding input artifact IDs do not match evidence")
+
+    return _StrictBindingInvocationContext(
+        identity_digest=identity_digest,
+        evidence_json=evidence_json,
+        input_artifact_ids=input_artifact_ids,
+        _factory_token=_STRICT_BINDING_CONTEXT_FACTORY_TOKEN,
+    )
+
+
+def _validate_strict_binding_invocation_context(
+    context: object,
+) -> _StrictBindingInvocationContext:
+    """Reject forged values before they can alter strict run behavior."""
+    if not isinstance(context, _StrictBindingInvocationContext):
+        raise ValueError("strict binding context must be Scenario-created")
+    if context._factory_token is not _STRICT_BINDING_CONTEXT_FACTORY_TOKEN:
+        raise ValueError("strict binding context has an invalid factory token")
+    return context
 
 
 class ResolvedBindingBuilder:

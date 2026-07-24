@@ -37,6 +37,14 @@ run = tracker.get_run(run_id)
 print(run.identity_summary)
 ```
 
+- For an advanced Python `ResolvedBinding` run, inspect
+  `run.identity_summary["input_identity"]` to distinguish the strict typed
+  prefix from ordinary Merkle inputs. Inspect
+  `tracker.db.get_binding_invocations(requested_run_id=...)` for the selected
+  artifact and producer evidence. Primitive inputs, Coupler values,
+  `BindingResult`, legacy directories, and native containers do not use this
+  strict content-addressed mode.
+
 - Enable timing and signature diagnostics when the failure mode is cache reuse
   or unexpectedly slow cache hits:
 

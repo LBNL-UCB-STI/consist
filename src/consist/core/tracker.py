@@ -3,6 +3,7 @@ import json
 import re
 from collections.abc import Mapping as MappingABC
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import replace
 from datetime import date, datetime
 import logging
@@ -48,6 +49,10 @@ from consist.core.run_resolution import (
     resolve_input_refs as _resolve_input_refs,
     resolve_output_path as _resolve_output_path,
     write_xarray_dataset as _write_xarray_dataset,
+)
+from consist.core.resolved_binding import (
+    _StrictBindingInvocationContext,
+    _validate_strict_binding_invocation_context,
 )
 from consist.core.tracker_artifact_logging import ArtifactLoggingCoordinator
 from consist.core.tracker_artifact_queries import TrackerArtifactQueryService
@@ -152,6 +157,30 @@ if TYPE_CHECKING:
 AccessMode = Literal["standard", "analysis", "read_only"]
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _FILE_HASH_CHUNK_SIZE = 8 * 1024 * 1024
+_RAW_STRICT_BINDING_CONTROL_KEYS = frozenset(
+    {
+        "_consist_strict_binding_json",
+        "_strict_binding_context",
+        "requested_input_strict_snapshot",
+        "strict_binding_identity",
+        "strict_binding_json",
+    }
+)
+
+
+def _reject_raw_strict_binding_controls(kwargs: Mapping[str, Any]) -> None:
+    """Keep strict cache controls unavailable on public lifecycle entrypoints."""
+    controls = set(kwargs).intersection(_RAW_STRICT_BINDING_CONTROL_KEYS)
+    identity_overrides = kwargs.get("_consist_identity_config_overrides")
+    if isinstance(identity_overrides, MappingABC) and (
+        "__consist_resolved_binding__" in identity_overrides
+    ):
+        controls.add("_consist_identity_config_overrides")
+    if controls:
+        raise ValueError(
+            "raw strict binding controls are not supported on public Tracker APIs: "
+            + ", ".join(sorted(controls))
+        )
 
 
 def _compute_file_sha256(path: Path) -> str:
@@ -330,6 +359,9 @@ class Tracker:
         self.identity = IdentityManager(
             project_root=project_root, hashing_strategy=hashing_strategy
         )
+        self._strict_binding_context: ContextVar[
+            _StrictBindingInvocationContext | None
+        ] = ContextVar("consist_strict_binding_context", default=None)
         self.settings = ConsistSettings.from_env()
         self._dlt_lock_retries = self.settings.dlt_lock_retries
         self._dlt_lock_base_sleep_seconds = self.settings.dlt_lock_base_sleep_seconds
@@ -1364,6 +1396,9 @@ class Tracker:
 
         Raises
         ------
+        ValueError
+            If raw strict-binding controls are supplied. Strict binding runs
+            must be initiated through ``ScenarioContext.run(binding=...)``.
         Exception
             Any exception raised within the `with` block will be caught, the run
             marked as "failed", and then re-raised after cleanup.
@@ -1382,6 +1417,7 @@ class Tracker:
              tracker.log_artifact("results.parquet", "output")
         ```
         """
+        _reject_raw_strict_binding_controls(kwargs)
         self.begin_run(run_id=run_id, model=model, **kwargs)
         try:
             yield self
@@ -1430,6 +1466,7 @@ class Tracker:
         execution_options: Optional[ExecutionOptions] = None,
         runtime_kwargs: Optional[Mapping[str, Any]] = None,
         _apply_step_defaults: Optional[bool] = None,
+        _strict_binding_context: _StrictBindingInvocationContext | None = None,
     ) -> RunResult:
         """
         Execute a function-shaped run with caching and output handling.
@@ -1556,6 +1593,12 @@ class Tracker:
         RuntimeError
             If the function execution fails or container execution returns non-zero code.
 
+        Notes
+        -----
+        Strict ``ResolvedBinding`` cache semantics are available only through
+        ``ScenarioContext.run(binding=...)``. Direct ``Tracker.run`` callers
+        cannot supply strict-binding identity, evidence, or staging controls.
+
         Examples
         --------
         Execute a basic data processing step:
@@ -1587,7 +1630,9 @@ class Tracker:
         start_run : Manual run context management (more control)
         trace : Context manager alternative (always executes, even on cache hit)
         """
-        return self._run_trace.run(
+        return self._run_with_strict_binding_context(
+            _strict_binding_context,
+            self._run_trace.run,
             fn=fn,
             name=name,
             run_id=run_id,
@@ -1624,6 +1669,21 @@ class Tracker:
             runtime_kwargs=runtime_kwargs,
             _apply_step_defaults=_apply_step_defaults,
         )
+
+    def _run_with_strict_binding_context(
+        self,
+        context: _StrictBindingInvocationContext | None,
+        run: Callable[..., RunResult],
+        **kwargs: Any,
+    ) -> RunResult:
+        """Bind Scenario-validated strict facts for one internal execution handoff."""
+        if context is not None:
+            _validate_strict_binding_invocation_context(context)
+        token = self._strict_binding_context.set(context)
+        try:
+            return run(**kwargs)
+        finally:
+            self._strict_binding_context.reset(token)
 
     def run_with_config_overrides(
         self,

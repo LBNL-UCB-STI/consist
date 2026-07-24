@@ -41,6 +41,7 @@ from consist.core.resolved_binding import (
     ArtifactIdentity,
     ResolvedBinding,
     TrackedArtifactLocator,
+    _create_strict_binding_invocation_context,
     step_contract_identity,
 )
 from consist.core.run_invocation import resolve_run_invocation
@@ -1235,6 +1236,7 @@ class ScenarioContext:
             parent_run_id = self.run_id
 
         strict_snapshot_paths: dict[str, Path] | None = None
+        strict_binding_context = None
         if strict_binding is not None:
             if self.tracker.db is None:
                 raise RuntimeError(
@@ -1259,6 +1261,8 @@ class ScenarioContext:
                 raise ValueError(
                     "Resolved binding destinations require input_binding='paths'."
                 )
+            if resolved_executor != "python":
+                raise ValueError("ResolvedBinding only supports executor='python'.")
             parameters = inspect.signature(fn).parameters
             unexpected = sorted(set(strict_binding.inputs) - set(parameters))
             if unexpected:
@@ -1285,6 +1289,15 @@ class ScenarioContext:
                         "Resolved binding snapshot destination must be fresh."
                     )
                 strict_snapshot_paths[parameter] = snapshot_path
+            strict_binding_context = _create_strict_binding_invocation_context(
+                strict_binding=strict_binding,
+                identity_digest=strict_binding.identity_digest(),
+                evidence_json=strict_binding.evidence_json(),
+                input_artifact_ids=tuple(
+                    str(resolved_input.artifact.artifact_id)
+                    for resolved_input in strict_binding.inputs.values()
+                ),
+            )
 
         self._first_step_started = True
         self._last_step_name = resolved_name
@@ -1384,22 +1397,13 @@ class ScenarioContext:
                     if strict_binding is not None
                     else None
                 ),
-                strict_binding_identity=(
-                    strict_binding.identity_digest()
-                    if strict_binding is not None
-                    else None
-                ),
-                strict_binding_json=(
-                    strict_binding.evidence_json()
-                    if strict_binding is not None
-                    else None
-                ),
                 executor=resolved_executor,
                 container=resolved_container,
                 runtime_kwargs=runtime_kwargs_dict,
                 inject_context=resolved_inject_context,
             ),
             _apply_step_defaults=False,
+            _strict_binding_context=strict_binding_context,
         )
 
         if result.outputs:
