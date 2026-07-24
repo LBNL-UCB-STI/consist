@@ -418,6 +418,53 @@ def _strict_requested_output_hydration(
         dir=str(staging_parent),
     ) as tmp_dir:
         staged_root = Path(tmp_dir)
+        from consist.core.materialize import plan_run_output_hydration
+
+        try:
+            preflight = plan_run_output_hydration(
+                cast("Tracker", tracker),
+                cached_run,
+                target_root=staged_root,
+                source_root=active_options.materialize_cached_outputs_source_root,
+                keys=requested_keys,
+                preserve_existing=False,
+                db_fallback="if_ingested",
+            )
+        except Exception as exc:
+            logging.debug(
+                "[Consist][cache] candidate %s rejected before materialization: "
+                "preflight failure (%s)",
+                cached_run.id,
+                exc,
+            )
+            return None
+
+        planned_keys = {
+            key for planned_item in preflight.plan for key in planned_item.keys
+        }
+        if planned_keys != set(requested_keys):
+            missing_source_keys = sorted(
+                key
+                for key, output in preflight.preflight_results.items()
+                if output.status == "missing_source"
+            )
+            if missing_source_keys:
+                logging.debug(
+                    "[Consist][cache] candidate %s rejected before materialization: "
+                    "missing recovery source (keys=%s)",
+                    cached_run.id,
+                    missing_source_keys,
+                )
+            else:
+                rejected_keys = sorted(set(requested_keys) - planned_keys)
+                logging.debug(
+                    "[Consist][cache] candidate %s rejected before materialization: "
+                    "preflight failure (keys=%s)",
+                    cached_run.id,
+                    rejected_keys,
+                )
+            return None
+
         try:
             staged = tracker.materialize_run_outputs(
                 cached_run.id,
@@ -429,6 +476,12 @@ def _strict_requested_output_hydration(
                 db_fallback="if_ingested",
             )
         except Exception as exc:
+            logging.debug(
+                "[Consist][cache] candidate %s rejected after materialization: "
+                "copy/validation failure (%s)",
+                cached_run.id,
+                exc,
+            )
             logging.warning(
                 "[Consist] Rejecting cached output hydration after staging failure: %s",
                 exc,
@@ -443,6 +496,11 @@ def _strict_requested_output_hydration(
             or staged.skipped_missing_source
             or staged.failed
         ):
+            logging.debug(
+                "[Consist][cache] candidate %s rejected after materialization: "
+                "copy/validation failure",
+                cached_run.id,
+            )
             _warn_on_partial_materialization_result(staged, policy="outputs-requested")
             return None
 
@@ -470,6 +528,11 @@ def _strict_requested_output_hydration(
                         )
                     # A mismatched caller-owned destination is deliberately left
                     # for the ordinary miss path rather than replaced here.
+                    logging.debug(
+                        "[Consist][cache] candidate %s rejected after materialization: "
+                        "copy/validation failure",
+                        cached_run.id,
+                    )
                     return None
                 candidate_created.append(destination)
                 items.append((outputs_by_key[key], staged_path, destination))
@@ -480,12 +543,22 @@ def _strict_requested_output_hydration(
                 on_missing="warn",
             )
             if set(promoted) != {artifact.key for artifact, _, _ in items}:
+                logging.debug(
+                    "[Consist][cache] candidate %s rejected after materialization: "
+                    "copy/validation failure",
+                    cached_run.id,
+                )
                 return None
             for key, destination in requested_paths.items():
                 if not destination.exists() or (
                     _artifact_identity(destination)
                     != _artifact_identity(staged_paths[key])
                 ):
+                    logging.debug(
+                        "[Consist][cache] candidate %s rejected after materialization: "
+                        "copy/validation failure",
+                        cached_run.id,
+                    )
                     return None
             accepted = True
             return {
@@ -493,6 +566,12 @@ def _strict_requested_output_hydration(
                 for key, destination in requested_paths.items()
             }
         except (OSError, RuntimeError, ValueError) as exc:
+            logging.debug(
+                "[Consist][cache] candidate %s rejected after materialization: "
+                "copy/validation failure (%s)",
+                cached_run.id,
+                exc,
+            )
             logging.warning(
                 "[Consist] Rejecting cached output hydration after promotion failure: %s",
                 exc,
