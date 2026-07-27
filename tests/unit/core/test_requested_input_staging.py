@@ -99,6 +99,43 @@ def test_materialize_requested_inputs_stages_requested_key(tmp_path: Path) -> No
     assert artifact.abs_path == str(destination.resolve())
 
 
+def test_materialize_requested_inputs_rejects_distinct_artifacts_for_one_key(
+    tmp_path: Path,
+) -> None:
+    first_source = tmp_path / "first.csv"
+    first_source.write_text("value\n1\n", encoding="utf-8")
+    second_source = tmp_path / "second.csv"
+    second_source.write_text("value\n2\n", encoding="utf-8")
+    destination = tmp_path / "staged" / "raw.csv"
+    first = Artifact(
+        key="raw",
+        container_uri=str(first_source),
+        driver="csv",
+        hash=_sha256(first_source),
+        meta={},
+    )
+    second = Artifact(
+        key="raw",
+        container_uri=str(second_source),
+        driver="csv",
+        hash=_sha256(second_source),
+        meta={},
+    )
+    tracker = _FakeTracker(
+        run_dir=tmp_path,
+        current_consist=ConsistRecord(run=_make_run(), inputs=[first, second]),
+    )
+
+    with pytest.raises(ValueError, match="is ambiguous"):
+        materialize_requested_inputs(
+            tracker=tracker,
+            options=ActiveRunCacheOptions(
+                requested_input_paths={"raw": destination},
+                requested_input_materialization="requested",
+            ),
+        )
+
+
 def test_materialize_requested_inputs_stages_manifest_backed_directory(
     tmp_path: Path,
 ) -> None:

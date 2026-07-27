@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -76,6 +77,50 @@ def test_scenario_run_resolves_coupler_inputs(tracker):
             fn=consume,
             inputs={"data": "data"},
             execution_options=ExecutionOptions(load_inputs=True),
+        )
+
+
+def test_scenario_run_does_not_rewarn_decorated_optional_input_keys(
+    tracker, tmp_path
+) -> None:
+    source = tmp_path / "required.txt"
+    source.write_text("required\n", encoding="utf-8")
+    received: list[Path] = []
+
+    @tracker.define_step(optional_input_keys=("optional",))
+    def consume(required: Path) -> None:
+        received.append(required)
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        with tracker.scenario("decorated_optional_input") as scenario:
+            scenario.run(
+                fn=consume,
+                inputs={"required": source},
+                execution_options=ExecutionOptions(input_binding="paths"),
+            )
+
+    assert received == [source]
+    assert not [
+        warning
+        for warning in captured
+        if "input_keys/optional_input_keys" in str(warning.message)
+    ]
+
+
+def test_tracker_run_still_warns_for_direct_input_keys(tracker, tmp_path) -> None:
+    source = tmp_path / "required.txt"
+    source.write_text("required\n", encoding="utf-8")
+
+    def consume(required: Path) -> None:
+        assert required == source
+
+    with pytest.warns(DeprecationWarning, match="input_keys/optional_input_keys"):
+        tracker.run(
+            fn=consume,
+            inputs={"required": source},
+            input_keys=("legacy",),
+            execution_options=ExecutionOptions(input_binding="paths"),
         )
 
 

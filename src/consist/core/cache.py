@@ -1260,15 +1260,16 @@ def materialize_requested_inputs(
     for key, destination in requested_paths.items():
         is_strict_snapshot = active_options.requested_input_strict_snapshot
         requested_artifact_id = requested_artifact_ids.get(key)
-        matches = (
-            [
-                artifact
-                for artifact in tracker.current_consist.inputs
-                if str(artifact.id) == requested_artifact_id
-            ]
-            if requested_artifact_id is not None
-            else inputs_by_key.get(key, [])
-        )
+        if requested_artifact_id is not None:
+            matches = list(
+                {
+                    str(artifact.id): artifact
+                    for artifact in tracker.current_consist.inputs
+                    if str(artifact.id) == requested_artifact_id
+                }.values()
+            )
+        else:
+            matches = inputs_by_key.get(key, [])
         if not matches:
             raise ValueError(
                 format_problem_cause_fix(

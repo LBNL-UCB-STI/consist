@@ -527,6 +527,7 @@ class RunTraceCoordinator:
         output_policy: Optional[OutputPolicyOptions],
         execution_options: Optional[ExecutionOptions],
         runtime_kwargs: Optional[Mapping[str, Any]],
+        apply_step_defaults: Optional[bool],
     ) -> RunInvocationContext:
         tracker = self._tracker
         execution_options = resolve_runtime_kwargs_alias(
@@ -563,7 +564,7 @@ class RunTraceCoordinator:
             execution_options=execution_options,
             default_name_template=None,
             allow_template=None,
-            apply_step_defaults=None,
+            apply_step_defaults=apply_step_defaults,
             consist_settings=tracker.settings,
             consist_workspace=tracker.run_dir,
             consist_state=tracker.current_consist,
@@ -1475,6 +1476,7 @@ class RunTraceCoordinator:
         output_policy: Optional[OutputPolicyOptions] = None,
         execution_options: Optional[ExecutionOptions] = None,
         runtime_kwargs: Optional[Mapping[str, Any]] = None,
+        _apply_step_defaults: Optional[bool] = None,
     ) -> RunResult:
         """Execute function/container run flow with tracker-level orchestration.
 
@@ -1596,6 +1598,7 @@ class RunTraceCoordinator:
             output_policy=output_policy,
             execution_options=execution_options,
             runtime_kwargs=runtime_kwargs,
+            apply_step_defaults=_apply_step_defaults,
         )
         resolved_name = context.resolved_name
         config_plan = context.config_plan
