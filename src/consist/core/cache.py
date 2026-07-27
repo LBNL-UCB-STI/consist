@@ -190,7 +190,9 @@ class ActiveRunCacheOptions:
     requested_input_materialization_mode : str | None
         Requested input-materialization transfer mode.
     requested_input_artifact_ids : dict[str, str] | None
-        Optional parameter-to-artifact handle mapping for strict bindings.
+        Optional binding-key-to-artifact mapping for requested input staging.
+    requested_input_strict_snapshot : bool
+        Whether requested input staging must create strict binding snapshots.
     requested_input_validate_content_hash : str
         Content-hash validation policy for materialized requested inputs.
     """
@@ -208,6 +210,7 @@ class ActiveRunCacheOptions:
     requested_input_materialization: Optional[str] = None
     requested_input_materialization_mode: Optional[str] = None
     requested_input_artifact_ids: Optional[Dict[str, str]] = None
+    requested_input_strict_snapshot: bool = False
     requested_input_validate_content_hash: str = "if-present"
 
 
@@ -1255,7 +1258,7 @@ def materialize_requested_inputs(
         return None
 
     for key, destination in requested_paths.items():
-        is_strict_snapshot = key in requested_artifact_ids
+        is_strict_snapshot = active_options.requested_input_strict_snapshot
         requested_artifact_id = requested_artifact_ids.get(key)
         matches = (
             [

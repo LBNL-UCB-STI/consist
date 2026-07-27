@@ -13,7 +13,7 @@ from consist.core.directory_artifacts import build_directory_manifest
 from consist.core.tracker_orchestration import RunTraceCoordinator, RunTraceHelpers
 from consist.models.artifact import Artifact
 from consist.models.run import ConsistRecord, Run
-from consist.types import ExecutionOptions
+from consist.types import BindingResult, ExecutionOptions
 
 
 def _sha256(path: Path) -> str:
@@ -273,3 +273,75 @@ def test_tracker_run_stages_requested_input_paths(tracker, tmp_path: Path) -> No
     assert result.cache_hit is False
     assert result.run.meta["staged_inputs"] == {"raw": str(destination.resolve())}
     assert destination.read_text(encoding="utf-8") == "value\n42\n"
+
+
+def test_scenario_binding_stages_requested_input_by_binding_key(
+    tracker, tmp_path: Path
+) -> None:
+    source = tmp_path / "bootstrap.h5"
+    source.write_bytes(b"UrbanSim bootstrap")
+    destination = tracker.run_dir / "staged" / "usim_datastore.h5"
+
+    tracker.begin_run("bootstrap", "model")
+    artifact = tracker.log_artifact(
+        source,
+        key="usim_datastore_base_h5",
+        direction="output",
+    )
+    tracker.end_run(status="completed")
+
+    received: list[Path] = []
+
+    def consume(usim_datastore_h5: Path) -> None:
+        received.append(usim_datastore_h5)
+        assert usim_datastore_h5.read_bytes() == b"UrbanSim bootstrap"
+
+    with tracker.scenario("requested_input_binding_alias") as scenario:
+        result = scenario.run(
+            fn=consume,
+            binding=BindingResult(inputs={"usim_datastore_h5": artifact}),
+            execution_options=ExecutionOptions(
+                input_binding="paths",
+                input_materialization="requested",
+                input_paths={"usim_datastore_h5": destination},
+            ),
+        )
+
+    assert result.cache_hit is False
+    assert received == [destination.resolve()]
+    assert destination.read_bytes() == b"UrbanSim bootstrap"
+
+
+def test_requested_input_staging_rejects_unknown_binding_key(
+    tracker, tmp_path: Path
+) -> None:
+    source = tmp_path / "bootstrap.h5"
+    source.write_bytes(b"UrbanSim bootstrap")
+
+    tracker.begin_run("bootstrap", "model")
+    artifact = tracker.log_artifact(
+        source,
+        key="usim_datastore_base_h5",
+        direction="output",
+    )
+    tracker.end_run(status="completed")
+
+    called = False
+
+    def consume(usim_datastore_h5: Path) -> None:
+        nonlocal called
+        called = True
+
+    with tracker.scenario("requested_input_unknown_key") as scenario:
+        with pytest.raises(ValueError, match="not present in the resolved inputs"):
+            scenario.run(
+                fn=consume,
+                binding=BindingResult(inputs={"usim_datastore_h5": artifact}),
+                execution_options=ExecutionOptions(
+                    input_binding="paths",
+                    input_materialization="requested",
+                    input_paths={"usim_datastore_base_h5": tmp_path / "staged.h5"},
+                ),
+            )
+
+    assert called is False

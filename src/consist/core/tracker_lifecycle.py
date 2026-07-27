@@ -264,6 +264,9 @@ class RunLifecycleCoordinator:
             requested_input_artifact_ids_raw = kwargs.pop(
                 "requested_input_artifact_ids", None
             )
+            requested_input_strict_snapshot = kwargs.pop(
+                "requested_input_strict_snapshot", False
+            )
             strict_binding_json = kwargs.pop("_consist_strict_binding_json", None)
             identity_config_overrides = kwargs.pop(
                 "_consist_identity_config_overrides", None
@@ -505,6 +508,7 @@ class RunLifecycleCoordinator:
                     )
                 ),
                 requested_input_artifact_ids=requested_input_artifact_ids,
+                requested_input_strict_snapshot=requested_input_strict_snapshot,
             )
 
         with _track_begin_run_phase("lifecycle.persist_config_facet"):
