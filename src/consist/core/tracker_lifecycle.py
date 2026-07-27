@@ -9,6 +9,7 @@ keeps public API behavior in ``Tracker`` stable.
 from __future__ import annotations
 
 from collections.abc import Mapping as MappingABC
+from dataclasses import replace
 from datetime import datetime, timezone
 import logging
 import os
@@ -643,23 +644,86 @@ class RunLifecycleCoordinator:
                         run.git_hash,
                     )
 
-                cached_run = (
-                    tracker._local_cache_index.get(cache_key) if cache_key else None
+                cached_candidates: list[Run] = []
+                requested_output_hydration = (
+                    tracker._active_run_cache_options.cache_hydration
+                    == "outputs-requested"
                 )
-                if cached_run is None:
+                cached_run = None
+                if cache_key and requested_output_hydration:
                     t0 = time.perf_counter()
-                    if cache_key:
-                        config_h, input_h, git_h = cache_key
-                        cached_run = tracker.find_matching_run(
-                            config_hash=config_h,
-                            input_hash=input_h,
-                            git_hash=git_h,
-                            signature=run.signature,
-                        )
+                    config_h, input_h, git_h = cache_key
+                    cached_candidates = tracker._find_matching_cached_runs(
+                        config_h,
+                        input_h,
+                        git_h,
+                        signature=run.signature,
+                    )
                     _log_timing("find_matching_run", t0)
+                    local_candidate = tracker._local_cache_index.get(cache_key)
+                    if local_candidate and all(
+                        candidate.id != local_candidate.id
+                        for candidate in cached_candidates
+                    ):
+                        cached_candidates.append(local_candidate)
+                else:
+                    cached_run = (
+                        tracker._local_cache_index.get(cache_key) if cache_key else None
+                    )
+                    if cached_run is None:
+                        t0 = time.perf_counter()
+                        if cache_key:
+                            config_h, input_h, git_h = cache_key
+                            cached_run = tracker.find_matching_run(
+                                config_hash=config_h,
+                                input_hash=input_h,
+                                git_hash=git_h,
+                                signature=run.signature,
+                            )
+                        _log_timing("find_matching_run", t0)
+
+            cache_admitted = False
+            cached_items = None
+            cache_valid = False
             with _track_begin_run_phase("cache.validate"):
-                cache_valid = False
-                if cached_run:
+                if requested_output_hydration:
+                    for candidate in cached_candidates:
+                        cached_run = candidate
+                        t0 = time.perf_counter()
+                        candidate_valid = validate_cached_run_outputs(
+                            tracker=cast(CacheValidationContext, tracker),
+                            run=candidate,
+                            options=tracker._active_run_cache_options,
+                        )
+                        _log_timing("validate_cached_outputs", t0)
+                        if not candidate_valid:
+                            continue
+
+                        with _track_begin_run_phase("cache.hydrate_outputs"):
+                            t0 = time.perf_counter()
+                            cached_items = hydrate_cache_hit_outputs(
+                                tracker=cast(CacheHydrationContext, tracker),
+                                run=run,
+                                cached_run=candidate,
+                                options=replace(
+                                    tracker._active_run_cache_options,
+                                    cache_hydration_failure="miss",
+                                ),
+                                link_outputs=False,
+                            )
+                            _log_timing("hydrate_cache_hit_outputs", t0)
+                        if cached_items is not None:
+                            cache_valid = True
+                            cached_output_ids = [
+                                art.id for art in cached_items.outputs.values()
+                            ]
+                            cache_admitted = True
+                            break
+                    if not cached_candidates and debug_cache:
+                        logging.info(
+                            "[Consist][cache] miss: no matching completed run."
+                        )
+                elif cached_run:
                     t0 = time.perf_counter()
                     cache_valid = validate_cached_run_outputs(
                         tracker=cast(CacheValidationContext, tracker),
@@ -670,8 +734,7 @@ class RunLifecycleCoordinator:
                 elif debug_cache:
                     logging.info("[Consist][cache] miss: no matching completed run.")
 
-            cache_admitted = False
-            if cached_run and cache_valid:
+            if cached_run and cache_valid and not requested_output_hydration:
                 with _track_begin_run_phase("cache.hydrate_outputs"):
                     t0 = time.perf_counter()
                     cached_items = hydrate_cache_hit_outputs(
@@ -687,13 +750,13 @@ class RunLifecycleCoordinator:
                         ]
                         cache_admitted = True
                     _log_timing("hydrate_cache_hit_outputs", t0)
-                if cached_items is not None and debug_cache:
-                    logging.info(
-                        "[Consist][cache] hit: cached_run=%s outputs=%d hydration=%s",
-                        cached_run.id,
-                        len(cached_items.outputs),
-                        tracker._active_run_cache_options.cache_hydration,
-                    )
+            if cached_items is not None and debug_cache:
+                logging.info(
+                    "[Consist][cache] hit: cached_run=%s outputs=%d hydration=%s",
+                    cached_run.id,
+                    len(cached_items.outputs),
+                    tracker._active_run_cache_options.cache_hydration,
+                )
             if not cache_admitted:
                 with _track_begin_run_phase("cache.explain_miss"):
                     explanation = CacheMissExplainer(
@@ -848,15 +911,7 @@ class RunLifecycleCoordinator:
                 run.git_hash or "",
             )
             cache_hit = bool(run.meta.get("cache_hit")) if run.meta else False
-            if cache_key in tracker._local_cache_index and cache_mode != "overwrite":
-                if not cache_hit:
-                    logging.warning(
-                        "Cache key collision detected (extremely rare): %s. "
-                        "Keeping first cached run (created %s).",
-                        cache_key,
-                        tracker._local_cache_index[cache_key].created_at,
-                    )
-            else:
+            if not cache_hit:
                 tracker._local_cache_index[cache_key] = run
             if len(tracker._local_cache_index) > tracker._local_cache_max_entries:
                 tracker._local_cache_index.pop(next(iter(tracker._local_cache_index)))

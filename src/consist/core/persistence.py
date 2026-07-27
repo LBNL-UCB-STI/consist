@@ -2443,6 +2443,55 @@ class DatabaseManager:
             logging.warning(f"Cache lookup failed: {e}")
             return None
 
+    def find_matching_runs(
+        self, config_hash: str, input_hash: str, git_hash: str
+    ) -> list[Run]:
+        """Return completed runs with an exact cache identity.
+
+        Parameters
+        ----------
+        config_hash : str
+            Digest of the identity-relevant configuration.
+        input_hash : str
+            Digest of the declared input artifacts.
+        git_hash : str
+            Digest of the code identity.
+
+        Returns
+        -------
+        list[Run]
+            Completed runs with all three digests equal to the supplied values,
+            ordered newest first. Returns an empty list when no run matches or
+            the database lookup fails.
+
+        Notes
+        -----
+        This is the multi-candidate counterpart to :meth:`find_matching_run`.
+        Callers that need to validate candidate-specific materialization
+        contracts should use this method instead of selecting a single row at
+        query time.
+        """
+
+        def _query():
+            with self.session_scope() as session:
+                statement = (
+                    select(Run)
+                    .where(Run.status == "completed")
+                    .where(Run.config_hash == config_hash)
+                    .where(Run.input_hash == input_hash)
+                    .where(Run.git_hash == git_hash)
+                    .order_by(*recent_run_order_by())
+                )
+                return list(session.exec(statement).all())
+
+        try:
+            return self.execute_with_retry(
+                _query, operation_name="cache_lookup_candidates"
+            )
+        except Exception as e:
+            logging.warning(f"Cache candidate lookup failed: {e}")
+            return []
+
     def find_recent_completed_runs_for_model(
         self, model_name: str, *, limit: int = 20
     ) -> list[Run]:
@@ -2495,6 +2544,46 @@ class DatabaseManager:
         except Exception as e:
             logging.warning(f"Signature lookup failed: {e}")
             return None
+
+    def find_runs_by_signature(self, signature: str) -> list[Run]:
+        """Return completed runs with an exact composite signature.
+
+        Parameters
+        ----------
+        signature : str
+            Composite cache signature calculated from the run identity.
+
+        Returns
+        -------
+        list[Run]
+            Completed runs with the supplied signature, ordered newest first.
+            Returns an empty list when no run matches or the database lookup
+            fails.
+
+        Notes
+        -----
+        The result preserves every matching row so a caller can apply
+        candidate-specific admission checks, such as requested-output
+        materialization, before choosing a cache hit.
+        """
+
+        def _query():
+            with self.session_scope() as session:
+                statement = (
+                    select(Run)
+                    .where(Run.status == "completed")
+                    .where(Run.signature == signature)
+                    .order_by(*recent_run_order_by())
+                )
+                return list(session.exec(statement).all())
+
+        try:
+            return self.execute_with_retry(
+                _query, operation_name="cache_signature_lookup_candidates"
+            )
+        except Exception as e:
+            logging.warning(f"Cache signature candidate lookup failed: {e}")
+            return []
 
     def get_artifact(
         self,

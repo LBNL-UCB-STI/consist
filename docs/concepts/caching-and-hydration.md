@@ -187,24 +187,18 @@ For `outputs-requested`, provide explicit output paths. For `outputs-all`,
 provide a target output directory. `run(...)` accepts the high-level
 `output_paths={...}` pattern for requested outputs.
 
-By default, requested-output hydration warns if a selected cached output cannot
-be restored and still returns the cache hit. Use strict cache admission when a
-caller can only skip execution after every requested destination is verified:
+For cache reuse, `outputs-requested` is an all-or-miss contract. Consist stages
+and validates every requested output before it reports a cache hit. A candidate
+with a missing key, unavailable source, partial materialization, destination
+failure, or artifact identity mismatch is ineligible; Consist tries another
+same-identity candidate when available, otherwise it executes through the
+ordinary cache-miss path. Requested destination paths do not enter cache
+identity.
 
-```python
-CacheOptions(
-    cache_hydration="outputs-requested",
-    cache_hydration_failure="miss",
-)
-```
-
-With `cache_hydration_failure="miss"`, Consist stages and validates every
-currently requested cached output before accepting the candidate. A missing key,
-unavailable source, partial materialization, destination failure, or artifact
-identity mismatch rejects that candidate and runs the callable through the
-ordinary cache-miss path. This option is valid only with
-`cache_hydration="outputs-requested"`; it is not a replacement for eager
-cached-artifact validation, source-root selection, or restart recovery.
+`cache_hydration_failure="miss"` remains available for lower-level direct
+hydration calls; cache reuse already uses strict candidate admission for this
+policy. It is not a replacement for eager cached-artifact validation,
+source-root selection, or restart recovery.
 
 ## Input Binding and Hydration
 
