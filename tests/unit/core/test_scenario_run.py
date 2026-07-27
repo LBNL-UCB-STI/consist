@@ -124,6 +124,121 @@ def test_tracker_run_still_warns_for_direct_input_keys(tracker, tmp_path) -> Non
         )
 
 
+def test_tracker_run_rejects_public_or_forged_strict_controls_before_execution(
+    tracker,
+) -> None:
+    calls: list[str] = []
+
+    def consume() -> None:
+        calls.append("executed")
+
+    with pytest.raises(TypeError, match="strict_binding_identity"):
+        tracker.run(
+            fn=consume,
+            execution_options=ExecutionOptions(
+                strict_binding_identity="digest",
+                strict_binding_json="{}",
+            ),
+        )
+    with pytest.raises(ValueError, match="strict binding context"):
+        tracker.run(fn=consume, _strict_binding_context=object())
+
+    assert calls == []
+    assert tracker.current_consist is None
+
+
+@pytest.mark.parametrize(
+    "control",
+    [
+        {"strict_binding_identity": "digest"},
+        {"strict_binding_json": "{}"},
+        {"_consist_strict_binding_json": "{}"},
+        {"requested_input_strict_snapshot": True},
+        {"_strict_binding_context": object()},
+        {
+            "_consist_identity_config_overrides": {
+                "__consist_resolved_binding__": "digest"
+            }
+        },
+    ],
+)
+def test_tracker_start_run_rejects_raw_strict_controls_before_lifecycle(
+    tracker, monkeypatch, control
+) -> None:
+    begin_calls: list[dict[str, Any]] = []
+
+    def record_begin_run(**kwargs: Any) -> None:
+        begin_calls.append(kwargs)
+
+    monkeypatch.setattr(tracker, "begin_run", record_begin_run)
+
+    with pytest.raises(ValueError, match="strict binding"):
+        with tracker.start_run("forged_strict", "test", **control):
+            pass
+
+    assert begin_calls == []
+
+
+def test_scenario_strict_binding_rejects_container_before_tracker_handoff(
+    tracker, tmp_path, monkeypatch
+) -> None:
+    from consist.core.resolved_binding import (
+        ArtifactIdentity,
+        BoundArtifact,
+        ResolvedBindingBuilder,
+        TrackedArtifactLocator,
+        step_contract_identity,
+    )
+
+    source = tmp_path / "raw.txt"
+    source.write_text("accepted\n", encoding="utf-8")
+    with tracker.start_run("seed", "test"):
+        artifact = tracker.log_artifact(source, key="raw", direction="input")
+
+    def consume(raw: Path) -> None:
+        raise AssertionError("strict container binding must not execute")
+
+    binding = (
+        ResolvedBindingBuilder(
+            step_name="consume",
+            step_contract_identity=step_contract_identity(consume, "consume"),
+        )
+        .bind_artifact(
+            parameter="raw",
+            artifact=BoundArtifact(
+                artifact_id=artifact.id,
+                identity=ArtifactIdentity.from_artifact(artifact),
+                locator=TrackedArtifactLocator(artifact_id=artifact.id),
+            ),
+            destination=Path("inputs/raw.txt"),
+            source="pinned",
+        )
+        .freeze()
+    )
+    handoffs: list[dict[str, Any]] = []
+
+    def record_handoff(**kwargs: Any) -> None:
+        handoffs.append(kwargs)
+
+    monkeypatch.setattr(tracker, "run", record_handoff)
+
+    with tracker.scenario("strict_container") as scenario:
+        with pytest.raises(ValueError, match="only supports executor='python'"):
+            scenario.run(
+                fn=consume,
+                name="consume",
+                binding=binding,
+                output_paths={"output": tmp_path / "output.txt"},
+                execution_options=ExecutionOptions(
+                    input_binding="paths",
+                    executor="container",
+                    container={"image": "example:latest", "command": ["true"]},
+                ),
+            )
+
+    assert handoffs == []
+
+
 def test_scenario_run_profile_file_schema_profiles_inputs_and_outputs(
     tracker, tmp_path
 ):

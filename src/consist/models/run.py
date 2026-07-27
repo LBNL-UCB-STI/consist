@@ -230,6 +230,14 @@ class Run(SQLModel, table=True):
         The summary is intended for debugging cache behavior and explains the
         component hashes that form the run signature, plus identity-relevant
         metadata persisted on the run.
+
+        Returns
+        -------
+        dict[str, Any]
+            Cache-identity components and persisted identity metadata. Strict
+            resolved-binding runs additionally include ``input_identity`` with
+            the versioned hash mode, strict and ordinary input counts, and the
+            frozen strict-binding digest.
         """
         meta = self.meta if isinstance(self.meta, dict) else {}
         identity_input_digests = meta.get("consist_hash_inputs")
@@ -261,7 +269,7 @@ class Run(SQLModel, table=True):
         if not isinstance(inputs, list):
             inputs = []
 
-        return {
+        summary = {
             "code_version": self.git_hash,
             "config": config_payload,
             "adapter": adapter,
@@ -298,6 +306,10 @@ class Run(SQLModel, table=True):
                 "version": meta.get("cache_version"),
             },
         }
+        input_identity = meta.get("input_identity")
+        if isinstance(input_identity, dict):
+            summary["input_identity"] = input_identity
+        return summary
 
     def __repr__(self):
         status_icon = (

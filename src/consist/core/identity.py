@@ -520,6 +520,60 @@ class IdentityManager:
         composite = "|".join(signatures)
         return hashlib.sha256(composite.encode("utf-8")).hexdigest()
 
+    def compute_resolved_binding_input_hash(
+        self,
+        *,
+        ordinary_inputs: List["Artifact"],
+        strict_binding_identity: str,
+        path_resolver: Optional[Callable[[str], str]] = None,
+        signature_lookup: Optional[Callable[[str], Optional[str]]] = None,
+    ) -> str:
+        """Compute the input hash for a strict resolved binding.
+
+        Strict binding inputs are represented by their frozen binding identity,
+        while all remaining inputs retain the ordinary provenance-Merkle
+        semantics used by :meth:`compute_input_hash`.
+
+        Parameters
+        ----------
+        ordinary_inputs : list[Artifact]
+            Logged inputs outside the ordered strict-binding prefix. Their
+            producer signatures remain part of the resulting hash.
+        strict_binding_identity : str
+            Non-empty SHA-256 digest of the validated strict binding contract.
+        path_resolver : callable, optional
+            Resolves artifact paths before ordinary input hashing.
+        signature_lookup : callable, optional
+            Resolves a producing run signature for an ordinary artifact.
+
+        Returns
+        -------
+        str
+            SHA-256 input hash with the ``resolved-binding-content-v1`` domain
+            separator.
+
+        Raises
+        ------
+        ValueError
+            If ``strict_binding_identity`` is empty or not a string.
+        """
+        if (
+            not isinstance(strict_binding_identity, str)
+            or not strict_binding_identity.strip()
+        ):
+            raise ValueError("strict binding identity must not be empty")
+        ordinary_hash = self.compute_input_hash(
+            ordinary_inputs,
+            path_resolver=path_resolver,
+            signature_lookup=signature_lookup,
+        )
+        payload = (
+            "resolved-binding-content-v1"
+            f"|ordinary:{ordinary_hash}"
+            f"|binding:{strict_binding_identity}"
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
     # --- Internal Utilities ---
 
     def _clean_structure(self, obj: Any, exclude_keys: Set[str]) -> Any:

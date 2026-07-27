@@ -38,6 +38,7 @@ from consist.core.cache_miss_explainer import (
 )
 from consist.core.context import pop_tracker, push_tracker
 from consist.core.error_messages import format_problem_cause_fix
+from consist.core.resolved_binding import _validate_strict_binding_invocation_context
 from consist.core._performance_attribution import _track_begin_run_phase
 from consist.core.validation import (
     validate_config_structure,
@@ -245,6 +246,33 @@ class RunLifecycleCoordinator:
 
             validate_run_strings(model_name=model, description=description, tags=tags)
 
+            raw_strict_controls = {
+                key
+                for key in (
+                    "_consist_strict_binding_json",
+                    "_strict_binding_context",
+                    "requested_input_strict_snapshot",
+                    "strict_binding_identity",
+                    "strict_binding_json",
+                )
+                if key in kwargs
+            }
+            raw_identity_overrides = kwargs.get("_consist_identity_config_overrides")
+            if isinstance(raw_identity_overrides, MappingABC) and (
+                "__consist_resolved_binding__" in raw_identity_overrides
+            ):
+                raw_strict_controls.add("_consist_identity_config_overrides")
+            if raw_strict_controls:
+                raise ValueError(
+                    "raw strict binding controls are not supported on public Tracker APIs: "
+                    + ", ".join(sorted(raw_strict_controls))
+                )
+            strict_binding_context = tracker._strict_binding_context.get()
+            if strict_binding_context is not None:
+                strict_binding_context = _validate_strict_binding_invocation_context(
+                    strict_binding_context
+                )
+
             (
                 cache_hydration,
                 cache_hydration_failure,
@@ -265,13 +293,20 @@ class RunLifecycleCoordinator:
             requested_input_artifact_ids_raw = kwargs.pop(
                 "requested_input_artifact_ids", None
             )
-            requested_input_strict_snapshot = kwargs.pop(
-                "requested_input_strict_snapshot", False
+            requested_input_strict_snapshot = strict_binding_context is not None
+            strict_binding_json = (
+                strict_binding_context.evidence_json
+                if strict_binding_context is not None
+                else None
             )
-            strict_binding_json = kwargs.pop("_consist_strict_binding_json", None)
             identity_config_overrides = kwargs.pop(
                 "_consist_identity_config_overrides", None
             )
+            if strict_binding_context is not None:
+                identity_config_overrides = dict(identity_config_overrides or {})
+                identity_config_overrides["__consist_resolved_binding__"] = (
+                    strict_binding_context.identity_digest
+                )
 
             requested_input_paths: Optional[Dict[str, Path]] = None
             if requested_input_paths_raw is not None:
@@ -600,14 +635,26 @@ class RunLifecycleCoordinator:
                 if parent_candidates:
                     run.parent_run_id = parent_candidates[-1]
 
-        try:
-            with _track_begin_run_phase("input_signature.total"):
-                t0 = time.perf_counter()
-                tracker._prefetch_run_signatures(current_consist.inputs)
-                _log_timing("prefetch_run_signatures", t0)
-                t0 = time.perf_counter()
-                input_hash = tracker.identity.compute_input_hash(
-                    current_consist.inputs,
+        if strict_binding_context is not None:
+            with _track_begin_run_phase("input_signature.strict"):
+                strict_binding_context = _validate_strict_binding_invocation_context(
+                    strict_binding_context
+                )
+                strict_input_count = len(strict_binding_context.input_artifact_ids)
+                strict_prefix = current_consist.inputs[:strict_input_count]
+                strict_prefix_ids = tuple(
+                    str(artifact.id) for artifact in strict_prefix
+                )
+                if strict_prefix_ids != strict_binding_context.input_artifact_ids:
+                    raise ValueError(
+                        "strict binding input protocol mismatch: logged input prefix "
+                        "does not match the Scenario binding order"
+                    )
+                ordinary_inputs = current_consist.inputs[strict_input_count:]
+                tracker._prefetch_run_signatures(ordinary_inputs)
+                input_hash = tracker.identity.compute_resolved_binding_input_hash(
+                    ordinary_inputs=ordinary_inputs,
+                    strict_binding_identity=strict_binding_context.identity_digest,
                     path_resolver=tracker.resolve_uri,
                     signature_lookup=tracker._resolve_run_signature,
                 )
@@ -617,15 +664,39 @@ class RunLifecycleCoordinator:
                     config_hash=config_hash,
                     input_hash=input_hash,
                 )
-                _log_timing("compute_input_hash", t0)
-        except Exception as exc:
-            logging.warning(
-                "[Consist Warning] Failed to compute inputs hash for run %s: %s",
-                run_id,
-                exc,
-            )
-            run.input_hash = "error"
-            run.signature = "error"
+                run.meta["input_identity"] = {
+                    "mode": "resolved-binding-content-v1",
+                    "strict_input_count": strict_input_count,
+                    "ordinary_input_count": len(ordinary_inputs),
+                    "strict_binding_identity": strict_binding_context.identity_digest,
+                }
+        else:
+            try:
+                with _track_begin_run_phase("input_signature.total"):
+                    t0 = time.perf_counter()
+                    tracker._prefetch_run_signatures(current_consist.inputs)
+                    _log_timing("prefetch_run_signatures", t0)
+                    t0 = time.perf_counter()
+                    input_hash = tracker.identity.compute_input_hash(
+                        current_consist.inputs,
+                        path_resolver=tracker.resolve_uri,
+                        signature_lookup=tracker._resolve_run_signature,
+                    )
+                    run.input_hash = input_hash
+                    run.signature = tracker.identity.calculate_run_signature(
+                        code_hash=git_hash,
+                        config_hash=config_hash,
+                        input_hash=input_hash,
+                    )
+                    _log_timing("compute_input_hash", t0)
+            except Exception as exc:
+                logging.warning(
+                    "[Consist Warning] Failed to compute inputs hash for run %s: %s",
+                    run_id,
+                    exc,
+                )
+                run.input_hash = "error"
+                run.signature = "error"
 
         cached_output_ids: Optional[List[uuid.UUID]] = None
 

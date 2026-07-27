@@ -197,6 +197,17 @@ details, metadata, admission evidence, and diagnostics. The latter is written
 to `run_binding_invocation`, so explaining why a fallback was selected never
 changes cache reuse.
 
+For Python `ResolvedBinding` runs only, immutable typed bound inputs use
+content-addressed cache identity. Ordinary `BindingResult`, primitive
+`inputs=`, Coupler values, and legacy directories keep their normal
+provenance-Merkle identity. This is not a container image-cache contract:
+native `executor="container"` strict bindings are rejected.
+
+Inspect `run.identity_summary["input_identity"]` to see the strict/ordinary
+input split. Inspect
+`tracker.db.get_binding_invocations(requested_run_id=...)` for the selected
+artifact, producer, and immutable audit evidence on each hit or miss.
+
 ### Snapshot and callable-path invariant
 
 For `input_binding="paths"`, a strict input parameter receives the fresh

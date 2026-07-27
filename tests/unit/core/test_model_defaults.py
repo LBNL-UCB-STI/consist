@@ -123,6 +123,26 @@ def test_run_identity_summary_exposes_components() -> None:
     assert summary["run_fields"]["phase"] == "traffic_assignment"
     assert summary["run_fields"]["cache_epoch"] == 9
     assert summary["run_fields"]["cache_version"] == 3
+    assert "input_identity" not in summary
+
+
+def test_run_identity_summary_projects_strict_input_identity() -> None:
+    run = Run(
+        id="strict_identity_run",
+        model_name="activitysim",
+        meta={
+            "input_identity": {
+                "mode": "resolved-binding-content-v1",
+                "strict_input_count": 1,
+                "ordinary_input_count": 0,
+                "strict_binding_identity": "digest",
+            }
+        },
+    )
+
+    assert run.identity_summary["input_identity"]["mode"] == (
+        "resolved-binding-content-v1"
+    )
 
 
 def test_run_identity_summary_falls_back_to_legacy_meta_stage_phase() -> None:
