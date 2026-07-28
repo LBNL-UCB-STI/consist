@@ -821,7 +821,7 @@ class RunLifecycleCoordinator:
                         ]
                         cache_admitted = True
                     _log_timing("hydrate_cache_hit_outputs", t0)
-            if cached_items is not None and debug_cache:
+            if cached_items is not None and cached_run is not None and debug_cache:
                 logging.info(
                     "[Consist][cache] hit: cached_run=%s outputs=%d hydration=%s",
                     cached_run.id,
