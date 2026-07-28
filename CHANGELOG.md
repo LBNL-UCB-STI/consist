@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog], and this project adheres to
 [Semantic Versioning].
 
+## [0.3.1] - 2026-07-28
+
+### Added
+
+- Enable content-addressed cache reuse for advanced strict `ResolvedBinding`
+  Python runs: identical eligible input content can now hit the cache across
+  producer runs and artifact UUIDs, while preserving Scenario-owned strict
+  identity, invocation evidence, and fail-closed protocol validation by
+  @zneedell ([#203](https://github.com/LBNL-UCB-STI/consist/pull/203)).
+
+### Changed
+
+- Update Pillow, setuptools, GitHub Actions `setup-python`, GitPython, and
+  JupyterLab dependencies. The GitPython update includes upstream security
+  fixes for unsafe Git option validation by dependabot[bot]
+  ([#197](https://github.com/LBNL-UCB-STI/consist/pull/197),
+  [#198](https://github.com/LBNL-UCB-STI/consist/pull/198),
+  [#201](https://github.com/LBNL-UCB-STI/consist/pull/201),
+  [#204](https://github.com/LBNL-UCB-STI/consist/pull/204),
+  [#205](https://github.com/LBNL-UCB-STI/consist/pull/205)).
+
+### Fixed
+
+- Preserve named binding keys when staging requested input paths, so aliases
+  resolve against callable parameters rather than artifact provenance keys;
+  unknown keys continue to be rejected by @zneedell
+  ([#199](https://github.com/LBNL-UCB-STI/consist/pull/199)).
+- Allow a single tracked artifact bound to multiple callable parameters to
+  materialize to each parameter-specific run snapshot while retaining every
+  binding in invocation evidence by @zneedell
+  ([#200](https://github.com/LBNL-UCB-STI/consist/pull/200)).
+- Make `cache_hydration="outputs-requested"` candidate admission all-or-miss:
+  Consist now searches same-identity candidates for one that can hydrate every
+  requested output, preflights recovery before staging unusable candidates,
+  and replaces an incomplete local preference after a fallback run by
+  @zneedell ([#202](https://github.com/LBNL-UCB-STI/consist/pull/202)).
+
 ## [0.3.0] - 2026-07-20
 
 ### Added
@@ -583,7 +620,13 @@ The format is based on [Keep a Changelog], and this project adheres to
 
 [Semantic Versioning]: https://semver.org/spec/v2.0.0.html
 
-[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.3.1...HEAD
+
+[0.3.1]: https://github.com/LBNL-UCB-STI/consist/compare/v0.3.0...v0.3.1
+
+[0.3.0]: https://github.com/LBNL-UCB-STI/consist/compare/v0.2.3...v0.3.0
+
+[0.2.3]: https://github.com/LBNL-UCB-STI/consist/compare/v0.2.2...v0.2.3
 
 [0.2.2]: https://github.com/LBNL-UCB-STI/consist/compare/v0.2.1...v0.2.2
 

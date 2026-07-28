@@ -132,10 +132,11 @@ def test_tracker_run_rejects_public_or_forged_strict_controls_before_execution(
     def consume() -> None:
         calls.append("executed")
 
+    untyped_execution_options: Any = ExecutionOptions
     with pytest.raises(TypeError, match="strict_binding_identity"):
         tracker.run(
             fn=consume,
-            execution_options=ExecutionOptions(
+            execution_options=untyped_execution_options(
                 strict_binding_identity="digest",
                 strict_binding_json="{}",
             ),
