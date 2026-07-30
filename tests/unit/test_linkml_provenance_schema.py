@@ -9,6 +9,7 @@ import sys
 import tomllib
 from pathlib import Path
 
+import jsonschema
 import yaml
 from linkml_runtime.utils.schemaview import SchemaView
 
@@ -184,6 +185,45 @@ def test_fixtures_cover_production_consumption_identity_and_cache_semantics() ->
     assert hit["requested_run"] != hit["effective_execution_run"]
 
 
+def test_fixtures_validate_as_linkml_instances() -> None:
+    """Examples validate as the public LinkML instance classes they document."""
+    provenance = yaml.safe_load(PROVENANCE_GRAPH_FIXTURE.read_text())
+    invocations = yaml.safe_load(BINDING_INVOCATIONS_FIXTURE.read_text())
+
+    provenance_schema = json.loads(
+        subprocess.run(
+            [
+                str(JSON_SCHEMA_GENERATOR),
+                "--preserve-names",
+                "--top-class",
+                "ConsistProvenanceDocument",
+                str(SCHEMA_PATH),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )
+    binding_schema = json.loads(
+        subprocess.run(
+            [
+                str(JSON_SCHEMA_GENERATOR),
+                "--preserve-names",
+                "--top-class",
+                "ConsistBindingInvocationReference",
+                str(BINDING_SCHEMA_PATH),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )
+
+    jsonschema.validate(provenance, provenance_schema)
+    for invocation in invocations["invocations"]:
+        jsonschema.validate(invocation, binding_schema)
+
+
 def test_schemas_pass_linkml_lint() -> None:
     """Both published source modules stay valid under the supported LinkML linter."""
     assert LINKML_LINT.is_file()
@@ -319,6 +359,42 @@ classes:
     )
     assert "ReleasedArtifact" in json.loads(generated.stdout)["$defs"]
     assert "ConsistBindingInvocationReference" in json.loads(generated.stdout)["$defs"]
+
+    downstream_binding_release_fixture = output_dir / "downstream_binding_release.yaml"
+    downstream_binding_release_fixture.write_text(
+        """\
+id: https://example.org/pilates/released-binding-consumer
+name: released_binding_consumer
+prefixes:
+  linkml: https://w3id.org/linkml/
+  example: https://example.org/pilates/
+default_prefix: example
+default_range: string
+imports:
+  - linkml:types
+  - binding.merged
+classes:
+  ReleasedBindingConsumer:
+    attributes:
+      invocation:
+        range: ConsistBindingInvocationReference
+        required: true
+""",
+        encoding="utf-8",
+    )
+    binding_generated = subprocess.run(
+        [
+            str(JSON_SCHEMA_GENERATOR),
+            "--preserve-names",
+            str(downstream_binding_release_fixture),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    binding_definitions = json.loads(binding_generated.stdout)["$defs"]
+    assert "ReleasedBindingConsumer" in binding_definitions
+    assert "ConsistBindingInvocationReference" in binding_definitions
 
     rerun = subprocess.run(
         [sys.executable, str(RELEASE_BUILDER), "--output", str(output_dir)],
