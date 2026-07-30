@@ -1,0 +1,80 @@
+id: https://w3id.org/consist/provenance
+name: consist_provenance
+title: Consist provenance references
+description: >-
+  Portable references and production-lineage assertions for public Consist runs
+  and artifacts. This small semantic contract is not a complete Consist lineage
+  model, a mirror of the persistence model, or an artifact registry.
+version: 0.1.0
+status: experimental
+license: BSD-3-Clause
+prefixes:
+  linkml: https://w3id.org/linkml/
+  consist: https://w3id.org/consist/
+  xsd: http://www.w3.org/2001/XMLSchema#
+default_prefix: consist
+default_range: string
+imports:
+  - linkml:types
+
+types:
+  UUID:
+    description: A canonical RFC 4122 UUID string.
+    base: str
+    uri: xsd:string
+    pattern: >-
+      ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$
+
+classes:
+  ConsistRunReference:
+    description: >-
+      A portable reference to a public Consist Run record. When
+      provenance_namespace is present, it and run_id identify a run in a
+      particular logical provenance ledger. Without a namespace, the reference
+      is intentionally local to the surrounding provenance context.
+    attributes:
+      run_id:
+        description: The public Consist Run.id value.
+        required: true
+      provenance_namespace:
+        description: >-
+          A stable logical identifier for the Consist provenance ledger in
+          which run_id resolves. Omit it only when the surrounding provenance
+          context supplies that ledger.
+      signature:
+        description: >-
+          The Consist run signature when available. It supports audit but does
+          not replace run_id as the run reference.
+
+  ConsistArtifactReference:
+    description: >-
+      A portable reference to a public Consist Artifact record. It identifies
+      an artifact record and may describe its public fingerprint and producing
+      run without copying locations, mutable metadata, or container structure.
+    attributes:
+      artifact_id:
+        description: The public Consist Artifact.id UUID.
+        range: UUID
+        required: true
+      provenance_namespace:
+        description: >-
+          A stable logical identifier for the Consist provenance ledger in
+          which artifact_id resolves. Omit it only when the surrounding
+          provenance context supplies that ledger.
+      artifact_key:
+        description: The human-readable Consist artifact key, when known.
+      fingerprint:
+        description: >-
+          The public Artifact.hash value. It is a portable fingerprint whose
+          interpretation follows the hashing strategy and may be content- or
+          metadata-based. Artifact.content_id is database-local and is never a
+          portable fingerprint.
+      fingerprint_strategy:
+        description: >-
+          The hashing strategy or interpretation for fingerprint, when known.
+      producing_run:
+        description: >-
+          The Consist run that produced this artifact, when one exists. Leave
+          this absent for an external artifact with no producing Consist run.
+        range: ConsistRunReference
+        inlined: true

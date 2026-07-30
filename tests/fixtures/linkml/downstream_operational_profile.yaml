@@ -1,0 +1,37 @@
+id: https://example.org/pilates/operational-profile
+name: downstream_operational_profile
+description: >-
+  Minimal downstream schema proving that an operational profile can compose a
+  Consist artifact reference around model-owned data.
+prefixes:
+  linkml: https://w3id.org/linkml/
+  example: https://example.org/pilates/
+default_prefix: example
+default_range: string
+imports:
+  - linkml:types
+  - ../../../src/consist/schemas/provenance
+
+classes:
+  PilatesAtlasVehicleArtifact:
+    description: A model-owned vehicle artifact with a Consist provenance reference.
+    attributes:
+      physical_artifact:
+        range: ConsistArtifactReference
+        required: true
+      records:
+        range: AtlasVehicleOutputRecord
+        multivalued: true
+        inlined_as_list: true
+
+  AtlasVehicleOutputRecord:
+    description: An ATLAS-owned row that has no Consist fields.
+    attributes:
+      vehicle_id:
+        required: true
+      household_id:
+        required: true
+      vehicle_type:
+        required: true
+      annual_mileage:
+        range: float

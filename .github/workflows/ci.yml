@@ -63,6 +63,16 @@ jobs:
         if: runner.os == 'Linux' && matrix.python-version == '3.12'
         run: uv run -m ruff format --check src tests
 
+      - name: Verify LinkML provenance release assets
+        if: runner.os == 'Linux' && matrix.python-version == '3.12'
+        run: |
+          uv build --out-dir provenance-dist
+          unzip -l provenance-dist/consist-*.whl | grep -F "consist/schemas/provenance.yaml"
+          tar -tzf provenance-dist/consist-*.tar.gz | grep -F "/src/consist/schemas/provenance.yaml"
+          uv run python scripts/build_provenance_schema_release.py \
+            --output provenance-schema-release
+          (cd provenance-schema-release && sha256sum -c SHA256SUMS)
+
       - name: Pytest (skip heavy)
         run: >
           uv run -m pytest -q
