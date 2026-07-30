@@ -1,6 +1,6 @@
 [project]
 name = "consist"
-version = "0.3.1"
+version = "0.4.0"
 description = "Provenance tracking, intelligent caching, and data virtualization for scientific simulation workflows."
 readme = "README.md"
 authors = [
@@ -109,6 +109,7 @@ dev = [
     "zarr>=2.18,<3",
     "ty>=0.0.40",
     "pre-commit",
+    "linkml>=1.11.1",
 ]
 docs = [
     "markdown-exec[ansi]>=1.12.3",
