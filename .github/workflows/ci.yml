@@ -68,7 +68,9 @@ jobs:
         run: |
           uv build --out-dir provenance-dist
           unzip -l provenance-dist/consist-*.whl | grep -F "consist/schemas/provenance.yaml"
+          unzip -l provenance-dist/consist-*.whl | grep -F "consist/schemas/binding.yaml"
           tar -tzf provenance-dist/consist-*.tar.gz | grep -F "/src/consist/schemas/provenance.yaml"
+          tar -tzf provenance-dist/consist-*.tar.gz | grep -F "/src/consist/schemas/binding.yaml"
           uv run python scripts/build_provenance_schema_release.py \
             --output provenance-schema-release
           (cd provenance-schema-release && sha256sum -c SHA256SUMS)

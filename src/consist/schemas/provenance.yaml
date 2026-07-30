@@ -1,10 +1,10 @@
 id: https://w3id.org/consist/provenance
 name: consist_provenance
-title: Consist provenance references
+title: Consist provenance graph
 description: >-
-  Portable references and production-lineage assertions for public Consist runs
-  and artifacts. This small semantic contract is not a complete Consist lineage
-  model, a mirror of the persistence model, or an artifact registry.
+  Portable, durable provenance graph assertions for public Consist runs and
+  artifacts. This experimental semantic contract is not a complete execution
+  observation model, a mirror of the persistence model, or an artifact registry.
 version: 0.1.0
 status: experimental
 license: BSD-3-Clause
@@ -24,43 +24,147 @@ types:
     uri: xsd:string
     pattern: >-
       ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$
+  SHA256Digest:
+    description: A lowercase hexadecimal SHA-256 digest.
+    base: str
+    uri: xsd:string
+    pattern: ^[0-9a-f]{64}$
+  ConsistArtifactIdentityKind:
+    description: Immutable artifact identity contracts Consist can currently attest.
+    base: str
+    uri: xsd:string
+    pattern: ^(file|manifest-v1)$
+
+enums:
+  ConsistArtifactIdentityAlgorithm:
+    description: Algorithms Consist can currently attest for immutable artifacts.
+    permissible_values:
+      sha256: {}
+  ConsistRunArtifactDirection:
+    description: Whether a run consumed or produced an artifact.
+    permissible_values:
+      input: {}
+      output: {}
 
 classes:
+  ConsistProvenanceContext:
+    description: >-
+      The ledger context for portable Consist references. Namespace and a local
+      ID form identity; locator is mutable retrieval metadata and never
+      identity-bearing.
+    attributes:
+      namespace:
+        description: A stable logical identifier for the Consist provenance ledger.
+        required: true
+      locator:
+        description: >-
+          An optional mutable hint for locating the ledger. It is never part of
+          identity, equality, deduplication, or namespace assignment.
+
+  ConsistProvenanceDocument:
+    description: >-
+      A portable provenance handoff with one enclosing ledger context and graph
+      facts. A record that omits provenance_context inherits this context.
+    attributes:
+      provenance_context:
+        description: >-
+          The enclosing context inherited by any contained run or artifact
+          reference that omits provenance_context.
+        range: ConsistProvenanceContext
+        required: true
+        inlined: true
+      runs:
+        description: Run references carried by this provenance handoff.
+        range: ConsistRunReference
+        multivalued: true
+        inlined_as_list: true
+      artifacts:
+        description: Artifact references carried by this provenance handoff.
+        range: ConsistArtifactReference
+        multivalued: true
+        inlined_as_list: true
+      associations:
+        description: Consumption and production graph edges carried by this handoff.
+        range: ConsistRunArtifactAssociation
+        multivalued: true
+        inlined_as_list: true
+
+  ConsistRunIdentityEvidence:
+    description: >-
+      Optional cache-identity components copied from a Consist Run for audit.
+      These values support comparison but do not replace a run's public ID.
+    attributes:
+      config_hash:
+        description: The run configuration hash, when available.
+      input_hash:
+        description: The run input hash, when available.
+      git_hash:
+        description: The code revision hash recorded by the run, when available.
+
   ConsistRunReference:
     description: >-
-      A portable reference to a public Consist Run record. When
-      provenance_namespace is present, it and run_id identify a run in a
-      particular logical provenance ledger. Without a namespace, the reference
-      is intentionally local to the surrounding provenance context.
+      A portable reference to a public Consist Run record. Its identity is
+      provenance_context.namespace plus run_id. If provenance_context is absent,
+      it inherits the enclosing ConsistProvenanceDocument provenance_context.
     attributes:
       run_id:
         description: The public Consist Run.id value.
         required: true
-      provenance_namespace:
+      provenance_context:
         description: >-
-          A stable logical identifier for the Consist provenance ledger in
-          which run_id resolves. Omit it only when the surrounding provenance
-          context supplies that ledger.
+          The ledger context for this run. When omitted inside a
+          ConsistProvenanceDocument, inherit the enclosing provenance_context.
+        range: ConsistProvenanceContext
+        inlined: true
       signature:
         description: >-
           The Consist run signature when available. It supports audit but does
           not replace run_id as the run reference.
+      model_name:
+        description: The Consist model or workflow name, when available.
+      parent_run:
+        description: The parent Consist run for a nested execution, when one exists.
+        range: ConsistRunReference
+        inlined: true
+      identity_evidence:
+        description: Optional structured run cache-identity evidence.
+        range: ConsistRunIdentityEvidence
+        inlined: true
+
+  ConsistArtifactIdentity:
+    description: >-
+      A trusted, typed immutable identity that Consist can attest for a strict
+      bound artifact. It is stronger and narrower than Artifact.hash.
+    attributes:
+      algorithm:
+        description: The attested immutable identity algorithm.
+        range: ConsistArtifactIdentityAlgorithm
+        required: true
+      kind:
+        description: The attested immutable identity contract.
+        range: ConsistArtifactIdentityKind
+        required: true
+      digest:
+        description: The immutable identity digest.
+        range: SHA256Digest
+        required: true
 
   ConsistArtifactReference:
     description: >-
-      A portable reference to a public Consist Artifact record. It identifies
-      an artifact record and may describe its public fingerprint and producing
-      run without copying locations, mutable metadata, or container structure.
+      A portable reference to a public Consist Artifact record, including
+      optional portable fingerprint, trusted immutable identity, parent
+      container relationship, and producing run.
     attributes:
       artifact_id:
         description: The public Consist Artifact.id UUID.
         range: UUID
         required: true
-      provenance_namespace:
+      provenance_context:
         description: >-
-          A stable logical identifier for the Consist provenance ledger in
-          which artifact_id resolves. Omit it only when the surrounding
-          provenance context supplies that ledger.
+          The ledger context for this artifact. When omitted inside a
+          ConsistProvenanceDocument, inherit the enclosing provenance_context.
+        range: ConsistProvenanceContext
+        inlined: true
       artifact_key:
         description: The human-readable Consist artifact key, when known.
       fingerprint:
@@ -70,11 +174,53 @@ classes:
           metadata-based. Artifact.content_id is database-local and is never a
           portable fingerprint.
       fingerprint_strategy:
+        description: The hashing strategy or interpretation for fingerprint, when known.
+      immutable_identity:
         description: >-
-          The hashing strategy or interpretation for fingerprint, when known.
+          A trusted typed immutable identity, when Consist can attest one. It
+          must not be inferred from a broader Artifact.hash alone.
+        range: ConsistArtifactIdentity
+        inlined: true
+      parent_artifact:
+        description: >-
+          The parent container artifact, when this artifact is a member. This is
+          container structure, not an artifact derivation edge.
+        range: ConsistArtifactReference
+        inlined: true
       producing_run:
         description: >-
-          The Consist run that produced this artifact, when one exists. Leave
-          this absent for an external artifact with no producing Consist run.
+          The Consist run that produced this artifact, when one exists. For an
+          output association, this reference must resolve to the associated run.
+          Leave it absent for an external artifact with no producing Consist run.
         range: ConsistRunReference
         inlined: true
+
+  ConsistRunArtifactAssociation:
+    description: >-
+      A durable input or output relationship between a run and an artifact. An
+      output association is a production assertion; if artifact.producing_run is
+      supplied, it must resolve to the same run after context inheritance.
+    attributes:
+      run:
+        description: The consuming or producing Consist run.
+        range: ConsistRunReference
+        required: true
+        inlined: true
+      artifact:
+        description: The consumed or produced Consist artifact.
+        range: ConsistArtifactReference
+        required: true
+        inlined: true
+      direction:
+        description: Whether the run used the artifact as an input or output.
+        range: ConsistRunArtifactDirection
+        required: true
+      role:
+        description: The invocation-specific semantic role of the artifact, when known.
+      binding_parameter:
+        description: The invocation binding parameter for the artifact, when known.
+      is_implicit:
+        description: >-
+          Whether Consist discovered this relationship implicitly, when that
+          evidence is available.
+        range: boolean

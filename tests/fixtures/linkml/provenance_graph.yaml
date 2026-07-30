@@ -1,0 +1,63 @@
+provenance_context:
+  namespace: urn:consist:alpha
+  locator: https://ledger.example.org/alpha
+runs:
+  - run_id: pipeline-parent
+    model_name: pilates
+  - run_id: atlas-model
+    model_name: atlas
+    parent_run:
+      run_id: pipeline-parent
+    identity_evidence:
+      config_hash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      input_hash: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      git_hash: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+  - run_id: duplicated-local-run
+    provenance_context:
+      namespace: urn:consist:alpha
+  - run_id: duplicated-local-run
+    provenance_context:
+      namespace: urn:consist:beta
+artifacts:
+  - artifact_id: 11111111-1111-4111-8111-111111111111
+    artifact_key: source-table
+    immutable_identity:
+      algorithm: sha256
+      kind: file
+      digest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  - artifact_id: 22222222-2222-4222-8222-222222222222
+    artifact_key: output-container
+    immutable_identity:
+      algorithm: sha256
+      kind: manifest-v1
+      digest: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    producing_run:
+      run_id: atlas-model
+  - artifact_id: 33333333-3333-4333-8333-333333333333
+    artifact_key: output-member
+    parent_artifact:
+      artifact_id: 22222222-2222-4222-8222-222222222222
+    producing_run:
+      run_id: atlas-model
+  - artifact_id: 44444444-4444-4444-8444-444444444444
+    provenance_context:
+      namespace: urn:consist:alpha
+  - artifact_id: 44444444-4444-4444-8444-444444444444
+    provenance_context:
+      namespace: urn:consist:beta
+associations:
+  - run:
+      run_id: atlas-model
+    artifact:
+      artifact_id: 11111111-1111-4111-8111-111111111111
+    direction: input
+    role: source data
+    binding_parameter: source
+  - run:
+      run_id: atlas-model
+    artifact:
+      artifact_id: 22222222-2222-4222-8222-222222222222
+      producing_run:
+        run_id: atlas-model
+    direction: output
+    is_implicit: false

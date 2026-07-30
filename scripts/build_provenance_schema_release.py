@@ -9,7 +9,8 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).parents[1]
-DEFAULT_SCHEMA_PATH = PROJECT_ROOT / "src" / "consist" / "schemas" / "provenance.yaml"
+DEFAULT_SCHEMA_DIR = PROJECT_ROOT / "src" / "consist" / "schemas"
+SCHEMA_NAMES = ("provenance", "binding")
 
 
 def _sha256(path: Path) -> str:
@@ -36,8 +37,8 @@ def _write_checksums(output_dir: Path) -> Path:
     return checksum_path
 
 
-def build_release_assets(schema_path: Path, output_dir: Path) -> list[Path]:
-    """Build modular source, merged closure, and generated reference documentation.
+def build_release_assets(schema_dir: Path, output_dir: Path) -> list[Path]:
+    """Build modular sources, merged closures, and reference documentation.
 
     LinkML imports are intentionally local to this developer-facing release
     builder. Importing ``consist`` for normal tracking, caching, or recovery
@@ -46,8 +47,11 @@ def build_release_assets(schema_path: Path, output_dir: Path) -> list[Path]:
     from linkml.generators.docgen import DocGenerator
     from linkml.generators.yamlgen import YAMLGenerator
 
-    if not schema_path.is_file():
-        raise FileNotFoundError(f"Schema source does not exist: {schema_path}")
+    schema_paths = [schema_dir / f"{name}.yaml" for name in SCHEMA_NAMES]
+    missing_schema_paths = [path for path in schema_paths if not path.is_file()]
+    if missing_schema_paths:
+        missing = ", ".join(str(path) for path in missing_schema_paths)
+        raise FileNotFoundError(f"Schema source does not exist: {missing}")
 
     if output_dir.exists():
         if not output_dir.is_dir():
@@ -59,24 +63,32 @@ def build_release_assets(schema_path: Path, output_dir: Path) -> list[Path]:
             )
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    source_path = output_dir / "provenance.yaml"
-    merged_path = output_dir / "provenance.merged.yaml"
-    reference_dir = output_dir / "reference"
+    source_paths: list[Path] = []
+    merged_paths: list[Path] = []
+    reference_dirs: list[Path] = []
+    for schema_path in schema_paths:
+        schema_name = schema_path.stem
+        source_path = output_dir / schema_path.name
+        merged_path = output_dir / f"{schema_name}.merged.yaml"
+        reference_dir = output_dir / "reference" / schema_name
 
-    shutil.copyfile(schema_path, source_path)
-    merged_path.write_text(
-        YAMLGenerator(schema_path, mergeimports=True, metadata=False).serialize(),
-        encoding="utf-8",
-    )
-    DocGenerator(
-        schema_path,
-        mergeimports=False,
-        metadata=False,
-        preserve_names=True,
-    ).serialize(directory=str(reference_dir))
+        shutil.copyfile(schema_path, source_path)
+        merged_path.write_text(
+            YAMLGenerator(schema_path, mergeimports=True, metadata=False).serialize(),
+            encoding="utf-8",
+        )
+        DocGenerator(
+            schema_path,
+            mergeimports=True,
+            metadata=False,
+            preserve_names=True,
+        ).serialize(directory=str(reference_dir))
+        source_paths.append(source_path)
+        merged_paths.append(merged_path)
+        reference_dirs.append(reference_dir)
     checksum_path = _write_checksums(output_dir)
 
-    return [source_path, merged_path, reference_dir, checksum_path]
+    return [*source_paths, *merged_paths, *reference_dirs, checksum_path]
 
 
 def parse_args() -> argparse.Namespace:
@@ -85,10 +97,10 @@ def parse_args() -> argparse.Namespace:
         description="Build checksummed Consist LinkML provenance-schema release assets."
     )
     parser.add_argument(
-        "--schema",
+        "--schema-dir",
         type=Path,
-        default=DEFAULT_SCHEMA_PATH,
-        help="Path to the modular provenance LinkML source schema.",
+        default=DEFAULT_SCHEMA_DIR,
+        help="Directory containing the modular Consist LinkML source schemas.",
     )
     parser.add_argument(
         "--output",
@@ -102,7 +114,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     """Build release assets and report their output directory."""
     args = parse_args()
-    build_release_assets(args.schema.resolve(), args.output.resolve())
+    build_release_assets(args.schema_dir.resolve(), args.output.resolve())
     print(args.output.resolve())
 
 

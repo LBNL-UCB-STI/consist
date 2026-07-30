@@ -1,0 +1,59 @@
+id: https://w3id.org/consist/binding
+name: consist_binding
+title: Consist cache-aware binding invocations
+description: >-
+  Optional cache-aware invocation facts for portable Consist provenance. This
+  module imports the durable provenance graph without exporting opaque binding
+  evidence or operational observations.
+version: 0.1.0
+status: experimental
+license: BSD-3-Clause
+prefixes:
+  linkml: https://w3id.org/linkml/
+  consist: https://w3id.org/consist/
+default_prefix: consist
+default_range: string
+imports:
+  - linkml:types
+  - provenance
+
+enums:
+  ConsistBindingCacheOutcome:
+    description: Whether this invocation executed or reused a cached producer.
+    permissible_values:
+      miss: {}
+      hit: {}
+
+classes:
+  ConsistBindingInvocationReference:
+    description: >-
+      One resolved binding invocation. On a miss, requested_run and
+      effective_execution_run resolve to the same new run and cache_source_run
+      is absent. On a hit, effective_execution_run and cache_source_run resolve
+      to the same historical producer, distinct from the current requested run.
+    attributes:
+      requested_run:
+        description: The run created for the current invocation.
+        range: ConsistRunReference
+        required: true
+        inlined: true
+      effective_execution_run:
+        description: The run that supplied the execution result.
+        range: ConsistRunReference
+        required: true
+        inlined: true
+      cache_source_run:
+        description: >-
+          The historical producer reused for a cache hit. It is absent for a
+          cache miss and resolves to effective_execution_run for a cache hit.
+        range: ConsistRunReference
+        inlined: true
+      cache_outcome:
+        description: The cache outcome for this invocation.
+        range: ConsistBindingCacheOutcome
+        required: true
+      binding_identity_digest:
+        description: >-
+          The optional SHA-256 digest of Consist's strict resolved-binding
+          identity. It identifies a binding contract, not opaque evidence JSON.
+        range: SHA256Digest
