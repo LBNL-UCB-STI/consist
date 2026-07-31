@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog], and this project adheres to
 [Semantic Versioning].
 
+## [0.3.2] - 2026-07-31
+
+### Added
+
+- Publish experimental, portable LinkML provenance-schema assets (schema
+  version `0.1.0`) for durable ledger context, run and artifact references,
+  lineage associations, and optional cache-aware binding invocations. The
+  checksummed source, merged, and generated-reference assets are packaged
+  without adding LinkML to Consist's runtime dependencies by @zneedell
+  ([#207](https://github.com/LBNL-UCB-STI/consist/pull/207)).
+- Add archive and exact recovery support for manifest-backed `OutputSet`
+  outputs. Sets are validated and published as a single recovery unit, while
+  `ArchivedOutputs.paths` exposes an explicit read-only view of archived paths
+  and `.outputs` retains the refreshed artifacts for downstream reuse by
+  @zneedell ([#208](https://github.com/LBNL-UCB-STI/consist/pull/208)).
+- Add `BeamConfigAdapter.materialize_bundle(...)` and public launch-bundle
+  types for creating a recoverable, provenance-backed BEAM configuration tree
+  from ordered config roots, overrides, and declared file inputs. Equivalent
+  requests reuse a verified durable directory artifact by @zneedell
+  ([#210](https://github.com/LBNL-UCB-STI/consist/pull/210)).
+
+### Changed
+
+- Allow `archive_run_outputs(...)` to use a currently configured managed URI
+  mount as the final fallback for an ordinary run-owned file when historical
+  and recovery sources are unavailable. The fallback is limited to configured
+  schemes and verifies the recorded artifact identity before archival or
+  recovery-root registration by @zneedell
+  ([#209](https://github.com/LBNL-UCB-STI/consist/pull/209)).
+- Correct the prospective LinkML release-asset bundle to `0.1.1` with
+  timezone-aware UTC metadata, while preserving the `0.1.0` vocabulary by
+  @zneedell ([#208](https://github.com/LBNL-UCB-STI/consist/pull/208)).
+
 ## [0.3.1] - 2026-07-28
 
 ### Added
@@ -620,7 +653,9 @@ The format is based on [Keep a Changelog], and this project adheres to
 
 [Semantic Versioning]: https://semver.org/spec/v2.0.0.html
 
-[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.3.2...HEAD
+
+[0.3.2]: https://github.com/LBNL-UCB-STI/consist/compare/v0.3.1...v0.3.2
 
 [0.3.1]: https://github.com/LBNL-UCB-STI/consist/compare/v0.3.0...v0.3.1
 
