@@ -1819,6 +1819,16 @@ class DatabaseManager:
             logging.warning("Artifact sync failed: %s", e)
             logging.warning("Database sync failed: %s", e)
 
+    def upsert_artifact(self, artifact: Artifact) -> None:
+        """Persist an artifact that is not yet linked to a run."""
+
+        def _do_upsert() -> None:
+            with self.session_scope() as session:
+                session.merge(artifact)
+                session.commit()
+
+        self.execute_with_retry(_do_upsert, operation_name="upsert_artifact")
+
     def sync_artifacts(
         self,
         *,

@@ -2,6 +2,7 @@ import logging
 import importlib
 import json
 import os
+import shutil
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
@@ -17,7 +18,11 @@ from consist.core.config_canonicalization import (
     ConfigAdapterOptions,
     ConfigReference,
 )
-from consist.integrations.beam import BeamConfigAdapter, BeamConfigOverrides
+from consist.integrations.beam import (
+    BeamConfigAdapter,
+    BeamConfigOverrides,
+    BeamLaunchBundleMember,
+)
 from consist.integrations.beam.config_adapter import BeamReferencePolicy
 from consist.integrations.beam.config_adapter import (
     _build_beam_canonicalization_snapshot,
@@ -25,6 +30,7 @@ from consist.integrations.beam.config_adapter import (
 from consist.integrations.beam.config_adapter import _load_config_tree
 from consist.integrations.beam.config_adapter import _resolve_reference
 from consist.integrations.beam.config_adapter import _resolves_under_config_root
+from consist.models.artifact import Artifact
 from consist.models.beam import BeamConfigCache, BeamConfigIngestRunLink
 from consist.types import CacheOptions, ExecutionOptions
 from tests.helpers.beam_fixtures import build_beam_test_configs
@@ -1106,6 +1112,498 @@ def test_beam_materialize_overrides(tracker, tmp_path: Path):
     )
     config = ConfigFactory.parse_file(str(canonical.primary_config), resolve=True)
     assert config.get("beam.agentsim.agentSampleSizeAsFractionOfPopulation") == 0.75
+
+
+def test_beam_materialize_bundle_publishes_recoverable_launch_input(
+    tracker, tmp_path: Path
+):
+    """A launch bundle preserves config, staged inputs, and recovery bytes."""
+    ConfigFactory = importlib.import_module("pyhocon").ConfigFactory
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    prepared = tmp_path / "prepared" / "skims.omx"
+    prepared.parent.mkdir()
+    prepared.write_bytes(b"prepared skims")
+    launch_root = tmp_path / "launch"
+    durable_root = tmp_path / "durable"
+
+    bundle = BeamConfigAdapter(primary_config=overlay_conf).materialize_bundle(
+        tracker=tracker,
+        base_root_dirs=[case_dir],
+        overrides=BeamConfigOverrides(
+            values={"beam.agentsim.agentSampleSizeAsFractionOfPopulation": 0.75}
+        ),
+        staged_members=[
+            BeamLaunchBundleMember(
+                source=prepared,
+                destination="inputs/prepared/skims.omx",
+            )
+        ],
+        output_dir=launch_root,
+        durable_root=durable_root,
+    )
+
+    assert bundle.root == launch_root
+    assert bundle.primary_config == launch_root / case_dir.name / "overlay.conf"
+    assert (bundle.root / case_dir.name / "common.conf").is_file()
+    assert (bundle.root / "inputs" / "prepared" / "skims.omx").read_bytes() == (
+        b"prepared skims"
+    )
+    config = ConfigFactory.parse_file(str(bundle.primary_config), resolve=True)
+    assert config.get("beam.agentsim.agentSampleSizeAsFractionOfPopulation") == 0.75
+    assert bundle.artifact.recovery_roots == [str(durable_root.resolve())]
+    stored = tracker.get_artifact(str(bundle.artifact.id))
+    assert stored is not None
+    assert stored.run_id is None
+
+    shutil.rmtree(launch_root)
+    tracker.materialize(stored, launch_root, on_missing="raise")
+
+    assert (launch_root / "inputs" / "prepared" / "skims.omx").read_bytes() == (
+        b"prepared skims"
+    )
+
+
+def test_beam_materialize_bundle_reuses_matching_durable_tree(tracker, tmp_path: Path):
+    """Removing a caller launch tree reuses the existing durable bundle."""
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    prepared = tmp_path / "prepared.csv"
+    prepared.write_text("zone,value\n1,2\n", encoding="utf-8")
+    adapter = BeamConfigAdapter(primary_config=overlay_conf)
+    durable_root = tmp_path / "durable"
+    members = [
+        BeamLaunchBundleMember(source=prepared, destination="inputs/prepared.csv")
+    ]
+    first_root = tmp_path / "first_launch"
+    second_root = tmp_path / "second_launch"
+
+    first = adapter.materialize_bundle(
+        tracker=tracker,
+        base_root_dirs=[case_dir],
+        overrides=BeamConfigOverrides(values={}),
+        staged_members=members,
+        output_dir=first_root,
+        durable_root=durable_root,
+    )
+    shutil.rmtree(first_root)
+    reused = adapter.materialize_bundle(
+        tracker=tracker,
+        base_root_dirs=[case_dir],
+        overrides=BeamConfigOverrides(values={}),
+        staged_members=members,
+        output_dir=second_root,
+        durable_root=durable_root,
+    )
+
+    assert reused.artifact.id == first.artifact.id
+    assert (second_root / "inputs" / "prepared.csv").read_text(encoding="utf-8") == (
+        "zone,value\n1,2\n"
+    )
+
+
+def test_beam_materialize_bundle_recovers_artifact_backed_member(
+    tracker, tmp_path: Path
+):
+    """Artifact members are staged from verified recovery bytes when needed."""
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    prepared = tracker.run_dir / "prepared.csv"
+    prepared.parent.mkdir(parents=True, exist_ok=True)
+    prepared.write_text("zone,value\n1,2\n", encoding="utf-8")
+    with tracker.trace("prepare_recoverable_launch_member") as trace:
+        source_artifact = trace.log_artifact(
+            prepared, key="prepared_skims", direction="output"
+        )
+
+    archive_root = tmp_path / "source_archive"
+    relative_path = tracker.fs.get_remappable_relative_path(
+        source_artifact.container_uri
+    )
+    assert relative_path is not None
+    archived_source = archive_root / relative_path
+    archived_source.parent.mkdir(parents=True)
+    shutil.copy2(prepared, archived_source)
+    tracker.set_artifact_recovery_roots(source_artifact, [archive_root])
+    prepared.unlink()
+
+    bundle = BeamConfigAdapter(primary_config=overlay_conf).materialize_bundle(
+        tracker=tracker,
+        base_root_dirs=[case_dir],
+        overrides=BeamConfigOverrides(values={}),
+        staged_members=[
+            BeamLaunchBundleMember(
+                source=source_artifact,
+                destination="inputs/prepared.csv",
+            )
+        ],
+        output_dir=tmp_path / "launch",
+        durable_root=tmp_path / "durable",
+    )
+
+    assert (bundle.root / "inputs" / "prepared.csv").read_text(encoding="utf-8") == (
+        "zone,value\n1,2\n"
+    )
+
+
+def test_beam_materialize_bundle_rejects_changed_artifact_member_bytes(
+    tracker, tmp_path: Path
+):
+    """A changed primary artifact file cannot be published under its old identity."""
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    prepared = tmp_path / "prepared.csv"
+    prepared.write_text("zone,value\n1,2\n", encoding="utf-8")
+    with tracker.trace("prepare_changed_launch_member") as trace:
+        source_artifact = trace.log_artifact(
+            prepared, key="prepared_skims", direction="output"
+        )
+    prepared.write_text("zone,value\n1,changed\n", encoding="utf-8")
+    durable_root = tmp_path / "durable"
+
+    with pytest.raises(ValueError, match="source hash does not match"):
+        BeamConfigAdapter(primary_config=overlay_conf).materialize_bundle(
+            tracker=tracker,
+            base_root_dirs=[case_dir],
+            overrides=BeamConfigOverrides(values={}),
+            staged_members=[
+                BeamLaunchBundleMember(
+                    source=source_artifact,
+                    destination="inputs/prepared.csv",
+                )
+            ],
+            output_dir=tmp_path / "launch",
+            durable_root=durable_root,
+        )
+
+    assert not durable_root.exists()
+
+
+def test_beam_materialize_bundle_rejects_symlinked_external_artifact_member(
+    tracker, tmp_path: Path
+):
+    """An unmappable artifact URI cannot bypass staged-member symlink checks."""
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    prepared = tmp_path / "prepared.csv"
+    prepared.write_text("zone,value\n1,2\n", encoding="utf-8")
+    linked = tmp_path / "linked.csv"
+    linked.symlink_to(prepared)
+    source_artifact = Artifact(
+        key="prepared_skims",
+        container_uri=f"file://{linked.absolute()}",
+        driver="csv",
+        hash=tracker.identity.compute_file_checksum(prepared),
+    )
+    durable_root = tmp_path / "durable"
+
+    with pytest.raises(ValueError, match="regular non-symlink"):
+        BeamConfigAdapter(primary_config=overlay_conf).materialize_bundle(
+            tracker=tracker,
+            base_root_dirs=[case_dir],
+            overrides=BeamConfigOverrides(values={}),
+            staged_members=[
+                BeamLaunchBundleMember(
+                    source=source_artifact,
+                    destination="inputs/prepared.csv",
+                )
+            ],
+            output_dir=tmp_path / "launch",
+            durable_root=durable_root,
+        )
+
+    assert not durable_root.exists()
+
+
+def test_beam_materialize_bundle_stages_percent_escaped_external_artifact_uri(
+    tracker, tmp_path: Path
+):
+    """A valid local file URI is decoded before its source bytes are verified."""
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    prepared = tmp_path / "prepared skims.csv"
+    prepared.write_text("zone,value\n1,2\n", encoding="utf-8")
+    source_artifact = Artifact(
+        key="prepared_skims",
+        container_uri=prepared.as_uri(),
+        driver="csv",
+        hash=tracker.identity.compute_file_checksum(prepared),
+    )
+
+    bundle = BeamConfigAdapter(primary_config=overlay_conf).materialize_bundle(
+        tracker=tracker,
+        base_root_dirs=[case_dir],
+        overrides=BeamConfigOverrides(values={}),
+        staged_members=[
+            BeamLaunchBundleMember(
+                source=source_artifact,
+                destination="inputs/prepared.csv",
+            )
+        ],
+        output_dir=tmp_path / "launch",
+        durable_root=tmp_path / "durable",
+    )
+
+    assert (bundle.root / "inputs" / "prepared.csv").read_text(encoding="utf-8") == (
+        "zone,value\n1,2\n"
+    )
+
+
+def test_beam_materialize_bundle_rejects_corrupted_durable_tree_on_reuse(
+    tracker, tmp_path: Path
+):
+    """A durable bundle must still match its immutable directory manifest on retry."""
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    prepared = tmp_path / "prepared.csv"
+    prepared.write_text("zone,value\n1,2\n", encoding="utf-8")
+    adapter = BeamConfigAdapter(primary_config=overlay_conf)
+    durable_root = tmp_path / "durable"
+    members = [
+        BeamLaunchBundleMember(source=prepared, destination="inputs/prepared.csv")
+    ]
+    first = adapter.materialize_bundle(
+        tracker=tracker,
+        base_root_dirs=[case_dir],
+        overrides=BeamConfigOverrides(values={}),
+        staged_members=members,
+        output_dir=tmp_path / "first_launch",
+        durable_root=durable_root,
+    )
+    durable_member = Path(first.artifact.path) / "inputs" / "prepared.csv"
+    durable_member.write_text("zone,value\n1,corrupted\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="directory artifact file hash mismatch"):
+        adapter.materialize_bundle(
+            tracker=tracker,
+            base_root_dirs=[case_dir],
+            overrides=BeamConfigOverrides(values={}),
+            staged_members=members,
+            output_dir=tmp_path / "second_launch",
+            durable_root=durable_root,
+        )
+
+    assert not (tmp_path / "second_launch").exists()
+
+
+def test_beam_materialize_bundle_rejects_base_root_changed_during_staging(
+    tracker, tmp_path: Path
+):
+    """Copied config roots must match the manifests used for bundle identity."""
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    prepared = tmp_path / "prepared.csv"
+    prepared.write_text("zone,value\n1,2\n", encoding="utf-8")
+    original_copytree = shutil.copytree
+    mutated = False
+
+    def copytree_after_root_mutation(source, destination, *args, **kwargs):
+        nonlocal mutated
+        if not mutated:
+            mutated = True
+            with (case_dir / "common.conf").open("a", encoding="utf-8") as config:
+                config.write("\n# changed while launch bundle was staging\n")
+        return original_copytree(source, destination, *args, **kwargs)
+
+    with patch(
+        "consist.integrations.beam.config_adapter.shutil.copytree",
+        side_effect=copytree_after_root_mutation,
+    ):
+        with pytest.raises(ValueError, match="does not match its declared identity"):
+            BeamConfigAdapter(primary_config=overlay_conf).materialize_bundle(
+                tracker=tracker,
+                base_root_dirs=[case_dir],
+                overrides=BeamConfigOverrides(values={}),
+                staged_members=[
+                    BeamLaunchBundleMember(
+                        source=prepared,
+                        destination="inputs/prepared.csv",
+                    )
+                ],
+                output_dir=tmp_path / "launch",
+                durable_root=tmp_path / "durable",
+            )
+
+    assert mutated
+    assert not (tmp_path / "durable").exists()
+
+
+def test_beam_materialize_bundle_rejects_unsafe_destination_before_publication(
+    tracker, tmp_path: Path
+):
+    """A traversal destination cannot create a partial durable launch bundle."""
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    prepared = tmp_path / "prepared.csv"
+    prepared.write_text("zone,value\n1,2\n", encoding="utf-8")
+    durable_root = tmp_path / "durable"
+
+    with pytest.raises(ValueError, match="Unsafe launch bundle destination"):
+        BeamConfigAdapter(primary_config=overlay_conf).materialize_bundle(
+            tracker=tracker,
+            base_root_dirs=[case_dir],
+            overrides=BeamConfigOverrides(values={}),
+            staged_members=[
+                BeamLaunchBundleMember(source=prepared, destination="../escape.csv")
+            ],
+            output_dir=tmp_path / "launch",
+            durable_root=durable_root,
+        )
+
+    assert not durable_root.exists()
+
+
+def test_beam_materialize_bundle_rejects_symlinked_staged_source(
+    tracker, tmp_path: Path
+):
+    """A symlinked prepared member cannot become a recoverable launch input."""
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    prepared = tmp_path / "prepared.csv"
+    prepared.write_text("zone,value\n1,2\n", encoding="utf-8")
+    linked = tmp_path / "linked.csv"
+    linked.symlink_to(prepared)
+    durable_root = tmp_path / "durable"
+
+    with pytest.raises(ValueError, match="regular non-symlink"):
+        BeamConfigAdapter(primary_config=overlay_conf).materialize_bundle(
+            tracker=tracker,
+            base_root_dirs=[case_dir],
+            overrides=BeamConfigOverrides(values={}),
+            staged_members=[
+                BeamLaunchBundleMember(source=linked, destination="inputs/data.csv")
+            ],
+            output_dir=tmp_path / "launch",
+            durable_root=durable_root,
+        )
+
+    assert not durable_root.exists()
+
+
+def test_beam_materialize_bundle_rejects_staged_member_collision(
+    tracker, tmp_path: Path
+):
+    """A staged member cannot silently replace a copied config-root file."""
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    prepared = tmp_path / "prepared.conf"
+    prepared.write_text("beam.test = true\n", encoding="utf-8")
+    durable_root = tmp_path / "durable"
+
+    with pytest.raises(FileExistsError, match="already exists in the launch tree"):
+        BeamConfigAdapter(primary_config=overlay_conf).materialize_bundle(
+            tracker=tracker,
+            base_root_dirs=[case_dir],
+            overrides=BeamConfigOverrides(values={}),
+            staged_members=[
+                BeamLaunchBundleMember(
+                    source=prepared,
+                    destination=f"{case_dir.name}/common.conf",
+                )
+            ],
+            output_dir=tmp_path / "launch",
+            durable_root=durable_root,
+        )
+
+    assert not durable_root.exists()
+
+
+def test_beam_materialize_bundle_identity_tracks_launch_tree_inputs(
+    tracker, tmp_path: Path
+):
+    """Config contents, overrides, staged bytes, and paths cannot reuse a bundle."""
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    prepared = tmp_path / "prepared.csv"
+    prepared.write_text("zone,value\n1,2\n", encoding="utf-8")
+    adapter = BeamConfigAdapter(primary_config=overlay_conf)
+    durable_root = tmp_path / "durable"
+
+    def materialize(
+        name: str,
+        *,
+        overrides: dict[str, object] | None = None,
+        destination: str = "inputs/prepared.csv",
+    ):
+        return adapter.materialize_bundle(
+            tracker=tracker,
+            base_root_dirs=[case_dir],
+            overrides=BeamConfigOverrides(values=overrides or {}),
+            staged_members=[
+                BeamLaunchBundleMember(source=prepared, destination=destination)
+            ],
+            output_dir=tmp_path / name,
+            durable_root=durable_root,
+        )
+
+    original = materialize("original")
+    changed_override = materialize(
+        "changed_override",
+        overrides={"beam.agentsim.agentSampleSizeAsFractionOfPopulation": 0.8},
+    )
+    prepared.write_text("zone,value\n1,3\n", encoding="utf-8")
+    changed_member_bytes = materialize("changed_member_bytes")
+    changed_destination = materialize(
+        "changed_destination", destination="inputs/renamed.csv"
+    )
+    with (case_dir / "common.conf").open("a", encoding="utf-8") as config_file:
+        config_file.write("\n# materialized bundle identity regression\n")
+    changed_include = materialize("changed_include")
+
+    assert (
+        len(
+            {
+                original.artifact.id,
+                changed_override.artifact.id,
+                changed_member_bytes.artifact.id,
+                changed_destination.artifact.id,
+                changed_include.artifact.id,
+            }
+        )
+        == 5
+    )
+
+
+def test_beam_materialize_bundle_is_bound_as_a_downstream_input(
+    tracker, tmp_path: Path
+):
+    """The launch bundle is a BEAM input, not an output of that BEAM run."""
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    prepared = tmp_path / "prepared.csv"
+    prepared.write_text("zone,value\n1,2\n", encoding="utf-8")
+    with tracker.trace("prepare_launch_member") as trace:
+        source_artifact = trace.log_artifact(
+            prepared, key="prepared_skims", direction="output"
+        )
+    bundle = BeamConfigAdapter(primary_config=overlay_conf).materialize_bundle(
+        tracker=tracker,
+        base_root_dirs=[case_dir],
+        overrides=BeamConfigOverrides(values={}),
+        staged_members=[
+            BeamLaunchBundleMember(
+                source=source_artifact,
+                destination="inputs/prepared.csv",
+            )
+        ],
+        output_dir=tmp_path / "launch",
+        durable_root=tmp_path / "durable",
+    )
+    consumed: list[Path] = []
+
+    def consume(launch_bundle: Path) -> None:
+        consumed.append(launch_bundle)
+        assert (launch_bundle / case_dir.name / "overlay.conf").is_file()
+
+    downstream = tracker.run(
+        name="consume_beam_launch_bundle",
+        fn=consume,
+        inputs={"launch_bundle": bundle.artifact},
+        execution_options=ExecutionOptions(input_binding="paths"),
+    )
+
+    assert consumed == [Path(bundle.artifact.path)]
+    assert bundle.artifact.meta["bundle_staged_members"] == [
+        {
+            "destination": "inputs/prepared.csv",
+            "source_artifact_id": str(source_artifact.id),
+            "source_uri": source_artifact.container_uri,
+            "source_hash": source_artifact.hash,
+        }
+    ]
+    assert bundle.artifact.id in {
+        artifact.id for artifact in tracker.get_run_inputs(downstream.run.id).values()
+    }
+    assert bundle.artifact.id not in {
+        artifact.id for artifact in tracker.get_run_outputs(downstream.run.id).values()
+    }
 
 
 def test_beam_materialize_from_plan_uses_config_dirs(tracker, tmp_path: Path):
