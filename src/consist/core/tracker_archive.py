@@ -361,6 +361,8 @@ class TrackerArchiveService(_TrackerServiceBase):
             candidate = Path(self.resolve_uri(artifact.container_uri)).resolve()
             if candidate.exists():
                 source_path = candidate
+        if source_path is None:
+            source_path = self._find_current_managed_uri_source(artifact)
         if source_path is None or not source_path.exists():
             raise FileNotFoundError(
                 f"Cannot archive artifact {artifact.key!r}: source bytes are unavailable."
@@ -421,6 +423,40 @@ class TrackerArchiveService(_TrackerServiceBase):
         if mode == "move":
             artifact.abs_path = str(destination.resolve())
         return destination
+
+    def _find_current_managed_uri_source(self, artifact: Artifact) -> Path | None:
+        """Return a validated current-mount source for an ordinary artifact.
+
+        This is deliberately a fallback after producer historical and recovery
+        locations. Only an explicitly configured URI scheme is eligible: the
+        generic URI resolver also accepts run-relative and legacy local paths,
+        which must not become a new source authority for run-owned artifacts.
+        """
+        if "://" not in artifact.container_uri:
+            return None
+
+        scheme, _ = artifact.container_uri.split("://", 1)
+        if scheme not in self.fs.mounts:
+            return None
+
+        candidate = Path(self.fs.resolve_uri(artifact.container_uri))
+        if not candidate.exists():
+            return None
+        if not candidate.is_file():
+            return candidate
+        if not artifact.hash:
+            raise ValueError(
+                f"Cannot archive artifact {artifact.key!r} from its current "
+                "configured mount: artifact hash is unavailable."
+            )
+
+        candidate_hash = self.identity.compute_file_checksum(candidate)
+        if candidate_hash != artifact.hash:
+            raise ValueError(
+                f"Current configured mount source for artifact {artifact.key!r} "
+                "does not match artifact hash."
+            )
+        return candidate
 
     @staticmethod
     def _is_output_set_parent(artifact: Artifact) -> bool:

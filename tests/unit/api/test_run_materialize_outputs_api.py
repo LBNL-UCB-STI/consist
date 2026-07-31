@@ -779,6 +779,106 @@ def test_archive_artifact_prefers_historical_source_over_current_workspace(
         tracker_b.engine.dispose()
 
 
+def test_archive_run_outputs_uses_current_configured_mount_for_run_owned_file(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "provenance.db")
+    historical_workspace = tmp_path / "workspace_a"
+    current_workspace = tmp_path / "workspace_b"
+    tracker_a = Tracker(
+        run_dir=tmp_path / "runs_a",
+        db_path=db_path,
+        mounts={"workspace": str(historical_workspace)},
+    )
+    tracker_b = Tracker(
+        run_dir=tmp_path / "runs_b",
+        db_path=db_path,
+        mounts={"workspace": str(current_workspace)},
+    )
+    source_path = historical_workspace / "outputs" / "shared.csv"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text("historical\n", encoding="utf-8")
+
+    run_id = "producer_archive_current_mount"
+    with tracker_a.start_run(run_id, model="producer"):
+        artifact = tracker_a.log_artifact(source_path, key="shared", direction="output")
+
+    current_path = current_workspace / "outputs" / "shared.csv"
+    current_path.parent.mkdir(parents=True, exist_ok=True)
+    current_path.write_text("historical\n", encoding="utf-8")
+    source_path.unlink()
+    archive_root = tmp_path / "archive_current_mount"
+
+    try:
+        archived = tracker_b.archive_run_outputs(run_id, archive_root)
+
+        assert archived["shared"] == (archive_root / "outputs" / "shared.csv").resolve()
+        assert archived["shared"].read_text(encoding="utf-8") == "historical\n"
+        refreshed = tracker_b.get_run_outputs(run_id)["shared"]
+        assert refreshed.container_uri == artifact.container_uri
+        assert refreshed.recovery_roots == [str(archive_root.resolve())]
+
+        current_path.unlink()
+        restored_root = tracker_b.run_dir / "restored"
+        hydrated = tracker_b.hydrate_run_outputs(
+            run_id,
+            target_root=restored_root,
+            on_missing="raise",
+        )
+
+        assert hydrated["shared"].path == restored_root / "outputs" / "shared.csv"
+        assert hydrated["shared"].path.read_text(encoding="utf-8") == "historical\n"
+    finally:
+        if tracker_a.engine:
+            tracker_a.engine.dispose()
+        if tracker_b.engine:
+            tracker_b.engine.dispose()
+
+
+def test_archive_run_outputs_rejects_stale_current_managed_mount_file(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "provenance.db")
+    historical_workspace = tmp_path / "workspace_a"
+    current_workspace = tmp_path / "workspace_b"
+    tracker_a = Tracker(
+        run_dir=tmp_path / "runs_a",
+        db_path=db_path,
+        mounts={"workspace": str(historical_workspace)},
+    )
+    tracker_b = Tracker(
+        run_dir=tmp_path / "runs_b",
+        db_path=db_path,
+        mounts={"workspace": str(current_workspace)},
+    )
+    source_path = historical_workspace / "outputs" / "shared.csv"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text("historical\n", encoding="utf-8")
+
+    run_id = "producer_archive_stale_current_mount"
+    with tracker_a.start_run(run_id, model="producer"):
+        tracker_a.log_artifact(source_path, key="shared", direction="output")
+
+    current_path = current_workspace / "outputs" / "shared.csv"
+    current_path.parent.mkdir(parents=True, exist_ok=True)
+    current_path.write_text("stale\n", encoding="utf-8")
+    source_path.unlink()
+    archive_root = tmp_path / "archive_stale_current_mount"
+
+    try:
+        with pytest.raises(ValueError, match="does not match artifact hash"):
+            tracker_b.archive_run_outputs(run_id, archive_root)
+
+        refreshed = tracker_b.get_run_outputs(run_id)["shared"]
+        assert refreshed.recovery_roots == []
+        assert not archive_root.exists()
+    finally:
+        if tracker_a.engine:
+            tracker_a.engine.dispose()
+        if tracker_b.engine:
+            tracker_b.engine.dispose()
+
+
 def test_archive_artifact_move_rolls_back_on_metadata_failure(
     tracker: Tracker,
     tmp_path: Path,

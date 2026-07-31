@@ -250,6 +250,12 @@ tracker.archive_artifact(
 Use `mode="copy"` when the workspace file should remain in place. Use
 `mode="move"` when the archive copy should become the durable byte source.
 
+For an ordinary file output whose historical and recorded recovery locations no
+longer exist, archival can use the artifact's currently configured managed URI
+mount as a final source fallback. The file must still match the artifact's
+recorded identity before Consist records the recovery root; this does not
+change directory, bundle, or OutputSet archival rules.
+
 `archive_current_run_outputs(...)` and `archive_run_outputs(...)` now return an
 `ArchivedOutputs` mapping. Treat the mapping like a read-only `Mapping[str,
 Path]` for the archived bytes, or use its explicit `.paths` property for the
