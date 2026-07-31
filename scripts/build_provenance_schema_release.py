@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -37,6 +38,46 @@ def _write_checksums(output_dir: Path) -> Path:
     return checksum_path
 
 
+def _format_utc_timestamp(value: datetime) -> str:
+    """Return one timezone-aware timestamp in portable UTC ``Z`` notation."""
+    if value.tzinfo is None:
+        raise ValueError("release metadata timestamps must be timezone-aware")
+    return (
+        value.astimezone(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def _normalize_merged_schema_metadata(
+    serialized_schema: str,
+    *,
+    source_file_date: str,
+    generation_date: str,
+) -> str:
+    """Replace LinkML's naïve merge metadata with timezone-aware UTC values."""
+    metadata_values = {
+        "source_file_date": source_file_date,
+        "generation_date": generation_date,
+    }
+    normalized_lines: list[str] = []
+    remaining = set(metadata_values)
+    for line in serialized_schema.splitlines():
+        for field_name, value in metadata_values.items():
+            if line.startswith(f"{field_name}:"):
+                normalized_lines.append(f"{field_name}: '{value}'")
+                remaining.discard(field_name)
+                break
+        else:
+            normalized_lines.append(line)
+
+    normalized_lines.extend(
+        f"{field_name}: '{metadata_values[field_name]}'"
+        for field_name in sorted(remaining)
+    )
+    return "\n".join(normalized_lines) + "\n"
+
+
 def build_release_assets(schema_dir: Path, output_dir: Path) -> list[Path]:
     """Build modular sources, merged closures, and reference documentation.
 
@@ -66,6 +107,7 @@ def build_release_assets(schema_dir: Path, output_dir: Path) -> list[Path]:
     source_paths: list[Path] = []
     merged_paths: list[Path] = []
     reference_dirs: list[Path] = []
+    generation_date = _format_utc_timestamp(datetime.now(timezone.utc))
     for schema_path in schema_paths:
         schema_name = schema_path.stem
         source_path = output_dir / schema_path.name
@@ -73,8 +115,17 @@ def build_release_assets(schema_dir: Path, output_dir: Path) -> list[Path]:
         reference_dir = output_dir / "reference" / schema_name
 
         shutil.copyfile(schema_path, source_path)
+        source_file_date = _format_utc_timestamp(
+            datetime.fromtimestamp(schema_path.stat().st_mtime, timezone.utc)
+        )
         merged_path.write_text(
-            YAMLGenerator(schema_path, mergeimports=True, metadata=False).serialize(),
+            _normalize_merged_schema_metadata(
+                YAMLGenerator(
+                    schema_path, mergeimports=True, metadata=False
+                ).serialize(),
+                source_file_date=source_file_date,
+                generation_date=generation_date,
+            ),
             encoding="utf-8",
         )
         DocGenerator(

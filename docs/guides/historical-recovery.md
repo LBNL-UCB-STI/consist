@@ -257,6 +257,14 @@ artifacts directly into a later `inputs={...}` mapping instead of calling
 `get_run_outputs(...)`
 again.
 
+When a selected output is a manifest-backed `OutputSet`, this archive API
+copies or moves the whole declared set, not just the parent directory. It
+validates the manifest, member layout, source hashes, and symlink safety before
+registering the recovery root on the parent, members, and manifest. The mapping
+entry is the archived set root; `.outputs[set_key]` is the refreshed logical
+parent. The separate `archive_run_output_files(...)` helper intentionally
+continues to reject OutputSets because it reports regular files only.
+
 ### Verified File-Only Archive Reports
 
 Use `archive_run_output_files(...)` when a completed run needs a conservative,

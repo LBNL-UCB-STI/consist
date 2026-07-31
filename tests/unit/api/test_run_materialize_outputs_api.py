@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import hashlib
+import json
 import os
 from pathlib import Path
+import shutil
 from typing import Sequence
 import uuid
 
@@ -869,6 +871,359 @@ def test_archive_run_outputs_archives_selected_keys(
     outputs = tracker.get_run_outputs("producer_archive_bulk")
     assert outputs["a"].meta["recovery_roots"] == [str(archive_root.resolve())]
     assert "recovery_roots" not in outputs["b"].meta
+
+
+def test_archive_run_outputs_archives_output_set_and_hydrates_from_recovery_root(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    """A logical OutputSet archive includes its members and manifest atomically."""
+    calls = {"count": 0}
+
+    def produce_outputs(ctx) -> None:
+        calls["count"] += 1
+        annual_root = ctx.run_dir / "annual"
+        annual_root.mkdir(parents=True)
+        (annual_root / "annual_2030.csv").write_text(
+            "year,value\n2030,1\n", encoding="utf-8"
+        )
+        (annual_root / "annual_2035.csv").write_text(
+            "year,value\n2035,2\n", encoding="utf-8"
+        )
+        (ctx.run_dir / "summary.csv").write_text(
+            "metric,value\ncount,2\n", encoding="utf-8"
+        )
+
+    output_sets = {
+        "annual": consist.OutputSet(
+            root="annual",
+            include="annual_*.csv",
+            expected_members=["annual_2030.csv", "annual_2035.csv"],
+        )
+    }
+    first = tracker.run(
+        name="archive_output_set",
+        fn=produce_outputs,
+        output_paths={"summary": "summary.csv"},
+        output_sets=output_sets,
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+    archive_root = tmp_path / "archive_output_set"
+
+    archived = tracker.archive_run_outputs(first.run.id, archive_root)
+
+    assert set(archived) == {"summary", "annual"}
+    parent = archived.outputs["annual"]
+    parent_relative = tracker.fs.get_remappable_relative_path(parent.container_uri)
+    assert parent_relative is not None
+    assert archived["annual"] == archive_root / parent_relative
+    assert (archived["annual"] / "annual_2030.csv").read_text(encoding="utf-8") == (
+        "year,value\n2030,1\n"
+    )
+    assert (archived["annual"] / "annual_2035.csv").read_text(encoding="utf-8") == (
+        "year,value\n2035,2\n"
+    )
+
+    members = tracker.get_child_artifacts(parent)
+    manifest = tracker.get_artifact(parent.meta["manifest_artifact_id"])
+    assert manifest is not None
+    manifest_relative = tracker.fs.get_remappable_relative_path(manifest.container_uri)
+    assert manifest_relative is not None
+    assert (archive_root / manifest_relative).is_file()
+    for artifact in [parent, *members, manifest]:
+        assert artifact.recovery_roots == [str(archive_root.resolve())]
+
+    shutil.rmtree(tracker.run_artifact_dir(first.run))
+    second = tracker.run(
+        name="archive_output_set",
+        fn=produce_outputs,
+        output_paths={"summary": "summary.csv"},
+        output_sets=output_sets,
+        cache_options=consist.CacheOptions(cache_hydration="outputs-requested"),
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+
+    assert second.cache_hit is True
+    assert calls["count"] == 1
+    hydrated_root = tracker.run_artifact_dir(second.run) / "annual"
+    assert (hydrated_root / "annual_2030.csv").read_text(encoding="utf-8") == (
+        "year,value\n2030,1\n"
+    )
+    assert (hydrated_root / "annual_2035.csv").read_text(encoding="utf-8") == (
+        "year,value\n2035,2\n"
+    )
+
+
+def test_archive_run_outputs_rejects_unsafe_output_set_member_before_registration(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    """A tampered OutputSet member path cannot make a partial set recoverable."""
+
+    def produce_outputs(ctx) -> None:
+        annual_root = ctx.run_dir / "annual"
+        annual_root.mkdir(parents=True)
+        (annual_root / "annual_2030.csv").write_text(
+            "year,value\n2030,1\n", encoding="utf-8"
+        )
+
+    result = tracker.run(
+        name="unsafe_archive_output_set",
+        fn=produce_outputs,
+        output_sets={
+            "annual": consist.OutputSet(root="annual", include="annual_*.csv")
+        },
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+    parent = result.outputs["annual"]
+    [member] = tracker.get_child_artifacts(parent)
+    manifest = tracker.get_artifact(parent.meta["manifest_artifact_id"])
+    assert manifest is not None
+    assert tracker.db is not None
+    tracker.db.update_artifact_meta(
+        member,
+        {"output_set_relative_path": "../escaped.csv"},
+        raise_on_error=True,
+    )
+    archive_root = tmp_path / "unsafe_archive_output_set"
+
+    with pytest.raises(ValueError, match="unsafe output-set member path"):
+        tracker.archive_run_outputs(result.run.id, archive_root)
+
+    refreshed_parent = tracker.get_run_outputs(result.run.id)["annual"]
+    refreshed_member = tracker.get_child_artifacts(refreshed_parent)[0]
+    refreshed_manifest = tracker.get_artifact(
+        refreshed_parent.meta["manifest_artifact_id"]
+    )
+    assert refreshed_manifest is not None
+    assert refreshed_parent.recovery_roots == []
+    assert refreshed_member.recovery_roots == []
+    assert refreshed_manifest.recovery_roots == []
+    assert not archive_root.exists()
+
+
+def test_archive_run_outputs_moves_all_output_set_members_and_manifest(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    """Move mode leaves the validated logical set at its recovery location."""
+
+    def produce_outputs(ctx) -> None:
+        annual_root = ctx.run_dir / "annual"
+        annual_root.mkdir(parents=True)
+        (annual_root / "annual_2030.csv").write_text(
+            "year,value\n2030,1\n", encoding="utf-8"
+        )
+
+    result = tracker.run(
+        name="move_archive_output_set",
+        fn=produce_outputs,
+        output_sets={
+            "annual": consist.OutputSet(root="annual", include="annual_*.csv")
+        },
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+    parent = result.outputs["annual"]
+    [member] = tracker.get_child_artifacts(parent)
+    manifest = tracker.get_artifact(parent.meta["manifest_artifact_id"])
+    assert manifest is not None
+    member_source = Path(member.path)
+    manifest_source = Path(manifest.path)
+    archive_root = tmp_path / "move_archive_output_set"
+
+    archived = tracker.archive_run_outputs(result.run.id, archive_root, mode="move")
+
+    assert (archived["annual"] / "annual_2030.csv").is_file()
+    assert not member_source.exists()
+    assert not manifest_source.exists()
+    assert not Path(parent.path).exists()
+    refreshed_parent = archived.outputs["annual"]
+    refreshed_members = tracker.get_child_artifacts(refreshed_parent)
+    refreshed_manifest = tracker.get_artifact(
+        refreshed_parent.meta["manifest_artifact_id"]
+    )
+    assert refreshed_manifest is not None
+    for artifact in [refreshed_parent, *refreshed_members, refreshed_manifest]:
+        assert artifact.recovery_roots == [str(archive_root.resolve())]
+
+
+def test_archive_run_outputs_rejects_missing_output_set_member_before_registration(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    """Missing member bytes cannot register an otherwise complete OutputSet."""
+
+    def produce_outputs(ctx) -> None:
+        annual_root = ctx.run_dir / "annual"
+        annual_root.mkdir(parents=True)
+        (annual_root / "annual_2030.csv").write_text(
+            "year,value\n2030,1\n", encoding="utf-8"
+        )
+
+    result = tracker.run(
+        name="missing_archive_output_set",
+        fn=produce_outputs,
+        output_sets={
+            "annual": consist.OutputSet(root="annual", include="annual_*.csv")
+        },
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+    parent = result.outputs["annual"]
+    [member] = tracker.get_child_artifacts(parent)
+    manifest = tracker.get_artifact(parent.meta["manifest_artifact_id"])
+    assert manifest is not None
+    Path(member.path).unlink()
+    archive_root = tmp_path / "missing_archive_output_set"
+
+    with pytest.raises(FileNotFoundError, match="source bytes are unavailable"):
+        tracker.archive_run_outputs(result.run.id, archive_root)
+
+    refreshed_parent = tracker.get_run_outputs(result.run.id)["annual"]
+    refreshed_member = tracker.get_child_artifacts(refreshed_parent)[0]
+    refreshed_manifest = tracker.get_artifact(
+        refreshed_parent.meta["manifest_artifact_id"]
+    )
+    assert refreshed_manifest is not None
+    assert refreshed_parent.recovery_roots == []
+    assert refreshed_member.recovery_roots == []
+    assert refreshed_manifest.recovery_roots == []
+    assert not archive_root.exists()
+
+
+def test_archive_run_outputs_rejects_stale_output_set_manifest_before_registration(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    """Manifest formatting changes still invalidate the persisted manifest artifact."""
+
+    def produce_outputs(ctx) -> None:
+        annual_root = ctx.run_dir / "annual"
+        annual_root.mkdir(parents=True)
+        (annual_root / "annual_2030.csv").write_text(
+            "year,value\n2030,1\n", encoding="utf-8"
+        )
+
+    result = tracker.run(
+        name="stale_manifest_archive_output_set",
+        fn=produce_outputs,
+        output_sets={
+            "annual": consist.OutputSet(root="annual", include="annual_*.csv")
+        },
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+    parent = result.outputs["annual"]
+    [member] = tracker.get_child_artifacts(parent)
+    manifest = tracker.get_artifact(parent.meta["manifest_artifact_id"])
+    assert manifest is not None
+    manifest_path = Path(manifest.path)
+    manifest_path.write_text(
+        json.dumps(json.loads(manifest_path.read_text(encoding="utf-8"))) + "\n",
+        encoding="utf-8",
+    )
+    assert tracker.identity.compute_file_checksum(manifest_path) != manifest.hash
+    archive_root = tmp_path / "stale_manifest_archive_output_set"
+
+    with pytest.raises(ValueError, match="manifest.*identity"):
+        tracker.archive_run_outputs(result.run.id, archive_root)
+
+    refreshed_parent = tracker.get_run_outputs(result.run.id)["annual"]
+    refreshed_member = tracker.get_child_artifacts(refreshed_parent)[0]
+    refreshed_manifest = tracker.get_artifact(
+        refreshed_parent.meta["manifest_artifact_id"]
+    )
+    assert refreshed_manifest is not None
+    assert refreshed_parent.recovery_roots == []
+    assert refreshed_member.recovery_roots == []
+    assert refreshed_manifest.recovery_roots == []
+    assert not archive_root.exists()
+
+
+def test_archive_run_outputs_cleans_output_set_bytes_when_metadata_update_fails(
+    tracker: Tracker,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Published set bytes are not retained when recovery-root registration fails."""
+
+    def produce_outputs(ctx) -> None:
+        annual_root = ctx.run_dir / "annual"
+        annual_root.mkdir(parents=True)
+        (annual_root / "annual_2030.csv").write_text(
+            "year,value\n2030,1\n", encoding="utf-8"
+        )
+
+    result = tracker.run(
+        name="metadata_failure_archive_output_set",
+        fn=produce_outputs,
+        output_sets={
+            "annual": consist.OutputSet(root="annual", include="annual_*.csv")
+        },
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+    parent = result.outputs["annual"]
+    [member] = tracker.get_child_artifacts(parent)
+    manifest = tracker.get_artifact(parent.meta["manifest_artifact_id"])
+    assert manifest is not None
+    parent_relative = tracker.fs.get_remappable_relative_path(parent.container_uri)
+    manifest_relative = tracker.fs.get_remappable_relative_path(manifest.container_uri)
+    assert parent_relative is not None
+    assert manifest_relative is not None
+    archive_root = tmp_path / "metadata_failure_archive_output_set"
+
+    def fail_metadata_update(*_args, **_kwargs) -> None:
+        raise RuntimeError("metadata update failed")
+
+    monkeypatch.setattr(
+        tracker, "_set_artifact_recovery_roots_bulk", fail_metadata_update
+    )
+
+    with pytest.raises(RuntimeError, match="metadata update failed"):
+        tracker.archive_run_outputs(result.run.id, archive_root)
+
+    assert not (archive_root / parent_relative).exists()
+    assert not (archive_root / manifest_relative).exists()
+    assert parent.recovery_roots == []
+    assert member.recovery_roots == []
+    assert manifest.recovery_roots == []
+
+
+def test_archive_run_outputs_supports_output_sets_with_fast_manifest_identity(
+    tmp_path: Path,
+) -> None:
+    """OutputSet archival uses the tracker checksum policy for its manifest."""
+    fast_tracker = Tracker(
+        run_dir=tmp_path / "fast_runs",
+        db_path=str(tmp_path / "fast.duckdb"),
+        hashing_strategy="fast",
+    )
+    try:
+
+        def produce_outputs(ctx) -> None:
+            annual_root = ctx.run_dir / "annual"
+            annual_root.mkdir(parents=True)
+            (annual_root / "annual_2030.csv").write_text(
+                "year,value\n2030,1\n", encoding="utf-8"
+            )
+
+        result = fast_tracker.run(
+            name="fast_archive_output_set",
+            fn=produce_outputs,
+            output_sets={
+                "annual": consist.OutputSet(root="annual", include="annual_*.csv")
+            },
+            execution_options=consist.ExecutionOptions(inject_context="ctx"),
+        )
+        archived = fast_tracker.archive_run_outputs(
+            result.run.id, tmp_path / "fast_archive_output_set"
+        )
+
+        assert (archived["annual"] / "annual_2030.csv").is_file()
+        assert archived.outputs["annual"].recovery_roots == [
+            str((tmp_path / "fast_archive_output_set").resolve())
+        ]
+    finally:
+        if fast_tracker.engine is not None:
+            fast_tracker.engine.dispose()
 
 
 def test_archive_run_output_files_copies_verifies_and_registers_selected_file(

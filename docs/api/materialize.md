@@ -122,6 +122,16 @@ that already carry the new recovery root. Pass those refreshed artifacts
 directly into a later `inputs={...}` mapping when you want the next run to
 consume the archive.
 
+For a manifest-backed `OutputSet`, `archive_run_outputs(...)` archives the
+logical set as one recovery unit: every declared member is copied or moved into
+the parent artifact's URI-relative archive root, and the persisted manifest is
+archived at its own URI-relative location. The parent, members, and manifest
+receive the recovery root only after all of those bytes have been validated and
+published. Thus `archive.paths["set_key"]` is the archived set root and
+`archive.outputs["set_key"]` is the refreshed parent artifact for downstream
+reuse. `archive_run_output_files(...)` remains a regular-file-only report API
+and reports OutputSets as unsupported.
+
 When an application needs an auditable, no-replacement archive pass for files
 only, use `tracker.archive_run_output_files(...)` instead:
 
@@ -164,7 +174,7 @@ Use the lower-level helpers when you want to manage archival yourself:
 - `tracker.archive_artifact(...)` copies or moves a single artifact into an
   archive root and records that root.
 - `tracker.archive_run_outputs(...)` applies the same pattern to all or a
-  selected subset of outputs for a run.
+  selected subset of outputs for a run, including manifest-backed OutputSets.
 - `tracker.archive_run_output_files(...)` copies or conservatively retains
   selected regular files, verifies them when requested, and bulk-registers
   recovery roots while retaining per-key outcomes for retries.

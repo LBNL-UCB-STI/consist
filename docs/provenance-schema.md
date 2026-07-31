@@ -43,7 +43,7 @@ Downstreams should pin and checksum an immutable merged release asset. Import th
 ```yaml
 imports:
   - linkml:types
-  - ./vendor/consist-provenance-0.1.0/provenance.merged
+  - ./vendor/consist-provenance-0.1.1/provenance.merged
 
 classes:
   PilatesAtlasVehicleArtifact:
@@ -53,7 +53,7 @@ classes:
         required: true
 ```
 
-Only a cache-aware adapter also imports `./vendor/consist-provenance-0.1.0/binding.merged.yaml` (as `binding.merged`). The model-owned row schema remains independent of Consist. The local composition example is [`tests/fixtures/linkml/downstream_operational_profile.yaml`](../tests/fixtures/linkml/downstream_operational_profile.yaml).
+Only a cache-aware adapter also imports `./vendor/consist-provenance-0.1.1/binding.merged.yaml` (as `binding.merged`). The model-owned row schema remains independent of Consist. The local composition example is [`tests/fixtures/linkml/downstream_operational_profile.yaml`](../tests/fixtures/linkml/downstream_operational_profile.yaml).
 
 `consist:provenance` and `consist:binding` are logical identifiers, not remote import resolvers in this release. Consumers must use a checked local asset rather than a mutable branch URL or network fetch during normal work.
 
@@ -70,9 +70,21 @@ Create a new or empty release directory with the development-only LinkML toolcha
 
 ```bash
 uv run --group dev python scripts/build_provenance_schema_release.py \
-  --output dist/provenance-schema-0.1.0
+  --output dist/provenance-schema-0.1.1
 ```
 
-The builder rejects a nonempty output directory so stale generated pages cannot survive a schema rename or removal. A downstream build verifies `SHA256SUMS` before importing a merged asset. Python consumers may locate the packaged source with `importlib.resources.files("consist.schemas")`; normal `import consist`, tracking, caching, querying, recovery, persistence, and database migrations load neither `linkml` nor `linkml_runtime`.
+The corrected generated bundle is a prospective release-asset version `0.1.1`; the unchanged provenance and binding vocabulary remains schema version `0.1.0`. Do not replace the already checksummed `0.1.0` assets in place.
+
+Merged assets record `source_file_date` and `generation_date` as timezone-aware UTC timestamps in `Z` notation. Before publishing, lint the modular sources and both merged assets, then verify the manifest:
+
+```bash
+linkml-lint dist/provenance-schema-0.1.1/provenance.yaml
+linkml-lint dist/provenance-schema-0.1.1/binding.yaml
+linkml-lint --ignore-warnings dist/provenance-schema-0.1.1/provenance.merged.yaml
+linkml-lint --ignore-warnings dist/provenance-schema-0.1.1/binding.merged.yaml
+(cd dist/provenance-schema-0.1.1 && sha256sum -c SHA256SUMS)
+```
+
+The merged lints ignore LinkML's `standard_naming` warnings for generator-created flattened slots such as `ConsistRunReference__run_id`; errors still fail the command. The builder rejects a nonempty output directory so stale generated pages cannot survive a schema rename or removal. A downstream build verifies `SHA256SUMS` before importing a merged asset. Python consumers may locate the packaged source with `importlib.resources.files("consist.schemas")`; normal `import consist`, tracking, caching, querying, recovery, persistence, and database migrations load neither `linkml` nor `linkml_runtime`.
 
 The public LinkML Schema Registry is a later discovery mechanism, not a package manager, import resolver, or artifact-custody service. Register only after a downstream has successfully imported a released asset.
