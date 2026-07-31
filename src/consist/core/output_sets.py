@@ -213,7 +213,10 @@ def discover_output_set_members(output_set: OutputSet) -> list[OutputSetMember]:
         else None
     )
     exclude_patterns = _normalize_patterns(output_set.exclude)
-    candidates = root.rglob("*") if output_set.recursive else root.glob("*")
+    recursive_pattern = any("**" in pattern for pattern in include_patterns)
+    candidates = (
+        root.rglob("*") if output_set.recursive or recursive_pattern else root.glob("*")
+    )
     members: list[OutputSetMember] = []
     for path in candidates:
         if path.is_symlink():
@@ -609,7 +612,26 @@ def _normalize_patterns(patterns: str | Sequence[str] | None) -> list[str]:
 
 
 def _matches_any(relative_path: str, patterns: Sequence[str]) -> bool:
-    return any(fnmatch.fnmatchcase(relative_path, pattern) for pattern in patterns)
+    return any(_matches_glob(relative_path, pattern) for pattern in patterns)
+
+
+def _matches_glob(relative_path: str, pattern: str) -> bool:
+    """Match a glob with ``**/`` also representing zero directory levels."""
+    candidates = [pattern]
+    seen: set[str] = set()
+    while candidates:
+        candidate = candidates.pop()
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if fnmatch.fnmatchcase(relative_path, candidate):
+            return True
+        recursive_segment = candidate.find("**/")
+        if recursive_segment >= 0:
+            candidates.append(
+                candidate[:recursive_segment] + candidate[recursive_segment + 3 :]
+            )
+    return False
 
 
 def _normalize_output_set_relative_path(path: str | Path) -> str:
@@ -795,7 +817,7 @@ def _member_key(output_set_key: str, relative_path: str) -> str:
 
 def _infer_driver(path: Path) -> str:
     suffix = path.suffix.lower().lstrip(".")
-    return suffix or "other"
+    return suffix or "unknown"
 
 
 def _resolve_output_set_root(output_set: OutputSet, output_base_dir: Path) -> OutputSet:

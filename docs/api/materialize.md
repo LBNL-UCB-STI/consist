@@ -134,6 +134,12 @@ published. Thus `archive.paths["set_key"]` is the archived set root and
 reuse. `archive_run_output_files(...)` remains a regular-file-only report API
 and reports OutputSets as unsupported.
 
+When a selected immutable directory artifact is nested inside an OutputSet
+root, it reuses the set publication only when its persisted directory manifest
+exactly matches that OutputSet manifest subtree. This preserves strict set
+validation; unrepresented files or directories fail archival instead of being
+silently accepted.
+
 When an application needs an auditable, no-replacement archive pass for files
 only, use `tracker.archive_run_output_files(...)` instead:
 

@@ -1038,6 +1038,148 @@ def test_archive_run_outputs_archives_nested_manifest_scalar_before_set_validati
     )
 
 
+def test_archive_run_outputs_archives_nested_directory_artifact_with_output_set(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    """A manifest-backed directory can reuse an equivalent OutputSet subtree."""
+    calls = {"count": 0}
+
+    def produce_outputs(ctx) -> None:
+        calls["count"] += 1
+        bundle_root = ctx.run_dir / "bundle"
+        bundle_root.mkdir(parents=True)
+        (bundle_root / "summary.txt").write_text("complete\n", encoding="utf-8")
+        zarr_root = bundle_root / "skims.zarr"
+        (zarr_root / "nested").mkdir(parents=True)
+        (zarr_root / ".zgroup").write_text("{}\n", encoding="utf-8")
+        (zarr_root / "nested" / "0.0").write_bytes(b"skim")
+
+    output_sets = {"bundle": consist.OutputSet(root="bundle", include="**/*")}
+    first = tracker.run(
+        name="archive_nested_directory_output_set",
+        fn=produce_outputs,
+        output_paths={
+            "skims": consist.OutputArtifactSpec(
+                path="bundle/skims.zarr",
+                meta={"directory_artifact": True},
+            )
+        },
+        output_sets=output_sets,
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+    archive_root = tmp_path / "archive_nested_directory_output_set"
+
+    archived = tracker.archive_run_outputs(first.run.id, archive_root)
+
+    assert archived.paths["skims"] == archived["skims"]
+    assert archived["skims"] == archived["bundle"] / "skims.zarr"
+    assert (archived["skims"] / "nested" / "0.0").read_bytes() == b"skim"
+    parent = archived.outputs["bundle"]
+    directory = archived.outputs["skims"]
+    manifest = tracker.get_artifact(parent.meta["manifest_artifact_id"])
+    assert manifest is not None
+    for artifact in [parent, directory, *tracker.get_child_artifacts(parent), manifest]:
+        assert artifact.recovery_roots == [str(archive_root.resolve())]
+
+    retried = tracker.archive_run_outputs(first.run.id, archive_root)
+    assert retried.paths == archived.paths
+
+    shutil.rmtree(tracker.run_artifact_dir(first.run))
+    second = tracker.run(
+        name="archive_nested_directory_output_set",
+        fn=produce_outputs,
+        output_paths={
+            "skims": consist.OutputArtifactSpec(
+                path="bundle/skims.zarr",
+                meta={"directory_artifact": True},
+            )
+        },
+        output_sets=output_sets,
+        cache_options=consist.CacheOptions(cache_hydration="outputs-requested"),
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+
+    assert second.cache_hit is True
+    assert calls["count"] == 1
+    hydrated_zarr = tracker.run_artifact_dir(second.run) / "bundle" / "skims.zarr"
+    assert (hydrated_zarr / "nested" / "0.0").read_bytes() == b"skim"
+
+
+def test_archive_run_outputs_rejects_nested_directory_outside_output_set_manifest(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    """A directory artifact cannot introduce bytes excluded from an OutputSet."""
+
+    def produce_outputs(ctx) -> None:
+        bundle_root = ctx.run_dir / "bundle"
+        zarr_root = bundle_root / "skims.zarr"
+        zarr_root.mkdir(parents=True)
+        (zarr_root / ".zgroup").write_text("{}\n", encoding="utf-8")
+        (zarr_root / "unexpected.bin").write_bytes(b"not a manifest member")
+
+    result = tracker.run(
+        name="reject_nested_directory_outside_output_set_manifest",
+        fn=produce_outputs,
+        output_paths={
+            "skims": consist.OutputArtifactSpec(
+                path="bundle/skims.zarr",
+                meta={"directory_artifact": True},
+            )
+        },
+        output_sets={"bundle": consist.OutputSet(root="bundle", include="**/.zgroup")},
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+    archive_root = tmp_path / "reject_nested_directory_outside_output_set_manifest"
+
+    with pytest.raises(ValueError, match="does not match OutputSet.*manifest subtree"):
+        tracker.archive_run_outputs(result.run.id, archive_root)
+
+    outputs = tracker.get_run_outputs(result.run.id)
+    parent = outputs["bundle"]
+    directory = outputs["skims"]
+    manifest = tracker.get_artifact(parent.meta["manifest_artifact_id"])
+    assert manifest is not None
+    assert not archive_root.exists()
+    for artifact in [parent, directory, *tracker.get_child_artifacts(parent), manifest]:
+        assert artifact.recovery_roots == []
+
+
+def test_archive_run_outputs_moves_nested_directory_with_output_set(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    """Move mode removes a nested directory only after set publication succeeds."""
+
+    def produce_outputs(ctx) -> None:
+        zarr_root = ctx.run_dir / "bundle" / "skims.zarr"
+        zarr_root.mkdir(parents=True)
+        (zarr_root / ".zgroup").write_text("{}\n", encoding="utf-8")
+
+    result = tracker.run(
+        name="move_nested_directory_output_set",
+        fn=produce_outputs,
+        output_paths={
+            "skims": consist.OutputArtifactSpec(
+                path="bundle/skims.zarr",
+                meta={"directory_artifact": True},
+            )
+        },
+        output_sets={"bundle": consist.OutputSet(root="bundle", include="**/*")},
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+    source_root = tracker.run_artifact_dir(result.run) / "bundle"
+    archive_root = tmp_path / "move_nested_directory_output_set"
+
+    archived = tracker.archive_run_outputs(result.run.id, archive_root, mode="move")
+
+    assert not source_root.exists()
+    assert (archived["skims"] / ".zgroup").read_text(encoding="utf-8") == "{}\n"
+    for artifact in archived.outputs.values():
+        assert artifact.recovery_roots == [str(archive_root.resolve())]
+
+
 def test_archive_run_outputs_rejects_nested_scalar_outside_output_set_manifest(
     tracker: Tracker,
     tmp_path: Path,

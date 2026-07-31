@@ -311,14 +311,16 @@ class OutputSet:
         ``<run-output-dir>/annual``.
     include : str | Sequence[str] | FilenamePattern
         Glob-style filename pattern or patterns for files to include. Matching
-        is against each path relative to ``root``. For recursive sets, include
-        subdirectories in the pattern, for example ``"**/*.csv"``.
+        is against each path relative to ``root``. A ``"**/"`` segment matches
+        zero or more directory levels, so ``"**/*.csv"`` includes both root
+        files and nested files and requests recursive discovery.
         A ``FilenamePattern`` object may be used for capture-aware matching.
     exclude : str | Sequence[str] | None, optional
         Glob-style pattern or patterns to remove from the included files.
     recursive : bool, default False
-        If true, search below ``root`` recursively. If false, only direct child
-        files of ``root`` are considered.
+        If true, search below ``root`` recursively regardless of the include
+        pattern. If false, only direct child files are considered unless an
+        include pattern contains ``"**"``.
     kind : str | None, optional
         Human-facing category for the set, such as ``"annual-partitions"`` or
         ``"diagnostic-bundle"``. This is metadata only.

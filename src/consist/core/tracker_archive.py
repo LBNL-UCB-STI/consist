@@ -19,6 +19,7 @@ from consist.core.directory_artifacts import (
     materialize_directory_tree,
     materialize_shapefile_bundle,
     validate_directory_manifest,
+    validate_directory_tree,
 )
 from consist.core.materialize import (
     ArchivedRunOutputFile,
@@ -151,6 +152,24 @@ class _OutputSetArchivePlan:
     manifest_source: Path
     manifest_destination: Path
     manifest_content_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class _NestedOutputSetScalar:
+    """One scalar output that exactly reuses an OutputSet member destination."""
+
+    artifact: Artifact
+    destination: Path
+    output_set_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class _NestedOutputSetDirectory:
+    """One immutable directory artifact that reuses an OutputSet subtree."""
+
+    artifact: Artifact
+    destination: Path
+    output_set_key: str
 
 
 class TrackerArchiveService(_TrackerServiceBase):
@@ -729,16 +748,18 @@ class TrackerArchiveService(_TrackerServiceBase):
         archive_root: str | os.PathLike[str],
     ) -> tuple[
         dict[str, _OutputSetArchivePlan],
-        dict[str, _OutputSetArchiveMember],
+        dict[str, _NestedOutputSetScalar],
+        dict[str, _NestedOutputSetDirectory],
     ]:
-        """Validate selected OutputSets and their nested scalar overlap contract."""
+        """Validate selected OutputSets and their nested-output overlap contract."""
         output_set_plans = {
             key: self._build_output_set_archive_plan(artifact, archive_root)
             for key, artifact in selected.items()
             if self._is_output_set_parent(artifact)
         }
         archive_root_path = Path(archive_root).expanduser().absolute()
-        nested_scalar_members: dict[str, _OutputSetArchiveMember] = {}
+        nested_scalars: dict[str, _NestedOutputSetScalar] = {}
+        nested_directories: dict[str, _NestedOutputSetDirectory] = {}
 
         for key, artifact in selected.items():
             if key in output_set_plans:
@@ -747,52 +768,148 @@ class TrackerArchiveService(_TrackerServiceBase):
             if relative_path is None:
                 continue
             destination = archive_root_path / relative_path
+            containing_output_sets: list[tuple[str, _OutputSetArchivePlan]] = []
             for output_set_key, plan in output_set_plans.items():
                 try:
                     destination.relative_to(plan.destination)
                 except ValueError:
                     continue
-                matching_members = [
-                    member
-                    for member in plan.members
-                    if member.destination == destination
-                ]
-                if not matching_members:
-                    raise ValueError(
-                        f"Nested output {key!r} is not a manifest member of "
-                        f"OutputSet {output_set_key!r}."
-                    )
-                member = matching_members[0]
-                if (
-                    artifact.container_uri != member.artifact.container_uri
-                    or artifact.driver != member.artifact.driver
-                ):
-                    raise ValueError(
-                        f"Nested output {key!r} does not match immutable manifest "
-                        f"member {member.artifact.key!r} of OutputSet "
-                        f"{output_set_key!r}."
-                    )
-                producing_run = (
-                    self.get_run(str(artifact.run_id))
-                    if artifact.run_id is not None
-                    else None
+                containing_output_sets.append((output_set_key, plan))
+            if not containing_output_sets:
+                continue
+            if len(containing_output_sets) > 1:
+                raise ValueError(
+                    f"Nested output {key!r} is contained by multiple selected "
+                    "OutputSets."
                 )
-                source = self._find_output_set_archive_source(
-                    artifact, producing_run=producing_run
+            output_set_key, plan = containing_output_sets[0]
+            if destination == plan.destination:
+                raise ValueError(
+                    f"Nested output {key!r} conflicts with OutputSet "
+                    f"{output_set_key!r} root."
                 )
-                if (
-                    source != member.source_path
-                    or not source.is_file()
-                    or _compute_file_sha256(source) != member.content_hash
-                ):
-                    raise ValueError(
-                        f"Nested output {key!r} does not match immutable manifest "
-                        f"member {member.artifact.key!r} of OutputSet "
-                        f"{output_set_key!r}."
-                    )
-                nested_scalar_members[key] = member
+            if _is_directory_artifact(artifact):
+                self._validate_nested_output_set_directory(
+                    key, artifact, destination, output_set_key, plan
+                )
+                nested_directories[key] = _NestedOutputSetDirectory(
+                    artifact=artifact,
+                    destination=destination,
+                    output_set_key=output_set_key,
+                )
+                continue
+            matching_members = [
+                member for member in plan.members if member.destination == destination
+            ]
+            if not matching_members:
+                raise ValueError(
+                    f"Nested output {key!r} is not a manifest member of "
+                    f"OutputSet {output_set_key!r}."
+                )
+            member = matching_members[0]
+            if (
+                artifact.container_uri != member.artifact.container_uri
+                or artifact.driver != member.artifact.driver
+            ):
+                raise ValueError(
+                    f"Nested output {key!r} does not match immutable manifest "
+                    f"member {member.artifact.key!r} of OutputSet "
+                    f"{output_set_key!r}."
+                )
+            producing_run = (
+                self.get_run(str(artifact.run_id))
+                if artifact.run_id is not None
+                else None
+            )
+            source = self._find_output_set_archive_source(
+                artifact, producing_run=producing_run
+            )
+            if (
+                source != member.source_path
+                or not source.is_file()
+                or _compute_file_sha256(source) != member.content_hash
+            ):
+                raise ValueError(
+                    f"Nested output {key!r} does not match immutable manifest "
+                    f"member {member.artifact.key!r} of OutputSet "
+                    f"{output_set_key!r}."
+                )
+            nested_scalars[key] = _NestedOutputSetScalar(
+                artifact=artifact,
+                destination=destination,
+                output_set_key=output_set_key,
+            )
 
-        return output_set_plans, nested_scalar_members
+        for plan in output_set_plans.values():
+            self._validate_output_set_archive_destination(
+                plan.destination, plan.members
+            )
+            self._validate_output_set_manifest_archive_destination(plan)
+
+        return output_set_plans, nested_scalars, nested_directories
+
+    def _validate_nested_output_set_directory(
+        self,
+        key: str,
+        artifact: Artifact,
+        destination: Path,
+        output_set_key: str,
+        plan: _OutputSetArchivePlan,
+    ) -> None:
+        """Require a nested directory artifact to equal an OutputSet subtree."""
+        manifest = _directory_artifact_manifest(artifact)
+        relative_subtree = _normalize_output_set_relative_path(
+            destination.relative_to(plan.destination)
+        )
+        producing_run = (
+            self.get_run(str(artifact.run_id)) if artifact.run_id is not None else None
+        )
+        source = self._find_output_set_archive_source(
+            artifact, producing_run=producing_run
+        )
+        expected_source = plan.parent_source / relative_subtree
+        if source != expected_source or not source.is_dir():
+            raise ValueError(
+                f"Nested directory output {key!r} is outside OutputSet "
+                f"{output_set_key!r} source root."
+            )
+        validate_directory_tree(source, manifest)
+        expected_entries = self._output_set_directory_subtree_entries(plan, destination)
+        if manifest["entries"] != expected_entries:
+            raise ValueError(
+                f"Nested directory output {key!r} does not match OutputSet "
+                f"{output_set_key!r} manifest subtree."
+            )
+
+    @staticmethod
+    def _output_set_directory_subtree_entries(
+        plan: _OutputSetArchivePlan,
+        destination: Path,
+    ) -> list[dict[str, Any]]:
+        """Derive the exact directory manifest entries represented by set members."""
+        entries: list[dict[str, Any]] = []
+        directories: set[str] = set()
+        for member in plan.members:
+            try:
+                relative_path = _normalize_output_set_relative_path(
+                    member.destination.relative_to(destination)
+                )
+            except ValueError:
+                continue
+            parent = Path(relative_path).parent
+            while parent != Path("."):
+                directories.add(parent.as_posix())
+                parent = parent.parent
+            entries.append(
+                {
+                    "kind": "file",
+                    "path": relative_path,
+                    "sha256": member.content_hash,
+                    "size": member.source_path.stat().st_size,
+                }
+            )
+        entries.extend({"kind": "directory", "path": path} for path in directories)
+        return sorted(entries, key=lambda entry: (entry["path"], entry["kind"]))
 
     def _validate_output_set_archive_destination(
         self,
@@ -848,6 +965,23 @@ class TrackerArchiveService(_TrackerServiceBase):
                 raise ValueError(
                     f"OutputSet archive destination member hash mismatch: {path}"
                 )
+
+    def _validate_output_set_manifest_archive_destination(
+        self, plan: _OutputSetArchivePlan
+    ) -> None:
+        """Require an existing manifest destination to retain identical bytes."""
+        destination = plan.manifest_destination
+        if self._has_symlink_component(destination) or destination.is_symlink():
+            raise ValueError(
+                f"Symlink detected in OutputSet archive destination: {destination}"
+            )
+        if destination.exists() and (
+            not destination.is_file()
+            or _compute_file_sha256(destination) != plan.manifest_content_hash
+        ):
+            raise FileExistsError(
+                f"OutputSet manifest archive destination already exists: {destination}"
+            )
 
     def _publish_output_set_directory(self, plan: _OutputSetArchivePlan) -> bool:
         """Stage and publish one OutputSet member root without overwriting bytes."""
@@ -983,6 +1117,7 @@ class TrackerArchiveService(_TrackerServiceBase):
         mode: Literal["copy", "move"],
         append: bool,
         remove_sources: bool,
+        dependent_artifacts: Sequence[Artifact] = (),
     ) -> Path:
         """Archive a validated OutputSet plan before registering it recoverable."""
         published_directory = False
@@ -995,6 +1130,7 @@ class TrackerArchiveService(_TrackerServiceBase):
                     plan.parent,
                     *(member.artifact for member in plan.members),
                     plan.manifest,
+                    *dependent_artifacts,
                 ],
                 [Path(archive_root).expanduser().absolute()],
                 append=append,
@@ -1024,6 +1160,7 @@ class TrackerArchiveService(_TrackerServiceBase):
             mode=mode,
             append=append,
             remove_sources=True,
+            dependent_artifacts=(),
         )
 
     def _archive_directory_artifact(
@@ -2069,7 +2206,8 @@ class TrackerArchiveService(_TrackerServiceBase):
         Selected OutputSets are validated before any archive bytes are
         published. They are then published before ordinary outputs whose
         URI-relative destinations lie beneath their roots. Such nested outputs
-        must be identical manifest members. Use
+        must be identical manifest members or an immutable directory whose
+        manifest exactly equals the represented set subtree. Use
         :meth:`archive_run_output_files` for report-oriented, no-overwrite
         regular-file archival.
         """
@@ -2087,29 +2225,34 @@ class TrackerArchiveService(_TrackerServiceBase):
                 if _output_set_hydration_kind(self.tracker, artifact)
                 not in {"member", "manifest"}
             }
-        output_set_plans, nested_scalar_members = (
+        output_set_plans, nested_scalars, nested_directories = (
             self._build_selected_output_set_archive_plans(selected, archive_root)
         )
         archived_by_key: dict[str, Path] = {}
         for key, plan in output_set_plans.items():
+            dependent_artifacts = [
+                nested.artifact
+                for nested in (*nested_scalars.values(), *nested_directories.values())
+                if nested.output_set_key == key
+            ]
             archived_by_key[key] = self._archive_output_set_plan(
                 plan,
                 archive_root,
                 mode=mode,
                 append=append,
                 remove_sources=False,
+                dependent_artifacts=dependent_artifacts,
             )
         for key, artifact in selected.items():
             if key in output_set_plans:
                 continue
-            nested_member = nested_scalar_members.get(key)
-            if nested_member is not None:
-                self.tracker.set_artifact_recovery_roots(
-                    artifact,
-                    [Path(archive_root).expanduser().absolute()],
-                    append=append,
-                )
-                archived_by_key[key] = nested_member.destination
+            nested_scalar = nested_scalars.get(key)
+            if nested_scalar is not None:
+                archived_by_key[key] = nested_scalar.destination
+                continue
+            nested_directory = nested_directories.get(key)
+            if nested_directory is not None:
+                archived_by_key[key] = nested_directory.destination
                 continue
             archived_by_key[key] = self.tracker.archive_artifact(
                 artifact, archive_root, mode=mode, append=append
