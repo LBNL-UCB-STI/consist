@@ -233,6 +233,7 @@ archive = tracker.archive_run_outputs(
     mode="copy",
 )
 
+archived_persons_path = archive.paths["persons"]
 next_inputs = archive.outputs["persons"]
 ```
 
@@ -251,11 +252,11 @@ Use `mode="copy"` when the workspace file should remain in place. Use
 
 `archive_current_run_outputs(...)` and `archive_run_outputs(...)` now return an
 `ArchivedOutputs` mapping. Treat the mapping like a read-only `Mapping[str,
-Path]` for the archived bytes, and use `.outputs` when you want the refreshed
-artifacts with the new recovery root already attached. Pass those refreshed
-artifacts directly into a later `inputs={...}` mapping instead of calling
-`get_run_outputs(...)`
-again.
+Path]` for the archived bytes, or use its explicit `.paths` property for the
+same read-only mapping. Use `.outputs` when you want the refreshed artifacts
+with the new recovery root already attached. Pass those refreshed artifacts
+directly into a later `inputs={...}` mapping instead of calling
+`get_run_outputs(...)` again.
 
 When a selected output is a manifest-backed `OutputSet`, this archive API
 copies or moves the whole declared set, not just the parent directory. It

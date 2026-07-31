@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from collections.abc import Iterator, Mapping as MappingABC, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
+from types import MappingProxyType
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -641,9 +642,10 @@ class ArchivedOutputs(MappingABC[str, Path]):
     Mapping of archived output paths returned by archive_run_outputs(...).
 
     Behaves as a read-only ``Mapping[str, Path]`` for backward compatibility
-    with the previous ``dict[str, Path]`` return value. Also exposes
-    ``.outputs``, a ``dict[str, Artifact]`` of refreshed artifacts whose
-    recovery metadata reflects the newly registered archive root.
+    with the previous ``dict[str, Path]`` return value. ``.paths`` exposes the
+    same archived-path mapping explicitly, and ``.outputs`` exposes refreshed
+    artifacts whose recovery metadata reflects the newly registered archive
+    root.
 
     Use ``.outputs`` to pass archived artifacts into downstream
     ``scenario.run(inputs=...)`` calls without a second ``get_run_outputs``
@@ -659,8 +661,13 @@ class ArchivedOutputs(MappingABC[str, Path]):
         paths: dict[str, Path],
         outputs: dict[str, "Artifact"],
     ) -> None:
-        self._paths: dict[str, Path] = paths
+        self._paths: dict[str, Path] = dict(paths)
         self.outputs: dict[str, Artifact] = outputs
+
+    @property
+    def paths(self) -> MappingABC[str, Path]:
+        """Read-only view of the archived paths exposed by mapping access."""
+        return MappingProxyType(self._paths)
 
     def __getitem__(self, key: str) -> Path:
         return self._paths[key]

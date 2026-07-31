@@ -112,12 +112,14 @@ hydrated = tracker.hydrate_run_outputs(
     target_root=tracker.run_dir / "restored_workspace",
 )
 
+archived_persons_path = archive.paths["persons"]
 next_inputs = archive.outputs["persons"]
 ```
 
 `archive_current_run_outputs(...)` and `archive_run_outputs(...)` return an
 `ArchivedOutputs` mapping. It still behaves like a read-only `Mapping[str,
-Path]` for the archived bytes, while `.outputs` gives you refreshed artifacts
+Path]` for the archived bytes. Its explicit `.paths` property exposes that
+same read-only path mapping, while `.outputs` gives you refreshed artifacts
 that already carry the new recovery root. Pass those refreshed artifacts
 directly into a later `inputs={...}` mapping when you want the next run to
 consume the archive.

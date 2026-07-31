@@ -62,8 +62,8 @@ For query helpers that traverse child artifacts, see
 
 `tracker.archive_run_outputs(...)` and
 `tracker.archive_current_run_outputs(...)` return `ArchivedOutputs`, a
-dict-like mapping of archived paths. Use the mapping itself when you want the
-archived filesystem locations, and use `.outputs` when you want the refreshed
+dict-like mapping of archived paths. Use `.paths` when you want the explicit
+read-only archived-path mapping, and use `.outputs` when you want the refreshed
 artifacts with the new recovery root already attached for downstream
 `inputs=...` reuse.
 
