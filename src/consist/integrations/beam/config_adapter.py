@@ -6,6 +6,7 @@ import logging
 import re
 from dataclasses import dataclass, field, replace
 import shutil
+import tempfile
 from datetime import date, datetime
 from pathlib import Path
 from typing import (
@@ -18,6 +19,7 @@ from typing import (
     Sequence,
     TYPE_CHECKING,
 )
+from urllib.parse import unquote
 
 from sqlmodel import SQLModel
 
@@ -37,6 +39,12 @@ from consist.core.config_canonicalization import (
     _canonical_json_sha256,
 )
 from consist.core.config_canonicalization import ConfigPlan
+from consist.core.directory_artifacts import (
+    build_directory_manifest,
+    materialize_directory_tree,
+    validate_directory_manifest,
+    validate_directory_tree,
+)
 from consist.core.identity import IdentityManager
 from consist.core.gtfs import (
     GTFS_BUNDLE_SOURCE_KEY,
@@ -57,6 +65,7 @@ from consist.integrations._config_adapter_shared import (
     run_with_config_overrides_orchestrated as _shared_run_with_config_overrides_orchestrated,
 )
 from consist.models.beam import BeamConfigCache, BeamConfigIngestRunLink
+from consist.models.artifact import Artifact, set_tracker_ref
 from consist.models.run import Run
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -103,6 +112,223 @@ class BeamConfigOverrides:
 
     def to_canonical_dict(self) -> dict[str, Any]:
         return {"values": self.values}
+
+
+@dataclass(frozen=True)
+class BeamLaunchBundleMember:
+    """One regular file staged into a materialized BEAM launch bundle."""
+
+    source: Artifact | Path
+    destination: str | Path
+
+
+@dataclass(frozen=True)
+class MaterializedBeamLaunchBundle:
+    """A recoverable, ready-to-mount BEAM launch configuration bundle."""
+
+    canonical_config: CanonicalConfig
+    root: Path
+    primary_config: Path
+    artifact: Artifact
+
+
+@dataclass(frozen=True)
+class _NormalizedBeamLaunchBundleMember:
+    """Validated staged-member source and immutable identity details."""
+
+    destination: Path
+    source_path: Path | None
+    artifact: Artifact | None
+    sha256: str | None
+    identity: dict[str, str]
+    provenance: dict[str, str]
+
+
+def _normalize_launch_bundle_members(
+    members: Sequence[BeamLaunchBundleMember],
+) -> tuple[_NormalizedBeamLaunchBundleMember, ...]:
+    """Validate regular staged members before a launch tree is created."""
+    normalized: list[_NormalizedBeamLaunchBundleMember] = []
+    destinations: set[Path] = set()
+    for member in members:
+        destination = _normalize_launch_bundle_destination(member.destination)
+        if destination in destinations:
+            raise ValueError(f"Duplicate launch bundle destination: {destination}")
+        destinations.add(destination)
+        if isinstance(member.source, Artifact):
+            if not member.source.hash:
+                raise ValueError("Staged artifact source must have a content identity.")
+            normalized.append(
+                _NormalizedBeamLaunchBundleMember(
+                    destination=destination,
+                    source_path=None,
+                    artifact=member.source,
+                    sha256=None,
+                    identity={
+                        "destination": destination.as_posix(),
+                        "source_hash": member.source.hash,
+                    },
+                    provenance={
+                        "destination": destination.as_posix(),
+                        "source_artifact_id": str(member.source.id or ""),
+                        "source_uri": member.source.container_uri,
+                        "source_hash": member.source.hash,
+                    },
+                )
+            )
+            continue
+        source_path = Path(member.source).expanduser().absolute()
+        if not source_path.is_file() or _has_symlink_component(source_path):
+            raise ValueError(
+                f"Staged source must be a regular non-symlink file: {source_path}"
+            )
+        sha256 = _shared_file_sha256(source_path)
+        normalized.append(
+            _NormalizedBeamLaunchBundleMember(
+                destination=destination,
+                source_path=source_path,
+                artifact=None,
+                sha256=sha256,
+                identity={
+                    "destination": destination.as_posix(),
+                    "source_hash": sha256,
+                },
+                provenance={
+                    "destination": destination.as_posix(),
+                    "source_hash": sha256,
+                },
+            )
+        )
+    return tuple(normalized)
+
+
+def _normalize_launch_bundle_destination(destination: str | Path) -> Path:
+    """Return one safe, non-empty launch-tree-relative member path."""
+    raw = Path(destination)
+    if (
+        raw.is_absolute()
+        or not raw.parts
+        or any(part in {"", ".", ".."} for part in raw.parts)
+    ):
+        raise ValueError(f"Unsafe launch bundle destination: {destination!r}")
+    return raw
+
+
+def _prepare_launch_bundle_output_dir(output_dir: Path) -> Path:
+    """Allow a missing or empty launch root, never replacing caller bytes."""
+    resolved = Path(output_dir).expanduser().absolute()
+    if resolved.is_symlink():
+        raise ValueError(f"Launch bundle output_dir cannot be a symlink: {resolved}")
+    if resolved.exists():
+        if not resolved.is_dir() or any(resolved.iterdir()):
+            raise ValueError(f"output_dir must be empty: {resolved}")
+        resolved.rmdir()
+    return resolved
+
+
+def _has_symlink_component(path: Path) -> bool:
+    """Return whether a path or any existing ancestor is a symlink."""
+    current = Path(path).expanduser().absolute()
+    while True:
+        if current.is_symlink():
+            return True
+        if current.parent == current:
+            return False
+        current = current.parent
+
+
+def _is_matching_beam_launch_bundle(artifact: Artifact, identity: str) -> bool:
+    """Return whether an existing standalone artifact represents this request."""
+    meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+    return (
+        meta.get("beam_launch_bundle") is True
+        and meta.get("bundle_identity") == identity
+        and meta.get("directory_artifact") is True
+    )
+
+
+def _beam_launch_bundle_directory_manifest(artifact: Artifact) -> dict[str, Any]:
+    """Return the verified immutable-tree manifest for a launch bundle."""
+    meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+    manifest = meta.get("directory_manifest")
+    if not isinstance(manifest, Mapping):
+        raise ValueError(
+            f"BEAM launch bundle {artifact.key!r} has no persisted directory manifest."
+        )
+    normalized = validate_directory_manifest(manifest)
+    if artifact.hash != normalized["tree_hash"]:
+        raise ValueError(
+            f"BEAM launch bundle {artifact.key!r} manifest does not match artifact identity."
+        )
+    return normalized
+
+
+def _stage_launch_bundle_artifact_member(
+    *,
+    tracker: "Tracker",
+    artifact: Artifact,
+    destination: Path,
+    recovery_staging_root: Path,
+) -> None:
+    """Stage one artifact member through verified rematerialization."""
+    recovered = tracker.materialize_artifact(
+        artifact,
+        target_root=recovery_staging_root,
+        preserve_existing=False,
+        on_missing="raise",
+        validate_content_hash="always",
+        allow_external_paths=True,
+    )
+    if recovered.resolvable and recovered.path is not None:
+        source = recovered.path
+    elif recovered.status == "skipped_unmapped":
+        raw_uri = artifact.container_uri
+        if raw_uri.startswith("file://"):
+            source = Path(unquote(raw_uri.split("://", 1)[1])).absolute()
+        elif Path(raw_uri).is_absolute():
+            source = Path(raw_uri).absolute()
+        else:
+            raise ValueError(
+                "Artifact-backed staged member has no resolvable source path: "
+                f"{artifact.key!r}"
+            )
+        if not source.is_file() or _has_symlink_component(source):
+            raise ValueError(
+                "Artifact-backed staged member source must be a regular "
+                f"non-symlink file: {artifact.key!r}"
+            )
+    else:
+        raise ValueError(
+            "Artifact-backed staged member source hash does not match its "
+            f"declared identity: {artifact.key!r}. {recovered.message or recovered.status}"
+        )
+    if not source.is_file():
+        raise ValueError(
+            "Artifact-backed staged member must materialize as a regular file: "
+            f"{artifact.key!r}"
+        )
+    shutil.copy2(source, destination)
+    if _shared_file_sha256(destination) != artifact.hash:
+        raise ValueError(
+            "Artifact-backed staged member source hash does not match its "
+            f"declared identity: {artifact.key!r}"
+        )
+
+
+def _materialize_beam_launch_bundle_tree(
+    *,
+    artifact: Artifact,
+    source: Path,
+    destination: Path,
+) -> None:
+    """Materialize a launch bundle only after exact-tree verification."""
+    manifest = _beam_launch_bundle_directory_manifest(artifact)
+    materialize_directory_tree(
+        source,
+        destination,
+        manifest,
+        preserve_existing=True,
+    )
 
 
 @dataclass(frozen=True)
@@ -482,6 +708,7 @@ class BeamConfigAdapter:
         output_dir: Path,
         identity: IdentityManager,
         strict: bool = True,
+        _expected_base_root_manifests: Sequence[Mapping[str, Any]] | None = None,
     ) -> CanonicalConfig:
         if ConfigFactory is None:
             raise ImportError("pyhocon is required for BEAM canonicalization.")
@@ -490,11 +717,25 @@ class BeamConfigAdapter:
         if output_dir.exists() and any(output_dir.iterdir()):
             raise ValueError(f"output_dir must be empty: {output_dir}")
         output_dir.mkdir(parents=True, exist_ok=True)
+        if _expected_base_root_manifests is not None and len(
+            _expected_base_root_manifests
+        ) != len(base_root_dirs):
+            raise ValueError("Expected one manifest for each BEAM config root.")
 
         staged_root_dirs: list[Path] = []
-        for root_dir in base_root_dirs:
+        for index, root_dir in enumerate(base_root_dirs):
             staged_root = output_dir / root_dir.name
             shutil.copytree(root_dir, staged_root)
+            if _expected_base_root_manifests is not None:
+                try:
+                    validate_directory_tree(
+                        staged_root, _expected_base_root_manifests[index]
+                    )
+                except ValueError as exc:
+                    raise ValueError(
+                        "Copied BEAM config root does not match its declared "
+                        f"identity: {root_dir}"
+                    ) from exc
             staged_root_dirs.append(staged_root)
 
         primary_path = _map_primary_config(
@@ -521,6 +762,213 @@ class BeamConfigAdapter:
         )
         return materialized_adapter.discover(
             staged_root_dirs, identity=identity, strict=strict
+        )
+
+    def materialize_bundle(
+        self,
+        *,
+        tracker: "Tracker",
+        base_root_dirs: Sequence[Path],
+        overrides: BeamConfigOverrides,
+        staged_members: Sequence[BeamLaunchBundleMember],
+        output_dir: Path,
+        durable_root: Path,
+        strict: bool = True,
+    ) -> MaterializedBeamLaunchBundle:
+        """Publish a recoverable, complete BEAM launch tree as an input artifact.
+
+        ``durable_root`` owns the content-addressed bytes. ``output_dir`` is the
+        caller's requested launch location and may be removed and recreated from
+        the durable bundle through normal artifact materialization.
+        """
+        if tracker.db is None:
+            raise RuntimeError("materialize_bundle requires a tracker database.")
+        output_path = _prepare_launch_bundle_output_dir(Path(output_dir))
+        resolved_roots = [Path(root).expanduser().absolute() for root in base_root_dirs]
+        if not resolved_roots:
+            raise ValueError(
+                "materialize_bundle requires at least one base config root."
+            )
+        root_manifests = [build_directory_manifest(root) for root in resolved_roots]
+        root_names = [root.name for root in resolved_roots]
+        if len(set(root_names)) != len(root_names):
+            raise ValueError("Base config roots must have unique directory names.")
+
+        normalized_members = _normalize_launch_bundle_members(staged_members)
+        primary_source = self._resolve_primary_config(resolved_roots)
+        primary_root_index = next(
+            (
+                index
+                for index, root in enumerate(resolved_roots)
+                if _is_in_roots(primary_source, [root])
+            ),
+            None,
+        )
+        if primary_root_index is None:
+            raise ValueError("Primary config must be contained by a base config root.")
+        primary_relative = primary_source.relative_to(
+            resolved_roots[primary_root_index]
+        )
+        bundle_identity = tracker.identity.canonical_json_sha256(
+            {
+                "bundle_version": 1,
+                "adapter": self.model_name,
+                "adapter_version": self.adapter_version,
+                "base_roots": [
+                    {"name": root.name, "tree_hash": manifest["tree_hash"]}
+                    for root, manifest in zip(
+                        resolved_roots, root_manifests, strict=True
+                    )
+                ],
+                "primary_config": {
+                    "root_index": primary_root_index,
+                    "relative_path": primary_relative.as_posix(),
+                },
+                "overrides": overrides.to_canonical_dict(),
+                "staged_members": [member.identity for member in normalized_members],
+            }
+        )
+        durable_root_path = Path(durable_root).expanduser().absolute()
+        durable_path = durable_root_path / "beam-launch-bundles" / bundle_identity
+        durable_uri = tracker.fs.virtualize_path(str(durable_path))
+        existing = tracker.db.find_latest_artifact_at_uri(
+            durable_uri,
+            driver="beam_launch_bundle",
+            include_inputs=True,
+        )
+        if existing is not None and _is_matching_beam_launch_bundle(
+            existing, bundle_identity
+        ):
+            set_tracker_ref(existing, tracker)
+            _materialize_beam_launch_bundle_tree(
+                artifact=existing,
+                source=durable_path,
+                destination=output_path,
+            )
+            canonical = self._discover_materialized_bundle(
+                resolved_roots, output_path, tracker.identity, strict
+            )
+            if canonical.primary_config is None:
+                raise RuntimeError("Materialized BEAM bundle has no primary config.")
+            return MaterializedBeamLaunchBundle(
+                canonical_config=canonical,
+                root=output_path,
+                primary_config=canonical.primary_config,
+                artifact=existing,
+            )
+
+        output_parent = output_path.parent
+        output_parent.mkdir(parents=True, exist_ok=True)
+        staging_root = Path(
+            tempfile.mkdtemp(dir=str(output_parent), prefix=".consist-beam-launch-")
+        )
+        staging = staging_root / "payload"
+        recovery_staging = staging_root / "artifact-recovery"
+        try:
+            self.materialize(
+                list(resolved_roots),
+                overrides,
+                output_dir=staging,
+                identity=tracker.identity,
+                strict=strict,
+                _expected_base_root_manifests=root_manifests,
+            )
+            for member in normalized_members:
+                target = staging / member.destination
+                if target.exists() or target.is_symlink():
+                    raise FileExistsError(
+                        "Staged member destination already exists in the launch tree: "
+                        f"{member.destination}"
+                    )
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if member.artifact is not None:
+                    _stage_launch_bundle_artifact_member(
+                        tracker=tracker,
+                        artifact=member.artifact,
+                        destination=target,
+                        recovery_staging_root=recovery_staging,
+                    )
+                else:
+                    if member.source_path is None:
+                        raise AssertionError(
+                            "Path-backed staged member has no source path."
+                        )
+                    shutil.copy2(member.source_path, target)
+                if not target.is_file() or (
+                    member.sha256 is not None
+                    and _shared_file_sha256(target) != member.sha256
+                ):
+                    raise ValueError(
+                        f"Staged member does not match its declared identity: "
+                        f"{member.destination}"
+                    )
+            manifest = build_directory_manifest(staging)
+            materialize_directory_tree(
+                staging, durable_path, manifest, preserve_existing=True
+            )
+            artifact = tracker.artifacts.create_artifact(
+                durable_path,
+                key="beam_launch_bundle",
+                direction="input",
+                driver="beam_launch_bundle",
+                content_hash=manifest["tree_hash"],
+                force_hash_override=True,
+                directory_artifact=True,
+                directory_manifest=manifest,
+                directory_manifest_version=manifest["version"],
+                recovery_roots=[durable_root_path],
+                beam_launch_bundle=True,
+                bundle_identity=bundle_identity,
+                bundle_config_roots=[
+                    {
+                        "uri": tracker.fs.virtualize_path(str(root)),
+                        "tree_hash": root_manifest["tree_hash"],
+                    }
+                    for root, root_manifest in zip(
+                        resolved_roots, root_manifests, strict=True
+                    )
+                ],
+                bundle_staged_members=[
+                    member.provenance for member in normalized_members
+                ],
+            )
+            set_tracker_ref(artifact, tracker)
+            tracker.db.upsert_artifact(artifact)
+            _materialize_beam_launch_bundle_tree(
+                artifact=artifact,
+                source=durable_path,
+                destination=output_path,
+            )
+            result_canonical = self._discover_materialized_bundle(
+                resolved_roots, output_path, tracker.identity, strict
+            )
+            if result_canonical.primary_config is None:
+                raise RuntimeError("Materialized BEAM bundle has no primary config.")
+            return MaterializedBeamLaunchBundle(
+                canonical_config=result_canonical,
+                root=output_path,
+                primary_config=result_canonical.primary_config,
+                artifact=artifact,
+            )
+        finally:
+            shutil.rmtree(staging_root, ignore_errors=True)
+
+    def _discover_materialized_bundle(
+        self,
+        base_root_dirs: Sequence[Path],
+        output_dir: Path,
+        identity: IdentityManager,
+        strict: bool,
+    ) -> CanonicalConfig:
+        """Rediscover the caller-visible config rooted in a launch bundle."""
+        materialized_roots = [output_dir / root.name for root in base_root_dirs]
+        primary = _map_primary_config(
+            primary_config=self.primary_config,
+            base_root_dirs=list(base_root_dirs),
+            staged_root_dirs=materialized_roots,
+        )
+        return replace(self, primary_config=primary).discover(
+            materialized_roots, identity=identity, strict=strict
         )
 
     def materialize_from_plan(

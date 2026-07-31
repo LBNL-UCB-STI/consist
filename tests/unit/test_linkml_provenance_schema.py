@@ -7,10 +7,13 @@ import json
 import subprocess
 import sys
 import tomllib
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import cast
 
 import jsonschema
 import yaml
+from linkml_runtime.linkml_model import SlotDefinition
 from linkml_runtime.utils.schemaview import SchemaView
 
 
@@ -242,15 +245,18 @@ def test_schema_preserves_public_fingerprint_and_external_artifact_boundaries() 
     """Only Artifact.hash is portable, and an external artifact needs no producer."""
     schema = SchemaView(SCHEMA_PATH).schema
     artifact = schema.classes["ConsistArtifactReference"]
-    fingerprint = artifact.attributes["fingerprint"]
-    producing_run = artifact.attributes["producing_run"]
+    attributes = cast(dict[str, SlotDefinition], artifact.attributes)
+    fingerprint = attributes["fingerprint"]
+    producing_run = attributes["producing_run"]
+    fingerprint_description = cast(str, fingerprint.description)
+    producing_run_description = cast(str, producing_run.description)
 
-    assert "Artifact.hash" in fingerprint.description
-    assert "content- or metadata-based" in fingerprint.description
-    assert "content_id" not in artifact.attributes
-    assert "database-local" in fingerprint.description
+    assert "Artifact.hash" in fingerprint_description
+    assert "content- or metadata-based" in fingerprint_description
+    assert "content_id" not in attributes
+    assert "database-local" in fingerprint_description
     assert producing_run.required is not True
-    assert "external" in producing_run.description.lower()
+    assert "external" in producing_run_description.lower()
 
 
 def test_provenance_schema_documentation_states_cross_module_semantics() -> None:
@@ -402,6 +408,35 @@ classes:
         text=True,
     )
     assert rerun.returncode != 0
+
+
+def test_release_builder_writes_lintable_timezone_aware_merged_schemas(
+    tmp_path: Path,
+) -> None:
+    """Merged release inputs have UTC metadata accepted by LinkML lint."""
+    output_dir = tmp_path / f"provenance-schema-{SCHEMA_VERSION}"
+
+    subprocess.run(
+        [sys.executable, str(RELEASE_BUILDER), "--output", str(output_dir)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    for schema_name in ("provenance", "binding"):
+        merged_path = output_dir / f"{schema_name}.merged.yaml"
+        metadata = yaml.safe_load(merged_path.read_text())
+        for field_name in ("source_file_date", "generation_date"):
+            value = metadata[field_name]
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            assert parsed.tzinfo == timezone.utc
+
+        result = subprocess.run(
+            [str(LINKML_LINT), "--ignore-warnings", str(merged_path)],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_importing_consist_does_not_import_linkml() -> None:

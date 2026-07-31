@@ -39,6 +39,40 @@ def test_discover_output_set_members_are_filtered_and_sorted(tmp_path: Path) -> 
     ]
 
 
+def test_recursive_glob_includes_root_level_and_nested_files(tmp_path: Path) -> None:
+    """A recursive glob treats ``**/`` as matching zero directory levels too."""
+    root = tmp_path / "annual"
+    root.mkdir()
+    (root / "root.csv").write_text("id\n0\n")
+    (root / "nested").mkdir()
+    (root / "nested" / "nested.csv").write_text("id\n1\n")
+    outside = tmp_path / "outside.csv"
+    outside.write_text("id\n2\n")
+
+    members = discover_output_set_members(OutputSet(root=root, include="**/*"))
+
+    assert [member.relative_path for member in members] == [
+        "nested/nested.csv",
+        "root.csv",
+    ]
+    assert all(member.path != outside for member in members)
+
+
+def test_recursive_glob_exclude_matches_root_level_file(tmp_path: Path) -> None:
+    """A zero-depth ``**/`` exclusion applies to files at the set root."""
+    root = tmp_path / "annual"
+    root.mkdir()
+    (root / "root.csv").write_text("id\n0\n")
+    (root / "nested").mkdir()
+    (root / "nested" / "nested.csv").write_text("id\n1\n")
+
+    members = discover_output_set_members(
+        OutputSet(root=root, include="**/*", exclude="**/root.csv")
+    )
+
+    assert [member.relative_path for member in members] == ["nested/nested.csv"]
+
+
 def test_discover_output_set_members_rejects_symlinked_files(
     tmp_path: Path,
 ) -> None:

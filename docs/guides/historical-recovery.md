@@ -233,6 +233,7 @@ archive = tracker.archive_run_outputs(
     mode="copy",
 )
 
+archived_persons_path = archive.paths["persons"]
 next_inputs = archive.outputs["persons"]
 ```
 
@@ -249,13 +250,27 @@ tracker.archive_artifact(
 Use `mode="copy"` when the workspace file should remain in place. Use
 `mode="move"` when the archive copy should become the durable byte source.
 
+For an ordinary file output whose historical and recorded recovery locations no
+longer exist, archival can use the artifact's currently configured managed URI
+mount as a final source fallback. The file must still match the artifact's
+recorded identity before Consist records the recovery root; this does not
+change directory, bundle, or OutputSet archival rules.
+
 `archive_current_run_outputs(...)` and `archive_run_outputs(...)` now return an
 `ArchivedOutputs` mapping. Treat the mapping like a read-only `Mapping[str,
-Path]` for the archived bytes, and use `.outputs` when you want the refreshed
-artifacts with the new recovery root already attached. Pass those refreshed
-artifacts directly into a later `inputs={...}` mapping instead of calling
-`get_run_outputs(...)`
-again.
+Path]` for the archived bytes, or use its explicit `.paths` property for the
+same read-only mapping. Use `.outputs` when you want the refreshed artifacts
+with the new recovery root already attached. Pass those refreshed artifacts
+directly into a later `inputs={...}` mapping instead of calling
+`get_run_outputs(...)` again.
+
+When a selected output is a manifest-backed `OutputSet`, this archive API
+copies or moves the whole declared set, not just the parent directory. It
+validates the manifest, member layout, source hashes, and symlink safety before
+registering the recovery root on the parent, members, and manifest. The mapping
+entry is the archived set root; `.outputs[set_key]` is the refreshed logical
+parent. The separate `archive_run_output_files(...)` helper intentionally
+continues to reject OutputSets because it reports regular files only.
 
 ### Verified File-Only Archive Reports
 

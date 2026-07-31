@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 import hashlib
+import json
 import os
 from pathlib import Path
-from typing import Sequence
+import shutil
+from typing import Sequence, cast
 import uuid
 
 import pytest
@@ -777,6 +779,106 @@ def test_archive_artifact_prefers_historical_source_over_current_workspace(
         tracker_b.engine.dispose()
 
 
+def test_archive_run_outputs_uses_current_configured_mount_for_run_owned_file(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "provenance.db")
+    historical_workspace = tmp_path / "workspace_a"
+    current_workspace = tmp_path / "workspace_b"
+    tracker_a = Tracker(
+        run_dir=tmp_path / "runs_a",
+        db_path=db_path,
+        mounts={"workspace": str(historical_workspace)},
+    )
+    tracker_b = Tracker(
+        run_dir=tmp_path / "runs_b",
+        db_path=db_path,
+        mounts={"workspace": str(current_workspace)},
+    )
+    source_path = historical_workspace / "outputs" / "shared.csv"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text("historical\n", encoding="utf-8")
+
+    run_id = "producer_archive_current_mount"
+    with tracker_a.start_run(run_id, model="producer"):
+        artifact = tracker_a.log_artifact(source_path, key="shared", direction="output")
+
+    current_path = current_workspace / "outputs" / "shared.csv"
+    current_path.parent.mkdir(parents=True, exist_ok=True)
+    current_path.write_text("historical\n", encoding="utf-8")
+    source_path.unlink()
+    archive_root = tmp_path / "archive_current_mount"
+
+    try:
+        archived = tracker_b.archive_run_outputs(run_id, archive_root)
+
+        assert archived["shared"] == (archive_root / "outputs" / "shared.csv").resolve()
+        assert archived["shared"].read_text(encoding="utf-8") == "historical\n"
+        refreshed = tracker_b.get_run_outputs(run_id)["shared"]
+        assert refreshed.container_uri == artifact.container_uri
+        assert refreshed.recovery_roots == [str(archive_root.resolve())]
+
+        current_path.unlink()
+        restored_root = tracker_b.run_dir / "restored"
+        hydrated = tracker_b.hydrate_run_outputs(
+            run_id,
+            target_root=restored_root,
+            on_missing="raise",
+        )
+
+        assert hydrated["shared"].path == restored_root / "outputs" / "shared.csv"
+        assert hydrated["shared"].path.read_text(encoding="utf-8") == "historical\n"
+    finally:
+        if tracker_a.engine:
+            tracker_a.engine.dispose()
+        if tracker_b.engine:
+            tracker_b.engine.dispose()
+
+
+def test_archive_run_outputs_rejects_stale_current_managed_mount_file(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "provenance.db")
+    historical_workspace = tmp_path / "workspace_a"
+    current_workspace = tmp_path / "workspace_b"
+    tracker_a = Tracker(
+        run_dir=tmp_path / "runs_a",
+        db_path=db_path,
+        mounts={"workspace": str(historical_workspace)},
+    )
+    tracker_b = Tracker(
+        run_dir=tmp_path / "runs_b",
+        db_path=db_path,
+        mounts={"workspace": str(current_workspace)},
+    )
+    source_path = historical_workspace / "outputs" / "shared.csv"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text("historical\n", encoding="utf-8")
+
+    run_id = "producer_archive_stale_current_mount"
+    with tracker_a.start_run(run_id, model="producer"):
+        tracker_a.log_artifact(source_path, key="shared", direction="output")
+
+    current_path = current_workspace / "outputs" / "shared.csv"
+    current_path.parent.mkdir(parents=True, exist_ok=True)
+    current_path.write_text("stale\n", encoding="utf-8")
+    source_path.unlink()
+    archive_root = tmp_path / "archive_stale_current_mount"
+
+    try:
+        with pytest.raises(ValueError, match="does not match artifact hash"):
+            tracker_b.archive_run_outputs(run_id, archive_root)
+
+        refreshed = tracker_b.get_run_outputs(run_id)["shared"]
+        assert refreshed.recovery_roots == []
+        assert not archive_root.exists()
+    finally:
+        if tracker_a.engine:
+            tracker_a.engine.dispose()
+        if tracker_b.engine:
+            tracker_b.engine.dispose()
+
+
 def test_archive_artifact_move_rolls_back_on_metadata_failure(
     tracker: Tracker,
     tmp_path: Path,
@@ -869,6 +971,661 @@ def test_archive_run_outputs_archives_selected_keys(
     outputs = tracker.get_run_outputs("producer_archive_bulk")
     assert outputs["a"].meta["recovery_roots"] == [str(archive_root.resolve())]
     assert "recovery_roots" not in outputs["b"].meta
+
+
+def test_archive_run_outputs_archives_output_set_and_hydrates_from_recovery_root(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    """A logical OutputSet archive includes its members and manifest atomically."""
+    calls = {"count": 0}
+
+    def produce_outputs(ctx) -> None:
+        calls["count"] += 1
+        annual_root = ctx.run_dir / "annual"
+        annual_root.mkdir(parents=True)
+        (annual_root / "annual_2030.csv").write_text(
+            "year,value\n2030,1\n", encoding="utf-8"
+        )
+        (annual_root / "annual_2035.csv").write_text(
+            "year,value\n2035,2\n", encoding="utf-8"
+        )
+        (ctx.run_dir / "summary.csv").write_text(
+            "metric,value\ncount,2\n", encoding="utf-8"
+        )
+
+    output_sets = {
+        "annual": consist.OutputSet(
+            root="annual",
+            include="annual_*.csv",
+            expected_members=["annual_2030.csv", "annual_2035.csv"],
+        )
+    }
+    first = tracker.run(
+        name="archive_output_set",
+        fn=produce_outputs,
+        output_paths={"summary": "summary.csv"},
+        output_sets=output_sets,
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+    archive_root = tmp_path / "archive_output_set"
+
+    archived = tracker.archive_run_outputs(first.run.id, archive_root)
+
+    assert set(archived) == {"summary", "annual"}
+    parent = archived.outputs["annual"]
+    parent_relative = tracker.fs.get_remappable_relative_path(parent.container_uri)
+    assert parent_relative is not None
+    assert archived["annual"] == archive_root / parent_relative
+    assert (archived["annual"] / "annual_2030.csv").read_text(encoding="utf-8") == (
+        "year,value\n2030,1\n"
+    )
+    assert (archived["annual"] / "annual_2035.csv").read_text(encoding="utf-8") == (
+        "year,value\n2035,2\n"
+    )
+
+    members = tracker.get_child_artifacts(parent)
+    manifest = tracker.get_artifact(parent.meta["manifest_artifact_id"])
+    assert manifest is not None
+    manifest_relative = tracker.fs.get_remappable_relative_path(manifest.container_uri)
+    assert manifest_relative is not None
+    assert (archive_root / manifest_relative).is_file()
+    for artifact in [parent, *members, manifest]:
+        assert artifact.recovery_roots == [str(archive_root.resolve())]
+
+    shutil.rmtree(tracker.run_artifact_dir(first.run))
+    second = tracker.run(
+        name="archive_output_set",
+        fn=produce_outputs,
+        output_paths={"summary": "summary.csv"},
+        output_sets=output_sets,
+        cache_options=consist.CacheOptions(cache_hydration="outputs-requested"),
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+
+    assert second.cache_hit is True
+    assert calls["count"] == 1
+    hydrated_root = tracker.run_artifact_dir(second.run) / "annual"
+    assert (hydrated_root / "annual_2030.csv").read_text(encoding="utf-8") == (
+        "year,value\n2030,1\n"
+    )
+    assert (hydrated_root / "annual_2035.csv").read_text(encoding="utf-8") == (
+        "year,value\n2035,2\n"
+    )
+
+
+def test_archive_run_outputs_exposes_read_only_paths_mapping(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    """Archived paths remain available through the explicit public mapping."""
+    output_path = tracker.run_dir / "outputs" / "paths.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("value\n8\n", encoding="utf-8")
+    archive_root = tmp_path / "archive_paths"
+
+    with tracker.start_run("producer_archive_paths", model="producer"):
+        tracker.log_artifact(output_path, key="paths", direction="output")
+
+    archived = tracker.archive_run_outputs("producer_archive_paths", archive_root)
+
+    assert isinstance(archived.paths, Mapping)
+    assert archived.paths == dict(archived)
+    assert archived.paths["paths"] == archived["paths"]
+    with pytest.raises(TypeError):
+        cast(MutableMapping[str, Path], archived.paths)["paths"] = output_path
+
+
+def test_archive_run_outputs_archives_nested_manifest_scalar_before_set_validation(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    """A scalar duplicate of a manifest member does not depend on key order."""
+    calls = {"count": 0}
+
+    def produce_outputs(ctx) -> None:
+        calls["count"] += 1
+        annual_root = ctx.run_dir / "annual"
+        annual_root.mkdir(parents=True)
+        (annual_root / "annual_2030.csv").write_text(
+            "year,value\n2030,1\n", encoding="utf-8"
+        )
+        (annual_root / "annual_2035.csv").write_text(
+            "year,value\n2035,2\n", encoding="utf-8"
+        )
+
+    output_sets = {
+        "annual": consist.OutputSet(
+            root="annual",
+            include="annual_*.csv",
+            expected_members=["annual_2030.csv", "annual_2035.csv"],
+        )
+    }
+    first = tracker.run(
+        name="archive_nested_output_set",
+        fn=produce_outputs,
+        output_paths={"annual_2030": "annual/annual_2030.csv"},
+        output_sets=output_sets,
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+    archive_root = tmp_path / "archive_nested_output_set"
+
+    archived = tracker.archive_run_outputs(first.run.id, archive_root)
+
+    assert archived.paths["annual"] == archived["annual"]
+    assert archived.outputs["annual"].recovery_roots == [str(archive_root.resolve())]
+    assert archived["annual_2030"] == archived["annual"] / "annual_2030.csv"
+    assert archived["annual_2030"].read_text(encoding="utf-8") == "year,value\n2030,1\n"
+
+    retried = tracker.archive_run_outputs(first.run.id, archive_root)
+    assert retried.paths == archived.paths
+
+    shutil.rmtree(tracker.run_artifact_dir(first.run))
+    second = tracker.run(
+        name="archive_nested_output_set",
+        fn=produce_outputs,
+        output_paths={"annual_2030": "annual/annual_2030.csv"},
+        output_sets=output_sets,
+        cache_options=consist.CacheOptions(cache_hydration="outputs-requested"),
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+
+    assert second.cache_hit is True
+    assert calls["count"] == 1
+    hydrated_root = tracker.run_artifact_dir(second.run) / "annual"
+    assert (hydrated_root / "annual_2030.csv").read_text(encoding="utf-8") == (
+        "year,value\n2030,1\n"
+    )
+
+
+def test_archive_run_outputs_archives_nested_directory_artifact_with_output_set(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    """A manifest-backed directory can reuse an equivalent OutputSet subtree."""
+    calls = {"count": 0}
+
+    def produce_outputs(ctx) -> None:
+        calls["count"] += 1
+        bundle_root = ctx.run_dir / "bundle"
+        bundle_root.mkdir(parents=True)
+        (bundle_root / "summary.txt").write_text("complete\n", encoding="utf-8")
+        zarr_root = bundle_root / "skims.zarr"
+        (zarr_root / "nested").mkdir(parents=True)
+        (zarr_root / ".zgroup").write_text("{}\n", encoding="utf-8")
+        (zarr_root / "nested" / "0.0").write_bytes(b"skim")
+
+    output_sets = {"bundle": consist.OutputSet(root="bundle", include="**/*")}
+    first = tracker.run(
+        name="archive_nested_directory_output_set",
+        fn=produce_outputs,
+        output_paths={
+            "skims": consist.OutputArtifactSpec(
+                path="bundle/skims.zarr",
+                meta={"directory_artifact": True},
+            )
+        },
+        output_sets=output_sets,
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+    archive_root = tmp_path / "archive_nested_directory_output_set"
+
+    archived = tracker.archive_run_outputs(first.run.id, archive_root)
+
+    assert archived.paths["skims"] == archived["skims"]
+    assert archived["skims"] == archived["bundle"] / "skims.zarr"
+    assert (archived["skims"] / "nested" / "0.0").read_bytes() == b"skim"
+    parent = archived.outputs["bundle"]
+    directory = archived.outputs["skims"]
+    manifest = tracker.get_artifact(parent.meta["manifest_artifact_id"])
+    assert manifest is not None
+    for artifact in [parent, directory, *tracker.get_child_artifacts(parent), manifest]:
+        assert artifact.recovery_roots == [str(archive_root.resolve())]
+
+    retried = tracker.archive_run_outputs(first.run.id, archive_root)
+    assert retried.paths == archived.paths
+
+    shutil.rmtree(tracker.run_artifact_dir(first.run))
+    second = tracker.run(
+        name="archive_nested_directory_output_set",
+        fn=produce_outputs,
+        output_paths={
+            "skims": consist.OutputArtifactSpec(
+                path="bundle/skims.zarr",
+                meta={"directory_artifact": True},
+            )
+        },
+        output_sets=output_sets,
+        cache_options=consist.CacheOptions(cache_hydration="outputs-requested"),
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+
+    assert second.cache_hit is True
+    assert calls["count"] == 1
+    hydrated_zarr = tracker.run_artifact_dir(second.run) / "bundle" / "skims.zarr"
+    assert (hydrated_zarr / "nested" / "0.0").read_bytes() == b"skim"
+
+
+def test_archive_run_outputs_rejects_nested_directory_outside_output_set_manifest(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    """A directory artifact cannot introduce bytes excluded from an OutputSet."""
+
+    def produce_outputs(ctx) -> None:
+        bundle_root = ctx.run_dir / "bundle"
+        zarr_root = bundle_root / "skims.zarr"
+        zarr_root.mkdir(parents=True)
+        (zarr_root / ".zgroup").write_text("{}\n", encoding="utf-8")
+        (zarr_root / "unexpected.bin").write_bytes(b"not a manifest member")
+
+    result = tracker.run(
+        name="reject_nested_directory_outside_output_set_manifest",
+        fn=produce_outputs,
+        output_paths={
+            "skims": consist.OutputArtifactSpec(
+                path="bundle/skims.zarr",
+                meta={"directory_artifact": True},
+            )
+        },
+        output_sets={"bundle": consist.OutputSet(root="bundle", include="**/.zgroup")},
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+    archive_root = tmp_path / "reject_nested_directory_outside_output_set_manifest"
+
+    with pytest.raises(ValueError, match="does not match OutputSet.*manifest subtree"):
+        tracker.archive_run_outputs(result.run.id, archive_root)
+
+    outputs = tracker.get_run_outputs(result.run.id)
+    parent = outputs["bundle"]
+    directory = outputs["skims"]
+    manifest = tracker.get_artifact(parent.meta["manifest_artifact_id"])
+    assert manifest is not None
+    assert not archive_root.exists()
+    for artifact in [parent, directory, *tracker.get_child_artifacts(parent), manifest]:
+        assert artifact.recovery_roots == []
+
+
+def test_archive_run_outputs_moves_nested_directory_with_output_set(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    """Move mode removes a nested directory only after set publication succeeds."""
+
+    def produce_outputs(ctx) -> None:
+        zarr_root = ctx.run_dir / "bundle" / "skims.zarr"
+        zarr_root.mkdir(parents=True)
+        (zarr_root / ".zgroup").write_text("{}\n", encoding="utf-8")
+
+    result = tracker.run(
+        name="move_nested_directory_output_set",
+        fn=produce_outputs,
+        output_paths={
+            "skims": consist.OutputArtifactSpec(
+                path="bundle/skims.zarr",
+                meta={"directory_artifact": True},
+            )
+        },
+        output_sets={"bundle": consist.OutputSet(root="bundle", include="**/*")},
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+    source_root = tracker.run_artifact_dir(result.run) / "bundle"
+    archive_root = tmp_path / "move_nested_directory_output_set"
+
+    archived = tracker.archive_run_outputs(result.run.id, archive_root, mode="move")
+
+    assert not source_root.exists()
+    assert (archived["skims"] / ".zgroup").read_text(encoding="utf-8") == "{}\n"
+    for artifact in archived.outputs.values():
+        assert artifact.recovery_roots == [str(archive_root.resolve())]
+
+
+def test_archive_run_outputs_rejects_nested_scalar_outside_output_set_manifest(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    """A nested scalar that is not a member cannot make a set archive inexact."""
+
+    def produce_outputs(ctx) -> None:
+        annual_root = ctx.run_dir / "annual"
+        annual_root.mkdir(parents=True)
+        (annual_root / "annual_2030.csv").write_text(
+            "year,value\n2030,1\n", encoding="utf-8"
+        )
+        (annual_root / "summary.csv").write_text(
+            "metric,value\ncount,1\n", encoding="utf-8"
+        )
+
+    result = tracker.run(
+        name="archive_invalid_nested_output",
+        fn=produce_outputs,
+        output_paths={"summary": "annual/summary.csv"},
+        output_sets={
+            "annual": consist.OutputSet(
+                root="annual",
+                include="annual_*.csv",
+                expected_members=["annual_2030.csv"],
+            )
+        },
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+    archive_root = tmp_path / "archive_invalid_nested_output"
+
+    with pytest.raises(ValueError, match="not a manifest member"):
+        tracker.archive_run_outputs(result.run.id, archive_root)
+
+    outputs = tracker.get_run_outputs(result.run.id)
+    assert outputs["annual"].recovery_roots == []
+    assert outputs["summary"].recovery_roots == []
+    assert not archive_root.exists()
+
+
+def test_archive_run_outputs_moves_nested_manifest_scalar_after_registration(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    """Move mode delays set cleanup until its nested scalar has been archived."""
+
+    def produce_outputs(ctx) -> None:
+        annual_root = ctx.run_dir / "annual"
+        annual_root.mkdir(parents=True)
+        (annual_root / "annual_2030.csv").write_text(
+            "year,value\n2030,1\n", encoding="utf-8"
+        )
+
+    result = tracker.run(
+        name="move_nested_output_set",
+        fn=produce_outputs,
+        output_paths={"annual_2030": "annual/annual_2030.csv"},
+        output_sets={
+            "annual": consist.OutputSet(
+                root="annual",
+                include="annual_*.csv",
+                expected_members=["annual_2030.csv"],
+            )
+        },
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+    source_root = tracker.run_artifact_dir(result.run) / "annual"
+    archive_root = tmp_path / "move_nested_output_set"
+
+    archived = tracker.archive_run_outputs(result.run.id, archive_root, mode="move")
+
+    assert not source_root.exists()
+    assert archived["annual_2030"] == archived["annual"] / "annual_2030.csv"
+    assert archived.outputs["annual"].recovery_roots == [str(archive_root.resolve())]
+
+
+def test_archive_run_outputs_rejects_unsafe_output_set_member_before_registration(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    """A tampered OutputSet member path cannot make a partial set recoverable."""
+
+    def produce_outputs(ctx) -> None:
+        annual_root = ctx.run_dir / "annual"
+        annual_root.mkdir(parents=True)
+        (annual_root / "annual_2030.csv").write_text(
+            "year,value\n2030,1\n", encoding="utf-8"
+        )
+
+    result = tracker.run(
+        name="unsafe_archive_output_set",
+        fn=produce_outputs,
+        output_sets={
+            "annual": consist.OutputSet(root="annual", include="annual_*.csv")
+        },
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+    parent = result.outputs["annual"]
+    [member] = tracker.get_child_artifacts(parent)
+    manifest = tracker.get_artifact(parent.meta["manifest_artifact_id"])
+    assert manifest is not None
+    assert tracker.db is not None
+    tracker.db.update_artifact_meta(
+        member,
+        {"output_set_relative_path": "../escaped.csv"},
+        raise_on_error=True,
+    )
+    archive_root = tmp_path / "unsafe_archive_output_set"
+
+    with pytest.raises(ValueError, match="unsafe output-set member path"):
+        tracker.archive_run_outputs(result.run.id, archive_root)
+
+    refreshed_parent = tracker.get_run_outputs(result.run.id)["annual"]
+    refreshed_member = tracker.get_child_artifacts(refreshed_parent)[0]
+    refreshed_manifest = tracker.get_artifact(
+        refreshed_parent.meta["manifest_artifact_id"]
+    )
+    assert refreshed_manifest is not None
+    assert refreshed_parent.recovery_roots == []
+    assert refreshed_member.recovery_roots == []
+    assert refreshed_manifest.recovery_roots == []
+    assert not archive_root.exists()
+
+
+def test_archive_run_outputs_moves_all_output_set_members_and_manifest(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    """Move mode leaves the validated logical set at its recovery location."""
+
+    def produce_outputs(ctx) -> None:
+        annual_root = ctx.run_dir / "annual"
+        annual_root.mkdir(parents=True)
+        (annual_root / "annual_2030.csv").write_text(
+            "year,value\n2030,1\n", encoding="utf-8"
+        )
+
+    result = tracker.run(
+        name="move_archive_output_set",
+        fn=produce_outputs,
+        output_sets={
+            "annual": consist.OutputSet(root="annual", include="annual_*.csv")
+        },
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+    parent = result.outputs["annual"]
+    [member] = tracker.get_child_artifacts(parent)
+    manifest = tracker.get_artifact(parent.meta["manifest_artifact_id"])
+    assert manifest is not None
+    member_source = Path(member.path)
+    manifest_source = Path(manifest.path)
+    archive_root = tmp_path / "move_archive_output_set"
+
+    archived = tracker.archive_run_outputs(result.run.id, archive_root, mode="move")
+
+    assert (archived["annual"] / "annual_2030.csv").is_file()
+    assert not member_source.exists()
+    assert not manifest_source.exists()
+    assert not Path(parent.path).exists()
+    refreshed_parent = archived.outputs["annual"]
+    refreshed_members = tracker.get_child_artifacts(refreshed_parent)
+    refreshed_manifest = tracker.get_artifact(
+        refreshed_parent.meta["manifest_artifact_id"]
+    )
+    assert refreshed_manifest is not None
+    for artifact in [refreshed_parent, *refreshed_members, refreshed_manifest]:
+        assert artifact.recovery_roots == [str(archive_root.resolve())]
+
+
+def test_archive_run_outputs_rejects_missing_output_set_member_before_registration(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    """Missing member bytes cannot register an otherwise complete OutputSet."""
+
+    def produce_outputs(ctx) -> None:
+        annual_root = ctx.run_dir / "annual"
+        annual_root.mkdir(parents=True)
+        (annual_root / "annual_2030.csv").write_text(
+            "year,value\n2030,1\n", encoding="utf-8"
+        )
+
+    result = tracker.run(
+        name="missing_archive_output_set",
+        fn=produce_outputs,
+        output_sets={
+            "annual": consist.OutputSet(root="annual", include="annual_*.csv")
+        },
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+    parent = result.outputs["annual"]
+    [member] = tracker.get_child_artifacts(parent)
+    manifest = tracker.get_artifact(parent.meta["manifest_artifact_id"])
+    assert manifest is not None
+    Path(member.path).unlink()
+    archive_root = tmp_path / "missing_archive_output_set"
+
+    with pytest.raises(FileNotFoundError, match="source bytes are unavailable"):
+        tracker.archive_run_outputs(result.run.id, archive_root)
+
+    refreshed_parent = tracker.get_run_outputs(result.run.id)["annual"]
+    refreshed_member = tracker.get_child_artifacts(refreshed_parent)[0]
+    refreshed_manifest = tracker.get_artifact(
+        refreshed_parent.meta["manifest_artifact_id"]
+    )
+    assert refreshed_manifest is not None
+    assert refreshed_parent.recovery_roots == []
+    assert refreshed_member.recovery_roots == []
+    assert refreshed_manifest.recovery_roots == []
+    assert not archive_root.exists()
+
+
+def test_archive_run_outputs_rejects_stale_output_set_manifest_before_registration(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    """Manifest formatting changes still invalidate the persisted manifest artifact."""
+
+    def produce_outputs(ctx) -> None:
+        annual_root = ctx.run_dir / "annual"
+        annual_root.mkdir(parents=True)
+        (annual_root / "annual_2030.csv").write_text(
+            "year,value\n2030,1\n", encoding="utf-8"
+        )
+
+    result = tracker.run(
+        name="stale_manifest_archive_output_set",
+        fn=produce_outputs,
+        output_sets={
+            "annual": consist.OutputSet(root="annual", include="annual_*.csv")
+        },
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+    parent = result.outputs["annual"]
+    [member] = tracker.get_child_artifacts(parent)
+    manifest = tracker.get_artifact(parent.meta["manifest_artifact_id"])
+    assert manifest is not None
+    manifest_path = Path(manifest.path)
+    manifest_path.write_text(
+        json.dumps(json.loads(manifest_path.read_text(encoding="utf-8"))) + "\n",
+        encoding="utf-8",
+    )
+    assert tracker.identity.compute_file_checksum(manifest_path) != manifest.hash
+    archive_root = tmp_path / "stale_manifest_archive_output_set"
+
+    with pytest.raises(ValueError, match="manifest.*identity"):
+        tracker.archive_run_outputs(result.run.id, archive_root)
+
+    refreshed_parent = tracker.get_run_outputs(result.run.id)["annual"]
+    refreshed_member = tracker.get_child_artifacts(refreshed_parent)[0]
+    refreshed_manifest = tracker.get_artifact(
+        refreshed_parent.meta["manifest_artifact_id"]
+    )
+    assert refreshed_manifest is not None
+    assert refreshed_parent.recovery_roots == []
+    assert refreshed_member.recovery_roots == []
+    assert refreshed_manifest.recovery_roots == []
+    assert not archive_root.exists()
+
+
+def test_archive_run_outputs_cleans_output_set_bytes_when_metadata_update_fails(
+    tracker: Tracker,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Published set bytes are not retained when recovery-root registration fails."""
+
+    def produce_outputs(ctx) -> None:
+        annual_root = ctx.run_dir / "annual"
+        annual_root.mkdir(parents=True)
+        (annual_root / "annual_2030.csv").write_text(
+            "year,value\n2030,1\n", encoding="utf-8"
+        )
+
+    result = tracker.run(
+        name="metadata_failure_archive_output_set",
+        fn=produce_outputs,
+        output_sets={
+            "annual": consist.OutputSet(root="annual", include="annual_*.csv")
+        },
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+    parent = result.outputs["annual"]
+    [member] = tracker.get_child_artifacts(parent)
+    manifest = tracker.get_artifact(parent.meta["manifest_artifact_id"])
+    assert manifest is not None
+    parent_relative = tracker.fs.get_remappable_relative_path(parent.container_uri)
+    manifest_relative = tracker.fs.get_remappable_relative_path(manifest.container_uri)
+    assert parent_relative is not None
+    assert manifest_relative is not None
+    archive_root = tmp_path / "metadata_failure_archive_output_set"
+
+    def fail_metadata_update(*_args, **_kwargs) -> None:
+        raise RuntimeError("metadata update failed")
+
+    monkeypatch.setattr(
+        tracker, "_set_artifact_recovery_roots_bulk", fail_metadata_update
+    )
+
+    with pytest.raises(RuntimeError, match="metadata update failed"):
+        tracker.archive_run_outputs(result.run.id, archive_root)
+
+    assert not (archive_root / parent_relative).exists()
+    assert not (archive_root / manifest_relative).exists()
+    assert parent.recovery_roots == []
+    assert member.recovery_roots == []
+    assert manifest.recovery_roots == []
+
+
+def test_archive_run_outputs_supports_output_sets_with_fast_manifest_identity(
+    tmp_path: Path,
+) -> None:
+    """OutputSet archival uses the tracker checksum policy for its manifest."""
+    fast_tracker = Tracker(
+        run_dir=tmp_path / "fast_runs",
+        db_path=str(tmp_path / "fast.duckdb"),
+        hashing_strategy="fast",
+    )
+    try:
+
+        def produce_outputs(ctx) -> None:
+            annual_root = ctx.run_dir / "annual"
+            annual_root.mkdir(parents=True)
+            (annual_root / "annual_2030.csv").write_text(
+                "year,value\n2030,1\n", encoding="utf-8"
+            )
+
+        result = fast_tracker.run(
+            name="fast_archive_output_set",
+            fn=produce_outputs,
+            output_sets={
+                "annual": consist.OutputSet(root="annual", include="annual_*.csv")
+            },
+            execution_options=consist.ExecutionOptions(inject_context="ctx"),
+        )
+        archived = fast_tracker.archive_run_outputs(
+            result.run.id, tmp_path / "fast_archive_output_set"
+        )
+
+        assert (archived["annual"] / "annual_2030.csv").is_file()
+        assert archived.outputs["annual"].recovery_roots == [
+            str((tmp_path / "fast_archive_output_set").resolve())
+        ]
+    finally:
+        if fast_tracker.engine is not None:
+            fast_tracker.engine.dispose()
 
 
 def test_archive_run_output_files_copies_verifies_and_registers_selected_file(

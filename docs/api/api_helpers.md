@@ -45,8 +45,9 @@ restart-friendly semantic matcher with optional `cache_epoch=` and caller-owned
 
 `consist.archive_run_outputs(...)` and
 `consist.archive_current_run_outputs(...)` return `ArchivedOutputs`, a
-dict-like mapping of archived paths whose `.outputs` attribute exposes the
-refreshed artifacts for downstream `inputs=...` reuse.
+dict-like mapping of archived paths whose `.paths` attribute exposes the same
+read-only path mapping and whose `.outputs` attribute exposes the refreshed
+artifacts for downstream `inputs=...` reuse.
 
 `consist.archive_run_output_files(...)` is the conservative, file-only archive
 helper for a completed run. It returns an `ArchivedRunOutputFilesReport`, a

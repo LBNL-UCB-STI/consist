@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
+import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, Literal, Mapping, Sequence
@@ -17,6 +19,7 @@ from consist.core.directory_artifacts import (
     materialize_directory_tree,
     materialize_shapefile_bundle,
     validate_directory_manifest,
+    validate_directory_tree,
 )
 from consist.core.materialize import (
     ArchivedRunOutputFile,
@@ -29,6 +32,10 @@ from consist.core.materialize import (
     _output_set_hydration_kind,
 )
 from consist.core.materialize_options import normalize_materialize_output_keys
+from consist.core.output_sets import (
+    _manifest_identity_hash,
+    _normalize_output_set_relative_path,
+)
 from consist.models.artifact import Artifact, ArchivedOutputs
 
 _FILE_HASH_CHUNK_SIZE = 8 * 1024 * 1024
@@ -120,6 +127,49 @@ class _ArchiveFileCandidate:
     artifact: Artifact
     target_path: Path
     source_path: Path | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _OutputSetArchiveMember:
+    """One manifest-validated OutputSet member awaiting archival."""
+
+    artifact: Artifact
+    relative_path: str
+    content_hash: str
+    source_path: Path
+    destination: Path
+
+
+@dataclass(frozen=True, slots=True)
+class _OutputSetArchivePlan:
+    """All immutable inputs required to archive one logical OutputSet."""
+
+    parent: Artifact
+    parent_source: Path
+    destination: Path
+    members: tuple[_OutputSetArchiveMember, ...]
+    manifest: Artifact
+    manifest_source: Path
+    manifest_destination: Path
+    manifest_content_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class _NestedOutputSetScalar:
+    """One scalar output that exactly reuses an OutputSet member destination."""
+
+    artifact: Artifact
+    destination: Path
+    output_set_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class _NestedOutputSetDirectory:
+    """One immutable directory artifact that reuses an OutputSet subtree."""
+
+    artifact: Artifact
+    destination: Path
+    output_set_key: str
 
 
 class TrackerArchiveService(_TrackerServiceBase):
@@ -248,6 +298,13 @@ class TrackerArchiveService(_TrackerServiceBase):
             raise RuntimeError(
                 "Cannot archive artifact: tracker has no database configured."
             )
+        if self._is_output_set_parent(artifact):
+            return self._archive_output_set(
+                artifact,
+                archive_root,
+                mode=mode,
+                append=append,
+            )
         if _is_directory_artifact(artifact):
             return self._archive_directory_artifact(
                 artifact,
@@ -304,6 +361,8 @@ class TrackerArchiveService(_TrackerServiceBase):
             candidate = Path(self.resolve_uri(artifact.container_uri)).resolve()
             if candidate.exists():
                 source_path = candidate
+        if source_path is None:
+            source_path = self._find_current_managed_uri_source(artifact)
         if source_path is None or not source_path.exists():
             raise FileNotFoundError(
                 f"Cannot archive artifact {artifact.key!r}: source bytes are unavailable."
@@ -364,6 +423,781 @@ class TrackerArchiveService(_TrackerServiceBase):
         if mode == "move":
             artifact.abs_path = str(destination.resolve())
         return destination
+
+    def _find_current_managed_uri_source(self, artifact: Artifact) -> Path | None:
+        """Return a validated current-mount source for an ordinary artifact.
+
+        This is deliberately a fallback after producer historical and recovery
+        locations. Only an explicitly configured URI scheme is eligible: the
+        generic URI resolver also accepts run-relative and legacy local paths,
+        which must not become a new source authority for run-owned artifacts.
+        """
+        if "://" not in artifact.container_uri:
+            return None
+
+        scheme, _ = artifact.container_uri.split("://", 1)
+        if scheme not in self.fs.mounts:
+            return None
+
+        candidate = Path(self.fs.resolve_uri(artifact.container_uri))
+        if not candidate.exists():
+            return None
+        if not candidate.is_file():
+            return candidate
+        if not artifact.hash:
+            raise ValueError(
+                f"Cannot archive artifact {artifact.key!r} from its current "
+                "configured mount: artifact hash is unavailable."
+            )
+
+        candidate_hash = self.identity.compute_file_checksum(candidate)
+        if candidate_hash != artifact.hash:
+            raise ValueError(
+                f"Current configured mount source for artifact {artifact.key!r} "
+                "does not match artifact hash."
+            )
+        return candidate
+
+    @staticmethod
+    def _is_output_set_parent(artifact: Artifact) -> bool:
+        """Return whether an artifact is the logical parent of an OutputSet."""
+        metadata = artifact.meta if isinstance(artifact.meta, dict) else {}
+        return artifact.driver == "artifact_set" or metadata.get("artifact_set") is True
+
+    def _find_output_set_archive_source(
+        self,
+        artifact: Artifact,
+        *,
+        producing_run: Any | None,
+    ) -> Path:
+        """Locate an OutputSet source without resolving through symlinks."""
+
+        def reject_symlink(path: Path) -> bool:
+            if self._has_symlink_component(path):
+                raise ValueError(f"OutputSet source contains a symlink: {path}")
+            return True
+
+        source_path: Path | None = None
+        if producing_run is not None:
+            from consist.core.materialize import find_existing_recovery_source_path
+
+            _, source_path, _ = find_existing_recovery_source_path(
+                self.tracker,
+                artifact=artifact,
+                run=producing_run,
+                source_root=None,
+                source_validator=reject_symlink,
+                preserve_raw_paths=True,
+            )
+        if source_path is None and artifact.abs_path:
+            candidate = Path(artifact.abs_path)
+            if candidate.exists():
+                reject_symlink(candidate)
+                source_path = candidate
+        if source_path is None:
+            candidate = Path(self.resolve_uri(artifact.container_uri))
+            if candidate.exists():
+                reject_symlink(candidate)
+                source_path = candidate
+        if source_path is None:
+            raise FileNotFoundError(
+                f"Cannot archive OutputSet artifact {artifact.key!r}: "
+                "source bytes are unavailable."
+            )
+        return source_path
+
+    def _build_output_set_archive_plan(
+        self,
+        artifact: Artifact,
+        archive_root: str | os.PathLike[str],
+    ) -> _OutputSetArchivePlan:
+        """Validate a persisted OutputSet graph before changing archive bytes."""
+        metadata = artifact.meta if isinstance(artifact.meta, dict) else {}
+        output_set_key = metadata.get("output_set_key")
+        if not isinstance(output_set_key, str) or output_set_key != artifact.key:
+            raise ValueError(
+                f"OutputSet parent {artifact.key!r} has no matching output_set_key."
+            )
+        member_count = metadata.get("member_count")
+        if type(member_count) is not int or member_count < 0:
+            raise ValueError(
+                f"OutputSet parent {artifact.key!r} has no valid member_count."
+            )
+        manifest_id = metadata.get("manifest_artifact_id")
+        if not isinstance(manifest_id, str) or not manifest_id:
+            raise ValueError(
+                f"OutputSet parent {artifact.key!r} has no manifest artifact id."
+            )
+        manifest = self.tracker.get_artifact(manifest_id)
+        if manifest is None:
+            raise ValueError(
+                f"OutputSet parent {artifact.key!r} references a missing manifest artifact."
+            )
+        manifest_metadata = manifest.meta if isinstance(manifest.meta, dict) else {}
+        if (
+            manifest_metadata.get("output_set_manifest") is not True
+            or manifest_metadata.get("output_set_key") != artifact.key
+        ):
+            raise ValueError(
+                f"OutputSet parent {artifact.key!r} has an invalid manifest artifact."
+            )
+
+        parent_relative = self.fs.get_remappable_relative_path(artifact.container_uri)
+        manifest_relative = self.fs.get_remappable_relative_path(manifest.container_uri)
+        if parent_relative is None or manifest_relative is None:
+            raise ValueError(
+                f"OutputSet parent {artifact.key!r} does not have a rematerializable "
+                "URI layout."
+            )
+        archive_root_path = Path(archive_root).expanduser().absolute()
+        destination = archive_root_path / parent_relative
+        manifest_destination = archive_root_path / manifest_relative
+        if self._has_symlink_component(destination) or self._has_symlink_component(
+            manifest_destination
+        ):
+            raise ValueError("Symlink detected in OutputSet archive destination.")
+        try:
+            manifest_destination.relative_to(destination)
+        except ValueError:
+            pass
+        else:
+            raise ValueError(
+                f"OutputSet manifest {manifest.key!r} must not be stored inside "
+                "the member root."
+            )
+
+        producing_run = (
+            self.get_run(str(artifact.run_id)) if artifact.run_id is not None else None
+        )
+        parent_source = self._find_output_set_archive_source(
+            artifact, producing_run=producing_run
+        )
+        if not parent_source.is_dir():
+            raise ValueError(
+                f"OutputSet parent {artifact.key!r} source is not a directory."
+            )
+        manifest_source = self._find_output_set_archive_source(
+            manifest, producing_run=producing_run
+        )
+        if not manifest_source.is_file():
+            raise ValueError(
+                f"OutputSet manifest {manifest.key!r} source is not a regular file."
+            )
+        try:
+            manifest_contents = json.loads(manifest_source.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"OutputSet parent {artifact.key!r} has a malformed manifest."
+            ) from exc
+        if not isinstance(manifest_contents, Mapping):
+            raise ValueError(
+                f"OutputSet parent {artifact.key!r} has a malformed manifest."
+            )
+        if (
+            not manifest.hash
+            or self.identity.compute_file_checksum(manifest_source) != manifest.hash
+        ):
+            raise ValueError(
+                f"OutputSet manifest {manifest.key!r} bytes do not match its "
+                "persisted identity."
+            )
+        manifest_content_hash = _compute_file_sha256(manifest_source)
+        if artifact.hash != _manifest_identity_hash(manifest_contents):
+            raise ValueError(
+                f"OutputSet parent {artifact.key!r} manifest does not match its identity."
+            )
+        if (
+            manifest_contents.get("manifest_version") != 1
+            or manifest_contents.get("output_set_key") != artifact.key
+            or not isinstance(manifest_contents.get("root_uri"), str)
+        ):
+            raise ValueError(
+                f"OutputSet parent {artifact.key!r} has an incomplete manifest."
+            )
+
+        children = self.tracker.get_child_artifacts(artifact)
+        if any(
+            (child.meta if isinstance(child.meta, dict) else {}).get(
+                "output_set_member"
+            )
+            is not True
+            for child in children
+        ):
+            raise ValueError(
+                f"OutputSet parent {artifact.key!r} has a non-member child artifact."
+            )
+        if len(children) != member_count:
+            raise ValueError(
+                f"OutputSet parent {artifact.key!r} member count does not match "
+                "its persisted children."
+            )
+
+        manifest_members = manifest_contents.get("members")
+        if not isinstance(manifest_members, list) or len(manifest_members) != len(
+            children
+        ):
+            raise ValueError(
+                f"OutputSet parent {artifact.key!r} has an incomplete manifest."
+            )
+        manifest_totals = manifest_contents.get("totals")
+        if not isinstance(manifest_totals, Mapping):
+            raise ValueError(
+                f"OutputSet parent {artifact.key!r} has an incomplete manifest."
+            )
+
+        manifest_members_by_id: dict[str, Mapping[str, Any]] = {}
+        for manifest_member in manifest_members:
+            if not isinstance(manifest_member, Mapping):
+                raise ValueError(
+                    f"OutputSet parent {artifact.key!r} has a malformed manifest member."
+                )
+            member_id = manifest_member.get("artifact_id")
+            if not isinstance(member_id, str) or not member_id:
+                raise ValueError(
+                    f"OutputSet parent {artifact.key!r} has an incomplete manifest."
+                )
+            if member_id in manifest_members_by_id:
+                raise ValueError(
+                    f"OutputSet parent {artifact.key!r} has duplicate manifest members."
+                )
+            manifest_members_by_id[member_id] = manifest_member
+
+        members: list[_OutputSetArchiveMember] = []
+        total_size_bytes = 0
+        destination_paths: set[Path] = set()
+        for child in children:
+            child_metadata = child.meta if isinstance(child.meta, dict) else {}
+            if (
+                child.id is None
+                or child.parent_artifact_id != artifact.id
+                or child_metadata.get("output_set_key") != artifact.key
+            ):
+                raise ValueError(
+                    f"OutputSet parent {artifact.key!r} has an invalid member artifact."
+                )
+            relative_path = _normalize_output_set_relative_path(
+                child_metadata.get("output_set_relative_path", "")
+            )
+            manifest_member = manifest_members_by_id.pop(str(child.id), None)
+            if manifest_member is None:
+                raise ValueError(
+                    f"OutputSet parent {artifact.key!r} manifest is missing "
+                    f"member {child.key!r}."
+                )
+            content_hash = manifest_member.get("content_hash")
+            size_bytes = manifest_member.get("size_bytes")
+            if (
+                manifest_member.get("key") != child.key
+                or manifest_member.get("uri") != child.container_uri
+                or manifest_member.get("driver") != child.driver
+                or manifest_member.get("relative_path") != relative_path
+                or not isinstance(content_hash, str)
+                or not content_hash
+                or type(size_bytes) is not int
+                or size_bytes < 0
+            ):
+                raise ValueError(
+                    f"OutputSet parent {artifact.key!r} has an incomplete manifest."
+                )
+            child_relative = self.fs.get_remappable_relative_path(child.container_uri)
+            if child_relative is None:
+                raise ValueError(
+                    f"OutputSet member {child.key!r} does not have a rematerializable "
+                    "URI layout."
+                )
+            member_destination = archive_root_path / child_relative
+            if member_destination != destination / Path(relative_path):
+                raise ValueError(
+                    f"OutputSet member {child.key!r} is outside the set root."
+                )
+            if member_destination in destination_paths:
+                raise ValueError(
+                    f"OutputSet parent {artifact.key!r} has duplicate member paths."
+                )
+            destination_paths.add(member_destination)
+            member_source = self._find_output_set_archive_source(
+                child, producing_run=producing_run
+            )
+            if not member_source.is_file():
+                raise ValueError(
+                    f"OutputSet member {child.key!r} source is not a regular file."
+                )
+            try:
+                source_relative = _normalize_output_set_relative_path(
+                    member_source.relative_to(parent_source)
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    f"OutputSet member {child.key!r} is outside the set root."
+                ) from exc
+            if source_relative != relative_path:
+                raise ValueError(
+                    f"OutputSet member {child.key!r} is outside the set root."
+                )
+            if member_source.stat().st_size != size_bytes or (
+                _compute_file_sha256(member_source) != content_hash
+            ):
+                raise ValueError(
+                    f"OutputSet member {child.key!r} bytes do not match the manifest."
+                )
+            total_size_bytes += size_bytes
+            members.append(
+                _OutputSetArchiveMember(
+                    artifact=child,
+                    relative_path=relative_path,
+                    content_hash=content_hash,
+                    source_path=member_source,
+                    destination=member_destination,
+                )
+            )
+        if manifest_members_by_id:
+            raise ValueError(
+                f"OutputSet parent {artifact.key!r} manifest has unknown members."
+            )
+        if (
+            manifest_totals.get("file_count") != len(members)
+            or manifest_totals.get("byte_size") != total_size_bytes
+            or metadata.get("total_size_bytes") != total_size_bytes
+        ):
+            raise ValueError(
+                f"OutputSet parent {artifact.key!r} manifest totals are incomplete."
+            )
+        if manifest_destination in destination_paths:
+            raise ValueError(
+                f"OutputSet manifest {manifest.key!r} overlaps a member destination."
+            )
+
+        return _OutputSetArchivePlan(
+            parent=artifact,
+            parent_source=parent_source,
+            destination=destination,
+            members=tuple(sorted(members, key=lambda member: member.relative_path)),
+            manifest=manifest,
+            manifest_source=manifest_source,
+            manifest_destination=manifest_destination,
+            manifest_content_hash=manifest_content_hash,
+        )
+
+    def _build_selected_output_set_archive_plans(
+        self,
+        selected: Mapping[str, Artifact],
+        archive_root: str | os.PathLike[str],
+    ) -> tuple[
+        dict[str, _OutputSetArchivePlan],
+        dict[str, _NestedOutputSetScalar],
+        dict[str, _NestedOutputSetDirectory],
+    ]:
+        """Validate selected OutputSets and their nested-output overlap contract."""
+        output_set_plans = {
+            key: self._build_output_set_archive_plan(artifact, archive_root)
+            for key, artifact in selected.items()
+            if self._is_output_set_parent(artifact)
+        }
+        archive_root_path = Path(archive_root).expanduser().absolute()
+        nested_scalars: dict[str, _NestedOutputSetScalar] = {}
+        nested_directories: dict[str, _NestedOutputSetDirectory] = {}
+
+        for key, artifact in selected.items():
+            if key in output_set_plans:
+                continue
+            relative_path = self.fs.get_remappable_relative_path(artifact.container_uri)
+            if relative_path is None:
+                continue
+            destination = archive_root_path / relative_path
+            containing_output_sets: list[tuple[str, _OutputSetArchivePlan]] = []
+            for output_set_key, plan in output_set_plans.items():
+                try:
+                    destination.relative_to(plan.destination)
+                except ValueError:
+                    continue
+                containing_output_sets.append((output_set_key, plan))
+            if not containing_output_sets:
+                continue
+            if len(containing_output_sets) > 1:
+                raise ValueError(
+                    f"Nested output {key!r} is contained by multiple selected "
+                    "OutputSets."
+                )
+            output_set_key, plan = containing_output_sets[0]
+            if destination == plan.destination:
+                raise ValueError(
+                    f"Nested output {key!r} conflicts with OutputSet "
+                    f"{output_set_key!r} root."
+                )
+            if _is_directory_artifact(artifact):
+                self._validate_nested_output_set_directory(
+                    key, artifact, destination, output_set_key, plan
+                )
+                nested_directories[key] = _NestedOutputSetDirectory(
+                    artifact=artifact,
+                    destination=destination,
+                    output_set_key=output_set_key,
+                )
+                continue
+            matching_members = [
+                member for member in plan.members if member.destination == destination
+            ]
+            if not matching_members:
+                raise ValueError(
+                    f"Nested output {key!r} is not a manifest member of "
+                    f"OutputSet {output_set_key!r}."
+                )
+            member = matching_members[0]
+            if (
+                artifact.container_uri != member.artifact.container_uri
+                or artifact.driver != member.artifact.driver
+            ):
+                raise ValueError(
+                    f"Nested output {key!r} does not match immutable manifest "
+                    f"member {member.artifact.key!r} of OutputSet "
+                    f"{output_set_key!r}."
+                )
+            producing_run = (
+                self.get_run(str(artifact.run_id))
+                if artifact.run_id is not None
+                else None
+            )
+            source = self._find_output_set_archive_source(
+                artifact, producing_run=producing_run
+            )
+            if (
+                source != member.source_path
+                or not source.is_file()
+                or _compute_file_sha256(source) != member.content_hash
+            ):
+                raise ValueError(
+                    f"Nested output {key!r} does not match immutable manifest "
+                    f"member {member.artifact.key!r} of OutputSet "
+                    f"{output_set_key!r}."
+                )
+            nested_scalars[key] = _NestedOutputSetScalar(
+                artifact=artifact,
+                destination=destination,
+                output_set_key=output_set_key,
+            )
+
+        for plan in output_set_plans.values():
+            self._validate_output_set_archive_destination(
+                plan.destination, plan.members
+            )
+            self._validate_output_set_manifest_archive_destination(plan)
+
+        return output_set_plans, nested_scalars, nested_directories
+
+    def _validate_nested_output_set_directory(
+        self,
+        key: str,
+        artifact: Artifact,
+        destination: Path,
+        output_set_key: str,
+        plan: _OutputSetArchivePlan,
+    ) -> None:
+        """Require a nested directory artifact to equal an OutputSet subtree."""
+        manifest = _directory_artifact_manifest(artifact)
+        relative_subtree = _normalize_output_set_relative_path(
+            destination.relative_to(plan.destination)
+        )
+        producing_run = (
+            self.get_run(str(artifact.run_id)) if artifact.run_id is not None else None
+        )
+        source = self._find_output_set_archive_source(
+            artifact, producing_run=producing_run
+        )
+        expected_source = plan.parent_source / relative_subtree
+        if source != expected_source or not source.is_dir():
+            raise ValueError(
+                f"Nested directory output {key!r} is outside OutputSet "
+                f"{output_set_key!r} source root."
+            )
+        validate_directory_tree(source, manifest)
+        expected_entries = self._output_set_directory_subtree_entries(plan, destination)
+        if manifest["entries"] != expected_entries:
+            raise ValueError(
+                f"Nested directory output {key!r} does not match OutputSet "
+                f"{output_set_key!r} manifest subtree."
+            )
+
+    @staticmethod
+    def _output_set_directory_subtree_entries(
+        plan: _OutputSetArchivePlan,
+        destination: Path,
+    ) -> list[dict[str, Any]]:
+        """Derive the exact directory manifest entries represented by set members."""
+        entries: list[dict[str, Any]] = []
+        directories: set[str] = set()
+        for member in plan.members:
+            try:
+                relative_path = _normalize_output_set_relative_path(
+                    member.destination.relative_to(destination)
+                )
+            except ValueError:
+                continue
+            parent = Path(relative_path).parent
+            while parent != Path("."):
+                directories.add(parent.as_posix())
+                parent = parent.parent
+            entries.append(
+                {
+                    "kind": "file",
+                    "path": relative_path,
+                    "sha256": member.content_hash,
+                    "size": member.source_path.stat().st_size,
+                }
+            )
+        entries.extend({"kind": "directory", "path": path} for path in directories)
+        return sorted(entries, key=lambda entry: (entry["path"], entry["kind"]))
+
+    def _validate_output_set_archive_destination(
+        self,
+        destination: Path,
+        members: Sequence[_OutputSetArchiveMember],
+    ) -> None:
+        """Require an existing OutputSet archive root to match exactly."""
+        if self._has_symlink_component(destination) or destination.is_symlink():
+            raise ValueError(
+                f"Symlink detected in OutputSet archive destination: {destination}"
+            )
+        if not destination.exists():
+            return
+        if not destination.is_dir():
+            raise ValueError(
+                f"OutputSet archive destination is not a directory: {destination}"
+            )
+
+        expected_files = {member.relative_path: member for member in members}
+        expected_directories: set[str] = set()
+        for relative_path in expected_files:
+            parent = Path(relative_path).parent
+            while parent != Path("."):
+                expected_directories.add(parent.as_posix())
+                parent = parent.parent
+
+        actual_files: set[str] = set()
+        actual_directories: set[str] = set()
+        for path in destination.rglob("*"):
+            if path.is_symlink():
+                raise ValueError(
+                    f"Symlink detected in OutputSet archive destination: {path}"
+                )
+            relative_path = _normalize_output_set_relative_path(
+                path.relative_to(destination)
+            )
+            if path.is_file():
+                actual_files.add(relative_path)
+            elif path.is_dir():
+                actual_directories.add(relative_path)
+            else:
+                raise ValueError(f"Unsupported OutputSet archive entry: {path}")
+        if (
+            actual_files != set(expected_files)
+            or actual_directories != expected_directories
+        ):
+            raise ValueError(
+                f"OutputSet archive destination has unexpected or missing members: {destination}"
+            )
+        for relative_path, member in expected_files.items():
+            path = destination / relative_path
+            if _compute_file_sha256(path) != member.content_hash:
+                raise ValueError(
+                    f"OutputSet archive destination member hash mismatch: {path}"
+                )
+
+    def _validate_output_set_manifest_archive_destination(
+        self, plan: _OutputSetArchivePlan
+    ) -> None:
+        """Require an existing manifest destination to retain identical bytes."""
+        destination = plan.manifest_destination
+        if self._has_symlink_component(destination) or destination.is_symlink():
+            raise ValueError(
+                f"Symlink detected in OutputSet archive destination: {destination}"
+            )
+        if destination.exists() and (
+            not destination.is_file()
+            or _compute_file_sha256(destination) != plan.manifest_content_hash
+        ):
+            raise FileExistsError(
+                f"OutputSet manifest archive destination already exists: {destination}"
+            )
+
+    def _publish_output_set_directory(self, plan: _OutputSetArchivePlan) -> bool:
+        """Stage and publish one OutputSet member root without overwriting bytes."""
+        if plan.destination.exists():
+            self._validate_output_set_archive_destination(
+                plan.destination, plan.members
+            )
+            return False
+        if self._has_symlink_component(plan.destination):
+            raise ValueError(
+                f"Symlink detected in OutputSet archive destination: {plan.destination}"
+            )
+        plan.destination.parent.mkdir(parents=True, exist_ok=True)
+        if self._has_symlink_component(plan.destination.parent):
+            raise ValueError(
+                f"Symlink detected in OutputSet archive destination: {plan.destination}"
+            )
+        staging_root = Path(
+            tempfile.mkdtemp(
+                dir=str(plan.destination.parent),
+                prefix=f".consist-output-set-{plan.destination.name}-",
+            )
+        )
+        staging = staging_root / "payload"
+        try:
+            staging.mkdir()
+            for member in plan.members:
+                target = staging / member.relative_path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(member.source_path, target)
+                if _compute_file_sha256(target) != member.content_hash:
+                    raise ValueError(
+                        f"OutputSet member {member.artifact.key!r} changed while archiving."
+                    )
+            for member in plan.members:
+                if _compute_file_sha256(member.source_path) != member.content_hash:
+                    raise ValueError(
+                        f"OutputSet member {member.artifact.key!r} changed while archiving."
+                    )
+            self._validate_output_set_archive_destination(staging, plan.members)
+            if plan.destination.exists() or plan.destination.is_symlink():
+                raise FileExistsError(
+                    f"OutputSet archive destination already exists: {plan.destination}"
+                )
+            os.rename(staging, plan.destination)
+            return True
+        finally:
+            shutil.rmtree(staging_root, ignore_errors=True)
+
+    def _publish_output_set_manifest(self, plan: _OutputSetArchivePlan) -> bool:
+        """Stage and publish the persisted OutputSet manifest without overwriting."""
+        destination = plan.manifest_destination
+        if self._has_symlink_component(destination) or destination.is_symlink():
+            raise ValueError(
+                f"Symlink detected in OutputSet archive destination: {destination}"
+            )
+        if destination.exists():
+            if not destination.is_file() or (
+                _compute_file_sha256(destination) != plan.manifest_content_hash
+            ):
+                raise FileExistsError(
+                    f"OutputSet manifest archive destination already exists: {destination}"
+                )
+            return False
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if self._has_symlink_component(destination.parent):
+            raise ValueError(
+                f"Symlink detected in OutputSet archive destination: {destination}"
+            )
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=str(destination.parent),
+            prefix=f".consist-output-set-{destination.name}-",
+        )
+        temporary_path = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as temporary_file:
+                with plan.manifest_source.open("rb") as source_file:
+                    shutil.copyfileobj(source_file, temporary_file)
+            if _compute_file_sha256(temporary_path) != plan.manifest_content_hash:
+                raise ValueError(
+                    f"OutputSet manifest {plan.manifest.key!r} changed while archiving."
+                )
+            if _compute_file_sha256(plan.manifest_source) != plan.manifest_content_hash:
+                raise ValueError(
+                    f"OutputSet manifest {plan.manifest.key!r} changed while archiving."
+                )
+            if destination.exists() or destination.is_symlink():
+                raise FileExistsError(
+                    f"OutputSet manifest archive destination already exists: {destination}"
+                )
+            os.rename(temporary_path, destination)
+            return True
+        finally:
+            temporary_path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _remove_output_set_archive_destination(destination: Path) -> None:
+        """Best-effort cleanup of bytes created before OutputSet registration failed."""
+        if destination.is_symlink():
+            return
+        if destination.is_dir():
+            shutil.rmtree(destination)
+        elif destination.exists():
+            destination.unlink()
+
+    @staticmethod
+    def _remove_output_set_sources(plan: _OutputSetArchivePlan) -> None:
+        """Apply move semantics after a complete OutputSet archive is registered."""
+        for member in plan.members:
+            if member.source_path != member.destination:
+                member.source_path.unlink()
+        if plan.manifest_source != plan.manifest_destination:
+            plan.manifest_source.unlink()
+        directories = {plan.parent_source}
+        for member in plan.members:
+            current = member.source_path.parent
+            while current != plan.parent_source:
+                directories.add(current)
+                current = current.parent
+        for directory in sorted(
+            directories, key=lambda path: len(path.parts), reverse=True
+        ):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+
+    def _archive_output_set_plan(
+        self,
+        plan: _OutputSetArchivePlan,
+        archive_root: str | os.PathLike[str],
+        *,
+        mode: Literal["copy", "move"],
+        append: bool,
+        remove_sources: bool,
+        dependent_artifacts: Sequence[Artifact] = (),
+    ) -> Path:
+        """Archive a validated OutputSet plan before registering it recoverable."""
+        published_directory = False
+        published_manifest = False
+        try:
+            published_directory = self._publish_output_set_directory(plan)
+            published_manifest = self._publish_output_set_manifest(plan)
+            self.tracker._set_artifact_recovery_roots_bulk(
+                [
+                    plan.parent,
+                    *(member.artifact for member in plan.members),
+                    plan.manifest,
+                    *dependent_artifacts,
+                ],
+                [Path(archive_root).expanduser().absolute()],
+                append=append,
+            )
+        except Exception:
+            if published_manifest:
+                self._remove_output_set_archive_destination(plan.manifest_destination)
+            if published_directory:
+                self._remove_output_set_archive_destination(plan.destination)
+            raise
+        if mode == "move" and remove_sources:
+            self._remove_output_set_sources(plan)
+        return plan.destination
+
+    def _archive_output_set(
+        self,
+        artifact: Artifact,
+        archive_root: str | os.PathLike[str],
+        *,
+        mode: Literal["copy", "move"],
+        append: bool,
+    ) -> Path:
+        """Archive a manifest-backed OutputSet before registering it recoverable."""
+        return self._archive_output_set_plan(
+            self._build_output_set_archive_plan(artifact, archive_root),
+            archive_root,
+            mode=mode,
+            append=append,
+            remove_sources=True,
+            dependent_artifacts=(),
+        )
 
     def _archive_directory_artifact(
         self,
@@ -1405,7 +2239,11 @@ class TrackerArchiveService(_TrackerServiceBase):
 
         Notes
         -----
-        This compatibility API retains its sequential-copy semantics. Use
+        Selected OutputSets are validated before any archive bytes are
+        published. They are then published before ordinary outputs whose
+        URI-relative destinations lie beneath their roots. Such nested outputs
+        must be identical manifest members or an immutable directory whose
+        manifest exactly equals the represented set subtree. Use
         :meth:`archive_run_output_files` for report-oriented, no-overwrite
         regular-file archival.
         """
@@ -1416,14 +2254,52 @@ class TrackerArchiveService(_TrackerServiceBase):
         selected = self._select_required_output_keys(
             outputs, normalized_keys, run_id=run_id
         )
-        archived_paths = {
-            key: self.tracker.archive_artifact(
+        if normalized_keys is None:
+            selected = {
+                key: artifact
+                for key, artifact in selected.items()
+                if _output_set_hydration_kind(self.tracker, artifact)
+                not in {"member", "manifest"}
+            }
+        output_set_plans, nested_scalars, nested_directories = (
+            self._build_selected_output_set_archive_plans(selected, archive_root)
+        )
+        archived_by_key: dict[str, Path] = {}
+        for key, plan in output_set_plans.items():
+            dependent_artifacts = [
+                nested.artifact
+                for nested in (*nested_scalars.values(), *nested_directories.values())
+                if nested.output_set_key == key
+            ]
+            archived_by_key[key] = self._archive_output_set_plan(
+                plan,
+                archive_root,
+                mode=mode,
+                append=append,
+                remove_sources=False,
+                dependent_artifacts=dependent_artifacts,
+            )
+        for key, artifact in selected.items():
+            if key in output_set_plans:
+                continue
+            nested_scalar = nested_scalars.get(key)
+            if nested_scalar is not None:
+                archived_by_key[key] = nested_scalar.destination
+                continue
+            nested_directory = nested_directories.get(key)
+            if nested_directory is not None:
+                archived_by_key[key] = nested_directory.destination
+                continue
+            archived_by_key[key] = self.tracker.archive_artifact(
                 artifact, archive_root, mode=mode, append=append
             )
-            for key, artifact in selected.items()
-        }
+        if mode == "move":
+            for plan in output_set_plans.values():
+                self._remove_output_set_sources(plan)
+        archived_paths = {key: archived_by_key[key] for key in selected}
+        refreshed_outputs = self.get_run_outputs(run_id)
         refreshed_selected = self._select_required_output_keys(
-            self.get_run_outputs(run_id), normalized_keys, run_id=run_id
+            refreshed_outputs, tuple(selected), run_id=run_id
         )
         return ArchivedOutputs(paths=archived_paths, outputs=refreshed_selected)
 

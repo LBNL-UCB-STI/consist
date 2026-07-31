@@ -1598,7 +1598,7 @@ def archive_run_outputs(
     append: bool = True,
     tracker: Optional["Tracker"] = None,
 ) -> ArchivedOutputs:
-    """Archive selected historical run outputs using legacy archive semantics.
+    """Archive selected historical run outputs into a recovery root.
 
     Parameters
     ----------
@@ -1622,7 +1622,8 @@ def archive_run_outputs(
 
     Notes
     -----
-    Use :func:`archive_run_output_files` for no-overwrite, per-key report
+    Manifest-backed OutputSets are archived as one validated logical recovery
+    unit. Use :func:`archive_run_output_files` for no-overwrite, per-key report
     semantics for regular files.
     """
     return _resolve_tracker(tracker).archive_run_outputs(
