@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, MutableMapping
+import gzip
 import hashlib
 import json
 import os
@@ -32,6 +33,16 @@ from consist.api import set_artifact_recovery_roots as set_artifact_recovery_roo
 from consist.core.tracker import Tracker
 from consist.models.artifact import Artifact, ArchivedOutputs
 from consist.models.run import Run
+
+
+def _canonical_output_set_identity_hash(manifest: Mapping[str, object]) -> str:
+    """Compute the parent identity payload without persisted member locations."""
+    identity_manifest = json.loads(json.dumps(manifest, sort_keys=True))
+    for member in identity_manifest["members"]:
+        member.pop("artifact_id", None)
+        member.pop("uri", None)
+    payload = json.dumps(identity_manifest, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def test_tracker_forwards_file_output_archiving_to_archive_service(
@@ -1052,6 +1063,52 @@ def test_archive_run_outputs_archives_output_set_and_hydrates_from_recovery_root
     assert (hydrated_root / "annual_2035.csv").read_text(encoding="utf-8") == (
         "year,value\n2035,2\n"
     )
+
+
+def test_archive_run_outputs_preserves_compound_driver_output_set_identity(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    """A compressed CSV keeps the parent identity aligned with its manifest."""
+
+    def produce_outputs(ctx) -> None:
+        output_root = ctx.run_dir / "beam"
+        output_root.mkdir(parents=True)
+        with gzip.open(output_root / "0.skimsOD.csv.gz", "wt", encoding="utf-8") as f:
+            f.write("origin,destination\n1,2\n")
+        (output_root / "README").write_text("metadata\n", encoding="utf-8")
+
+    result = tracker.run(
+        name="archive_compound_driver_output_set",
+        fn=produce_outputs,
+        output_sets={
+            "beam_run_outputs": consist.OutputSet(root="beam", include="**/*")
+        },
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+    parent = result.outputs["beam_run_outputs"]
+    members = tracker.get_child_artifacts(parent)
+    member_drivers = {
+        member.meta["output_set_relative_path"]: member.driver for member in members
+    }
+    manifest = tracker.get_artifact(parent.meta["manifest_artifact_id"])
+    assert manifest is not None
+    manifest_contents = json.loads(Path(manifest.path).read_text(encoding="utf-8"))
+    manifest_drivers = {
+        member["relative_path"]: member["driver"]
+        for member in manifest_contents["members"]
+    }
+
+    assert member_drivers == {"0.skimsOD.csv.gz": "csv", "README": "unknown"}
+    assert manifest_drivers == member_drivers
+    assert parent.hash == _canonical_output_set_identity_hash(manifest_contents)
+
+    archived = tracker.archive_run_outputs(
+        result.run.id, tmp_path / "archive_compound_driver_output_set"
+    )
+
+    assert (archived["beam_run_outputs"] / "0.skimsOD.csv.gz").is_file()
+    assert (archived["beam_run_outputs"] / "README").is_file()
 
 
 def test_archive_run_outputs_exposes_read_only_paths_mapping(
