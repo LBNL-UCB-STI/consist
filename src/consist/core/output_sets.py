@@ -3,11 +3,12 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import json
+import os
 import re
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Literal, Mapping, Protocol, Sequence, cast
+from typing import Any, Callable, Iterator, Literal, Mapping, Protocol, Sequence, cast
 
 from sqlmodel import SQLModel
 
@@ -215,8 +216,11 @@ def discover_output_set_members(output_set: OutputSet) -> list[OutputSetMember]:
     )
     exclude_patterns = _normalize_patterns(output_set.exclude)
     recursive_pattern = any("**" in pattern for pattern in include_patterns)
+    recursive = output_set.recursive or recursive_pattern
     candidates = (
-        root.rglob("*") if output_set.recursive or recursive_pattern else root.glob("*")
+        _iter_recursive_output_set_paths(root, exclude_patterns)
+        if recursive
+        else root.glob("*")
     )
     members: list[OutputSetMember] = []
     for path in candidates:
@@ -254,6 +258,46 @@ def discover_output_set_members(output_set: OutputSet) -> list[OutputSetMember]:
             )
         )
     return sorted(members, key=lambda member: member.relative_path)
+
+
+def _iter_recursive_output_set_paths(
+    root: Path,
+    exclude_patterns: Sequence[str],
+) -> Iterator[Path]:
+    """Yield recursive candidates while skipping wholly excluded subtrees."""
+    for directory_name, child_directories, child_files in os.walk(root):
+        directory = Path(directory_name)
+        child_directories.sort()
+        child_files.sort()
+
+        retained_directories: list[str] = []
+        for child_name in child_directories:
+            child = directory / child_name
+            if child.is_symlink():
+                raise ValueError(f"Output set member cannot be a symlink: {child}")
+            relative_path = _normalize_output_set_relative_path(child.relative_to(root))
+            if _is_wholly_excluded_subtree(relative_path, exclude_patterns):
+                continue
+            retained_directories.append(child_name)
+            yield child
+        child_directories[:] = retained_directories
+
+        for child_name in child_files:
+            yield directory / child_name
+
+
+def _is_wholly_excluded_subtree(
+    relative_directory: str,
+    exclude_patterns: Sequence[str],
+) -> bool:
+    """Return whether one exclusion pattern covers every descendant file."""
+    for pattern in exclude_patterns:
+        if not pattern.endswith("/**"):
+            continue
+        directory_pattern = pattern.removesuffix("/**")
+        if _matches_glob(relative_directory, directory_pattern):
+            return True
+    return False
 
 
 def resolve_output_set_expected_members(

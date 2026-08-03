@@ -90,6 +90,30 @@ def test_discover_output_set_members_rejects_symlinked_files(
         discover_output_set_members(OutputSet(root=root, include="*.csv"))
 
 
+def test_discover_output_set_members_prunes_excluded_zarr_subtrees(
+    tmp_path: Path,
+) -> None:
+    """Excluded directory trees are not traversed before file filtering."""
+    root = tmp_path / "outputs"
+    root.mkdir()
+    (root / "keep.csv").write_text("id\n1\n")
+    zarr_root = root / "skims.zarr"
+    zarr_root.mkdir()
+    external_file = tmp_path / "external.csv"
+    external_file.write_text("id\n2\n")
+    symlink_path = zarr_root / "unexpected-symlink.csv"
+    try:
+        symlink_path.symlink_to(external_file)
+    except OSError as exc:
+        pytest.skip(f"symlinks are unavailable in this environment: {exc}")
+
+    members = discover_output_set_members(
+        OutputSet(root=root, include="**/*", exclude="**/*.zarr/**")
+    )
+
+    assert [member.relative_path for member in members] == ["keep.csv"]
+
+
 def test_output_set_child_destinations_rejects_traversal_metadata() -> None:
     parent_id = uuid.uuid4()
     parent = Artifact(id=parent_id, key="annual", driver="artifact_set")
