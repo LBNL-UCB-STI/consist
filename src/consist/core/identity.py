@@ -800,6 +800,32 @@ class IdentityManager:
     def _compute_file_checksum(self, file_path: Union[str, Path]) -> str:
         return self.compute_file_checksum(file_path)
 
+    def compute_fast_directory_observation(
+        self, directory_path: Union[str, Path]
+    ) -> str:
+        """Return a versioned metadata observation for one directory.
+
+        Unlike the legacy fast directory checksum, this observation includes
+        root-relative member paths.  It is deliberately not a content identity
+        and is not consumed by the legacy cache-input composer.
+        """
+        directory = Path(directory_path)
+        if not directory.is_dir():
+            raise ValueError(
+                f"Fast directory observation requires a directory: {directory}"
+            )
+
+        digest = hashlib.sha256()
+        for member in sorted(directory.rglob("*")):
+            if not member.is_file():
+                continue
+            stat = member.stat()
+            relative_path = member.relative_to(directory).as_posix()
+            digest.update(
+                f"{relative_path}:{stat.st_size}:{stat.st_mtime_ns}|".encode("utf-8")
+            )
+        return f"stat-v2:directory:{digest.hexdigest()}"
+
     # --- External "hash-only" config inputs ---
 
     def label_for_hash_input(self, path: Union[str, Path]) -> str:
