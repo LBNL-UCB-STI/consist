@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog], and this project adheres to
 [Semantic Versioning].
 
+## [0.3.3] - 2026-08-03
+
+### Fixed
+
+- Align `OutputSet` pre-registration with Consist's canonical artifact driver
+  resolver, so compound extensions such as `.csv.gz` retain their `csv` driver
+  identity. This keeps finalized manifests consistent with their parent
+  identity and restores strict central archival without weakening fail-closed
+  validation by @zneedell
+  ([#214](https://github.com/LBNL-UCB-STI/consist/pull/214)).
+- Prune directory trees wholly excluded by an `.../**` pattern before recursive
+  `OutputSet` discovery descends into them. Excluded Zarr trees no longer cause
+  unnecessary traversal or out-of-scope symlink-safety failures; in-scope
+  symlink rejection, filtering, and member ordering are unchanged by
+  @zneedell ([#215](https://github.com/LBNL-UCB-STI/consist/pull/215)).
+
 ## [0.3.2] - 2026-07-31
 
 ### Added
@@ -653,7 +669,9 @@ The format is based on [Keep a Changelog], and this project adheres to
 
 [Semantic Versioning]: https://semver.org/spec/v2.0.0.html
 
-[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.3.3...HEAD
+
+[0.3.3]: https://github.com/LBNL-UCB-STI/consist/compare/v0.3.2...v0.3.3
 
 [0.3.2]: https://github.com/LBNL-UCB-STI/consist/compare/v0.3.1...v0.3.2
 
