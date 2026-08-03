@@ -240,6 +240,16 @@ class TestInputHashing:
         finally:
             os.remove(fname)
 
+    def test_full_file_checksum_reads_all_chunks(self, tmp_path):
+        source = tmp_path / "large-input.bin"
+        payload = b"a" * 65536 + b"trailing-bytes"
+        source.write_bytes(payload)
+
+        assert (
+            IdentityManager(hashing_strategy="full").compute_file_checksum(source)
+            == hashlib.sha256(payload).hexdigest()
+        )
+
     def test_digest_path_hashing_strategy_override_uses_content_hashing(self, tmp_path):
         config_dir = tmp_path / "config"
         config_dir.mkdir()
@@ -300,6 +310,28 @@ class TestZarrHashing:
         hash_fast_2 = im_fast.compute_file_checksum(store)
 
         assert hash_fast_1 != hash_fast_2
+
+    def test_fast_directory_observation_includes_relative_paths(self, tmp_path):
+        first = tmp_path / "first"
+        second = tmp_path / "second"
+        (first / "north").mkdir(parents=True)
+        (second / "south").mkdir(parents=True)
+        first_file = first / "north" / "duplicate.bin"
+        second_file = second / "south" / "duplicate.bin"
+        first_file.write_bytes(b"same")
+        second_file.write_bytes(b"same")
+        shared_mtime = 1_700_000_000_000_000_000
+        os.utime(first_file, ns=(shared_mtime, shared_mtime))
+        os.utime(second_file, ns=(shared_mtime, shared_mtime))
+
+        identity = IdentityManager(hashing_strategy="fast")
+
+        assert identity.compute_file_checksum(first) == identity.compute_file_checksum(
+            second
+        )
+        assert identity.compute_fast_directory_observation(
+            first
+        ) != identity.compute_fast_directory_observation(second)
 
 
 class TestCallableHashing:
