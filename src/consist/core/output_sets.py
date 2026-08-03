@@ -11,6 +11,7 @@ from typing import Any, Callable, Literal, Mapping, Protocol, Sequence, cast
 
 from sqlmodel import SQLModel
 
+from consist.core.artifacts import _infer_driver_from_path
 from consist.models.artifact import Artifact
 from consist.types import (
     EnumCapture,
@@ -348,7 +349,7 @@ def build_output_set_manifest(
                 "driver": (
                     artifact.driver
                     if artifact is not None
-                    else _infer_driver(member.path)
+                    else _infer_driver_from_path(member.path)
                 ),
                 "size_bytes": member.size_bytes,
                 "content_hash": member.content_hash,
@@ -813,11 +814,6 @@ def _manifest_identity_hash(manifest: Mapping[str, Any]) -> str:
 def _member_key(output_set_key: str, relative_path: str) -> str:
     suffix = _SAFE_KEY_RE.sub("_", relative_path).strip("_")
     return f"{output_set_key}__{suffix}"
-
-
-def _infer_driver(path: Path) -> str:
-    suffix = path.suffix.lower().lstrip(".")
-    return suffix or "unknown"
 
 
 def _resolve_output_set_root(output_set: OutputSet, output_base_dir: Path) -> OutputSet:
