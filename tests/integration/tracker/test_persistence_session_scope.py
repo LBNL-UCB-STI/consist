@@ -219,6 +219,13 @@ def test_pre_action_v2_rows_remain_queryable_without_identity_rewrites(tmp_path)
     assert lineage is not None
     assert lineage["producing_run"]["run"].id == consumer_id
     assert lineage["producing_run"]["inputs"][0]["artifact"].id == prepared_id
+    legacy_match = tracker.find_matching_run(
+        config_hash="legacy_consumer_config",
+        input_hash="legacy_consumer_input",
+        git_hash="legacy_code",
+    )
+    assert legacy_match is not None
+    assert legacy_match.id == consumer_id
     assert (
         tracker.find_matching_run(
             config_hash="legacy_consumer_config",
