@@ -427,6 +427,106 @@ def test_tracker_run_cache_hit_skips_callable(tracker):
     assert second.cache_hit is True
 
 
+def test_tracker_run_reuses_attested_content_from_distinct_producers(
+    tracker, tmp_path: Path
+) -> None:
+    def produce(label: str) -> Artifact:
+        path = tmp_path / f"{label}.txt"
+        path.write_text("equivalent payload\n", encoding="utf-8")
+        with tracker.start_run(
+            f"produce_{label}",
+            "producer",
+            config={"producer": label},
+        ):
+            return tracker.log_artifact(path, key="data", direction="output")
+
+    first_input = produce("first")
+    second_input = produce("second")
+    assert first_input.run_id != second_input.run_id
+    assert first_input.meta["content_identity"] == second_input.meta["content_identity"]
+
+    calls: list[str] = []
+
+    def consume(ctx) -> None:
+        calls.append("called")
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "out.txt").write_text("done\n", encoding="utf-8")
+
+    options = ExecutionOptions(input_binding="none", inject_context="ctx")
+    first = tracker.run(
+        fn=consume,
+        name="consume_equivalent_content",
+        inputs={"data": first_input},
+        output_paths={"out": "out.txt"},
+        execution_options=options,
+    )
+    second = tracker.run(
+        fn=consume,
+        name="consume_equivalent_content",
+        inputs={"data": second_input},
+        output_paths={"out": "out.txt"},
+        execution_options=options,
+    )
+
+    assert calls == ["called"]
+    assert first.cache_hit is False
+    assert second.cache_hit is True
+    assert second.outputs["out"].path.read_text(encoding="utf-8") == "done\n"
+    assert first.run.input_hash == second.run.input_hash
+    assert first.run.meta["input_identity"]["bindings"][0]["mode"] == "content-v1"
+    assert second.run.meta["input_identity"]["bindings"][0]["mode"] == "content-v1"
+
+
+def test_tracker_run_separates_same_content_container_selectors(
+    tracker, tmp_path: Path
+) -> None:
+    container = tmp_path / "container.h5"
+    container.write_bytes(b"shared container bytes")
+    left = tracker.artifacts.create_artifact(
+        container,
+        run_id="producer_left",
+        key="data",
+        driver="h5",
+        table_path="/tables/left",
+    )
+    right = tracker.artifacts.create_artifact(
+        container,
+        run_id="producer_right",
+        key="data",
+        driver="h5",
+        table_path="/tables/right",
+    )
+    assert left.meta["content_identity"] == right.meta["content_identity"]
+
+    calls: list[str] = []
+
+    def consume(ctx) -> None:
+        calls.append("called")
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "out.txt").write_text("done\n", encoding="utf-8")
+
+    options = ExecutionOptions(input_binding="none", inject_context="ctx")
+    first = tracker.run(
+        fn=consume,
+        name="consume_selected_table",
+        inputs={"data": left},
+        output_paths={"out": "out.txt"},
+        execution_options=options,
+    )
+    second = tracker.run(
+        fn=consume,
+        name="consume_selected_table",
+        inputs={"data": right},
+        output_paths={"out": "out.txt"},
+        execution_options=options,
+    )
+
+    assert calls == ["called", "called"]
+    assert first.cache_hit is False
+    assert second.cache_hit is False
+    assert first.run.input_hash != second.run.input_hash
+
+
 def test_tracker_run_uses_canonical_input_binding_evidence_for_action_v2(
     tracker, tmp_path: Path, monkeypatch
 ) -> None:
