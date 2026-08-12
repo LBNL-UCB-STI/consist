@@ -302,6 +302,7 @@ class Run(SQLModel, table=True):
             "cache": {
                 "mode": meta.get("cache_mode"),
                 "hit": meta.get("cache_hit"),
+                "source_run_id": meta.get("cache_source"),
                 "epoch": meta.get("cache_epoch"),
                 "version": meta.get("cache_version"),
             },
