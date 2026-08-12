@@ -49,6 +49,49 @@ def test_tracker_trace_accepts_identity_kwargs(tracker, tmp_path):
     assert isinstance(run.meta.get("consist_hash_inputs"), dict)
 
 
+def test_tracker_trace_records_positional_and_dependency_roles(tracker, tmp_path):
+    first = tmp_path / "first.txt"
+    first.write_text("first\n", encoding="utf-8")
+    second = tmp_path / "second.txt"
+    second.write_text("second\n", encoding="utf-8")
+    dependency = tmp_path / "dependency.txt"
+    dependency.write_text("dependency\n", encoding="utf-8")
+
+    with tracker.trace(
+        name="trace_input_roles",
+        inputs=[first, second],
+        depends_on=[dependency],
+    ):
+        pass
+
+    run = tracker.last_run.run
+    assert [
+        (binding["kind"], binding["role"])
+        for binding in run.meta["input_binding"]["bindings"]
+    ] == [
+        ("positional", 0),
+        ("positional", 1),
+        ("dependency", 0),
+    ]
+
+    with tracker.trace(
+        name="trace_input_roles",
+        inputs=[second, first],
+        depends_on=[dependency],
+        cache_mode="overwrite",
+    ):
+        pass
+
+    reversed_run = tracker.last_run.run
+    assert run.input_hash == reversed_run.input_hash
+    assert [
+        binding["artifact_id"] for binding in run.meta["input_binding"]["bindings"]
+    ] != [
+        binding["artifact_id"]
+        for binding in reversed_run.meta["input_binding"]["bindings"]
+    ]
+
+
 def test_tracker_trace_propagates_start_run_optional_kwargs(tracker, monkeypatch):
     captured_start_kwargs: dict[str, object] = {}
     original_start_run = tracker.start_run
