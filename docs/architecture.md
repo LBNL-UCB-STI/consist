@@ -12,9 +12,9 @@ signature = SHA256(code_hash || config_hash || input_hash)
 
 | Component | Source | Notes |
 |-----------|--------|-------|
-| **Code hash** | Configurable code identity | Default `repo_git` uses Git commit/dirty state; callable modes hash the function module or source |
+| **Code hash** | Configurable code identity | Default `repo_git` uses Git commit/dirty state; callable modes hash the function module or source. Action orchestration also records the selected mode with its resolved digest. |
 | **Config hash** | Canonical JSON of config dict | Normalized for key order and numeric types; Pydantic models serialize deterministically |
-| **Input hash** | SHA256 of input content | For Consist artifacts, uses the producing run's signature (Merkle linking); for raw files, hashes bytes or metadata per `hashing_strategy` |
+| **Input hash** | Bound input identity | `run(...)`, `trace(...)`, and Scenario orchestration use `sha256:action-v2:` over role-aware inputs, selectors, and the typed code identity. Trusted immutable artifacts use content identity; ambiguous inputs retain provenance-sensitive identity. Direct lifecycle calls use legacy input hashing. |
 
 ### What Changes Break Cache Hits?
 
@@ -27,11 +27,23 @@ signature = SHA256(code_hash || config_hash || input_hash)
 | Output file names | ✅ Yes | Output names don't affect signature |
 | Comments in code | Depends | Under `repo_git`, tracked comment changes affect code hash. Under `callable_source`, only comments in the callable source matter. Under `callable_module`, comments in the callable's module matter. |
 
-**Merkle DAG structure**: Each run's signature incorporates the signatures of its input artifacts' producing runs. This forms a directed acyclic graph where:
+**Lineage DAG and action identity**: Artifact links still form a directed
+lineage graph, but action cache identity does not always inherit the producing
+run's signature. For `action-v2` runs:
 
-- Changing a parameter invalidates only downstream runs that depend on it
-- Identical inputs produce cache hits across machines (given the same code version)
-- Provenance validity depends on the lineage graph, not file existence
+- A full-file SHA-256 or validated directory manifest identifies trusted
+  immutable content independently of which upstream run produced it.
+- The binding role and selector remain part of identity, so exchanging inputs
+  between parameters or selecting a different table or array causes a miss.
+- Weak observations or legacy hashes with ambiguous semantics fall back to
+  producer- and provenance-sensitive identity.
+- A strict Scenario run also includes its frozen binding identity.
+
+Consequently, changing upstream code reruns that upstream step. If the new run
+produces the same attested content, an unchanged downstream consumer can still
+hit cache; if the content changes, the downstream input identity changes and
+the consumer reruns. Legacy lifecycle and `action-v2` cache entries use separate
+identity domains and never cross-match.
 
 For detailed terminology, see [Core Concepts](concepts/overview.md).
 

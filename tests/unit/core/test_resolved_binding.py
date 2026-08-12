@@ -1217,12 +1217,17 @@ def test_strict_binding_reuses_across_equivalent_selected_producers(
     ] == str(second_artifact.id)
     for result in (first, second, third):
         identity = result.run.identity_summary["input_identity"]
-        assert identity == {
-            "mode": "resolved-binding-content-v1",
-            "strict_input_count": 1,
-            "ordinary_input_count": 0,
-            "strict_binding_identity": second_binding.identity_digest(),
+        assert identity["mode"] == "action-v2"
+        assert identity["version"] == 2
+        assert identity["code"] == {
+            "version": 1,
+            "mode": "repo_git",
+            "digest": "static_test_hash",
         }
+        assert identity["strict_input_count"] == 1
+        assert identity["ordinary_input_count"] == 0
+        assert identity["strict_binding_identity"] == second_binding.identity_digest()
+        assert identity["bindings"] == []
 
 
 def test_non_git_callable_identity_evidence_records_resolved_mode_and_digest(tracker):
@@ -1252,7 +1257,7 @@ def test_non_git_callable_identity_evidence_records_resolved_mode_and_digest(tra
     )
 
 
-def test_strict_binding_keeps_ordinary_dependency_provenance_sensitive(
+def test_strict_binding_reuses_attested_ordinary_dependency_content(
     tracker, tmp_path: Path
 ) -> None:
     from consist import ExecutionOptions
@@ -1317,9 +1322,18 @@ def test_strict_binding_keeps_ordinary_dependency_provenance_sensitive(
         )
 
     assert first.cache_hit is False
-    assert second.cache_hit is False
+    assert second.cache_hit is True
     assert first.run.identity_summary["input_identity"]["ordinary_input_count"] == 1
     assert second.run.identity_summary["input_identity"]["ordinary_input_count"] == 1
+    assert first.run.identity_summary["input_identity"]["bindings"] == [
+        {
+            "kind": "dependency",
+            "role": 0,
+            "mode": "content-v1",
+            "value": f"sha256:file:{first_dependency.hash}",
+            "artifact_id": str(first_dependency.id),
+        }
+    ]
 
 
 def test_strict_binding_protocol_mismatch_raises_before_callable_execution(

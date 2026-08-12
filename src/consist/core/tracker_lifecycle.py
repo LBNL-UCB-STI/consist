@@ -464,9 +464,10 @@ class RunLifecycleCoordinator:
             )
             git_hash = code_identity_resolution.digest
 
-            # When CodeIdentityDescriptor/action-v2 construction
-            # lands on this branch, pass this exact resolved mode and digest into
-            # that descriptor instead of recomputing identity or defaulting mode.
+        action_code_identity = tracker.identity.describe_code_identity(
+            mode=code_identity_resolution.mode,
+            digest=code_identity_resolution.digest,
+        )
 
         with _track_begin_run_phase("lifecycle.create_run_and_bind_state"):
             kwargs["code_identity"] = code_identity_resolution.mode
@@ -636,7 +637,7 @@ class RunLifecycleCoordinator:
                 if parent_candidates:
                     run.parent_run_id = parent_candidates[-1]
 
-        if input_binding_roles:
+        if input_binding_roles is not None:
             if len(input_binding_roles) != len(current_consist.inputs):
                 raise ValueError(
                     "input binding role protocol mismatch: role count does not match "
@@ -670,24 +671,50 @@ class RunLifecycleCoordinator:
                         "does not match the Scenario binding order"
                     )
                 ordinary_inputs = current_consist.inputs[strict_input_count:]
+                if input_binding_roles is None:
+                    raise ValueError(
+                        "strict binding runs require internal input binding roles"
+                    )
+                ordinary_binding_roles = [
+                    replace(role, input_index=role.input_index - strict_input_count)
+                    for role in input_binding_roles
+                    if role.input_index >= strict_input_count
+                ]
                 tracker._prefetch_run_signatures(ordinary_inputs)
-                input_hash = tracker.identity.compute_resolved_binding_input_hash(
-                    ordinary_inputs=ordinary_inputs,
-                    strict_binding_identity=strict_binding_context.identity_digest,
-                    path_resolver=tracker.resolve_uri,
-                    signature_lookup=tracker._resolve_run_signature,
+                action_identity = (
+                    tracker.identity.compute_resolved_binding_action_identity(
+                        ordinary_inputs=ordinary_inputs,
+                        ordinary_binding_roles=ordinary_binding_roles,
+                        strict_binding_identity=strict_binding_context.identity_digest,
+                        code_identity=action_code_identity,
+                        path_resolver=tracker.resolve_uri,
+                        signature_lookup=tracker._resolve_run_signature,
+                    )
                 )
-                run.input_hash = input_hash
+                run.input_hash = action_identity.value
                 run.signature = tracker.identity.calculate_run_signature(
                     code_hash=git_hash,
                     config_hash=config_hash,
-                    input_hash=input_hash,
+                    input_hash=action_identity.value,
                 )
                 run.meta["input_identity"] = {
-                    "mode": "resolved-binding-content-v1",
+                    "mode": "action-v2",
+                    "version": 2,
+                    "code": action_identity.code.as_payload(),
                     "strict_input_count": strict_input_count,
                     "ordinary_input_count": len(ordinary_inputs),
                     "strict_binding_identity": strict_binding_context.identity_digest,
+                    "bindings": [
+                        {
+                            **binding.as_payload(),
+                            "artifact_id": str(ordinary_inputs[role.input_index].id),
+                        }
+                        for role, binding in zip(
+                            ordinary_binding_roles,
+                            action_identity.bindings,
+                            strict=True,
+                        )
+                    ],
                 }
         else:
             try:
@@ -696,12 +723,41 @@ class RunLifecycleCoordinator:
                     tracker._prefetch_run_signatures(current_consist.inputs)
                     _log_timing("prefetch_run_signatures", t0)
                     t0 = time.perf_counter()
-                    input_hash = tracker.identity.compute_input_hash(
-                        current_consist.inputs,
-                        path_resolver=tracker.resolve_uri,
-                        signature_lookup=tracker._resolve_run_signature,
-                        binding_roles=input_binding_roles,
-                    )
+                    if input_binding_roles is None:
+                        input_hash = tracker.identity.compute_input_hash(
+                            current_consist.inputs,
+                            path_resolver=tracker.resolve_uri,
+                            signature_lookup=tracker._resolve_run_signature,
+                        )
+                    else:
+                        action_identity = (
+                            tracker.identity.compute_action_input_identity(
+                                inputs=current_consist.inputs,
+                                binding_roles=input_binding_roles,
+                                code_identity=action_code_identity,
+                                path_resolver=tracker.resolve_uri,
+                                signature_lookup=tracker._resolve_run_signature,
+                            )
+                        )
+                        input_hash = action_identity.value
+                        run.meta["input_identity"] = {
+                            "mode": "action-v2",
+                            "version": 2,
+                            "code": action_identity.code.as_payload(),
+                            "bindings": [
+                                {
+                                    **binding.as_payload(),
+                                    "artifact_id": str(
+                                        current_consist.inputs[role.input_index].id
+                                    ),
+                                }
+                                for role, binding in zip(
+                                    input_binding_roles,
+                                    action_identity.bindings,
+                                    strict=True,
+                                )
+                            ],
+                        }
                     run.input_hash = input_hash
                     run.signature = tracker.identity.calculate_run_signature(
                         code_hash=git_hash,
