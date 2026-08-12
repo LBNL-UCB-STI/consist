@@ -21,6 +21,7 @@ from consist.core.config_canonicalization import (
     ConfigPlan,
     canonical_identity_from_config,
 )
+from consist.core.run_resolution import InputBindingRole
 from consist.core.tracker import Tracker
 from consist.models.artifact import Artifact
 from consist.models.run import RunResult
@@ -424,6 +425,149 @@ def test_tracker_run_cache_hit_skips_callable(tracker):
     assert calls == ["called"]
     assert first.outputs["out"].path.read_text() == "calls=1\n"
     assert second.cache_hit is True
+
+
+def test_tracker_run_records_canonical_non_hashing_input_binding_evidence(
+    tracker, tmp_path: Path, monkeypatch
+) -> None:
+    alpha = tmp_path / "alpha.txt"
+    alpha.write_text("alpha\n", encoding="utf-8")
+    beta = tmp_path / "beta.txt"
+    beta.write_text("beta\n", encoding="utf-8")
+    dependency = tmp_path / "dependency.txt"
+    dependency.write_text("dependency\n", encoding="utf-8")
+
+    def step() -> None:
+        pass
+
+    captured_binding_roles = []
+    original_compute_input_hash = tracker.identity.compute_input_hash
+
+    def capture_input_hash(inputs, **kwargs):
+        captured_binding_roles.append(kwargs["binding_roles"])
+        return original_compute_input_hash(inputs, **kwargs)
+
+    monkeypatch.setattr(tracker.identity, "compute_input_hash", capture_input_hash)
+
+    first = tracker.run(
+        fn=step,
+        name="role_evidence",
+        inputs={"zeta": beta, "alpha": alpha},
+        depends_on=[dependency],
+    )
+    second = tracker.run(
+        fn=step,
+        name="role_evidence",
+        inputs={"alpha": alpha, "zeta": beta},
+        depends_on=[dependency],
+    )
+
+    first_binding = first.run.meta["input_binding"]
+    second_binding = second.run.meta["input_binding"]
+    assert first_binding["version"] == "roles-v1"
+    assert second_binding["version"] == "roles-v1"
+    first_roles = [
+        (binding["kind"], binding["role"]) for binding in first_binding["bindings"]
+    ]
+    second_roles = [
+        (binding["kind"], binding["role"]) for binding in second_binding["bindings"]
+    ]
+    assert (
+        first_roles
+        == second_roles
+        == [
+            ("named", "alpha"),
+            ("named", "zeta"),
+            ("dependency", 0),
+        ]
+    )
+    assert [binding["kind"] for binding in first_binding["bindings"]] == [
+        "named",
+        "named",
+        "dependency",
+    ]
+    assert [binding["role"] for binding in first_binding["bindings"]] == [
+        "alpha",
+        "zeta",
+        0,
+    ]
+    assert all(binding["artifact_id"] for binding in first_binding["bindings"])
+    assert [
+        (role.kind, role.role, role.input_index) for role in captured_binding_roles[0]
+    ] == [("named", "alpha", 1), ("named", "zeta", 0), ("dependency", 0, 2)]
+    assert first.run.input_hash == second.run.input_hash
+    assert second.cache_hit is True
+
+
+def test_tracker_run_preserves_swapped_named_bindings_without_changing_hash(
+    tracker, tmp_path: Path
+) -> None:
+    alpha = tmp_path / "alpha.txt"
+    alpha.write_text("alpha\n", encoding="utf-8")
+    beta = tmp_path / "beta.txt"
+    beta.write_text("beta\n", encoding="utf-8")
+
+    first = tracker.run(
+        fn=lambda: None,
+        name="swapped_roles",
+        inputs={"left": alpha, "right": beta},
+        cache_options=CacheOptions(cache_mode="overwrite"),
+    )
+    second = tracker.run(
+        fn=lambda: None,
+        name="swapped_roles",
+        inputs={"left": beta, "right": alpha},
+        cache_options=CacheOptions(cache_mode="overwrite"),
+    )
+
+    def role_artifact_ids(result) -> dict[str, str]:
+        return {
+            binding["role"]: binding["artifact_id"]
+            for binding in result.run.meta["input_binding"]["bindings"]
+        }
+
+    assert role_artifact_ids(first) != role_artifact_ids(second)
+    assert first.run.input_hash == second.run.input_hash
+
+
+def test_tracker_run_preserves_duplicate_named_bindings(
+    tracker, tmp_path: Path
+) -> None:
+    source = tmp_path / "source.txt"
+    source.write_text("source\n", encoding="utf-8")
+    artifact = tracker.artifacts.create_artifact(
+        source,
+        run_id=None,
+        key="source",
+        direction="input",
+    )
+
+    result = tracker.run(
+        fn=lambda: None,
+        name="duplicate_roles",
+        inputs={"left": artifact, "right": artifact},
+    )
+
+    bindings = result.run.meta["input_binding"]["bindings"]
+    assert [binding["role"] for binding in bindings] == ["left", "right"]
+    assert bindings[0]["artifact_id"] == bindings[1]["artifact_id"]
+
+
+def test_begin_run_rejects_forged_input_binding_roles(tracker, tmp_path: Path) -> None:
+    source = tmp_path / "source.txt"
+    source.write_text("source\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="input binding role"):
+        tracker.begin_run(
+            "forged_roles",
+            "forged_roles",
+            inputs=[source],
+            _consist_input_binding_roles=[
+                InputBindingRole(kind="named", role="forged", input_index=0)
+            ],
+        )
+
+    assert tracker.current_consist is None
 
 
 def test_tracker_run_cache_options_callable_code_identity(tracker):
