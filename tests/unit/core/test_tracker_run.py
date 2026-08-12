@@ -427,7 +427,7 @@ def test_tracker_run_cache_hit_skips_callable(tracker):
     assert second.cache_hit is True
 
 
-def test_tracker_run_records_canonical_non_hashing_input_binding_evidence(
+def test_tracker_run_uses_canonical_input_binding_evidence_for_action_v2(
     tracker, tmp_path: Path, monkeypatch
 ) -> None:
     alpha = tmp_path / "alpha.txt"
@@ -441,13 +441,19 @@ def test_tracker_run_records_canonical_non_hashing_input_binding_evidence(
         pass
 
     captured_binding_roles = []
-    original_compute_input_hash = tracker.identity.compute_input_hash
+    original_compute_action_input_identity = (
+        tracker.identity.compute_action_input_identity
+    )
 
-    def capture_input_hash(inputs, **kwargs):
+    def capture_action_input_identity(**kwargs):
         captured_binding_roles.append(kwargs["binding_roles"])
-        return original_compute_input_hash(inputs, **kwargs)
+        return original_compute_action_input_identity(**kwargs)
 
-    monkeypatch.setattr(tracker.identity, "compute_input_hash", capture_input_hash)
+    monkeypatch.setattr(
+        tracker.identity,
+        "compute_action_input_identity",
+        capture_action_input_identity,
+    )
 
     first = tracker.run(
         fn=step,
@@ -495,11 +501,13 @@ def test_tracker_run_records_canonical_non_hashing_input_binding_evidence(
     assert [
         (role.kind, role.role, role.input_index) for role in captured_binding_roles[0]
     ] == [("named", "alpha", 1), ("named", "zeta", 0), ("dependency", 0, 2)]
+    assert first.run.input_hash.startswith("sha256:action-v2:")
+    assert first.run.meta["input_identity"]["mode"] == "action-v2"
     assert first.run.input_hash == second.run.input_hash
     assert second.cache_hit is True
 
 
-def test_tracker_run_preserves_swapped_named_bindings_without_changing_hash(
+def test_tracker_run_distinguishes_swapped_named_bindings_in_action_v2(
     tracker, tmp_path: Path
 ) -> None:
     alpha = tmp_path / "alpha.txt"
@@ -527,7 +535,33 @@ def test_tracker_run_preserves_swapped_named_bindings_without_changing_hash(
         }
 
     assert role_artifact_ids(first) != role_artifact_ids(second)
-    assert first.run.input_hash == second.run.input_hash
+    assert first.run.input_hash != second.run.input_hash
+
+
+def test_tracker_run_action_v2_does_not_reuse_a_legacy_lifecycle_cache_key(
+    tracker, tmp_path: Path
+) -> None:
+    source = tmp_path / "source.txt"
+    source.write_text("source\n", encoding="utf-8")
+
+    with tracker.start_run(
+        "legacy_input_identity",
+        "action_boundary",
+        config={"version": 1},
+        inputs=[source],
+    ):
+        legacy = tracker.current_consist.run
+
+    action = tracker.run(
+        fn=lambda: None,
+        name="action_boundary",
+        config={"version": 1},
+        inputs={"data": source},
+    )
+
+    assert not legacy.input_hash.startswith("sha256:action-v2:")
+    assert action.run.input_hash.startswith("sha256:action-v2:")
+    assert action.cache_hit is False
 
 
 def test_tracker_run_preserves_duplicate_named_bindings(
