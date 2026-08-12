@@ -1332,6 +1332,12 @@ def test_strict_binding_reuses_attested_ordinary_dependency_content(
             "mode": "content-v1",
             "value": f"sha256:file:{first_dependency.hash}",
             "artifact_id": str(first_dependency.id),
+            "selector": {
+                "driver": "txt",
+                "table_path": None,
+                "array_path": None,
+            },
+            "evidence": {"identity_strength": "content-v1"},
         }
     ]
 
