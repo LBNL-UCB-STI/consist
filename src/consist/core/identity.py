@@ -41,6 +41,7 @@ except ImportError:
     np = None
 
 if TYPE_CHECKING:
+    from consist.core.run_resolution import InputBindingRole
     from consist.models.artifact import Artifact
     from consist.types import HashInput
 
@@ -476,6 +477,7 @@ class IdentityManager:
         inputs: List["Artifact"],
         path_resolver: Optional[Callable[[str], str]] = None,
         signature_lookup: Optional[Callable[[str], Optional[str]]] = None,
+        binding_roles: Optional[List["InputBindingRole"]] = None,
     ) -> str:
         """
         Synthesize a deterministic hash representing the aggregate state of all input artifacts.
@@ -502,6 +504,9 @@ class IdentityManager:
         signature_lookup : Optional[Callable[[str], Optional[str]]], optional
             A function to retrieve the run signatures of producing runs,
             facilitating Merkle-link construction.
+        binding_roles : Optional[List[InputBindingRole]], optional
+            Caller-visible input roles preserved for the future role-aware composer.
+            Phase 2 deliberately does not include them in the legacy hash payload.
 
         Returns
         -------
@@ -513,6 +518,8 @@ class IdentityManager:
         ValueError
             If an exogenous file requires hashing but no path_resolver is provided.
         """
+        del binding_roles
+
         if not inputs:
             # Hash of an empty set
             return hashlib.sha256(b"empty_inputs").hexdigest()

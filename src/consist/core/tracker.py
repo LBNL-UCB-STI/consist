@@ -43,6 +43,7 @@ from consist.core.cache import (
     ActiveRunCacheOptions,
 )
 from consist.core.run_resolution import (
+    InputBindingRole,
     is_xarray_dataset as _is_xarray_dataset,
     preview_run_artifact_dir as _preview_run_artifact_dir,
     resolve_input_reference_configured as _resolve_input_reference_configured,
@@ -362,6 +363,9 @@ class Tracker:
         self._strict_binding_context: ContextVar[
             _StrictBindingInvocationContext | None
         ] = ContextVar("consist_strict_binding_context", default=None)
+        self._input_binding_roles: ContextVar[list[InputBindingRole] | None] = (
+            ContextVar("consist_input_binding_roles", default=None)
+        )
         self.settings = ConsistSettings.from_env()
         self._dlt_lock_retries = self.settings.dlt_lock_retries
         self._dlt_lock_base_sleep_seconds = self.settings.dlt_lock_base_sleep_seconds
@@ -1684,6 +1688,17 @@ class Tracker:
             return run(**kwargs)
         finally:
             self._strict_binding_context.reset(token)
+
+    @contextmanager
+    def _input_binding_roles_context(
+        self, roles: list[InputBindingRole]
+    ) -> Iterator[None]:
+        """Make orchestration-produced input roles available to one lifecycle call."""
+        token = self._input_binding_roles.set(roles)
+        try:
+            yield
+        finally:
+            self._input_binding_roles.reset(token)
 
     def run_with_config_overrides(
         self,
