@@ -26,8 +26,15 @@ jobs:
           # Keep the matrix small to reduce CI time/credits.
           - os: ubuntu-latest
             python-version: "3.11"
+            coverage: true
           - os: ubuntu-latest
             python-version: "3.12"
+            coverage: false
+
+    # .python-version currently selects 3.13 locally.  Pin uv to the matrix
+    # interpreter so each CI leg actually exercises the advertised version.
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
 
     steps:
       - uses: actions/checkout@v7
@@ -75,15 +82,25 @@ jobs:
             --output provenance-schema-release
           (cd provenance-schema-release && sha256sum -c SHA256SUMS)
 
-      - name: Pytest (skip heavy)
+      - name: Pytest (skip heavy, coverage)
+        if: ${{ matrix.coverage }}
         run: >
           uv run -m pytest -q
           -m "not heavy"
           tests/unit tests/integration tests/e2e
+          --durations=40
           --cov=src/consist
           --cov-report=term
           --cov-report=json:coverage.json
           --cov-fail-under=80
+
+      - name: Pytest (skip heavy)
+        if: ${{ !matrix.coverage }}
+        run: >
+          uv run -m pytest -q
+          -m "not heavy"
+          tests/unit tests/integration tests/e2e
+          --durations=40
 
       - name: Coverage Guardrails (Critical Modules)
         if: runner.os == 'Linux' && matrix.python-version == '3.11'
