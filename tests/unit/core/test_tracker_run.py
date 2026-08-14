@@ -8,6 +8,7 @@ import subprocess
 import sys
 from typing import Any, cast
 from unittest.mock import patch
+from uuid import UUID
 
 import pandas as pd
 import pytest
@@ -21,6 +22,7 @@ from consist.core.config_canonicalization import (
     ConfigPlan,
     canonical_identity_from_config,
 )
+from consist.core.resolved_binding import ArtifactIdentity
 from consist.core.run_resolution import InputBindingRole
 from consist.core.tracker import Tracker
 from consist.models.artifact import Artifact
@@ -544,6 +546,95 @@ def test_tracker_run_records_fast_input_fallback_without_content_reuse(
     assert first.cache_hit is False
     assert second.cache_hit is False
     assert first.run.input_hash != second.run.input_hash
+
+
+def test_action_v2_content_binding_survives_later_caller_hash_logging_after_reopen(
+    tmp_path: Path,
+) -> None:
+    """A later untrusted observation must not rewrite an earlier trusted input."""
+    db_path = tmp_path / "provenance.duckdb"
+    tracker = Tracker(run_dir=tmp_path / "runs", db_path=db_path)
+    datastore = tmp_path / "usim_datastore.h5"
+    datastore.write_bytes(b"HDF5 datastore bytes")
+
+    with tracker.start_run("produce_datastore", "activitysim"):
+        trusted = tracker.log_artifact(
+            datastore,
+            key="usim_datastore_h5",
+            direction="output",
+            driver="h5",
+        )
+
+    def consume() -> None:
+        tracker.log_artifact(
+            trusted,
+            key="usim_datastore_h5",
+            direction="input",
+            content_hash=trusted.hash,
+            force_hash_override=True,
+        )
+
+    result = tracker.run(
+        fn=consume,
+        name="consume_datastore",
+        inputs={"usim_datastore_h5": trusted},
+        execution_options=ExecutionOptions(input_binding="none"),
+    )
+
+    binding = result.run.meta["input_identity"]["bindings"][0]
+    assert binding["mode"] == "content-v1"
+    assert binding["artifact_id"] == str(trusted.id)
+
+    tracker.db.engine.dispose()
+    reopened = Tracker(run_dir=tmp_path / "runs", db_path=db_path)
+    persisted = reopened.db.get_artifact(UUID(binding["artifact_id"]))
+
+    assert persisted is not None
+    assert ArtifactIdentity.from_artifact(persisted) == ArtifactIdentity.from_artifact(
+        trusted
+    )
+
+
+def test_action_v2_records_caller_hash_input_as_legacy_after_reopen(
+    tmp_path: Path,
+) -> None:
+    """Caller-provided hashes remain untrusted after persistence."""
+    db_path = tmp_path / "provenance.duckdb"
+    tracker = Tracker(run_dir=tmp_path / "runs", db_path=db_path)
+    datastore = tmp_path / "usim_datastore.h5"
+    datastore.write_bytes(b"caller-provided HDF5 datastore bytes")
+
+    with tracker.start_run("record_external_datastore", "activitysim"):
+        untrusted = tracker.log_artifact(
+            datastore,
+            key="usim_datastore_h5",
+            direction="output",
+            driver="h5",
+            content_hash="a" * 64,
+            force_hash_override=True,
+        )
+
+    result = tracker.run(
+        fn=lambda: None,
+        name="consume_external_datastore",
+        inputs={"usim_datastore_h5": untrusted},
+        execution_options=ExecutionOptions(input_binding="none"),
+    )
+
+    tracker.db.engine.dispose()
+    reopened = Tracker(run_dir=tmp_path / "runs", db_path=db_path)
+    persisted = reopened.db.get_artifact(untrusted.id)
+    binding = reopened.get_run(result.run.id).identity_summary["input_identity"][
+        "bindings"
+    ][0]
+
+    assert persisted is not None
+    assert persisted.meta["hash_semantics"]["source"] == "caller_supplied"
+    assert binding["mode"] == "legacy-provenance-v1"
+    assert binding["evidence"] == {
+        "identity_strength": "legacy-provenance-v1",
+        "fallback_reason": "caller_supplied_hash",
+    }
 
 
 def test_tracker_run_separates_same_content_container_selectors(
