@@ -63,9 +63,14 @@ from consist.core.workflow import StepIdentity
 from consist.api import (
     AdmissionReference,  # noqa: F401
     AdmissionReport,  # noqa: F401
+    DeclaredDigestExpectation,  # noqa: F401
+    FileIdentity,  # noqa: F401
     RunContext,
     check_admission_reference,  # noqa: F401
+    check_admission_reference_expected_identity,  # noqa: F401
     check_artifact_identity,  # noqa: F401
+    check_expected_identity,  # noqa: F401
+    compare_path_to_identity,  # noqa: F401
     load,
     load_df,
     load_relation,
@@ -211,6 +216,8 @@ __all__ = [
     "RunContext",
     "AdmissionReference",
     "AdmissionReport",
+    "DeclaredDigestExpectation",
+    "FileIdentity",
     "AdmissionEvidence",
     "ArtifactIdentity",
     "BoundArtifact",
@@ -299,7 +306,10 @@ __all__ = [
     "to_df",
     "run",
     "check_admission_reference",
+    "check_admission_reference_expected_identity",
     "check_artifact_identity",
+    "check_expected_identity",
+    "compare_path_to_identity",
     "ref",
     "refs",
     "trace",
