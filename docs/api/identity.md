@@ -43,10 +43,14 @@ only a full regular-file SHA-256 whose forward metadata explicitly records raw
 file-byte semantics. For older or otherwise ambiguous stored hashes, callers
 may supply a distinct immutable expected file; Consist hashes that file directly
 instead of resolving the stored artifact URI or recovery roots, then requires it
-to corroborate the stored 64-character historical fingerprint. The result is a
-versioned, policy-neutral `AdmissionReport` with a deterministic JSON form. See
-[Artifact Admission](admission.md) for the complete API and developer helper
-reference.
+to corroborate the stored 64-character historical fingerprint.
+
+`check_expected_identity()` accepts a separately validated `FileIdentity` for
+the same raw-file comparison without a Tracker lookup. It verifies equality to
+that declaration but does not turn caller-supplied bytes or a digest into a
+trusted `ArtifactIdentity`. Both APIs return a versioned, policy-neutral
+`AdmissionReport` with deterministic JSON. See [Artifact Admission](admission.md)
+for the complete API and developer helper reference.
 
 ::: consist.core.identity.IdentityManager
     options:
