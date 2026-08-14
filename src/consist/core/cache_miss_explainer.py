@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional, Protocol, Sequence, runtime_checkable
 
@@ -633,7 +633,7 @@ def _binding_selector(binding: Mapping[str, Any]) -> Mapping[str, Any] | None:
 
 
 def _ordered_action_v2_role_pairs(
-    pairs: Sequence[tuple[str, str | int]],
+    pairs: Iterable[tuple[str, str | int]],
 ) -> list[tuple[str, str | int]]:
     """Order persisted role pairs without comparing unlike role value types."""
     return sorted(pairs, key=lambda item: (item[0], str(item[1])))
