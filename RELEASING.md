@@ -96,7 +96,7 @@ PyPI publishing is currently manual. Publish the exact artifacts you just
 tested:
 
 ```bash
-.venv/bin/python -m pip install --upgrade twine
+uv pip install --python .venv/bin/python --upgrade twine
 .venv/bin/python -m twine check dist/*
 ```
 
