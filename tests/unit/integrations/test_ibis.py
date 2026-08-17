@@ -21,6 +21,13 @@ class Person(SQLModel, table=True):
     age: int
 
 
+@pytest.fixture
+def ibis_available():
+    return pytest.importorskip(
+        "ibis", reason="this test exercises the optional Ibis integration"
+    )
+
+
 def test_import_consist_without_ibis() -> None:
     code = dedent(
         """
@@ -81,7 +88,7 @@ def test_ibis_grouped_view_requires_profiled_schema(tmp_path) -> None:
 
 
 def test_ibis_grouped_view_resolves_schema_and_closes_backend(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
+    tmp_path, monkeypatch: pytest.MonkeyPatch, ibis_available
 ) -> None:
     tracker = Tracker(run_dir=tmp_path, db_path=str(tmp_path / "provenance.duckdb"))
     calls: dict[str, object] = {}
