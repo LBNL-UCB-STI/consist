@@ -49,8 +49,8 @@ For manual lifecycle/decorator APIs (`start_run`, `begin_run/end_run`,
 
 ## Running
 
-1. Install editable dev dependencies:
-   - `pip install -e ".[dev]"`
+1. Install the development and notebook dependencies with uv:
+   - `uv sync --group dev --group examples`
 2. Launch Jupyter from repo root:
    - `jupyter lab`
 3. Open one of the notebooks in `examples/` and run all cells.

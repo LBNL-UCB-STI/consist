@@ -19,11 +19,10 @@ cd consist
 
 # With uv (recommended)
 uv sync --group dev
-uv run pytest
+uv run pytest tests
 
-# Or with pip
-pip install -e ".[dev]"
-pytest
+# Notebook examples additionally require the examples dependency group:
+# uv sync --group dev --group examples
 ```
 
 ## Guidelines
