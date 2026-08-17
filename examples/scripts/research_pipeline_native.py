@@ -45,7 +45,7 @@ def main():
     tracker = Tracker(
         run_dir=example_workspace / "research_logs",
         db_path=str(example_workspace / "research_provenance.duckdb"),
-        project_root=".",
+        project_root=Path(__file__).resolve().parents[2],
     )
 
     # 3. Execute the Pipeline as a Scenario
@@ -69,15 +69,17 @@ def main():
         )
 
         # Step 2: Simulate
-        # Consist will cache this result based on the code in 'simulate'
-        # AND the contents of the logged inputs.
+        # Consist will cache this result based on the code in 'simulate',
+        # the declared simulation settings, and the logged inputs.
+        simulation_params = {"resolution": "high", "seed": 42}
         sc.run(
             simulate,
             inputs={"clean_data": consist.ref(preprocess_result, key="clean_data")},
+            config={"params": simulation_params},
             outputs=["run_simulation"],
             execution_options=ExecutionOptions(
-                load_inputs=True,
-                runtime_kwargs={"params": {"resolution": "high", "seed": 42}},
+                input_binding="loaded",
+                runtime_kwargs={"params": simulation_params},
             ),
         )
 

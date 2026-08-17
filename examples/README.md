@@ -57,6 +57,10 @@ For manual lifecycle/decorator APIs (`start_run`, `begin_run/end_run`,
 4. Run the self-contained native pipeline from repo root:
    - `uv run python examples/scripts/research_pipeline_native.py`
 
+The native pipeline writes a Zarr output, so the `--group dev` environment
+above supplies its `xarray` and `zarr` dependencies. For a smaller runtime-only
+setup, use `uv sync --extra zarr`.
+
 ## Outputs
 
 Notebooks write run outputs and DuckDB databases under `examples/runs/`.
