@@ -11,6 +11,7 @@ authors:
   - name: Zachary A. Needell
     affiliation: 1
     corresponding: true
+    orcid: 0000-0001-6190-5186
 affiliations:
   - name: Lawrence Berkeley National Laboratory, United States
     index: 1
@@ -70,7 +71,7 @@ Consist was developed to support PILATES, a workflow runtime used in the BEAM CO
 
 During PILATES integration, adding Consist required making model-step input and output bindings explicit. That process surfaced a latent cross-model dependency error: ActivitySim's population-source input was bound to a valid but wrong-year UrbanSim artifact, using the current-year datastore rather than the forecast-year population snapshot produced after ATLAS updates. The issue was difficult to detect from individual files alone because each artifact was internally valid; the lineage graph made the semantic mismatch between upstream artifact roles visible.
 
-Consist's caching also delivers practical savings: when ActivitySim or BEAM configurations vary across scenarios, unchanged upstream UrbanSim and ATLAS steps are identified by their signatures and reused rather than re-executed, typically saving several HPC node-hours per cache hit. The repository includes five example notebooks demonstrating these mechanics in self-contained workflows, covering cache behavior, scenario comparison, parameter sweeps, iterative extension, and cross-run analysis.
+Consist's caching also delivers practical savings: when ActivitySim or BEAM configurations vary across scenarios, unchanged upstream UrbanSim and ATLAS steps are identified by their signatures and reused rather than re-executed, typically saving several HPC node-hours per cache hit. The repository includes six example notebooks demonstrating these mechanics in self-contained workflows, covering cache behavior, scenario comparison, parameter sweeps, iterative extension, and cross-run analysis.
 
 # Availability
 
@@ -93,10 +94,3 @@ nonexclusive, paid-up, irrevocable, worldwide license to publish or reproduce th
 form of this work, or allow others to do so, for U.S. Government purposes.
 
 # References
-
-
-
-
-
-
-
