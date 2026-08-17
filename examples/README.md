@@ -54,10 +54,15 @@ For manual lifecycle/decorator APIs (`start_run`, `begin_run/end_run`,
 2. Launch Jupyter from repo root:
    - `jupyter lab`
 3. Open one of the notebooks in `examples/` and run all cells.
+4. Run the self-contained native pipeline from repo root:
+   - `uv run python examples/scripts/research_pipeline_native.py`
 
 ## Outputs
 
 Notebooks write run outputs and DuckDB databases under `examples/runs/`.
+The native pipeline creates its deterministic input, DuckDB database, and run
+logs under `examples/runs/research_pipeline_native/`. Remove that directory to
+clean up the generated example state.
 Generated SQLModel modules are written under `examples/src/generated/`.
 
 ## Conventions

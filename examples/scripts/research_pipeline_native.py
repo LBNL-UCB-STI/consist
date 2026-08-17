@@ -30,11 +30,21 @@ def simulate(clean_data: pd.DataFrame, params: dict) -> xr.Dataset:
     return ds
 
 
+def _write_example_input(path: Path) -> None:
+    """Create the deterministic input used by this self-contained example."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({"value": [20, 21, 22, 23]}).to_csv(path, index=False)
+
+
 def main():
+    example_workspace = Path("examples/runs/research_pipeline_native")
+    raw_path = example_workspace / "raw_data.csv"
+    _write_example_input(raw_path)
+
     # 2. Setup the Tracker
     tracker = Tracker(
-        run_dir=Path("./research_logs"),
-        db_path="research_provenance.duckdb",
+        run_dir=example_workspace / "research_logs",
+        db_path=str(example_workspace / "research_provenance.duckdb"),
         project_root=".",
     )
 
@@ -49,7 +59,6 @@ def main():
         tags=["baseline_2025"],
     ) as sc:
         # Step 1: Preprocess
-        raw_path = Path("examples/data/raw_data.csv")
         preprocess_result = sc.run(
             preprocess,
             inputs={"raw_data": raw_path},
