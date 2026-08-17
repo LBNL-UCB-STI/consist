@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import cast
 
 import jsonschema
+import pytest
 import yaml
 from linkml_runtime.linkml_model import SlotDefinition
 from linkml_runtime.utils.schemaview import SchemaView
@@ -40,6 +41,25 @@ BINDING_INVOCATIONS_FIXTURE = (
 )
 LINKML_LINT = Path(sys.executable).with_name("linkml-lint")
 JSON_SCHEMA_GENERATOR = Path(sys.executable).with_name("gen-json-schema")
+
+
+@pytest.fixture
+def linkml_lint() -> Path:
+    if not LINKML_LINT.is_file():
+        pytest.skip(
+            f"linkml-lint is not installed beside the active Python: {LINKML_LINT}"
+        )
+    return LINKML_LINT
+
+
+@pytest.fixture
+def json_schema_generator() -> Path:
+    if not JSON_SCHEMA_GENERATOR.is_file():
+        pytest.skip(
+            "gen-json-schema is not installed beside the active Python: "
+            f"{JSON_SCHEMA_GENERATOR}"
+        )
+    return JSON_SCHEMA_GENERATOR
 
 
 def test_schema_defines_portable_graph_and_binding_module() -> None:
@@ -188,7 +208,9 @@ def test_fixtures_cover_production_consumption_identity_and_cache_semantics() ->
     assert hit["requested_run"] != hit["effective_execution_run"]
 
 
-def test_fixtures_validate_as_linkml_instances() -> None:
+def test_fixtures_validate_as_linkml_instances(
+    json_schema_generator: Path,
+) -> None:
     """Examples validate as the public LinkML instance classes they document."""
     provenance = yaml.safe_load(PROVENANCE_GRAPH_FIXTURE.read_text())
     invocations = yaml.safe_load(BINDING_INVOCATIONS_FIXTURE.read_text())
@@ -196,7 +218,7 @@ def test_fixtures_validate_as_linkml_instances() -> None:
     provenance_schema = json.loads(
         subprocess.run(
             [
-                str(JSON_SCHEMA_GENERATOR),
+                str(json_schema_generator),
                 "--preserve-names",
                 "--top-class",
                 "ConsistProvenanceDocument",
@@ -210,7 +232,7 @@ def test_fixtures_validate_as_linkml_instances() -> None:
     binding_schema = json.loads(
         subprocess.run(
             [
-                str(JSON_SCHEMA_GENERATOR),
+                str(json_schema_generator),
                 "--preserve-names",
                 "--top-class",
                 "ConsistBindingInvocationReference",
@@ -227,13 +249,11 @@ def test_fixtures_validate_as_linkml_instances() -> None:
         jsonschema.validate(invocation, binding_schema)
 
 
-def test_schemas_pass_linkml_lint() -> None:
+def test_schemas_pass_linkml_lint(linkml_lint: Path) -> None:
     """Both published source modules stay valid under the supported LinkML linter."""
-    assert LINKML_LINT.is_file()
-
     for schema_path in (SCHEMA_PATH, BINDING_SCHEMA_PATH):
         result = subprocess.run(
-            [str(LINKML_LINT), str(schema_path)],
+            [str(linkml_lint), str(schema_path)],
             capture_output=True,
             text=True,
         )
@@ -272,12 +292,12 @@ def test_provenance_schema_documentation_states_cross_module_semantics() -> None
     assert "binding.merged.yaml" in documentation
 
 
-def test_downstream_fixture_generates_json_schema_from_local_import() -> None:
+def test_downstream_fixture_generates_json_schema_from_local_import(
+    json_schema_generator: Path,
+) -> None:
     """A downstream operational profile can resolve the local modular source."""
-    assert JSON_SCHEMA_GENERATOR.is_file()
-
     result = subprocess.run(
-        [str(JSON_SCHEMA_GENERATOR), "--preserve-names", str(DOWNSTREAM_FIXTURE)],
+        [str(json_schema_generator), "--preserve-names", str(DOWNSTREAM_FIXTURE)],
         check=True,
         capture_output=True,
         text=True,
@@ -290,7 +310,7 @@ def test_downstream_fixture_generates_json_schema_from_local_import() -> None:
 
 
 def test_release_builder_writes_modular_merged_and_documented_assets(
-    tmp_path: Path,
+    tmp_path: Path, json_schema_generator: Path
 ) -> None:
     """Release assets are self-contained and protected by reproducible checksums."""
     output_dir = tmp_path / f"provenance-schema-{SCHEMA_VERSION}"
@@ -355,7 +375,7 @@ classes:
     )
     generated = subprocess.run(
         [
-            str(JSON_SCHEMA_GENERATOR),
+            str(json_schema_generator),
             "--preserve-names",
             str(downstream_release_fixture),
         ],
@@ -390,7 +410,7 @@ classes:
     )
     binding_generated = subprocess.run(
         [
-            str(JSON_SCHEMA_GENERATOR),
+            str(json_schema_generator),
             "--preserve-names",
             str(downstream_binding_release_fixture),
         ],
@@ -411,7 +431,7 @@ classes:
 
 
 def test_release_builder_writes_lintable_timezone_aware_merged_schemas(
-    tmp_path: Path,
+    tmp_path: Path, linkml_lint: Path
 ) -> None:
     """Merged release inputs have UTC metadata accepted by LinkML lint."""
     output_dir = tmp_path / f"provenance-schema-{SCHEMA_VERSION}"
@@ -432,7 +452,7 @@ def test_release_builder_writes_lintable_timezone_aware_merged_schemas(
             assert parsed.tzinfo == timezone.utc
 
         result = subprocess.run(
-            [str(LINKML_LINT), "--ignore-warnings", str(merged_path)],
+            [str(linkml_lint), "--ignore-warnings", str(merged_path)],
             capture_output=True,
             text=True,
         )

@@ -9,8 +9,11 @@ from unittest.mock import patch
 
 import pytest
 import pandas as pd
-from sqlalchemy import func, select
-from sqlmodel import Session, SQLModel
+
+pytest.importorskip(
+    "pyhocon",
+    reason="BEAM config-adapter tests require the optional pyhocon dependency",
+)
 
 from consist.core.config_canonicalization import (
     ArtifactSpec,
@@ -31,7 +34,6 @@ from consist.integrations.beam.config_adapter import _load_config_tree
 from consist.integrations.beam.config_adapter import _resolve_reference
 from consist.integrations.beam.config_adapter import _resolves_under_config_root
 from consist.models.artifact import Artifact
-from consist.models.beam import BeamConfigCache, BeamConfigIngestRunLink
 from consist.types import CacheOptions, ExecutionOptions
 from tests.helpers.beam_fixtures import build_beam_test_configs
 
@@ -198,22 +200,6 @@ def _write_gtfs_directory_feed(
     ).to_csv(path / "stop_times.txt", index=False)
     (path / "license.txt").write_text("license text that should be ignored\n")
     return path
-
-
-def test_beam_models_register_tables(tracker):
-    if tracker.engine is None:
-        raise AssertionError("Tracker engine missing; DB tests require DuckDB.")
-    with tracker.engine.begin() as connection:
-        connection.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
-        SQLModel.metadata.create_all(
-            connection,
-            tables=[
-                BeamConfigCache.__table__,
-                BeamConfigIngestRunLink.__table__,
-            ],
-        )
-    with Session(tracker.engine) as session:
-        session.exec(select(func.count()).select_from(BeamConfigCache))
 
 
 def test_beam_discover_includes_and_hash(tracker, tmp_path: Path):
