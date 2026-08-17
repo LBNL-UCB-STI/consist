@@ -219,5 +219,5 @@ This workflow demonstrated:
 - **[Core Concepts](../concepts/overview.md)** — Mental model for runs, artifacts, and signatures
 - **[Config Management](../concepts/config-management.md)** — Control which parameters affect caching
 - **[Caching & Hydration](../concepts/caching-and-hydration.md)** — Advanced cache strategies and data recovery
-- **[Data Materialization](../concepts/data-materialization.md)** — Ingest artifacts for SQL analysis
+- **[Data Storage and Ingestion](../concepts/data-materialization.md)** — Ingest artifacts for SQL analysis
 - **[Building a Domain Tracker](../building-domain-tracker.md)** — Wrap Consist behind domain verbs

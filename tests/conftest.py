@@ -13,7 +13,7 @@ from consist.core import context
 from consist.core.identity import IdentityManager
 
 # Import specific models
-from consist.models.run import Run, RunArtifactLink
+from consist.models.run import Run, RunArtifactLink, RunBindingInvocation
 from consist.models.artifact import Artifact
 from consist.models.artifact_facet import ArtifactFacet
 from consist.models.artifact_kv import ArtifactKV
@@ -147,6 +147,7 @@ def _build_tracker(
         getattr(Run, "__table__"),
         getattr(Artifact, "__table__"),
         getattr(RunArtifactLink, "__table__"),
+        getattr(RunBindingInvocation, "__table__"),
         getattr(ConfigFacet, "__table__"),
         getattr(RunConfigKV, "__table__"),
         getattr(ArtifactFacet, "__table__"),

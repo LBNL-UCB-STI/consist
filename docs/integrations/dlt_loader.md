@@ -16,4 +16,4 @@ Requires the optional `ingest` extra before using DLT features:
 ## See Also
 
 - [DLT Loader Guide](../dlt-loader-guide.md) — prose guide with examples and decision criteria
-- [Data Materialization](../concepts/data-materialization.md)
+- [Data Storage and Ingestion](../concepts/data-materialization.md)

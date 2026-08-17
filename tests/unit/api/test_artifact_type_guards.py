@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from consist import (
     is_dataframe_artifact,
     is_tabular_artifact,
@@ -11,6 +12,7 @@ from consist import (
     is_spatial_artifact,
     DriverType,
 )
+import consist.api as api
 from consist.models.artifact import Artifact
 from consist.api import (
     ArtifactLike,
@@ -43,6 +45,7 @@ class TestDriverType:
             "h5",
             "hdf5",
             "geojson",
+            "geoparquet",
             "shapefile",
             "geopackage",
             "other",
@@ -67,6 +70,7 @@ class TestDriverType:
                 "h5",
                 "hdf5",
                 "geojson",
+                "geoparquet",
                 "shapefile",
                 "geopackage",
                 "other",
@@ -156,7 +160,7 @@ class TestTypeGuards:
 
     def test_is_spatial_artifact(self) -> None:
         """Verify is_spatial_artifact recognizes spatial drivers."""
-        for driver in ("geojson", "shapefile", "geopackage"):
+        for driver in ("geojson", "geoparquet", "shapefile", "geopackage"):
             art = _artifact(driver)
             assert is_spatial_artifact(art) is True, f"Expected {driver} to be spatial"
 
@@ -173,3 +177,27 @@ class TestRuntimeCheckable:
         """Verify Artifact instances pass isinstance checks for ArtifactLike."""
         art = _artifact("parquet")
         assert isinstance(art, ArtifactLike)
+
+
+def test_load_from_disk_uses_read_parquet_for_geoparquet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+    sentinel = object()
+
+    class _FakeGeoPandas:
+        def read_parquet(self, path: str, **kwargs: object) -> object:
+            observed["path"] = path
+            observed["kwargs"] = kwargs
+            return sentinel
+
+        def read_file(self, path: str, **kwargs: object) -> object:
+            raise AssertionError("read_file should not be called for GeoParquet")
+
+    monkeypatch.setattr(api, "gpd", _FakeGeoPandas())
+
+    result = api._load_from_disk("/tmp/tiny.parquet", "geoparquet", columns=["x"])
+
+    assert result is sentinel
+    assert observed["path"] == "/tmp/tiny.parquet"
+    assert observed["kwargs"] == {"columns": ["x"]}

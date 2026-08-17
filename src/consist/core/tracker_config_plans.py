@@ -26,6 +26,7 @@ from consist.core.config_canonicalization import (
     ConfigAdapterOptions,
     ConfigContribution,
     ConfigPlan,
+    _resolve_canonicalization_snapshot,
     validate_config_plan,
 )
 from consist.core.stores import get_hot_data_store
@@ -151,6 +152,46 @@ class TrackerConfigPlanService(_TrackerServiceBase):
         profile_schema: bool = False,
         options: Optional[ConfigAdapterOptions] = None,
     ) -> ConfigContribution:
+        """
+        Canonicalize config and apply the resulting contribution to a run.
+
+        Parameters
+        ----------
+        adapter : ConfigAdapter
+            Model-specific adapter that discovers and canonicalizes config.
+        config_dirs : Iterable[str or pathlib.Path]
+            Ordered configuration roots supplied to the adapter.
+        run, run_id : Run or str, optional
+            Explicit target run or matching active-run ID. Supply at most one.
+        strict : bool, default False
+            Whether missing required references should raise.
+        ingest : bool, default True
+            Whether adapter ingestion specs should materialize rows.
+        profile_schema : bool, default False
+            Whether to profile ingestion schemas during application.
+        options : ConfigAdapterOptions, optional
+            Structured adapter options. When supplied, it owns strictness and
+            ingestion mode.
+
+        Returns
+        -------
+        ConfigContribution
+            Applied artifacts, ingest specs, identity metadata, and validated
+            canonicalization observations for the target run.
+
+        Raises
+        ------
+        RuntimeError
+            If no matching active or explicit target run is available.
+        ValueError
+            If target-run or direct-option arguments conflict.
+
+        Notes
+        -----
+        This convenience method combines planning and application. Use
+        :meth:`prepare_config` and :meth:`apply_config_plan` when a workflow
+        needs to inspect or defer the plan before attaching it to a run.
+        """
         if run is not None and run_id is not None:
             raise ValueError("Provide either run= or run_id=, not both.")
         if options is not None and (strict is not False or ingest is not True):
@@ -185,6 +226,11 @@ class TrackerConfigPlanService(_TrackerServiceBase):
             plan_only=False,
             options=options,
         )
+        canonicalization = _resolve_canonicalization_snapshot(
+            identity=result.identity,
+            artifacts=result.artifacts,
+            snapshot=result.canonicalization,
+        )
 
         contribution = ConfigContribution(
             identity=result.identity,
@@ -195,6 +241,7 @@ class TrackerConfigPlanService(_TrackerServiceBase):
                 "adapter": adapter.model_name,
                 "config_dirs": [str(p) for p in config_dir_paths],
             },
+            canonicalization=canonicalization,
         )
 
         self._apply_config_contribution(
@@ -226,6 +273,42 @@ class TrackerConfigPlanService(_TrackerServiceBase):
         facet_schema_version: Optional[Union[str, int]] = None,
         facet_index: Optional[bool] = None,
     ) -> ConfigPlan:
+        """
+        Build a validated, unapplied configuration plan.
+
+        Parameters
+        ----------
+        adapter : ConfigAdapter
+            Model-specific adapter that discovers and canonicalizes the config.
+        config_dirs : Iterable[str or pathlib.Path]
+            Ordered configuration roots consumed by the adapter.
+        strict : bool, default False
+            Whether missing required configuration references should raise.
+        options : ConfigAdapterOptions, optional
+            Structured adapter options. When supplied, it owns strictness.
+        validate_only : bool, default False
+            Whether to attach non-mutating plan diagnostics before returning.
+        facet_spec, facet_schema_name, facet_schema_version, facet_index
+            Optional facet configuration preserved on the returned plan.
+
+        Returns
+        -------
+        ConfigPlan
+            An unapplied plan with artifact specs, ingest specs, canonical
+            identity, and a validated canonicalization snapshot.
+
+        Raises
+        ------
+        ValueError
+            If incompatible options are supplied or the adapter produces an
+            invalid canonicalization snapshot.
+
+        Notes
+        -----
+        Preparing a plan observes local config paths but does not log artifacts
+        or attach anything to a run. Apply the plan before treating its snapshot
+        as execution-time context.
+        """
         if options is not None and strict is not False:
             raise ValueError("When options= is provided, do not pass strict=.")
         if options is not None:
@@ -240,6 +323,11 @@ class TrackerConfigPlanService(_TrackerServiceBase):
             strict=strict,
             plan_only=True,
             options=options,
+        )
+        canonicalization = _resolve_canonicalization_snapshot(
+            identity=result.identity,
+            artifacts=result.artifacts,
+            snapshot=result.canonicalization,
         )
         facet_data = None
         if facet_spec is not None:
@@ -268,6 +356,7 @@ class TrackerConfigPlanService(_TrackerServiceBase):
                 "config_dirs": [str(p) for p in config_dir_paths],
             },
             adapter=adapter,
+            canonicalization=canonicalization,
         )
         if validate_only:
             diagnostics = validate_config_plan(plan)
@@ -290,6 +379,35 @@ class TrackerConfigPlanService(_TrackerServiceBase):
         facet_schema_version: Optional[Union[str, int]] = None,
         facet_index: Optional[bool] = None,
     ) -> Callable[["StepContext"], ConfigPlan]:
+        """
+        Build a step-time resolver that prepares one configuration plan.
+
+        Parameters
+        ----------
+        adapter : ConfigAdapter
+            Adapter used when the resolver executes.
+        config_dirs : Iterable[str or pathlib.Path], optional
+            Static ordered config roots. Mutually exclusive with
+            ``config_dirs_from``.
+        config_dirs_from : str or callable, optional
+            Dotted runtime path or callable that returns config roots from a
+            step context. Mutually exclusive with ``config_dirs``.
+        strict, options, validate_only, facet_spec, facet_schema_name,
+        facet_schema_version, facet_index
+            Options forwarded unchanged to :meth:`prepare_config`.
+
+        Returns
+        -------
+        Callable[[StepContext], ConfigPlan]
+            Resolver suitable for a workflow step that needs config planning at
+            runtime.
+
+        Raises
+        ------
+        ValueError
+            If neither or both config-root sources are supplied, or a runtime
+            source resolves to a single path instead of an iterable.
+        """
         if (config_dirs is None) == (config_dirs_from is None):
             raise ValueError(
                 "prepare_config_resolver requires exactly one of "
@@ -367,6 +485,43 @@ class TrackerConfigPlanService(_TrackerServiceBase):
         adapter: Optional[ConfigAdapter] = None,
         options: Optional[ConfigAdapterOptions] = None,
     ) -> ConfigContribution:
+        """
+        Apply a configuration plan to an active or explicit run.
+
+        Parameters
+        ----------
+        plan : ConfigPlan
+            Previously prepared plan to log and optionally ingest.
+        run : Run, optional
+            Target run. Defaults to the active Consist run.
+        ingest : bool, default True
+            Whether to materialize plan ingestion rows.
+        profile_schema : bool, default False
+            Whether to profile ingest schemas while applying the plan.
+        adapter : ConfigAdapter, optional
+            Adapter used to create an apply-time bundle artifact when needed.
+        options : ConfigAdapterOptions, optional
+            Structured adapter options. When supplied, it owns ingestion mode.
+
+        Returns
+        -------
+        ConfigContribution
+            Applied artifact and ingestion summary with the validated snapshot
+            that execution can receive through ``RunContext``.
+
+        Raises
+        ------
+        RuntimeError
+            If no target or active run is available.
+        ValueError
+            If supplied options conflict with direct arguments or the plan's
+            canonicalization snapshot no longer agrees with emitted artifacts.
+
+        Notes
+        -----
+        Applying a plan persists config identity metadata and may add a bundle
+        artifact. It does not resolve downstream staging or container paths.
+        """
         if options is not None and ingest is not True:
             raise ValueError("When options= is provided, do not pass ingest=.")
         if options is not None:
@@ -389,6 +544,12 @@ class TrackerConfigPlanService(_TrackerServiceBase):
                 if bundle_spec is not None:
                     artifacts.append(bundle_spec)
 
+        canonicalization = _resolve_canonicalization_snapshot(
+            identity=plan.identity,
+            artifacts=artifacts,
+            snapshot=plan.canonicalization,
+        )
+
         contribution = ConfigContribution(
             identity=plan.identity,
             adapter_version=plan.adapter_version,
@@ -398,6 +559,7 @@ class TrackerConfigPlanService(_TrackerServiceBase):
             facet_schema_name=plan.facet_schema_name,
             facet_schema_version=plan.facet_schema_version,
             meta=dict(plan.meta or {}),
+            canonicalization=canonicalization,
         )
 
         self._apply_config_contribution(

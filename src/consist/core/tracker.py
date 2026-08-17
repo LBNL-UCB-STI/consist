@@ -1,9 +1,9 @@
 import hashlib
 import json
 import re
-import shutil
 from collections.abc import Mapping as MappingABC
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import replace
 from datetime import date, datetime
 import logging
@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import (
     Any,
     Callable,
+    ContextManager,
     Dict,
     Hashable,
     Iterable,
@@ -33,7 +34,7 @@ from sqlalchemy.sql import Executable
 
 import pandas as pd
 from pydantic import BaseModel
-from sqlmodel import SQLModel, Session, col, select
+from sqlmodel import SQLModel, Session
 
 from consist.core.artifact_schemas import ArtifactSchemaManager
 from consist.core.artifact_facets import ArtifactFacetManager
@@ -49,12 +50,17 @@ from consist.core.run_resolution import (
     resolve_output_path as _resolve_output_path,
     write_xarray_dataset as _write_xarray_dataset,
 )
+from consist.core.resolved_binding import (
+    _StrictBindingInvocationContext,
+    _validate_strict_binding_invocation_context,
+)
 from consist.core.tracker_artifact_logging import ArtifactLoggingCoordinator
 from consist.core.tracker_artifact_queries import TrackerArtifactQueryService
 from consist.core.tracker_lifecycle import RunLifecycleCoordinator
 from consist.core.tracker_history import TrackerHistoryService
 from consist.core.tracker_orchestration import RunTraceCoordinator, RunTraceHelpers
 from consist.core.tracker_recovery import TrackerRecoveryService
+from consist.core.tracker_archive import TrackerArchiveService
 from consist.core.tracker_config import TrackerConfig
 from consist.core.tracker_config_plans import TrackerConfigPlanService
 from consist.core.config_canonicalization import (
@@ -71,7 +77,6 @@ from consist.core.decorators import define_step as define_step_decorator
 from consist.core.container_policy import (
     ChildRecoveryPolicy,
     ContainerRecoveryUnit,
-    validate_recovery_registration_policy,
 )
 from consist.core.error_messages import format_problem_cause_fix
 from consist.core.events import EventManager
@@ -93,13 +98,13 @@ from consist.core.views import ViewFactory, ViewRegistry
 from consist.core.ingestion import ingest_artifact
 from consist.core.lineage import LineageService
 from consist.core.materialize import (
+    ArchivedRunOutputFilesReport,
     ArtifactRecoveryCopyRegistration,
     MaterializedArtifact,
-    RecoveryCopyStatus,
     RunOutputRecoveryCopiesRegistration,
     hydrate_run_outputs as hydrate_run_outputs_core,  # noqa: F401
+    hydrate_run_outputs_to_destinations as hydrate_run_outputs_to_destinations_core,  # noqa: F401
 )
-from consist.core.materialize_options import normalize_materialize_output_keys
 from consist.core.matrix import MatrixViewFactory
 from consist.core.netcdf_views import NetCdfMetadataView
 from consist.core.openmatrix_views import OpenMatrixMetadataView
@@ -109,12 +114,13 @@ from consist.core.settings import ConsistSettings
 from consist.core.stores import HotDataStore, MetadataStore
 from consist.core.workflow import OutputCapture, ScenarioContext
 from consist.models.gtfs import GTFS_SCHEMAS
-from consist.models.artifact import Artifact, set_tracker_ref
+from consist.models.artifact import Artifact, ArchivedOutputs, set_tracker_ref
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
 from consist.models.run import (
     ConsistRecord,
     Run,
     RunArtifacts,
+    RunBindingInvocation,
     RunResult,
 )
 from consist.types import (
@@ -129,6 +135,8 @@ from consist.types import (
     HashInputs,
     IdentityInputs,
     OutputPolicyOptions,
+    OutputPathRef,
+    OutputSet,
     RunInputRef,
 )
 
@@ -143,10 +151,36 @@ if TYPE_CHECKING:
     )
     from consist.core.step_context import StepContext
     from consist.runset import RunSet
+    from ibis.backends.duckdb import Backend as IbisDuckDBBackend
+    from ibis.expr.types import Table as IbisTable
 
 AccessMode = Literal["standard", "analysis", "read_only"]
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _FILE_HASH_CHUNK_SIZE = 8 * 1024 * 1024
+_RAW_STRICT_BINDING_CONTROL_KEYS = frozenset(
+    {
+        "_consist_strict_binding_json",
+        "_strict_binding_context",
+        "requested_input_strict_snapshot",
+        "strict_binding_identity",
+        "strict_binding_json",
+    }
+)
+
+
+def _reject_raw_strict_binding_controls(kwargs: Mapping[str, Any]) -> None:
+    """Keep strict cache controls unavailable on public lifecycle entrypoints."""
+    controls = set(kwargs).intersection(_RAW_STRICT_BINDING_CONTROL_KEYS)
+    identity_overrides = kwargs.get("_consist_identity_config_overrides")
+    if isinstance(identity_overrides, MappingABC) and (
+        "__consist_resolved_binding__" in identity_overrides
+    ):
+        controls.add("_consist_identity_config_overrides")
+    if controls:
+        raise ValueError(
+            "raw strict binding controls are not supported on public Tracker APIs: "
+            + ", ".join(sorted(controls))
+        )
 
 
 def _compute_file_sha256(path: Path) -> str:
@@ -325,6 +359,9 @@ class Tracker:
         self.identity = IdentityManager(
             project_root=project_root, hashing_strategy=hashing_strategy
         )
+        self._strict_binding_context: ContextVar[
+            _StrictBindingInvocationContext | None
+        ] = ContextVar("consist_strict_binding_context", default=None)
         self.settings = ConsistSettings.from_env()
         self._dlt_lock_retries = self.settings.dlt_lock_retries
         self._dlt_lock_base_sleep_seconds = self.settings.dlt_lock_base_sleep_seconds
@@ -374,6 +411,7 @@ class Tracker:
         self._artifact_queries = TrackerArtifactQueryService(self)
         self._history_service = TrackerHistoryService(self)
         self._recovery_service = TrackerRecoveryService(self)
+        self._archive_service = TrackerArchiveService(self)
         self._config_plan_service = TrackerConfigPlanService(self)
 
         self.views = ViewRegistry(self)
@@ -443,16 +481,24 @@ class Tracker:
 
             project_root_path = Path(project_root) if project_root else Path.cwd()
             namespace = openlineage_namespace or project_root_path.resolve().name
-            schema_resolver = None
+            schema_resolver: (
+                Callable[
+                    [Artifact],
+                    Optional[tuple[ArtifactSchema, List[ArtifactSchemaField]]],
+                ]
+                | None
+            ) = None
             db = metadata_db
             if db is not None:
 
-                def schema_resolver(
+                def _schema_resolver(
                     artifact: Artifact,
                     *,
                     _db: DatabaseManager = db,
                 ) -> Optional[tuple[ArtifactSchema, List[ArtifactSchemaField]]]:
                     return _db.get_artifact_schema_for_artifact(artifact_id=artifact.id)
+
+                schema_resolver = _schema_resolver
 
             openlineage_emitter = OpenLineageEmitter(
                 OpenLineageOptions(
@@ -966,11 +1012,13 @@ class Tracker:
         key: Optional[str] = None,
         *,
         type_label: str = "inputs",
-        missing_path_error: str = (
-            "Problem: Input path does not exist: {path!s}\n"
-            "Cause: The provided input path is missing or not accessible.\n"
-            "Fix: Pass an existing file/directory path or a valid Artifact/RunResult "
-            "reference."
+        missing_path_error: str = format_problem_cause_fix(
+            problem="Input path does not exist: {path!s}",
+            cause="The provided input path is missing or not accessible.",
+            fix=(
+                "Pass an existing file/directory path or a valid Artifact/RunResult "
+                "reference."
+            ),
         ),
         missing_string_error: Optional[str] = None,
         string_ref_resolver: Optional[Callable[[str], Optional[ArtifactRef]]] = None,
@@ -1009,51 +1057,9 @@ class Tracker:
         *,
         append: bool = False,
     ) -> Artifact:
-        """
-        Persist advisory filesystem recovery roots for an artifact.
-
-        Recovery roots are ordered fallback locations used during historical
-        rematerialization and cache-hit output hydration when the canonical
-        cold bytes are no longer available at their original location.
-
-        The artifact's ``container_uri`` remains the canonical logical
-        location. Recovery roots are only alternate byte sources.
-        """
-        if not isinstance(artifact, Artifact):
-            raise TypeError("artifact must be an Artifact instance.")
-        if self.db is None:
-            raise RuntimeError(
-                "Cannot update artifact recovery roots: tracker has no database configured."
-            )
-
-        incoming = self.fs.normalize_recovery_roots(roots)
-        existing = self.fs.normalize_recovery_roots(
-            (artifact.meta or {}).get("recovery_roots")
+        return self._archive_service.set_artifact_recovery_roots(
+            artifact, roots, append=append
         )
-        normalized = incoming
-        if append:
-            normalized = self.fs.normalize_recovery_roots([*existing, *incoming])
-
-        updates: dict[str, Any]
-        if normalized:
-            updates = {"recovery_roots": normalized}
-        else:
-            current_meta = dict(artifact.meta or {})
-            current_meta.pop("recovery_roots", None)
-            self.db.update_artifact_meta(
-                artifact,
-                {"recovery_roots": None},
-                raise_on_error=True,
-            )
-            artifact.meta = current_meta
-            self._run_artifacts_cache.clear()
-            return artifact
-
-        self.db.update_artifact_meta(artifact, updates, raise_on_error=True)
-        artifact.meta = dict(artifact.meta or {})
-        artifact.meta["recovery_roots"] = normalized
-        self._run_artifacts_cache.clear()
-        return artifact
 
     def archive_artifact(
         self,
@@ -1063,120 +1069,9 @@ class Tracker:
         mode: Literal["copy", "move"] = "copy",
         append: bool = True,
     ) -> Path:
-        """
-        Archive a rematerializable artifact into a stable recovery root.
-
-        The archived copy preserves the artifact's URI-relative layout under
-        ``archive_root`` and records that root in
-        ``artifact.meta["recovery_roots"]``.
-
-        This helper is intended for workflows that promote bytes into archival
-        storage while keeping the original artifact identity and
-        ``container_uri`` unchanged.
-        """
-        if not isinstance(artifact, Artifact):
-            raise TypeError("artifact must be an Artifact instance.")
-        if mode not in {"copy", "move"}:
-            raise ValueError("mode must be 'copy' or 'move'.")
-        if self.db is None:
-            raise RuntimeError(
-                "Cannot archive artifact: tracker has no database configured."
-            )
-
-        relative_path = self.fs.get_remappable_relative_path(artifact.container_uri)
-        if relative_path is None:
-            raise ValueError(
-                f"Artifact {artifact.key!r} does not have a rematerializable URI "
-                "layout. Use managed output paths or preserve a stable relative "
-                "layout before archiving. Absolute-path and file:// artifacts "
-                "cannot be recovered from root-only recovery metadata."
-            )
-
-        archive_root_path = Path(archive_root).resolve()
-        destination = (archive_root_path / relative_path).resolve()
-        source_path: Path | None = None
-
-        if artifact.run_id:
-            from consist.core.materialize import find_existing_recovery_source_path
-
-            producing_run = self.get_run(str(artifact.run_id))
-            if producing_run is not None:
-                _, recovered, _ = find_existing_recovery_source_path(
-                    self,
-                    artifact=artifact,
-                    run=producing_run,
-                    source_root=None,
-                )
-                source_path = recovered
-
-        if source_path is None and artifact.run_id is None and artifact.abs_path:
-            candidate = Path(artifact.abs_path).resolve()
-            if candidate.exists():
-                source_path = candidate
-
-        if source_path is None and artifact.run_id is None:
-            candidate = Path(self.resolve_uri(artifact.container_uri)).resolve()
-            if candidate.exists():
-                source_path = candidate
-
-        if source_path is None or not source_path.exists():
-            raise FileNotFoundError(
-                f"Cannot archive artifact {artifact.key!r}: source bytes are unavailable."
-            )
-
-        destination_preexisted = destination.exists()
-        moved_from: Path | None = None
-        if destination.exists():
-            if destination.is_symlink():
-                raise ValueError(
-                    f"Symlink detected in archive destination: {destination}"
-                )
-            if destination.resolve() != source_path.resolve():
-                if source_path.is_file() and destination.is_file():
-                    same_size = source_path.stat().st_size == destination.stat().st_size
-                    same_hash = False
-                    if same_size:
-                        same_hash = self.identity.compute_file_checksum(
-                            str(source_path)
-                        ) == self.identity.compute_file_checksum(str(destination))
-                    if not same_hash:
-                        raise FileExistsError(
-                            f"Archive destination already exists: {destination}"
-                        )
-                else:
-                    raise FileExistsError(
-                        f"Archive destination already exists: {destination}"
-                    )
-        else:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            if source_path.resolve() != destination.resolve():
-                if mode == "copy":
-                    if source_path.is_dir():
-                        shutil.copytree(source_path, destination)
-                    else:
-                        shutil.copy2(source_path, destination)
-                else:
-                    moved_from = source_path
-                    shutil.move(str(source_path), str(destination))
-
-        try:
-            self.set_artifact_recovery_roots(
-                artifact, [archive_root_path], append=append
-            )
-        except Exception:
-            if moved_from is not None and destination.exists():
-                moved_from.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(destination), str(moved_from))
-            elif not destination_preexisted and destination.exists():
-                if destination.is_dir():
-                    shutil.rmtree(destination)
-                else:
-                    destination.unlink()
-            raise
-
-        if mode == "move":
-            artifact.abs_path = str(destination.resolve())
-        return destination
+        return self._archive_service.archive_artifact(
+            artifact, archive_root, mode=mode, append=append
+        )
 
     def register_artifact_recovery_copy(
         self,
@@ -1187,35 +1082,12 @@ class Tracker:
         content_hash: str | None = None,
         append: bool = True,
     ) -> ArtifactRecoveryCopyRegistration:
-        """
-        Verify and record an externally copied artifact recovery location.
-
-        Unlike ``archive_artifact(...)``, this helper never copies bytes. It
-        expects external infrastructure to have already copied the artifact to
-        ``recovery_root / <uri-relative-path>``. Consist verifies that location
-        and only then appends or replaces ``artifact.meta["recovery_roots"]``.
-
-        Directory artifacts are intentionally blocked here until Consist has a
-        first-class directory manifest contract for recovery-root equivalence.
-        HDF5 child table artifacts are also blocked unless a future parent
-        container policy explicitly supports independent child recovery.
-        ``content_hash`` is interpreted as a full file SHA-256 and takes
-        precedence when supplied. Without it, ``artifact.hash`` is only used for
-        byte verification when this tracker is using full content hashing; fast
-        metadata hashes are not byte-equivalence proofs.
-
-        ``append`` defaults to True so verified adoption behaves like
-        ``archive_artifact(...)``: the newly verified root is added to existing
-        recovery metadata. Use ``append=False`` to replace existing recovery
-        roots, matching ``set_artifact_recovery_roots(...)`` replace semantics.
-        """
-        return self._register_artifact_recovery_copy(
+        return self._archive_service.register_artifact_recovery_copy(
             artifact,
             recovery_root,
             verify=verify,
             content_hash=content_hash,
             append=append,
-            persist=True,
         )
 
     def _register_artifact_recovery_copy(
@@ -1228,163 +1100,13 @@ class Tracker:
         append: bool,
         persist: bool,
     ) -> ArtifactRecoveryCopyRegistration:
-        """Validate a recovery copy and optionally persist recovery metadata."""
-        if not isinstance(artifact, Artifact):
-            raise TypeError("artifact must be an Artifact instance.")
-        if self.db is None:
-            raise RuntimeError(
-                "Cannot register artifact recovery copy: tracker has no database configured."
-            )
-
-        recovery_root_path = Path(recovery_root).resolve()
-        artifact_id = str(artifact.id) if artifact.id is not None else ""
-
-        def _result(
-            status: RecoveryCopyStatus,
-            *,
-            expected_path: Path | None = None,
-            message: str | None = None,
-            metadata_updated: bool = False,
-        ) -> ArtifactRecoveryCopyRegistration:
-            return ArtifactRecoveryCopyRegistration(
-                artifact=artifact,
-                key=artifact.key,
-                artifact_id=artifact_id,
-                recovery_root=recovery_root_path,
-                expected_path=expected_path,
-                status=status,
-                message=message,
-                metadata_updated=metadata_updated,
-            )
-
-        parent = (
-            self.get_parent_artifact(artifact)
-            if artifact.driver == "h5_table"
-            else None
-        )
-        policy_validation = validate_recovery_registration_policy(
+        return self._archive_service._register_artifact_recovery_copy(
             artifact,
-            parent=parent,
-        )
-        if not policy_validation.allowed:
-            return _result(
-                "blocked_by_container_policy",
-                message=policy_validation.message,
-            )
-
-        relative_path = self.fs.get_remappable_relative_path(artifact.container_uri)
-        if relative_path is None:
-            return _result(
-                "skipped_unmapped",
-                message=(
-                    f"Artifact {artifact.key!r} does not have a rematerializable URI "
-                    "layout. Absolute-path and file:// artifacts cannot be adopted "
-                    "from root-only recovery metadata."
-                ),
-            )
-
-        expected_path = recovery_root_path / relative_path
-        expected_path_resolved = expected_path.resolve()
-        if expected_path.is_symlink():
-            return _result(
-                "symlink_destination",
-                expected_path=expected_path_resolved,
-                message=(
-                    "Symlink detected in recovery destination: "
-                    f"{expected_path_resolved}"
-                ),
-            )
-        if not expected_path.exists():
-            return _result(
-                "missing_copy",
-                expected_path=expected_path_resolved,
-                message=f"Expected recovery copy does not exist: {expected_path_resolved}",
-            )
-        if expected_path.is_dir():
-            return _result(
-                "unsupported_directory",
-                expected_path=expected_path_resolved,
-                message=(
-                    "Directory recovery-copy adoption is not supported yet; use "
-                    "archive_artifact(...) or wait for directory manifest support."
-                ),
-            )
-        if not expected_path.is_file():
-            return _result(
-                "failed",
-                expected_path=expected_path_resolved,
-                message=(
-                    "Expected recovery copy is not a regular file: "
-                    f"{expected_path_resolved}"
-                ),
-            )
-
-        expected_hashes: list[tuple[str, str]] = []
-        if content_hash is not None:
-            expected_hashes.append(("content_hash", content_hash))
-        elif artifact.hash and self.identity.hashing_strategy == "full":
-            expected_hashes.append(("artifact.hash", artifact.hash))
-
-        if verify and not expected_hashes:
-            return _result(
-                "unverifiable_hash",
-                expected_path=expected_path_resolved,
-                message=(
-                    "Verification requested, but no full file hash is available. "
-                    "Pass content_hash=<sha256> or use verify=False to register "
-                    "the existing copy without byte verification."
-                ),
-            )
-
-        if verify and expected_hashes:
-            try:
-                actual_hash = _compute_file_sha256(expected_path_resolved)
-            except Exception as exc:
-                return _result(
-                    "failed",
-                    expected_path=expected_path_resolved,
-                    message=(
-                        f"Could not hash recovery copy {expected_path_resolved}: {exc}"
-                    ),
-                )
-            mismatches = [
-                label
-                for label, expected_hash in expected_hashes
-                if actual_hash != expected_hash
-            ]
-            if mismatches:
-                return _result(
-                    "hash_mismatch",
-                    expected_path=expected_path_resolved,
-                    message=(
-                        "Recovery copy hash did not match "
-                        f"{', '.join(mismatches)} for artifact {artifact.key!r}."
-                    ),
-                )
-
-        if persist:
-            try:
-                self.set_artifact_recovery_roots(
-                    artifact, [recovery_root_path], append=append
-                )
-            except Exception as exc:
-                return _result(
-                    "failed",
-                    expected_path=expected_path_resolved,
-                    message=f"Could not update recovery_roots metadata: {exc}",
-                )
-        else:
-            return _result(
-                "registered",
-                expected_path=expected_path_resolved,
-                message="Recovery copy verified; metadata update deferred.",
-            )
-
-        return _result(
-            "registered",
-            expected_path=expected_path_resolved,
-            message="Recovery copy verified and registered.",
-            metadata_updated=True,
+            recovery_root,
+            verify=verify,
+            content_hash=content_hash,
+            append=append,
+            persist=persist,
         )
 
     def _set_artifact_recovery_roots_bulk(
@@ -1394,60 +1116,9 @@ class Tracker:
         *,
         append: bool,
     ) -> None:
-        if self.db is None:
-            raise RuntimeError(
-                "Cannot update artifact recovery roots: tracker has no database configured."
-            )
-
-        incoming = self.fs.normalize_recovery_roots(roots)
-        updates: dict[str, tuple[Artifact, dict[str, Any]]] = {}
-        for artifact in artifacts:
-            if not isinstance(artifact, Artifact):
-                raise TypeError("artifact must be an Artifact instance.")
-            if artifact.id is None:
-                raise ValueError("artifact must have an id.")
-
-            existing = self.fs.normalize_recovery_roots(
-                (artifact.meta or {}).get("recovery_roots")
-            )
-            normalized = incoming
-            if append:
-                normalized = self.fs.normalize_recovery_roots([*existing, *incoming])
-
-            next_meta = dict(artifact.meta or {})
-            if normalized:
-                next_meta["recovery_roots"] = normalized
-            else:
-                next_meta.pop("recovery_roots", None)
-            updates[str(artifact.id)] = (artifact, next_meta)
-
-        if not updates:
-            return
-
-        artifact_ids = [artifact.id for artifact, _ in updates.values()]
-        with self.db.session_scope() as session:
-            db_artifacts = session.exec(
-                select(Artifact).where(col(Artifact.id).in_(artifact_ids))
-            ).all()
-            db_artifacts_by_id = {
-                str(db_artifact.id): db_artifact for db_artifact in db_artifacts
-            }
-            missing_ids = sorted(set(updates) - set(db_artifacts_by_id))
-            if missing_ids:
-                raise KeyError(
-                    "Artifacts were not found for recovery root update: "
-                    + ", ".join(missing_ids)
-                )
-
-            for artifact_id, (_, next_meta) in updates.items():
-                db_artifact = db_artifacts_by_id[artifact_id]
-                db_artifact.meta = dict(next_meta)
-                session.add(db_artifact)
-            session.commit()
-
-        for artifact, next_meta in updates.values():
-            artifact.meta = dict(next_meta)
-        self._run_artifacts_cache.clear()
+        self._archive_service._set_artifact_recovery_roots_bulk(
+            artifacts, roots, append=append
+        )
 
     def register_run_output_recovery_copies(
         self,
@@ -1459,94 +1130,33 @@ class Tracker:
         append: bool = True,
         content_hashes: Mapping[str, str] | None = None,
     ) -> RunOutputRecoveryCopiesRegistration:
-        """
-        Verify and record externally copied recovery locations for run outputs.
-
-        Unknown requested output keys raise immediately. Per-artifact blockers
-        such as missing files or hash mismatches are returned in the keyed
-        result without aborting the rest of the requested outputs.
-
-        ``append`` defaults to True so verified adoption behaves like
-        ``archive_run_outputs(...)``: the newly verified root is added to
-        existing recovery metadata. Use ``append=False`` to replace existing
-        recovery roots.
-        """
-        normalized_keys = normalize_materialize_output_keys(
-            keys,
-            caller="register_run_output_recovery_copies",
+        return self._archive_service.register_run_output_recovery_copies(
+            run_id,
+            recovery_root,
+            keys=keys,
+            verify=verify,
+            append=append,
+            content_hashes=content_hashes,
         )
-        outputs = self.get_run_outputs(run_id)
-        if normalized_keys is not None:
-            missing = [key for key in normalized_keys if key not in outputs]
-            if missing:
-                raise KeyError(
-                    "Requested output keys were not found for run "
-                    f"{run_id!r}: {', '.join(repr(key) for key in missing)}"
-                )
-            selected = {key: outputs[key] for key in normalized_keys}
-        else:
-            selected = outputs
 
-        if content_hashes is not None:
-            unknown_hash_keys = [key for key in content_hashes if key not in selected]
-            if unknown_hash_keys:
-                raise KeyError(
-                    "content_hashes contained keys that were not selected for run "
-                    f"{run_id!r}: {', '.join(repr(key) for key in unknown_hash_keys)}"
-                )
-
-        registered: dict[str, ArtifactRecoveryCopyRegistration] = {}
-        pending_metadata_updates: list[
-            tuple[str, Artifact, ArtifactRecoveryCopyRegistration]
-        ] = []
-        for key, artifact in selected.items():
-            registration = self._register_artifact_recovery_copy(
-                artifact,
-                recovery_root,
-                verify=verify,
-                content_hash=content_hashes.get(key) if content_hashes else None,
-                append=append,
-                persist=False,
-            )
-            registered[key] = registration
-            if registration.status == "registered":
-                pending_metadata_updates.append((key, artifact, registration))
-
-        recovery_root_path = Path(recovery_root).resolve()
-        if pending_metadata_updates:
-            try:
-                self._set_artifact_recovery_roots_bulk(
-                    [artifact for _, artifact, _ in pending_metadata_updates],
-                    [recovery_root_path],
-                    append=append,
-                )
-            except Exception:
-                for key, artifact, registration in pending_metadata_updates:
-                    try:
-                        self.set_artifact_recovery_roots(
-                            artifact, [recovery_root_path], append=append
-                        )
-                    except Exception as exc:
-                        registered[key] = replace(
-                            registration,
-                            status="failed",
-                            message=f"Could not update recovery_roots metadata: {exc}",
-                            metadata_updated=False,
-                        )
-                    else:
-                        registered[key] = replace(
-                            registration,
-                            message="Recovery copy verified and registered.",
-                            metadata_updated=True,
-                        )
-            else:
-                for key, _, registration in pending_metadata_updates:
-                    registered[key] = replace(
-                        registration,
-                        message="Recovery copy verified and registered.",
-                        metadata_updated=True,
-                    )
-        return RunOutputRecoveryCopiesRegistration(outputs=registered)
+    def archive_run_output_files(
+        self,
+        run_id: str,
+        recovery_root: str | os.PathLike[str],
+        *,
+        keys: Sequence[str] | None = None,
+        preserve_existing: bool = True,
+        verify: bool = True,
+        append: bool = True,
+    ) -> ArchivedRunOutputFilesReport:
+        return self._archive_service.archive_run_output_files(
+            run_id,
+            recovery_root,
+            keys=keys,
+            preserve_existing=preserve_existing,
+            verify=verify,
+            append=append,
+        )
 
     def archive_run_outputs(
         self,
@@ -1556,38 +1166,10 @@ class Tracker:
         keys: Sequence[str] | None = None,
         mode: Literal["copy", "move"] = "copy",
         append: bool = True,
-    ) -> dict[str, Path]:
-        """
-        Archive one or more historical run outputs into a stable recovery root.
-
-        Each archived output retains its canonical artifact identity and gains
-        ``archive_root`` as an advisory recovery root.
-        """
-        normalized_keys = normalize_materialize_output_keys(
-            keys,
-            caller="archive_run_outputs",
+    ) -> ArchivedOutputs:
+        return self._archive_service.archive_run_outputs(
+            run_id, archive_root, keys=keys, mode=mode, append=append
         )
-        outputs = self.get_run_outputs(run_id)
-        if normalized_keys is not None:
-            missing = [key for key in normalized_keys if key not in outputs]
-            if missing:
-                raise KeyError(
-                    "Requested output keys were not found for run "
-                    f"{run_id!r}: {', '.join(repr(key) for key in missing)}"
-                )
-            selected = {key: outputs[key] for key in normalized_keys}
-        else:
-            selected = outputs
-
-        archived: dict[str, Path] = {}
-        for key, artifact in selected.items():
-            archived[key] = self.archive_artifact(
-                artifact,
-                archive_root,
-                mode=mode,
-                append=append,
-            )
-        return archived
 
     def archive_current_run_outputs(
         self,
@@ -1596,24 +1178,9 @@ class Tracker:
         keys: Sequence[str] | None = None,
         mode: Literal["copy", "move"] = "copy",
         append: bool = True,
-    ) -> dict[str, Path]:
-        """
-        Archive outputs for the currently active run into a stable recovery root.
-
-        This is a convenience wrapper around ``archive_run_outputs(...)`` for
-        the common workflow of archiving outputs immediately after they are
-        logged, without manually extracting the active run ID first.
-        """
-        if not self.current_consist or self.current_consist.run is None:
-            raise RuntimeError(
-                "archive_current_run_outputs(...) requires an active run context."
-            )
-        return self.archive_run_outputs(
-            self.current_consist.run.id,
-            archive_root,
-            keys=keys,
-            mode=mode,
-            append=append,
+    ) -> ArchivedOutputs:
+        return self._archive_service.archive_current_run_outputs(
+            archive_root, keys=keys, mode=mode, append=append
         )
 
     def _parse_artifact_facet_from_registered_parsers(
@@ -1829,6 +1396,9 @@ class Tracker:
 
         Raises
         ------
+        ValueError
+            If raw strict-binding controls are supplied. Strict binding runs
+            must be initiated through ``ScenarioContext.run(binding=...)``.
         Exception
             Any exception raised within the `with` block will be caught, the run
             marked as "failed", and then re-raised after cleanup.
@@ -1847,6 +1417,7 @@ class Tracker:
              tracker.log_artifact("results.parquet", "output")
         ```
         """
+        _reject_raw_strict_binding_controls(kwargs)
         self.begin_run(run_id=run_id, model=model, **kwargs)
         try:
             yield self
@@ -1885,13 +1456,17 @@ class Tracker:
         stage: Optional[str] = None,
         parent_run_id: Optional[str] = None,
         outputs: Optional[List[str]] = None,
-        output_paths: Optional[Mapping[str, ArtifactRef]] = None,
+        output_paths: Optional[Mapping[str, OutputPathRef]] = None,
+        output_sets: Optional[Mapping[str, OutputSet]] = None,
+        profile_file_schema: bool | Literal["if_changed"] | None = None,
         capture_dir: Optional[Path] = None,
         capture_pattern: str = "*",
         cache_options: Optional[CacheOptions] = None,
         output_policy: Optional[OutputPolicyOptions] = None,
         execution_options: Optional[ExecutionOptions] = None,
         runtime_kwargs: Optional[Mapping[str, Any]] = None,
+        _apply_step_defaults: Optional[bool] = None,
+        _strict_binding_context: _StrictBindingInvocationContext | None = None,
     ) -> RunResult:
         """
         Execute a function-shaped run with caching and output handling.
@@ -1926,9 +1501,13 @@ class Tracker:
               `load_inputs`).
             - List/Iterable: Hashed for cache key but not automatically bound.
         input_keys : Optional[Iterable[str] | str], optional
-            Deprecated. Use `inputs` mapping instead.
+            Deprecated. Use `inputs` mapping instead. Direct ``Tracker.run``
+            calls warn when this is provided, including when it is supplied by
+            the callable's decorated step metadata.
         optional_input_keys : Optional[Iterable[str] | str], optional
-            Deprecated. Use `inputs` mapping instead.
+            Deprecated. Use `inputs` mapping instead. Direct ``Tracker.run``
+            calls warn when this is provided, including when it is supplied by
+            the callable's decorated step metadata.
         depends_on : Optional[List[RunInputRef]], optional
             Additional file paths or artifacts to hash for the cache signature (e.g., config files).
 
@@ -1965,7 +1544,17 @@ class Tracker:
             Consist auto-logs artifact-like returns (Path/str/Artifact or dict[str, ...])
             when ``output_paths`` is not provided.
         output_paths : Optional[Mapping[str, ArtifactRef]], optional
-            Output file paths to log. Dict maps artifact keys to host paths or Artifact refs.
+            Output file paths to log. Dict maps artifact keys to host paths,
+            Artifact refs, or ``ArtifactSpec`` declarations.
+        profile_file_schema : bool | {"if_changed"} | None, optional
+            Run-scoped default for automatic file schema profiling of logged
+            inputs and declared file outputs. Per-artifact specs can override it.
+        output_sets : Optional[Mapping[str, OutputSet]], optional
+            Logical output declarations for directory or chunked outputs. Each
+            mapping key becomes the parent artifact key. Each ``OutputSet`` needs
+            only ``root`` and ``include``; ``expected_members`` and
+            ``expected_count`` are optional completeness checks, not required
+            fields.
         capture_dir : Optional[Path], optional
             Directory to scan for outputs (legacy tools that write to specific dirs).
         capture_pattern : str, default "*"
@@ -2004,6 +1593,12 @@ class Tracker:
         RuntimeError
             If the function execution fails or container execution returns non-zero code.
 
+        Notes
+        -----
+        Strict ``ResolvedBinding`` cache semantics are available only through
+        ``ScenarioContext.run(binding=...)``. Direct ``Tracker.run`` callers
+        cannot supply strict-binding identity, evidence, or staging controls.
+
         Examples
         --------
         Execute a basic data processing step:
@@ -2035,7 +1630,9 @@ class Tracker:
         start_run : Manual run context management (more control)
         trace : Context manager alternative (always executes, even on cache hit)
         """
-        return self._run_trace.run(
+        return self._run_with_strict_binding_context(
+            _strict_binding_context,
+            self._run_trace.run,
             fn=fn,
             name=name,
             run_id=run_id,
@@ -2062,13 +1659,31 @@ class Tracker:
             parent_run_id=parent_run_id,
             outputs=outputs,
             output_paths=output_paths,
+            output_sets=output_sets,
+            profile_file_schema=profile_file_schema,
             capture_dir=capture_dir,
             capture_pattern=capture_pattern,
             cache_options=cache_options,
             output_policy=output_policy,
             execution_options=execution_options,
             runtime_kwargs=runtime_kwargs,
+            _apply_step_defaults=_apply_step_defaults,
         )
+
+    def _run_with_strict_binding_context(
+        self,
+        context: _StrictBindingInvocationContext | None,
+        run: Callable[..., RunResult],
+        **kwargs: Any,
+    ) -> RunResult:
+        """Bind Scenario-validated strict facts for one internal execution handoff."""
+        if context is not None:
+            _validate_strict_binding_invocation_context(context)
+        token = self._strict_binding_context.set(context)
+        try:
+            return run(**kwargs)
+        finally:
+            self._strict_binding_context.reset(token)
 
     def run_with_config_overrides(
         self,
@@ -2189,7 +1804,7 @@ class Tracker:
         iteration: Optional[int] = None,
         parent_run_id: Optional[str] = None,
         outputs: Optional[List[str]] = None,
-        output_paths: Optional[Mapping[str, ArtifactRef]] = None,
+        output_paths: Optional[Mapping[str, OutputPathRef]] = None,
         capture_dir: Optional[Path] = None,
         capture_pattern: str = "*",
         cache_mode: str = "reuse",
@@ -2197,6 +1812,7 @@ class Tracker:
         cache_version: Optional[int] = None,
         cache_epoch: Optional[int] = None,
         validate_cached_outputs: str = "lazy",
+        validate_materialized_inputs: Optional[bool] = None,
         code_identity: Optional[CodeIdentityMode] = None,
         code_identity_extra_deps: Optional[List[str]] = None,
         output_mismatch: str = "warn",
@@ -2287,6 +1903,9 @@ class Tracker:
             Optional cache-epoch discriminator folded into run identity.
         validate_cached_outputs : str, default "lazy"
             Validation for cached outputs: "lazy" (check if files exist), "strict", or "none".
+        validate_materialized_inputs : bool or None, optional
+            When True with ``cache_hydration="inputs-missing"``, validate
+            existing cache-miss input destinations before preserving them.
         code_identity : Optional[CodeIdentityMode], optional
             Strategy for hashing code identity in cache keys.
         code_identity_extra_deps : Optional[List[str]], optional
@@ -2379,6 +1998,7 @@ class Tracker:
             cache_version=cache_version,
             cache_epoch=cache_epoch,
             validate_cached_outputs=validate_cached_outputs,
+            validate_materialized_inputs=validate_materialized_inputs,
             code_identity=code_identity,
             code_identity_extra_deps=code_identity_extra_deps,
             output_mismatch=output_mismatch,
@@ -2823,6 +2443,7 @@ class Tracker:
         key: Optional[str] = None,
         direction: str = "output",
         schema: Optional[Type[SQLModel]] = None,
+        strict_schema: bool = False,
         driver: Optional[str] = None,
         table_path: Optional[str] = None,
         array_path: Optional[str] = None,
@@ -2853,7 +2474,7 @@ class Tracker:
             **"Path Resolution & Mounts"**.
 
         -   **Schema Metadata Injection**: Embeds schema information (if provided) into the
-            artifact's metadata, useful for later "Strict Mode" validation or introspection.
+            artifact's metadata for discovery, export, and optional validation workflows.
 
         -   **Immediate Persistence**: This single-artifact method flushes JSON state
             and syncs artifact links to the database immediately for this call.
@@ -2871,8 +2492,12 @@ class Tracker:
             Specifies whether the artifact is an "input" or "output" for the
             current run. Defaults to "output".
         schema : Optional[Type[SQLModel]], optional
-            An optional SQLModel class that defines the expected schema for the artifact's data.
-            Its name will be stored in artifact metadata.
+            An optional SQLModel class that names the artifact's logical schema.
+            Its name will be stored in artifact metadata. This tags metadata; it
+            does not validate file contents by default.
+        strict_schema : bool, default False
+            Whether a schema tag should also mark the artifact as strict for
+            validation workflows. Schema tagging itself is non-strict by default.
         driver : Optional[str], optional
             Explicitly specify the driver (e.g., 'h5_table').
             If None, the driver is inferred from the file extension.
@@ -2932,6 +2557,7 @@ class Tracker:
             key=key,
             direction=direction,
             schema=schema,
+            strict_schema=strict_schema,
             driver=driver,
             table_path=table_path,
             array_path=array_path,
@@ -3246,6 +2872,10 @@ class Tracker:
         facet: Optional[FacetLike] = None,
         facet_schema_version: Optional[Union[str, int]] = None,
         facet_index: bool = False,
+        *,
+        artifact_kind: Literal["file", "directory"] = "file",
+        schema: Optional[Type[SQLModel]] = None,
+        driver: Optional[str] = None,
         **meta: Any,
     ) -> Artifact:
         """
@@ -3257,6 +2887,15 @@ class Tracker:
             A file path (str/Path) or an existing `Artifact` reference to be logged.
         key : Optional[str], optional
             A semantic, human-readable name for the artifact.
+        artifact_kind : {"file", "directory"}, default "file"
+            Declare an immutable logical directory artifact. Directory outputs
+            persist a complete member manifest while retaining their content
+            driver for archive-safe recovery and format-aware loading.
+        schema : Optional[Type[SQLModel]], optional
+            Optional schema metadata for the output artifact.
+        driver : Optional[str], optional
+            Explicit content driver. Zarr directories infer ``"zarr"`` when
+            the path ends in ``.zarr``.
         content_hash : Optional[str], optional
             Precomputed artifact fingerprint to use instead of hashing the path
             on disk. When provided, Consist stores it on the canonical public
@@ -3285,10 +2924,41 @@ class Tracker:
         Artifact
             The created or updated `Artifact` object.
         """
+        if artifact_kind not in {"file", "directory"}:
+            raise ValueError("artifact_kind must be 'file' or 'directory'.")
+
+        if artifact_kind == "directory":
+            if isinstance(path, Artifact) or not isinstance(path, (str, Path)):
+                raise TypeError("directory outputs must be logged from a path.")
+            if driver == "artifact_directory":
+                raise ValueError(
+                    "artifact_directory is not a content driver; use a format driver "
+                    "such as 'zarr' or let Consist infer one."
+                )
+            return self.log_artifact(
+                path,
+                key=key,
+                direction="output",
+                schema=schema,
+                driver=driver,
+                content_hash=content_hash,
+                force_hash_override=force_hash_override,
+                validate_content_hash=validate_content_hash,
+                reuse_if_unchanged=reuse_if_unchanged,
+                reuse_scope=reuse_scope,
+                facet=facet,
+                facet_schema_version=facet_schema_version,
+                facet_index=facet_index,
+                directory_artifact=True,
+                **meta,
+            )
+
         return self.log_artifact(
             path,
             key=key,
             direction="output",
+            schema=schema,
+            driver=driver,
             content_hash=content_hash,
             force_hash_override=force_hash_override,
             validate_content_hash=validate_content_hash,
@@ -3660,7 +3330,9 @@ class Tracker:
             was logged with a schema (e.g., ``log_artifact(path, schema=MySchema)``)
             and that schema was registered with the Tracker at initialization
             (e.g., ``Tracker(..., schemas=[MySchema])``), it will be automatically
-            looked up and used for ingestion.
+            looked up and used for ingestion. Logging the artifact with
+            ``schema=...`` only tags metadata; ingestion is the step that applies
+            the schema to data.
         data : Optional[Union[Iterable[Dict[str, Any]], Any]], optional
             An iterable (e.g., list of dicts, generator) where each item represents a
             row of data to be ingested. If `data` is omitted, Consist attempts to
@@ -4378,6 +4050,73 @@ class Tracker:
             status=status,
             year=year,
             iteration=iteration,
+        )
+
+    def ibis_connection(self) -> "IbisDuckDBBackend":
+        """
+        Return an Ibis DuckDB backend bound to this tracker's database.
+        """
+        from consist.integrations.ibis import ibis_connection
+
+        return ibis_connection(self)
+
+    def ibis_view(
+        self,
+        model: Type[SQLModel],
+        key: Optional[str] = None,
+    ) -> "IbisTable":
+        """
+        Create or refresh a Consist view and return it as an Ibis table.
+        """
+        from consist.integrations.ibis import ibis_view
+
+        return ibis_view(self, model=model, key=key)
+
+    def ibis_grouped_view(
+        self,
+        *,
+        view_name: str,
+        artifact_id: uuid.UUID,
+        namespace: Optional[str] = None,
+        params: Optional[Iterable[str]] = None,
+        drivers: Optional[List[str]] = None,
+        attach_facets: Optional[List[str]] = None,
+        include_system_columns: bool = True,
+        mode: Literal["hybrid", "hot_only", "cold_only"] = "hybrid",
+        if_exists: Literal["replace", "error"] = "replace",
+        missing_files: Literal["warn", "error", "skip_silent"] = "warn",
+        run_id: Optional[str] = None,
+        parent_run_id: Optional[str] = None,
+        model: Optional[str] = None,
+        status: Optional[str] = None,
+        year: Optional[int] = None,
+        iteration: Optional[int] = None,
+        schema_compatible: bool = False,
+    ) -> ContextManager["IbisTable"]:
+        """
+        Create a grouped Consist view and expose it as a native Ibis table.
+        """
+        from consist.integrations.ibis import ibis_grouped_view
+
+        return ibis_grouped_view(
+            self,
+            view_name=view_name,
+            artifact_id=artifact_id,
+            namespace=namespace,
+            params=params,
+            drivers=drivers,
+            attach_facets=attach_facets,
+            include_system_columns=include_system_columns,
+            mode=mode,
+            if_exists=if_exists,
+            missing_files=missing_files,
+            run_id=run_id,
+            parent_run_id=parent_run_id,
+            model=model,
+            status=status,
+            year=year,
+            iteration=iteration,
+            schema_compatible=schema_compatible,
         )
 
     def load_matrix(
@@ -5154,6 +4893,32 @@ class Tracker:
             db_fallback=db_fallback,
         )
 
+    def hydrate_run_outputs_to_destinations(
+        self,
+        run_id: str,
+        *,
+        destinations_by_key: Mapping[str, str | Path],
+        source_root: str | Path | None = None,
+        preserve_existing: bool = True,
+        on_missing: Literal["warn", "raise"] = "warn",
+        db_fallback: Literal["never", "if_ingested"] = "if_ingested",
+    ) -> "HydratedRunOutputsResult":
+        """Hydrate selected historical outputs to exact destinations by key.
+
+        ``destinations_by_key`` is both the requested-output selection and the
+        exact destination mapping. Every destination must be inside the
+        tracker's configured run or mount roots unless external paths are
+        explicitly enabled.
+        """
+        return self._recovery_service.hydrate_run_outputs_to_destinations(
+            run_id,
+            destinations_by_key=destinations_by_key,
+            source_root=source_root,
+            preserve_existing=preserve_existing,
+            on_missing=on_missing,
+            db_fallback=db_fallback,
+        )
+
     def get_config_bundle(
         self,
         run_id: str,
@@ -5243,6 +5008,47 @@ class Tracker:
                 "cache-identity matching requires config_hash, input_hash, and git_hash"
             )
         return self._history_service.find_matching_run(
+            config_hash,
+            input_hash,
+            git_hash,
+            signature=signature,
+        )
+
+    def _find_matching_cached_runs(
+        self,
+        config_hash: str,
+        input_hash: str,
+        git_hash: str,
+        *,
+        signature: Optional[str] = None,
+    ) -> list[Run]:
+        """Return completed cache candidates for internal hydration admission.
+
+        Parameters
+        ----------
+        config_hash : str
+            Digest of the identity-relevant configuration.
+        input_hash : str
+            Digest of the declared input artifacts.
+        git_hash : str
+            Digest of the code identity.
+        signature : str, optional
+            Composite cache signature used to prioritize matching candidates.
+
+        Returns
+        -------
+        list[Run]
+            Deduplicated completed candidates in cache-preference order. The
+            list is empty when the tracker has no persistent cache history or
+            no candidate matches.
+
+        Notes
+        -----
+        This private wrapper keeps lifecycle orchestration independent of the
+        history-service implementation. It returns candidates only; hydration
+        and validation determine whether any candidate becomes a cache hit.
+        """
+        return self._history_service.find_matching_cached_runs(
             config_hash,
             input_hash,
             git_hash,
@@ -5480,7 +5286,13 @@ class Tracker:
         if self._last_consist is not None and self._last_consist.run.id == run.id:
             self.persistence.flush_record_json(self._last_consist)
 
-    def _sync_run_to_db(self, run: Run) -> None:
+    def _sync_run_to_db(
+        self,
+        run: Run,
+        *,
+        binding_invocation: Optional[RunBindingInvocation] = None,
+        require_success: bool = False,
+    ) -> None:
         """
         Synchronizes the state of a `Run` object to the DuckDB database.
 
@@ -5498,7 +5310,14 @@ class Tracker:
         run : Run
             The `Run` object whose state needs to be synchronized with the database.
         """
-        self.persistence.sync_run(run)
+        if binding_invocation is None:
+            self.persistence.sync_run(run)
+        else:
+            self.persistence.sync_run(
+                run,
+                binding_invocation=binding_invocation,
+                require_success=require_success,
+            )
 
     def _sync_artifact_to_db(
         self,
@@ -5814,9 +5633,27 @@ _TRACKER_WRAPPER_DOCS = {
     ),
     "history": TrackerHistoryService.history,
     "load_input_bundle": TrackerHistoryService.load_input_bundle,
+    "set_artifact_recovery_roots": TrackerArchiveService.set_artifact_recovery_roots,
+    "archive_artifact": TrackerArchiveService.archive_artifact,
+    "register_artifact_recovery_copy": (
+        TrackerArchiveService.register_artifact_recovery_copy
+    ),
+    "register_run_output_recovery_copies": (
+        TrackerArchiveService.register_run_output_recovery_copies
+    ),
+    "archive_run_output_files": TrackerArchiveService.archive_run_output_files,
+    "archive_run_outputs": TrackerArchiveService.archive_run_outputs,
+    "archive_current_run_outputs": TrackerArchiveService.archive_current_run_outputs,
+    "materialize": TrackerRecoveryService.materialize,
+    "stage_artifact": TrackerRecoveryService.stage_artifact,
+    "materialize_artifact": TrackerRecoveryService.materialize_artifact,
+    "stage_inputs": TrackerRecoveryService.stage_inputs,
+    "materialize_run_outputs": TrackerRecoveryService.materialize_run_outputs,
+    "hydrate_run_outputs": TrackerRecoveryService.hydrate_run_outputs,
+    "hydrate_run_outputs_to_destinations": (
+        TrackerRecoveryService.hydrate_run_outputs_to_destinations
+    ),
 }
 
 for _name, _source in _TRACKER_WRAPPER_DOCS.items():
     getattr(Tracker, _name).__doc__ = _source.__doc__
-
-del _name, _source

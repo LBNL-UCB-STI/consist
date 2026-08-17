@@ -1,10 +1,16 @@
-# Data Virtualization & Materialization Strategy
+# Data Storage and Ingestion Strategy
 
-This guide explains when to keep data on disk (virtualize) versus ingesting it into DuckDB (materialize).
+This guide explains when to keep data on disk as cold files versus ingesting
+tabular artifacts into DuckDB for SQL analysis and database fallback.
 
 Canonical one-line definitions for cold/hot data, hybrid views, and
-materialization live in [Core Concepts Overview](overview.md). This page focuses
-on decision criteria and implementation patterns.
+ingestion live in [Core Concepts Overview](overview.md). This page focuses on
+decision criteria and implementation patterns.
+
+This is different from filesystem materialization in
+[Caching and Hydration](caching-and-hydration.md), where Consist copies,
+exports, or stages bytes so a local path exists. Ingestion is a database storage
+choice; filesystem materialization is a byte-location/recovery operation.
 
 !!! note "Recommended path"
     For standard execution flow, prefer `tracker.run(...)`, `tracker.trace(...)`,
@@ -116,7 +122,10 @@ with tracker.start_run("strict_ingest", model="demo"):
     tracker.ingest(artifact, schema=Person)
 ```
 
-Strict mode rejects incompatible data rather than silently coercing it.
+`log_artifact(..., schema=Person)` tags the artifact with logical schema
+metadata; it does not validate the file by itself. The validation happens during
+`tracker.ingest(..., schema=Person)`, where strict mode rejects incompatible data
+rather than silently coercing it.
 
 ---
 
@@ -160,15 +169,22 @@ VPerson = tracker.views.Person
 Once registered, you can query across all runs (both ingested and cold data):
 
 ```python
-from sqlmodel import select, func
 import consist
 
-query = (
-    select(VPerson.consist_year, func.avg(VPerson.age).label("avg_age"))
-    .group_by(VPerson.consist_year)
+persons = consist.ibis_view(tracker, model=Person)
+summary = (
+    persons.filter(persons.age >= 18)
+    .group_by(persons.consist_year)
+    .agg(avg_age=persons.age.mean())
 )
-rows = consist.run_query(query, tracker=tracker)
+rows = summary.to_pandas()
 ```
+
+Use `consist.run_query(...)` when you need explicit SQLAlchemy / SQLModel
+queries or database-native SQL over tracker tables and views. For lazy analysis
+over typed tracker views, `consist.ibis_view(...)` is the recommended surface.
+For schema-driven cross-artifact analysis, create a grouped view and query it
+with `consist.ibis_grouped_view(...)`.
 
 For schema/facet-driven cross-key analysis, use
 [Grouped Views](grouped-views.md) to create one view over many artifacts that
@@ -192,6 +208,29 @@ Example:
 df = consist.load_df(artifact, tracker=tracker, db_fallback="always")
 ```
 
+## Choosing A Query Surface
+
+Use the narrowest surface that matches the task:
+
+- `consist.load_df(...)` for one artifact when you want an eager pandas DataFrame.
+- `consist.ibis_view(...)` or `consist.ibis_connection(...)` when you want lazy,
+  dataframe-style analysis over a Consist DuckDB view. This is the recommended
+  surface for tabular tracker analysis when you are willing to install the
+  optional `consist[ibis]` extra.
+- `consist.ibis_grouped_view(...)` when you want the same lazy Ibis surface but
+  need to aggregate or compare many artifacts through a grouped DuckDB view.
+- `consist.run_query(...)` when you need explicit SQLAlchemy / SQLModel queries
+  or hand-written SQL against Consist tables or views.
+- Call Ibis after the current SQLAlchemy session or run has released its DuckDB
+  connection; the adapter opens a separate DuckDB handle for analysis.
+
+Example:
+
+```python
+persons = consist.ibis_view(tracker, model=Person)
+summary = persons.filter(persons.age >= 18).group_by("home_zone_id").count()
+```
+
 ---
 
 ## Loader Kwargs
@@ -206,6 +245,62 @@ df = consist.load_df(artifact, tracker=tracker, db_fallback="always")
 | `h5_table` | `columns`, `where`, `start`, `stop` |
 
 Use `consist.load_relation(...)` to manage DuckDB Relation lifecycle explicitly. Use `consist.load_df(...)` for DataFrame with automatic cleanup.
+
+---
+
+## GeoParquet and Spatial Artifacts
+
+GeoParquet is supported only when you log it explicitly:
+
+```python
+artifact = tracker.log_artifact(
+    "outputs/parcels.parquet",
+    key="parcels",
+    driver="geoparquet",
+)
+```
+
+Without an explicit driver, Consist keeps the existing generic `.parquet`
+behavior. The artifact is inferred as `driver="parquet"`, `load(...)` returns a
+DuckDB relation, and `is_spatial_artifact(...)` returns `False`.
+
+Spatial ingestion records lightweight metadata only: bounds, CRS, geometry
+types, geometry column, feature count, and columns. It does not ingest geometry
+rows into hot database storage, and it does not reconstruct GeoParquet from hot
+DB state.
+
+For direct cold-file spatial queries in DuckDB, load the spatial extension
+after it is installed locally, then read the file from its path:
+
+```python
+from pathlib import Path
+
+import duckdb
+
+path = artifact.as_path(tracker)
+
+con = duckdb.connect()
+con.sql("LOAD spatial")
+nearby = con.sql(
+    """
+    SELECT
+        parcel_id,
+        ST_Distance_Sphere(
+            ST_Centroid(geometry),
+            ST_Point(-122.3321, 47.6062)
+        ) AS distance_m
+    FROM read_parquet(?)
+    WHERE distance_m < 1000
+    ORDER BY distance_m
+    """,
+    params=[str(path)],
+)
+```
+
+Use the returned relation for SQL exploration against the file on disk. In this
+example, DuckDB Spatial reads the GeoParquet geometry column and computes each
+parcel centroid's spherical distance from a reference point. The pattern stays
+explicit: Consist tracks the artifact and DuckDB queries the cold file directly.
 
 ---
 
@@ -238,6 +333,6 @@ Currently `h5_table` uses a staging bridge (`pandas.read_hdf(...)` + `conn.from_
 
 ## See Also
 
-- **[Caching & Hydration](caching-and-hydration.md)** — How materialization interacts with caching
+- **[Caching & Hydration](caching-and-hydration.md)** — How filesystem materialization interacts with caching
 - **[DLT Loader Guide](../dlt-loader-guide.md)** — Detailed ingestion patterns using DLT
 - **[Schema Export](../schema-export.md)** — Generate and manage schemas for ingested data

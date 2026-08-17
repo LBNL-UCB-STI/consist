@@ -32,6 +32,7 @@ from typing import Any
 import consist
 from sqlalchemy import text
 from consist import ExecutionOptions, Tracker
+from consist.models.run_config_kv import RunConfigKV
 
 
 class CalibrationTracker:
@@ -90,7 +91,20 @@ class CalibrationTracker:
             LIMIT :k
         """)
         return self._tracker.run_query(query.params(metric=metric, k=k))
+
+    def query_top_k_ibis(self, *, metric: str, k: int = 5):
+        kv = consist.ibis_view(self._tracker, model=RunConfigKV)
+        return (
+            kv.filter(kv.key == metric)
+            .select("run_id", "value_num")
+            .order_by("value_num")
+            .limit(k)
+        )
 ```
+
+Prefer the Ibis helper for analysis-time reads over the typed view surface.
+Keep the SQLAlchemy / SQLModel version when you want to show the lower-level
+tracker internals or the exact SQL text being issued.
 
 Usage:
 

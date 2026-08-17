@@ -94,9 +94,9 @@ def test_shell_artifacts_no_arg_non_tty_errors_without_prompt(tmp_path, capsys) 
         shell.do_artifacts("")
 
     out = capsys.readouterr().out
-    normalized = " ".join(out.split())
-    assert "run_id required" in out
-    assert "run `runs` first to populate shortcuts" in normalized
+    assert "Run ID required" in out
+    assert "runs" in out
+    assert "shortcuts" in out
     fake_input.assert_not_called()
 
 
@@ -111,10 +111,9 @@ def test_shell_preview_no_arg_non_tty_reports_next_steps(tmp_path, capsys) -> No
     shell.do_preview("")
 
     out = capsys.readouterr().out
-    normalized = " ".join(out.split())
-    assert "artifact_key required" in out
-    assert "Run `artifacts <run_id>` first to populate @refs." in normalized
-    assert "Use `context` to inspect shell defaults." in normalized
+    assert "Artifact key required" in out
+    assert "artifacts <run_id>" in out
+    assert "Use `context` to inspect shell defaults." in out
 
 
 def test_shell_preview_picker_selects_artifact_in_tty_mode(tmp_path) -> None:
@@ -265,7 +264,7 @@ def test_shell_artifact_ref_missing_suggests_how_to_populate_refs(
 
     out = capsys.readouterr().out
     assert resolved is None
-    assert "no cached artifact refs" in out
+    assert "No cached artifact refs." in out
     assert "artifacts <run_id>" in out
     assert "artifacts #<n>" in out
 
@@ -682,3 +681,167 @@ def test_shell_preview_accepts_cached_artifact_ref(tmp_path) -> None:
         shell.do_preview("@1")
 
     tracker.get_artifact.assert_called_once_with("artifact-id")
+
+
+def test_shell_preview_uses_cached_artifact_run_context(tmp_path) -> None:
+    tracker = MagicMock()
+    tracker.get_artifact.return_value = SimpleNamespace(
+        id="artifact-id",
+        key="artifact-key",
+        driver="csv",
+        run_id="run-123",
+        container_uri="data://outputs/file.csv",
+        meta={},
+    )
+    with (
+        patch("consist.cli.Path.home", return_value=tmp_path),
+        patch("consist.cli._READLINE", None),
+    ):
+        shell = ConsistShell(tracker)
+    shell._last_artifact_ids = ["artifact-id"]
+    shell._last_artifact_run_id = "run-123"
+
+    with (
+        patch("consist.cli._ensure_tracker_mounts_for_artifact") as ensure_mounts,
+        patch("consist.cli._render_artifact_set_preview", return_value=False),
+        patch("consist.cli._render_output_set_manifest_preview", return_value=False),
+        patch(
+            "consist.cli._build_relative_resolution_bases",
+            return_value=([], None),
+        ),
+        patch(
+            "consist.cli._load_artifact_with_diagnostics",
+            return_value=pd.DataFrame({"value": [1]}),
+        ),
+    ):
+        shell.do_preview("@1")
+
+    ensure_mounts.assert_called_once()
+    assert ensure_mounts.call_args.kwargs["preferred_run_id"] == "run-123"
+
+
+def test_shell_schema_profile_uses_cached_artifact_run_context(tmp_path) -> None:
+    tracker = MagicMock()
+    tracker.get_artifact.return_value = SimpleNamespace(
+        id="artifact-id",
+        key="artifact-key",
+        driver="csv",
+        run_id="run-123",
+        container_uri="data://outputs/file.csv",
+        meta={},
+    )
+    tracker.db = None
+    with (
+        patch("consist.cli.Path.home", return_value=tmp_path),
+        patch("consist.cli._READLINE", None),
+    ):
+        shell = ConsistShell(tracker)
+    shell._last_artifact_ids = ["artifact-id"]
+    shell._last_artifact_run_id = "run-123"
+
+    with (
+        patch("consist.cli._ensure_tracker_mounts_for_artifact") as ensure_mounts,
+        patch("consist.cli._render_artifact_set_preview", return_value=False),
+        patch("consist.cli._render_output_set_manifest_preview", return_value=False),
+        patch(
+            "consist.cli._build_relative_resolution_bases",
+            return_value=([], None),
+        ),
+        patch(
+            "consist.cli._load_artifact_with_diagnostics",
+            return_value=pd.DataFrame({"value": [1]}),
+        ),
+    ):
+        shell.do_schema_profile("@1")
+
+    ensure_mounts.assert_called_once()
+    assert ensure_mounts.call_args.kwargs["preferred_run_id"] == "run-123"
+
+
+def test_shell_preview_renders_artifact_set_without_loading_parent(tmp_path) -> None:
+    tracker = MagicMock()
+    parent = SimpleNamespace(
+        id="parent-id",
+        key="annual",
+        driver="artifact_set",
+        run_id="run-1",
+        container_uri="./outputs/annual",
+        meta={"artifact_set": True},
+    )
+    tracker.get_artifact.return_value = parent
+    with (
+        patch("consist.cli.Path.home", return_value=tmp_path),
+        patch("consist.cli._READLINE", None),
+    ):
+        shell = ConsistShell(tracker)
+
+    with (
+        patch("consist.cli._render_artifact_set_preview", return_value=True) as render,
+        patch("consist.cli._load_artifact_with_diagnostics") as load_artifact,
+    ):
+        shell.do_preview("annual")
+
+    render.assert_called_once_with(tracker, parent, n_rows=5)
+    load_artifact.assert_not_called()
+
+
+def test_shell_members_lists_artifact_set_children(tmp_path, capsys) -> None:
+    tracker = MagicMock()
+    parent = SimpleNamespace(
+        id="parent-id",
+        key="annual",
+        driver="artifact_set",
+        run_id="run-1",
+        container_uri="./outputs/annual",
+        meta={"artifact_set": True},
+    )
+    tracker.get_artifact.return_value = parent
+    tracker.get_child_artifacts.return_value = [
+        SimpleNamespace(
+            key="annual__annual_2030_csv",
+            driver="csv",
+            meta={"output_set_relative_path": "annual_2030.csv"},
+        )
+    ]
+    with (
+        patch("consist.cli.Path.home", return_value=tmp_path),
+        patch("consist.cli._READLINE", None),
+    ):
+        shell = ConsistShell(tracker)
+
+    shell.do_members("annual")
+
+    out = capsys.readouterr().out
+    assert "annual__annual_2030_csv" in out
+    assert "annual_2030.csv" in out
+
+
+def test_shell_manifest_previews_artifact_set_manifest(tmp_path) -> None:
+    tracker = MagicMock()
+    parent = SimpleNamespace(
+        id="parent-id",
+        key="annual",
+        driver="artifact_set",
+        run_id="run-1",
+        container_uri="./outputs/annual",
+        meta={"artifact_set": True, "manifest_artifact_id": "manifest-id"},
+    )
+    manifest = SimpleNamespace(
+        id="manifest-id",
+        key="annual_manifest",
+        driver="json",
+        run_id="run-1",
+        container_uri="./outputs/annual.output_set_manifest.json",
+        meta={"output_set_manifest": True},
+    )
+    tracker.get_artifact.side_effect = [parent, manifest]
+    with (
+        patch("consist.cli.Path.home", return_value=tmp_path),
+        patch("consist.cli._READLINE", None),
+    ):
+        shell = ConsistShell(tracker)
+
+    with patch.object(shell, "do_preview") as do_preview:
+        shell.do_manifest("annual")
+
+    do_preview.assert_called_once_with("manifest-id")

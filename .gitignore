@@ -23,3 +23,6 @@ GEMINI.md
 .idea
 /examples/runs/
 /examples/generated/
+/graphify-out/
+/runs/
+/tests-temp/

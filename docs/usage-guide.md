@@ -67,6 +67,9 @@ Reach for this first when:
 - Inputs and config fully describe the computation.
 - Outputs can be returned as `dict[str, Path]` or declared with
   `output_paths={...}`.
+- Use `ArtifactSpec(path=..., schema=..., profile_file_schema=True)` inside
+  `output_paths` when a legacy file-writing step needs non-strict logical schema
+  metadata at the same declaration site as the output path.
 
 Use options objects for policy controls:
 
@@ -360,7 +363,7 @@ For indexed metadata and query helpers, see:
 
 - [Caching and Hydration](concepts/caching-and-hydration.md): signatures,
   hit/miss behavior, hydration, and materialization policies.
-- [Data Materialization](concepts/data-materialization.md): ingestion,
+- [Data Storage and Ingestion](concepts/data-materialization.md): ingestion,
   database fallback, and hybrid views.
 - [Materialization](api/materialize.md): `hydrate_run_outputs(...)`,
   `stage_inputs(...)`, and staging status meanings.

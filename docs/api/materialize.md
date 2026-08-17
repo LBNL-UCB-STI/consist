@@ -1,14 +1,21 @@
 # Materialization
 
-Consist has two related filesystem-recovery stories:
+This page covers filesystem byte recovery and input staging. It is not about
+choosing whether tabular artifacts should be ingested into DuckDB, except where
+ingested artifacts provide a fallback byte source.
 
-- historical output recovery, which starts with `hydrate_run_outputs(...)`
+Consist has three related filesystem recovery and staging stories:
+
+- historical output recovery, which starts with `hydrate_run_outputs(...)` or
+  `hydrate_run_outputs_to_destinations(...)`
 - single-artifact recovery, which starts with `materialize_artifact(...)`
 - canonical input staging, which starts with
   `ExecutionOptions(input_materialization="requested", input_paths={...})` on
   `run(...)` and `ScenarioContext.run(...)`
 
-For historical output recovery, start with `hydrate_run_outputs(...)`.
+For layout-preserving historical output recovery, start with
+`hydrate_run_outputs(...)`. When a consumer needs exact, unrelated paths,
+use `hydrate_run_outputs_to_destinations(...)`.
 
 It is the clearest API for restart, archive-mirror recovery, and
 cross-workspace reuse because it answers the practical questions in one call:
@@ -23,6 +30,42 @@ but returns the older aggregate
 Keep it for compatibility or summary-style reporting; use
 `hydrate_run_outputs(...)` for new workflows.
 
+### Exact destinations
+
+`hydrate_run_outputs_to_destinations(...)` makes the caller-provided mapping
+the complete requested-output set. It supports ordinary artifact files and
+directories, including unrelated destinations:
+
+```python
+hydrated = tracker.hydrate_run_outputs_to_destinations(
+    "prior_run_id",
+    destinations_by_key={
+        "persons": tracker.run_dir / "tool_inputs" / "persons.csv",
+        "skims": tracker.run_dir / "shared" / "skims.zarr",
+    },
+)
+```
+
+The caller selects the historical run and is responsible for verifying that an
+external tool consumes these staged paths. Results are keyed and can be partial
+in warning mode, so inspect each status before invoking that tool. Every
+destination must be inside the tracker's run directory or a configured mount
+root unless `allow_external_paths=True`. Persisted `OutputSet` hydration is
+deferred from this slice. Newly logged Zarr outputs are immutable directory
+artifacts automatically; other directory trees require
+`log_output(..., artifact_kind="directory")`. Newly logged Shapefile outputs
+are immutable file bundles automatically: Consist records the `.shp`, `.shx`,
+and `.dbf` files plus every same-stem regular sidecar. Zarr and Shapefile
+artifacts retain their native drivers for `consist.load(...)`.
+
+For strict archive recovery, pair `db_fallback="never"` with an explicit
+`source_root`; Consist uses only that archive root and atomically publishes a
+verified tree. A Shapefile destination is a clean bundle-root directory, not a
+shared `.shp` parent: the returned item's `path` is that root and `entry_path`
+is the loadable `.shp` inside it. Legacy Zarr and Shapefile rows without their
+respective persisted manifests cannot use exact archive or hydration and must
+be re-logged under this contract.
+
 Use `materialize_artifact(...)` when you already have one artifact object and
 need Consist to recover its bytes into a target workspace root. It is the
 artifact-centric primitive beside the run-output-centric
@@ -36,8 +79,8 @@ staging behavior outside a run lifecycle.
 
 ## Recovery Ordering
 
-When Consist rematerializes a historical output, it probes recovery sources in
-this order:
+When Consist rematerializes a historical output or stages a resolved artifact,
+it probes recovery sources in this order:
 
 1. A per-call `source_root=...` override
 2. The historical source derived from the producing run directory, historical
@@ -58,7 +101,7 @@ on every restart:
 archive_root = Path("/archive/pilates/iteration_004")
 run_id = tracker.current_consist.run.id
 
-tracker.archive_current_run_outputs(
+archive = tracker.archive_current_run_outputs(
     archive_root,
     mode="copy",
 )
@@ -68,7 +111,63 @@ hydrated = tracker.hydrate_run_outputs(
     keys=["persons"],
     target_root=tracker.run_dir / "restored_workspace",
 )
+
+archived_persons_path = archive.paths["persons"]
+next_inputs = archive.outputs["persons"]
 ```
+
+`archive_current_run_outputs(...)` and `archive_run_outputs(...)` return an
+`ArchivedOutputs` mapping. It still behaves like a read-only `Mapping[str,
+Path]` for the archived bytes. Its explicit `.paths` property exposes that
+same read-only path mapping, while `.outputs` gives you refreshed artifacts
+that already carry the new recovery root. Pass those refreshed artifacts
+directly into a later `inputs={...}` mapping when you want the next run to
+consume the archive.
+
+For a manifest-backed `OutputSet`, `archive_run_outputs(...)` archives the
+logical set as one recovery unit: every declared member is copied or moved into
+the parent artifact's URI-relative archive root, and the persisted manifest is
+archived at its own URI-relative location. The parent, members, and manifest
+receive the recovery root only after all of those bytes have been validated and
+published. Thus `archive.paths["set_key"]` is the archived set root and
+`archive.outputs["set_key"]` is the refreshed parent artifact for downstream
+reuse. `archive_run_output_files(...)` remains a regular-file-only report API
+and reports OutputSets as unsupported.
+
+When a selected immutable directory artifact is nested inside an OutputSet
+root, it reuses the set publication only when its persisted directory manifest
+exactly matches that OutputSet manifest subtree. This preserves strict set
+validation; unrepresented files or directories fail archival instead of being
+silently accepted.
+
+When an application needs an auditable, no-replacement archive pass for files
+only, use `tracker.archive_run_output_files(...)` instead:
+
+```python
+report = tracker.archive_run_output_files(
+    "prior_run_id",
+    Path("/archive/pilates/iteration_004"),
+    keys=["persons", "households"],
+    preserve_existing=True,
+    verify=True,
+    append=True,
+)
+
+if not report.complete:
+    for key, result in report.items():
+        if not result.metadata_committed:
+            print(key, result.copy_status, result.verification_status, result.message)
+```
+
+`ArchivedRunOutputFilesReport` is a read-only mapping of selected output keys
+to immutable per-key results. Each result includes the source artifact, known
+source and target paths, copy and verification statuses, metadata-commit state,
+and a message. The helper supports regular file artifacts only; directories,
+output sets, symlinks, and artifacts lacking a full-file hash are reported per
+key rather than copied. It never replaces archive bytes. A rerun can retain a
+previously verified target and retry only the recovery-root metadata commit.
+`report.complete` means every selected key met the requested verification policy
+and committed metadata in this call; it is not a durable workflow-state claim.
 
 Use the lower-level helpers when you want to manage archival yourself:
 
@@ -83,7 +182,10 @@ Use the lower-level helpers when you want to manage archival yourself:
 - `tracker.archive_artifact(...)` copies or moves a single artifact into an
   archive root and records that root.
 - `tracker.archive_run_outputs(...)` applies the same pattern to all or a
-  selected subset of outputs for a run.
+  selected subset of outputs for a run, including manifest-backed OutputSets.
+- `tracker.archive_run_output_files(...)` copies or conservatively retains
+  selected regular files, verifies them when requested, and bulk-registers
+  recovery roots while retaining per-key outcomes for retries.
 
 For HDF5 containers, verified recovery-copy adoption respects the parent
 container policy. Parent H5 files with
@@ -224,6 +326,8 @@ signatures and attribute details, use the generated reference below.
         - StagedInputsResult
         - ArtifactRecoveryCopyRegistration
         - RunOutputRecoveryCopiesRegistration
+        - ArchivedRunOutputFile
+        - ArchivedRunOutputFilesReport
         - HydratedRunOutput
         - HydratedRunOutputsResult
         - MaterializationResult

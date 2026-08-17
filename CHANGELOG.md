@@ -5,6 +5,270 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog], and this project adheres to
 [Semantic Versioning].
 
+## [0.3.3] - 2026-08-03
+
+### Fixed
+
+- Align `OutputSet` pre-registration with Consist's canonical artifact driver
+  resolver, so compound extensions such as `.csv.gz` retain their `csv` driver
+  identity. This keeps finalized manifests consistent with their parent
+  identity and restores strict central archival without weakening fail-closed
+  validation by @zneedell
+  ([#214](https://github.com/LBNL-UCB-STI/consist/pull/214)).
+- Prune directory trees wholly excluded by an `.../**` pattern before recursive
+  `OutputSet` discovery descends into them. Excluded Zarr trees no longer cause
+  unnecessary traversal or out-of-scope symlink-safety failures; in-scope
+  symlink rejection, filtering, and member ordering are unchanged by
+  @zneedell ([#215](https://github.com/LBNL-UCB-STI/consist/pull/215)).
+
+## [0.3.2] - 2026-07-31
+
+### Added
+
+- Publish experimental, portable LinkML provenance-schema assets (schema
+  version `0.1.0`) for durable ledger context, run and artifact references,
+  lineage associations, and optional cache-aware binding invocations. The
+  checksummed source, merged, and generated-reference assets are packaged
+  without adding LinkML to Consist's runtime dependencies by @zneedell
+  ([#207](https://github.com/LBNL-UCB-STI/consist/pull/207)).
+- Add archive and exact recovery support for manifest-backed `OutputSet`
+  outputs. Sets are validated and published as a single recovery unit, while
+  `ArchivedOutputs.paths` exposes an explicit read-only view of archived paths
+  and `.outputs` retains the refreshed artifacts for downstream reuse by
+  @zneedell ([#208](https://github.com/LBNL-UCB-STI/consist/pull/208)).
+- Add `BeamConfigAdapter.materialize_bundle(...)` and public launch-bundle
+  types for creating a recoverable, provenance-backed BEAM configuration tree
+  from ordered config roots, overrides, and declared file inputs. Equivalent
+  requests reuse a verified durable directory artifact by @zneedell
+  ([#210](https://github.com/LBNL-UCB-STI/consist/pull/210)).
+
+### Changed
+
+- Allow `archive_run_outputs(...)` to use a currently configured managed URI
+  mount as the final fallback for an ordinary run-owned file when historical
+  and recovery sources are unavailable. The fallback is limited to configured
+  schemes and verifies the recorded artifact identity before archival or
+  recovery-root registration by @zneedell
+  ([#209](https://github.com/LBNL-UCB-STI/consist/pull/209)).
+- Correct the prospective LinkML release-asset bundle to `0.1.1` with
+  timezone-aware UTC metadata, while preserving the `0.1.0` vocabulary by
+  @zneedell ([#208](https://github.com/LBNL-UCB-STI/consist/pull/208)).
+
+## [0.3.1] - 2026-07-28
+
+### Added
+
+- Enable content-addressed cache reuse for advanced strict `ResolvedBinding`
+  Python runs: identical eligible input content can now hit the cache across
+  producer runs and artifact UUIDs, while preserving Scenario-owned strict
+  identity, invocation evidence, and fail-closed protocol validation by
+  @zneedell ([#203](https://github.com/LBNL-UCB-STI/consist/pull/203)).
+
+### Changed
+
+- Update Pillow, setuptools, GitHub Actions `setup-python`, GitPython, and
+  JupyterLab dependencies. The GitPython update includes upstream security
+  fixes for unsafe Git option validation by dependabot[bot]
+  ([#197](https://github.com/LBNL-UCB-STI/consist/pull/197),
+  [#198](https://github.com/LBNL-UCB-STI/consist/pull/198),
+  [#201](https://github.com/LBNL-UCB-STI/consist/pull/201),
+  [#204](https://github.com/LBNL-UCB-STI/consist/pull/204),
+  [#205](https://github.com/LBNL-UCB-STI/consist/pull/205)).
+
+### Fixed
+
+- Preserve named binding keys when staging requested input paths, so aliases
+  resolve against callable parameters rather than artifact provenance keys;
+  unknown keys continue to be rejected by @zneedell
+  ([#199](https://github.com/LBNL-UCB-STI/consist/pull/199)).
+- Allow a single tracked artifact bound to multiple callable parameters to
+  materialize to each parameter-specific run snapshot while retaining every
+  binding in invocation evidence by @zneedell
+  ([#200](https://github.com/LBNL-UCB-STI/consist/pull/200)).
+- Make `cache_hydration="outputs-requested"` candidate admission all-or-miss:
+  Consist now searches same-identity candidates for one that can hydrate every
+  requested output, preflights recovery before staging unusable candidates,
+  and replaces an incomplete local preference after a fallback run by
+  @zneedell ([#202](https://github.com/LBNL-UCB-STI/consist/pull/202)).
+
+## [0.3.0] - 2026-07-20
+
+### Added
+
+- Add receiving-side prior-run artifact admission with full-file SHA-256
+  identity checks, deterministic `AdmissionReport` sidecars, explicit completed
+  run and input selection, historical-hash trust boundaries, and the
+  policy-neutral `consist admission doctor` CLI by @zneedell
+  ([#185](https://github.com/LBNL-UCB-STI/consist/pull/185)).
+- Add immutable `CanonicalizationSnapshot` and `CanonicalizationReference`
+  values on `RunContext`, exposing exact adapter-resolved references to wrapped
+  Python steps while preserving existing identity hashes, cache behavior, and
+  container execution by @zneedell
+  ([#186](https://github.com/LBNL-UCB-STI/consist/pull/186)).
+- Extend artifact admission with immutable runtime and consumer-path evidence,
+  schema-v2 `AdmissionReport` serialization, and
+  `check_admission_reference(...)` while keeping downstream selection,
+  staging, mount translation, and policy decisions outside Consist by
+  @zneedell ([#190](https://github.com/LBNL-UCB-STI/consist/pull/190)).
+- Add exact-destination historical output hydration through
+  `hydrate_run_outputs_to_destinations(...)`, including caller-selected runs,
+  destination validation, collision diagnostics, and keyed partial outcomes for
+  ordinary file and directory artifacts by @zneedell
+  ([#191](https://github.com/LBNL-UCB-STI/consist/pull/191)).
+- Add file-only completed-run archive reporting through
+  `archive_run_output_files(...)`, with per-key copy, verification,
+  registration, and diagnostic results, no-overwrite behavior, and retry-safe
+  metadata registration by @zneedell
+  ([#192](https://github.com/LBNL-UCB-STI/consist/pull/192)).
+- Add immutable directory-artifact recovery for Zarr and explicit directories,
+  plus Shapefile file-bundle manifests, deterministic tree identity, atomic
+  archive/hydration, detached native-driver loading, and fail-closed validation
+  by @zneedell ([#193](https://github.com/LBNL-UCB-STI/consist/pull/193)).
+- Add the advanced opt-in `ResolvedBinding` contract, immutable artifact
+  identities, durable invocation evidence, verified execution snapshots, and
+  `scenario.resolve_step_identity(...)` preflight while preserving ordinary
+  Coupler, `BindingResult`, and cache behavior by @zneedell
+  ([#195](https://github.com/LBNL-UCB-STI/consist/pull/195)).
+
+### Changed
+
+- Add an opt-in `cache_hydration_failure="miss"` policy for
+  `cache_hydration="outputs-requested"`, requiring every requested output to
+  materialize and validate at its exact destination before admitting a cache
+  hit; the default `"warn"` behavior remains unchanged by @zneedell
+  ([#194](https://github.com/LBNL-UCB-STI/consist/pull/194)).
+- Tighten exact archive and hydration validation for legacy Zarr and Shapefile
+  artifacts without immutable manifests: these artifacts now fail closed and
+  must be re-logged before exact recovery can be used by @zneedell
+  ([#193](https://github.com/LBNL-UCB-STI/consist/pull/193)).
+- Update pytest, idna, JupyterLab, mistune, jupyter-server, urllib3, tornado,
+  bleach, msgpack, nbconvert, Pillow, pip, and soupsieve dependency versions
+  through Dependabot by dependabot[bot] ([#172](https://github.com/LBNL-UCB-STI/consist/pull/172),
+  [#173](https://github.com/LBNL-UCB-STI/consist/pull/173),
+  [#174](https://github.com/LBNL-UCB-STI/consist/pull/174),
+  [#175](https://github.com/LBNL-UCB-STI/consist/pull/175),
+  [#176](https://github.com/LBNL-UCB-STI/consist/pull/176),
+  [#177](https://github.com/LBNL-UCB-STI/consist/pull/177),
+  [#178](https://github.com/LBNL-UCB-STI/consist/pull/178),
+  [#179](https://github.com/LBNL-UCB-STI/consist/pull/179),
+  [#180](https://github.com/LBNL-UCB-STI/consist/pull/180),
+  [#181](https://github.com/LBNL-UCB-STI/consist/pull/181),
+  [#182](https://github.com/LBNL-UCB-STI/consist/pull/182),
+  [#183](https://github.com/LBNL-UCB-STI/consist/pull/183),
+  [#187](https://github.com/LBNL-UCB-STI/consist/pull/187),
+  [#188](https://github.com/LBNL-UCB-STI/consist/pull/188),
+  [#189](https://github.com/LBNL-UCB-STI/consist/pull/189)).
+- Configure Dependabot to open at most one dependency update pull request per
+  week by @zneedell ([5a9f653](https://github.com/LBNL-UCB-STI/consist/commit/5a9f653)).
+
+## [0.2.3] - 2026-07-07
+
+### Added
+
+- Add `ArchivedOutputs`, a dict-like return type for
+  `archive_run_outputs(...)` and `archive_current_run_outputs(...)`, and
+  expose it from the public `consist` and `consist.models` namespaces by
+  @zneedell ([#166](https://github.com/LBNL-UCB-STI/consist/pull/166)).
+- Add `driver="geoparquet"` support for spatial artifacts, including
+  GeoPandas-backed loading, metadata-only spatial ingestion, and docs for
+  cold-file DuckDB Spatial querying by @zneedell
+  ([#169](https://github.com/LBNL-UCB-STI/consist/pull/169)).
+- Add `FilenamePattern` and typed capture specs for `OutputSet`
+  declarations so filename wildcards can be captured as queryable facets in a
+  fail-closed way by @zneedell
+  ([#168](https://github.com/LBNL-UCB-STI/consist/pull/168)).
+
+### Changed
+
+- Refresh the docs surface around CLI discoverability and onboarding with a
+  fixture-backed CLI Quick Tour, a common task map, corrected
+  path-resolution guidance, real rendered examples, and navigation updates for
+  RunSet/grouped views and API helper entries. This also adds
+  `--run-dir`, `--mount`, and `--trust-db` support to `consist artifacts` by
+  @zneedell ([#170](https://github.com/LBNL-UCB-STI/consist/pull/170)).
+- Clean up internal contracts and typing noise across the tracker, CLI,
+  workflow, and model layers without changing core runtime behavior by
+  @zneedell ([#167](https://github.com/LBNL-UCB-STI/consist/pull/167)).
+
+### Fixed
+
+- Fix `exclude` ordering in `OutputSet` wildcard faceting so excluded files
+  are skipped before typed capture validation by @zneedell
+  ([#168](https://github.com/LBNL-UCB-STI/consist/pull/168)).
+- Fix `consist artifacts --run-dir` resolving moved or archived relative
+  artifact paths by @zneedell
+  ([#170](https://github.com/LBNL-UCB-STI/consist/pull/170)).
+
+## [0.2.2] - 2026-06-29
+
+### Added
+
+- Add opt-in stale-input recovery for `cache_hydration="inputs-missing"` with
+  `validate_materialized_inputs=True`, restoring missing or proven-stale
+  inputs from historical roots, `recovery_roots`, or DB fallback by @zneedell
+  ([#155](https://github.com/LBNL-UCB-STI/consist/pull/155)).
+
+### Changed
+
+- Add Dependabot and pre-commit hooks, and run Ruff across the repository by
+  @zneedell ([#162](https://github.com/LBNL-UCB-STI/consist/pull/162)).
+- Bump the `github-actions-dependencies` group, upgrading `actions/checkout`,
+  `actions/setup-python`, and `actions/upload-artifact` by dependabot[bot]
+  ([#163](https://github.com/LBNL-UCB-STI/consist/pull/163)).
+
+### Fixed
+
+- Fix trusted-DB shell mount inference for scenario-linked artifacts so
+  `consist shell --trust-db` resolves multi-linked `data://...` artifacts
+  consistently by @zneedell
+  ([#154](https://github.com/LBNL-UCB-STI/consist/pull/154)).
+- Tighten validated cache-miss input recovery for same-path workflows so
+  stale historical sources are skipped in favor of later recovery roots by
+  @zneedell ([#164](https://github.com/LBNL-UCB-STI/consist/pull/164)).
+
+## [0.2.1] - 2026-06-24
+
+### Added
+
+- Add a thin, optional Ibis bridge on top of existing Consist DuckDB views so
+  tabular analysis can use native Ibis table expressions . Consist still owns
+  view creation, provenance, and grouping logic; Ibis is only used as the query
+  surface by @zneedell
+  ([#144](https://github.com/LBNL-UCB-STI/consist/pull/144)).
+- Add first-class `OutputSet` support for logical outputs written as multiple
+  files, including a deterministic JSON manifest, `parent_artifact_id`
+  links, cache hydration of member files, CLI inspection, and security
+  hardening against symlinked or traversed paths by @zneedell
+  ([#145](https://github.com/LBNL-UCB-STI/consist/pull/145)).
+- Add `StepContract`, `resolve_step_contract(...)`, and
+  `collect_step_contracts(...)` so downstream orchestrators can resolve
+  declarative step metadata without executing the step by @zneedell
+  ([#146](https://github.com/LBNL-UCB-STI/consist/pull/146)).
+- Add `ArtifactSpec` / `OutputArtifactSpec` for richer `output_paths`
+  declarations, run-level file schema profiling, and expanded OutputSet and
+  shell inspection UX by @zneedell
+  ([#147](https://github.com/LBNL-UCB-STI/consist/pull/147)).
+- Add a provider-agnostic LLM skill package for agents working with Consist in
+  downstream projects by @zneedell
+  ([#151](https://github.com/LBNL-UCB-STI/consist/pull/151),
+  [#152](https://github.com/LBNL-UCB-STI/consist/pull/152)).
+
+### Changed
+
+- Improve Consist’s error-message UX by standardizing core diagnostics around
+  `Problem / Likely cause / Suggested fix` and rendering key CLI errors in a
+  Rich box by @zneedell
+  ([#148](https://github.com/LBNL-UCB-STI/consist/pull/148)).
+
+### Fixed
+
+- Fix `ScenarioContext.run(output_paths=...)` so it accepts
+  `ArtifactSpec` / `OutputArtifactSpec`, matching `Tracker.run(...)`
+  by @zneedell ([#149](https://github.com/LBNL-UCB-STI/consist/pull/149)).
+- Fix shell mount resolution so `consist shell --trust-db` applies trusted
+  mount metadata before computing artifact accessibility by @zneedell
+  ([#150](https://github.com/LBNL-UCB-STI/consist/pull/150)).
+
 ## [0.2.0] - 2026-06-16
 
 ### Added
@@ -405,7 +669,23 @@ The format is based on [Keep a Changelog], and this project adheres to
 
 [Semantic Versioning]: https://semver.org/spec/v2.0.0.html
 
-[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.3.3...HEAD
+
+[0.3.3]: https://github.com/LBNL-UCB-STI/consist/compare/v0.3.2...v0.3.3
+
+[0.3.2]: https://github.com/LBNL-UCB-STI/consist/compare/v0.3.1...v0.3.2
+
+[0.3.1]: https://github.com/LBNL-UCB-STI/consist/compare/v0.3.0...v0.3.1
+
+[0.3.0]: https://github.com/LBNL-UCB-STI/consist/compare/v0.2.3...v0.3.0
+
+[0.2.3]: https://github.com/LBNL-UCB-STI/consist/compare/v0.2.2...v0.2.3
+
+[0.2.2]: https://github.com/LBNL-UCB-STI/consist/compare/v0.2.1...v0.2.2
+
+[0.2.1]: https://github.com/LBNL-UCB-STI/consist/compare/v0.2.0...v0.2.1
+
+[0.2.0]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.5...v0.2.0
 
 [0.1.5]: https://github.com/LBNL-UCB-STI/consist/compare/v0.1.4...v0.1.5
 

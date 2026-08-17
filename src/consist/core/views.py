@@ -92,6 +92,19 @@ def _facet_type_to_duckdb(value_types: List[str]) -> str:
     return "VARCHAR"
 
 
+def _python_value_to_facet_type(value: Any) -> str:
+    """Map a Python facet value to the tracked facet type labels."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return "int"
+    if isinstance(value, float):
+        return "float"
+    return "json" if isinstance(value, (dict, list, tuple)) else "str"
+
+
 def _virtual_view_class_name(model: Type[SQLModel], view_name: str) -> str:
     safe_suffix = "".join(ch if ch.isalnum() else "_" for ch in view_name).strip("_")
     if not safe_suffix:
@@ -472,6 +485,29 @@ class ViewFactory:
                 namespace=namespace,
             )
 
+        run_namespace = model
+        if run_namespace is None and selected:
+            model_names = {
+                run.model_name
+                for _, run in selected
+                if isinstance(run.model_name, str) and run.model_name
+            }
+            if len(model_names) == 1:
+                run_namespace = next(iter(model_names))
+
+        facet_values_by_run: Dict[str, Dict[str, Any]] = {}
+        if facets and selected and run_namespace is not None:
+            run_ids = [run.id for _, run in selected if isinstance(run.id, str)]
+            if run_ids:
+                for facet in facets:
+                    facet_values_by_run[facet] = (
+                        self.tracker.db.get_facet_values_for_runs(
+                            run_ids,
+                            key=facet,
+                            namespace=run_namespace,
+                        )
+                    )
+
         records: List[GroupedViewRecord] = []
         for artifact, run in selected:
             facet_values: Dict[str, Any] = {}
@@ -479,8 +515,16 @@ class ViewFactory:
             for facet in facets:
                 info = art_facet_map.get(facet)
                 if info is None:
-                    facet_values[facet] = None
-                    facet_types[facet].append("null")
+                    run_facet_map = facet_values_by_run.get(facet, {})
+                    if run.id in run_facet_map:
+                        run_value = run_facet_map.get(run.id)
+                        facet_values[facet] = run_value
+                        facet_types[facet].append(
+                            _python_value_to_facet_type(run_value)
+                        )
+                    else:
+                        facet_values[facet] = None
+                        facet_types[facet].append("null")
                 else:
                     facet_values[facet] = info.get("value")
                     facet_types[facet].append(str(info.get("type") or "null"))

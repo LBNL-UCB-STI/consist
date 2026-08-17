@@ -10,10 +10,20 @@ from __future__ import annotations
 import uuid
 import weakref
 from dataclasses import dataclass
-from collections.abc import Sequence
+from collections.abc import Iterator, Mapping as MappingABC, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Literal, Optional, Protocol, cast
+from types import MappingProxyType
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    ClassVar,
+    Dict,
+    Literal,
+    Optional,
+    Protocol,
+    cast,
+)
 
 from pydantic import PrivateAttr
 from sqlalchemy import JSON, Column, UniqueConstraint
@@ -227,7 +237,7 @@ class Artifact(SQLModel, table=True):
         created_at (datetime): The timestamp when the artifact was first logged.
     """
 
-    __tablename__ = "artifact"
+    __tablename__: ClassVar[str] = "artifact"  # pyright: ignore[reportIncompatibleVariableOverride]
 
     # Core Identity
     id: uuid.UUID = Field(
@@ -252,10 +262,10 @@ class Artifact(SQLModel, table=True):
     )
 
     # Driver Info
-    # Valid drivers: parquet, csv, gtfs, zarr, json, h5_table, h5, hdf5, geojson, shapefile, geopackage, other
+    # Valid drivers: parquet, csv, gtfs, zarr, json, h5_table, h5, hdf5, geojson, geoparquet, shapefile, geopackage, other
     # (See DriverType enum in consist.types for the authoritative list)
     driver: str = Field(
-        description="Format handler: parquet, csv, gtfs, zarr, json, h5_table, h5, hdf5, geojson, shapefile, geopackage, or other"
+        description="Format handler: parquet, csv, gtfs, zarr, json, h5_table, h5, hdf5, geojson, geoparquet, shapefile, geopackage, or other"
     )
 
     # Canonical artifact fingerprint (portable) plus DB-local content identity.
@@ -595,7 +605,7 @@ class ArtifactContent(SQLModel, table=True):
     occurrences can reference.
     """
 
-    __tablename__ = "artifact_content"
+    __tablename__: ClassVar[str] = "artifact_content"  # pyright: ignore[reportIncompatibleVariableOverride]
     __table_args__ = (UniqueConstraint("content_hash", "driver"),)
 
     id: uuid.UUID = Field(
@@ -625,3 +635,48 @@ class ArtifactContent(SQLModel, table=True):
             f"ArtifactContent(hash={self.content_hash}, "
             f"driver={self.driver}, id={self.id})"
         )
+
+
+class ArchivedOutputs(MappingABC[str, Path]):
+    """
+    Mapping of archived output paths returned by archive_run_outputs(...).
+
+    Behaves as a read-only ``Mapping[str, Path]`` for backward compatibility
+    with the previous ``dict[str, Path]`` return value. ``.paths`` exposes the
+    same archived-path mapping explicitly, and ``.outputs`` exposes refreshed
+    artifacts whose recovery metadata reflects the newly registered archive
+    root.
+
+    Use ``.outputs`` to pass archived artifacts into downstream
+    ``scenario.run(inputs=...)`` calls without a second ``get_run_outputs``
+    call::
+
+        archive = tracker.archive_run_outputs(result.run.id, archive_root)
+        archive["my_key"]           # archived Path (backward-compatible)
+        archive.outputs["my_key"]   # refreshed Artifact with recovery root set
+    """
+
+    def __init__(
+        self,
+        paths: dict[str, Path],
+        outputs: dict[str, "Artifact"],
+    ) -> None:
+        self._paths: dict[str, Path] = dict(paths)
+        self.outputs: dict[str, Artifact] = outputs
+
+    @property
+    def paths(self) -> MappingABC[str, Path]:
+        """Read-only view of the archived paths exposed by mapping access."""
+        return MappingProxyType(self._paths)
+
+    def __getitem__(self, key: str) -> Path:
+        return self._paths[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._paths)
+
+    def __len__(self) -> int:
+        return len(self._paths)
+
+    def __repr__(self) -> str:
+        return f"ArchivedOutputs(paths={self._paths!r}, outputs={self.outputs!r})"

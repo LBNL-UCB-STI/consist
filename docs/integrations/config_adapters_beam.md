@@ -65,6 +65,54 @@ with use_tracker(tracker):
 `config_plan` is not accepted on run/trace public surfaces. Use `adapter=...`
 and `identity_inputs=...`.
 
+## Recoverable Launch Bundles
+
+`BeamConfigAdapter.materialize_bundle(...)` publishes a complete, immutable
+launch tree as an input-side directory artifact. It copies the ordered config
+roots, applies structured HOCON overrides, stages declared regular-file
+members, and then atomically publishes the exact resulting tree below a
+caller-owned durable root. The returned `root` and `primary_config` are the
+paths to pass to BEAM; the returned `artifact` is the value to bind as an input
+to the downstream BEAM run.
+
+```python
+from consist.integrations.beam import BeamLaunchBundleMember
+
+bundle = adapter.materialize_bundle(
+    tracker=tracker,
+    base_root_dirs=[config_root],
+    overrides=BeamConfigOverrides(
+        values={"beam.agentsim.agentSampleSizeAsFractionOfPopulation": 0.5}
+    ),
+    staged_members=[
+        BeamLaunchBundleMember(
+            source=prepared_skims_artifact,
+            destination="inputs/prepared/skims.omx",
+        )
+    ],
+    output_dir=Path("/scratch/beam-launch"),
+    durable_root=Path("/archive/consist-launch-bundles"),
+)
+
+tracker.run(
+    name="beam",
+    fn=run_beam,
+    inputs={"launch_bundle": bundle.artifact},
+)
+```
+
+The durable bundle is content-addressed from the source config-root manifests,
+overrides, staged-member content identities, and staged destinations. Repeating
+an equivalent request hydrates the durable tree into the requested `output_dir`.
+Unsafe destinations, symlinked paths, missing sources, and mismatched bytes
+fail before a bundle is registered as recoverable. Staged members cannot silently
+replace files copied from the config roots. `staged_members` intentionally
+does not accept an arbitrary finalization callback; any future finalizer must
+have an explicit versioned identity contract.
+
+Launch bundles are not BEAM outputs. They are standalone artifacts with recovery
+metadata, and downstream BEAM runs consume them through normal input binding.
+
 ## Facets
 
 ```python

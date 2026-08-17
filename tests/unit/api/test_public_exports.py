@@ -3,6 +3,8 @@ from types import SimpleNamespace
 
 from consist import (
     ArtifactRecoveryCopyRegistration,
+    ArchivedRunOutputFile,
+    ArchivedRunOutputFilesReport,
     HydratedRunOutput,
     HydratedRunOutputsResult,
     MaterializedArtifact,
@@ -13,11 +15,15 @@ from consist import (
     materialize_artifact,
     register_artifact_recovery_copy,
     register_run_output_recovery_copies,
+    archive_run_output_files,
     stage_artifact,
     stage_inputs,
     TrackerLike,
 )
 from consist.protocols import TrackerLike as ProtocolTrackerLike
+from consist.api import (
+    archive_run_output_files as archive_run_output_files_api,
+)
 from consist.api import (
     materialize_artifact as materialize_artifact_api,
 )
@@ -30,6 +36,8 @@ from consist.api import (
 from consist.api import stage_artifact as stage_artifact_api
 from consist.api import stage_inputs as stage_inputs_api
 from consist.core.materialize import (
+    ArchivedRunOutputFile as CoreArchivedRunOutputFile,
+    ArchivedRunOutputFilesReport as CoreArchivedRunOutputFilesReport,
     ArtifactRecoveryCopyRegistration as CoreArtifactRecoveryCopyRegistration,
     HydratedRunOutput as CoreHydratedRunOutput,
     HydratedRunOutputsResult as CoreHydratedRunOutputsResult,
@@ -78,6 +86,11 @@ def test_recovery_copy_types_and_helpers_are_exported_from_top_level() -> None:
     assert (
         register_run_output_recovery_copies is register_run_output_recovery_copies_api
     )
+    assert ArchivedRunOutputFile is CoreArchivedRunOutputFile
+    assert ArchivedRunOutputFilesReport is CoreArchivedRunOutputFilesReport
+    assert archive_run_output_files is archive_run_output_files_api
+    assert not hasattr(consist, "ArchiveRunOutputFileStatus")
+    assert not hasattr(consist, "ArchiveRunOutputVerificationStatus")
 
 
 def test_staged_input_types_and_helpers_are_exported_from_top_level() -> None:

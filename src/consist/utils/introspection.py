@@ -5,6 +5,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from consist.core.decorators import StepDefinition
 from consist.core.step_context import StepContext, resolve_metadata
+from consist.core.step_contracts import resolve_step_contract
 
 
 def _step_name(step: Any) -> str:
@@ -55,37 +56,51 @@ def collect_step_schema(
         schema_outputs = defn.schema_outputs
         outputs_value = schema_outputs if schema_outputs is not None else defn.outputs
 
-        if callable(outputs_value):
-            if settings is not None:
-                try:
-                    ctx = StepContext(
-                        func_name=step_name,
-                        runtime_settings=settings,
-                        runtime_kwargs={"settings": settings},
-                    )
-                    outputs = _normalize_outputs(resolve_metadata(outputs_value, ctx))
-                except TypeError as exc:
-                    if warn_unresolvable:
-                        warnings.warn(
-                            "Cannot resolve callable outputs for "
-                            f"{step_name}: {exc}. "
-                            "Consider adding schema_outputs to @define_step.",
-                            UserWarning,
-                            stacklevel=2,
+        if callable(outputs_value) and settings is None:
+            if warn_unresolvable:
+                warnings.warn(
+                    "Callable outputs for "
+                    f"{step_name} require settings. "
+                    "Consider adding schema_outputs to @define_step.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            outputs = []
+        else:
+            try:
+                contract_outputs = None
+                if schema_outputs is not None:
+                    if callable(schema_outputs):
+                        ctx = StepContext(
+                            func_name=step_name,
+                            runtime_settings=settings,
+                            runtime_kwargs=(
+                                {"settings": settings} if settings is not None else {}
+                            ),
                         )
-                    outputs = []
-            else:
+                        contract_outputs = _normalize_outputs(
+                            resolve_metadata(schema_outputs, ctx)
+                        )
+                    else:
+                        contract_outputs = _normalize_outputs(schema_outputs)
+                contract = resolve_step_contract(
+                    step,
+                    outputs=contract_outputs,
+                    runtime_kwargs=(
+                        {"settings": settings} if settings is not None else None
+                    ),
+                )
+                outputs = _normalize_outputs(contract.outputs)
+            except TypeError as exc:
                 if warn_unresolvable:
                     warnings.warn(
-                        "Callable outputs for "
-                        f"{step_name} require settings. "
+                        "Cannot resolve callable outputs for "
+                        f"{step_name}: {exc}. "
                         "Consider adding schema_outputs to @define_step.",
                         UserWarning,
                         stacklevel=2,
                     )
                 outputs = []
-        else:
-            outputs = _normalize_outputs(outputs_value)
 
         description_value = defn.description
         if callable(description_value) and settings is not None:

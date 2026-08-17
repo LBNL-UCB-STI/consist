@@ -98,3 +98,37 @@ def test_recovery_service_materialize_run_outputs_folds_tracker_results(
     assert captured["kwargs"]["keys"] == ["result"]
     assert captured["kwargs"]["preserve_existing"] is False
     assert result.materialized_from_filesystem == {"result": str(restored_path)}
+
+
+def test_recovery_service_hydrates_run_outputs_to_normalized_destinations(
+    monkeypatch,
+    tracker,
+    tmp_path: Path,
+) -> None:
+    service = tracker._recovery_service
+    run = type("Run", (), {"id": "prior-run"})()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(service, "get_run", lambda _run_id: run)
+
+    def fake_hydrate_core(**kwargs):
+        captured.update(kwargs)
+        return HydratedRunOutputsResult(source_run_id="prior-run")
+
+    monkeypatch.setattr(
+        "consist.core.tracker.hydrate_run_outputs_to_destinations_core",
+        fake_hydrate_core,
+    )
+
+    result = service.hydrate_run_outputs_to_destinations(
+        "prior-run",
+        destinations_by_key={
+            "result": tracker.run_dir / "restored" / "." / "result.csv"
+        },
+    )
+
+    assert result.source_run_id == "prior-run"
+    assert captured["run"] is run
+    assert captured["destinations_by_key"] == {
+        "result": (tracker.run_dir / "restored" / "result.csv").resolve()
+    }

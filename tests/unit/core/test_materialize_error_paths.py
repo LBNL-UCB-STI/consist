@@ -22,8 +22,8 @@ def _artifact(*, key: str, driver: str = "csv", is_ingested: bool = False) -> Ar
     )
 
 
-def test_materialize_artifacts_blocks_symlink_destination_when_resolution_is_identity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_materialize_artifacts_blocks_symlink_destination(
+    tmp_path: Path,
 ) -> None:
     source = tmp_path / "source.csv"
     source.write_text("x\n1\n", encoding="utf-8")
@@ -32,9 +32,6 @@ def test_materialize_artifacts_blocks_symlink_destination_when_resolution_is_ide
     target.write_text("x\n2\n", encoding="utf-8")
     destination = tmp_path / "dest.csv"
     destination.symlink_to(target)
-
-    # Keep paths un-resolved so the symlink guard sees the link path directly.
-    monkeypatch.setattr(Path, "resolve", lambda self: self)
 
     tracker = SimpleNamespace(resolve_uri=lambda _uri: str(source))
     artifact = _artifact(key="symlinked")
@@ -83,6 +80,110 @@ def test_materialize_artifacts_from_sources_raises_for_allowed_base_violation(
             allowed_base=allowed_base,
             on_missing="raise",
         )
+
+
+def test_materialize_artifacts_from_sources_preserves_existing_destination_by_default(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.csv"
+    source.write_text("value\nexpected\n", encoding="utf-8")
+    destination = tmp_path / "destination.csv"
+    destination.write_text("value\nexisting\n", encoding="utf-8")
+    artifact = _artifact(key="preserved")
+
+    materialized = materialize_artifacts_from_sources(
+        items=[(artifact, source, destination)],
+        allowed_base=tmp_path,
+        on_missing="raise",
+    )
+
+    assert materialized == {"preserved": str(destination.resolve())}
+    assert destination.read_text(encoding="utf-8") == "value\nexisting\n"
+
+
+def test_materialize_artifacts_from_sources_overwrites_existing_file_when_requested(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.csv"
+    source.write_text("value\nexpected\n", encoding="utf-8")
+    destination = tmp_path / "destination.csv"
+    destination.write_text("value\nstale\n", encoding="utf-8")
+    artifact = _artifact(key="stale_file")
+
+    materialized = materialize_artifacts_from_sources(
+        items=[(artifact, source, destination)],
+        allowed_base=tmp_path,
+        on_missing="raise",
+        overwrite_existing=True,
+    )
+
+    assert materialized == {"stale_file": str(destination.resolve())}
+    assert destination.read_text(encoding="utf-8") == "value\nexpected\n"
+
+
+def test_materialize_artifacts_from_sources_overwrites_existing_directory_when_requested(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source_dir"
+    source.mkdir()
+    (source / "data.csv").write_text("value\nexpected\n", encoding="utf-8")
+    destination = tmp_path / "destination_dir"
+    destination.mkdir()
+    (destination / "stale.csv").write_text("value\nstale\n", encoding="utf-8")
+    artifact = _artifact(key="stale_dir")
+
+    materialized = materialize_artifacts_from_sources(
+        items=[(artifact, source, destination)],
+        allowed_base=tmp_path,
+        on_missing="raise",
+        overwrite_existing=True,
+    )
+
+    assert materialized == {"stale_dir": str(destination.resolve())}
+    assert not (destination / "stale.csv").exists()
+    assert (destination / "data.csv").read_text(encoding="utf-8") == "value\nexpected\n"
+
+
+def test_materialize_artifacts_from_sources_refuses_overwrite_type_mismatch(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.csv"
+    source.write_text("value\nexpected\n", encoding="utf-8")
+    destination = tmp_path / "destination_dir"
+    destination.mkdir()
+    artifact = _artifact(key="type_mismatch")
+
+    with pytest.raises(RuntimeError, match="Destination type mismatch"):
+        materialize_artifacts_from_sources(
+            items=[(artifact, source, destination)],
+            allowed_base=tmp_path,
+            on_missing="raise",
+            overwrite_existing=True,
+        )
+
+    assert destination.is_dir()
+
+
+def test_materialize_artifacts_from_sources_refuses_symlink_destination_when_overwriting(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.csv"
+    source.write_text("value\nexpected\n", encoding="utf-8")
+    target = tmp_path / "target.csv"
+    target.write_text("value\nstale\n", encoding="utf-8")
+    destination = tmp_path / "destination.csv"
+    destination.symlink_to(target)
+    artifact = _artifact(key="symlinked")
+
+    with pytest.raises(ValueError, match="Symlink detected in destination path"):
+        materialize_artifacts_from_sources(
+            items=[(artifact, source, destination)],
+            allowed_base=tmp_path,
+            on_missing="raise",
+            overwrite_existing=True,
+        )
+
+    assert target.read_text(encoding="utf-8") == "value\nstale\n"
 
 
 def test_materialize_ingested_artifact_from_db_requires_tracker_engine(

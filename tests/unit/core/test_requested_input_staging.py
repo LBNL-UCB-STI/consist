@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from consist.core.cache import ActiveRunCacheOptions, materialize_requested_inputs
+from consist.core.directory_artifacts import build_directory_manifest
 from consist.core.tracker_orchestration import RunTraceCoordinator, RunTraceHelpers
 from consist.models.artifact import Artifact
 from consist.models.run import ConsistRecord, Run
-from consist.types import ExecutionOptions
+from consist.types import BindingResult, ExecutionOptions
 
 
 def _sha256(path: Path) -> str:
@@ -36,7 +40,13 @@ def _make_run(run_id: str = "run_001") -> Run:
 
 
 class _FakeTracker:
-    def __init__(self, *, run_dir: Path, current_consist: ConsistRecord | None = None):
+    def __init__(
+        self,
+        *,
+        run_dir: Path,
+        current_consist: ConsistRecord | None = None,
+        compute_file_checksum: Callable[[Path], str] = _sha256,
+    ):
         self.current_consist = current_consist
         self.db = None
         self.fs = SimpleNamespace(
@@ -45,7 +55,7 @@ class _FakeTracker:
             get_remappable_relative_path=lambda uri: None,
             get_historical_root=lambda **kwargs: None,
         )
-        self.identity = SimpleNamespace(compute_file_checksum=_sha256)
+        self.identity = SimpleNamespace(compute_file_checksum=compute_file_checksum)
         self.run_dir = run_dir
         self.mounts = {}
         self.allow_external_paths = False
@@ -87,6 +97,141 @@ def test_materialize_requested_inputs_stages_requested_key(tmp_path: Path) -> No
     assert staged == {"raw": str(destination.resolve())}
     assert destination.read_text(encoding="utf-8") == "value\n1\n"
     assert artifact.abs_path == str(destination.resolve())
+
+
+def test_materialize_requested_inputs_rejects_distinct_artifacts_for_one_key(
+    tmp_path: Path,
+) -> None:
+    first_source = tmp_path / "first.csv"
+    first_source.write_text("value\n1\n", encoding="utf-8")
+    second_source = tmp_path / "second.csv"
+    second_source.write_text("value\n2\n", encoding="utf-8")
+    destination = tmp_path / "staged" / "raw.csv"
+    first = Artifact(
+        key="raw",
+        container_uri=str(first_source),
+        driver="csv",
+        hash=_sha256(first_source),
+        meta={},
+    )
+    second = Artifact(
+        key="raw",
+        container_uri=str(second_source),
+        driver="csv",
+        hash=_sha256(second_source),
+        meta={},
+    )
+    tracker = _FakeTracker(
+        run_dir=tmp_path,
+        current_consist=ConsistRecord(run=_make_run(), inputs=[first, second]),
+    )
+
+    with pytest.raises(ValueError, match="is ambiguous"):
+        materialize_requested_inputs(
+            tracker=tracker,
+            options=ActiveRunCacheOptions(
+                requested_input_paths={"raw": destination},
+                requested_input_materialization="requested",
+            ),
+        )
+
+
+def test_materialize_requested_inputs_stages_manifest_backed_directory(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.zarr"
+    source.mkdir()
+    (source / "0.0").write_bytes(b"skim")
+    destination = tmp_path / "staged" / "skims.zarr"
+    manifest = build_directory_manifest(source)
+
+    artifact = Artifact(
+        key="skims",
+        container_uri=str(source),
+        driver="zarr",
+        hash=manifest["tree_hash"],
+        meta={"directory_artifact": True, "directory_manifest": manifest},
+    )
+    tracker = _FakeTracker(
+        run_dir=tmp_path,
+        current_consist=ConsistRecord(run=_make_run(), inputs=[artifact]),
+        compute_file_checksum=lambda _path: "legacy-directory-checksum",
+    )
+
+    staged = materialize_requested_inputs(
+        tracker=tracker,
+        options=ActiveRunCacheOptions(
+            requested_input_paths={"skims": destination},
+            requested_input_materialization="requested",
+        ),
+    )
+
+    assert staged == {"skims": str(destination.resolve())}
+    assert build_directory_manifest(destination)["tree_hash"] == artifact.hash
+
+
+def test_materialize_requested_inputs_rejects_mutated_manifest_directory(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "staged" / "skims.zarr"
+    destination.mkdir(parents=True)
+    member = destination / "0.0"
+    member.write_bytes(b"original")
+    manifest = build_directory_manifest(destination)
+    member.write_bytes(b"mutated")
+
+    artifact = Artifact(
+        key="skims",
+        container_uri=str(destination),
+        driver="zarr",
+        hash=manifest["tree_hash"],
+        meta={"directory_artifact": True, "directory_manifest": manifest},
+    )
+    tracker = _FakeTracker(
+        run_dir=tmp_path,
+        current_consist=ConsistRecord(run=_make_run(), inputs=[artifact]),
+        compute_file_checksum=lambda _path: "legacy-directory-checksum",
+    )
+
+    with pytest.raises(ValueError, match="Hash mismatch"):
+        materialize_requested_inputs(
+            tracker=tracker,
+            options=ActiveRunCacheOptions(
+                requested_input_paths={"skims": destination},
+                requested_input_materialization="requested",
+            ),
+        )
+
+
+def test_materialize_requested_inputs_preserves_legacy_directory_checksum(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "staged" / "legacy.zarr"
+    destination.mkdir(parents=True)
+    (destination / "0.0").write_bytes(b"legacy")
+
+    artifact = Artifact(
+        key="legacy",
+        container_uri=str(tmp_path / "missing.zarr"),
+        driver="zarr",
+        hash="legacy-directory-checksum",
+        meta={},
+    )
+    tracker = _FakeTracker(
+        run_dir=tmp_path,
+        current_consist=ConsistRecord(run=_make_run(), inputs=[artifact]),
+        compute_file_checksum=lambda _path: "legacy-directory-checksum",
+    )
+
+    staged = materialize_requested_inputs(
+        tracker=tracker,
+        options=ActiveRunCacheOptions(
+            requested_input_paths={"legacy": destination},
+            requested_input_materialization="requested",
+        ),
+    )
+
+    assert staged == {"legacy": str(destination.resolve())}
 
 
 def test_execute_python_run_uses_staged_input_path(tmp_path: Path) -> None:
@@ -165,3 +310,75 @@ def test_tracker_run_stages_requested_input_paths(tracker, tmp_path: Path) -> No
     assert result.cache_hit is False
     assert result.run.meta["staged_inputs"] == {"raw": str(destination.resolve())}
     assert destination.read_text(encoding="utf-8") == "value\n42\n"
+
+
+def test_scenario_binding_stages_requested_input_by_binding_key(
+    tracker, tmp_path: Path
+) -> None:
+    source = tmp_path / "bootstrap.h5"
+    source.write_bytes(b"UrbanSim bootstrap")
+    destination = tracker.run_dir / "staged" / "usim_datastore.h5"
+
+    tracker.begin_run("bootstrap", "model")
+    artifact = tracker.log_artifact(
+        source,
+        key="usim_datastore_base_h5",
+        direction="output",
+    )
+    tracker.end_run(status="completed")
+
+    received: list[Path] = []
+
+    def consume(usim_datastore_h5: Path) -> None:
+        received.append(usim_datastore_h5)
+        assert usim_datastore_h5.read_bytes() == b"UrbanSim bootstrap"
+
+    with tracker.scenario("requested_input_binding_alias") as scenario:
+        result = scenario.run(
+            fn=consume,
+            binding=BindingResult(inputs={"usim_datastore_h5": artifact}),
+            execution_options=ExecutionOptions(
+                input_binding="paths",
+                input_materialization="requested",
+                input_paths={"usim_datastore_h5": destination},
+            ),
+        )
+
+    assert result.cache_hit is False
+    assert received == [destination.resolve()]
+    assert destination.read_bytes() == b"UrbanSim bootstrap"
+
+
+def test_requested_input_staging_rejects_unknown_binding_key(
+    tracker, tmp_path: Path
+) -> None:
+    source = tmp_path / "bootstrap.h5"
+    source.write_bytes(b"UrbanSim bootstrap")
+
+    tracker.begin_run("bootstrap", "model")
+    artifact = tracker.log_artifact(
+        source,
+        key="usim_datastore_base_h5",
+        direction="output",
+    )
+    tracker.end_run(status="completed")
+
+    called = False
+
+    def consume(usim_datastore_h5: Path) -> None:
+        nonlocal called
+        called = True
+
+    with tracker.scenario("requested_input_unknown_key") as scenario:
+        with pytest.raises(ValueError, match="not present in the resolved inputs"):
+            scenario.run(
+                fn=consume,
+                binding=BindingResult(inputs={"usim_datastore_h5": artifact}),
+                execution_options=ExecutionOptions(
+                    input_binding="paths",
+                    input_materialization="requested",
+                    input_paths={"usim_datastore_base_h5": tmp_path / "staged.h5"},
+                ),
+            )
+
+    assert called is False

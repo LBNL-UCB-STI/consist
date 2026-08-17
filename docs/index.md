@@ -70,10 +70,12 @@ hide:
       <li><a href="concepts/caching-and-hydration/"><strong>Caching & Hydration</strong><span>Understand cache hits, misses, hydration, and materialization.</span></a></li>
       <li><a href="getting-started/first-workflow/"><strong>First Workflow</strong><span>Pass artifacts between workflow steps.</span></a></li>
       <li><a href="guides/historical-recovery/"><strong>Historical Recovery</strong><span>Restore historical outputs or stage inputs.</span></a></li>
+      <li><a href="api/runset/"><strong>RunSet Analysis</strong><span>Select, align, and compare scenario runs.</span></a></li>
+      <li><a href="concepts/grouped-views/"><strong>Grouped Views</strong><span>Create one analysis relation across schema-compatible artifacts.</span></a></li>
       <li><a href="containers-guide/"><strong>Container Guide</strong><span>Run Docker, Singularity, or Apptainer tools.</span></a></li>
       <li><a href="building-domain-tracker/"><strong>Domain Tracker</strong><span>Wrap Consist behind domain-specific verbs for shared codebases.</span></a></li>
       <li><a href="integrations/gtfs/"><strong>GTFS Support</strong><span>Canonicalize transit feeds into selected-service slices for Tracker or BEAM.</span></a></li>
-      <li><a href="concepts/data-materialization/"><strong>Data Materialization</strong><span>Ingest data for SQL analysis.</span></a></li>
+      <li><a href="concepts/data-materialization/"><strong>Data Storage and Ingestion</strong><span>Ingest data for SQL analysis.</span></a></li>
       <li><a href="schema-export/"><strong>Schema Export</strong><span>Generate SQLModel schemas from captured files.</span></a></li>
       <li><a href="cli-reference/"><strong>CLI Reference</strong><span>Inspect runs from the terminal.</span></a></li>
       <li><a href="db-maintenance/"><strong>DB Maintenance</strong><span>Repair or compact the provenance database.</span></a></li>

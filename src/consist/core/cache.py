@@ -1,28 +1,38 @@
 import hashlib
-import os
 import logging
+import os
 import shutil
 import tempfile
 import uuid
 import weakref
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
+    TYPE_CHECKING,
     Any,
     Dict,
     Literal,
     Optional,
     Protocol,
     Sequence,
-    TYPE_CHECKING,
     cast,
     runtime_checkable,
 )
 
-from consist.models.artifact import Artifact
-from consist.models.run import Run, RunArtifacts, ConsistRecord
+from consist.core.directory_artifacts import (
+    validate_directory_manifest,
+    validate_directory_tree,
+)
 from consist.core.error_messages import format_problem_cause_fix
+from consist.core.output_sets import build_output_set_child_destinations
+from consist.core.resolved_binding import (
+    ArtifactIdentity,
+    create_execution_snapshot,
+)
+from consist.models.artifact import Artifact
+from consist.models.run import ConsistRecord, Run, RunArtifacts
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
@@ -69,6 +79,8 @@ class CacheFs(Protocol):
 
 @runtime_checkable
 class CacheIdentity(Protocol):
+    hashing_strategy: str
+
     def compute_file_checksum(self, file_path: str | Path) -> str: ...
 
 
@@ -143,26 +155,64 @@ class CacheMaterializationContext(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class ActiveRunCacheOptions:
-    """
-    Active-run cache/materialization controls for Tracker.
+    """Hold cache and materialization controls active for one tracker run.
 
-    Stored on the Tracker (not in run.meta) because they affect runtime
-    behavior and should reset automatically at the end of the run.
+    These runtime-only options are stored on ``Tracker`` rather than in
+    ``run.meta`` and reset automatically when the run ends. Artifact-level
+    ``recovery_roots`` are consulted separately during cache-hit hydration and
+    eager cache validation.
 
-    ``materialize_cached_outputs_source_root`` remains the per-run override for
-    archive/mirror recovery. Artifact-level ``recovery_roots`` are consulted
-    separately during cache-hit output hydration and eager cache validation.
+    Attributes
+    ----------
+    cache_mode : str
+        Active cache lookup policy. Defaults to ``"reuse"``.
+    cache_hydration : str
+        Active cache-hit hydration policy. Defaults to ``"metadata"``.
+    cache_hydration_failure : {"warn", "miss"}
+        Lower-level requested-output hydration failure policy. Cache reuse
+        performs strict requested-output candidate admission regardless of
+        this value. ``"miss"`` is valid only with
+        ``cache_hydration="outputs-requested"``.
+    materialize_cached_output_paths : dict[str, pathlib.Path] | None
+        Exact destination paths requested for individual cached output keys.
+    materialize_cached_output_set_roots : dict[str, pathlib.Path] | None
+        Destination roots requested for cached output sets.
+    materialize_cached_outputs_dir : pathlib.Path | None
+        Directory used as the default destination for materialized outputs.
+    materialize_cached_outputs_source_root : pathlib.Path | None
+        Per-run archive or mirror root used before artifact recovery roots.
+    validate_cached_outputs : str
+        Cached-output validation policy. Defaults to ``"lazy"``.
+    validate_materialized_inputs : bool
+        Whether to validate inputs after materialization. Defaults to ``False``.
+    requested_input_paths : dict[str, pathlib.Path] | None
+        Explicit destination paths for requested input materialization.
+    requested_input_materialization : str | None
+        Requested input-materialization selection policy.
+    requested_input_materialization_mode : str | None
+        Requested input-materialization transfer mode.
+    requested_input_artifact_ids : dict[str, str] | None
+        Optional binding-key-to-artifact mapping for requested input staging.
+    requested_input_strict_snapshot : bool
+        Whether requested input staging must create strict binding snapshots.
+    requested_input_validate_content_hash : str
+        Content-hash validation policy for materialized requested inputs.
     """
 
     cache_mode: str = "reuse"
     cache_hydration: str = "metadata"  # "metadata" | "inputs-missing" | "outputs-requested" | "outputs-all"
+    cache_hydration_failure: Literal["warn", "miss"] = "warn"
     materialize_cached_output_paths: Optional[Dict[str, Path]] = None
+    materialize_cached_output_set_roots: Optional[Dict[str, Path]] = None
     materialize_cached_outputs_dir: Optional[Path] = None
     materialize_cached_outputs_source_root: Optional[Path] = None
     validate_cached_outputs: str = "lazy"  # "eager" | "lazy"
+    validate_materialized_inputs: bool = False
     requested_input_paths: Optional[Dict[str, Path]] = None
     requested_input_materialization: Optional[str] = None
     requested_input_materialization_mode: Optional[str] = None
+    requested_input_artifact_ids: Optional[Dict[str, str]] = None
+    requested_input_strict_snapshot: bool = False
     requested_input_validate_content_hash: str = "if-present"
 
 
@@ -232,7 +282,13 @@ def _materialize_cached_outputs_via_run_api(
     active_options: ActiveRunCacheOptions,
     outputs_by_key: dict[str, Artifact],
 ) -> Optional[dict[str, str]]:
-    requested_paths = active_options.materialize_cached_output_paths or {}
+    requested_paths = dict(active_options.materialize_cached_output_paths or {})
+    requested_paths.update(
+        build_output_set_child_destinations(
+            outputs=list(outputs_by_key.values()),
+            output_set_roots=active_options.materialize_cached_output_set_roots or {},
+        )
+    )
     requested_keys = list(requested_paths)
     hydrated_keys = set(outputs_by_key)
     missing_keys = sorted(set(requested_keys) - hydrated_keys)
@@ -302,9 +358,252 @@ def _materialize_cached_outputs_via_run_api(
         )
 
 
+def _requested_output_destinations(
+    *,
+    active_options: ActiveRunCacheOptions,
+    outputs_by_key: dict[str, Artifact],
+) -> dict[str, Path]:
+    destinations = dict(active_options.materialize_cached_output_paths or {})
+    destinations.update(
+        build_output_set_child_destinations(
+            outputs=list(outputs_by_key.values()),
+            output_set_roots=active_options.materialize_cached_output_set_roots or {},
+        )
+    )
+    return destinations
+
+
+def _remove_candidate_destination(destination: Path) -> None:
+    if not destination.exists() or destination.is_symlink():
+        return
+    if destination.is_dir():
+        shutil.rmtree(destination)
+    else:
+        destination.unlink()
+
+
+def _artifact_identity(path: Path) -> str:
+    from consist.core.materialize import _compute_path_checksum
+
+    return _compute_path_checksum(path)
+
+
+def _strict_requested_output_hydration(
+    *,
+    tracker: CacheHydrationContext,
+    cached_run: Run,
+    target_run: Run,
+    active_options: ActiveRunCacheOptions,
+    outputs_by_key: dict[str, Artifact],
+) -> Optional[dict[str, str]]:
+    """Materialize every requested output before admitting a cache hit."""
+    requested_paths = _requested_output_destinations(
+        active_options=active_options,
+        outputs_by_key=outputs_by_key,
+    )
+    requested_keys = list(requested_paths)
+    missing_keys = sorted(set(requested_keys) - set(outputs_by_key))
+    if missing_keys:
+        logging.warning(
+            "[Consist] Rejecting cached output hydration; missing requested keys: %s",
+            missing_keys,
+        )
+        return None
+
+    allowed_roots = _allowed_materialization_roots(tracker, target_run=target_run)
+    staging_parent = tracker.run_dir.resolve()
+    staging_parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix="consist-cache-hit-",
+        dir=str(staging_parent),
+    ) as tmp_dir:
+        staged_root = Path(tmp_dir)
+        from consist.core.materialize import plan_run_output_hydration
+
+        try:
+            preflight = plan_run_output_hydration(
+                cast("Tracker", tracker),
+                cached_run,
+                target_root=staged_root,
+                source_root=active_options.materialize_cached_outputs_source_root,
+                keys=requested_keys,
+                preserve_existing=False,
+                db_fallback="if_ingested",
+            )
+        except Exception as exc:
+            logging.debug(
+                "[Consist][cache] candidate %s rejected before materialization: "
+                "preflight failure (%s)",
+                cached_run.id,
+                exc,
+            )
+            return None
+
+        planned_keys = {
+            key for planned_item in preflight.plan for key in planned_item.keys
+        }
+        if planned_keys != set(requested_keys):
+            missing_source_keys = sorted(
+                key
+                for key, output in preflight.preflight_results.items()
+                if output.status == "missing_source"
+            )
+            if missing_source_keys:
+                logging.debug(
+                    "[Consist][cache] candidate %s rejected before materialization: "
+                    "missing recovery source (keys=%s)",
+                    cached_run.id,
+                    missing_source_keys,
+                )
+            else:
+                rejected_keys = sorted(set(requested_keys) - planned_keys)
+                logging.debug(
+                    "[Consist][cache] candidate %s rejected before materialization: "
+                    "preflight failure (keys=%s)",
+                    cached_run.id,
+                    rejected_keys,
+                )
+            return None
+
+        try:
+            staged = tracker.materialize_run_outputs(
+                cached_run.id,
+                target_root=staged_root,
+                source_root=active_options.materialize_cached_outputs_source_root,
+                keys=requested_keys,
+                preserve_existing=False,
+                on_missing="warn",
+                db_fallback="if_ingested",
+            )
+        except Exception as exc:
+            logging.debug(
+                "[Consist][cache] candidate %s rejected after materialization: "
+                "copy/validation failure (%s)",
+                cached_run.id,
+                exc,
+            )
+            logging.warning(
+                "[Consist] Rejecting cached output hydration after staging failure: %s",
+                exc,
+            )
+            return None
+
+        staged_paths = {
+            key: Path(path) for key, path in dict(staged.materialized or {}).items()
+        }
+        if (
+            set(staged_paths) != set(requested_keys)
+            or staged.skipped_missing_source
+            or staged.failed
+        ):
+            logging.debug(
+                "[Consist][cache] candidate %s rejected after materialization: "
+                "copy/validation failure",
+                cached_run.id,
+            )
+            _warn_on_partial_materialization_result(staged, policy="outputs-requested")
+            return None
+
+        candidate_created: list[Path] = []
+        accepted = False
+        try:
+            from consist.core.materialize import materialize_artifacts_from_sources
+
+            items: list[tuple[Artifact, Path, Path]] = []
+            for key in requested_keys:
+                staged_path = staged_paths[key]
+                destination = Path(requested_paths[key])
+                if destination.exists():
+                    try:
+                        if _artifact_identity(destination) == _artifact_identity(
+                            staged_path
+                        ):
+                            continue
+                    except OSError as exc:
+                        logging.warning(
+                            "[Consist] Rejecting cached output hydration while "
+                            "validating destination %s: %s",
+                            destination,
+                            exc,
+                        )
+                    # A mismatched caller-owned destination is deliberately left
+                    # for the ordinary miss path rather than replaced here.
+                    logging.debug(
+                        "[Consist][cache] candidate %s rejected after materialization: "
+                        "copy/validation failure",
+                        cached_run.id,
+                    )
+                    return None
+                candidate_created.append(destination)
+                items.append((outputs_by_key[key], staged_path, destination))
+
+            promoted = materialize_artifacts_from_sources(
+                items=items,
+                allowed_base=allowed_roots,
+                on_missing="warn",
+            )
+            if set(promoted) != {artifact.key for artifact, _, _ in items}:
+                logging.debug(
+                    "[Consist][cache] candidate %s rejected after materialization: "
+                    "copy/validation failure",
+                    cached_run.id,
+                )
+                return None
+            for key, destination in requested_paths.items():
+                if not destination.exists() or (
+                    _artifact_identity(destination)
+                    != _artifact_identity(staged_paths[key])
+                ):
+                    logging.debug(
+                        "[Consist][cache] candidate %s rejected after materialization: "
+                        "copy/validation failure",
+                        cached_run.id,
+                    )
+                    return None
+            accepted = True
+            return {
+                key: str(Path(destination).resolve())
+                for key, destination in requested_paths.items()
+            }
+        except (OSError, RuntimeError, ValueError) as exc:
+            logging.debug(
+                "[Consist][cache] candidate %s rejected after materialization: "
+                "copy/validation failure (%s)",
+                cached_run.id,
+                exc,
+            )
+            logging.warning(
+                "[Consist] Rejecting cached output hydration after promotion failure: %s",
+                exc,
+            )
+            return None
+        finally:
+            # Only destinations absent before promotion belong to this candidate.
+            # They are retained on success and removed for a rejected admission.
+            if not accepted:
+                for destination in candidate_created:
+                    try:
+                        _remove_candidate_destination(destination)
+                    except OSError as exc:
+                        logging.warning(
+                            "[Consist] Failed to remove rejected cached destination %s: %s",
+                            destination,
+                            exc,
+                        )
+
+
 def parse_materialize_cached_outputs_kwargs(
     kwargs: Dict[str, Any],
-) -> tuple[str, Optional[Dict[str, Path]], Optional[Path], Optional[Path], str]:
+) -> tuple[
+    str,
+    Literal["warn", "miss"],
+    Optional[Dict[str, Path]],
+    Optional[Dict[str, Path]],
+    Optional[Path],
+    Optional[Path],
+    str,
+    bool,
+]:
     """
     Parse and validate cached-output materialization options from run kwargs.
 
@@ -325,8 +624,12 @@ def parse_materialize_cached_outputs_kwargs(
         )
 
     cache_hydration = str(kwargs.pop("cache_hydration", "metadata")).lower()
+    cache_hydration_failure = str(kwargs.pop("cache_hydration_failure", "warn")).lower()
     materialize_cached_output_paths_raw = kwargs.pop(
         "materialize_cached_output_paths", None
+    )
+    materialize_cached_output_set_roots_raw = kwargs.pop(
+        "materialize_cached_output_set_roots", None
     )
     materialize_cached_outputs_dir_raw = kwargs.pop(
         "materialize_cached_outputs_dir", None
@@ -335,6 +638,12 @@ def parse_materialize_cached_outputs_kwargs(
         "materialize_cached_outputs_source_root", None
     )
     validate_cached_outputs = str(kwargs.pop("validate_cached_outputs", "lazy")).lower()
+    validate_materialized_inputs_raw = kwargs.pop("validate_materialized_inputs", False)
+    validate_materialized_inputs = (
+        False
+        if validate_materialized_inputs_raw is None
+        else validate_materialized_inputs_raw
+    )
 
     if cache_hydration not in {
         "metadata",
@@ -347,11 +656,29 @@ def parse_materialize_cached_outputs_kwargs(
             "'metadata', 'inputs-missing', 'outputs-requested', 'outputs-all'"
         )
 
+    if cache_hydration_failure not in {"warn", "miss"}:
+        raise ValueError("cache_hydration_failure must be one of: 'warn', 'miss'")
+    if cache_hydration_failure == "miss" and cache_hydration != "outputs-requested":
+        raise ValueError(
+            "cache_hydration_failure='miss' requires "
+            "cache_hydration='outputs-requested'"
+        )
+
     if validate_cached_outputs not in {"eager", "lazy"}:
         raise ValueError("validate_cached_outputs must be one of: 'eager', 'lazy'")
+    if not isinstance(validate_materialized_inputs, bool):
+        raise ValueError("validate_materialized_inputs must be a boolean")
+    if validate_materialized_inputs and cache_hydration != "inputs-missing":
+        raise ValueError(
+            "validate_materialized_inputs=True requires "
+            "cache_hydration='inputs-missing'"
+        )
 
     if cache_hydration == "outputs-requested":
-        if materialize_cached_output_paths_raw is None:
+        if (
+            materialize_cached_output_paths_raw is None
+            and materialize_cached_output_set_roots_raw is None
+        ):
             raise ValueError(
                 "cache_hydration='outputs-requested' requires materialize_cached_output_paths"
             )
@@ -371,6 +698,7 @@ def parse_materialize_cached_outputs_kwargs(
     else:
         if (
             materialize_cached_output_paths_raw is not None
+            or materialize_cached_output_set_roots_raw is not None
             or materialize_cached_outputs_dir_raw is not None
             or materialize_cached_outputs_source_root_raw is not None
         ):
@@ -388,6 +716,13 @@ def parse_materialize_cached_outputs_kwargs(
             for k, v in dict(materialize_cached_output_paths_raw).items()
         }
 
+    materialize_cached_output_set_roots: Optional[Dict[str, Path]] = None
+    if materialize_cached_output_set_roots_raw is not None:
+        materialize_cached_output_set_roots = {
+            str(k): Path(v)
+            for k, v in dict(materialize_cached_output_set_roots_raw).items()
+        }
+
     materialize_cached_outputs_dir: Optional[Path] = (
         Path(materialize_cached_outputs_dir_raw)
         if materialize_cached_outputs_dir_raw is not None
@@ -401,10 +736,13 @@ def parse_materialize_cached_outputs_kwargs(
 
     return (
         cache_hydration,
+        cast(Literal["warn", "miss"], cache_hydration_failure),
         materialize_cached_output_paths,
+        materialize_cached_output_set_roots,
         materialize_cached_outputs_dir,
         materialize_cached_outputs_source_root,
         validate_cached_outputs,
+        validate_materialized_inputs,
     )
 
 
@@ -415,7 +753,7 @@ def hydrate_cache_hit_outputs(
     cached_run: Run,
     options: Optional[ActiveRunCacheOptions] = None,
     link_outputs: bool = True,
-) -> RunArtifacts:
+) -> Optional[RunArtifacts]:
     """
     Hydrate cached outputs into the active run and optionally materialize bytes to disk.
 
@@ -430,10 +768,29 @@ def hydrate_cache_hit_outputs(
     if record is None:
         raise RuntimeError("Cannot hydrate cache hit: no active run.")
 
-    record.cached_run = cached_run
     target_run = record.run
-
     cached_items = tracker.get_artifacts_for_run(cached_run.id)
+    active_options = options or ActiveRunCacheOptions()
+    strict_materialized: Optional[dict[str, str]] = None
+    if (
+        active_options.cache_hydration == "outputs-requested"
+        and active_options.cache_hydration_failure == "miss"
+    ):
+        strict_materialized = _strict_requested_output_hydration(
+            tracker=tracker,
+            cached_run=cached_run,
+            target_run=target_run,
+            active_options=active_options,
+            outputs_by_key=dict(cached_items.outputs),
+        )
+        if strict_materialized is None:
+            logging.info(
+                "[Consist] Cache candidate %s rejected by strict requested-output admission.",
+                cached_run.id,
+            )
+            return None
+
+    record.cached_run = cached_run
 
     scenario_hint = (
         f", scenario='{cached_run.parent_run_id}'" if cached_run.parent_run_id else ""
@@ -447,8 +804,6 @@ def hydrate_cache_hit_outputs(
         len(cached_items.inputs),
         len(cached_items.outputs),
     )
-
-    active_options = options or ActiveRunCacheOptions()
 
     for art in cached_items.outputs.values():
         # Deep-clone artifacts to prevent metadata sharing between cached run and active run.
@@ -479,7 +834,9 @@ def hydrate_cache_hit_outputs(
     # Core Consist defaults to "never" (artifact hydration only). Integrations and
     # advanced workflows can opt in when callers expect host paths to exist.
     try:
-        if active_options.cache_hydration in {"outputs-requested", "outputs-all"}:
+        if strict_materialized is not None:
+            target_run.meta["materialized_outputs"] = strict_materialized
+        elif active_options.cache_hydration in {"outputs-requested", "outputs-all"}:
             materialized: dict[str, str] = {}
             should_use_legacy = not _can_delegate_run_output_materialization(tracker)
             if not should_use_legacy:
@@ -543,9 +900,9 @@ def hydrate_cache_hit_outputs(
                             run_id = str(art.run_id)
                             if run_id not in run_cache:
                                 run_cache[run_id] = db.get_run(run_id)
-                            run: Run | None = run_cache.get(run_id)
-                            if run is not None:
-                                historical_run = run
+                            cached_run_record: Run | None = run_cache.get(run_id)
+                            if cached_run_record is not None:
+                                historical_run = cached_run_record
                         _, source, _ = find_existing_recovery_source_path(
                             cast("Tracker", tracker),
                             artifact=art,
@@ -586,9 +943,9 @@ def hydrate_cache_hit_outputs(
                             run_id = str(art.run_id)
                             if run_id not in run_cache:
                                 run_cache[run_id] = db.get_run(run_id)
-                            run: Run | None = run_cache.get(run_id)
-                            if run is not None:
-                                historical_run = run
+                            cached_run_record: Run | None = run_cache.get(run_id)
+                            if cached_run_record is not None:
+                                historical_run = cached_run_record
                         relative_path, source, _ = find_existing_recovery_source_path(
                             cast("Tracker", tracker),
                             artifact=art,
@@ -711,10 +1068,13 @@ def materialize_missing_inputs(
     *, tracker: CacheMaterializationContext, options: Optional[ActiveRunCacheOptions]
 ) -> None:
     """
-    Copy cached-input artifacts into the current run_dir when missing.
+    Copy cached-input artifacts into the current run_dir when needed.
 
     This is intended for cache-miss runs that rely on cached outputs from
-    previous runs in a different run_dir.
+    previous runs in a different run_dir. By default only absent destinations
+    are restored. With ``validate_materialized_inputs=True``, existing
+    destinations are replaced only when a portable full-content hash proves they
+    are stale.
 
     Parameters
     ----------
@@ -733,8 +1093,44 @@ def materialize_missing_inputs(
     if db is None:
         return
 
+    def _should_preserve_existing_input(artifact: Artifact, path: Path) -> bool:
+        if not artifact.hash:
+            return True
+        if tracker.identity.hashing_strategy != "full":
+            return True
+        try:
+            return tracker.identity.compute_file_checksum(path) == artifact.hash
+        except FileNotFoundError:
+            return False
+        except (OSError, ValueError) as exc:
+            logging.debug(
+                "[Consist] Could not validate existing input %s at %s: %s",
+                artifact.key,
+                path,
+                exc,
+            )
+            return True
+
+    def _recovery_source_matches_artifact(artifact: Artifact, path: Path) -> bool:
+        if not active_options.validate_materialized_inputs:
+            return True
+        if not artifact.hash:
+            return True
+        if tracker.identity.hashing_strategy != "full":
+            return True
+        try:
+            return tracker.identity.compute_file_checksum(path) == artifact.hash
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            logging.debug(
+                "[Consist] Skipping recovery source for input %s at %s: %s",
+                artifact.key,
+                path,
+                exc,
+            )
+            return False
+
     items: list[tuple[Artifact, Path, Path]] = []
-    db_items: list[tuple[Artifact, Path]] = []
+    db_items: list[tuple[Artifact, Path, bool]] = []
 
     for artifact in tracker.current_consist.inputs:
         if not artifact.run_id:
@@ -742,38 +1138,55 @@ def materialize_missing_inputs(
 
         destination = Path(tracker.resolve_uri(artifact.container_uri))
         if destination.exists():
-            continue
+            if not active_options.validate_materialized_inputs:
+                continue
+            if _should_preserve_existing_input(artifact, destination):
+                continue
 
         run_id = str(artifact.run_id)
         run = db.get_run(run_id)
-        original_run_dir = (
-            run.meta.get("_physical_run_dir") if run and run.meta else None
-        )
-        if not original_run_dir:
-            continue
+        source: Path | None = None
+        if run is not None:
+            from consist.core.materialize import find_existing_recovery_source_path
 
-        source = Path(
-            tracker.fs.resolve_historical_path(artifact.container_uri, original_run_dir)
-        )
-        if source is not None and source.exists():
+            _, source, _ = find_existing_recovery_source_path(
+                cast("Tracker", tracker),
+                artifact=artifact,
+                run=run,
+                source_root=None,
+                source_validator=lambda path, artifact=artifact: (
+                    _recovery_source_matches_artifact(artifact, path)
+                ),
+            )
+        if source is not None:
             items.append((artifact, source, destination))
             continue
 
         if artifact.meta.get("is_ingested", False):
-            db_items.append((artifact, destination))
+            if destination.exists() and destination.is_dir():
+                logging.warning(
+                    "[Consist] Cannot materialize ingested input %r over "
+                    "directory destination %s.",
+                    artifact.key,
+                    destination,
+                )
+                continue
+            db_items.append((artifact, destination, destination.exists()))
 
     materialized: dict[str, str] = {}
 
     if items:
         from consist.core.materialize import materialize_artifacts_from_sources
 
+        allowed_base = _allowed_materialization_roots(
+            tracker, target_run=tracker.current_consist.run
+        )
         materialized.update(
             materialize_artifacts_from_sources(
                 items,
-                allowed_base=_allowed_materialization_roots(
-                    tracker, target_run=tracker.current_consist.run
-                ),
+                allowed_base=allowed_base,
                 on_missing="warn",
+                overwrite_existing=active_options.validate_materialized_inputs,
             )
         )
         for artifact, _, destination in items:
@@ -782,11 +1195,12 @@ def materialize_missing_inputs(
     if db_items:
         from consist.core.materialize import materialize_ingested_artifact_from_db
 
-        for artifact, destination in db_items:
+        for artifact, destination, overwrite in db_items:
             materialized_path = materialize_ingested_artifact_from_db(
                 artifact=artifact,
                 tracker=cast("Tracker", tracker),
                 destination=destination,
+                overwrite=overwrite,
             )
             materialized[artifact.key] = materialized_path
             artifact.abs_path = materialized_path
@@ -815,6 +1229,7 @@ def materialize_requested_inputs(
 
     requested_mode = active_options.requested_input_materialization_mode or "copy"
     requested_paths = active_options.requested_input_paths or {}
+    requested_artifact_ids = active_options.requested_input_artifact_ids or {}
     if not requested_paths:
         return {}
 
@@ -863,6 +1278,19 @@ def materialize_requested_inputs(
     def _artifact_hash_matches_path(artifact: Artifact, path: Path) -> bool:
         if not artifact.hash:
             return False
+        meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+        if meta.get("directory_artifact") is True:
+            manifest = meta.get("directory_manifest")
+            if not isinstance(manifest, Mapping):
+                return False
+            try:
+                normalized_manifest = validate_directory_manifest(manifest)
+                if artifact.hash != normalized_manifest["tree_hash"]:
+                    return False
+                validate_directory_tree(path, normalized_manifest)
+            except (OSError, ValueError):
+                return False
+            return True
         return tracker.identity.compute_file_checksum(path) == artifact.hash
 
     def _paths_match(source: Path, destination: Path) -> bool:
@@ -911,7 +1339,18 @@ def materialize_requested_inputs(
         return None
 
     for key, destination in requested_paths.items():
-        matches = inputs_by_key.get(key, [])
+        is_strict_snapshot = active_options.requested_input_strict_snapshot
+        requested_artifact_id = requested_artifact_ids.get(key)
+        if requested_artifact_id is not None:
+            matches = list(
+                {
+                    str(artifact.id): artifact
+                    for artifact in tracker.current_consist.inputs
+                    if str(artifact.id) == requested_artifact_id
+                }.values()
+            )
+        else:
+            matches = inputs_by_key.get(key, [])
         if not matches:
             raise ValueError(
                 format_problem_cause_fix(
@@ -943,7 +1382,6 @@ def materialize_requested_inputs(
             )
 
         artifact = matches[0]
-        destination_path = Path(destination).resolve()
 
         from consist.core.materialize import (
             _ensure_destination_not_symlink,
@@ -952,16 +1390,16 @@ def materialize_requested_inputs(
             validate_allowed_materialization_destination,
         )
 
+        _ensure_destination_not_symlink(Path(destination))
+        destination_path = Path(destination).resolve()
+
         validate_allowed_materialization_destination(destination_path, allowed_base)
-        _ensure_destination_not_symlink(destination_path)
         destination_path.parent.mkdir(parents=True, exist_ok=True)
 
         source_path = _resolve_source(artifact)
         if destination_path.exists():
-            if destination_path.is_symlink():
-                raise ValueError(
-                    f"Symlink detected in destination path: {destination_path}"
-                )
+            if is_strict_snapshot:
+                raise ValueError("Resolved binding snapshot destination must be fresh.")
             if (
                 source_path is None
                 and artifact.hash
@@ -971,6 +1409,23 @@ def materialize_requested_inputs(
                 staged[key] = str(destination_path)
                 continue
             if source_path is not None and _paths_match(source_path, destination_path):
+                if (
+                    active_options.requested_input_validate_content_hash == "if-present"
+                    and artifact.hash
+                    and not _artifact_hash_matches_path(artifact, destination_path)
+                ):
+                    raise ValueError(
+                        format_problem_cause_fix(
+                            problem=f"Hash mismatch for existing input {key!r}.",
+                            cause=(
+                                "The existing input bytes do not match the artifact hash."
+                            ),
+                            fix=(
+                                "Verify the existing input or disable hash validation for "
+                                "this staging request."
+                            ),
+                        )
+                    )
                 artifact.abs_path = str(destination_path)
                 staged[key] = str(destination_path)
                 continue
@@ -990,6 +1445,10 @@ def materialize_requested_inputs(
             _remove_existing(destination_path)
 
         if source_path is None:
+            if is_strict_snapshot:
+                raise FileNotFoundError(
+                    f"[Consist] Cannot stage strict input {artifact.key!r}: source path missing."
+                )
             if artifact.meta.get("is_ingested", False):
                 staged_path = Path(
                     materialize_ingested_artifact_from_db(
@@ -1026,6 +1485,23 @@ def materialize_requested_inputs(
             )
 
         if source_path.resolve() == destination_path:
+            artifact.abs_path = str(destination_path)
+            staged[key] = str(destination_path)
+            continue
+
+        if is_strict_snapshot:
+            meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
+            directory_manifest = meta.get("directory_manifest")
+            create_execution_snapshot(
+                source=source_path,
+                destination=destination_path,
+                identity=ArtifactIdentity.from_artifact(artifact),
+                directory_manifest=(
+                    directory_manifest
+                    if isinstance(directory_manifest, Mapping)
+                    else None
+                ),
+            )
             artifact.abs_path = str(destination_path)
             staged[key] = str(destination_path)
             continue

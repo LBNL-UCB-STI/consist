@@ -8,17 +8,28 @@ from unittest.mock import patch
 
 import pandas as pd
 import pytest
+from pydantic import BaseModel
+from sqlmodel import SQLModel
 
 import consist
 from consist.core.config_canonicalization import (
     CanonicalConfig,
+    CanonicalizationSnapshot,
     ConfigPlan,
     canonical_identity_from_config,
 )
 from consist.core.tracker import Tracker
 from consist.models.artifact import Artifact
 from consist.models.run import RunResult
-from consist.types import CacheOptions, ExecutionOptions, OutputPolicyOptions
+from consist.types import (
+    ArtifactSpec,
+    CacheOptions,
+    ExecutionOptions,
+    FilenamePattern,
+    OutputPolicyOptions,
+    OutputSet,
+    IntCapture,
+)
 
 
 def test_tracker_run_load_inputs_requires_mapping(tracker, sample_csv):
@@ -57,6 +68,209 @@ def test_tracker_run_loads_inputs_and_injects_context(tracker, sample_csv):
 
     assert "filtered" in result.outputs
     assert result.outputs["filtered"].path.exists()
+
+
+def test_tracker_run_context_has_no_canonicalization_without_adapter(tracker) -> None:
+    observed = []
+
+    def step(ctx) -> None:
+        observed.append(ctx.canonicalization)
+
+    tracker.run(
+        fn=step,
+        name="no_adapter_snapshot",
+        cache_options=CacheOptions(cache_mode="overwrite"),
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    assert observed == [None]
+
+
+def test_tracker_run_output_path_spec_tags_schema_and_profiles_output(
+    tracker,
+) -> None:
+    class SyntheticFirm(SQLModel):
+        firm_id: int
+        employment: int
+
+    def step(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "synthetic_firms.csv").write_text(
+            "firm_id,employment\n1,42\n",
+            encoding="utf-8",
+        )
+
+    result = tracker.run(
+        fn=step,
+        output_paths={
+            "synthetic_firms": ArtifactSpec(
+                path="synthetic_firms.csv",
+                schema=SyntheticFirm,
+                profile_file_schema=True,
+                file_schema_sample_rows=10,
+                driver="csv",
+            )
+        },
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    artifact = result.outputs["synthetic_firms"]
+    assert artifact.driver == "csv"
+    assert artifact.meta["schema_name"] == "SyntheticFirm"
+    assert artifact.meta.get("has_strict_schema") is not True
+    assert artifact.meta["schema_id"]
+    assert tracker.db.get_artifact_schema_for_artifact(artifact_id=artifact.id)
+
+
+def test_tracker_log_artifact_schema_tags_non_strict_by_default(tracker) -> None:
+    class TaggedOutput(SQLModel):
+        item_id: int
+        value: int
+
+    logged: dict[str, Artifact] = {}
+
+    def step(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        output_path = ctx.run_dir / "strict.csv"
+        output_path.write_text("item_id,value\n1,2\n", encoding="utf-8")
+        logged["strict"] = tracker.log_artifact(
+            output_path,
+            key="strict",
+            schema=TaggedOutput,
+            direction="output",
+        )
+
+    tracker.run(fn=step, execution_options=ExecutionOptions(inject_context="ctx"))
+
+    artifact = logged["strict"]
+    assert artifact.meta["schema_name"] == "TaggedOutput"
+    assert artifact.meta.get("has_strict_schema") is not True
+
+
+def test_tracker_log_artifact_schema_strictness_can_be_explicitly_enabled(
+    tracker,
+) -> None:
+    class StrictOutput(SQLModel):
+        item_id: int
+        value: int
+
+    logged: dict[str, Artifact] = {}
+
+    def step(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        output_path = ctx.run_dir / "strict.csv"
+        output_path.write_text("item_id,value\n1,2\n", encoding="utf-8")
+        logged["strict"] = tracker.log_artifact(
+            output_path,
+            key="strict",
+            schema=StrictOutput,
+            strict_schema=True,
+            direction="output",
+        )
+
+    tracker.run(fn=step, execution_options=ExecutionOptions(inject_context="ctx"))
+
+    artifact = logged["strict"]
+    assert artifact.meta["schema_name"] == "StrictOutput"
+    assert artifact.meta["has_strict_schema"] is True
+
+
+def test_tracker_run_profile_file_schema_profiles_named_inputs_and_outputs(
+    tracker, sample_csv
+) -> None:
+    raw_path = sample_csv("raw_firms.csv", rows=1, firm_id=[1], employment=[42])
+
+    def step(raw: Path, ctx) -> None:
+        assert raw == raw_path
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "summary.csv").write_text(
+            "metric,value\nemployment,42\n",
+            encoding="utf-8",
+        )
+
+    result = tracker.run(
+        fn=step,
+        inputs={"raw": raw_path},
+        output_paths={"summary": "summary.csv"},
+        profile_file_schema=True,
+        execution_options=ExecutionOptions(input_binding="paths", inject_context="ctx"),
+    )
+
+    input_artifact = tracker.db.get_artifact("raw", run_id=result.run.id)
+    assert input_artifact is not None
+    assert tracker.db.get_artifact_schema_for_artifact(artifact_id=input_artifact.id)
+    assert tracker.db.get_artifact_schema_for_artifact(
+        artifact_id=result.outputs["summary"].id
+    )
+
+
+def test_tracker_run_output_sets_log_parent_children_and_preserve_output_paths(
+    tracker,
+) -> None:
+    def step(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        output_set_root = ctx.run_dir / "annual"
+        output_set_root.mkdir(parents=True, exist_ok=True)
+        (output_set_root / "annual_2030.csv").write_text("year,value\n2030,1\n")
+        (output_set_root / "annual_2035.csv").write_text("year,value\n2035,2\n")
+        (ctx.run_dir / "summary.csv").write_text("metric,value\ncount,2\n")
+
+    result = tracker.run(
+        fn=step,
+        output_paths={"summary": "summary.csv"},
+        output_sets={"annual": OutputSet(root="annual", include="annual_*.csv")},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    assert set(result.outputs) == {"summary", "annual"}
+    assert result.outputs["summary"].path.read_text() == "metric,value\ncount,2\n"
+
+    parent = result.outputs["annual"]
+    assert parent.path.is_dir()
+    assert parent.meta["artifact_set"] is True
+    assert parent.meta["member_count"] == 2
+
+    children = tracker.get_child_artifacts(parent)
+    assert [child.key for child in children] == [
+        "annual__annual_2030_csv",
+        "annual__annual_2035_csv",
+    ]
+    assert {child.parent_artifact_id for child in children} == {parent.id}
+    assert {child.meta["output_set_key"] for child in children} == {"annual"}
+
+
+def test_tracker_run_output_set_schema_tags_child_members(tracker) -> None:
+    class AnnualOutput(SQLModel):
+        year: int
+        value: int
+
+    def step(ctx) -> None:
+        output_set_root = ctx.run_dir / "annual"
+        output_set_root.mkdir(parents=True, exist_ok=True)
+        (output_set_root / "annual_2030.csv").write_text(
+            "year,value\n2030,1\n",
+            encoding="utf-8",
+        )
+
+    result = tracker.run(
+        fn=step,
+        output_sets={
+            "annual": OutputSet(
+                root="annual",
+                include="annual_*.csv",
+                schema=AnnualOutput,
+            )
+        },
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    parent = result.outputs["annual"]
+    assert parent.meta["schema_name"] == "AnnualOutput"
+    assert parent.meta.get("has_strict_schema") is not True
+    [child] = tracker.get_child_artifacts(parent)
+    assert child.meta["schema_name"] == "AnnualOutput"
+    assert child.meta.get("has_strict_schema") is not True
+    assert tracker.db.get_artifact_schema_for_artifact(artifact_id=child.id)
 
 
 def test_tracker_run_binds_paths_with_input_binding_paths(tracker, sample_csv):
@@ -627,6 +841,20 @@ def test_tracker_run_logs_series_for_single_declared_output(tracker):
     assert isinstance(loaded, pd.DataFrame)
     assert list(loaded.columns) == ["series_out"]
     assert loaded["series_out"].tolist() == [3, 4]
+
+
+def test_tracker_run_profiles_tabular_outputs_for_grouped_analysis(tracker):
+    def step() -> pd.DataFrame:
+        return pd.DataFrame({"id": [1, 2], "value": [10.0, 20.0]})
+
+    result = tracker.run(fn=step, outputs=["table"])
+    artifact = result.outputs["table"]
+
+    assert artifact.meta.get("schema_id") is not None
+    assert tracker.db is not None
+    assert (
+        tracker.db.get_artifact_schema_for_artifact(artifact_id=artifact.id) is not None
+    )
 
 
 def test_tracker_run_output_missing_error(tracker):
@@ -1268,6 +1496,134 @@ def test_tracker_run_container_forces_overwrite_and_errors_on_missing_outputs(
     assert Path(tracker.run_dir) in out_path.parents
 
 
+def test_tracker_run_container_forwards_output_path_spec_log_kwargs(
+    tracker, monkeypatch
+):
+    from types import SimpleNamespace
+
+    from consist.integrations import containers
+
+    class ContainerOutput(SQLModel):
+        item_id: int
+        value: int
+
+    captured: dict[str, Any] = {}
+
+    def _fake_run_container(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(artifacts={}, cache_hit=False)
+
+    monkeypatch.setattr(containers, "run_container", _fake_run_container)
+
+    tracker.run(
+        fn=None,
+        name="container_step",
+        output_paths={
+            "out": ArtifactSpec(
+                path="container_out.csv",
+                schema=ContainerOutput,
+                driver="csv",
+                profile_file_schema=True,
+            )
+        },
+        output_policy=OutputPolicyOptions(output_missing="ignore"),
+        execution_options=ExecutionOptions(
+            executor="container",
+            container={
+                "image": "ghcr.io/example/test:latest",
+                "command": ["python", "-V"],
+            },
+        ),
+    )
+
+    log_kwargs = captured["output_log_kwargs"]["out"]
+    assert log_kwargs["schema"] is ContainerOutput
+    assert log_kwargs["driver"] == "csv"
+    assert log_kwargs["profile_file_schema"] is True
+    assert log_kwargs["strict_schema"] is False
+
+
+def test_tracker_run_container_applies_snapshot_without_forwarding_it(
+    tracker, tmp_path: Path, monkeypatch
+) -> None:
+    from types import SimpleNamespace
+
+    from consist.integrations import containers
+
+    config_root = tmp_path / "container_config"
+    config_root.mkdir()
+    canonical = CanonicalConfig(
+        root_dirs=[config_root],
+        primary_config=None,
+        config_files=[],
+        external_files=[],
+        content_hash="container",
+    )
+    identity = canonical_identity_from_config(
+        adapter_name="container_adapter",
+        adapter_version="1",
+        config=canonical,
+    )
+    snapshot = CanonicalizationSnapshot(
+        adapter_name="container_adapter",
+        adapter_version="1",
+        identity_hash=identity.identity_hash,
+    )
+    plan = ConfigPlan(
+        adapter_name="container_adapter",
+        adapter_version="1",
+        canonical=canonical,
+        artifacts=[],
+        ingestables=[],
+        identity=identity,
+        canonicalization=snapshot,
+    )
+
+    class Adapter:
+        root_dirs = [config_root]
+
+    monkeypatch.setattr(tracker, "prepare_config", lambda **_: plan)
+    applied = []
+    original_apply = tracker.apply_config_plan
+
+    def _apply(*args, **kwargs):
+        contribution = original_apply(*args, **kwargs)
+        applied.append(contribution.canonicalization)
+        return contribution
+
+    captured: dict[str, Any] = {}
+
+    def _fake_run_container(**kwargs):
+        assert applied == [snapshot]
+        captured.update(kwargs)
+        return SimpleNamespace(artifacts={}, cache_hit=False)
+
+    monkeypatch.setattr(tracker, "apply_config_plan", _apply)
+    monkeypatch.setattr(containers, "run_container", _fake_run_container)
+
+    tracker.run(
+        fn=None,
+        name="container_snapshot",
+        adapter=Adapter(),
+        output_paths={"out": "out.txt"},
+        output_policy=OutputPolicyOptions(output_missing="ignore"),
+        execution_options=ExecutionOptions(
+            executor="container",
+            container={
+                "image": "ghcr.io/example/test:latest",
+                "command": ["python", "-V"],
+                "environment": {"MODE": "test"},
+                "volumes": {"/host": {"bind": "/container", "mode": "ro"}},
+            },
+        ),
+    )
+
+    assert captured["command"] == ["python", "-V"]
+    assert captured["environment"] == {"MODE": "test"}
+    assert captured["volumes"] == {"/host": {"bind": "/container", "mode": "ro"}}
+    assert "canonicalization" not in captured
+
+
 def test_tracker_run_delegates_invocation_defaults_and_validation(tracker, monkeypatch):
     from consist.core import tracker_orchestration
     from consist.core.run_invocation import resolve_run_invocation as _resolve
@@ -1324,6 +1680,7 @@ def test_tracker_run_propagates_start_run_optional_kwargs(tracker, monkeypatch):
         cache_options=CacheOptions(
             cache_mode="overwrite",
             cache_hydration="outputs-requested",
+            cache_hydration_failure="miss",
             cache_version=7,
             materialize_cached_outputs_source_root=Path("/tmp/archive-root"),
         ),
@@ -1333,6 +1690,7 @@ def test_tracker_run_propagates_start_run_optional_kwargs(tracker, monkeypatch):
 
     assert captured_start_kwargs["cache_version"] == 7
     assert captured_start_kwargs["cache_hydration"] == "outputs-requested"
+    assert captured_start_kwargs["cache_hydration_failure"] == "miss"
     assert captured_start_kwargs["facet_schema_version"] == "facet-v1"
     assert captured_start_kwargs["facet_index"] is False
     assert captured_start_kwargs["_consist_code_identity_callable"] is step
@@ -1347,3 +1705,113 @@ def test_tracker_run_propagates_start_run_optional_kwargs(tracker, monkeypatch):
     )
     assert materialize_path.name == "out.txt"
     assert Path(tracker.run_dir) in materialize_path.parents
+
+
+def test_tracker_run_logs_output_set_parent_members_and_manifest(tracker):
+    def step(ctx) -> None:
+        annual_dir = ctx.run_dir / "annual"
+        annual_dir.mkdir(parents=True)
+        (annual_dir / "annual_2030.csv").write_text("year,value\n2030,1\n")
+        (annual_dir / "annual_2035.csv").write_text("year,value\n2035,2\n")
+        (ctx.run_dir / "summary.txt").write_text("ok\n")
+
+    result = tracker.run(
+        fn=step,
+        name="annual_forecast",
+        config={"years": [2030, 2035]},
+        output_paths={"summary": "summary.txt"},
+        output_sets={
+            "annual_outputs": OutputSet(
+                root="annual",
+                include="annual_*.csv",
+                kind="tabular-partitioned",
+                expected_members=lambda config: [
+                    f"annual_{year}.csv" for year in config["years"]
+                ],
+                member_facets=lambda path, relpath, config: {
+                    "year": int(Path(relpath).stem.removeprefix("annual_"))
+                },
+            )
+        },
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    assert set(result.outputs) == {"summary", "annual_outputs"}
+    parent = result.outputs["annual_outputs"]
+    assert parent.driver == "artifact_set"
+    assert parent.meta["artifact_set"] is True
+    assert parent.meta["output_set_key"] == "annual_outputs"
+    assert parent.meta["output_set_kind"] == "tabular-partitioned"
+    assert parent.meta["member_count"] == 2
+    assert parent.meta["manifest_artifact_id"]
+
+    children = tracker.get_child_artifacts(parent)
+    assert [child.meta["output_set_relative_path"] for child in children] == [
+        "annual_2030.csv",
+        "annual_2035.csv",
+    ]
+    assert {child.parent_artifact_id for child in children} == {parent.id}
+
+    manifest = tracker.get_artifact(parent.meta["manifest_artifact_id"])
+    assert manifest is not None
+    assert manifest.driver == "json"
+    assert manifest.meta["output_set_manifest"] is True
+
+
+def test_tracker_run_logs_typed_output_set_facets_as_queryable_ints(tracker):
+    def step(ctx) -> None:
+        annual_dir = ctx.run_dir / "annual"
+        annual_dir.mkdir(parents=True)
+        (annual_dir / "output_2030.parquet").write_text("year\n2030\n")
+        (annual_dir / "output_2035.parquet").write_text("year\n2035\n")
+
+    result = tracker.run(
+        fn=step,
+        name="annual_forecast",
+        output_sets={
+            "annual_outputs": OutputSet(
+                root="annual",
+                include=FilenamePattern.glob("output_*.parquet").with_captures(
+                    IntCapture(name="year", wildcard=1)
+                ),
+            )
+        },
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    assert set(result.outputs) == {"annual_outputs"}
+    matches = tracker.find_artifacts_by_params(
+        params=["year>=2035"],
+        key_prefix="annual_outputs",
+    )
+    assert len(matches) == 1
+    assert matches[0].meta["output_set_relative_path"] == "output_2035.parquet"
+
+
+def test_tracker_run_output_sets_preserve_pydantic_config_facets(tracker) -> None:
+    class Cfg(BaseModel):
+        year: int
+
+        def to_consist_facet(self):
+            return {"year": self.year}
+
+    def step(ctx) -> None:
+        annual_dir = ctx.run_dir / "annual"
+        annual_dir.mkdir(parents=True)
+        (annual_dir / "summary.csv").write_text("year\n2030\n")
+
+    result = tracker.run(
+        fn=step,
+        name="annual_facet",
+        config=Cfg(year=2030),
+        output_sets={"annual": OutputSet(root="annual", include="*.csv")},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    run = tracker.get_run(result.run.id)
+    assert run is not None
+    facet_id = run.meta["config_facet_id"]
+    facet = tracker.get_config_facet(facet_id)
+    assert facet is not None
+    assert facet.facet_json["year"] == 2030
+    assert run.meta["config_facet_schema"] == "Cfg"

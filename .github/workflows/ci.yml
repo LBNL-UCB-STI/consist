@@ -30,10 +30,10 @@ jobs:
             python-version: "3.12"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -62,6 +62,18 @@ jobs:
       - name: Ruff format
         if: runner.os == 'Linux' && matrix.python-version == '3.12'
         run: uv run -m ruff format --check src tests
+
+      - name: Verify LinkML provenance release assets
+        if: runner.os == 'Linux' && matrix.python-version == '3.12'
+        run: |
+          uv build --out-dir provenance-dist
+          unzip -l provenance-dist/consist-*.whl | grep -F "consist/schemas/provenance.yaml"
+          unzip -l provenance-dist/consist-*.whl | grep -F "consist/schemas/binding.yaml"
+          tar -tzf provenance-dist/consist-*.tar.gz | grep -F "/src/consist/schemas/provenance.yaml"
+          tar -tzf provenance-dist/consist-*.tar.gz | grep -F "/src/consist/schemas/binding.yaml"
+          uv run python scripts/build_provenance_schema_release.py \
+            --output provenance-schema-release
+          (cd provenance-schema-release && sha256sum -c SHA256SUMS)
 
       - name: Pytest (skip heavy)
         run: >
@@ -142,7 +154,7 @@ jobs:
 
       - name: Upload CLI startup benchmark
         if: runner.os == 'Linux' && matrix.python-version == '3.11'
-        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
         with:
           name: cli-startup-benchmark-${{ github.sha }}
           path: ci-artifacts/cli-startup-benchmark.json

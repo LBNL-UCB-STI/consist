@@ -107,6 +107,9 @@ with tracker.scenario("baseline") as sc:
 - [`consist.Tracker`](tracker.md)
 - [`consist.Run`](run.md)
 - [`consist.Artifact`](artifact.md)
+- [`consist.ArchivedOutputs`](artifact.md#archived-outputs)
+- [`consist.ArchivedRunOutputFilesReport`](materialize.md#consist.core.materialize.ArchivedRunOutputFilesReport)
+- [`consist.ArchivedRunOutputFile`](materialize.md#consist.core.materialize.ArchivedRunOutputFile)
 - [`consist.HydratedRunOutput`](materialize.md#consist.core.materialize.HydratedRunOutput)
 - [`consist.HydratedRunOutputsResult`](materialize.md#consist.core.materialize.HydratedRunOutputsResult)
 - [`consist.MaterializedArtifact`](materialize.md#consist.core.materialize.MaterializedArtifact)
@@ -117,8 +120,29 @@ with tracker.scenario("baseline") as sc:
 - [`consist.StagedInputsResult`](materialize.md#consist.core.materialize.StagedInputsResult)
 - [`consist.RunSet`](runset.md#consist.runset.RunSet)
 - [`consist.AlignedPair`](runset.md#consist.runset.AlignedPair)
+- [`consist.AdmissionReport`](admission.md#consist.core.admission.AdmissionReport)
+  (policy-neutral evidence returned by prior-run artifact admission)
+- [`consist.AdmissionReference`](admission.md#consist.core.admission.AdmissionReference)
+  (caller-proven runtime host/consumer path evidence for admission)
+- [`consist.check_artifact_identity`](admission.md#consist.core.admission.check_artifact_identity)
+  (compare one resolved file with an exact input from a completed run)
+- [`consist.check_admission_reference`](admission.md#consist.core.admission.check_admission_reference)
+  (compare a runtime-resolved input without recreating consumer path logic)
+- `consist.ArtifactSpec` / `consist.OutputArtifactSpec` (rich declared-output
+  metadata for `Tracker.run(output_paths=...)`)
+- `consist.FilenamePattern`, `consist.IntCapture`, and `consist.EnumCapture`
+  (capture-aware output-set declarations for `OutputSet(include=...)`; the
+  capture set is intentionally narrow in v1, and future typed captures can be
+  added by design if there is demand)
 - `consist.CacheOptions`, `consist.OutputPolicyOptions`, `consist.ExecutionOptions`
 - `consist.BindingResult` (execution envelope for orchestrator-resolved scenario inputs)
+- `consist.StepIdentity` (Scenario-owned resolved name, model, and strict
+  callable contract for preflighted advanced bindings)
+- `consist.ResolvedBindingBuilder` / `consist.ResolvedBinding`
+  (advanced immutable execution contract for a previously verified artifact
+  selection; `bind_tracked_artifact(...)` derives the trusted identity and
+  locator from a Consist artifact; ordinary workflows should continue to use
+  Coupler refs or `BindingResult`)
 - `consist.H5ChildSpec` (typed child-artifact customization for HDF5 containers)
 - `consist.GtfsCanonicalizationResult` and `consist.GtfsFeedSnapshot`
   (GTFS selected-service identity results)
@@ -143,6 +167,7 @@ with tracker.scenario("baseline") as sc:
 - [`ScenarioContext`](workflow.md#scenario-context) (returned by `consist.scenario(...)`)
   - `run_id`, `config`, `inputs`, `add_input`, `declare_outputs`, `require_outputs`, `collect_by_keys`, `run`, `map_runs`, `trace`
   - `run(..., binding=BindingResult(...))` for resolved orchestrator plans
+    or `binding=ResolvedBinding(...)` for verified execution-exact plans
   - `map_runs(...)` for independent process-backed sweep rows
 - [`RunContext`](workflow.md#run-context) (injected via `execution_options=ExecutionOptions(inject_context=True)`)
   - `run_dir`, `output_dir`, `output_path`, `inputs`, `load`, `log_artifact`, `log_artifacts`, `log_input`, `log_output`, `log_meta`, `capture_outputs`
@@ -164,6 +189,9 @@ These models are returned by, or support, `ScenarioContext.map_runs(...)`:
 
 ### Utilities and Introspection
 
+- [`StepContract`](step_contracts.md#consist.core.step_contracts.StepContract) (Resolved declarative metadata for a decorated step)
+- [`resolve_step_contract`](step_contracts.md#consist.core.step_contracts.resolve_step_contract) (Resolve one decorated step without executing it)
+- [`collect_step_contracts`](step_contracts.md#consist.core.step_contracts.collect_step_contracts) (Resolve a sequence of decorated steps with shared context)
 - [`collect_step_schema`](../concepts/decorators-and-metadata.md#schema-introspection) (Extract outputs for Coupler schemas)
 - [`ArtifactKeyRegistry`](../concepts/decorators-and-metadata.md#artifact-key-registries) (Manage consistent artifact keys)
 
@@ -180,6 +208,7 @@ These models are returned by, or support, `ScenarioContext.map_runs(...)`:
 - [`consist.capture_outputs`](api_helpers.md#consist.api.capture_outputs)
 - [`consist.get_artifact`](api_helpers.md#consist.api.get_artifact)
 - [`consist.hydrate_run_outputs`](api_helpers.md#consist.api.hydrate_run_outputs) (recommended historical output recovery API)
+- [`consist.hydrate_run_outputs_to_destinations`](api_helpers.md#consist.api.hydrate_run_outputs_to_destinations) (historical recovery to exact caller-chosen paths)
 - [`consist.materialize_run_outputs`](api_helpers.md#consist.api.materialize_run_outputs) (aggregate compatibility wrapper)
 - [`consist.materialize_artifact`](api_helpers.md#consist.api.materialize_artifact) (single-artifact recovery)
 - [`consist.stage_artifact`](api_helpers.md#consist.api.stage_artifact) (low-level canonical input staging)
@@ -188,6 +217,7 @@ These models are returned by, or support, `ScenarioContext.map_runs(...)`:
 - [`consist.archive_artifact`](api_helpers.md#consist.api.archive_artifact)
 - [`consist.archive_run_outputs`](api_helpers.md#consist.api.archive_run_outputs)
 - [`consist.archive_current_run_outputs`](api_helpers.md#consist.api.archive_current_run_outputs)
+- [`consist.archive_run_output_files`](api_helpers.md#consist.api.archive_run_output_files)
 - [`consist.register_artifact_facet_parser`](api_helpers.md#consist.api.register_artifact_facet_parser)
 - [`consist.cached_output`](api_helpers.md#consist.api.cached_output)
 - [`consist.cached_artifacts`](api_helpers.md#consist.api.cached_artifacts)
@@ -256,11 +286,12 @@ to Consist, start with the **Core** and **Logging/Loading** groups and reach for
 - `find_artifacts`, `get_artifact`, `get_child_artifacts`, `get_parent_artifact`, `get_artifacts_for_run`
 - `find_artifacts_by_params`, `get_artifact_kv`, `register_artifact_facet_parser`
 - `get_run`, `get_run_config`, `get_run_inputs`, `get_run_outputs`
-- `hydrate_run_outputs`, `materialize_run_outputs`, `materialize_artifact`
+- `hydrate_run_outputs`, `hydrate_run_outputs_to_destinations`,
+  `materialize_run_outputs`, `materialize_artifact`
 - `stage_artifact`, `stage_inputs`
 - `set_artifact_recovery_roots`, `register_artifact_recovery_copy`,
   `register_run_output_recovery_copies`, `archive_artifact`, `archive_run_outputs`,
-  `archive_current_run_outputs`
+  `archive_current_run_outputs`, `archive_run_output_files`
 - `get_artifact_lineage`, `print_lineage`, `history`
 - `diff_runs`, `get_config_facet`, `get_config_facets`, `get_run_config_kv`
 - `get_config_values`, `get_config_value`, `find_runs_by_facet_kv`
@@ -304,5 +335,6 @@ These methods are still public, but are more low-level or easier to misuse.
 These APIs are part of the public surface, but require extra dependencies.
 
 - Ingestion helpers: [`consist.ingest`](api_helpers.md#consist.api.ingest) (install with `consist[ingest]`)
+- Ibis query bridge: [`consist.ibis_connection`](api_helpers.md#consist.api.ibis_connection), [`consist.ibis_view`](api_helpers.md#consist.api.ibis_view), [`consist.ibis_grouped_view`](api_helpers.md#consist.api.ibis_grouped_view) (install with `consist[ibis]`)
 - [`consist.integrations.containers`](../integrations/containers.md) (container execution + caching; requires Docker or Singularity)
 - [`consist.integrations.dlt_loader`](../integrations/dlt_loader.md) (low-level ingestion integration; requires `consist[ingest]`)

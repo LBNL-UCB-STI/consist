@@ -63,7 +63,8 @@ def test_preview_shows_driver_specific_hint_for_missing_optional_dependency(
     `preview` should guide users to the right extras when optional deps are missing.
     """
     artifact_path = tmp_path / "artifact.zarr"
-    artifact_path.write_text("placeholder", encoding="utf-8")
+    artifact_path.mkdir()
+    (artifact_path / "0.0").write_text("placeholder", encoding="utf-8")
 
     with tracker.start_run("run_preview_zarr", "model"):
         tracker.log_artifact(
@@ -98,7 +99,7 @@ def test_shell_preview_requires_artifact_key(capsys) -> None:
     shell.do_preview("")
 
     out = capsys.readouterr().out
-    assert "artifact_key required" in out
+    assert "Artifact key required" in out
 
 
 def test_shell_preview_reports_missing_artifact(capsys) -> None:
@@ -280,6 +281,104 @@ def test_preview_renders_gtfs_selected_service_summary(
     assert "preview_gtfs_selected_service_notes" not in result.stdout
 
 
+def test_preview_renders_artifact_set_summary(
+    cli_runner, tracker, tmp_path: Path
+) -> None:
+    """`preview` should summarize artifact_set parents without loading them."""
+    manifest_path = tmp_path / "output_set_manifest.json"
+    manifest_path.write_text('{"kind": "table"}\n', encoding="utf-8")
+    member_one_path = tmp_path / "output_set_member_one.csv"
+    member_one_path.write_text("value\n1\n", encoding="utf-8")
+    member_two_path = tmp_path / "output_set_member_two.csv"
+    member_two_path.write_text("value\n2\n", encoding="utf-8")
+
+    with tracker.start_run("run_preview_output_set", "model"):
+        manifest = tracker.log_artifact(
+            manifest_path,
+            key="preview_output_set_manifest",
+            driver="json",
+            direction="output",
+        )
+        parent = tracker.log_artifact(
+            manifest_path,
+            key="preview_output_set",
+            driver="artifact_set",
+            direction="output",
+            artifact_set=True,
+            output_set_key="preview_output_set",
+            output_set_kind="table",
+            manifest_artifact_id=str(manifest.id),
+            member_count=2,
+            total_size_bytes=12,
+            schema_id="schema-preview-output-set",
+        )
+        tracker.log_artifact(
+            member_one_path,
+            key="preview_output_set_member_one",
+            driver="csv",
+            direction="output",
+            parent_artifact_id=parent.id,
+        )
+        tracker.log_artifact(
+            member_two_path,
+            key="preview_output_set_member_two",
+            driver="csv",
+            direction="output",
+            parent_artifact_id=parent.id,
+            schema_id="schema-preview-output-set-member",
+        )
+
+    result = cli_runner.invoke(app, ["preview", "preview_output_set"])
+
+    assert result.exit_code == 0
+    assert "Artifact Set Summary" in result.stdout
+    assert "preview_output_set" in result.stdout
+    assert "Member Count" in result.stdout
+    assert "Total Size" in result.stdout
+    assert "Schema" in result.stdout
+    assert "Manifest ID" in result.stdout
+    assert "preview_output_set_member_one" in result.stdout
+    assert "preview_output_set_member_two" in result.stdout
+
+
+def test_preview_renders_nested_output_set_manifest_json(
+    cli_runner, tracker, tmp_path: Path
+) -> None:
+    """`preview` should summarize nested output-set manifest JSON artifacts."""
+    manifest_path = tmp_path / "nested_output_set_manifest.json"
+    manifest_path.write_text(
+        """
+        {
+          "output_set_key": "annual",
+          "members": [
+            {"key": "annual__2030", "relative_path": "annual_2030.csv"},
+            {"key": "annual__2035", "relative_path": "annual_2035.csv"}
+          ],
+          "totals": {"file_count": 2, "byte_size": 12}
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    with tracker.start_run("run_preview_output_set_manifest", "model"):
+        tracker.log_artifact(
+            manifest_path,
+            key="nested_output_set_manifest",
+            driver="json",
+            direction="output",
+            output_set_key="annual",
+            output_set_manifest=True,
+        )
+
+    result = cli_runner.invoke(app, ["preview", "nested_output_set_manifest"])
+
+    assert result.exit_code == 0
+    assert "JSON Manifest Summary" in result.stdout
+    assert "annual" in result.stdout
+    assert "annual__2030" in result.stdout
+    assert "annual_2035.csv" in result.stdout
+
+
 def test_preview_renders_dimensions_for_xarray_like_dataset(
     cli_runner,
     tracker,
@@ -326,7 +425,7 @@ def test_shell_schema_profile_requires_artifact_key(capsys) -> None:
     shell.do_schema_profile("")
 
     out = capsys.readouterr().out
-    assert "artifact_key required" in out
+    assert "Artifact key required" in out
 
 
 def test_shell_schema_profile_reports_missing_artifact(capsys) -> None:
@@ -418,7 +517,7 @@ def test_shell_schema_stub_requires_artifact_key(capsys) -> None:
     shell.do_schema_stub("")
 
     out = capsys.readouterr().out
-    assert "artifact_key required" in out
+    assert "Artifact key required" in out
 
 
 def test_shell_schema_stub_reports_missing_artifact(capsys) -> None:

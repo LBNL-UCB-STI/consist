@@ -33,7 +33,7 @@ from sqlalchemy.pool import NullPool
 from sqlmodel import create_engine, Session, select, SQLModel, col, delete
 
 from consist.core.db_runtime import DatabaseRuntimeOps
-from consist.core.db_snapshot import DatabaseSnapshotOps
+from consist.core.db_snapshot import DatabaseSnapshotOps, snapshot_sidecar_path
 from consist.core._performance_attribution import _track_begin_run_phase
 from consist.core.provenance_writer import ProvenanceWriter
 from consist.core.schema_compat import (
@@ -57,6 +57,7 @@ from consist.models.config_facet import ConfigFacet
 from consist.models.run import (
     Run,
     RunArtifactLink,
+    RunBindingInvocation,
     resolve_canonical_run_meta_field,
 )
 from consist.models.run_config_kv import RunConfigKV
@@ -423,6 +424,7 @@ class DatabaseManager:
                     getattr(Run, "__table__"),
                     getattr(Artifact, "__table__"),
                     getattr(RunArtifactLink, "__table__"),
+                    getattr(RunBindingInvocation, "__table__"),
                     getattr(ConfigFacet, "__table__"),
                     getattr(RunConfigKV, "__table__"),
                     getattr(ArtifactFacet, "__table__"),
@@ -658,11 +660,7 @@ class DatabaseManager:
 
         Example: provenance.duckdb -> provenance.snapshot_meta.json
         """
-        snapshot_ops = getattr(self, "_snapshot_ops", None)
-        if snapshot_ops is None:
-            snapshot_ops = DatabaseSnapshotOps(self)
-            self._snapshot_ops = snapshot_ops
-        return snapshot_ops._snapshot_sidecar_path(destination)
+        return snapshot_sidecar_path(destination)
 
     def snapshot_to(
         self,
@@ -779,8 +777,29 @@ class DatabaseManager:
             logging.warning(f"Failed to update artifact metadata: {e}")
             return False
 
-    def sync_run(self, run: Run) -> None:
-        """Upserts a Run object."""
+    def get_binding_invocations(
+        self, *, requested_run_id: Optional[str] = None
+    ) -> List[RunBindingInvocation]:
+        """Return resolved-binding invocation evidence in creation order."""
+
+        with self.session_scope() as session:
+            statement = select(RunBindingInvocation).order_by(
+                col(RunBindingInvocation.created_at)
+            )
+            if requested_run_id is not None:
+                statement = statement.where(
+                    RunBindingInvocation.requested_run_id == requested_run_id
+                )
+            return list(session.exec(statement).all())
+
+    def sync_run(
+        self,
+        run: Run,
+        *,
+        binding_invocation: Optional[RunBindingInvocation] = None,
+        require_success: bool = False,
+    ) -> None:
+        """Upsert a run and optional strict-binding evidence atomically."""
 
         def _do_sync():
             with _track_begin_run_phase("db.sync_run.session_scope"):
@@ -794,6 +813,8 @@ class DatabaseManager:
                     )
                     with _track_begin_run_phase("db.sync_run.merge_run"):
                         session.merge(run)
+                    if binding_invocation is not None:
+                        session.add(binding_invocation)
                     with _track_begin_run_phase("db.sync_run.commit"):
                         session.commit()
                     if logging.getLogger().isEnabledFor(logging.DEBUG):
@@ -809,6 +830,8 @@ class DatabaseManager:
                     self.execute_with_retry(_do_sync, operation_name="sync_run")
         except Exception as e:
             logging.warning("Database sync failed: %s", e)
+            if require_success:
+                raise
 
     def update_run_meta(self, run_id: str, meta_updates: Dict[str, Any]) -> None:
         """Updates a run's meta field with a partial dict."""
@@ -1639,7 +1662,13 @@ class DatabaseManager:
             )
 
     def sync_run_with_links(
-        self, *, run: Run, artifact_ids: List[uuid.UUID], direction: str = "output"
+        self,
+        *,
+        run: Run,
+        artifact_ids: List[uuid.UUID],
+        direction: str = "output",
+        binding_invocation: Optional[RunBindingInvocation] = None,
+        require_success: bool = False,
     ) -> None:
         """
         Upsert a Run and link artifacts in a single transaction.
@@ -1654,7 +1683,11 @@ class DatabaseManager:
             Link direction for all artifacts.
         """
         if not artifact_ids:
-            self.sync_run(run)
+            self.sync_run(
+                run,
+                binding_invocation=binding_invocation,
+                require_success=require_success,
+            )
             return
 
         def _do_sync():
@@ -1662,6 +1695,8 @@ class DatabaseManager:
                 with self.session_scope() as session:
                     with _track_begin_run_phase("db.sync_run_with_links.merge_run"):
                         session.merge(run)
+                    if binding_invocation is not None:
+                        session.add(binding_invocation)
 
                     with _track_begin_run_phase(
                         "db.sync_run_with_links.query_existing_links"
@@ -1719,6 +1754,8 @@ class DatabaseManager:
                     )
         except Exception as e:
             logging.warning("Database sync failed: %s", e)
+            if require_success:
+                raise
 
     def sync_artifact(
         self,
@@ -1781,6 +1818,16 @@ class DatabaseManager:
         except Exception as e:
             logging.warning("Artifact sync failed: %s", e)
             logging.warning("Database sync failed: %s", e)
+
+    def upsert_artifact(self, artifact: Artifact) -> None:
+        """Persist an artifact that is not yet linked to a run."""
+
+        def _do_upsert() -> None:
+            with self.session_scope() as session:
+                session.merge(artifact)
+                session.commit()
+
+        self.execute_with_retry(_do_upsert, operation_name="upsert_artifact")
 
     def sync_artifacts(
         self,
@@ -2406,6 +2453,55 @@ class DatabaseManager:
             logging.warning(f"Cache lookup failed: {e}")
             return None
 
+    def find_matching_runs(
+        self, config_hash: str, input_hash: str, git_hash: str
+    ) -> list[Run]:
+        """Return completed runs with an exact cache identity.
+
+        Parameters
+        ----------
+        config_hash : str
+            Digest of the identity-relevant configuration.
+        input_hash : str
+            Digest of the declared input artifacts.
+        git_hash : str
+            Digest of the code identity.
+
+        Returns
+        -------
+        list[Run]
+            Completed runs with all three digests equal to the supplied values,
+            ordered newest first. Returns an empty list when no run matches or
+            the database lookup fails.
+
+        Notes
+        -----
+        This is the multi-candidate counterpart to :meth:`find_matching_run`.
+        Callers that need to validate candidate-specific materialization
+        contracts should use this method instead of selecting a single row at
+        query time.
+        """
+
+        def _query():
+            with self.session_scope() as session:
+                statement = (
+                    select(Run)
+                    .where(Run.status == "completed")
+                    .where(Run.config_hash == config_hash)
+                    .where(Run.input_hash == input_hash)
+                    .where(Run.git_hash == git_hash)
+                    .order_by(*recent_run_order_by())
+                )
+                return list(session.exec(statement).all())
+
+        try:
+            return self.execute_with_retry(
+                _query, operation_name="cache_lookup_candidates"
+            )
+        except Exception as e:
+            logging.warning(f"Cache candidate lookup failed: {e}")
+            return []
+
     def find_recent_completed_runs_for_model(
         self, model_name: str, *, limit: int = 20
     ) -> list[Run]:
@@ -2458,6 +2554,46 @@ class DatabaseManager:
         except Exception as e:
             logging.warning(f"Signature lookup failed: {e}")
             return None
+
+    def find_runs_by_signature(self, signature: str) -> list[Run]:
+        """Return completed runs with an exact composite signature.
+
+        Parameters
+        ----------
+        signature : str
+            Composite cache signature calculated from the run identity.
+
+        Returns
+        -------
+        list[Run]
+            Completed runs with the supplied signature, ordered newest first.
+            Returns an empty list when no run matches or the database lookup
+            fails.
+
+        Notes
+        -----
+        The result preserves every matching row so a caller can apply
+        candidate-specific admission checks, such as requested-output
+        materialization, before choosing a cache hit.
+        """
+
+        def _query():
+            with self.session_scope() as session:
+                statement = (
+                    select(Run)
+                    .where(Run.status == "completed")
+                    .where(Run.signature == signature)
+                    .order_by(*recent_run_order_by())
+                )
+                return list(session.exec(statement).all())
+
+        try:
+            return self.execute_with_retry(
+                _query, operation_name="cache_signature_lookup_candidates"
+            )
+        except Exception as e:
+            logging.warning(f"Cache signature candidate lookup failed: {e}")
+            return []
 
     def get_artifact(
         self,

@@ -15,7 +15,7 @@ from consist.models.artifact_kv import ArtifactKV
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
     from consist.models.artifact import Artifact
-    from consist.models.run import ConsistRecord
+    from consist.models.run import ConsistRecord, RunBindingInvocation
     from consist.models.run import Run as RunModel
 
 
@@ -136,13 +136,25 @@ class ProvenanceWriter:
                 self._cleanup_temp_path(tmp_path)
             raise
 
-    def sync_run(self, run: "RunModel") -> None:
+    def sync_run(
+        self,
+        run: "RunModel",
+        *,
+        binding_invocation: "RunBindingInvocation | None" = None,
+        require_success: bool = False,
+    ) -> None:
         tracker = self._tracker
         if tracker.db:
             try:
-                tracker.db.sync_run(run)
+                tracker.db.sync_run(
+                    run,
+                    binding_invocation=binding_invocation,
+                    require_success=require_success,
+                )
             except Exception as e:
                 logging.warning("Database sync failed: %s", e)
+                if require_success:
+                    raise
 
     def sync_run_with_links(
         self,
@@ -150,15 +162,23 @@ class ProvenanceWriter:
         *,
         artifact_ids: list[uuid.UUID],
         direction: str = "output",
+        binding_invocation: "RunBindingInvocation | None" = None,
+        require_success: bool = False,
     ) -> None:
         tracker = self._tracker
         if tracker.db:
             try:
                 tracker.db.sync_run_with_links(
-                    run=run, artifact_ids=artifact_ids, direction=direction
+                    run=run,
+                    artifact_ids=artifact_ids,
+                    direction=direction,
+                    binding_invocation=binding_invocation,
+                    require_success=require_success,
                 )
             except Exception as e:
                 logging.warning("Database sync failed: %s", e)
+                if require_success:
+                    raise
 
     def sync_artifact(
         self,

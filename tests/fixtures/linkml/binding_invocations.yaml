@@ -1,0 +1,15 @@
+invocations:
+  - requested_run:
+      run_id: atlas-model-miss
+    effective_execution_run:
+      run_id: atlas-model-miss
+    cache_outcome: miss
+    binding_identity_digest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  - requested_run:
+      run_id: atlas-model-hit
+    effective_execution_run:
+      run_id: atlas-model-miss
+    cache_source_run:
+      run_id: atlas-model-miss
+    cache_outcome: hit
+    binding_identity_digest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa

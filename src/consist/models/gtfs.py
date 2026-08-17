@@ -13,7 +13,7 @@ metadata without forcing a concrete storage shape.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import ClassVar, Optional
 
 from sqlmodel import Field, SQLModel
 
@@ -30,7 +30,7 @@ class GtfsSchema(SQLModel):
 
 
 class GtfsAgency(GtfsSchema):
-    __tablename__ = "agency"
+    __tablename__: ClassVar[str] = "agency"  # pyright: ignore[reportIncompatibleVariableOverride]
 
     agency_id: Optional[str] = Field(default=None, index=True)
     agency_name: str
@@ -43,7 +43,7 @@ class GtfsAgency(GtfsSchema):
 
 
 class GtfsStops(GtfsSchema):
-    __tablename__ = "stops"
+    __tablename__: ClassVar[str] = "stops"  # pyright: ignore[reportIncompatibleVariableOverride]
 
     stop_id: str = Field(index=True)
     stop_code: Optional[str] = None
@@ -62,7 +62,7 @@ class GtfsStops(GtfsSchema):
 
 
 class GtfsRoutes(GtfsSchema):
-    __tablename__ = "routes"
+    __tablename__: ClassVar[str] = "routes"  # pyright: ignore[reportIncompatibleVariableOverride]
 
     route_id: str = Field(index=True)
     agency_id: Optional[str] = Field(
@@ -83,7 +83,7 @@ class GtfsRoutes(GtfsSchema):
 
 
 class GtfsCalendar(GtfsSchema):
-    __tablename__ = "calendar"
+    __tablename__: ClassVar[str] = "calendar"  # pyright: ignore[reportIncompatibleVariableOverride]
 
     service_id: str = Field(index=True)
     monday: int
@@ -98,7 +98,7 @@ class GtfsCalendar(GtfsSchema):
 
 
 class GtfsCalendarDates(GtfsSchema):
-    __tablename__ = "calendar_dates"
+    __tablename__: ClassVar[str] = "calendar_dates"  # pyright: ignore[reportIncompatibleVariableOverride]
 
     service_id: str = Field(foreign_key="calendar.service_id", index=True)
     date: str
@@ -106,7 +106,7 @@ class GtfsCalendarDates(GtfsSchema):
 
 
 class GtfsFeedInfo(GtfsSchema):
-    __tablename__ = "feed_info"
+    __tablename__: ClassVar[str] = "feed_info"  # pyright: ignore[reportIncompatibleVariableOverride]
 
     feed_publisher_name: str
     feed_publisher_url: str
@@ -120,7 +120,7 @@ class GtfsFeedInfo(GtfsSchema):
 
 
 class GtfsShapes(GtfsSchema):
-    __tablename__ = "shapes"
+    __tablename__: ClassVar[str] = "shapes"  # pyright: ignore[reportIncompatibleVariableOverride]
 
     shape_id: str = Field(index=True)
     shape_pt_lat: float
@@ -130,7 +130,7 @@ class GtfsShapes(GtfsSchema):
 
 
 class GtfsTrips(GtfsSchema):
-    __tablename__ = "trips"
+    __tablename__: ClassVar[str] = "trips"  # pyright: ignore[reportIncompatibleVariableOverride]
 
     route_id: str = Field(foreign_key="routes.route_id", index=True)
     service_id: str = Field(foreign_key="calendar.service_id", index=True)
@@ -145,7 +145,7 @@ class GtfsTrips(GtfsSchema):
 
 
 class GtfsStopTimes(GtfsSchema):
-    __tablename__ = "stop_times"
+    __tablename__: ClassVar[str] = "stop_times"  # pyright: ignore[reportIncompatibleVariableOverride]
 
     trip_id: str = Field(foreign_key="trips.trip_id", index=True)
     arrival_time: Optional[str] = None
@@ -162,7 +162,7 @@ class GtfsStopTimes(GtfsSchema):
 
 
 class GtfsFrequencies(GtfsSchema):
-    __tablename__ = "frequencies"
+    __tablename__: ClassVar[str] = "frequencies"  # pyright: ignore[reportIncompatibleVariableOverride]
 
     trip_id: str = Field(foreign_key="trips.trip_id", index=True)
     start_time: str
@@ -172,7 +172,7 @@ class GtfsFrequencies(GtfsSchema):
 
 
 class GtfsTransfers(GtfsSchema):
-    __tablename__ = "transfers"
+    __tablename__: ClassVar[str] = "transfers"  # pyright: ignore[reportIncompatibleVariableOverride]
 
     from_stop_id: Optional[str] = Field(default=None, foreign_key="stops.stop_id")
     to_stop_id: Optional[str] = Field(default=None, foreign_key="stops.stop_id")
@@ -185,7 +185,7 @@ class GtfsTransfers(GtfsSchema):
 
 
 class GtfsFareAttributes(GtfsSchema):
-    __tablename__ = "fare_attributes"
+    __tablename__: ClassVar[str] = "fare_attributes"  # pyright: ignore[reportIncompatibleVariableOverride]
 
     fare_id: str = Field(index=True)
     price: float
@@ -197,7 +197,7 @@ class GtfsFareAttributes(GtfsSchema):
 
 
 class GtfsFareRules(GtfsSchema):
-    __tablename__ = "fare_rules"
+    __tablename__: ClassVar[str] = "fare_rules"  # pyright: ignore[reportIncompatibleVariableOverride]
 
     fare_id: str = Field(foreign_key="fare_attributes.fare_id", index=True)
     route_id: Optional[str] = Field(default=None, foreign_key="routes.route_id")

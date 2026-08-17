@@ -81,9 +81,10 @@ live in the linked specialized pages.
 | **Facet** | Queryable metadata subset used for filtering runs (does not contribute to the signature). | [Config Management](config-management.md) |
 | **Cache hit / miss** | Hit reuses prior completed outputs; miss executes and records new lineage. | [Caching & Hydration](caching-and-hydration.md) |
 | **Hydration** | Recover artifact metadata/paths without copying bytes. | [Caching & Hydration](caching-and-hydration.md) |
-| **Materialization** | Ensure bytes exist in a target location (filesystem or DB path). | [Data Materialization](data-materialization.md) |
-| **Cold / hot data** | Cold stays file-based; hot is ingested into DuckDB for SQL queries. | [Data Materialization](data-materialization.md) |
-| **Hybrid view** | SQL view that combines ingested rows with file-backed rows. | [Data Materialization](data-materialization.md) |
+| **Filesystem materialization** | Ensure bytes exist at a target filesystem path. | [Caching & Hydration](caching-and-hydration.md) |
+| **DuckDB ingestion** | Store tabular artifact bytes in DuckDB for SQL analysis and database fallback. | [Data Storage and Ingestion](data-materialization.md) |
+| **Cold / hot data** | Cold stays file-based; hot is ingested into DuckDB for SQL queries. | [Data Storage and Ingestion](data-materialization.md) |
+| **Hybrid view** | SQL view that combines ingested rows with file-backed rows. | [Data Storage and Ingestion](data-materialization.md) |
 | **Ghost mode** | Recovery path when files are missing but provenance/ingestion exists. | [Caching & Hydration](caching-and-hydration.md) |
 | **Coupler** | Scenario helper for passing step outputs to downstream inputs. | [Decorators & Metadata](decorators-and-metadata.md) |
 
@@ -138,6 +139,161 @@ result = tracker.run(
 )
 ```
 
+Use `ArtifactSpec` when a declared output also needs schema, driver, facet, or
+file-profiling metadata:
+
+``` python
+from consist import ArtifactSpec
+
+result = tracker.run(
+    fn=run_legacy_model,
+    inputs={"config": config_artifact},
+    output_paths={
+        "synthetic_firms": ArtifactSpec(
+            path=Path("./synthetic_firms.csv"),
+            schema=SyntheticFirms,
+            profile_file_schema=True,
+        )
+    },
+)
+```
+
+`schema=...` tags and persists the logical schema metadata. It does not validate
+the file contents; stricter validation remains a separate workflow. The
+declaration is applied when Consist logs the output. On cache hits, newly added
+schema or profiling metadata is not backfilled onto cached artifacts; force a
+rerun or change the cache version/epoch when you need that metadata recorded.
+
+### When to use `output_sets`
+
+Use `output_sets` when one logical output is written as multiple files, such as
+annual partitions, thread chunks, or diagnostic bundles. For discovery-only
+sets, the smallest useful declaration still only needs a root directory and an
+include pattern:
+
+``` python
+from consist import OutputSet
+
+result = tracker.run(
+    fn=run_forecast,
+    output_sets={
+        "annual_outputs": OutputSet(
+            root="annual",
+            include="annual_*.csv",
+        )
+    },
+)
+```
+
+Here `run_forecast` should write files such as `annual/annual_2030.csv` under
+the run output directory. Consist discovers every file matching `include`, sorts
+the members by relative path, records one logical parent artifact named
+`annual_outputs`, and records each file as a child artifact.
+
+If a filename segment should become queryable metadata, use a
+capture-aware `FilenamePattern` instead of a raw glob string. In v1, each
+capture binds to a numbered wildcard explicitly, so the filename layout stays
+fail-closed and discovery-only patterns remain unchanged:
+
+``` python
+from consist import EnumCapture, FilenamePattern, IntCapture, OutputSet
+
+yearly = OutputSet(
+    root="annual",
+    include=FilenamePattern.glob("annual_*.parquet").with_captures(
+        IntCapture(name="year", wildcard=1)
+    ),
+)
+
+purpose = OutputSet(
+    root="trip_outputs",
+    include=FilenamePattern.glob("trip_*.csv").with_captures(
+        EnumCapture(
+            name="purpose",
+            allowed={"home", "work", "shopping"},
+            wildcard=1,
+        )
+    ),
+)
+```
+
+Capture-aware patterns match the output-set relative path, reject `**`, and
+require every wildcard to be bound. Captured values are stored with their real
+types on member artifacts, so `year` is queryable as an integer rather than a
+string.
+
+The current capture surface is intentionally narrow: integer and enum-style
+captures cover the supported v1 cases. If you need another typed capture, open
+an issue first so the extension can be designed deliberately instead of growing
+ad hoc.
+
+If a filename repeats the same facet more than once, bind both wildcards to the
+same capture name. Consist will keep one facet value and require the repeated
+values to match:
+
+``` python
+events = OutputSet(
+    root="output",
+    recursive=True,
+    include=FilenamePattern.glob("IT.*/*.events.parquet").with_captures(
+        IntCapture(name="iteration", wildcard=1),
+        IntCapture(name="iteration", wildcard=2),
+    ),
+)
+```
+
+This matches paths like `output/IT.3/3.events.parquet` and yields one
+`iteration=3` facet. If the two occurrences disagree, Consist raises during
+discovery instead of guessing which one to keep.
+
+The optional `expected_members` and `expected_count` fields turn discovery into
+a completeness check. They are not required. Use them when the config tells you
+which files must exist and the run should fail if one is missing:
+
+``` python
+result = tracker.run(
+    fn=run_forecast,
+    config={"years": [2030, 2035]},
+    output_sets={
+        "annual_outputs": OutputSet(
+            root="annual",
+            include="annual_*.csv",
+            expected_members=lambda config: [
+                f"annual_{year}.csv" for year in config["years"]
+            ],
+        )
+    },
+)
+```
+
+Consist records one logical parent artifact plus member file artifacts linked by
+`parent_artifact_id`. Cache hydration restores the member files under the
+declared root.
+
+If you pass `schema=...` on an `OutputSet`, Consist tags both the logical parent
+and discovered member artifacts with that schema. Member CSV/Parquet artifacts
+can also be profiled with `OutputSet(profile_file_schema=True)` or an enclosing
+`Tracker.run(..., profile_file_schema=True)` /
+`ScenarioContext.run(..., profile_file_schema=True)`.
+
+Output-set fields fall into two groups:
+
+- Required: `root`, `include`.
+- Optional discovery controls: `exclude`, `recursive`.
+- Optional metadata: `kind`, `schema`, `partition_key`, `facet`,
+  `member_facets`.
+- Optional validation: `expected_count`, `expected_members`, `validate`.
+
+For capture-aware sets, `include` accepts a `FilenamePattern` object. The
+`wildcard=` binding is the v1 mechanism for mapping each wildcard to exactly one
+capture; if the filename matches discovery but fails the typed capture, Consist
+raises during registration rather than silently skipping the file.
+
+For v1, `validate="manifest"` is the default and applies the optional
+`expected_*` checks when provided. `validate="exists"` also requires at least one
+member. Stricter hash and schema validation modes are reserved for a future
+release.
+
 ### Auto-loading inputs as DataFrames
 
 If you prefer to receive a DataFrame directly instead of a path, use `input_binding="loaded"` and Consist will load the artifact for you before calling the function. This is convenient for short scripts but hides the I/O boundary — prefer `input_binding="paths"` for pipelines where the function boundary matters.
@@ -149,6 +305,6 @@ If you prefer to receive a DataFrame directly instead of a path, use `input_bind
 - **[Usage Guide](../usage-guide.md)** — Practical patterns for moving from the mental model to working code
 - **[Config Management](config-management.md)** — Understand the config vs. facet distinction and when to use each
 - **[Caching & Hydration](caching-and-hydration.md)** — Caching patterns and data recovery strategies
-- **[Data Materialization](data-materialization.md)** — When to ingest data and use hybrid views
+- **[Data Storage and Ingestion](data-materialization.md)** — When to ingest data and use hybrid views
 - **[Grouped Views](grouped-views.md)** — Build one view across schema-matched artifacts
 - **[Decorators & Metadata](decorators-and-metadata.md)** — Defaults, templates, and schema introspection

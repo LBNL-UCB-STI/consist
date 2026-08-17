@@ -84,22 +84,22 @@ with tracker.start_run("ingest_people", model="demo", year=2030):
     tracker.log_dataframe(df, key="persons", schema=Person)
 ```
 
-Query the hybrid view:
+Query the typed hybrid view with Ibis:
 
 ```python
-from sqlmodel import Session, func, select
+VPerson = tracker.ibis_view(Person)
 
-VPerson = tracker.views.Person
-
-with Session(tracker.engine) as session:
-    avg_age = session.exec(
-        select(func.avg(VPerson.age)).where(VPerson.consist_year == 2030)
-    ).one()
+avg_age = VPerson.filter(VPerson.consist_year == 2030).age.mean().execute()
 ```
 
 The ingested rows include Consist provenance columns. You can filter or group by
 `consist_run_id`, `consist_scenario_id`, `consist_year`, and related runtime
-metadata exposed by the view.
+metadata exposed by the view before aggregating.
+
+For spatial artifacts, the DLT-backed path stays metadata-only. Consist records
+bounds, CRS, geometry types, geometry column, feature count, and columns, but
+it does not ingest geometry rows into DuckDB. GeoParquet follows the same
+metadata-only path.
 
 ## Ingesting Files
 
@@ -117,6 +117,9 @@ with tracker.start_run("ingest_trips", model="demo"):
     )
     tracker.ingest(artifact, schema=Trip)
 ```
+
+The `log_artifact(..., schema=Trip)` call records logical schema metadata on the
+artifact. The strict data check happens in `tracker.ingest(..., schema=Trip)`.
 
 For DataFrames, `tracker.log_dataframe(..., schema=...)` is the shorter path and
 is usually the simplest ingestion API.
@@ -221,11 +224,12 @@ table name before registering it.
 | Validate column names and types | DLT with SQLModel schema |
 | Export a SQLModel stub later | DLT ingestion or file schema profiling |
 | Record a non-tabular artifact such as Zarr/NetCDF | Direct artifact logging plus any separate metadata table you create |
+| Record a spatial file without ingesting geometry rows | DLT metadata-only spatial logging |
 
 ## See Also
 
 - [DLT Loader API Reference](integrations/dlt_loader.md) — generated API signatures
-- [Data Materialization](concepts/data-materialization.md) — when to ingest vs. keep cold
+- [Data Storage and Ingestion](concepts/data-materialization.md) — when to ingest vs. keep cold
 - [Integrations Overview](integrations/index.md)
 - [Schema Export](schema-export.md)
 - [dlt Documentation](https://dlthub.com/docs)

@@ -85,6 +85,31 @@ class RunArtifactLink(SQLModel, table=True):
     is_implicit: bool = Field(default=False)
 
 
+class RunBindingInvocation(SQLModel, table=True):
+    """Immutable evidence for one resolved-binding execution attempt.
+
+    A cache hit reuses a producer ``Run`` and therefore cannot safely store
+    per-invocation input intent on that historical row. This ledger keeps the
+    requested run identifier, the run that actually supplied the result, and
+    the canonical resolved binding as distinct durable facts.
+    """
+
+    __tablename__ = "run_binding_invocation"
+
+    id: uuid.UUID = Field(
+        default_factory=uuid.uuid4,
+        primary_key=True,
+        sa_type=UUIDType,
+        sa_column_kwargs={"autoincrement": False},
+    )
+    requested_run_id: str = Field(index=True)
+    execution_run_id: str = Field(index=True)
+    cache_source_run_id: Optional[str] = Field(default=None, index=True)
+    cache_outcome: str = Field(index=True)
+    binding_json: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
 class Run(SQLModel, table=True):
     """
     Primary run table in the Consist database.
@@ -205,6 +230,14 @@ class Run(SQLModel, table=True):
         The summary is intended for debugging cache behavior and explains the
         component hashes that form the run signature, plus identity-relevant
         metadata persisted on the run.
+
+        Returns
+        -------
+        dict[str, Any]
+            Cache-identity components and persisted identity metadata. Strict
+            resolved-binding runs additionally include ``input_identity`` with
+            the versioned hash mode, strict and ordinary input counts, and the
+            frozen strict-binding digest.
         """
         meta = self.meta if isinstance(self.meta, dict) else {}
         identity_input_digests = meta.get("consist_hash_inputs")
@@ -236,7 +269,7 @@ class Run(SQLModel, table=True):
         if not isinstance(inputs, list):
             inputs = []
 
-        return {
+        summary = {
             "code_version": self.git_hash,
             "config": config_payload,
             "adapter": adapter,
@@ -273,6 +306,10 @@ class Run(SQLModel, table=True):
                 "version": meta.get("cache_version"),
             },
         }
+        input_identity = meta.get("input_identity")
+        if isinstance(input_identity, dict):
+            summary["input_identity"] = input_identity
+        return summary
 
     def __repr__(self):
         status_icon = (

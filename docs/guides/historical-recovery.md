@@ -6,8 +6,13 @@ outputs in a fresh workspace, or an archive mirror now holds the durable copy.
 
 The short version:
 
-- Use `hydrate_run_outputs(...)` for prior run outputs.
+- Use `hydrate_run_outputs(...)` for layout-preserving prior run output recovery.
+- Use `hydrate_run_outputs_to_destinations(...)` when an external tool requires
+  particular file or directory paths.
 - Use run-level requested input materialization for inputs needed by a callable.
+- Use `CacheOptions(cache_hydration="inputs-missing",
+  validate_materialized_inputs=True)` when a cache-miss run must replace a
+  stale path-bound input only after a portable hash proves it is wrong.
 - Use `stage_artifact(...)` / `stage_inputs(...)` only when staging already
   resolved artifacts outside a run lifecycle.
 - Use `recovery_roots` when archived bytes should remain discoverable across
@@ -109,6 +114,61 @@ possible. Other destinations require `allow_external_paths=True`.
 `hydrate_run_outputs(...)` returns keyed results, so each requested output
 carries its own status, path, and detached artifact view.
 
+## Exact-Destination Output Recovery
+
+When the consumer expects unrelated filesystem locations, use
+`hydrate_run_outputs_to_destinations(...)`. Its mapping is the complete
+requested-output set: every key must be an output of the caller-selected run,
+and each value is the exact destination for that output.
+
+```python
+from pathlib import Path
+
+hydrated = tracker.hydrate_run_outputs_to_destinations(
+    "prior_run_id",
+    destinations_by_key={
+        "persons": tracker.run_dir / "tool_inputs" / "persons.csv",  # one file
+        "skims": tracker.run_dir / "shared" / "skims.zarr",  # one directory
+    },
+    source_root=Path("/archive/outputs_mirror"),  # optional
+)
+```
+
+Consist recovers bytes; it does not choose the prior run or prove that an
+external executable consumed the staged paths. The caller owns both decisions.
+Inspect each keyed result because a warning-mode call can have structured
+partial outcomes such as `materialized_from_filesystem`, `preserved_existing`,
+`materialized_directory_from_filesystem`,
+`materialized_file_bundle_from_filesystem`, or `missing_source`.
+
+Each requested destination must be under `tracker.run_dir` or a configured
+mount root unless the tracker was created with `allow_external_paths=True`.
+Persisted `OutputSet` hydration is intentionally deferred. Newly logged Zarr
+outputs are immutable directory artifacts automatically, retaining
+`driver="zarr"` for `consist.load(...)`:
+
+```python
+tracker.log_output(
+    beam_zarr_root,
+    key="raw_od_skims_zarr_2018_0_sub0",
+)
+```
+
+For a non-Zarr directory tree, declare `artifact_kind="directory"` explicitly.
+Consist persists a complete tree manifest. Directory hydration with
+`db_fallback="never"` requires `source_root` and reads only the corresponding
+URI-relative tree below that root. It validates every member, stages the copy,
+and publishes it atomically. With `preserve_existing=False`, the destination
+root must not already exist. Shapefile outputs also opt into strict recovery
+automatically. Their bundle manifest includes required `.shp`, `.shx`, and
+`.dbf` files plus every same-stem regular sidecar. Archive and hydrate them
+through a clean bundle root, so the full bundle is atomically published; the
+hydration result exposes that root as `path` and the native `.shp` member as
+`entry_path` (and on the detached artifact's `as_path()`). Zarr and Shapefile
+artifacts logged before their manifest contracts remain loadable from bytes but
+cannot be archived or hydrated exactly; re-log them to create a new
+recovery-capable artifact.
+
 ## Compatibility Output Recovery
 
 Use `tracker.materialize_run_outputs(...)` when existing code expects aggregate
@@ -155,21 +215,26 @@ and cache-hit validation can find the files without repeated overrides.
 For outputs of the active run:
 
 ```python
-tracker.archive_current_run_outputs(
+archive = tracker.archive_current_run_outputs(
     Path("/archive/iteration_004"),
     mode="copy",
 )
+
+next_inputs = archive.outputs["persons"]
 ```
 
 For a prior run:
 
 ```python
-tracker.archive_run_outputs(
+archive = tracker.archive_run_outputs(
     "prior_run_id",
     Path("/archive/iteration_004"),
     keys=["persons", "households"],
     mode="copy",
 )
+
+archived_persons_path = archive.paths["persons"]
+next_inputs = archive.outputs["persons"]
 ```
 
 For one artifact:
@@ -184,6 +249,67 @@ tracker.archive_artifact(
 
 Use `mode="copy"` when the workspace file should remain in place. Use
 `mode="move"` when the archive copy should become the durable byte source.
+
+For an ordinary file output whose historical and recorded recovery locations no
+longer exist, archival can use the artifact's currently configured managed URI
+mount as a final source fallback. The file must still match the artifact's
+recorded identity before Consist records the recovery root; this does not
+change directory, bundle, or OutputSet archival rules.
+
+`archive_current_run_outputs(...)` and `archive_run_outputs(...)` now return an
+`ArchivedOutputs` mapping. Treat the mapping like a read-only `Mapping[str,
+Path]` for the archived bytes, or use its explicit `.paths` property for the
+same read-only mapping. Use `.outputs` when you want the refreshed artifacts
+with the new recovery root already attached. Pass those refreshed artifacts
+directly into a later `inputs={...}` mapping instead of calling
+`get_run_outputs(...)` again.
+
+When a selected output is a manifest-backed `OutputSet`, this archive API
+copies or moves the whole declared set, not just the parent directory. It
+validates the manifest, member layout, source hashes, and symlink safety before
+registering the recovery root on the parent, members, and manifest. The mapping
+entry is the archived set root; `.outputs[set_key]` is the refreshed logical
+parent. The separate `archive_run_output_files(...)` helper intentionally
+continues to reject OutputSets because it reports regular files only.
+
+### Verified File-Only Archive Reports
+
+Use `archive_run_output_files(...)` when a completed run needs a conservative,
+auditable archive pass for ordinary files:
+
+```python
+report = tracker.archive_run_output_files(
+    "prior_run_id",
+    Path("/archive/iteration_004"),
+    keys=["persons", "households"],
+    preserve_existing=True,
+    verify=True,
+    append=True,
+)
+
+for key, result in report.items():
+    print(key, result.copy_status, result.verification_status)
+
+if not report.complete:
+    print(report.summary)
+```
+
+The report is a read-only mapping from output key to an immutable result with
+the source artifact, known source and target paths, copy status, verification
+status, metadata-commit state, and message. It is intentionally file-only:
+directory artifacts and output sets are not archived by this helper. Symlinked
+sources or destinations, unmappable URIs, missing sources, and files without a
+full content hash remain explicit per-key outcomes.
+
+The helper never overwrites an existing target. With `preserve_existing=True`,
+it can retain an existing matching file after the requested verification;
+otherwise it leaves the target unchanged and reports the reason. If copying and
+verification succeed but recovery-root metadata cannot be committed, rerun the
+same call to retain and re-verify the target before retrying registration.
+`report.complete` only means every selected key satisfied the requested
+verification policy and committed metadata in this invocation. It is not a
+durable workflow-state claim, nor evidence that a downstream application has
+used the archive.
 
 If bytes were already copied by another system, verify the archive-side file
 and then record the root:
@@ -290,6 +416,11 @@ result = tracker.run(
 This keeps artifact identity canonical in `inputs={...}` while making an exact
 local copy available to path-bound code.
 
+If a cache-miss workflow uses `cache_hydration="inputs-missing"` and the
+destination path may already contain stale bytes, opt into
+`validate_materialized_inputs=True`. Without that opt-in, Consist preserves
+existing input destinations and only restores inputs whose paths are absent.
+
 Use low-level staging only when you already have resolved artifacts and are
 outside a run lifecycle:
 
@@ -318,6 +449,7 @@ including `recovery_roots`, but do not create a new run.
 | Restore one already-resolved artifact into a workspace | `materialize_artifact(...)` |
 | Copy or move current run outputs into an archive and record the root | `archive_current_run_outputs(...)` |
 | Copy or move selected prior run outputs into an archive and record the root | `archive_run_outputs(...)` |
+| Copy, verify, and register selected regular-file outputs with per-key outcomes | `archive_run_output_files(...)` |
 | Copy or move one artifact into an archive and record the root | `archive_artifact(...)` |
 | Verify an externally copied artifact file and record the root | `register_artifact_recovery_copy(...)` |
 | Verify externally copied run outputs and record the root | `register_run_output_recovery_copies(...)` |

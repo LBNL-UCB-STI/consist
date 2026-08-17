@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass, field, replace
+import inspect
 import uuid
 import functools
 import concurrent.futures
@@ -34,7 +36,14 @@ from consist.core.orchestration import (
     BatchResult,
 )
 from consist.core.error_messages import format_problem_cause_fix
-from consist.core.input_utils import coerce_input_map
+from consist.core.metadata_resolver import MetadataResolver, ResolvedStepIdentity
+from consist.core.resolved_binding import (
+    ArtifactIdentity,
+    ResolvedBinding,
+    TrackedArtifactLocator,
+    _create_strict_binding_invocation_context,
+    step_contract_identity,
+)
 from consist.core.run_invocation import resolve_run_invocation
 from consist.types import (
     ArtifactRef,
@@ -45,13 +54,19 @@ from consist.types import (
     FacetLike,
     InputBindingMode,
     IdentityInputs,
+    OutputArtifactSpec,
     OutputPolicyOptions,
+    OutputPathRef,
+    OutputSet,
     RunInputRef,
 )
 from pathlib import Path
 
 if TYPE_CHECKING:
-    from consist.core.config_canonicalization import ConfigAdapter
+    from consist.core.config_canonicalization import (
+        CanonicalizationSnapshot,
+        ConfigAdapter,
+    )
     from consist.core.tracker import Tracker
 
 
@@ -63,6 +78,31 @@ def _raise_unexpected_kwargs(kwargs: Mapping[str, Any]) -> None:
         raise TypeError(f"unexpected keyword argument '{names[0]}'")
     joined = "', '".join(names)
     raise TypeError(f"unexpected keyword arguments '{joined}'")
+
+
+@dataclass(frozen=True, slots=True)
+class StepIdentity:
+    """One Scenario-owned, pre-resolved Python step identity.
+
+    Obtain this value from :meth:`ScenarioContext.resolve_step_identity` and
+    pass it back to :meth:`ScenarioContext.run`. The public fields are stable
+    inputs for a strict binding; the remaining fields prevent that preflight
+    result from being reused for a different Scenario invocation.
+    """
+
+    name: str
+    model: str
+    step_contract_identity: str
+    _resolved_identity: ResolvedStepIdentity = field(repr=False, compare=False)
+    _owner_token: object = field(repr=False, compare=False)
+    _fn: Callable[..., Any] = field(repr=False, compare=False)
+    _name_argument: Optional[str] = field(repr=False, compare=False)
+    _model_argument: Optional[str] = field(repr=False, compare=False)
+    _year: Optional[int] = field(repr=False, compare=False)
+    _iteration: Optional[int] = field(repr=False, compare=False)
+    _phase: Optional[str] = field(repr=False, compare=False)
+    _stage: Optional[str] = field(repr=False, compare=False)
+    _runtime_kwargs: Mapping[str, Any] | None = field(repr=False, compare=False)
 
 
 class OutputCapture:
@@ -82,25 +122,57 @@ class OutputCapture:
 
 class RunContext:
     """
-    A lightweight helper object injected into user functions.
-    When you execute a run with `inject_context=True`, Consist passes a `RunContext`
-    to your function. This allows you to access run-aware helpers—like the run's
-    dedicated artifact directory and artifact logging methods—without needing to
-    reference a global tracker instance directly.
+    Provide run-aware helpers to a Python callable.
+
+    Consist injects this object when ``inject_context`` is enabled. It exposes
+    output locations, artifact logging helpers, and canonicalization facts
+    without requiring application code to access a global tracker.
+
+    Parameters
+    ----------
+    tracker : Tracker
+        Active tracker for the executing run.
+    canonicalization : CanonicalizationSnapshot, optional
+        Immutable observations from the applied config plan. These are
+        canonicalization-time facts, not final staged or container paths.
+
+    Notes
+    -----
+    Cache hits and native container executions do not invoke the Python
+    callable, so they do not receive this context.
 
     Examples
     --------
-    ```python
-    def my_step(ctx: RunContext):
-        # Access the run's dedicated directory
-        output_path = ctx.run_dir / "results.csv"
-        # ... generate file ...
-        ctx.log_artifact(output_path, "results")
-    ```
+    >>> def my_step(ctx: RunContext):
+    ...     output_path = ctx.run_dir / "results.csv"
+    ...     ctx.log_artifact(output_path, "results")
     """
 
-    def __init__(self, tracker: "Tracker") -> None:
+    def __init__(
+        self,
+        tracker: "Tracker",
+        *,
+        canonicalization: Optional["CanonicalizationSnapshot"] = None,
+    ) -> None:
         self._tracker = tracker
+        self._canonicalization = canonicalization
+
+    @property
+    def canonicalization(self) -> Optional["CanonicalizationSnapshot"]:
+        """
+        Immutable facts from the applied config canonicalization, if any.
+
+        This snapshot describes references observed while Consist
+        canonicalized configuration. It does not identify the final paths a
+        staged or containerized model will consume.
+
+        Returns
+        -------
+        Optional[CanonicalizationSnapshot]
+            The applied canonicalization snapshot, or ``None`` when the run
+            did not configure an adapter.
+        """
+        return self._canonicalization
 
     @property
     def run_dir(self) -> Path:
@@ -387,6 +459,7 @@ class ScenarioContext:
         cache_epoch: Optional[int] = None,
         coupler: Optional[Coupler] = None,
         require_outputs: Optional[Iterable[str]] = None,
+        output_sets: Optional[Mapping[str, OutputSet]] = None,
         **kwargs: Any,
     ):
         self.tracker = tracker
@@ -400,6 +473,7 @@ class ScenarioContext:
         self.step_cache_hydration = step_cache_hydration
         self.name_template = name_template
         self.cache_epoch = cache_epoch
+        self.output_sets = output_sets
 
         # Internal State
         self._header_record: Optional[ConsistRecord] = None
@@ -407,6 +481,7 @@ class ScenarioContext:
         self._inputs: Dict[str, Artifact] = {}
         self._first_step_started: bool = False
         self._last_step_name: Optional[str] = None
+        self._step_identity_owner = object()
 
         # ARTIFACT STORAGE ARCHITECTURE
         # ==============================
@@ -655,18 +730,26 @@ class ScenarioContext:
         return self.tracker._resolve_input_reference(
             value,
             type_label="Scenario inputs",
-            missing_path_error=(
-                "Problem: Scenario input path does not exist: {path!s}\n"
-                "Cause: The provided scenario input path is missing or not accessible.\n"
-                "Fix: Use an existing path, or pass a Coupler key from a prior step. "
-                "For the recommended path, use consist.refs(...) between steps."
+            missing_path_error=format_problem_cause_fix(
+                problem="Scenario input path does not exist: {path!s}",
+                cause=(
+                    "The provided scenario input path is missing or not accessible."
+                ),
+                fix=(
+                    "Use an existing path, or pass a Coupler key from a prior step. "
+                    "For the recommended path, use consist.refs(...) between steps."
+                ),
             ),
-            missing_string_error=(
-                "Problem: Scenario input string did not resolve: {value!r} "
-                "(checked path: {path!s}).\n"
-                "Cause: The string is neither a Coupler key nor an existing path.\n"
-                "Fix: Use a Coupler key produced earlier in the scenario, or provide "
-                "a valid file path. For the recommended path, use consist.refs(...)."
+            missing_string_error=format_problem_cause_fix(
+                problem=(
+                    "Scenario input string did not resolve: {value!r} "
+                    "(checked path: {path!s})."
+                ),
+                cause=("The string is neither a Coupler key nor an existing path."),
+                fix=(
+                    "Use a Coupler key produced earlier in the scenario, or provide "
+                    "a valid file path. For the recommended path, use consist.refs(...)."
+                ),
             ),
             string_ref_resolver=_resolve_coupler_ref,
         )
@@ -731,19 +814,29 @@ class ScenarioContext:
         return inputs
 
     def _resolve_output_paths(
-        self, output_paths: Optional[Mapping[str, ArtifactRef]]
-    ) -> Optional[Dict[str, ArtifactRef]]:
+        self, output_paths: Optional[Mapping[str, OutputPathRef]]
+    ) -> Optional[Dict[str, OutputPathRef]]:
         if output_paths is None:
             return None
-        resolved_output_paths: Dict[str, ArtifactRef] = {}
-        for key, ref in coerce_input_map(output_paths).items():
-            if isinstance(ref, str) and ref in self.coupler:
-                path = self.coupler.path(ref)
+        resolved_output_paths: Dict[str, OutputPathRef] = {}
+        for key, ref in output_paths.items():
+            if not isinstance(key, str):
+                raise TypeError(
+                    f"output_paths mapping keys must be str (got {type(key)})."
+                )
+            output_ref = ref.path if isinstance(ref, OutputArtifactSpec) else ref
+            if not isinstance(output_ref, (Artifact, str, Path)):
+                raise TypeError(
+                    "output_paths mapping values must be Artifact, Path, str, "
+                    f"or OutputArtifactSpec (got {type(ref)})."
+                )
+            if isinstance(output_ref, str) and output_ref in self.coupler:
+                path = self.coupler.path(output_ref)
                 if path is None:
                     raise RuntimeError(
                         format_problem_cause_fix(
                             problem=(
-                                f"Coupler key {ref!r} has no path to use for "
+                                f"Coupler key {output_ref!r} has no path to use for "
                                 f"output_paths[{key!r}]."
                             ),
                             cause=(
@@ -756,10 +849,81 @@ class ScenarioContext:
                             ),
                         )
                     )
-                resolved_output_paths[str(key)] = path
+                resolved_output_paths[str(key)] = (
+                    replace(ref, path=path)
+                    if isinstance(ref, OutputArtifactSpec)
+                    else path
+                )
             else:
                 resolved_output_paths[str(key)] = ref
         return resolved_output_paths
+
+    def resolve_step_identity(
+        self,
+        fn: Callable[..., Any],
+        *,
+        name: Optional[str] = None,
+        model: Optional[str] = None,
+        year: Optional[int] = None,
+        iteration: Optional[int] = None,
+        phase: Optional[str] = None,
+        stage: Optional[str] = None,
+        execution_options: Optional[ExecutionOptions] = None,
+    ) -> StepIdentity:
+        """Resolve a Python step identity once for strict-binding preflight.
+
+        ``execution_options.runtime_kwargs`` supplies the runtime metadata
+        context. Pass the resulting value to ``run(step_identity=...)`` with
+        the same runtime kwargs; ``run`` reuses this name/model resolution and
+        rejects a different callable or dynamic context.
+        """
+        if not self._header_record:
+            raise RuntimeError("Scenario not active. Use within 'with' block.")
+        runtime_kwargs = (
+            dict(execution_options.runtime_kwargs)
+            if execution_options is not None
+            and execution_options.runtime_kwargs is not None
+            else None
+        )
+        resolver = MetadataResolver(
+            default_name_template=self.name_template,
+            allow_template=True,
+            apply_step_defaults=True,
+        )
+        resolved = resolver.resolve_identity(
+            fn=fn,
+            name=name,
+            model=model,
+            year=year,
+            iteration=iteration,
+            phase=phase,
+            stage=stage,
+            consist_settings=self.tracker.settings,
+            consist_workspace=self.tracker.run_dir,
+            consist_state=self._header_record,
+            runtime_kwargs=runtime_kwargs,
+            missing_name_error="ScenarioContext.run requires a run name.",
+        )
+        frozen_runtime_kwargs = (
+            MappingProxyType(dict(runtime_kwargs))
+            if runtime_kwargs is not None
+            else None
+        )
+        return StepIdentity(
+            name=resolved.name,
+            model=resolved.model,
+            step_contract_identity=step_contract_identity(fn, resolved.name),
+            _resolved_identity=resolved,
+            _owner_token=self._step_identity_owner,
+            _fn=fn,
+            _name_argument=name,
+            _model_argument=model,
+            _year=year,
+            _iteration=iteration,
+            _phase=phase,
+            _stage=stage,
+            _runtime_kwargs=frozen_runtime_kwargs,
+        )
 
     def run(
         self,
@@ -768,6 +932,7 @@ class ScenarioContext:
         *,
         run_id: Optional[str] = None,
         model: Optional[str] = None,
+        step_identity: StepIdentity | None = None,
         description: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
         adapter: Optional["ConfigAdapter"] = None,
@@ -778,7 +943,7 @@ class ScenarioContext:
         ] = None,
         input_keys: Optional[Iterable[str] | str] = None,
         optional_input_keys: Optional[Iterable[str] | str] = None,
-        binding: Optional[BindingResult] = None,
+        binding: Optional[BindingResult | ResolvedBinding] = None,
         depends_on: Optional[List[RunInputRef]] = None,
         tags: Optional[List[str]] = None,
         facet: Optional[FacetLike] = None,
@@ -792,7 +957,9 @@ class ScenarioContext:
         stage: Optional[str] = None,
         parent_run_id: Optional[str] = None,
         outputs: Optional[List[str]] = None,
-        output_paths: Optional[Mapping[str, ArtifactRef]] = None,
+        output_paths: Optional[Mapping[str, OutputPathRef]] = None,
+        output_sets: Optional[Mapping[str, OutputSet]] = None,
+        profile_file_schema: bool | Literal["if_changed"] | None = None,
         capture_dir: Optional[Path] = None,
         capture_pattern: str = "*",
         cache_options: Optional[CacheOptions] = None,
@@ -804,6 +971,11 @@ class ScenarioContext:
 
         This method wraps ``Tracker.run`` while ensuring the scenario header
         is updated with step metadata and artifacts.
+        Decorator metadata is resolved once by the scenario before it delegates
+        the fully resolved invocation to ``Tracker.run``. In particular,
+        decorated ``input_keys`` and ``optional_input_keys`` are compatibility
+        metadata and do not cause a deprecation warning solely because of this
+        internal handoff.
         Use ``execution_options.runtime_kwargs`` for runtime-only inputs and
         `consist.require_runtime_kwargs` to validate required keys.
         For direct workflow code, prefer primitive `inputs=` kwargs and, when
@@ -817,6 +989,9 @@ class ScenarioContext:
 
         ``adapter`` and ``identity_inputs`` are the public identity-related
         kwargs.
+        ``profile_file_schema`` is the scenario-step equivalent of
+        ``Tracker.run(..., profile_file_schema=...)``: it profiles named
+        tabular inputs and declared tabular outputs logged during this step.
 
         Examples
         --------
@@ -857,11 +1032,64 @@ class ScenarioContext:
             raise RuntimeError("Scenario not active. Use within 'with' block.")
 
         func_name = getattr(fn, "__name__", None) if fn is not None else None
-        if fn is not None and func_name is None and name is None:
+        if (
+            fn is not None
+            and func_name is None
+            and name is None
+            and step_identity is None
+        ):
             raise ValueError("ScenarioContext.run requires a run name.")
         if fn is None and name is None:
             raise ValueError("ScenarioContext.run requires name when fn is None.")
 
+        if step_identity is not None:
+            if step_identity._owner_token is not self._step_identity_owner:
+                raise ValueError(
+                    "Step identity belongs to a different ScenarioContext."
+                )
+            if fn is not step_identity._fn:
+                raise ValueError("Step identity was resolved for a different callable.")
+            if name is not None or model is not None:
+                raise ValueError(
+                    "step_identity cannot be combined with name or model overrides."
+                )
+            supplied_dynamic_values = {
+                "year": year,
+                "iteration": iteration,
+                "phase": phase,
+                "stage": stage,
+            }
+            preflight_dynamic_values = {
+                "year": step_identity._year,
+                "iteration": step_identity._iteration,
+                "phase": step_identity._phase,
+                "stage": step_identity._stage,
+            }
+            mismatched_values = [
+                key
+                for key, value in supplied_dynamic_values.items()
+                if value is not None and value != preflight_dynamic_values[key]
+            ]
+            if mismatched_values:
+                raise ValueError(
+                    "Step identity dynamic context differs for: "
+                    + ", ".join(mismatched_values)
+                )
+            runtime_kwargs = (
+                execution_options.runtime_kwargs
+                if execution_options is not None
+                else None
+            )
+            if dict(runtime_kwargs or {}) != dict(step_identity._runtime_kwargs or {}):
+                raise ValueError("Step identity runtime kwargs differ from preflight.")
+            name = step_identity._name_argument
+            model = step_identity._model_argument
+            year = step_identity._year
+            iteration = step_identity._iteration
+            phase = step_identity._phase
+            stage = step_identity._stage
+
+        strict_binding = binding if isinstance(binding, ResolvedBinding) else None
         if binding is not None:
             if (
                 inputs is not None
@@ -885,9 +1113,35 @@ class ScenarioContext:
                         ),
                     )
                 )
-            invocation_inputs = binding.inputs
-            input_keys = binding.input_keys
-            optional_input_keys = binding.optional_input_keys
+            if strict_binding is not None:
+                bound_inputs: dict[str, Artifact] = {}
+                for parameter, resolved_input in strict_binding.inputs.items():
+                    locator = resolved_input.artifact.locator
+                    if not isinstance(locator, TrackedArtifactLocator):
+                        raise ValueError(
+                            f"Resolved binding locator is unsupported for {parameter!r}."
+                        )
+                    artifact = self.tracker.get_artifact(locator.artifact_id)
+                    if artifact is None:
+                        raise ValueError(
+                            f"Resolved binding artifact is unavailable for {parameter!r}."
+                        )
+                    if (
+                        ArtifactIdentity.from_artifact(artifact)
+                        != resolved_input.artifact.identity
+                    ):
+                        raise ValueError(
+                            f"Resolved binding artifact identity changed for {parameter!r}."
+                        )
+                    bound_inputs[parameter] = artifact
+                invocation_inputs = bound_inputs
+                input_keys = None
+                optional_input_keys = None
+            else:
+                assert isinstance(binding, BindingResult)
+                invocation_inputs = binding.inputs
+                input_keys = binding.input_keys
+                optional_input_keys = binding.optional_input_keys
         else:
             invocation_inputs = inputs
 
@@ -928,6 +1182,7 @@ class ScenarioContext:
             stage=stage,
             outputs=outputs,
             output_paths=output_paths,
+            output_sets=output_sets,
             cache_options=cache_options,
             output_policy=output_policy,
             execution_options=execution_options,
@@ -939,6 +1194,9 @@ class ScenarioContext:
             consist_state=self._header_record,
             missing_name_error="ScenarioContext.run requires a run name.",
             python_missing_fn_error="Tracker.run requires a callable fn.",
+            pre_resolved_step_identity=(
+                step_identity._resolved_identity if step_identity is not None else None
+            ),
         )
 
         resolved_name = resolved_invocation.name
@@ -976,6 +1234,70 @@ class ScenarioContext:
             run_id = f"{self.run_id}_{resolved_name}_{uuid.uuid4().hex[:8]}"
         if parent_run_id is None:
             parent_run_id = self.run_id
+
+        strict_snapshot_paths: dict[str, Path] | None = None
+        strict_binding_context = None
+        if strict_binding is not None:
+            if self.tracker.db is None:
+                raise RuntimeError(
+                    "ResolvedBinding requires metadata persistence for invocation evidence."
+                )
+            if fn is None:
+                raise ValueError("ResolvedBinding requires a Python callable.")
+            if strict_binding.step_name != resolved_name:
+                raise ValueError(
+                    "Resolved binding step name does not match the run name."
+                )
+            resolved_contract_identity = (
+                step_identity.step_contract_identity
+                if step_identity is not None
+                else step_contract_identity(fn, resolved_name)
+            )
+            if resolved_contract_identity != strict_binding.step_contract_identity:
+                raise ValueError(
+                    "Resolved binding step contract does not match callable."
+                )
+            if resolved_input_binding != "paths":
+                raise ValueError(
+                    "Resolved binding destinations require input_binding='paths'."
+                )
+            if resolved_executor != "python":
+                raise ValueError("ResolvedBinding only supports executor='python'.")
+            parameters = inspect.signature(fn).parameters
+            unexpected = sorted(set(strict_binding.inputs) - set(parameters))
+            if unexpected:
+                raise ValueError(
+                    "Resolved binding parameters are absent from callable: "
+                    + ", ".join(unexpected)
+                )
+            strict_snapshot_paths = {}
+            for parameter, resolved_input in strict_binding.inputs.items():
+                destination = resolved_input.destination
+                if (
+                    destination is None
+                    or destination.is_absolute()
+                    or ".." in destination.parts
+                ):
+                    raise ValueError(
+                        "Resolved binding destinations must be relative run-owned paths."
+                    )
+                snapshot_path = (
+                    self.tracker.run_dir / ".resolved-bindings" / run_id / destination
+                )
+                if snapshot_path.exists():
+                    raise ValueError(
+                        "Resolved binding snapshot destination must be fresh."
+                    )
+                strict_snapshot_paths[parameter] = snapshot_path
+            strict_binding_context = _create_strict_binding_invocation_context(
+                strict_binding=strict_binding,
+                identity_digest=strict_binding.identity_digest(),
+                evidence_json=strict_binding.evidence_json(),
+                input_artifact_ids=tuple(
+                    str(resolved_input.artifact.artifact_id)
+                    for resolved_input in strict_binding.inputs.values()
+                ),
+            )
 
         self._first_step_started = True
         self._last_step_name = resolved_name
@@ -1031,14 +1353,20 @@ class ScenarioContext:
             parent_run_id=parent_run_id,
             outputs=resolved_outputs,
             output_paths=resolved_output_paths,
+            output_sets=resolved_invocation.output_sets,
+            profile_file_schema=profile_file_schema,
             capture_dir=capture_dir,
             capture_pattern=capture_pattern,
             cache_options=CacheOptions(
                 cache_mode=resolved_cache_mode,
                 cache_hydration=effective_cache_hydration,
+                cache_hydration_failure=resolved_invocation.cache_hydration_failure,
                 cache_version=resolved_cache_version,
                 cache_epoch=resolved_cache_epoch,
                 validate_cached_outputs=resolved_validate_cached_outputs,
+                validate_materialized_inputs=(
+                    resolved_invocation.validate_materialized_inputs
+                ),
                 code_identity=resolved_invocation.code_identity,
                 code_identity_extra_deps=resolved_invocation.code_identity_extra_deps,
             ),
@@ -1048,16 +1376,34 @@ class ScenarioContext:
             ),
             execution_options=ExecutionOptions(
                 input_binding=resolved_input_binding,
-                input_paths=resolved_invocation.input_paths,
-                input_materialization=resolved_invocation.input_materialization,
+                input_paths=(
+                    strict_snapshot_paths
+                    if strict_snapshot_paths is not None
+                    else resolved_invocation.input_paths
+                ),
+                input_materialization=(
+                    "requested"
+                    if strict_snapshot_paths is not None
+                    else resolved_invocation.input_materialization
+                ),
                 input_materialization_mode=(
                     resolved_invocation.input_materialization_mode
+                ),
+                requested_input_artifact_ids=(
+                    {
+                        parameter: str(resolved_input.artifact.artifact_id)
+                        for parameter, resolved_input in strict_binding.inputs.items()
+                    }
+                    if strict_binding is not None
+                    else None
                 ),
                 executor=resolved_executor,
                 container=resolved_container,
                 runtime_kwargs=runtime_kwargs_dict,
                 inject_context=resolved_inject_context,
             ),
+            _apply_step_defaults=False,
+            _strict_binding_context=strict_binding_context,
         )
 
         if result.outputs:
@@ -1097,7 +1443,7 @@ class ScenarioContext:
         iteration: Optional[int] = None,
         parent_run_id: Optional[str] = None,
         outputs: Optional[List[str]] = None,
-        output_paths: Optional[Mapping[str, ArtifactRef]] = None,
+        output_paths: Optional[Mapping[str, OutputPathRef]] = None,
         capture_dir: Optional[Path] = None,
         capture_pattern: str = "*",
         cache_mode: str = "reuse",
@@ -1150,12 +1496,14 @@ class ScenarioContext:
             stage=None,
             outputs=outputs,
             output_paths=output_paths,
+            output_sets=None,
             cache_options=CacheOptions(
                 cache_mode=cache_mode,
                 cache_hydration=cache_hydration,
                 cache_version=cache_version,
                 cache_epoch=cache_epoch,
                 validate_cached_outputs=validate_cached_outputs,
+                validate_materialized_inputs=None,
                 code_identity=code_identity,
                 code_identity_extra_deps=code_identity_extra_deps,
             ),
@@ -1245,6 +1593,9 @@ class ScenarioContext:
                 cache_version=resolved_cache_version,
                 cache_epoch=resolved_cache_epoch,
                 validate_cached_outputs=resolved_validate_cached_outputs,
+                validate_materialized_inputs=(
+                    resolved_invocation.validate_materialized_inputs
+                ),
                 code_identity=resolved_invocation.code_identity,
                 code_identity_extra_deps=resolved_invocation.code_identity_extra_deps,
                 output_mismatch=resolved_invocation.output_mismatch,
@@ -1301,19 +1652,13 @@ class ScenarioContext:
         return {key: config_dict[key] for key in facet_from}
 
     def _record_step_in_parent(self, child_run, child_inputs, child_outputs):
-        # Resolve Parent Lists (assuming header_record is the wrapper)
-        # If header_record is just a Run, you need to capture its lists in __enter__ too.
-        if hasattr(self._header_record, "inputs"):
-            parent_run = self._header_record.run
-            parent_inputs_list = self._header_record.inputs
-            parent_outputs_list = self._header_record.outputs
-        else:
-            # Fallback if header is weird, but ideally this shouldn't happen with the fix above
-            parent_run = self._header_record
-            parent_inputs_list = []
-            parent_outputs_list = []
-        if parent_run is None:
+        header_record = self._header_record
+        if header_record is None:
             return
+
+        parent_run = header_record.run
+        parent_inputs_list = header_record.inputs
+        parent_outputs_list = header_record.outputs
 
         # --- Smart Merge Logic ---
         parent_output_ids = {a.id for a in parent_outputs_list}

@@ -434,6 +434,58 @@ class TrackerHistoryService(_TrackerServiceBase):
             return self.db.find_matching_run(config_hash, input_hash, git_hash)
         return None
 
+    def find_matching_cached_runs(
+        self,
+        config_hash: str,
+        input_hash: str,
+        git_hash: str,
+        *,
+        signature: Optional[str] = None,
+    ) -> list[Run]:
+        """Return deduplicated completed candidates for cache admission.
+
+        Parameters
+        ----------
+        config_hash : str
+            Digest of the identity-relevant configuration.
+        input_hash : str
+            Digest of the declared input artifacts.
+        git_hash : str
+            Digest of the code identity.
+        signature : str, optional
+            Composite cache signature. Signature matches are considered before
+            raw digest-tuple matches, but both sets are retained so a
+            same-identity candidate is not hidden by signature preference.
+
+        Returns
+        -------
+        list[Run]
+            Completed candidates in cache-preference order, with duplicate run
+            IDs removed. Returns an empty list when the tracker has no
+            database or no candidate matches.
+
+        Notes
+        -----
+        This service intentionally does not decide whether a candidate is
+        reusable. Lifecycle code performs output validation and requested-path
+        hydration admission for each returned candidate.
+        """
+        if self.db is None:
+            return []
+        candidates: list[Run] = []
+        if signature:
+            candidates.extend(self.db.find_runs_by_signature(signature))
+        candidates.extend(self.db.find_matching_runs(config_hash, input_hash, git_hash))
+
+        seen_run_ids: set[str] = set()
+        unique_candidates: list[Run] = []
+        for candidate in candidates:
+            if candidate.id in seen_run_ids:
+                continue
+            seen_run_ids.add(candidate.id)
+            unique_candidates.append(candidate)
+        return unique_candidates
+
     def find_recent_completed_runs_for_model(
         self, model_name: str, *, limit: int = 20
     ) -> list[Run]:

@@ -14,6 +14,7 @@ from consist.core.materialize import (
     PlannedMaterialization,
     build_run_output_materialize_plan,
     hydrate_run_outputs,
+    hydrate_run_outputs_to_destinations,
     materialize_artifact,
     materialize_planned_outputs,
 )
@@ -1366,6 +1367,7 @@ def test_hydrate_run_outputs_returns_detached_artifact_views(
     assert hydrated.paths == {"table": restored_path}
     assert list(hydrated.resolvable) == ["table"]
     assert hydrated.complete is True
+    assert hydrated.source_run_id == "producer_hydrate"
     assert historical_artifact.as_path() == output_path
 
 
@@ -1485,3 +1487,297 @@ def test_hydrate_run_outputs_warn_mode_returns_mixed_keyed_statuses(
     }
     assert list(result.failed_keys) == []
     assert result.complete is False
+
+
+def test_hydrate_run_outputs_to_destinations_restores_unrelated_file_and_directory_paths(
+    tracker, run_dir: Path
+) -> None:
+    file_source = run_dir / "outputs" / "summary.csv"
+    directory_source = run_dir / "outputs" / "tables"
+    file_source.parent.mkdir(parents=True, exist_ok=True)
+    file_source.write_text("value\n1\n", encoding="utf-8")
+    directory_source.mkdir()
+    (directory_source / "part.csv").write_text("value\n2\n", encoding="utf-8")
+
+    with tracker.start_run("destination_run", model="producer", cache_mode="overwrite"):
+        tracker.log_artifact(file_source, key="summary", direction="output")
+        tracker.log_artifact(directory_source, key="tables", direction="output")
+
+    summary_destination = run_dir / "staged" / "analysis.csv"
+    tables_destination = run_dir / "different" / "tables_copy"
+    historical_summary = tracker.get_run_outputs("destination_run")["summary"]
+    hydrated = tracker.hydrate_run_outputs_to_destinations(
+        "destination_run",
+        destinations_by_key={
+            "summary": summary_destination,
+            "tables": tables_destination,
+        },
+    )
+
+    assert hydrated.source_run_id == "destination_run"
+    assert hydrated["summary"].path == summary_destination.resolve()
+    assert hydrated["summary"].status == "materialized_from_filesystem"
+    assert hydrated["summary"].artifact is not historical_summary
+    assert hydrated["summary"].artifact.id == historical_summary.id
+    assert hydrated["summary"].artifact.as_path() == summary_destination.resolve()
+    assert summary_destination.read_text(encoding="utf-8") == "value\n1\n"
+    assert hydrated["tables"].path == tables_destination.resolve()
+    assert hydrated["tables"].status == "materialized_from_filesystem"
+    assert (tables_destination / "part.csv").read_text(encoding="utf-8") == "value\n2\n"
+
+
+def test_hydrate_run_outputs_to_destinations_rejects_unknown_keys_before_copy(
+    tracker, run_dir: Path
+) -> None:
+    source = run_dir / "outputs" / "summary.csv"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("value\n1\n", encoding="utf-8")
+    with tracker.start_run(
+        "unknown_destination_key", model="producer", cache_mode="overwrite"
+    ):
+        tracker.log_artifact(source, key="summary", direction="output")
+
+    destination = run_dir / "staged" / "summary.csv"
+    with pytest.raises(KeyError, match="not found"):
+        tracker.hydrate_run_outputs_to_destinations(
+            "unknown_destination_key",
+            destinations_by_key={"unknown": destination},
+        )
+    assert not destination.exists()
+
+
+def test_hydrate_run_outputs_to_destinations_reports_normalized_collisions(
+    tracker, run_dir: Path
+) -> None:
+    first = run_dir / "outputs" / "first.csv"
+    second = run_dir / "outputs" / "second.csv"
+    first.parent.mkdir(parents=True, exist_ok=True)
+    first.write_text("value\n1\n", encoding="utf-8")
+    second.write_text("value\n2\n", encoding="utf-8")
+    with tracker.start_run(
+        "collision_destination_run", model="producer", cache_mode="overwrite"
+    ):
+        tracker.log_artifact(first, key="first", direction="output")
+        tracker.log_artifact(second, key="second", direction="output")
+
+    destination = run_dir / "staged" / "same.csv"
+    hydrated = tracker.hydrate_run_outputs_to_destinations(
+        "collision_destination_run",
+        destinations_by_key={
+            "first": destination,
+            "second": destination.parent / "." / destination.name,
+        },
+    )
+
+    assert hydrated["first"].status == "failed"
+    assert hydrated["second"].status == "failed"
+    assert "destination collision" in hydrated["first"].message
+    assert not destination.exists()
+
+
+def test_hydrate_run_outputs_to_destinations_validates_every_destination_before_copy(
+    tracker, run_dir: Path
+) -> None:
+    source = run_dir / "outputs" / "summary.csv"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("value\n1\n", encoding="utf-8")
+    with tracker.start_run(
+        "destination_policy_run", model="producer", cache_mode="overwrite"
+    ):
+        tracker.log_artifact(source, key="summary", direction="output")
+
+    outside_destination = run_dir.parent / "outside" / "summary.csv"
+    with pytest.raises(ValueError, match="outside allowed base"):
+        tracker.hydrate_run_outputs_to_destinations(
+            "destination_policy_run",
+            destinations_by_key={"summary": outside_destination},
+        )
+    assert not outside_destination.exists()
+
+
+def test_hydrate_run_outputs_to_destinations_rejects_output_set_artifacts(
+    tracker, run_dir: Path
+) -> None:
+    parent_path = run_dir / "outputs" / "set-parent"
+    member_path = parent_path / "member.csv"
+    manifest_path = run_dir / "outputs" / "set-manifest.json"
+    parent_path.mkdir(parents=True)
+    member_path.write_text("value\n1\n", encoding="utf-8")
+    manifest_path.write_text("{}\n", encoding="utf-8")
+
+    with tracker.start_run(
+        "output_set_destination_run", model="producer", cache_mode="overwrite"
+    ):
+        manifest = tracker.log_artifact(
+            manifest_path,
+            key="set_manifest",
+            driver="json",
+            direction="output",
+            output_set_manifest=True,
+        )
+        parent = tracker.log_artifact(
+            parent_path,
+            key="set_parent",
+            driver="artifact_set",
+            direction="output",
+            artifact_set=True,
+            output_set_key="set_parent",
+            manifest_artifact_id=str(manifest.id),
+        )
+        tracker.log_artifact(
+            member_path,
+            key="set_member",
+            direction="output",
+            parent_artifact_id=parent.id,
+            output_set_key="set_parent",
+            output_set_member=True,
+            output_set_relative_path="member.csv",
+        )
+
+    for key in ("set_parent", "set_member", "set_manifest"):
+        destination = run_dir / "staged" / f"{key}.out"
+        with pytest.raises(ValueError, match="OutputSet hydration is deferred"):
+            tracker.hydrate_run_outputs_to_destinations(
+                "output_set_destination_run",
+                destinations_by_key={key: destination},
+            )
+        assert not destination.exists()
+
+
+def test_hydrate_run_outputs_to_destinations_collides_before_unmapped_resolution(
+    tmp_path: Path,
+) -> None:
+    selected_run = _run("consumer", run_dir=tmp_path / "consumer")
+    outputs = [
+        _artifact("first", "/tmp/first.csv", run_id="consumer"),
+        _artifact("second", "/tmp/second.csv", run_id="consumer"),
+    ]
+    tracker = _stub_tracker(
+        run_dir=tmp_path / "workspace",
+        outputs_by_run={"consumer": outputs},
+        runs={"consumer": selected_run},
+    )
+    destination = tmp_path / "restored" / "same.csv"
+
+    hydrated = hydrate_run_outputs_to_destinations(
+        tracker,
+        selected_run,
+        destinations_by_key={
+            "first": destination,
+            "second": destination.parent / "." / destination.name,
+        },
+        source_root=None,
+        allowed_base=tmp_path,
+        preserve_existing=True,
+        on_missing="warn",
+        db_fallback="never",
+    )
+
+    assert hydrated["first"].status == "failed"
+    assert hydrated["second"].status == "failed"
+    for output in hydrated.values():
+        assert output.message is not None
+        assert "destination collision" in output.message
+    assert not destination.exists()
+
+
+def test_hydrate_run_outputs_to_destinations_prefers_source_root(
+    tmp_path: Path,
+) -> None:
+    historical_root = tmp_path / "historical"
+    recovery_root = tmp_path / "recovery"
+    source_root = tmp_path / "source_override"
+    for root, marker in (
+        (historical_root, "historical"),
+        (recovery_root, "recovery"),
+        (source_root, "source-root"),
+    ):
+        source = root / "outputs" / "table.csv"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(f"value\n{marker}\n", encoding="utf-8")
+
+    selected_run = _run("consumer", run_dir=tmp_path / "consumer")
+    producing_run = _run("producer", run_dir=historical_root)
+    artifact = _artifact(
+        "table",
+        "./outputs/table.csv",
+        run_id="producer",
+        meta={"recovery_roots": [str(recovery_root)]},
+    )
+    tracker = _stub_tracker(
+        run_dir=tmp_path / "workspace",
+        outputs_by_run={"consumer": [artifact]},
+        runs={"consumer": selected_run, "producer": producing_run},
+    )
+    destination = tmp_path / "staged" / "unrelated.csv"
+
+    hydrated = hydrate_run_outputs_to_destinations(
+        tracker,
+        selected_run,
+        destinations_by_key={"table": destination},
+        source_root=source_root,
+        allowed_base=tmp_path,
+        preserve_existing=True,
+        on_missing="raise",
+        db_fallback="never",
+    )
+
+    assert hydrated["table"].status == "materialized_from_filesystem"
+    assert destination.read_text(encoding="utf-8") == "value\nsource-root\n"
+
+
+def test_hydrate_run_outputs_to_destinations_preserves_existing_destination(
+    tracker, run_dir: Path
+) -> None:
+    source = run_dir / "outputs" / "summary.csv"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("value\nsource\n", encoding="utf-8")
+    with tracker.start_run(
+        "preserve_destination_run", model="producer", cache_mode="overwrite"
+    ):
+        tracker.log_artifact(source, key="summary", direction="output")
+
+    destination = run_dir / "staged" / "existing.csv"
+    destination.parent.mkdir(parents=True)
+    destination.write_text("value\nexisting\n", encoding="utf-8")
+    hydrated = tracker.hydrate_run_outputs_to_destinations(
+        "preserve_destination_run",
+        destinations_by_key={"summary": destination},
+    )
+
+    assert hydrated["summary"].status == "preserved_existing"
+    assert hydrated["summary"].resolvable is True
+    assert destination.read_text(encoding="utf-8") == "value\nexisting\n"
+
+
+def test_hydrate_run_outputs_to_destinations_missing_source_honors_on_missing(
+    tracker, run_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = run_dir / "outputs" / "summary.csv"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("value\nsource\n", encoding="utf-8")
+    with tracker.start_run(
+        "missing_destination_run", model="producer", cache_mode="overwrite"
+    ):
+        tracker.log_artifact(source, key="summary", direction="output")
+
+    def missing_materialization(*args, **kwargs):
+        raise FileNotFoundError("source path disappeared")
+
+    monkeypatch.setattr(
+        "consist.core.materialize._materialize_path", missing_materialization
+    )
+    destination = run_dir / "staged" / "summary.csv"
+    warned = tracker.hydrate_run_outputs_to_destinations(
+        "missing_destination_run",
+        destinations_by_key={"summary": destination},
+        on_missing="warn",
+    )
+    assert warned["summary"].status == "missing_source"
+
+    with pytest.raises(FileNotFoundError, match="source path disappeared"):
+        tracker.hydrate_run_outputs_to_destinations(
+            "missing_destination_run",
+            destinations_by_key={"summary": destination},
+            on_missing="raise",
+        )

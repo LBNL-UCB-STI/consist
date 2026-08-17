@@ -46,15 +46,66 @@ LEGACY_POLICY_KWARGS: Final[frozenset[str]] = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class ResolvedRunOptions:
-    """
-    Flattened run options derived from option objects.
+    """Flatten cache, output-policy, and execution options for one run.
+
+    This immutable value preserves unset options as ``None`` so downstream
+    invocation code can apply active defaults consistently.
+
+    Attributes
+    ----------
+    cache_mode : str | None
+        Requested cache lookup policy.
+    cache_hydration : str | None
+        Requested cache-hit hydration policy.
+    cache_hydration_failure : {"warn", "miss"}
+        Requested-output hydration failure policy.
+    cache_version : int | None
+        Optional cache-version candidate discriminator.
+    cache_epoch : int | None
+        Optional cache-epoch candidate discriminator.
+    validate_cached_outputs : str | None
+        Cached-output validation policy.
+    validate_materialized_inputs : bool | None
+        Whether materialized inputs must be validated.
+    materialize_cached_outputs_source_root : PathLike | None
+        Source-root override for cached-output recovery.
+    code_identity : CodeIdentityMode | None
+        Callable code-identity policy.
+    code_identity_extra_deps : list[str] | None
+        Additional dependency paths included in code identity.
+    output_mismatch : str | None
+        Policy applied when declared outputs differ from returned outputs.
+    output_missing : str | None
+        Policy applied when a declared output is absent after execution.
+    input_binding : InputBindingMode | None
+        Input-to-callable binding policy.
+    load_inputs : bool | None
+        Whether to load input artifacts before invoking the callable.
+    input_paths : Mapping[str, Any] | None
+        Explicit input artifact paths for the invocation.
+    input_materialization : {"requested"} | None
+        Input-materialization selection policy.
+    input_materialization_mode : {"copy"} | None
+        Input-materialization transfer mode.
+    requested_input_artifact_ids : Mapping[str, str] | None
+        Internal parameter-to-artifact mapping for strict input staging.
+    executor : str | None
+        Requested execution backend.
+    container : Mapping[str, Any] | None
+        Container execution configuration.
+    runtime_kwargs : Mapping[str, Any] | None
+        Additional runtime keyword arguments for the callable.
+    inject_context : bool | str | None
+        Whether and how to inject Consist run context into the callable.
     """
 
     cache_mode: Optional[str]
     cache_hydration: Optional[str]
+    cache_hydration_failure: Literal["warn", "miss"]
     cache_version: Optional[int]
     cache_epoch: Optional[int]
     validate_cached_outputs: Optional[str]
+    validate_materialized_inputs: Optional[bool]
     materialize_cached_outputs_source_root: Optional[PathLike]
     code_identity: Optional[CodeIdentityMode]
     code_identity_extra_deps: Optional[list[str]]
@@ -65,6 +116,7 @@ class ResolvedRunOptions:
     input_paths: Optional[Mapping[str, Any]]
     input_materialization: Optional[Literal["requested"]]
     input_materialization_mode: Optional[Literal["copy"]]
+    requested_input_artifact_ids: Optional[Mapping[str, str]]
     executor: Optional[str]
     container: Optional[Mapping[str, Any]]
     runtime_kwargs: Optional[Mapping[str, Any]]
@@ -132,6 +184,7 @@ def resolve_runtime_kwargs_alias(
         input_paths=execution_options.input_paths,
         input_materialization=execution_options.input_materialization,
         input_materialization_mode=execution_options.input_materialization_mode,
+        requested_input_artifact_ids=execution_options.requested_input_artifact_ids,
         executor=execution_options.executor,
         container=execution_options.container,
         runtime_kwargs=runtime_kwargs,
@@ -156,9 +209,11 @@ def merge_run_options(
     return ResolvedRunOptions(
         cache_mode=cache_obj.cache_mode,
         cache_hydration=cache_obj.cache_hydration,
+        cache_hydration_failure=cache_obj.cache_hydration_failure,
         cache_version=cache_obj.cache_version,
         cache_epoch=cache_obj.cache_epoch,
         validate_cached_outputs=cache_obj.validate_cached_outputs,
+        validate_materialized_inputs=cache_obj.validate_materialized_inputs,
         materialize_cached_outputs_source_root=(
             cache_obj.materialize_cached_outputs_source_root
         ),
@@ -171,6 +226,7 @@ def merge_run_options(
         input_paths=exec_obj.input_paths,
         input_materialization=exec_obj.input_materialization,
         input_materialization_mode=exec_obj.input_materialization_mode,
+        requested_input_artifact_ids=exec_obj.requested_input_artifact_ids,
         executor=exec_obj.executor,
         container=exec_obj.container,
         runtime_kwargs=exec_obj.runtime_kwargs,

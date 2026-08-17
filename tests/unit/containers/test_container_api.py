@@ -1,12 +1,15 @@
 from pathlib import Path
 
 import pytest
+from sqlmodel import SQLModel
 
 from consist.core.tracker import Tracker
+from consist.integrations.containers import api as container_api
 from consist.integrations.containers.api import (
     _build_container_manifest,
     _ensure_output_within_run_dir,
     _validate_host_path,
+    run_container,
 )
 
 
@@ -78,3 +81,54 @@ def test_ensure_output_within_run_dir_allows_external_when_enabled(
     outside_path = tmp_path / "outside" / "file.txt"
     outside_path.parent.mkdir(parents=True, exist_ok=True)
     _ensure_output_within_run_dir(outside_path.resolve(), tracker, strict_mounts=True)
+
+
+def test_run_container_applies_output_log_kwargs(monkeypatch, tmp_path: Path) -> None:
+    class TaggedOutput(SQLModel):
+        item_id: int
+        value: int
+
+    output_path = tmp_path / "runs" / "out.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    class FakeDockerBackend:
+        def __init__(self, pull_latest: bool = False) -> None:
+            self.pull_latest = pull_latest
+
+        def resolve_image_digest(self, image: str) -> str:
+            return f"{image}@sha256:test"
+
+        def run(self, **kwargs) -> bool:
+            output_path.write_text("item_id,value\n1,2\n", encoding="utf-8")
+            return True
+
+    monkeypatch.setattr(container_api, "DockerBackend", FakeDockerBackend)
+
+    tracker = Tracker(
+        run_dir=tmp_path / "runs",
+        db_path=tmp_path / "state.duckdb",
+        allow_external_paths=True,
+    )
+
+    result = run_container(
+        tracker=tracker,
+        run_id="container_spec_test",
+        image="example:latest",
+        command=["python", "-V"],
+        volumes={},
+        inputs=[],
+        outputs={"out": output_path},
+        strict_mounts=False,
+        output_log_kwargs={
+            "out": {
+                "schema": TaggedOutput,
+                "strict_schema": False,
+                "driver": "csv",
+            }
+        },
+    )
+
+    artifact = result.artifacts["out"]
+    assert artifact.driver == "csv"
+    assert artifact.meta["schema_name"] == "TaggedOutput"
+    assert artifact.meta.get("has_strict_schema") is not True

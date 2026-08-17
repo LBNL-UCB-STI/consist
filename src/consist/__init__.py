@@ -7,7 +7,7 @@ the Tracker for managing runs, logging artifacts, and ingesting data.
 
 # Models
 from consist.models.run import Run, RunResult
-from consist.models.artifact import Artifact
+from consist.models.artifact import Artifact, ArchivedOutputs
 from consist.models.gtfs import (
     GTFS_SCHEMA_BY_TABLE_NAME,
     GTFS_SCHEMAS,
@@ -38,15 +38,34 @@ from consist.runset import AlignedPair, RunSet
 # Core
 from consist.core.tracker import Tracker
 from consist.core.coupler import Coupler
+from consist.core.config_canonicalization import (
+    CanonicalizationArtifactMember,
+    CanonicalizationReference,
+    CanonicalizationSnapshot,
+)
 from consist.core.indexing import (
     FacetIndex,
     RunFieldIndex,
     index_by_facet,
     index_by_field,
 )
+from consist.core.resolved_binding import (
+    AdmissionEvidence,
+    ArtifactIdentity,
+    BoundArtifact,
+    ResolvedBinding,
+    ResolvedBindingBuilder,
+    TrackedArtifactLocator,
+)
+from consist.core.workflow import StepIdentity
 
 # API
 from consist.api import (
+    AdmissionReference,  # noqa: F401
+    AdmissionReport,  # noqa: F401
+    RunContext,
+    check_admission_reference,  # noqa: F401
+    check_artifact_identity,  # noqa: F401
     load,
     load_df,
     load_relation,
@@ -77,10 +96,14 @@ from consist.api import (
     output_path,
     log_meta,
     view,
+    ibis_connection,
+    ibis_grouped_view,
+    ibis_view,
     cached_output,
     cached_artifacts,
     get_run_result,
     hydrate_run_outputs,
+    hydrate_run_outputs_to_destinations,
     materialize_run_outputs,
     materialize_artifact,
     stage_artifact,
@@ -88,6 +111,7 @@ from consist.api import (
     set_artifact_recovery_roots,
     register_artifact_recovery_copy,
     register_run_output_recovery_copies,
+    archive_run_output_files,
     archive_artifact,
     archive_run_outputs,
     archive_current_run_outputs,
@@ -119,13 +143,20 @@ from consist.api import (
 
 # Types
 from consist.types import (
+    ArtifactSpec,
     BindingResult,
     BuiltinSchemaLiteral,
     CacheOptions,
+    EnumCapture,
     DriverType,
     ExecutionOptions,
+    FilenamePattern,
+    IntCapture,
     H5ChildSpec,
+    OutputArtifactSpec,
     OutputPolicyOptions,
+    OutputPathRef,
+    OutputSet,
 )
 from consist.core.noop import (
     NoopArtifact,
@@ -135,6 +166,8 @@ from consist.core.noop import (
     NoopTracker,
 )
 from consist.core.materialize import (
+    ArchivedRunOutputFile,
+    ArchivedRunOutputFilesReport,
     ArtifactRecoveryCopyRegistration,
     HydratedRunOutput,
     HydratedRunOutputsResult,
@@ -165,14 +198,33 @@ from consist.core.orchestration import (
     execute_worker_run,
     resolve_callable,
 )
+from consist.core.step_contracts import (
+    StepContract,
+    collect_step_contracts,
+    resolve_step_contract,
+)
 
 __all__ = [
     # Core objects
     "Tracker",
     "Coupler",
+    "RunContext",
+    "AdmissionReference",
+    "AdmissionReport",
+    "AdmissionEvidence",
+    "ArtifactIdentity",
+    "BoundArtifact",
+    "ResolvedBinding",
+    "ResolvedBindingBuilder",
+    "TrackedArtifactLocator",
+    "StepIdentity",
+    "CanonicalizationArtifactMember",
+    "CanonicalizationReference",
+    "CanonicalizationSnapshot",
     "Run",
     "RunResult",
     "Artifact",
+    "ArchivedOutputs",
     "RunSet",
     "AlignedPair",
     "GtfsSchema",
@@ -199,10 +251,17 @@ __all__ = [
     "discover_gtfs_members",
     # Types
     "BindingResult",
+    "ArtifactSpec",
+    "OutputArtifactSpec",
+    "OutputPathRef",
     "BuiltinSchemaLiteral",
+    "IntCapture",
+    "EnumCapture",
+    "FilenamePattern",
     "DriverType",
     "CacheOptions",
     "OutputPolicyOptions",
+    "OutputSet",
     "ExecutionOptions",
     "H5ChildSpec",
     "NoopArtifact",
@@ -215,6 +274,8 @@ __all__ = [
     "MaterializedArtifact",
     "ArtifactRecoveryCopyRegistration",
     "RunOutputRecoveryCopiesRegistration",
+    "ArchivedRunOutputFile",
+    "ArchivedRunOutputFilesReport",
     "MaterializationResult",
     "StagedInput",
     "StagedInputsResult",
@@ -237,6 +298,8 @@ __all__ = [
     "RelationConnectionLeakWarning",
     "to_df",
     "run",
+    "check_admission_reference",
+    "check_artifact_identity",
     "ref",
     "refs",
     "trace",
@@ -259,10 +322,14 @@ __all__ = [
     "output_path",
     "log_meta",
     "view",
+    "ibis_connection",
+    "ibis_grouped_view",
+    "ibis_view",
     "cached_output",
     "cached_artifacts",
     "get_run_result",
     "hydrate_run_outputs",
+    "hydrate_run_outputs_to_destinations",
     "materialize_run_outputs",
     "materialize_artifact",
     "stage_artifact",
@@ -270,6 +337,7 @@ __all__ = [
     "set_artifact_recovery_roots",
     "register_artifact_recovery_copy",
     "register_run_output_recovery_copies",
+    "archive_run_output_files",
     "archive_artifact",
     "archive_run_outputs",
     "archive_current_run_outputs",
@@ -307,4 +375,7 @@ __all__ = [
     "RunSpecResult",
     "execute_worker_run",
     "resolve_callable",
+    "StepContract",
+    "collect_step_contracts",
+    "resolve_step_contract",
 ]

@@ -21,7 +21,7 @@ if __package__ is None and __spec__ is None:
         sys.path.insert(0, package_root)
 
 import cmd
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 import importlib
 from importlib.metadata import PackageNotFoundError, version as package_version
@@ -49,15 +49,18 @@ import click
 import duckdb
 import pandas as pd
 import typer
+from rich import box
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.tree import Tree
+from rich.text import Text
 from sqlalchemy import and_, or_
 from sqlmodel import Session, col, select
 
-from consist import Tracker
+from consist import AdmissionReport, Tracker, check_artifact_identity
 from consist.core.gtfs import GTFS_CORE_TABLE_NAMES, discover_gtfs_members
+from consist.core.db_snapshot import snapshot_sidecar_path
 from consist.core.maintenance import DatabaseMaintenance
 from consist.core.persistence import DatabaseManager
 from consist.core.run_ordering import recent_run_order_by
@@ -80,7 +83,22 @@ app = typer.Typer(rich_markup_mode="markdown")
 schema_app = typer.Typer(rich_markup_mode="markdown")
 views_app = typer.Typer(rich_markup_mode="markdown")
 db_app = typer.Typer(rich_markup_mode="markdown")
+admission_app = typer.Typer(rich_markup_mode="markdown")
 console = Console()
+
+
+def _print_cli_error(message: str, *, title: str = "Consist error") -> None:
+    """Render an error message in a small boxed panel."""
+    console.print(
+        Panel.fit(
+            Text(message),
+            title=title,
+            border_style="red",
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
+    )
+
 
 app.add_typer(
     schema_app,
@@ -96,6 +114,11 @@ app.add_typer(
     db_app,
     name="db",
     help="Database maintenance and recovery commands.",
+)
+app.add_typer(
+    admission_app,
+    name="admission",
+    help="Check files against explicit completed prior-run inputs.",
 )
 
 MAX_CLI_LIMIT = 1_000_000
@@ -287,6 +310,99 @@ def get_tracker(
     )
 
 
+def _render_admission_report(report: AdmissionReport) -> None:
+    """Render the diagnostic verdict before supporting evidence."""
+    typer.echo(f"Outcome: {report.outcome}")
+    typer.echo(f"Expected digest: {report.expected_artifact_id or 'unknown'}")
+    typer.echo(f"Observed digest: {report.observed_artifact_id or 'unknown'}")
+    typer.echo(f"Expected run: {report.expected_run_id}")
+    typer.echo(f"Artifact key: {report.artifact_key}")
+    typer.echo(f"Execution path: {report.execution_path}")
+    if report.physical_target_path is not None:
+        typer.echo(f"Physical target: {report.physical_target_path}")
+    if report.expected_bytes_path is not None:
+        typer.echo(f"Expected bytes path: {report.expected_bytes_path}")
+    if report.observations:
+        typer.echo(f"Observations: {', '.join(report.observations)}")
+    if report.reason is not None:
+        typer.echo(f"Reason: {report.reason}")
+    if report.recommended_action is not None:
+        typer.echo(f"Recommended action: {report.recommended_action}")
+
+
+@admission_app.command("doctor")
+def admission_doctor(
+    db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
+    expected_run_id: str = typer.Option(
+        ..., "--expected-run", help="Completed run supplying the expected input."
+    ),
+    artifact_key: str = typer.Option(
+        ..., "--artifact-key", help="Exact input artifact key on the expected run."
+    ),
+    file: str = typer.Option(..., "--file", help="Resolved execution file to check."),
+    expected_file: Optional[str] = typer.Option(
+        None,
+        "--expected-file",
+        help="Distinct immutable expected file when the stored hash is not legible.",
+    ),
+    output: Optional[Path] = typer.Option(
+        None, "--output", help="Write canonical JSON report to this path."
+    ),
+    require_verified: bool = typer.Option(
+        False,
+        "--require-verified",
+        help="Exit 1 unless the diagnostic outcome is verified.",
+    ),
+) -> None:
+    """
+    Diagnose one file against an explicit completed prior-run input.
+
+    Parameters
+    ----------
+    db_path : str, optional
+        DuckDB provenance database to inspect.
+    expected_run_id : str
+        Explicit completed run supplying the expected input artifact.
+    artifact_key : str
+        Exact input artifact key on the expected run.
+    file : str
+        Resolved regular file whose bytes should be checked.
+    expected_file : str, optional
+        Distinct immutable expected-byte file for a historical hash without
+        explicit full-file semantics.
+    output : pathlib.Path, optional
+        Destination for canonical JSON report output.
+    require_verified : bool, default False
+        Exit nonzero unless the resulting outcome is ``verified``.
+
+    Raises
+    ------
+    typer.Exit
+        With a nonzero status when ``require_verified`` is enabled and the
+        diagnostic outcome is not verified.
+
+    Notes
+    -----
+    By default every admission outcome exits successfully so shell callers can
+    apply their own policy. The command does not copy files or mutate run state.
+    """
+    tracker = get_tracker(db_path)
+    report = check_artifact_identity(
+        tracker,
+        execution_path=file,
+        expected_run_id=expected_run_id,
+        artifact_key=artifact_key,
+        expected_bytes_path=expected_file,
+    )
+    _render_admission_report(report)
+
+    if output is not None:
+        output.write_text(report.canonical_json() + "\n", encoding="utf-8")
+
+    if require_verified and report.outcome != "verified":
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
+
+
 @contextmanager
 def _tracker_session(tracker: Tracker) -> Iterator[Session]:
     db = getattr(tracker, "db", None)
@@ -310,11 +426,7 @@ def _maintenance_service(db_path: Optional[str]) -> DatabaseMaintenance:
 
 
 def _resolve_snapshot_sidecar_path(db: DatabaseManager, snapshot_path: Path) -> Path:
-    sidecar_path_fn = getattr(db, "_snapshot_sidecar_path", None)
-    if callable(sidecar_path_fn):
-        return sidecar_path_fn(snapshot_path)
-    base_name = snapshot_path.stem if snapshot_path.suffix else snapshot_path.name
-    return snapshot_path.with_name(f"{base_name}.snapshot_meta.json")
+    return snapshot_sidecar_path(snapshot_path)
 
 
 @db_app.command("inspect")
@@ -902,15 +1014,25 @@ def _preserve_tracker_mounts(tracker: Tracker) -> Iterator[None]:
         _set_tracker_mounts(tracker, original_mounts)
 
 
+def _run_has_mount_metadata(run: "Run") -> bool:
+    if not isinstance(run.meta, dict):
+        return False
+    return any(
+        bool(run.meta.get(field))
+        for field in ("mounts", "archive_mounts", "_physical_run_dir")
+    )
+
+
 def _get_artifact_run_for_mount_inference(
     tracker: Tracker, artifact: "Artifact", preferred_run_id: Optional[str] = None
 ) -> Tuple[Optional["Run"], bool]:
-    if preferred_run_id is not None:
-        run = tracker.get_run(preferred_run_id)
-        if run is not None:
-            return run, False
-
     from consist.models.run import RunArtifactLink
+
+    preferred_run = (
+        tracker.get_run(preferred_run_id) if preferred_run_id is not None else None
+    )
+    if preferred_run is not None and _run_has_mount_metadata(preferred_run):
+        return preferred_run, False
 
     if artifact.id is not None:
         with _tracker_session(tracker) as session:
@@ -921,11 +1043,51 @@ def _get_artifact_run_for_mount_inference(
                     )
                 ).all()
             )
-        if len(links) == 1:
-            return tracker.get_run(links[0].run_id), False
+        linked_runs = [
+            run for link in links if (run := tracker.get_run(link.run_id)) is not None
+        ]
+        linked_runs_with_mounts = [
+            run for run in linked_runs if _run_has_mount_metadata(run)
+        ]
+        if preferred_run is not None:
+            if preferred_run.parent_run_id is not None:
+                parent_run = next(
+                    (
+                        run
+                        for run in linked_runs_with_mounts
+                        if run.id == preferred_run.parent_run_id
+                    ),
+                    None,
+                )
+                if parent_run is not None:
+                    return parent_run, False
+            child_run = next(
+                (
+                    run
+                    for run in linked_runs_with_mounts
+                    if run.parent_run_id == preferred_run.id
+                ),
+                None,
+            )
+            if child_run is not None:
+                return child_run, False
+        leaf_runs = [
+            run
+            for run in linked_runs_with_mounts
+            if not any(
+                other.id != run.id and other.parent_run_id == run.id
+                for other in linked_runs_with_mounts
+            )
+        ]
+        if len(leaf_runs) == 1:
+            return leaf_runs[0], False
+        if len(linked_runs_with_mounts) == 1:
+            return linked_runs_with_mounts[0], False
         if len(links) > 1:
             return None, True
 
+    if preferred_run is not None:
+        return preferred_run, False
     if artifact.run_id:
         return tracker.get_run(artifact.run_id), False
     return None, False
@@ -975,12 +1137,6 @@ def _ensure_tracker_mounts_for_artifact(
 
     if ambiguous_run_links and scheme not in inferred:
         return
-
-    if scheme not in inferred:
-        meta = artifact.meta or {}
-        mount_root = meta.get("mount_root")
-        if isinstance(mount_root, str) and mount_root:
-            inferred[scheme] = mount_root
 
     _apply_inferred_mounts(tracker, inferred)
 
@@ -1226,7 +1382,11 @@ def schema_capture_file(
 
     if artifact.run_id is None:
         console.print(
-            "[red]Artifact has no producing run_id; cannot attach schema observation.[/red]"
+            "[red]Artifact has no producing run_id; cannot attach schema observation.[/red]\n"
+            "[yellow]For inputs or other exogenous artifacts, enable automatic "
+            "run-time profiling with `Tracker.run(..., profile_file_schema=True)` "
+            "or `tracker.settings.schema_profile_enabled=True`. post-hoc capture "
+            "needs a producing run context so Consist can attach the observation.[/yellow]"
         )
         raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
     run = tracker.get_run(artifact.run_id)
@@ -1250,12 +1410,12 @@ def schema_capture_file(
             trust_db=trust_db,
         )
     except FileNotFoundError as exc:
-        console.print(f"[red]{exc}[/red]")
+        _print_cli_error(str(exc))
         raise typer.Exit(CLI_EXIT_RUNTIME_ERROR) from exc
 
     if not resolved_path.exists():
-        console.print(
-            f"[red]Artifact file does not exist at resolved path: {resolved_path}[/red]"
+        _print_cli_error(
+            f"Artifact file does not exist at resolved path: {resolved_path}"
         )
         raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
 
@@ -1270,7 +1430,7 @@ def schema_capture_file(
     )
 
     if not tracker.db:
-        console.print("[red]Tracker database not initialized.[/red]")
+        _print_cli_error("Tracker database not initialized.")
         raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
     fetched = tracker.db.get_artifact_schema_for_artifact(artifact_id=artifact.id)
     if fetched is None:
@@ -1407,7 +1567,7 @@ def schema_apply_fks(
     """Best-effort application of physical foreign key constraints."""
     tracker = get_tracker(db_path)
     if not tracker.db:
-        console.print("[red]Tracker database not initialized.[/red]")
+        _print_cli_error("Tracker database not initialized.")
         raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
     applied = tracker.db.apply_physical_fks()
     console.print(
@@ -1559,7 +1719,48 @@ def _render_runs_table(
         console.print(table)
 
 
-def _render_artifacts_table(tracker: Tracker, run_id: str) -> List["Artifact"]:
+def _artifact_meta_value(artifact: "Artifact", key: str) -> Any:
+    meta = artifact.meta or {}
+    return meta.get(key)
+
+
+def _artifact_is_output_set_parent(artifact: "Artifact") -> bool:
+    return (
+        artifact.driver == "artifact_set"
+        or _artifact_meta_value(artifact, "artifact_set") is True
+    )
+
+
+def _artifact_is_output_set_manifest(artifact: "Artifact") -> bool:
+    return _artifact_meta_value(artifact, "output_set_manifest") is True
+
+
+def _artifact_schema_label(artifact: "Artifact") -> Optional[str]:
+    for key in ("schema_id", "schema", "schema_name", "schema_signature"):
+        value = _artifact_meta_value(artifact, key)
+        if value is not None:
+            return str(value)
+    return None
+
+
+def _artifact_size_label(total_size_bytes: Any) -> str:
+    if total_size_bytes is None:
+        return "N/A"
+    try:
+        size = int(total_size_bytes)
+    except (TypeError, ValueError):
+        return str(total_size_bytes)
+    return f"{size} bytes"
+
+
+def _render_artifacts_table(
+    tracker: Tracker,
+    run_id: str,
+    *,
+    expand_sets: bool = False,
+    trust_db: bool = False,
+    archive_base: Optional[Path | str] = None,
+) -> List["Artifact"]:
     """Shared logic for displaying artifacts for a run."""
     run_artifacts = tracker.get_artifacts_for_run(run_id)
     rendered: List["Artifact"] = []
@@ -1573,6 +1774,8 @@ def _render_artifacts_table(tracker: Tracker, run_id: str) -> List["Artifact"]:
     table.add_column("Access", overflow="fold")
     table.add_column("Driver")
     table.add_column("Hash", style="magenta")
+    if expand_sets:
+        table.add_column("Set Parent", style="cyan", overflow="fold")
 
     def _style_artifact_access(status: str) -> str:
         if status == "primary":
@@ -1581,46 +1784,101 @@ def _render_artifacts_table(tracker: Tracker, run_id: str) -> List["Artifact"]:
             return "yellow"
         return "red"
 
+    def _should_hide_set_member(artifact: "Artifact") -> bool:
+        parent_id = artifact.parent_artifact_id
+        if not expand_sets and _artifact_is_output_set_manifest(artifact):
+            return True
+        return (
+            not expand_sets
+            and parent_id is not None
+            and parent_id in output_set_parent_ids
+        )
+
     inputs = sorted(run_artifacts.inputs.values(), key=lambda x: x.key)
     outputs = sorted(run_artifacts.outputs.values(), key=lambda x: x.key)
+    output_set_parent_ids = {
+        artifact.id for artifact in outputs if _artifact_is_output_set_parent(artifact)
+    }
+    hidden_set_member_count = 0
     ref_index = 1
 
-    for artifact in inputs:
-        rendered.append(artifact)
-        accessibility = artifact.accessibility(tracker=tracker)
-        access_status = accessibility.status
-        table.add_row(
-            str(ref_index),
-            "[blue]Input[/blue]",
-            artifact.key,
-            str(artifact.id),
-            artifact.container_uri,
-            f"[{_style_artifact_access(access_status)}]{access_status}[/]",
-            artifact.driver,
-            artifact.hash[:12] if artifact.hash else "N/A",
-        )
-        ref_index += 1
+    render_context = _preserve_tracker_mounts(tracker) if trust_db else nullcontext()
+    with render_context:
+        for artifact in inputs:
+            if trust_db:
+                _ensure_tracker_mounts_for_artifact(
+                    tracker,
+                    artifact,
+                    trust_db=trust_db,
+                    archive_base=archive_base,
+                    preferred_run_id=run_id,
+                )
+            if _should_hide_set_member(artifact):
+                hidden_set_member_count += 1
+                continue
+            rendered.append(artifact)
+            accessibility = artifact.accessibility(tracker=tracker)
+            access_status = accessibility.status
+            set_parent_key = ""
+            if expand_sets and artifact.parent_artifact_id is not None:
+                parent_artifact = tracker.get_artifact(artifact.parent_artifact_id)
+                if parent_artifact is not None:
+                    set_parent_key = parent_artifact.key
+            table.add_row(
+                str(ref_index),
+                "[blue]Input[/blue]",
+                artifact.key,
+                str(artifact.id),
+                artifact.container_uri,
+                f"[{_style_artifact_access(access_status)}]{access_status}[/]",
+                artifact.driver,
+                artifact.hash[:12] if artifact.hash else "N/A",
+                *([set_parent_key] if expand_sets else []),
+            )
+            ref_index += 1
 
-    if inputs and outputs:
-        table.add_section()
+        if inputs and outputs:
+            table.add_section()
 
-    for artifact in outputs:
-        rendered.append(artifact)
-        accessibility = artifact.accessibility(tracker=tracker)
-        access_status = accessibility.status
-        table.add_row(
-            str(ref_index),
-            "[green]Output[/green]",
-            artifact.key,
-            str(artifact.id),
-            artifact.container_uri,
-            f"[{_style_artifact_access(access_status)}]{access_status}[/]",
-            artifact.driver,
-            artifact.hash[:12] if artifact.hash else "N/A",
-        )
-        ref_index += 1
+        for artifact in outputs:
+            if trust_db:
+                _ensure_tracker_mounts_for_artifact(
+                    tracker,
+                    artifact,
+                    trust_db=trust_db,
+                    archive_base=archive_base,
+                    preferred_run_id=run_id,
+                )
+            if _should_hide_set_member(artifact):
+                hidden_set_member_count += 1
+                continue
+            rendered.append(artifact)
+            accessibility = artifact.accessibility(tracker=tracker)
+            access_status = accessibility.status
+            set_parent_key = ""
+            if expand_sets and artifact.parent_artifact_id is not None:
+                parent_artifact = tracker.get_artifact(artifact.parent_artifact_id)
+                if parent_artifact is not None:
+                    set_parent_key = parent_artifact.key
+            table.add_row(
+                str(ref_index),
+                "[green]Output[/green]",
+                artifact.key,
+                str(artifact.id),
+                artifact.container_uri,
+                f"[{_style_artifact_access(access_status)}]{access_status}[/]",
+                artifact.driver,
+                artifact.hash[:12] if artifact.hash else "N/A",
+                *([set_parent_key] if expand_sets else []),
+            )
+            ref_index += 1
 
     console.print(table)
+    if hidden_set_member_count:
+        console.print(
+            f"[dim]Hidden {hidden_set_member_count} output-set member artifact"
+            f"{'s' if hidden_set_member_count != 1 else ''}. Use --expand-sets to show them.[/dim]"
+        )
     if rendered:
         console.print("[dim]Artifact refs:[/dim]")
         max_refs_to_show = 20
@@ -2154,9 +2412,34 @@ def artifacts(
     db_path: Optional[str] = typer.Option(
         None, help="Path to the Consist DuckDB database."
     ),
+    run_dir: Optional[str] = typer.Option(
+        None,
+        "--run-dir",
+        help=RUN_DIR_RESOLUTION_HELP,
+    ),
+    trust_db: bool = typer.Option(
+        False,
+        "--trust-db",
+        help=TRUST_DB_RESOLUTION_HELP,
+    ),
+    mount: Optional[List[str]] = typer.Option(
+        None,
+        "--mount",
+        help=MOUNT_OVERRIDE_HELP,
+    ),
+    expand_sets: bool = typer.Option(
+        False,
+        "--expand-sets",
+        help="Show output-set member artifacts instead of hiding them.",
+    ),
 ) -> None:
     """Display run artifacts or query artifacts by indexed facet parameters."""
-    tracker = get_tracker(db_path)
+    mount_overrides = _resolve_mount_overrides_or_exit(mount)
+    tracker = get_tracker(
+        db_path,
+        run_dir=run_dir,
+        mounts=mount_overrides or None,
+    )
     query_mode = bool(param or key_prefix or family_prefix)
     if not query_mode:
         if not run_id:
@@ -2168,7 +2451,13 @@ def artifacts(
         if not run:
             console.print(f"[red]Run with ID '{run_id}' not found.[/red]")
             raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
-        _render_artifacts_table(tracker, run_id)
+        _render_artifacts_table(
+            tracker,
+            run_id,
+            expand_sets=expand_sets,
+            trust_db=trust_db,
+            archive_base=run_dir,
+        )
         return
 
     if run_id is not None:
@@ -2354,6 +2643,7 @@ def _print_optional_dependency_hint(driver: str) -> None:
         "hdf5": "hdf5",
         "h5_table": "hdf5",
         "geojson": "spatial",
+        "geoparquet": "spatial",
         "shapefile": "spatial",
         "geopackage": "spatial",
     }
@@ -2389,7 +2679,7 @@ def _render_gtfs_bundle_preview(
         _print_missing_artifact_file_help(tracker, artifact)
         return True
     except ValueError as exc:
-        console.print(f"[red]Error reading GTFS bundle: {exc}[/red]")
+        _print_cli_error(f"Error reading GTFS bundle: {exc}")
         return True
 
     standard_members = [
@@ -2526,6 +2816,200 @@ def _render_gtfs_selected_service_preview(
         "[dim]Preview a selected table with its child artifact key, "
         "such as <bundle_key>_trips.[/dim]"
     )
+    return True
+
+
+def _render_artifact_set_preview(
+    tracker: Tracker,
+    artifact: "Artifact",
+    *,
+    n_rows: int,
+) -> bool:
+    """Render a compact artifact_set summary for logical parent artifacts."""
+    if not _artifact_is_output_set_parent(artifact):
+        return False
+
+    meta = artifact.meta or {}
+    children = tracker.get_child_artifacts(artifact)
+    manifest_artifact_id = meta.get("manifest_artifact_id")
+    manifest_artifact = None
+    if manifest_artifact_id is not None:
+        manifest_artifact = tracker.get_artifact(manifest_artifact_id)
+
+    summary = Table.grid(padding=(0, 2))
+    summary.add_column(style="bold cyan")
+    summary.add_column()
+    summary.add_row("Artifact", str(artifact.key))
+    summary.add_row("Kind", str(meta.get("output_set_kind") or artifact.driver))
+    summary.add_row("Member Count", str(meta.get("member_count", len(children))))
+    summary.add_row(
+        "Total Size",
+        _artifact_size_label(meta.get("total_size_bytes")),
+    )
+    schema_label = _artifact_schema_label(artifact)
+    if schema_label is not None:
+        summary.add_row("Schema", schema_label)
+    if manifest_artifact_id is not None:
+        summary.add_row("Manifest ID", str(manifest_artifact_id))
+
+    console.print(
+        Panel(
+            summary,
+            title="Artifact Set Summary",
+            border_style="green",
+            expand=False,
+        )
+    )
+
+    member_artifacts = list(children)
+    if manifest_artifact is not None and all(
+        member.id != manifest_artifact.id for member in member_artifacts
+    ):
+        member_artifacts.append(manifest_artifact)
+
+    if not member_artifacts:
+        console.print("[yellow]No output-set members were found.[/yellow]")
+        return True
+
+    display_count = min(max(n_rows, 1), len(member_artifacts))
+    member_table = Table(
+        title=f"Member Artifacts (showing {display_count} of {len(member_artifacts)})"
+    )
+    member_table.add_column("Role", style="yellow")
+    member_table.add_column("Artifact Key", style="cyan", overflow="fold", no_wrap=True)
+    member_table.add_column("Driver", style="dim")
+    member_table.add_column("Schema", style="magenta", overflow="fold")
+    member_table.add_column("Manifest ID", style="dim", overflow="fold")
+
+    for member in member_artifacts[:display_count]:
+        member_meta = member.meta or {}
+        role = (
+            "manifest"
+            if manifest_artifact is not None and member.id == manifest_artifact.id
+            else "member"
+        )
+        member_table.add_row(
+            role,
+            str(member.key),
+            str(member.driver),
+            _artifact_schema_label(member) or "-",
+            str(member_meta.get("manifest_artifact_id") or "-"),
+        )
+
+    console.print(member_table)
+    if len(member_artifacts) > display_count:
+        console.print(
+            f"[dim]... and {len(member_artifacts) - display_count} more output-set members[/dim]"
+        )
+    return True
+
+
+def _resolve_artifact_json_path(
+    tracker: Tracker,
+    artifact: "Artifact",
+    *,
+    trust_db: bool,
+) -> Path | None:
+    candidates: List[Path] = []
+    if artifact.abs_path is not None:
+        candidates.append(Path(artifact.abs_path))
+    try:
+        candidates.append(Path(tracker.resolve_uri(artifact.container_uri)))
+    except (OSError, RuntimeError, TypeError, ValueError):
+        pass
+    candidates.extend(
+        path
+        for _, path in _artifact_recovery_candidate_paths(
+            tracker, artifact, trust_db=trust_db
+        )
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _render_output_set_manifest_preview(
+    tracker: Tracker,
+    artifact: "Artifact",
+    *,
+    n_rows: int,
+    trust_db: bool = False,
+) -> bool:
+    """Render nested output-set manifest JSON without dataframe coercion."""
+    if not _artifact_is_output_set_manifest(artifact):
+        return False
+
+    resolved_path = _resolve_artifact_json_path(
+        tracker,
+        artifact,
+        trust_db=trust_db,
+    )
+    if resolved_path is None:
+        console.print(
+            "[red]Could not resolve output-set manifest JSON path for preview.[/red]"
+        )
+        return True
+
+    try:
+        manifest = json.loads(resolved_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        console.print(f"[red]Could not read output-set manifest JSON: {exc}[/red]")
+        return True
+
+    if not isinstance(manifest, dict):
+        console.print("[yellow]Output-set manifest JSON is not an object.[/yellow]")
+        return True
+
+    members = manifest.get("members")
+    member_rows = members if isinstance(members, list) else []
+    totals = manifest.get("totals")
+    totals_map = totals if isinstance(totals, dict) else {}
+
+    summary = Table.grid(padding=(0, 2))
+    summary.add_column(style="bold cyan")
+    summary.add_column()
+    summary.add_row("Artifact", str(artifact.key))
+    summary.add_row("Output Set", str(manifest.get("output_set_key") or "-"))
+    summary.add_row("Members", str(len(member_rows)))
+    if "file_count" in totals_map:
+        summary.add_row("Manifest File Count", str(totals_map["file_count"]))
+    if "byte_size" in totals_map:
+        summary.add_row("Total Size", _artifact_size_label(totals_map["byte_size"]))
+
+    console.print(
+        Panel(
+            summary,
+            title="JSON Manifest Summary",
+            border_style="green",
+            expand=False,
+        )
+    )
+
+    if not member_rows:
+        return True
+
+    display_count = min(max(n_rows, 1), len(member_rows))
+    table = Table(
+        title=f"Manifest Members (showing {display_count} of {len(member_rows)})"
+    )
+    table.add_column("Key", style="cyan", overflow="fold", no_wrap=True)
+    table.add_column("Relative Path", style="magenta", overflow="fold")
+    table.add_column("Driver", style="dim")
+    table.add_column("Hash", style="dim", overflow="fold")
+    for member in member_rows[:display_count]:
+        member_map = member if isinstance(member, dict) else {}
+        table.add_row(
+            str(member_map.get("key") or "-"),
+            str(member_map.get("relative_path") or "-"),
+            str(member_map.get("driver") or "-"),
+            str(member_map.get("content_hash") or "-"),
+        )
+    console.print(table)
+    if len(member_rows) > display_count:
+        console.print(
+            f"[dim]... and {len(member_rows) - display_count} more manifest members[/dim]"
+        )
     return True
 
 
@@ -2732,6 +3216,15 @@ def preview(
     if _render_gtfs_selected_service_preview(tracker, artifact, n_rows=n_rows):
         return
     if _render_gtfs_bundle_preview(tracker, artifact, n_rows=n_rows):
+        return
+    if _render_artifact_set_preview(tracker, artifact, n_rows=n_rows):
+        return
+    if _render_output_set_manifest_preview(
+        tracker,
+        artifact,
+        n_rows=n_rows,
+        trust_db=trust_db,
+    ):
         return
 
     resolution_bases, db_metadata_run_dir = _build_relative_resolution_bases(
@@ -3063,7 +3556,7 @@ class ConsistShell(cmd.Cmd):
         if not args:
             return
         if args[0] == "shell":
-            console.print("[red]Error: already inside Consist shell.[/red]")
+            _print_cli_error("Already inside Consist shell.")
             return
         try:
             prepared = self._prepare_cli_args(args)
@@ -3071,9 +3564,9 @@ class ConsistShell(cmd.Cmd):
         except typer.Exit:
             return
         except click.ClickException as exc:
-            console.print(f"[red]Error: {exc.format_message()}[/red]")
+            _print_cli_error(exc.format_message())
         except Exception as exc:
-            console.print(f"[red]Error: {exc}[/red]")
+            _print_cli_error(str(exc))
 
     def _invoke_cli_command(self, command_name: str, arg: str) -> None:
         command_args = [command_name, *self._safe_split(arg)]
@@ -3201,46 +3694,39 @@ class ConsistShell(cmd.Cmd):
             try:
                 selected_index = int(raw_choice)
             except ValueError:
-                console.print(
-                    "[red]Error: enter a number or press Enter to cancel[/red]"
-                )
+                _print_cli_error("Enter a number or press Enter to cancel.")
                 continue
             if 1 <= selected_index <= len(choices):
                 return choices[selected_index - 1]
-            console.print(
-                f"[red]Error: selection must be between 1 and {len(choices)}[/red]"
-            )
+            _print_cli_error(f"Selection must be between 1 and {len(choices)}.")
 
     def _resolve_run_id(self, arg: str, *, command_name: str) -> Optional[str]:
         run_id = arg.strip()
         if run_id:
             if run_id.startswith("#"):
                 if not self._last_run_ids:
-                    console.print(
-                        "[red]Error: no cached run refs. Run `runs` first.[/red]"
-                    )
+                    _print_cli_error("No cached run refs. Run `runs` first.")
                     return None
                 raw_index = run_id[1:]
                 if not raw_index:
-                    console.print("[red]Error: run ref must look like #1[/red]")
+                    _print_cli_error("Run ref must look like #1.")
                     return None
                 try:
                     index = int(raw_index)
                 except ValueError:
-                    console.print("[red]Error: run ref must look like #1[/red]")
+                    _print_cli_error("Run ref must look like #1.")
                     return None
                 if index < 1 or index > len(self._last_run_ids):
-                    console.print(
-                        "[red]Error: run ref out of range "
-                        f"(1-{len(self._last_run_ids)}).[/red]"
+                    _print_cli_error(
+                        f"Run ref out of range (1-{len(self._last_run_ids)})."
                     )
                     return None
                 return self._last_run_ids[index - 1]
             return run_id
         if not self._is_tty():
-            console.print(
-                "[red]Error: run_id required. Pass a run_id or #<n>, or run `runs` "
-                "first to populate shortcuts.[/red]"
+            _print_cli_error(
+                "Run ID required. Pass a run_id or #<n>, or run `runs` "
+                "first to populate shortcuts."
             )
             return None
         return self._select_from_list(
@@ -3257,10 +3743,10 @@ class ConsistShell(cmd.Cmd):
         if args:
             return self._resolve_artifact_ref(args[0])
         if not self._is_tty():
-            console.print(
-                "[red]Error: artifact_key required. Pass a key or @<n>. "
+            _print_cli_error(
+                "Artifact key required. Pass a key or @<n>. "
                 f"{self._artifact_ref_population_hint()} Use `context` to inspect "
-                "shell defaults.[/red]"
+                "shell defaults."
             )
             return None
         return self._select_from_list(
@@ -3278,24 +3764,22 @@ class ConsistShell(cmd.Cmd):
         if not token.startswith("@"):
             return token
         if not self._last_artifact_ids:
-            console.print(
-                "[red]Error: no cached artifact refs. "
-                f"{self._artifact_ref_population_hint()}[/red]"
+            _print_cli_error(
+                f"No cached artifact refs. {self._artifact_ref_population_hint()}"
             )
             return None
         raw_index = token[1:]
         if not raw_index:
-            console.print("[red]Error: artifact ref must look like @1[/red]")
+            _print_cli_error("Artifact ref must look like @1.")
             return None
         try:
             index = int(raw_index)
         except ValueError:
-            console.print("[red]Error: artifact ref must look like @1[/red]")
+            _print_cli_error("Artifact ref must look like @1.")
             return None
         if index < 1 or index > len(self._last_artifact_ids):
-            console.print(
-                "[red]Error: artifact ref out of range "
-                f"(1-{len(self._last_artifact_ids)}).[/red]"
+            _print_cli_error(
+                f"Artifact ref out of range (1-{len(self._last_artifact_ids)})."
             )
             return None
         return self._last_artifact_ids[index - 1]
@@ -3305,7 +3789,7 @@ class ConsistShell(cmd.Cmd):
     ) -> Optional["Artifact"]:
         candidate = hash_prefix.strip()
         if not candidate:
-            console.print("[red]Error: --hash requires a non-empty prefix.[/red]")
+            _print_cli_error("--hash requires a non-empty prefix.")
             return None
 
         try:
@@ -3323,7 +3807,7 @@ class ConsistShell(cmd.Cmd):
                 statement = statement.order_by(col(Artifact.created_at).desc()).limit(6)
                 matches = session.exec(statement).all()
         except Exception as exc:
-            console.print(f"[red]Error: failed hash lookup: {exc}[/red]")
+            _print_cli_error(f"Failed hash lookup: {exc}")
             return None
 
         if not matches:
@@ -3442,7 +3926,7 @@ class ConsistShell(cmd.Cmd):
         )
         if selector_count == 0:
             raise ValueError(
-                "artifact_key required (or provide --artifact-id or --hash)."
+                "Artifact key required (or provide --artifact-id or --hash)."
             )
         if selector_count > 1:
             raise ValueError(
@@ -3481,7 +3965,7 @@ class ConsistShell(cmd.Cmd):
         """Run any consist CLI command. Usage: cli <command> [args...]"""
         args = self._safe_split(arg)
         if not args:
-            console.print("[red]Error: provide a command, e.g. `cli db inspect`.[/red]")
+            _print_cli_error("Provide a command, e.g. `cli db inspect`.")
             return
         self._invoke_cli(args)
 
@@ -3540,7 +4024,7 @@ class ConsistShell(cmd.Cmd):
                 return
             self._invoke_cli(["schema", *normalized])
         except ValueError as exc:
-            console.print(f"[red]Error: {exc}[/red]")
+            _print_cli_error(str(exc))
 
     def do_views(self, arg: str) -> None:
         """Run view subcommands. Usage: views create ..."""
@@ -3646,7 +4130,7 @@ class ConsistShell(cmd.Cmd):
                     console.print(f"[dim]  #{index}: {run_id}[/dim]")
                 console.print("[dim]Tip: use show #<n> or artifacts #<n>.[/dim]")
         except Exception as exc:
-            console.print(f"[red]Error: {exc}[/red]")
+            _print_cli_error(str(exc))
 
     def do_show(self, arg: str) -> None:
         """Show details for a run. Usage: show <run_id>"""
@@ -3662,29 +4146,49 @@ class ConsistShell(cmd.Cmd):
         try:
             run = self.tracker.get_run(run_id)
             if not run:
-                console.print(f"[red]Run '{run_id}' not found.[/red]")
+                _print_cli_error(f"Run '{run_id}' not found.")
                 return
             _render_run_details(run)
         except Exception as exc:
-            console.print(f"[red]Error: {exc}[/red]")
+            _print_cli_error(str(exc))
 
     def do_artifacts(self, arg: str) -> None:
-        """Show artifacts for a run or query by facets. Usage: artifacts <run_id> | artifacts --param ..."""
-        args = self._safe_split(arg)
-        if args and (len(args) != 1 or args[0].startswith("-")):
-            self._invoke_cli_command("artifacts", arg)
-            return
-
-        run_id = self._resolve_run_id(args[0] if args else "", command_name="artifacts")
-        if run_id is None:
-            return
-
+        """Show artifacts for a run or query by facets. Usage: artifacts <run_id> | artifacts --param ... | artifacts --expand-sets"""
         try:
+            args = self._safe_split(arg)
+            expand_sets = False
+            run_id_arg: Optional[str] = None
+            i = 0
+            while i < len(args):
+                token = args[i]
+                if token == "--expand-sets":
+                    expand_sets = True
+                    i += 1
+                    continue
+                if token.startswith("--"):
+                    self._invoke_cli_command("artifacts", arg)
+                    return
+                if run_id_arg is not None:
+                    self._invoke_cli_command("artifacts", arg)
+                    return
+                run_id_arg = token
+                i += 1
+
+            run_id = self._resolve_run_id(run_id_arg or "", command_name="artifacts")
+            if run_id is None:
+                return
+
             run = self.tracker.get_run(run_id)
             if not run:
                 console.print(f"[red]Run '{run_id}' not found.[/red]")
                 return
-            rendered = _render_artifacts_table(self.tracker, run_id)
+            rendered = _render_artifacts_table(
+                self.tracker,
+                run_id,
+                expand_sets=expand_sets,
+                trust_db=self.trust_db,
+                archive_base=self.run_dir,
+            )
             self._last_artifact_run_id = run_id
             self._last_artifact_ids = []
             for artifact in rendered:
@@ -3697,7 +4201,89 @@ class ConsistShell(cmd.Cmd):
                     "schema_stub @<n> for exact artifact rows.[/dim]"
                 )
         except Exception as exc:
-            console.print(f"[red]Error: {exc}[/red]")
+            _print_cli_error(str(exc))
+
+    def do_members(self, arg: str) -> None:
+        """List output-set members. Usage: members <artifact_key|artifact_id|@ref>"""
+        try:
+            args = self._safe_split(arg)
+            if len(args) != 1 or args[0].startswith("-"):
+                _print_cli_error("Members accepts one output-set selector.")
+                return
+            artifact_key = self._resolve_artifact_ref(args[0])
+            if artifact_key is None:
+                return
+            artifact = self.tracker.get_artifact(artifact_key)
+            if not artifact:
+                _print_cli_error(f"Artifact '{args[0]}' not found.")
+                return
+            if not _artifact_is_output_set_parent(artifact):
+                console.print(
+                    f"[yellow]Artifact '{artifact.key}' is not an output set.[/yellow]"
+                )
+                return
+            children = self.tracker.get_child_artifacts(artifact)
+            if not children:
+                console.print("[yellow]No output-set members were found.[/yellow]")
+                return
+
+            table = Table(title=f"Members: {artifact.key}")
+            table.add_column("Artifact Key", style="cyan", overflow="fold")
+            table.add_column("Driver", style="dim")
+            table.add_column("Relative Path", style="magenta", overflow="fold")
+            table.add_column("Schema", style="yellow", overflow="fold")
+            for child in children:
+                meta = child.meta or {}
+                table.add_row(
+                    str(child.key),
+                    str(child.driver),
+                    str(meta.get("output_set_relative_path") or "-"),
+                    _artifact_schema_label(child) or "-",
+                )
+            console.print(table)
+            console.print(
+                "[dim]Tip: preview a child with `preview @<n>` or its key.[/dim]"
+            )
+        except Exception as exc:
+            _print_cli_error(str(exc))
+
+    def do_manifest(self, arg: str) -> None:
+        """Preview an output-set manifest. Usage: manifest <artifact_key|artifact_id|@ref>"""
+        try:
+            args = self._safe_split(arg)
+            if len(args) != 1 or args[0].startswith("-"):
+                console.print(
+                    "[red]Error: manifest accepts one output-set selector.[/red]"
+                )
+                return
+            artifact_key = self._resolve_artifact_ref(args[0])
+            if artifact_key is None:
+                return
+            artifact = self.tracker.get_artifact(artifact_key)
+            if not artifact:
+                console.print(f"[red]Artifact '{args[0]}' not found.[/red]")
+                return
+            if not _artifact_is_output_set_parent(artifact):
+                console.print(
+                    f"[yellow]Artifact '{artifact.key}' is not an output set.[/yellow]"
+                )
+                return
+            meta = artifact.meta or {}
+            manifest_id = meta.get("manifest_artifact_id")
+            if not isinstance(manifest_id, str) or not manifest_id:
+                console.print(
+                    f"[yellow]Artifact '{artifact.key}' has no manifest artifact id.[/yellow]"
+                )
+                return
+            manifest = self.tracker.get_artifact(manifest_id)
+            if not manifest:
+                console.print(
+                    f"[yellow]Manifest artifact '{manifest_id}' was not found.[/yellow]"
+                )
+                return
+            self.do_preview(str(manifest.id))
+        except Exception as exc:
+            _print_cli_error(str(exc))
 
     def do_preview(self, arg: str) -> None:
         """Preview an artifact. Usage: preview <artifact_key|artifact_id|@ref> [--rows N] | preview --hash <prefix>"""
@@ -3788,6 +4374,19 @@ class ConsistShell(cmd.Cmd):
                     archive_base=self.run_dir,
                     preferred_run_id=preferred_run_id,
                 )
+                if _render_artifact_set_preview(
+                    self.tracker,
+                    artifact,
+                    n_rows=n_rows,
+                ):
+                    return
+                if _render_output_set_manifest_preview(
+                    self.tracker,
+                    artifact,
+                    n_rows=n_rows,
+                    trust_db=self.trust_db,
+                ):
+                    return
                 resolution_bases, db_metadata_run_dir = (
                     _build_relative_resolution_bases(
                         self.tracker,
@@ -3851,7 +4450,7 @@ class ConsistShell(cmd.Cmd):
                 f"[yellow]Preview not implemented for loaded type: {type(data).__name__}[/yellow]"
             )
         except Exception as exc:
-            console.print(f"[red]Error: {exc}[/red]")
+            _print_cli_error(str(exc))
 
     def do_schema_profile(self, arg: str) -> None:
         """Show artifact schema. Usage: schema_profile <artifact_key|artifact_id|@ref> | schema_profile --hash <prefix>"""
@@ -3903,10 +4502,10 @@ class ConsistShell(cmd.Cmd):
                     return
                 artifact = self.tracker.get_artifact(artifact_key)
             else:
-                console.print(
-                    "[red]Error: artifact_key required. Pass a key or @<n>, use "
+                _print_cli_error(
+                    "Artifact key required. Pass a key or @<n>, use "
                     "`--hash <prefix>`, or run `artifacts <run_id>` first to "
-                    "populate artifact refs.[/red]"
+                    "populate artifact refs."
                 )
                 return
             if not artifact:
@@ -4009,7 +4608,7 @@ class ConsistShell(cmd.Cmd):
                     "[/yellow]"
                 )
         except Exception as exc:
-            console.print(f"[red]Error: {exc}[/red]")
+            _print_cli_error(str(exc))
 
     def do_schema_stub(self, arg: str) -> None:
         """Export SQLModel schema stub. Usage: schema_stub <artifact_key|artifact_id|@ref>|--artifact-id UUID|--hash PREFIX [--run-id RUN_ID] [--source file|duckdb|user_provided] [--class-name NAME] [--table-name NAME] [--include-system-cols] [--no-stats-comments] [--concrete]"""
@@ -4099,9 +4698,9 @@ class ConsistShell(cmd.Cmd):
                     f"{resolved_artifact_id}` to persist a file schema first.[/yellow]"
                 )
         except ValueError as exc:
-            console.print(f"[red]Error: {exc}[/red]")
+            _print_cli_error(str(exc))
         except Exception as exc:
-            console.print(f"[red]Error: {exc}[/red]")
+            _print_cli_error(str(exc))
 
     def do_summary(self, arg: str) -> None:
         """Display database summary. Usage: summary"""
@@ -4110,7 +4709,7 @@ class ConsistShell(cmd.Cmd):
                 summary_data = queries.get_summary(session)
             _render_summary(summary_data)
         except Exception as exc:
-            console.print(f"[red]Error: {exc}[/red]")
+            _print_cli_error(str(exc))
 
     def do_scenarios(self, arg: str) -> None:
         """List scenarios. Usage: scenarios [--limit N]"""
@@ -4138,13 +4737,13 @@ class ConsistShell(cmd.Cmd):
                         maximum=MAX_CLI_LIMIT,
                     )
             except ValueError as exc:
-                console.print(f"[red]Error: {exc}[/red]")
+                _print_cli_error(str(exc))
                 return
 
         try:
             _render_scenarios(self.tracker, limit)
         except Exception as exc:
-            console.print(f"[red]Error: {exc}[/red]")
+            _print_cli_error(str(exc))
 
     def do_exit(self, arg: str) -> bool:
         """Exit the shell."""

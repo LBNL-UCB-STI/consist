@@ -22,16 +22,19 @@ a tracker object to every call.
   `consist.load`, `consist.load_df`
 - Transit feeds: `consist.canonicalize_gtfs`
 - Recovery/staging/archive: `consist.hydrate_run_outputs`,
+  `consist.hydrate_run_outputs_to_destinations`,
   `consist.materialize_run_outputs`, `consist.materialize_artifact`,
   `consist.stage_artifact`, `consist.stage_inputs`,
   `consist.set_artifact_recovery_roots`, `consist.register_artifact_recovery_copy`,
   `consist.register_run_output_recovery_copies`, `consist.archive_artifact`,
-  `consist.archive_run_outputs`, `consist.archive_current_run_outputs`
+  `consist.archive_run_outputs`, `consist.archive_current_run_outputs`,
+  `consist.archive_run_output_files`
 - Querying: `consist.find_run`, `consist.find_runs`,
   `consist.find_latest_run`, `consist.find_matching_run`,
   `consist.find_matching_runs`, `consist.run_query`, `consist.run_set`,
   `consist.get_run_result`, `consist.config_run_query`,
-  `consist.config_run_rows`
+  `consist.config_run_rows`, `consist.ibis_connection`, `consist.ibis_view`,
+  `consist.ibis_grouped_view`
 
 `consist.find_runs(...)`, `consist.find_run(...)`, and
 `consist.find_latest_run(...)` forward standard run filters, including
@@ -39,6 +42,21 @@ a tracker object to every call.
 `consist.find_matching_run(...)` and `consist.find_matching_runs(...)` add a
 restart-friendly semantic matcher with optional `cache_epoch=` and caller-owned
 `run_scope=` prefix filtering.
+
+`consist.archive_run_outputs(...)` and
+`consist.archive_current_run_outputs(...)` return `ArchivedOutputs`, a
+dict-like mapping of archived paths whose `.paths` attribute exposes the same
+read-only path mapping and whose `.outputs` attribute exposes the refreshed
+artifacts for downstream `inputs=...` reuse.
+
+`consist.archive_run_output_files(...)` is the conservative, file-only archive
+helper for a completed run. It returns an `ArchivedRunOutputFilesReport`, a
+read-only mapping of per-key results. It never overwrites an existing archive
+target: with `preserve_existing=True`, a matching target can be verified and
+registered; otherwise that key remains a reported outcome. Inspect `.complete`
+and each result before treating the archive as ready. `.complete` reports this
+call's selected files and metadata registration; it does not establish durable
+workflow state or prove that another application consumed the archive.
 
 ## Minimal runnable helper workflow
 
@@ -116,7 +134,11 @@ For class-level equivalents, see [Tracker](tracker.md) and
         - load
         - load_df
         - load_relation
+        - ibis_connection
+        - ibis_view
+        - ibis_grouped_view
         - hydrate_run_outputs
+        - hydrate_run_outputs_to_destinations
         - materialize_run_outputs
         - materialize_artifact
         - stage_artifact
@@ -127,6 +149,7 @@ For class-level equivalents, see [Tracker](tracker.md) and
         - archive_artifact
         - archive_run_outputs
         - archive_current_run_outputs
+        - archive_run_output_files
         - to_df
         - active_relation_count
         - set_current_tracker

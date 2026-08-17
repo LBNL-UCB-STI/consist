@@ -288,7 +288,9 @@ class TrackerArtifactQueryService(_TrackerServiceBase):
 
     def _parse_artifact_param_expression(self, expression: str) -> Dict[str, Any]:
         raw = expression.strip()
-        operator = None
+        operator: str | None = None
+        lhs = ""
+        rhs = ""
         for candidate in (">=", "<=", "="):
             idx = raw.find(candidate)
             if idx > 0:

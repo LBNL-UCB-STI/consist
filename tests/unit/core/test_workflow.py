@@ -7,12 +7,13 @@ import consist
 from consist.core.coupler import Coupler
 from consist.core.config_canonicalization import (
     CanonicalConfig,
+    CanonicalizationSnapshot,
     ConfigPlan,
     canonical_identity_from_config,
 )
 from consist.core.tracker import Tracker
 from consist.core.workflow import RunContext
-from consist.types import CacheOptions, ExecutionOptions
+from consist.types import CacheOptions, ExecutionOptions, OutputSet
 
 
 def _dummy_config_plan(
@@ -551,6 +552,58 @@ def test_run_adapter_includes_adapter_version(
     assert hash_v1 != hash_v2
 
 
+def test_run_injects_applied_canonicalization_snapshot(
+    tracker: Tracker, tmp_path: Path, monkeypatch
+) -> None:
+    config_root = tmp_path / "snapshot_config"
+    config_root.mkdir()
+    canonical = CanonicalConfig(
+        root_dirs=[config_root],
+        primary_config=None,
+        config_files=[],
+        external_files=[],
+        content_hash="snapshot",
+    )
+    identity = canonical_identity_from_config(
+        adapter_name="snapshot_adapter",
+        adapter_version="1",
+        config=canonical,
+    )
+    snapshot = CanonicalizationSnapshot(
+        adapter_name="snapshot_adapter",
+        adapter_version="1",
+        identity_hash=identity.identity_hash,
+    )
+    plan = ConfigPlan(
+        adapter_name="snapshot_adapter",
+        adapter_version="1",
+        canonical=canonical,
+        artifacts=[],
+        ingestables=[],
+        identity=identity,
+        canonicalization=snapshot,
+    )
+
+    class Adapter:
+        root_dirs = [config_root]
+
+    monkeypatch.setattr(tracker, "prepare_config", lambda **_: plan)
+    observed = []
+
+    def step(ctx: RunContext) -> None:
+        observed.append(ctx.canonicalization)
+
+    tracker.run(
+        fn=step,
+        name="snapshot_run",
+        adapter=Adapter(),
+        cache_options=CacheOptions(cache_mode="overwrite"),
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    assert observed == [snapshot]
+
+
 def test_scenario_run_with_adapter(tracker: Tracker, tmp_path: Path, monkeypatch):
     config_root = tmp_path / "adapter_cfg_scenario"
     config_root.mkdir(parents=True, exist_ok=True)
@@ -633,3 +686,23 @@ def test_scenario_run_uses_decorator_identity_inputs_default(
         digest_map = record.run.meta.get("consist_hash_inputs")
         assert isinstance(digest_map, dict)
         assert len(digest_map) == 1
+
+
+def test_scenario_run_accepts_output_sets(tracker: Tracker) -> None:
+    def step(ctx) -> None:
+        annual_dir = ctx.run_dir / "annual"
+        annual_dir.mkdir(parents=True)
+        (annual_dir / "annual_2030.csv").write_text("year\n2030\n")
+
+    with tracker.scenario("scen_output_sets") as sc:
+        result = sc.run(
+            fn=step,
+            name="annual_step",
+            output_sets={
+                "annual_outputs": OutputSet(root="annual", include="annual_*.csv")
+            },
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+
+        assert result.outputs["annual_outputs"].driver == "artifact_set"
+        assert sc.coupler["annual_outputs"].driver == "artifact_set"

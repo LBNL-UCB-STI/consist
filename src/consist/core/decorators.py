@@ -13,7 +13,7 @@ from typing import (
 )
 
 from consist.core.step_context import StepContext
-from consist.types import IdentityInputs, InputBindingMode
+from consist.types import IdentityInputs, InputBindingMode, OutputSet
 
 if TYPE_CHECKING:
     from consist.core.config_canonicalization import ConfigAdapter
@@ -35,6 +35,7 @@ class StepDefinition:
     outputs: Optional[MetaValue[List[str]]] = None
     schema_outputs: Optional[MetaValue[List[str]]] = None
     output_paths: Optional[MetaValue[Mapping[str, Any]]] = None
+    output_sets: Optional[MetaValue[Mapping[str, OutputSet]]] = None
 
     # Inputs
     inputs: Optional[MetaValue[Union[Mapping[str, Any], Iterable[Any]]]] = None
@@ -74,6 +75,7 @@ def define_step(
     outputs: Optional[MetaValue[List[str]]] = None,
     schema_outputs: Optional[MetaValue[List[str]]] = None,
     output_paths: Optional[MetaValue[Mapping[str, Any]]] = None,
+    output_sets: Optional[MetaValue[Mapping[str, OutputSet]]] = None,
     inputs: Optional[MetaValue[Union[Mapping[str, Any], Iterable[Any]]]] = None,
     input_keys: Optional[MetaValue[Union[Iterable[str], str]]] = None,
     optional_input_keys: Optional[MetaValue[Union[Iterable[str], str]]] = None,
@@ -99,6 +101,11 @@ def define_step(
 
     This is used by Tracker.run/ScenarioContext.run to infer defaults. Callable
     values are resolved at runtime with a StepContext.
+
+    ``output_sets`` may be supplied here as reusable defaults for steps that
+    write one logical output as many files. Each ``OutputSet`` needs only
+    ``root`` and ``include``; ``expected_members`` and ``expected_count`` are
+    optional validation checks.
     """
     removed_kwargs = [name for name in ("config_plan", "hash_inputs") if name in extra]
     if removed_kwargs:
@@ -118,6 +125,7 @@ def define_step(
                 outputs=outputs,
                 schema_outputs=schema_outputs,
                 output_paths=output_paths,
+                output_sets=output_sets,
                 inputs=inputs,
                 input_keys=input_keys,
                 optional_input_keys=optional_input_keys,

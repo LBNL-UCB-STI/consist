@@ -10,9 +10,10 @@ These are intentionally minimal and dependency-tolerant:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
+import re
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -21,11 +22,14 @@ from typing import (
     Optional,
     Protocol,
     Literal,
+    Callable,
+    Sequence,
     TypeAlias,
     Union,
     runtime_checkable,
 )
 from pydantic import BaseModel
+from sqlmodel import SQLModel
 
 if TYPE_CHECKING:  # pragma: no cover
     from consist.models.artifact import Artifact
@@ -71,17 +75,53 @@ class BindingResult:
 
 @dataclass(frozen=True, slots=True)
 class CacheOptions:
-    """
-    Grouped cache behavior options for ``run(...)`` APIs.
+    """Configure cache lookup, hydration, validation, and code identity.
 
-    All fields are optional so callers can set only the knobs they need.
+    All options except ``cache_hydration_failure`` are optional, so callers can
+    set only the cache controls relevant to a run.
+
+    Attributes
+    ----------
+    cache_mode : str | None
+        Cache lookup policy, such as ``"reuse"`` or ``"off"``. ``None`` uses
+        the active run default.
+    cache_hydration : str | None
+        Cache-hit hydration policy. Supported values include metadata-only,
+        requested-output, and all-output hydration modes. ``None`` uses the
+        active run default.
+    cache_hydration_failure : {"warn", "miss"}
+        Compatibility policy for lower-level requested-output hydration.
+        Cache reuse always rejects an ``outputs-requested`` candidate that
+        cannot materialize every requested output; ``"miss"`` is required
+        outside that lifecycle path and requires
+        ``cache_hydration="outputs-requested"``.
+    cache_version : int | None
+        Optional cache-version discriminator used when selecting candidates.
+    cache_epoch : int | None
+        Optional cache-epoch discriminator used to invalidate older candidates.
+    validate_cached_outputs : str | None
+        Validation policy for cached output artifacts, such as ``"lazy"`` or
+        ``"eager"``. This validates candidate artifacts independently of
+        requested-output admission.
+    validate_materialized_inputs : bool | None
+        Whether to validate inputs after Consist materializes them for a run.
+    materialize_cached_outputs_source_root : PathLike | None
+        Optional source-root override used to recover cached output artifacts
+        from an archive or mirror.
+    code_identity : CodeIdentityMode | None
+        Optional policy controlling how callable code contributes to the cache
+        identity.
+    code_identity_extra_deps : list[str] | None
+        Extra dependency paths to include when computing code identity.
     """
 
     cache_mode: Optional[str] = None
     cache_hydration: Optional[str] = None
+    cache_hydration_failure: Literal["warn", "miss"] = "warn"
     cache_version: Optional[int] = None
     cache_epoch: Optional[int] = None
     validate_cached_outputs: Optional[str] = None
+    validate_materialized_inputs: Optional[bool] = None
     materialize_cached_outputs_source_root: Optional[PathLike] = None
     code_identity: Optional[CodeIdentityMode] = None
     code_identity_extra_deps: Optional[list[str]] = None
@@ -95,6 +135,241 @@ class OutputPolicyOptions:
 
     output_mismatch: Optional[Literal["warn", "error", "ignore"]] = None
     output_missing: Optional[Literal["warn", "error", "ignore"]] = None
+
+
+@dataclass(frozen=True, slots=True)
+class OutputArtifactSpec:
+    """
+    Declares one file output with optional artifact logging metadata.
+
+    ``output_paths={key: path}`` remains the shorthand for plain path outputs.
+    Use this richer declaration when the output path should carry schema,
+    driver, facet, profiling, or future validation metadata at the declaration
+    site.
+    """
+
+    path: ArtifactRef
+    schema: type[SQLModel] | None = None
+    driver: str | None = None
+    facet: FacetLike | None = None
+    facet_schema_version: str | int | None = None
+    facet_index: bool = False
+    profile_file_schema: bool | Literal["if_changed"] | None = None
+    file_schema_sample_rows: int | None = None
+    meta: Mapping[str, Any] | None = None
+
+
+ArtifactSpec = OutputArtifactSpec
+OutputPathRef: TypeAlias = Union[ArtifactRef, OutputArtifactSpec]
+
+
+_SAFE_CAPTURE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_FILENAME_PATTERN_RESERVED_NAMES = {
+    "artifact_set",
+    "manifest_artifact_id",
+    "member_count",
+    "output_set_key",
+    "output_set_kind",
+    "output_set_member",
+    "output_set_relative_path",
+    "schema_name",
+    "total_size_bytes",
+}
+
+
+def _validate_capture_name(name: str) -> None:
+    if not _SAFE_CAPTURE_NAME_RE.fullmatch(name):
+        raise ValueError(f"capture name must be a safe identifier (got {name!r})")
+    if name in _FILENAME_PATTERN_RESERVED_NAMES:
+        raise ValueError(f"capture name {name!r} is reserved")
+
+
+def _capture_signature(capture: "FilenameCapture") -> tuple[str, tuple[str, ...]]:
+    if isinstance(capture, IntCapture):
+        return ("int", ())
+    if isinstance(capture, EnumCapture):
+        return ("enum", tuple(sorted(capture.allowed)))
+    raise TypeError(f"unsupported capture type: {type(capture)!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class IntCapture:
+    name: str
+    wildcard: int
+
+    def __post_init__(self) -> None:
+        _validate_capture_name(self.name)
+        if self.wildcard < 1:
+            raise ValueError(f"wildcard must be 1-indexed (got {self.wildcard})")
+
+
+@dataclass(frozen=True, slots=True)
+class EnumCapture:
+    name: str
+    allowed: frozenset[str] | Iterable[str]
+    wildcard: int
+
+    def __post_init__(self) -> None:
+        _validate_capture_name(self.name)
+        if self.wildcard < 1:
+            raise ValueError(f"wildcard must be 1-indexed (got {self.wildcard})")
+        allowed_values = frozenset(str(value) for value in self.allowed)
+        if not allowed_values:
+            raise ValueError("enum capture must define at least one allowed value")
+        object.__setattr__(self, "allowed", allowed_values)
+
+
+FilenameCapture: TypeAlias = Union[IntCapture, EnumCapture]
+
+
+@dataclass(frozen=True, slots=True)
+class FilenamePattern:
+    pattern: str
+    captures: tuple[FilenameCapture, ...] = ()
+
+    def __post_init__(self) -> None:
+        _validate_filename_pattern_glob(self.pattern)
+        if self.captures:
+            _validate_filename_pattern_captures(self)
+
+    @classmethod
+    def glob(cls, pattern: str) -> "FilenamePattern":
+        return cls(pattern=pattern)
+
+    def with_captures(self, *captures: FilenameCapture) -> "FilenamePattern":
+        return replace(self, captures=tuple(captures))
+
+
+def _validate_filename_pattern_glob(pattern: str) -> None:
+    if not pattern:
+        raise ValueError("filename pattern must not be empty")
+    if "\\" in pattern:
+        raise ValueError(
+            "capture-aware filename patterns must use '/' as the path separator"
+        )
+    if "**" in pattern:
+        raise ValueError("capture-aware filename patterns cannot contain '**'")
+    if any(token in pattern for token in ("?", "[", "]")):
+        raise ValueError(
+            "capture-aware filename patterns only support literal text and '*'"
+        )
+
+
+def _validate_filename_pattern_captures(pattern: FilenamePattern) -> None:
+    wildcard_count = pattern.pattern.count("*")
+    if not pattern.captures:
+        raise ValueError("filename patterns must declare at least one capture")
+    if wildcard_count != len(pattern.captures):
+        raise ValueError(
+            f"filename pattern has {wildcard_count} wildcard(s) but "
+            f"{len(pattern.captures)} capture(s)"
+        )
+
+    seen_signatures: dict[str, tuple[str, tuple[str, ...]]] = {}
+    seen_wildcards: set[int] = set()
+    for capture in pattern.captures:
+        signature = _capture_signature(capture)
+        previous_signature = seen_signatures.get(capture.name)
+        if previous_signature is not None and previous_signature != signature:
+            raise ValueError(f"incompatible repeated capture {capture.name!r}")
+        if capture.wildcard in seen_wildcards:
+            raise ValueError(
+                f"duplicate wildcard index {capture.wildcard} is not allowed"
+            )
+        if capture.wildcard < 1 or capture.wildcard > wildcard_count:
+            raise ValueError(
+                f"wildcard index {capture.wildcard} is out of range for pattern "
+                f"with {wildcard_count} wildcard(s)"
+            )
+        seen_signatures[capture.name] = signature
+        seen_wildcards.add(capture.wildcard)
+
+    if seen_wildcards != set(range(1, wildcard_count + 1)):
+        raise ValueError("every wildcard must be bound exactly once")
+
+
+@dataclass(frozen=True, slots=True)
+class OutputSet:
+    """
+    Declares a logical output artifact represented by multiple member files.
+
+    Use an output set when a step writes one conceptual output as several files,
+    such as one CSV per year or one partition per worker. Consist records one
+    parent artifact for the logical output and records each discovered file as a
+    child artifact. The JSON manifest artifact stores the detailed member list.
+
+    Only ``root`` and ``include`` are required. The ``expected_*`` fields are
+    optional guardrails: use them when the run should fail if a known partition
+    is missing, but omit them for open-ended bundles where "whatever matched the
+    include pattern" is the desired set.
+
+    Parameters
+    ----------
+    root : str | pathlib.Path
+        Directory containing the member files. Relative roots are resolved under
+        the run's output directory, so ``root="annual"`` means
+        ``<run-output-dir>/annual``.
+    include : str | Sequence[str] | FilenamePattern
+        Glob-style filename pattern or patterns for files to include. Matching
+        is against each path relative to ``root``. A ``"**/"`` segment matches
+        zero or more directory levels, so ``"**/*.csv"`` includes both root
+        files and nested files and requests recursive discovery.
+        A ``FilenamePattern`` object may be used for capture-aware matching.
+    exclude : str | Sequence[str] | None, optional
+        Glob-style pattern or patterns to remove from the included files.
+    recursive : bool, default False
+        If true, search below ``root`` recursively regardless of the include
+        pattern. If false, only direct child files are considered unless an
+        include pattern contains ``"**"``.
+    kind : str | None, optional
+        Human-facing category for the set, such as ``"annual-partitions"`` or
+        ``"diagnostic-bundle"``. This is metadata only.
+    schema : type[SQLModel] | None, optional
+        Optional schema metadata for the logical parent and members. This does
+        not make schema validation happen yet.
+    profile_file_schema : bool | {"if_changed"} | None, optional
+        Optional per-set file schema profiling control for tabular member files.
+        ``None`` means use the enclosing run/tracker default.
+    file_schema_sample_rows : int | None, optional
+        Optional sample size used when member file schema profiling is enabled.
+    expected_count : int | Callable[[Mapping[str, Any]], int] | None, optional
+        Optional completeness check for the number of discovered members.
+    expected_members : Sequence[str] | Callable[[Mapping[str, Any]], Sequence[str]] | None, optional
+        Optional completeness check for exact relative member names. This is not
+        required. It is useful for partitioned outputs where the config already
+        tells you the expected files, for example one file per requested year.
+    partition_key : str | None, optional
+        Optional metadata label for the partition dimension represented by the
+        members, such as ``"year"``. Consist does not infer facets from this
+        value.
+    member_facets : Callable[..., Mapping[str, Any]] | None, optional
+        Optional callable returning facets for each member. It receives
+        ``(path, relative_path, config)``.
+    facet : Mapping[str, Any] | None, optional
+        Optional facets for the logical parent artifact.
+    validate : {"exists", "manifest", "hashes", "schema"}, default "manifest"
+        Validation mode. ``"manifest"`` and ``"exists"`` are implemented in v1.
+        ``"manifest"`` records the member manifest and applies any
+        ``expected_*`` checks. ``"exists"`` also requires at least one member.
+        ``"hashes"`` and ``"schema"`` are reserved for future stricter checks.
+    """
+
+    root: PathLike
+    include: str | Sequence[str] | FilenamePattern
+    exclude: str | Sequence[str] | None = None
+    recursive: bool = False
+    kind: str | None = None
+    schema: type[SQLModel] | None = None
+    profile_file_schema: bool | Literal["if_changed"] | None = None
+    file_schema_sample_rows: int | None = None
+    expected_count: int | Callable[[Mapping[str, Any]], int] | None = None
+    expected_members: (
+        Sequence[str] | Callable[[Mapping[str, Any]], Sequence[str]] | None
+    ) = None
+    partition_key: str | None = None
+    member_facets: Callable[..., Mapping[str, Any]] | None = None
+    facet: Mapping[str, Any] | None = None
+    validate: Literal["exists", "manifest", "hashes", "schema"] = "manifest"
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +414,7 @@ class ExecutionOptions:
     input_paths: Optional[Mapping[str, PathLike]] = None
     input_materialization: Optional[Literal["requested"]] = None
     input_materialization_mode: Optional[Literal["copy"]] = None
+    requested_input_artifact_ids: Optional[Mapping[str, str]] = None
     executor: Optional[Literal["python", "container"]] = None
     container: Optional[Mapping[str, Any]] = None
     runtime_kwargs: Optional[Mapping[str, Any]] = None
@@ -172,6 +448,7 @@ DriverLiteral: TypeAlias = Literal[
     "netcdf",
     "openmatrix",
     "geojson",
+    "geoparquet",
     "shapefile",
     "geopackage",
     "json",
@@ -217,6 +494,7 @@ class DriverType(str, Enum):
     NETCDF = "netcdf"
     OPENMATRIX = "openmatrix"
     GEOJSON = "geojson"
+    GEOPARQUET = "geoparquet"
     SHAPEFILE = "shapefile"
     GEOPACKAGE = "geopackage"
     JSON = "json"
@@ -268,7 +546,14 @@ class DriverType(str, Enum):
     @classmethod
     def spatial_drivers(cls) -> frozenset[str]:
         """Drivers that load as GeoDataFrame (geospatial formats)."""
-        return frozenset({cls.GEOJSON.value, cls.SHAPEFILE.value, cls.GEOPACKAGE.value})
+        return frozenset(
+            {
+                cls.GEOJSON.value,
+                cls.GEOPARQUET.value,
+                cls.SHAPEFILE.value,
+                cls.GEOPACKAGE.value,
+            }
+        )
 
     @classmethod
     def hdf_drivers(cls) -> frozenset[str]:

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import pytest
+from sqlmodel import SQLModel
 
 import consist
 from consist.core.config_canonicalization import (
@@ -12,13 +14,18 @@ from consist.core.config_canonicalization import (
     ConfigPlan,
     canonical_identity_from_config,
 )
-from consist.types import CacheOptions, ExecutionOptions, OutputPolicyOptions
+from consist.types import (
+    ArtifactSpec,
+    CacheOptions,
+    ExecutionOptions,
+    OutputPolicyOptions,
+)
 
 
 def _assert_problem_cause_fix(message: str) -> None:
     assert "Problem:" in message
-    assert "Cause:" in message
-    assert "Fix:" in message
+    assert "Likely cause:" in message
+    assert "Suggested fix:" in message
 
 
 def test_scenario_run_updates_coupler_and_cache_hit(tracker):
@@ -71,6 +78,257 @@ def test_scenario_run_resolves_coupler_inputs(tracker):
             inputs={"data": "data"},
             execution_options=ExecutionOptions(load_inputs=True),
         )
+
+
+def test_scenario_run_does_not_rewarn_decorated_optional_input_keys(
+    tracker, tmp_path
+) -> None:
+    source = tmp_path / "required.txt"
+    source.write_text("required\n", encoding="utf-8")
+    received: list[Path] = []
+
+    @tracker.define_step(optional_input_keys=("optional",))
+    def consume(required: Path) -> None:
+        received.append(required)
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        with tracker.scenario("decorated_optional_input") as scenario:
+            scenario.run(
+                fn=consume,
+                inputs={"required": source},
+                execution_options=ExecutionOptions(input_binding="paths"),
+            )
+
+    assert received == [source]
+    assert not [
+        warning
+        for warning in captured
+        if "input_keys/optional_input_keys" in str(warning.message)
+    ]
+
+
+def test_tracker_run_still_warns_for_direct_input_keys(tracker, tmp_path) -> None:
+    source = tmp_path / "required.txt"
+    source.write_text("required\n", encoding="utf-8")
+
+    def consume(required: Path) -> None:
+        assert required == source
+
+    with pytest.warns(DeprecationWarning, match="input_keys/optional_input_keys"):
+        tracker.run(
+            fn=consume,
+            inputs={"required": source},
+            input_keys=("legacy",),
+            execution_options=ExecutionOptions(input_binding="paths"),
+        )
+
+
+def test_tracker_run_rejects_public_or_forged_strict_controls_before_execution(
+    tracker,
+) -> None:
+    calls: list[str] = []
+
+    def consume() -> None:
+        calls.append("executed")
+
+    untyped_execution_options: Any = ExecutionOptions
+    with pytest.raises(TypeError, match="strict_binding_identity"):
+        tracker.run(
+            fn=consume,
+            execution_options=untyped_execution_options(
+                strict_binding_identity="digest",
+                strict_binding_json="{}",
+            ),
+        )
+    with pytest.raises(ValueError, match="strict binding context"):
+        tracker.run(fn=consume, _strict_binding_context=object())
+
+    assert calls == []
+    assert tracker.current_consist is None
+
+
+@pytest.mark.parametrize(
+    "control",
+    [
+        {"strict_binding_identity": "digest"},
+        {"strict_binding_json": "{}"},
+        {"_consist_strict_binding_json": "{}"},
+        {"requested_input_strict_snapshot": True},
+        {"_strict_binding_context": object()},
+        {
+            "_consist_identity_config_overrides": {
+                "__consist_resolved_binding__": "digest"
+            }
+        },
+    ],
+)
+def test_tracker_start_run_rejects_raw_strict_controls_before_lifecycle(
+    tracker, monkeypatch, control
+) -> None:
+    begin_calls: list[dict[str, Any]] = []
+
+    def record_begin_run(**kwargs: Any) -> None:
+        begin_calls.append(kwargs)
+
+    monkeypatch.setattr(tracker, "begin_run", record_begin_run)
+
+    with pytest.raises(ValueError, match="strict binding"):
+        with tracker.start_run("forged_strict", "test", **control):
+            pass
+
+    assert begin_calls == []
+
+
+def test_scenario_strict_binding_rejects_container_before_tracker_handoff(
+    tracker, tmp_path, monkeypatch
+) -> None:
+    from consist.core.resolved_binding import (
+        ArtifactIdentity,
+        BoundArtifact,
+        ResolvedBindingBuilder,
+        TrackedArtifactLocator,
+        step_contract_identity,
+    )
+
+    source = tmp_path / "raw.txt"
+    source.write_text("accepted\n", encoding="utf-8")
+    with tracker.start_run("seed", "test"):
+        artifact = tracker.log_artifact(source, key="raw", direction="input")
+
+    def consume(raw: Path) -> None:
+        raise AssertionError("strict container binding must not execute")
+
+    binding = (
+        ResolvedBindingBuilder(
+            step_name="consume",
+            step_contract_identity=step_contract_identity(consume, "consume"),
+        )
+        .bind_artifact(
+            parameter="raw",
+            artifact=BoundArtifact(
+                artifact_id=artifact.id,
+                identity=ArtifactIdentity.from_artifact(artifact),
+                locator=TrackedArtifactLocator(artifact_id=artifact.id),
+            ),
+            destination=Path("inputs/raw.txt"),
+            source="pinned",
+        )
+        .freeze()
+    )
+    handoffs: list[dict[str, Any]] = []
+
+    def record_handoff(**kwargs: Any) -> None:
+        handoffs.append(kwargs)
+
+    monkeypatch.setattr(tracker, "run", record_handoff)
+
+    with tracker.scenario("strict_container") as scenario:
+        with pytest.raises(ValueError, match="only supports executor='python'"):
+            scenario.run(
+                fn=consume,
+                name="consume",
+                binding=binding,
+                output_paths={"output": tmp_path / "output.txt"},
+                execution_options=ExecutionOptions(
+                    input_binding="paths",
+                    executor="container",
+                    container={"image": "example:latest", "command": ["true"]},
+                ),
+            )
+
+    assert handoffs == []
+
+
+def test_scenario_run_profile_file_schema_profiles_inputs_and_outputs(
+    tracker, tmp_path
+):
+    raw_path = tmp_path / "raw.csv"
+    raw_path.write_text("firm_id,employment\n1,42\n", encoding="utf-8")
+
+    def step(raw: Path, ctx) -> None:
+        assert raw == raw_path
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "summary.csv").write_text(
+            "metric,value\nemployment,42\n",
+            encoding="utf-8",
+        )
+
+    with tracker.scenario("scen_profile_schema") as sc:
+        result = sc.run(
+            fn=step,
+            inputs={"raw": raw_path},
+            output_paths={"summary": "summary.csv"},
+            profile_file_schema=True,
+            execution_options=ExecutionOptions(
+                input_binding="paths",
+                inject_context="ctx",
+            ),
+        )
+
+    input_artifact = tracker.db.get_artifact("raw", run_id=result.run.id)
+    assert input_artifact is not None
+    assert tracker.db.get_artifact_schema_for_artifact(artifact_id=input_artifact.id)
+    assert tracker.db.get_artifact_schema_for_artifact(
+        artifact_id=result.outputs["summary"].id
+    )
+
+
+def test_scenario_run_output_path_artifact_spec_profiles_declared_output(
+    tracker,
+) -> None:
+    def step(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "out.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+
+    with tracker.scenario("scen_artifact_spec_profile") as sc:
+        parent_run_id = sc.run_id
+        result = sc.run(
+            fn=step,
+            output_paths={
+                "out": ArtifactSpec(
+                    path="out.csv",
+                    profile_file_schema=True,
+                )
+            },
+            profile_file_schema=True,
+            cache_options=CacheOptions(cache_mode="overwrite"),
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+
+    artifact = result.outputs["out"]
+    assert artifact.path.name == "out.csv"
+    assert result.run.parent_run_id == parent_run_id
+    assert tracker.db.get_artifact_schema_for_artifact(artifact_id=artifact.id)
+
+
+def test_scenario_run_output_path_artifact_spec_tags_schema(tracker) -> None:
+    class ScenarioOutput(SQLModel):
+        a: int
+        b: int
+
+    def step(ctx) -> None:
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "typed.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+
+    with tracker.scenario("scen_artifact_spec_schema") as sc:
+        result = sc.run(
+            fn=step,
+            output_paths={
+                "typed": ArtifactSpec(
+                    path="typed.csv",
+                    schema=ScenarioOutput,
+                    driver="csv",
+                )
+            },
+            cache_options=CacheOptions(cache_mode="overwrite"),
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+
+    artifact = result.outputs["typed"]
+    assert artifact.driver == "csv"
+    assert artifact.meta["schema_name"] == "ScenarioOutput"
+    assert artifact.meta.get("has_strict_schema") is not True
 
 
 def test_scenario_run_promotes_coupler_inputs_for_path_binding(tracker):
@@ -821,3 +1079,82 @@ def test_scenario_run_metadata_resolution_matches_tracker_run(tracker):
     assert tracker_run.tags == scenario_run.tags == ["stage:model"]
     assert "step__y2040" in tracker_run.id
     assert "step__y2040" in scenario_run.id
+
+
+def test_scenario_preflight_identity_reuses_dynamic_metadata_once(tracker) -> None:
+    calls = {"model": 0, "name": 0, "description": 0}
+
+    def dynamic_model(ctx) -> str:
+        calls["model"] += 1
+        return f"demand-{ctx.runtime_kwargs['scenario']}"
+
+    def dynamic_name(ctx) -> str:
+        calls["name"] += 1
+        return "{func_name}__{model}__y{year}__{phase}"
+
+    def dynamic_description(ctx) -> str:
+        calls["description"] += 1
+        return f"scenario:{ctx.runtime_kwargs['scenario']}"
+
+    @tracker.define_step(
+        model=dynamic_model,
+        name_template=dynamic_name,
+        description=dynamic_description,
+    )
+    def step(scenario: str) -> None:
+        assert scenario == "baseline"
+        return None
+
+    execution_options = ExecutionOptions(runtime_kwargs={"scenario": "baseline"})
+    with tracker.scenario("preflight_identity") as scenario:
+        identity = scenario.resolve_step_identity(
+            step,
+            year=2040,
+            phase="warmstart",
+            execution_options=execution_options,
+        )
+
+        assert isinstance(identity, consist.StepIdentity)
+        assert identity.name == "step__demand-baseline__y2040__warmstart"
+        assert identity.model == "demand-baseline"
+        scenario.run(
+            step,
+            step_identity=identity,
+            execution_options=execution_options,
+        )
+
+    assert calls == {"model": 1, "name": 1, "description": 1}
+
+
+def test_scenario_preflight_identity_rejects_a_different_callable(tracker) -> None:
+    def first() -> None:
+        return None
+
+    def other() -> None:
+        return None
+
+    with tracker.scenario("preflight_identity_mismatch") as scenario:
+        identity = scenario.resolve_step_identity(first)
+
+        with pytest.raises(ValueError, match="different callable"):
+            scenario.run(other, step_identity=identity)
+
+
+def test_scenario_preflight_identity_rejects_changed_runtime_kwargs(tracker) -> None:
+    def step(scenario: str) -> None:
+        return None
+
+    with tracker.scenario("preflight_identity_runtime_mismatch") as scenario:
+        identity = scenario.resolve_step_identity(
+            step,
+            execution_options=ExecutionOptions(runtime_kwargs={"scenario": "first"}),
+        )
+
+        with pytest.raises(ValueError, match="runtime kwargs"):
+            scenario.run(
+                step,
+                step_identity=identity,
+                execution_options=ExecutionOptions(
+                    runtime_kwargs={"scenario": "second"}
+                ),
+            )

@@ -2,22 +2,38 @@ import logging
 import importlib
 import json
 import os
+import shutil
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 import pandas as pd
-from sqlalchemy import func, select
-from sqlmodel import Session, SQLModel
 
-from consist.core.config_canonicalization import ConfigAdapterOptions
-from consist.integrations.beam import BeamConfigAdapter, BeamConfigOverrides
+pytest.importorskip(
+    "pyhocon",
+    reason="BEAM config-adapter tests require the optional pyhocon dependency",
+)
+
+from consist.core.config_canonicalization import (
+    ArtifactSpec,
+    CanonicalConfigIdentity,
+    ConfigAdapterOptions,
+    ConfigReference,
+)
+from consist.integrations.beam import (
+    BeamConfigAdapter,
+    BeamConfigOverrides,
+    BeamLaunchBundleMember,
+)
 from consist.integrations.beam.config_adapter import BeamReferencePolicy
+from consist.integrations.beam.config_adapter import (
+    _build_beam_canonicalization_snapshot,
+)
 from consist.integrations.beam.config_adapter import _load_config_tree
 from consist.integrations.beam.config_adapter import _resolve_reference
 from consist.integrations.beam.config_adapter import _resolves_under_config_root
-from consist.models.beam import BeamConfigCache, BeamConfigIngestRunLink
+from consist.models.artifact import Artifact
 from consist.types import CacheOptions, ExecutionOptions
 from tests.helpers.beam_fixtures import build_beam_test_configs
 
@@ -186,22 +202,6 @@ def _write_gtfs_directory_feed(
     return path
 
 
-def test_beam_models_register_tables(tracker):
-    if tracker.engine is None:
-        raise AssertionError("Tracker engine missing; DB tests require DuckDB.")
-    with tracker.engine.begin() as connection:
-        connection.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
-        SQLModel.metadata.create_all(
-            connection,
-            tables=[
-                BeamConfigCache.__table__,
-                BeamConfigIngestRunLink.__table__,
-            ],
-        )
-    with Session(tracker.engine) as session:
-        session.exec(select(func.count()).select_from(BeamConfigCache))
-
-
 def test_beam_discover_includes_and_hash(tracker, tmp_path: Path):
     case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
     adapter = BeamConfigAdapter(primary_config=overlay_conf)
@@ -247,6 +247,16 @@ def test_beam_canonicalize_artifacts_and_rows(tracker, tmp_path: Path, caplog):
     assert "beam_config_ingest_run_link" in ingest_tables
     assert result.identity.adapter_name == "beam"
     assert result.identity.identity_hash
+    assert result.canonicalization is not None
+    assert (
+        tuple(item.reference for item in result.canonicalization.references)
+        == result.identity.references
+    )
+    assert all(
+        key in artifact_keys
+        for item in result.canonicalization.references
+        for key in item.artifact_keys
+    )
     refs_by_key = {ref.config_key: ref for ref in result.identity.references}
     assert refs_by_key["beam.inputDirectory"].identity_policy == "path_alias"
     assert refs_by_key["beam.inputDirectory"].delegated_artifact_keys
@@ -320,6 +330,131 @@ def test_beam_canonicalize_discovers_gtfs_bundle_from_r5_directory(
         for spec in result.artifacts
         if spec.meta.get("config_role") == "gtfs_feed"
     } == {"gtfs"}
+
+
+def test_beam_canonicalize_selects_first_top_level_r5_osm_source(
+    gtfs_tracker, tmp_path: Path
+):
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    r5_root = case_dir / "inputs" / "r5" / "sfbay-cbg5500-weakConn-network"
+    r5_root.mkdir(parents=True)
+    selected_osm = r5_root / "001-network.VEX"
+    ignored_osm = r5_root / "002-network.pbf"
+    selected_osm.write_bytes(b"selected osm")
+    ignored_osm.write_bytes(b"ignored osm")
+    nested_osm = r5_root / "nested" / "000-network.pbf"
+    nested_osm.parent.mkdir()
+    nested_osm.write_bytes(b"nested osm")
+    _write_gtfs_zip_feed(
+        r5_root / "Caltrain.zip",
+        route_short_name="CT",
+        service_id="S1",
+    )
+    legacy_osm = case_dir / "inputs" / "legacy-network.pbf"
+    legacy_osm.write_bytes(b"legacy osm")
+    mapdb_path = case_dir / "inputs" / "r5" / "osm.mapdb"
+    mapdb_path.write_bytes(b"generated cache")
+    overlay_conf.write_text(
+        overlay_conf.read_text(encoding="utf-8")
+        + '\nbeam.routing.baseDate = "2024-01-01"\n'
+        + '\nbeam.routing.r5.directory = ${beam.inputDirectory}"/r5/sfbay-cbg5500-weakConn-network"\n'
+        + '\nbeam.routing.r5.osmFile = ${beam.inputDirectory}"/legacy-network.pbf"\n'
+        + '\nbeam.routing.r5.osmMapdbFile = ${beam.inputDirectory}"/r5/osm.mapdb"\n',
+        encoding="utf-8",
+    )
+
+    adapter = BeamConfigAdapter(primary_config=overlay_conf)
+    canonical = adapter.discover([case_dir], identity=gtfs_tracker.identity)
+    run = gtfs_tracker.begin_run("beam_r5_osm_source_unit", "beam")
+    result = adapter.canonicalize(canonical, run=run, tracker=gtfs_tracker)
+
+    osm_spec = next(
+        spec
+        for spec in result.artifacts
+        if spec.meta.get("config_role") == "r5_osm_source"
+    )
+    assert osm_spec.path == selected_osm
+    assert osm_spec.meta == {
+        "config_role": "r5_osm_source",
+        "config_reference_key": "beam.routing.r5.directory",
+        "selection_rule": "r5_top_level_osm_v1",
+        "selected_filename": "001-network.VEX",
+        "ignored_candidate_filenames": ["002-network.pbf"],
+    }
+    assert all(spec.path != legacy_osm for spec in result.artifacts)
+    assert all(spec.path != mapdb_path for spec in result.artifacts)
+
+    assert result.canonicalization is not None
+    r5_reference = next(
+        item
+        for item in result.canonicalization.references
+        if item.reference.config_key == "beam.routing.r5.directory"
+    )
+    assert osm_spec.key in r5_reference.artifact_keys
+    osm_member = next(
+        member
+        for member in r5_reference.artifact_members
+        if member.role == "r5_osm_source"
+    )
+    assert osm_member.resolved_path == selected_osm.resolve()
+    assert osm_member.artifact_key == osm_spec.key
+    assert osm_member.artifact_key in r5_reference.artifact_keys
+    assert dict(osm_member.metadata) == {
+        "selection_rule": "r5_top_level_osm_v1",
+        "selected_filename": "001-network.VEX",
+        "ignored_candidate_filenames": ("002-network.pbf",),
+    }
+    with pytest.raises(TypeError):
+        osm_member.metadata["selection_rule"] = "other"
+    gtfs_feed_keys = {
+        spec.key
+        for spec in result.artifacts
+        if spec.meta.get("config_role") == "gtfs_feed"
+    }
+    assert gtfs_feed_keys <= set(r5_reference.artifact_keys)
+    assert tuple(
+        member
+        for member in r5_reference.artifact_members
+        if member.role == "r5_osm_source"
+    ) == (osm_member,)
+
+
+def test_beam_canonicalize_does_not_select_r5_osm_without_top_level_candidate(
+    gtfs_tracker, tmp_path: Path
+):
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    r5_root = case_dir / "inputs" / "r5" / "sfbay-cbg5500-weakConn-network"
+    r5_root.mkdir(parents=True)
+    nested_osm = r5_root / "nested" / "network.pbf"
+    nested_osm.parent.mkdir()
+    nested_osm.write_bytes(b"nested osm")
+    _write_gtfs_zip_feed(
+        r5_root / "Caltrain.zip",
+        route_short_name="CT",
+        service_id="S1",
+    )
+    overlay_conf.write_text(
+        overlay_conf.read_text(encoding="utf-8")
+        + '\nbeam.routing.baseDate = "2024-01-01"\n'
+        + '\nbeam.routing.r5.directory = ${beam.inputDirectory}"/r5/sfbay-cbg5500-weakConn-network"\n',
+        encoding="utf-8",
+    )
+
+    adapter = BeamConfigAdapter(primary_config=overlay_conf)
+    canonical = adapter.discover([case_dir], identity=gtfs_tracker.identity)
+    run = gtfs_tracker.begin_run("beam_r5_no_osm_source_unit", "beam")
+    result = adapter.canonicalize(canonical, run=run, tracker=gtfs_tracker)
+
+    assert not any(
+        spec.meta.get("config_role") == "r5_osm_source" for spec in result.artifacts
+    )
+    assert result.canonicalization is not None
+    r5_reference = next(
+        item
+        for item in result.canonicalization.references
+        if item.reference.config_key == "beam.routing.r5.directory"
+    )
+    assert r5_reference.artifact_members == ()
 
 
 def test_beam_canonicalize_ignores_r5_sidecar_csv_and_discovers_zip_feeds(
@@ -409,6 +544,61 @@ def test_beam_canonicalize_ingests_gtfs_tables(gtfs_tracker, tmp_path: Path):
     assert count == 2
 
 
+def test_beam_canonicalization_snapshot_omits_unlogged_gtfs_directory_delegate(
+    tmp_path: Path,
+):
+    root_dir = tmp_path / "beam_case"
+    gtfs_root = root_dir / "inputs" / "r5"
+    feed_path = gtfs_root / "Caltrain.zip"
+    gtfs_root.mkdir(parents=True)
+    feed_path.write_bytes(b"feed")
+
+    reference = ConfigReference(
+        config_key="beam.routing.r5.directory",
+        raw_value=str(gtfs_root),
+        canonical_value="config:inputs/r5",
+        status="resolved",
+        required=True,
+        identity_policy="delegated_to_artifacts",
+        delegated_artifact_keys=("config:beam_case/inputs/r5",),
+    )
+    identity = CanonicalConfigIdentity(
+        adapter_name="beam",
+        adapter_version="0.1",
+        primary_config=None,
+        identity_hash="identity",
+        references=(reference,),
+    )
+    artifacts = {
+        gtfs_root: ArtifactSpec(
+            path=gtfs_root,
+            key="consist_gtfs_bundle",
+            direction="input",
+            meta={"config_role": "gtfs_bundle"},
+            driver="gtfs",
+        ),
+        feed_path: ArtifactSpec(
+            path=feed_path,
+            key="config:inputs/r5/Caltrain.zip",
+            direction="input",
+            meta={"config_role": "gtfs_feed"},
+            driver="gtfs",
+        ),
+    }
+
+    snapshot = _build_beam_canonicalization_snapshot(
+        identity=identity,
+        artifacts_by_path=artifacts,
+        root_dirs=[root_dir],
+        r5_directory=gtfs_root,
+    )
+
+    assert snapshot.references[0].artifact_keys == (
+        "consist_gtfs_bundle",
+        "config:inputs/r5/Caltrain.zip",
+    )
+
+
 def test_beam_canonicalize_prefers_directory_root_gtfs_bundle(
     gtfs_tracker, tmp_path: Path
 ):
@@ -476,6 +666,15 @@ def test_beam_canonicalize_normalizes_path_aliases(tracker, tmp_path: Path):
     assert alias_ref.identity_policy == "content_hash"
     assert alias_ref.canonical_value == "local_inputs/scenario.csv"
     assert alias_ref.hash
+    assert result.canonicalization is not None
+    alias_item = next(
+        item
+        for item in result.canonicalization.references
+        if item.reference.config_key == "beam.agentsim.aliasInput"
+    )
+    assert alias_item.reference is alias_ref
+    assert alias_item.resolved_path == data_path
+    assert alias_item.artifact_keys
     assert result.identity.scalars["options"]["path_aliases"] == {
         "local_inputs": external_root.resolve().as_posix()
     }
@@ -899,6 +1098,498 @@ def test_beam_materialize_overrides(tracker, tmp_path: Path):
     )
     config = ConfigFactory.parse_file(str(canonical.primary_config), resolve=True)
     assert config.get("beam.agentsim.agentSampleSizeAsFractionOfPopulation") == 0.75
+
+
+def test_beam_materialize_bundle_publishes_recoverable_launch_input(
+    tracker, tmp_path: Path
+):
+    """A launch bundle preserves config, staged inputs, and recovery bytes."""
+    ConfigFactory = importlib.import_module("pyhocon").ConfigFactory
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    prepared = tmp_path / "prepared" / "skims.omx"
+    prepared.parent.mkdir()
+    prepared.write_bytes(b"prepared skims")
+    launch_root = tmp_path / "launch"
+    durable_root = tmp_path / "durable"
+
+    bundle = BeamConfigAdapter(primary_config=overlay_conf).materialize_bundle(
+        tracker=tracker,
+        base_root_dirs=[case_dir],
+        overrides=BeamConfigOverrides(
+            values={"beam.agentsim.agentSampleSizeAsFractionOfPopulation": 0.75}
+        ),
+        staged_members=[
+            BeamLaunchBundleMember(
+                source=prepared,
+                destination="inputs/prepared/skims.omx",
+            )
+        ],
+        output_dir=launch_root,
+        durable_root=durable_root,
+    )
+
+    assert bundle.root == launch_root
+    assert bundle.primary_config == launch_root / case_dir.name / "overlay.conf"
+    assert (bundle.root / case_dir.name / "common.conf").is_file()
+    assert (bundle.root / "inputs" / "prepared" / "skims.omx").read_bytes() == (
+        b"prepared skims"
+    )
+    config = ConfigFactory.parse_file(str(bundle.primary_config), resolve=True)
+    assert config.get("beam.agentsim.agentSampleSizeAsFractionOfPopulation") == 0.75
+    assert bundle.artifact.recovery_roots == [str(durable_root.resolve())]
+    stored = tracker.get_artifact(str(bundle.artifact.id))
+    assert stored is not None
+    assert stored.run_id is None
+
+    shutil.rmtree(launch_root)
+    tracker.materialize(stored, launch_root, on_missing="raise")
+
+    assert (launch_root / "inputs" / "prepared" / "skims.omx").read_bytes() == (
+        b"prepared skims"
+    )
+
+
+def test_beam_materialize_bundle_reuses_matching_durable_tree(tracker, tmp_path: Path):
+    """Removing a caller launch tree reuses the existing durable bundle."""
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    prepared = tmp_path / "prepared.csv"
+    prepared.write_text("zone,value\n1,2\n", encoding="utf-8")
+    adapter = BeamConfigAdapter(primary_config=overlay_conf)
+    durable_root = tmp_path / "durable"
+    members = [
+        BeamLaunchBundleMember(source=prepared, destination="inputs/prepared.csv")
+    ]
+    first_root = tmp_path / "first_launch"
+    second_root = tmp_path / "second_launch"
+
+    first = adapter.materialize_bundle(
+        tracker=tracker,
+        base_root_dirs=[case_dir],
+        overrides=BeamConfigOverrides(values={}),
+        staged_members=members,
+        output_dir=first_root,
+        durable_root=durable_root,
+    )
+    shutil.rmtree(first_root)
+    reused = adapter.materialize_bundle(
+        tracker=tracker,
+        base_root_dirs=[case_dir],
+        overrides=BeamConfigOverrides(values={}),
+        staged_members=members,
+        output_dir=second_root,
+        durable_root=durable_root,
+    )
+
+    assert reused.artifact.id == first.artifact.id
+    assert (second_root / "inputs" / "prepared.csv").read_text(encoding="utf-8") == (
+        "zone,value\n1,2\n"
+    )
+
+
+def test_beam_materialize_bundle_recovers_artifact_backed_member(
+    tracker, tmp_path: Path
+):
+    """Artifact members are staged from verified recovery bytes when needed."""
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    prepared = tracker.run_dir / "prepared.csv"
+    prepared.parent.mkdir(parents=True, exist_ok=True)
+    prepared.write_text("zone,value\n1,2\n", encoding="utf-8")
+    with tracker.trace("prepare_recoverable_launch_member") as trace:
+        source_artifact = trace.log_artifact(
+            prepared, key="prepared_skims", direction="output"
+        )
+
+    archive_root = tmp_path / "source_archive"
+    relative_path = tracker.fs.get_remappable_relative_path(
+        source_artifact.container_uri
+    )
+    assert relative_path is not None
+    archived_source = archive_root / relative_path
+    archived_source.parent.mkdir(parents=True)
+    shutil.copy2(prepared, archived_source)
+    tracker.set_artifact_recovery_roots(source_artifact, [archive_root])
+    prepared.unlink()
+
+    bundle = BeamConfigAdapter(primary_config=overlay_conf).materialize_bundle(
+        tracker=tracker,
+        base_root_dirs=[case_dir],
+        overrides=BeamConfigOverrides(values={}),
+        staged_members=[
+            BeamLaunchBundleMember(
+                source=source_artifact,
+                destination="inputs/prepared.csv",
+            )
+        ],
+        output_dir=tmp_path / "launch",
+        durable_root=tmp_path / "durable",
+    )
+
+    assert (bundle.root / "inputs" / "prepared.csv").read_text(encoding="utf-8") == (
+        "zone,value\n1,2\n"
+    )
+
+
+def test_beam_materialize_bundle_rejects_changed_artifact_member_bytes(
+    tracker, tmp_path: Path
+):
+    """A changed primary artifact file cannot be published under its old identity."""
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    prepared = tmp_path / "prepared.csv"
+    prepared.write_text("zone,value\n1,2\n", encoding="utf-8")
+    with tracker.trace("prepare_changed_launch_member") as trace:
+        source_artifact = trace.log_artifact(
+            prepared, key="prepared_skims", direction="output"
+        )
+    prepared.write_text("zone,value\n1,changed\n", encoding="utf-8")
+    durable_root = tmp_path / "durable"
+
+    with pytest.raises(ValueError, match="source hash does not match"):
+        BeamConfigAdapter(primary_config=overlay_conf).materialize_bundle(
+            tracker=tracker,
+            base_root_dirs=[case_dir],
+            overrides=BeamConfigOverrides(values={}),
+            staged_members=[
+                BeamLaunchBundleMember(
+                    source=source_artifact,
+                    destination="inputs/prepared.csv",
+                )
+            ],
+            output_dir=tmp_path / "launch",
+            durable_root=durable_root,
+        )
+
+    assert not durable_root.exists()
+
+
+def test_beam_materialize_bundle_rejects_symlinked_external_artifact_member(
+    tracker, tmp_path: Path
+):
+    """An unmappable artifact URI cannot bypass staged-member symlink checks."""
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    prepared = tmp_path / "prepared.csv"
+    prepared.write_text("zone,value\n1,2\n", encoding="utf-8")
+    linked = tmp_path / "linked.csv"
+    linked.symlink_to(prepared)
+    source_artifact = Artifact(
+        key="prepared_skims",
+        container_uri=f"file://{linked.absolute()}",
+        driver="csv",
+        hash=tracker.identity.compute_file_checksum(prepared),
+    )
+    durable_root = tmp_path / "durable"
+
+    with pytest.raises(ValueError, match="regular non-symlink"):
+        BeamConfigAdapter(primary_config=overlay_conf).materialize_bundle(
+            tracker=tracker,
+            base_root_dirs=[case_dir],
+            overrides=BeamConfigOverrides(values={}),
+            staged_members=[
+                BeamLaunchBundleMember(
+                    source=source_artifact,
+                    destination="inputs/prepared.csv",
+                )
+            ],
+            output_dir=tmp_path / "launch",
+            durable_root=durable_root,
+        )
+
+    assert not durable_root.exists()
+
+
+def test_beam_materialize_bundle_stages_percent_escaped_external_artifact_uri(
+    tracker, tmp_path: Path
+):
+    """A valid local file URI is decoded before its source bytes are verified."""
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    prepared = tmp_path / "prepared skims.csv"
+    prepared.write_text("zone,value\n1,2\n", encoding="utf-8")
+    source_artifact = Artifact(
+        key="prepared_skims",
+        container_uri=prepared.as_uri(),
+        driver="csv",
+        hash=tracker.identity.compute_file_checksum(prepared),
+    )
+
+    bundle = BeamConfigAdapter(primary_config=overlay_conf).materialize_bundle(
+        tracker=tracker,
+        base_root_dirs=[case_dir],
+        overrides=BeamConfigOverrides(values={}),
+        staged_members=[
+            BeamLaunchBundleMember(
+                source=source_artifact,
+                destination="inputs/prepared.csv",
+            )
+        ],
+        output_dir=tmp_path / "launch",
+        durable_root=tmp_path / "durable",
+    )
+
+    assert (bundle.root / "inputs" / "prepared.csv").read_text(encoding="utf-8") == (
+        "zone,value\n1,2\n"
+    )
+
+
+def test_beam_materialize_bundle_rejects_corrupted_durable_tree_on_reuse(
+    tracker, tmp_path: Path
+):
+    """A durable bundle must still match its immutable directory manifest on retry."""
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    prepared = tmp_path / "prepared.csv"
+    prepared.write_text("zone,value\n1,2\n", encoding="utf-8")
+    adapter = BeamConfigAdapter(primary_config=overlay_conf)
+    durable_root = tmp_path / "durable"
+    members = [
+        BeamLaunchBundleMember(source=prepared, destination="inputs/prepared.csv")
+    ]
+    first = adapter.materialize_bundle(
+        tracker=tracker,
+        base_root_dirs=[case_dir],
+        overrides=BeamConfigOverrides(values={}),
+        staged_members=members,
+        output_dir=tmp_path / "first_launch",
+        durable_root=durable_root,
+    )
+    durable_member = Path(first.artifact.path) / "inputs" / "prepared.csv"
+    durable_member.write_text("zone,value\n1,corrupted\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="directory artifact file hash mismatch"):
+        adapter.materialize_bundle(
+            tracker=tracker,
+            base_root_dirs=[case_dir],
+            overrides=BeamConfigOverrides(values={}),
+            staged_members=members,
+            output_dir=tmp_path / "second_launch",
+            durable_root=durable_root,
+        )
+
+    assert not (tmp_path / "second_launch").exists()
+
+
+def test_beam_materialize_bundle_rejects_base_root_changed_during_staging(
+    tracker, tmp_path: Path
+):
+    """Copied config roots must match the manifests used for bundle identity."""
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    prepared = tmp_path / "prepared.csv"
+    prepared.write_text("zone,value\n1,2\n", encoding="utf-8")
+    original_copytree = shutil.copytree
+    mutated = False
+
+    def copytree_after_root_mutation(source, destination, *args, **kwargs):
+        nonlocal mutated
+        if not mutated:
+            mutated = True
+            with (case_dir / "common.conf").open("a", encoding="utf-8") as config:
+                config.write("\n# changed while launch bundle was staging\n")
+        return original_copytree(source, destination, *args, **kwargs)
+
+    with patch(
+        "consist.integrations.beam.config_adapter.shutil.copytree",
+        side_effect=copytree_after_root_mutation,
+    ):
+        with pytest.raises(ValueError, match="does not match its declared identity"):
+            BeamConfigAdapter(primary_config=overlay_conf).materialize_bundle(
+                tracker=tracker,
+                base_root_dirs=[case_dir],
+                overrides=BeamConfigOverrides(values={}),
+                staged_members=[
+                    BeamLaunchBundleMember(
+                        source=prepared,
+                        destination="inputs/prepared.csv",
+                    )
+                ],
+                output_dir=tmp_path / "launch",
+                durable_root=tmp_path / "durable",
+            )
+
+    assert mutated
+    assert not (tmp_path / "durable").exists()
+
+
+def test_beam_materialize_bundle_rejects_unsafe_destination_before_publication(
+    tracker, tmp_path: Path
+):
+    """A traversal destination cannot create a partial durable launch bundle."""
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    prepared = tmp_path / "prepared.csv"
+    prepared.write_text("zone,value\n1,2\n", encoding="utf-8")
+    durable_root = tmp_path / "durable"
+
+    with pytest.raises(ValueError, match="Unsafe launch bundle destination"):
+        BeamConfigAdapter(primary_config=overlay_conf).materialize_bundle(
+            tracker=tracker,
+            base_root_dirs=[case_dir],
+            overrides=BeamConfigOverrides(values={}),
+            staged_members=[
+                BeamLaunchBundleMember(source=prepared, destination="../escape.csv")
+            ],
+            output_dir=tmp_path / "launch",
+            durable_root=durable_root,
+        )
+
+    assert not durable_root.exists()
+
+
+def test_beam_materialize_bundle_rejects_symlinked_staged_source(
+    tracker, tmp_path: Path
+):
+    """A symlinked prepared member cannot become a recoverable launch input."""
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    prepared = tmp_path / "prepared.csv"
+    prepared.write_text("zone,value\n1,2\n", encoding="utf-8")
+    linked = tmp_path / "linked.csv"
+    linked.symlink_to(prepared)
+    durable_root = tmp_path / "durable"
+
+    with pytest.raises(ValueError, match="regular non-symlink"):
+        BeamConfigAdapter(primary_config=overlay_conf).materialize_bundle(
+            tracker=tracker,
+            base_root_dirs=[case_dir],
+            overrides=BeamConfigOverrides(values={}),
+            staged_members=[
+                BeamLaunchBundleMember(source=linked, destination="inputs/data.csv")
+            ],
+            output_dir=tmp_path / "launch",
+            durable_root=durable_root,
+        )
+
+    assert not durable_root.exists()
+
+
+def test_beam_materialize_bundle_rejects_staged_member_collision(
+    tracker, tmp_path: Path
+):
+    """A staged member cannot silently replace a copied config-root file."""
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    prepared = tmp_path / "prepared.conf"
+    prepared.write_text("beam.test = true\n", encoding="utf-8")
+    durable_root = tmp_path / "durable"
+
+    with pytest.raises(FileExistsError, match="already exists in the launch tree"):
+        BeamConfigAdapter(primary_config=overlay_conf).materialize_bundle(
+            tracker=tracker,
+            base_root_dirs=[case_dir],
+            overrides=BeamConfigOverrides(values={}),
+            staged_members=[
+                BeamLaunchBundleMember(
+                    source=prepared,
+                    destination=f"{case_dir.name}/common.conf",
+                )
+            ],
+            output_dir=tmp_path / "launch",
+            durable_root=durable_root,
+        )
+
+    assert not durable_root.exists()
+
+
+def test_beam_materialize_bundle_identity_tracks_launch_tree_inputs(
+    tracker, tmp_path: Path
+):
+    """Config contents, overrides, staged bytes, and paths cannot reuse a bundle."""
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    prepared = tmp_path / "prepared.csv"
+    prepared.write_text("zone,value\n1,2\n", encoding="utf-8")
+    adapter = BeamConfigAdapter(primary_config=overlay_conf)
+    durable_root = tmp_path / "durable"
+
+    def materialize(
+        name: str,
+        *,
+        overrides: dict[str, object] | None = None,
+        destination: str = "inputs/prepared.csv",
+    ):
+        return adapter.materialize_bundle(
+            tracker=tracker,
+            base_root_dirs=[case_dir],
+            overrides=BeamConfigOverrides(values=overrides or {}),
+            staged_members=[
+                BeamLaunchBundleMember(source=prepared, destination=destination)
+            ],
+            output_dir=tmp_path / name,
+            durable_root=durable_root,
+        )
+
+    original = materialize("original")
+    changed_override = materialize(
+        "changed_override",
+        overrides={"beam.agentsim.agentSampleSizeAsFractionOfPopulation": 0.8},
+    )
+    prepared.write_text("zone,value\n1,3\n", encoding="utf-8")
+    changed_member_bytes = materialize("changed_member_bytes")
+    changed_destination = materialize(
+        "changed_destination", destination="inputs/renamed.csv"
+    )
+    with (case_dir / "common.conf").open("a", encoding="utf-8") as config_file:
+        config_file.write("\n# materialized bundle identity regression\n")
+    changed_include = materialize("changed_include")
+
+    assert (
+        len(
+            {
+                original.artifact.id,
+                changed_override.artifact.id,
+                changed_member_bytes.artifact.id,
+                changed_destination.artifact.id,
+                changed_include.artifact.id,
+            }
+        )
+        == 5
+    )
+
+
+def test_beam_materialize_bundle_is_bound_as_a_downstream_input(
+    tracker, tmp_path: Path
+):
+    """The launch bundle is a BEAM input, not an output of that BEAM run."""
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    prepared = tmp_path / "prepared.csv"
+    prepared.write_text("zone,value\n1,2\n", encoding="utf-8")
+    with tracker.trace("prepare_launch_member") as trace:
+        source_artifact = trace.log_artifact(
+            prepared, key="prepared_skims", direction="output"
+        )
+    bundle = BeamConfigAdapter(primary_config=overlay_conf).materialize_bundle(
+        tracker=tracker,
+        base_root_dirs=[case_dir],
+        overrides=BeamConfigOverrides(values={}),
+        staged_members=[
+            BeamLaunchBundleMember(
+                source=source_artifact,
+                destination="inputs/prepared.csv",
+            )
+        ],
+        output_dir=tmp_path / "launch",
+        durable_root=tmp_path / "durable",
+    )
+    consumed: list[Path] = []
+
+    def consume(launch_bundle: Path) -> None:
+        consumed.append(launch_bundle)
+        assert (launch_bundle / case_dir.name / "overlay.conf").is_file()
+
+    downstream = tracker.run(
+        name="consume_beam_launch_bundle",
+        fn=consume,
+        inputs={"launch_bundle": bundle.artifact},
+        execution_options=ExecutionOptions(input_binding="paths"),
+    )
+
+    assert consumed == [Path(bundle.artifact.path)]
+    assert bundle.artifact.meta["bundle_staged_members"] == [
+        {
+            "destination": "inputs/prepared.csv",
+            "source_artifact_id": str(source_artifact.id),
+            "source_uri": source_artifact.container_uri,
+            "source_hash": source_artifact.hash,
+        }
+    ]
+    assert bundle.artifact.id in {
+        artifact.id for artifact in tracker.get_run_inputs(downstream.run.id).values()
+    }
+    assert bundle.artifact.id not in {
+        artifact.id for artifact in tracker.get_run_outputs(downstream.run.id).values()
+    }
 
 
 def test_beam_materialize_from_plan_uses_config_dirs(tracker, tmp_path: Path):

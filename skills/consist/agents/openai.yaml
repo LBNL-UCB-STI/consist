@@ -1,0 +1,4 @@
+interface:
+  display_name: "Consist"
+  short_description: "Consist bootstrap, integration, and debugging"
+  default_prompt: "Use $consist to bootstrap a new project with Consist or to integrate, debug, or analyze an existing downstream project that uses Consist."

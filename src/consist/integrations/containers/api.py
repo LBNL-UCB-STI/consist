@@ -25,7 +25,7 @@ import json
 import logging
 import shlex
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Union
@@ -407,6 +407,7 @@ def run_container(
     pull_latest: bool = False,
     lineage_mode: Literal["full", "none"] = "full",
     strict_mounts: bool = True,
+    output_log_kwargs: Optional[Mapping[str, Mapping[str, Any]]] = None,
 ) -> ContainerResult:
     """
     Executes a containerized step with optional provenance tracking and caching via Consist.
@@ -466,6 +467,9 @@ def run_container(
     strict_mounts : bool, default True
         If True, require tracker mounts to be configured and constrain container
         host paths to those roots. Set to False to allow any absolute host path.
+    output_log_kwargs : Optional[Mapping[str, Mapping[str, Any]]], optional
+        Per-output keyword arguments forwarded to ``Tracker.log_artifact`` when
+        a declared output is logged on a cache miss.
 
     Returns
     -------
@@ -481,6 +485,7 @@ def run_container(
         If the underlying backend fails to resolve image digest or run the container.
     """
     environment = environment or {}
+    output_log_kwargs = output_log_kwargs or {}
 
     # 1. Initialize Backend
     if backend_type == "docker":
@@ -585,11 +590,13 @@ def run_container(
         for output_key, host_out in output_specs:
             path_obj = Path(host_out).resolve()
             if path_obj.exists():
+                log_kwargs = dict(output_log_kwargs.get(output_key, {}))
                 # Log artifact (Consist handles auto-detecting file vs dir)
                 logged = active_tracker.log_artifact(
                     path_obj,
                     key=output_key or path_obj.name,
                     direction="output",
+                    **log_kwargs,
                 )
                 try:
                     object.__setattr__(logged, "_abs_path", str(path_obj))

@@ -19,6 +19,14 @@ pass `binding=BindingResult(...)` to `ScenarioContext.run(...)`. That envelope
 is the preferred scenario-level path for complex or externally orchestrated
 workflows. Keep using `consist.ref(...)` / `consist.refs(...)` for direct
 step-to-step wiring and primitive `inputs=` kwargs for ordinary scenario code.
+`ResolvedBinding` is a separate, advanced opt-in for a planner that needs
+execution-exact pinned inputs and durable admission/cache evidence; it does
+not change the preferred Coupler path.
+
+The advanced V1 contract binds only named callable parameters. Dynamic
+workspace-only artifacts are not yet strict binding inputs; see the
+[advanced workflow contract](workflow.md#immutable-resolved-bindings-advanced)
+before using it for restart closures.
 
 ## Essential helpers
 
@@ -29,7 +37,8 @@ step-to-step wiring and primitive `inputs=` kwargs for ordinary scenario code.
   [`consist.ref`](api_helpers.md#consist.api.ref),
   [`consist.refs`](api_helpers.md#consist.api.refs)
 - Resolved scenario bindings:
-  `consist.BindingResult`
+  `consist.BindingResult`; `consist.ResolvedBindingBuilder` for verified,
+  execution-exact advanced bindings
 - Managed output paths:
   [`consist.output_path`](api_helpers.md#consist.api.output_path),
   [`consist.output_dir`](api_helpers.md#consist.api.output_dir)

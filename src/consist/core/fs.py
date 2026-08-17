@@ -203,11 +203,28 @@ class FileSystemManager:
     @staticmethod
     def normalize_recovery_roots(
         roots: str | os.PathLike[str] | Sequence[str | os.PathLike[str]] | None,
+        *,
+        resolve: bool = True,
     ) -> list[str]:
-        """
-        Normalize advisory recovery roots into a deduped ordered list.
+        """Normalize advisory recovery roots into a deduplicated ordered list.
 
-        Roots are stored as absolute filesystem paths and retain caller order.
+        Parameters
+        ----------
+        roots : path-like, sequence of path-like, or None
+            Roots to normalize. ``None`` produces an empty list.
+        resolve : bool, default True
+            Whether to resolve symlinks. Set ``False`` when a caller must
+            inspect raw path components before following them.
+
+        Returns
+        -------
+        list[str]
+            Absolute normalized roots in first-occurrence order.
+
+        Raises
+        ------
+        ValueError
+            If ``roots`` or an entry is not path-like.
         """
         if roots is None:
             return []
@@ -229,10 +246,11 @@ class FileSystemManager:
                 raise ValueError(
                     "recovery_roots entries must be strings or pathlib.Path values."
                 )
-            resolved = str(Path(root).resolve())
-            if resolved not in seen:
-                seen.add(resolved)
-                normalized.append(resolved)
+            normalized_root = Path(root).resolve() if resolve else Path(root).absolute()
+            root_string = str(normalized_root)
+            if root_string not in seen:
+                seen.add(root_string)
+                normalized.append(root_string)
         return normalized
 
     @staticmethod
@@ -286,14 +304,34 @@ class FileSystemManager:
         original_run_dir: Optional[str],
         mounts_snapshot: Optional[Mapping[str, str]] = None,
         artifact_mount_root: Optional[str] = None,
+        resolve: bool = True,
     ) -> Optional[Path]:
-        """
-        Resolve the most specific historical root recorded for a URI.
+        """Resolve the most specific recorded historical root for a URI.
+
+        Parameters
+        ----------
+        uri : str
+            Artifact container URI whose owning root is requested.
+        original_run_dir : str | None
+            Historical workspace root for ``workspace://`` and relative URIs.
+        mounts_snapshot : mapping of str to str | None, optional
+            Historical mount roots recorded by URI scheme.
+        artifact_mount_root : str | None, optional
+            Artifact-specific fallback mount root.
+        resolve : bool, default True
+            Whether to resolve symlinks in the returned root. Set ``False``
+            when a caller needs to apply its own symlink policy.
+
+        Returns
+        -------
+        Path | None
+            Most specific applicable root, or ``None`` for unmappable URIs.
         """
         if uri.startswith("workspace://") or uri.startswith("./"):
             if not original_run_dir:
                 return None
-            return Path(original_run_dir).resolve()
+            path = Path(original_run_dir)
+            return path.resolve() if resolve else path.absolute()
 
         if "://" not in uri:
             return None
@@ -303,10 +341,12 @@ class FileSystemManager:
             return None
 
         if mounts_snapshot and isinstance(mounts_snapshot.get(scheme), str):
-            return Path(mounts_snapshot[scheme]).resolve()
+            path = Path(mounts_snapshot[scheme])
+            return path.resolve() if resolve else path.absolute()
 
         if artifact_mount_root:
-            return Path(artifact_mount_root).resolve()
+            path = Path(artifact_mount_root)
+            return path.resolve() if resolve else path.absolute()
 
         return None
 
@@ -318,11 +358,29 @@ class FileSystemManager:
         mounts_snapshot: Optional[Dict[str, str]] = None,
         artifact_mount_root: Optional[str] = None,
     ) -> Optional[tuple[Path, Path]]:
-        """
-        Derive a historical root plus portable relative layout for a URI.
+        """Derive a historical root plus portable relative URI layout.
 
-        This is stricter than ``resolve_historical_path(...)`` because it only
-        returns remappable layouts used by recovery-oriented materialization.
+        Parameters
+        ----------
+        uri : str
+            Artifact container URI to remap.
+        original_run_dir : str | None
+            Historical workspace root for workspace-relative URIs.
+        mounts_snapshot : dict[str, str] | None, optional
+            Historical mount roots recorded by URI scheme.
+        artifact_mount_root : str | None, optional
+            Artifact-specific fallback mount root.
+
+        Returns
+        -------
+        tuple[Path, Path] | None
+            Historical root and safe relative layout, or ``None`` when the URI
+            is not recovery-remappable.
+
+        Notes
+        -----
+        This is stricter than :meth:`resolve_historical_path` because it only
+        returns layouts safe for recovery-oriented materialization.
         """
         relative_path = self.get_remappable_relative_path(uri)
         if relative_path is None:

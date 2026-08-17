@@ -5,6 +5,7 @@ import json
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import (
     Any,
     Callable,
@@ -182,6 +183,116 @@ class ConfigReference:
             "delegated_artifact_keys": list(self.delegated_artifact_keys),
         }
         return {key: value for key, value in data.items() if value not in (None, [])}
+
+
+def _freeze_snapshot_metadata(value: Any) -> Any:
+    """
+    Recursively freeze runtime observation metadata.
+
+    Parameters
+    ----------
+    value : Any
+        Adapter-provided metadata value to preserve in a snapshot.
+
+    Returns
+    -------
+    Any
+        A recursively immutable equivalent: mappings become mapping proxies and
+        lists or tuples become tuples. Scalar values are returned unchanged.
+    """
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {str(key): _freeze_snapshot_metadata(item) for key, item in value.items()}
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_snapshot_metadata(item) for item in value)
+    return value
+
+
+@dataclass(frozen=True)
+class CanonicalizationArtifactMember:
+    """
+    Represent one exact artifact selected under a config reference.
+
+    Parameters
+    ----------
+    role : str
+        Adapter-defined semantic role for the selected artifact.
+    resolved_path : pathlib.Path
+        Local path observed during canonicalization. This is not a portable
+        identity or a final staged/container execution path.
+    artifact_key : str
+        Exact persisted key of the emitted adapter artifact.
+    metadata : Mapping[str, Any]
+        Immutable, adapter-defined selection facts. Nested mappings and
+        sequences are frozen when the observation is created.
+    """
+
+    role: str
+    resolved_path: Path
+    artifact_key: str
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """
+        Freeze nested metadata after dataclass construction.
+
+        Notes
+        -----
+        ``CanonicalizationArtifactMember`` is frozen, but a mutable mapping
+        supplied by an adapter would otherwise remain mutable through the
+        ``metadata`` attribute.
+        """
+        object.__setattr__(self, "metadata", _freeze_snapshot_metadata(self.metadata))
+
+
+@dataclass(frozen=True)
+class CanonicalizationReference:
+    """
+    Runtime facts observed for one canonicalized configuration reference.
+
+    Parameters
+    ----------
+    reference : ConfigReference
+        Portable identity facts for the configuration reference.
+    resolved_path : Optional[Path]
+        Local path observed during canonicalization, if one was resolved. This
+        is not an execution path and must not be used as portable identity.
+    artifact_keys : tuple[str, ...]
+        Exact artifact keys logged for this reference. A reference can map to
+        zero, one, or many artifacts.
+    artifact_members : tuple[CanonicalizationArtifactMember, ...]
+        Exact member-level observations for artifacts whose semantic role and
+        local observed path must remain associated with this reference.
+    """
+
+    reference: ConfigReference
+    resolved_path: Optional[Path]
+    artifact_keys: tuple[str, ...] = ()
+    artifact_members: tuple[CanonicalizationArtifactMember, ...] = ()
+
+
+@dataclass(frozen=True)
+class CanonicalizationSnapshot:
+    """
+    Immutable runtime view of one adapter canonicalization result.
+
+    Parameters
+    ----------
+    adapter_name : str
+        Name of the adapter that produced the snapshot.
+    adapter_version : Optional[str]
+        Adapter version, when declared by the adapter.
+    identity_hash : str
+        Existing portable canonical identity hash.
+    references : tuple[CanonicalizationReference, ...]
+        Ordered reference observations from the same canonicalization pass.
+    """
+
+    adapter_name: str
+    adapter_version: Optional[str]
+    identity_hash: str
+    references: tuple[CanonicalizationReference, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -398,11 +509,15 @@ class CanonicalizationResult(NamedTuple):
         Table ingestion specs for queryable config slices.
     identity : CanonicalConfigIdentity
         Structured adapter identity manifest.
+    canonicalization : Optional[CanonicalizationSnapshot]
+        Immutable runtime reference observations from the same canonicalization
+        pass.
     """
 
     artifacts: list[ArtifactSpec]
     ingestables: list[IngestSpec]
     identity: CanonicalConfigIdentity
+    canonicalization: Optional[CanonicalizationSnapshot] = None
 
 
 class _IngestableDataFrameMixin:
@@ -472,6 +587,8 @@ class ConfigContribution(_IngestableDataFrameMixin):
         Optional facet schema version.
     meta : Optional[dict[str, Any]]
         Optional metadata for the contribution.
+    canonicalization : Optional[CanonicalizationSnapshot]
+        Immutable runtime reference observations preserved from the config plan.
     """
 
     identity: CanonicalConfigIdentity
@@ -482,6 +599,7 @@ class ConfigContribution(_IngestableDataFrameMixin):
     facet_schema_name: Optional[str] = None
     facet_schema_version: Optional[Union[str, int]] = None
     meta: Optional[dict[str, Any]] = None
+    canonicalization: Optional[CanonicalizationSnapshot] = None
 
     @property
     def identity_hash(self) -> str:
@@ -521,6 +639,8 @@ class ConfigPlan(_IngestableDataFrameMixin):
         Optional diagnostics produced by validation.
     adapter : Optional[ConfigAdapter]
         Adapter instance for run-scoped artifacts, if available.
+    canonicalization : Optional[CanonicalizationSnapshot]
+        Immutable runtime reference observations produced by the adapter.
     """
 
     adapter_name: str
@@ -536,6 +656,7 @@ class ConfigPlan(_IngestableDataFrameMixin):
     meta: Optional[dict[str, Any]] = None
     diagnostics: Optional[ConfigDiagnostics] = None
     adapter: Optional["ConfigAdapter"] = None
+    canonicalization: Optional[CanonicalizationSnapshot] = None
 
     @property
     def identity_hash(self) -> str:
@@ -546,9 +667,134 @@ class ConfigPlan(_IngestableDataFrameMixin):
         return self.identity_hash
 
 
+def _resolve_canonicalization_snapshot(
+    *,
+    identity: CanonicalConfigIdentity,
+    artifacts: Sequence[ArtifactSpec],
+    snapshot: Optional[CanonicalizationSnapshot],
+) -> CanonicalizationSnapshot:
+    """
+    Validate or synthesize the runtime view for a canonicalization result.
+
+    Parameters
+    ----------
+    identity : CanonicalConfigIdentity
+        Portable identity produced by the adapter canonicalization pass.
+    artifacts : Sequence[ArtifactSpec]
+        Artifact specs emitted by that same pass, including any apply-time
+        bundle artifact when validation occurs during plan application.
+    snapshot : CanonicalizationSnapshot or None
+        Adapter-provided runtime observations. ``None`` is valid only when the
+        canonical identity has no references.
+
+    Returns
+    -------
+    CanonicalizationSnapshot
+        The validated adapter snapshot, or an empty snapshot aligned with an
+        identity that contains no references.
+
+    Raises
+    ------
+    ValueError
+        If snapshot metadata, reference ordering, member keys, or member paths
+        disagree with the canonical identity and emitted artifact specs.
+
+    Notes
+    -----
+    This is the boundary that prevents runtime observations from becoming an
+    independently invented configuration identity. It validates observations
+    against the canonicalization result but does not claim they are final
+    execution paths.
+    """
+    if snapshot is None:
+        if identity.references:
+            raise ValueError(
+                "ConfigAdapter.canonicalize() must provide a "
+                "CanonicalizationSnapshot when identity.references is non-empty."
+            )
+        return CanonicalizationSnapshot(
+            adapter_name=identity.adapter_name,
+            adapter_version=identity.adapter_version,
+            identity_hash=identity.identity_hash,
+        )
+
+    if (
+        snapshot.adapter_name != identity.adapter_name
+        or snapshot.adapter_version != identity.adapter_version
+        or snapshot.identity_hash != identity.identity_hash
+    ):
+        raise ValueError(
+            "CanonicalizationSnapshot adapter metadata must match the canonical "
+            "config identity."
+        )
+
+    references = tuple(item.reference for item in snapshot.references)
+    if references != identity.references:
+        raise ValueError(
+            "CanonicalizationSnapshot references must exactly match the ordered "
+            "canonical config identity references."
+        )
+
+    artifacts_by_key = {artifact.key: artifact for artifact in artifacts}
+    artifact_keys = set(artifacts_by_key)
+    unlisted_member_keys = sorted(
+        {
+            member.artifact_key
+            for item in snapshot.references
+            for member in item.artifact_members
+            if member.artifact_key not in item.artifact_keys
+        }
+    )
+    if unlisted_member_keys:
+        raise ValueError(
+            "CanonicalizationSnapshot member artifact keys are not listed on "
+            f"its parent reference: {unlisted_member_keys}."
+        )
+    missing_keys = sorted(
+        {
+            key
+            for item in snapshot.references
+            for key in item.artifact_keys
+            if key not in artifact_keys
+        }
+    )
+    if missing_keys:
+        raise ValueError(
+            "CanonicalizationSnapshot references unknown artifact keys: "
+            f"{missing_keys}."
+        )
+    path_mismatches = sorted(
+        {
+            member.artifact_key
+            for item in snapshot.references
+            for member in item.artifact_members
+            if member.resolved_path
+            != artifacts_by_key[member.artifact_key].path.resolve()
+        }
+    )
+    if path_mismatches:
+        raise ValueError(
+            "CanonicalizationSnapshot member paths do not match emitted "
+            f"artifacts: {path_mismatches}."
+        )
+    return snapshot
+
+
 class ConfigAdapter(Protocol):
     """
-    Protocol for model-specific config canonicalization adapters.
+    Define the contract for model-specific config canonicalization adapters.
+
+    Attributes
+    ----------
+    model_name : str
+        Stable model namespace used in persisted identity metadata.
+
+    Notes
+    -----
+    Implementations must return a ``CanonicalizationSnapshot`` whenever their
+    identity contains configuration references. The snapshot must describe the
+    same ordered reference sequence and emitted artifacts as the identity; it
+    is validated before plans or contributions become runtime context.
     """
 
     model_name: str
@@ -560,7 +806,27 @@ class ConfigAdapter(Protocol):
         identity: IdentityManager,
         strict: bool = False,
         options: Optional[ConfigAdapterOptions] = None,
-    ) -> CanonicalConfig: ...
+    ) -> CanonicalConfig:
+        """
+        Discover source configuration before canonicalization.
+
+        Parameters
+        ----------
+        root_dirs : list[pathlib.Path]
+            Ordered config roots selected by the caller.
+        identity : IdentityManager
+            Helper used to normalize and hash discovered config content.
+        strict : bool, default False
+            Whether adapter-specific missing configuration should raise.
+        options : ConfigAdapterOptions, optional
+            Structured overrides for the adapter discovery pass.
+
+        Returns
+        -------
+        CanonicalConfig
+            Discovered config files, roots, primary config, and content hash.
+        """
+        ...
 
     def canonicalize(
         self,
@@ -571,13 +837,50 @@ class ConfigAdapter(Protocol):
         strict: bool = False,
         plan_only: bool = False,
         options: Optional[ConfigAdapterOptions] = None,
-    ) -> CanonicalizationResult: ...
+    ) -> CanonicalizationResult:
+        """
+        Produce artifacts, identity, ingestion, and runtime observations.
+
+        Parameters
+        ----------
+        config : CanonicalConfig
+            Result previously returned by :meth:`discover`.
+        run : Run, optional
+            Active run for run-scoped work; may be absent in plan-only mode.
+        tracker : Tracker, optional
+            Tracker available for adapter-specific identity operations.
+        strict : bool, default False
+            Whether unresolved required references should raise.
+        plan_only : bool, default False
+            Whether to avoid run-scoped side effects while producing specs.
+        options : ConfigAdapterOptions, optional
+            Structured overrides for the canonicalization pass.
+
+        Returns
+        -------
+        CanonicalizationResult
+            Identity-aligned artifacts, ingest specs, and runtime snapshot.
+        """
+        ...
 
     def build_facet(
         self, config: CanonicalConfig, *, facet_spec: dict[str, Any]
     ) -> Optional[dict[str, Any]]:
         """
-        Optional: extract facet values from config.
+        Extract optional facet values from discovered config.
+
+        Parameters
+        ----------
+        config : CanonicalConfig
+            Adapter-discovered configuration metadata.
+        facet_spec : dict[str, Any]
+            Adapter-specific facet selection request.
+
+        Returns
+        -------
+        dict[str, Any] or None
+            Normalizable facet data, or ``None`` when the adapter does not
+            implement facets.
         """
         return None
 
@@ -585,7 +888,10 @@ class ConfigAdapter(Protocol):
 @runtime_checkable
 class SupportsRunWithConfigOverrides(Protocol):
     """
-    Optional protocol for adapters that support override-driven run execution.
+    Define optional override-driven config execution support.
+
+    Implementations stage a derived config, run a supplied callable, and retain
+    enough identity metadata to distinguish the override run from its base.
     """
 
     def run_with_config_overrides(
@@ -609,7 +915,34 @@ class SupportsRunWithConfigOverrides(Protocol):
         identity_label: str = "activitysim_config",
         override_runtime_kwargs: Optional[Mapping[str, Any]] = None,
         **run_kwargs: Any,
-    ) -> Any: ...
+    ) -> Any:
+        """
+        Execute a callable with a staged config derived from one base config.
+
+        Parameters
+        ----------
+        tracker : Tracker
+            Tracker that owns the base lookup and resulting run.
+        base_run_id, base_config_dirs, base_primary_config
+            Alternative selectors for the source config; implementations define
+            their exact precedence and validation.
+        overrides : Any
+            Adapter-defined override payload.
+        output_dir : pathlib.Path
+            Empty directory where the derived configuration is staged.
+        fn : callable
+            Callable to execute with the derived configuration.
+        name : str
+            Name for the resulting Consist run.
+        **run_kwargs
+            Additional run invocation options accepted by the implementation.
+
+        Returns
+        -------
+        Any
+            Implementation-defined run result.
+        """
+        ...
 
 
 def _ingestable_df(
@@ -701,6 +1034,9 @@ __all__ = [
     "CanonicalConfigIdentity",
     "ConfigPathAlias",
     "ConfigReference",
+    "CanonicalizationReference",
+    "CanonicalizationArtifactMember",
+    "CanonicalizationSnapshot",
     "ConfigReferenceStatus",
     "ConfigReferenceIdentityPolicy",
     "DirectoryIdentity",

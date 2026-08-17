@@ -17,9 +17,9 @@ Short definitions for terms used across Consist docs. For the mental model, see
 | Ghost mode | Recovery mode where provenance or ingested data remains queryable even when the original cold file is missing. |
 | Hydration | Restoring artifact metadata and usable artifact objects from prior runs without necessarily copying bytes. |
 | Config identity | The configuration component (full config dict or adapter-derived structure) that contributes to a run signature. |
-| Ingestion | Loading artifact contents into DuckDB for SQL-native analysis and recovery. |
+| DuckDB ingestion | Loading artifact contents into DuckDB for SQL-native analysis and recovery. |
 | Lineage | The dependency chain from an output artifact back through the runs, inputs, configs, and upstream artifacts that produced it. |
-| Materialization | Ensuring bytes exist at a requested destination, either by copying historical files or exporting ingested data. |
+| Filesystem materialization | Ensuring bytes exist at a requested filesystem destination, either by copying historical files or exporting ingested data. |
 | Provenance | Evidence for what produced a result: code, config, inputs, environment metadata, outputs, and status. |
 | Recovery roots | Ordered archive or mirror roots stored on artifact metadata so future hydration can find bytes after the original workspace path moves. |
 | Run | A single tracked execution, cache hit, or trace block with inputs, config, outputs, status, timing, and metadata. |
@@ -35,5 +35,5 @@ Short definitions for terms used across Consist docs. For the mental model, see
 | Hybrid view | A SQL view that combines hot ingested data with cold file-backed data so runs can be queried together. |
 
 See also: [Caching & Hydration](concepts/caching-and-hydration.md),
-[Data Materialization](concepts/data-materialization.md), and
+[Data Storage and Ingestion](concepts/data-materialization.md), and
 [Historical Recovery](guides/historical-recovery.md).

@@ -9,13 +9,14 @@ keeps public API behavior in ``Tracker`` stable.
 from __future__ import annotations
 
 from collections.abc import Mapping as MappingABC
+from dataclasses import replace
 from datetime import datetime, timezone
 import logging
 import os
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TYPE_CHECKING, Union, cast
+from typing import Any, Dict, List, Literal, Optional, TYPE_CHECKING, Union, cast
 
 from pydantic import BaseModel
 
@@ -37,6 +38,7 @@ from consist.core.cache_miss_explainer import (
 )
 from consist.core.context import pop_tracker, push_tracker
 from consist.core.error_messages import format_problem_cause_fix
+from consist.core.resolved_binding import _validate_strict_binding_invocation_context
 from consist.core._performance_attribution import _track_begin_run_phase
 from consist.core.validation import (
     validate_config_structure,
@@ -44,7 +46,7 @@ from consist.core.validation import (
     validate_run_strings,
 )
 from consist.models.artifact import Artifact
-from consist.models.run import ConsistRecord, Run
+from consist.models.run import ConsistRecord, Run, RunBindingInvocation
 from consist.types import (
     ArtifactRef,
     CodeIdentityMode,
@@ -244,12 +246,42 @@ class RunLifecycleCoordinator:
 
             validate_run_strings(model_name=model, description=description, tags=tags)
 
+            raw_strict_controls = {
+                key
+                for key in (
+                    "_consist_strict_binding_json",
+                    "_strict_binding_context",
+                    "requested_input_strict_snapshot",
+                    "strict_binding_identity",
+                    "strict_binding_json",
+                )
+                if key in kwargs
+            }
+            raw_identity_overrides = kwargs.get("_consist_identity_config_overrides")
+            if isinstance(raw_identity_overrides, MappingABC) and (
+                "__consist_resolved_binding__" in raw_identity_overrides
+            ):
+                raw_strict_controls.add("_consist_identity_config_overrides")
+            if raw_strict_controls:
+                raise ValueError(
+                    "raw strict binding controls are not supported on public Tracker APIs: "
+                    + ", ".join(sorted(raw_strict_controls))
+                )
+            strict_binding_context = tracker._strict_binding_context.get()
+            if strict_binding_context is not None:
+                strict_binding_context = _validate_strict_binding_invocation_context(
+                    strict_binding_context
+                )
+
             (
                 cache_hydration,
+                cache_hydration_failure,
                 materialize_cached_output_paths,
+                materialize_cached_output_set_roots,
                 materialize_cached_outputs_dir,
                 materialize_cached_outputs_source_root,
                 validate_cached_outputs,
+                validate_materialized_inputs,
             ) = parse_materialize_cached_outputs_kwargs(kwargs)
             requested_input_paths_raw = kwargs.pop("requested_input_paths", None)
             requested_input_materialization = kwargs.pop(
@@ -258,12 +290,35 @@ class RunLifecycleCoordinator:
             requested_input_materialization_mode = kwargs.pop(
                 "requested_input_materialization_mode", None
             )
+            requested_input_artifact_ids_raw = kwargs.pop(
+                "requested_input_artifact_ids", None
+            )
+            requested_input_strict_snapshot = strict_binding_context is not None
+            strict_binding_json = (
+                strict_binding_context.evidence_json
+                if strict_binding_context is not None
+                else None
+            )
+            identity_config_overrides = kwargs.pop(
+                "_consist_identity_config_overrides", None
+            )
+            if strict_binding_context is not None:
+                identity_config_overrides = dict(identity_config_overrides or {})
+                identity_config_overrides["__consist_resolved_binding__"] = (
+                    strict_binding_context.identity_digest
+                )
 
             requested_input_paths: Optional[Dict[str, Path]] = None
             if requested_input_paths_raw is not None:
                 requested_input_paths = {
                     str(key): Path(value)
                     for key, value in dict(requested_input_paths_raw).items()
+                }
+            requested_input_artifact_ids: Optional[Dict[str, str]] = None
+            if requested_input_artifact_ids_raw is not None:
+                requested_input_artifact_ids = {
+                    str(key): str(value)
+                    for key, value in dict(requested_input_artifact_ids_raw).items()
                 }
             if (
                 requested_input_materialization_mode is not None
@@ -310,6 +365,9 @@ class RunLifecycleCoordinator:
             cache_version = kwargs.pop("cache_version", None)
             parent_run_id = kwargs.pop("parent_run_id", None)
             code_identity_callable = kwargs.pop("_consist_code_identity_callable", None)
+            profile_file_schema: bool | Literal["if_changed"] | None = kwargs.pop(
+                "profile_file_schema", None
+            )
 
             if artifact_dir is not None:
                 kwargs["artifact_dir"] = str(artifact_dir)
@@ -323,6 +381,21 @@ class RunLifecycleCoordinator:
                 config_dict = config.model_dump()
             else:
                 config_dict = config
+
+            if identity_config_overrides is not None:
+                if not isinstance(identity_config_overrides, MappingABC):
+                    raise TypeError(
+                        "_consist_identity_config_overrides must be a mapping."
+                    )
+                config_dict = dict(config_dict)
+                for key, value in identity_config_overrides.items():
+                    if key in config_dict:
+                        logging.warning(
+                            "[Consist] Overwriting user-provided %r in config for run %s.",
+                            key,
+                            run_id,
+                        )
+                    config_dict[key] = value
 
             normalized_hash_inputs = _normalize_identity_inputs(hash_inputs)
             if normalized_hash_inputs:
@@ -449,12 +522,17 @@ class RunLifecycleCoordinator:
             tracker._active_run_cache_options = ActiveRunCacheOptions(
                 cache_mode=cache_mode,
                 cache_hydration=cache_hydration,
+                cache_hydration_failure=cache_hydration_failure,
                 materialize_cached_output_paths=materialize_cached_output_paths,
+                materialize_cached_output_set_roots=(
+                    materialize_cached_output_set_roots
+                ),
                 materialize_cached_outputs_dir=materialize_cached_outputs_dir,
                 materialize_cached_outputs_source_root=(
                     materialize_cached_outputs_source_root
                 ),
                 validate_cached_outputs=validate_cached_outputs,
+                validate_materialized_inputs=validate_materialized_inputs,
                 requested_input_paths=requested_input_paths,
                 requested_input_materialization=requested_input_materialization,
                 requested_input_materialization_mode=(
@@ -465,6 +543,8 @@ class RunLifecycleCoordinator:
                         else None
                     )
                 ),
+                requested_input_artifact_ids=requested_input_artifact_ids,
+                requested_input_strict_snapshot=requested_input_strict_snapshot,
             )
 
         with _track_begin_run_phase("lifecycle.persist_config_facet"):
@@ -530,6 +610,7 @@ class RunLifecycleCoordinator:
                             tracker._artifact_logging.log_artifact(
                                 item,
                                 direction="input",
+                                profile_file_schema=profile_file_schema,
                             )
                         else:
                             key = Path(item).stem
@@ -537,6 +618,7 @@ class RunLifecycleCoordinator:
                                 item,
                                 key=key,
                                 direction="input",
+                                profile_file_schema=profile_file_schema,
                                 known_latest_artifact_at_uri=known_latest_by_index.get(
                                     index
                                 ),
@@ -553,14 +635,26 @@ class RunLifecycleCoordinator:
                 if parent_candidates:
                     run.parent_run_id = parent_candidates[-1]
 
-        try:
-            with _track_begin_run_phase("input_signature.total"):
-                t0 = time.perf_counter()
-                tracker._prefetch_run_signatures(current_consist.inputs)
-                _log_timing("prefetch_run_signatures", t0)
-                t0 = time.perf_counter()
-                input_hash = tracker.identity.compute_input_hash(
-                    current_consist.inputs,
+        if strict_binding_context is not None:
+            with _track_begin_run_phase("input_signature.strict"):
+                strict_binding_context = _validate_strict_binding_invocation_context(
+                    strict_binding_context
+                )
+                strict_input_count = len(strict_binding_context.input_artifact_ids)
+                strict_prefix = current_consist.inputs[:strict_input_count]
+                strict_prefix_ids = tuple(
+                    str(artifact.id) for artifact in strict_prefix
+                )
+                if strict_prefix_ids != strict_binding_context.input_artifact_ids:
+                    raise ValueError(
+                        "strict binding input protocol mismatch: logged input prefix "
+                        "does not match the Scenario binding order"
+                    )
+                ordinary_inputs = current_consist.inputs[strict_input_count:]
+                tracker._prefetch_run_signatures(ordinary_inputs)
+                input_hash = tracker.identity.compute_resolved_binding_input_hash(
+                    ordinary_inputs=ordinary_inputs,
+                    strict_binding_identity=strict_binding_context.identity_digest,
                     path_resolver=tracker.resolve_uri,
                     signature_lookup=tracker._resolve_run_signature,
                 )
@@ -570,15 +664,39 @@ class RunLifecycleCoordinator:
                     config_hash=config_hash,
                     input_hash=input_hash,
                 )
-                _log_timing("compute_input_hash", t0)
-        except Exception as exc:
-            logging.warning(
-                "[Consist Warning] Failed to compute inputs hash for run %s: %s",
-                run_id,
-                exc,
-            )
-            run.input_hash = "error"
-            run.signature = "error"
+                run.meta["input_identity"] = {
+                    "mode": "resolved-binding-content-v1",
+                    "strict_input_count": strict_input_count,
+                    "ordinary_input_count": len(ordinary_inputs),
+                    "strict_binding_identity": strict_binding_context.identity_digest,
+                }
+        else:
+            try:
+                with _track_begin_run_phase("input_signature.total"):
+                    t0 = time.perf_counter()
+                    tracker._prefetch_run_signatures(current_consist.inputs)
+                    _log_timing("prefetch_run_signatures", t0)
+                    t0 = time.perf_counter()
+                    input_hash = tracker.identity.compute_input_hash(
+                        current_consist.inputs,
+                        path_resolver=tracker.resolve_uri,
+                        signature_lookup=tracker._resolve_run_signature,
+                    )
+                    run.input_hash = input_hash
+                    run.signature = tracker.identity.calculate_run_signature(
+                        code_hash=git_hash,
+                        config_hash=config_hash,
+                        input_hash=input_hash,
+                    )
+                    _log_timing("compute_input_hash", t0)
+            except Exception as exc:
+                logging.warning(
+                    "[Consist Warning] Failed to compute inputs hash for run %s: %s",
+                    run_id,
+                    exc,
+                )
+                run.input_hash = "error"
+                run.signature = "error"
 
         cached_output_ids: Optional[List[uuid.UUID]] = None
 
@@ -597,23 +715,86 @@ class RunLifecycleCoordinator:
                         run.git_hash,
                     )
 
-                cached_run = (
-                    tracker._local_cache_index.get(cache_key) if cache_key else None
+                cached_candidates: list[Run] = []
+                requested_output_hydration = (
+                    tracker._active_run_cache_options.cache_hydration
+                    == "outputs-requested"
                 )
-                if cached_run is None:
+                cached_run = None
+                if cache_key and requested_output_hydration:
                     t0 = time.perf_counter()
-                    if cache_key:
-                        config_h, input_h, git_h = cache_key
-                        cached_run = tracker.find_matching_run(
-                            config_hash=config_h,
-                            input_hash=input_h,
-                            git_hash=git_h,
-                            signature=run.signature,
-                        )
+                    config_h, input_h, git_h = cache_key
+                    cached_candidates = tracker._find_matching_cached_runs(
+                        config_h,
+                        input_h,
+                        git_h,
+                        signature=run.signature,
+                    )
                     _log_timing("find_matching_run", t0)
+                    local_candidate = tracker._local_cache_index.get(cache_key)
+                    if local_candidate and all(
+                        candidate.id != local_candidate.id
+                        for candidate in cached_candidates
+                    ):
+                        cached_candidates.append(local_candidate)
+                else:
+                    cached_run = (
+                        tracker._local_cache_index.get(cache_key) if cache_key else None
+                    )
+                    if cached_run is None:
+                        t0 = time.perf_counter()
+                        if cache_key:
+                            config_h, input_h, git_h = cache_key
+                            cached_run = tracker.find_matching_run(
+                                config_hash=config_h,
+                                input_hash=input_h,
+                                git_hash=git_h,
+                                signature=run.signature,
+                            )
+                        _log_timing("find_matching_run", t0)
+
+            cache_admitted = False
+            cached_items = None
+            cache_valid = False
             with _track_begin_run_phase("cache.validate"):
-                cache_valid = False
-                if cached_run:
+                if requested_output_hydration:
+                    for candidate in cached_candidates:
+                        cached_run = candidate
+                        t0 = time.perf_counter()
+                        candidate_valid = validate_cached_run_outputs(
+                            tracker=cast(CacheValidationContext, tracker),
+                            run=candidate,
+                            options=tracker._active_run_cache_options,
+                        )
+                        _log_timing("validate_cached_outputs", t0)
+                        if not candidate_valid:
+                            continue
+
+                        with _track_begin_run_phase("cache.hydrate_outputs"):
+                            t0 = time.perf_counter()
+                            cached_items = hydrate_cache_hit_outputs(
+                                tracker=cast(CacheHydrationContext, tracker),
+                                run=run,
+                                cached_run=candidate,
+                                options=replace(
+                                    tracker._active_run_cache_options,
+                                    cache_hydration_failure="miss",
+                                ),
+                                link_outputs=False,
+                            )
+                            _log_timing("hydrate_cache_hit_outputs", t0)
+                        if cached_items is not None:
+                            cache_valid = True
+                            cached_output_ids = [
+                                art.id for art in cached_items.outputs.values()
+                            ]
+                            cache_admitted = True
+                            break
+                    if not cached_candidates and debug_cache:
+                        logging.info(
+                            "[Consist][cache] miss: no matching completed run."
+                        )
+                elif cached_run:
                     t0 = time.perf_counter()
                     cache_valid = validate_cached_run_outputs(
                         tracker=cast(CacheValidationContext, tracker),
@@ -624,7 +805,7 @@ class RunLifecycleCoordinator:
                 elif debug_cache:
                     logging.info("[Consist][cache] miss: no matching completed run.")
 
-            if cached_run and cache_valid:
+            if cached_run and cache_valid and not requested_output_hydration:
                 with _track_begin_run_phase("cache.hydrate_outputs"):
                     t0 = time.perf_counter()
                     cached_items = hydrate_cache_hit_outputs(
@@ -634,18 +815,20 @@ class RunLifecycleCoordinator:
                         options=tracker._active_run_cache_options,
                         link_outputs=False,
                     )
-                    cached_output_ids = [
-                        art.id for art in cached_items.outputs.values()
-                    ]
+                    if cached_items is not None:
+                        cached_output_ids = [
+                            art.id for art in cached_items.outputs.values()
+                        ]
+                        cache_admitted = True
                     _log_timing("hydrate_cache_hit_outputs", t0)
-                if debug_cache:
-                    logging.info(
-                        "[Consist][cache] hit: cached_run=%s outputs=%d hydration=%s",
-                        cached_run.id,
-                        len(cached_items.outputs),
-                        tracker._active_run_cache_options.cache_hydration,
-                    )
-            else:
+            if cached_items is not None and cached_run is not None and debug_cache:
+                logging.info(
+                    "[Consist][cache] hit: cached_run=%s outputs=%d hydration=%s",
+                    cached_run.id,
+                    len(cached_items.outputs),
+                    tracker._active_run_cache_options.cache_hydration,
+                )
+            if not cache_admitted:
                 with _track_begin_run_phase("cache.explain_miss"):
                     explanation = CacheMissExplainer(
                         cast(CacheMissExplainerContext, tracker)
@@ -688,15 +871,54 @@ class RunLifecycleCoordinator:
                     run.meta["staged_inputs"] = staged_inputs
 
         with _track_begin_run_phase("lifecycle.final_persist_and_emit"):
-            tracker._flush_json()
-            if cached_output_ids and tracker.db:
-                tracker.persistence.sync_run_with_links(
-                    run,
-                    artifact_ids=cached_output_ids,
-                    direction="output",
+            binding_invocation = None
+            if strict_binding_json is not None:
+                if not isinstance(strict_binding_json, str):
+                    raise TypeError("_consist_strict_binding_json must be a string.")
+                binding_invocation = RunBindingInvocation(
+                    requested_run_id=run.id,
+                    execution_run_id=(
+                        run.meta["cache_source"]
+                        if isinstance(run.meta, dict)
+                        and isinstance(run.meta.get("cache_source"), str)
+                        else run.id
+                    ),
+                    cache_source_run_id=(
+                        run.meta.get("cache_source")
+                        if isinstance(run.meta, dict)
+                        and isinstance(run.meta.get("cache_source"), str)
+                        else None
+                    ),
+                    cache_outcome=(
+                        "hit"
+                        if isinstance(run.meta, dict)
+                        and run.meta.get("cache_hit") is True
+                        else "miss"
+                    ),
+                    binding_json=strict_binding_json,
                 )
-            else:
-                tracker._sync_run_to_db(run)
+            tracker._flush_json()
+            try:
+                if cached_output_ids and tracker.db:
+                    tracker.persistence.sync_run_with_links(
+                        run,
+                        artifact_ids=cached_output_ids,
+                        direction="output",
+                        binding_invocation=binding_invocation,
+                        require_success=binding_invocation is not None,
+                    )
+                else:
+                    tracker._sync_run_to_db(
+                        run,
+                        binding_invocation=binding_invocation,
+                        require_success=binding_invocation is not None,
+                    )
+            except Exception:
+                pop_tracker()
+                tracker._last_consist = tracker.current_consist
+                tracker.current_consist = None
+                tracker._active_run_cache_options = ActiveRunCacheOptions()
+                raise
             tracker._emit_run_start(run)
 
         return run
@@ -760,15 +982,7 @@ class RunLifecycleCoordinator:
                 run.git_hash or "",
             )
             cache_hit = bool(run.meta.get("cache_hit")) if run.meta else False
-            if cache_key in tracker._local_cache_index and cache_mode != "overwrite":
-                if not cache_hit:
-                    logging.warning(
-                        "Cache key collision detected (extremely rare): %s. "
-                        "Keeping first cached run (created %s).",
-                        cache_key,
-                        tracker._local_cache_index[cache_key].created_at,
-                    )
-            else:
+            if not cache_hit:
                 tracker._local_cache_index[cache_key] = run
             if len(tracker._local_cache_index) > tracker._local_cache_max_entries:
                 tracker._local_cache_index.pop(next(iter(tracker._local_cache_index)))

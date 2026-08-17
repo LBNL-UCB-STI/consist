@@ -12,6 +12,7 @@ from typing import (
     Callable,
     Dict,
     Hashable,
+    ContextManager,
     Iterable,
     Iterator,
     Literal,
@@ -42,6 +43,12 @@ from consist.core.context import (
     set_default_tracker,
     use_tracker as _use_tracker,
 )
+from consist.core.admission import (  # noqa: F401
+    AdmissionReference,
+    AdmissionReport,
+    check_admission_reference,
+    check_artifact_identity,
+)
 from consist.core.decorators import (
     define_step as define_step_decorator,
     require_runtime_kwargs as require_runtime_kwargs_decorator,
@@ -53,7 +60,12 @@ from consist.core.run_options import raise_legacy_policy_kwargs_error
 from consist.core.stores import get_hot_data_db_path
 from consist.core.views import _quote_ident, create_view_model
 from consist.core.workflow import OutputCapture, RunContext
-from consist.models.artifact import Artifact, get_tracker_ref
+from consist.integrations.ibis import (
+    ibis_grouped_view as _ibis_grouped_view,
+    ibis_connection as _ibis_connection,
+    ibis_view as _ibis_view,
+)
+from consist.models.artifact import Artifact, ArchivedOutputs, get_tracker_ref
 from consist.models.run import ConsistRecord, Run, RunResult, resolve_run_result_output
 from consist.models.run_config_kv import RunConfigKV
 from consist.core.tracker import Tracker
@@ -66,11 +78,13 @@ from consist.types import (
     InputBindingMode,
     IdentityInputs,
     OutputPolicyOptions,
+    OutputSet,
 )
 
 if TYPE_CHECKING:
     from consist.core.config_canonicalization import ConfigAdapter
     from consist.core.materialize import (
+        ArchivedRunOutputFilesReport,
         ArtifactRecoveryCopyRegistration,
         HydratedRunOutputsResult,
         MaterializedArtifact,
@@ -81,6 +95,9 @@ if TYPE_CHECKING:
     )
     from consist.core.step_context import StepContext
     from consist.runset import RunSet
+    from ibis.backends.duckdb import Backend as IbisDuckDBBackend
+    from ibis.expr.types import Table as IbisTable
+    from consist.core.tracker import Tracker
 
 GeoDataFrameType = Any
 XarrayDatasetType = Any
@@ -183,7 +200,14 @@ class SpatialArtifact(ArtifactLike, Protocol):
     """Artifact that loads as GeoDataFrame (spatial formats)."""
 
     @property
-    def driver(self) -> Literal["geojson", "shapefile", "geopackage"]: ...
+    def driver(
+        self,
+    ) -> Literal[
+        "geojson",
+        "geoparquet",
+        "shapefile",
+        "geopackage",
+    ]: ...
 
 
 def view(model: Type[T], name: Optional[str] = None) -> Type[T]:
@@ -232,6 +256,73 @@ def view(model: Type[T], name: Optional[str] = None) -> Type[T]:
     ```
     """
     return create_view_model(model, name)
+
+
+def ibis_connection(
+    tracker: Optional["Tracker"] = None,
+) -> "IbisDuckDBBackend":
+    """
+    Return an Ibis DuckDB backend connected to the active Consist database.
+    """
+    return _ibis_connection(tracker)
+
+
+def ibis_view(
+    tracker: Optional["Tracker"] = None,
+    *,
+    model: Type[SQLModel],
+    key: Optional[str] = None,
+) -> "IbisTable":
+    """
+    Ensure a Consist view exists and return it as a native Ibis table.
+    """
+    return _ibis_view(tracker, model=model, key=key)
+
+
+def ibis_grouped_view(
+    tracker: Optional["Tracker"] = None,
+    *,
+    view_name: str,
+    artifact_id: uuid.UUID,
+    namespace: Optional[str] = None,
+    params: Optional[Iterable[str]] = None,
+    drivers: Optional[list[str]] = None,
+    attach_facets: Optional[list[str]] = None,
+    include_system_columns: bool = True,
+    mode: Literal["hybrid", "hot_only", "cold_only"] = "hybrid",
+    if_exists: Literal["replace", "error"] = "replace",
+    missing_files: Literal["warn", "error", "skip_silent"] = "warn",
+    run_id: Optional[str] = None,
+    parent_run_id: Optional[str] = None,
+    model: Optional[str] = None,
+    status: Optional[str] = None,
+    year: Optional[int] = None,
+    iteration: Optional[int] = None,
+    schema_compatible: bool = False,
+) -> ContextManager["IbisTable"]:
+    """
+    Create a grouped Consist view and expose it as a native Ibis table.
+    """
+    return _ibis_grouped_view(
+        tracker,
+        view_name=view_name,
+        artifact_id=artifact_id,
+        namespace=namespace,
+        params=params,
+        drivers=drivers,
+        attach_facets=attach_facets,
+        include_system_columns=include_system_columns,
+        mode=mode,
+        if_exists=if_exists,
+        missing_files=missing_files,
+        run_id=run_id,
+        parent_run_id=parent_run_id,
+        model=model,
+        status=status,
+        year=year,
+        iteration=iteration,
+        schema_compatible=schema_compatible,
+    )
 
 
 # --- Core Access ---
@@ -301,6 +392,7 @@ def define_step(
     outputs: Optional[list[str]] = None,
     schema_outputs: Optional[list[str]] = None,
     output_paths: Optional[Mapping[str, Any]] = None,
+    output_sets: Optional[Mapping[str, OutputSet]] = None,
     inputs: Optional[Union[Mapping[str, Any], Iterable[Any]]] = None,
     input_keys: Optional[Union[Iterable[str], str]] = None,
     optional_input_keys: Optional[Union[Iterable[str], str]] = None,
@@ -329,6 +421,11 @@ def define_step(
     This decorator lets you attach defaults such as ``outputs`` or ``tags`` to a
     function. ``Tracker.run`` and ``ScenarioContext.run`` read this metadata.
     Callable values are resolved at runtime with a StepContext.
+
+    Use ``output_sets`` for defaults that describe one logical output written as
+    many files. Each ``OutputSet`` requires ``root`` and ``include``. Optional
+    fields such as ``expected_members`` and ``expected_count`` add completeness
+    checks but are not required.
     """
     return define_step_decorator(
         model=model,
@@ -336,6 +433,7 @@ def define_step(
         outputs=outputs,
         schema_outputs=schema_outputs,
         output_paths=output_paths,
+        output_sets=output_sets,
         inputs=inputs,
         input_keys=input_keys,
         optional_input_keys=optional_input_keys,
@@ -1180,6 +1278,56 @@ def hydrate_run_outputs(
     )
 
 
+def hydrate_run_outputs_to_destinations(
+    run_id: str,
+    *,
+    destinations_by_key: Mapping[str, str | Path],
+    source_root: str | Path | None = None,
+    preserve_existing: bool = True,
+    on_missing: Literal["warn", "raise"] = "warn",
+    db_fallback: Literal["never", "if_ingested"] = "if_ingested",
+    tracker: Optional["Tracker"] = None,
+) -> "HydratedRunOutputsResult":
+    """Hydrate selected historical outputs to caller-chosen destinations.
+
+    ``destinations_by_key`` is the complete requested output set: each key is
+    restored exactly to its corresponding path. Destinations must be under the
+    tracker's run directory or configured mount roots unless external paths are
+    enabled on the tracker. The returned keyed result can describe a mixture of
+    successful, preserved, and unavailable outputs.
+
+    Parameters
+    ----------
+    run_id : str
+        Identifier of the historical run whose outputs should be restored.
+    destinations_by_key : Mapping[str, str | Path]
+        Exact destination path for each requested output key.
+    source_root : str | Path | None, optional
+        Optional alternate source root for filesystem-backed recovery.
+    preserve_existing : bool, default True
+        If True, existing destinations are preserved and reported as reusable.
+    on_missing : {"warn", "raise"}, default "warn"
+        Missing-source handling policy forwarded to the tracker.
+    db_fallback : {"never", "if_ingested"}, default "if_ingested"
+        DB export fallback policy forwarded to the tracker.
+    tracker : Optional[Tracker], optional
+        Tracker instance to use. If omitted, resolves the active/default tracker.
+
+    Returns
+    -------
+    HydratedRunOutputsResult
+        Keyed hydration outcome for the requested outputs.
+    """
+    return _resolve_tracker(tracker).hydrate_run_outputs_to_destinations(
+        run_id,
+        destinations_by_key=destinations_by_key,
+        source_root=source_root,
+        preserve_existing=preserve_existing,
+        on_missing=on_missing,
+        db_fallback=db_fallback,
+    )
+
+
 def stage_artifact(
     artifact: Artifact,
     *,
@@ -1300,6 +1448,11 @@ def set_artifact_recovery_roots(
     tracker : Tracker | None, optional
         Tracker used for persistence. If omitted, resolves the active/default
         tracker.
+
+    Returns
+    -------
+    Artifact
+        The supplied artifact with refreshed in-memory recovery metadata.
     """
     return _resolve_tracker(tracker).set_artifact_recovery_roots(
         artifact, roots, append=append
@@ -1315,22 +1468,32 @@ def register_artifact_recovery_copy(
     append: bool = True,
     tracker: Optional["Tracker"] = None,
 ) -> "ArtifactRecoveryCopyRegistration":
-    """
-    Verify and record an externally copied artifact recovery location.
+    """Verify and register an externally copied artifact recovery location.
 
-    The expected copy must already exist at
-    ``recovery_root / <artifact-uri-relative-path>``. Consist verifies the
-    existing file and then records ``recovery_root`` in
-    ``artifact.meta["recovery_roots"]`` without copying bytes itself.
+    Parameters
+    ----------
+    artifact : Artifact
+        Artifact represented by an existing recovery copy.
+    recovery_root : str | Path
+        Root containing the artifact at its URI-relative path.
+    verify : bool, default True
+        Whether to verify the copy's full-file SHA-256 digest.
+    content_hash : str | None, optional
+        Expected SHA-256 digest, taking precedence over ``artifact.hash``.
+    append : bool, default True
+        Whether to append rather than replace recovery-root metadata.
+    tracker : Tracker | None, optional
+        Tracker used for validation and persistence.
 
-    ``content_hash`` is interpreted as a full file SHA-256 and takes precedence
-    when supplied. Without it, ``artifact.hash`` is only used for byte
-    verification when the tracker is using full content hashing. Directory
-    artifacts are intentionally blocked until directory manifest support exists.
-    HDF5 child table artifacts are also blocked unless a future parent
-    container policy explicitly supports independent child recovery.
-    ``append`` defaults to True, like ``archive_artifact(...)``; pass
-    ``append=False`` to replace existing recovery roots.
+    Returns
+    -------
+    ArtifactRecoveryCopyRegistration
+        Per-artifact verification and metadata-persistence outcome.
+
+    Notes
+    -----
+    This function never copies bytes. Directory artifacts and HDF5 child tables
+    are deliberately blocked until they have an independent recovery contract.
     """
     return _resolve_tracker(tracker).register_artifact_recovery_copy(
         artifact,
@@ -1351,15 +1514,34 @@ def register_run_output_recovery_copies(
     content_hashes: Mapping[str, str] | None = None,
     tracker: Optional["Tracker"] = None,
 ) -> "RunOutputRecoveryCopiesRegistration":
-    """
-    Verify and record externally copied recovery locations for run outputs.
+    """Verify and register existing recovery copies for run outputs.
 
-    This is the bulk form of ``register_artifact_recovery_copy(...)`` for
-    workflows where an external archive or HPC process has already copied run
-    outputs into a recovery root. Unknown requested output keys raise
-    immediately; per-artifact blockers are returned in the keyed result.
-    ``append`` defaults to True, like ``archive_run_outputs(...)``; pass
-    ``append=False`` to replace existing recovery roots.
+    Parameters
+    ----------
+    run_id : str
+        Completed run whose outputs are being registered.
+    recovery_root : str | Path
+        Root containing URI-relative recovery copies.
+    keys : sequence of str | None, optional
+        Outputs to register; ``None`` selects all outputs.
+    verify : bool, default True
+        Whether selected copies require a matching full-file hash.
+    append : bool, default True
+        Whether successful registrations append recovery-root metadata.
+    content_hashes : mapping of str to str | None, optional
+        Optional per-key SHA-256 proofs for artifacts without full hashes.
+    tracker : Tracker | None, optional
+        Tracker used for validation and persistence.
+
+    Returns
+    -------
+    RunOutputRecoveryCopiesRegistration
+        Mapping-style result with one registration outcome per selected key.
+
+    Raises
+    ------
+    KeyError
+        If requested output or content-hash keys are unknown.
     """
     return _resolve_tracker(tracker).register_run_output_recovery_copies(
         run_id,
@@ -1379,14 +1561,25 @@ def archive_artifact(
     append: bool = True,
     tracker: Optional["Tracker"] = None,
 ) -> Path:
-    """
-    Archive an artifact into a stable recovery root and record that root.
+    """Archive an artifact into a stable recovery root and register it.
 
-    This helper copies or moves the artifact's bytes to
-    ``archive_root / <uri-relative-path>`` and then records ``archive_root`` in
-    ``artifact.meta["recovery_roots"]``. It is designed for restart/resume
-    workflows where outputs are promoted into long-lived storage but retain
-    their canonical ``container_uri``.
+    Parameters
+    ----------
+    artifact : Artifact
+        Artifact whose bytes will be copied or moved.
+    archive_root : str | Path
+        Root below which its URI-relative layout is recreated.
+    mode : {"copy", "move"}, default "copy"
+        Filesystem operation used when the destination is absent.
+    append : bool, default True
+        Whether to append ``archive_root`` to recovery-root metadata.
+    tracker : Tracker | None, optional
+        Tracker that owns the artifact and metadata database.
+
+    Returns
+    -------
+    Path
+        Archive destination containing the artifact bytes.
     """
     return _resolve_tracker(tracker).archive_artifact(
         artifact,
@@ -1404,18 +1597,94 @@ def archive_run_outputs(
     mode: Literal["copy", "move"] = "copy",
     append: bool = True,
     tracker: Optional["Tracker"] = None,
-) -> dict[str, Path]:
-    """
-    Archive one or more historical run outputs into a stable recovery root.
+) -> ArchivedOutputs:
+    """Archive selected historical run outputs into a recovery root.
 
-    This is the bulk form of ``archive_artifact(...)`` for iteration/archive
-    workflows that promote all or a subset of outputs after a run completes.
+    Parameters
+    ----------
+    run_id : str
+        Completed run whose outputs should be archived.
+    archive_root : str | Path
+        Root below which URI-relative output paths are recreated.
+    keys : sequence of str | None, optional
+        Output keys to archive; ``None`` selects all outputs.
+    mode : {"copy", "move"}, default "copy"
+        Filesystem operation used for each output.
+    append : bool, default True
+        Whether to append the root to recovery-root metadata.
+    tracker : Tracker | None, optional
+        Tracker that owns the historical run.
+
+    Returns
+    -------
+    ArchivedOutputs
+        Read-only key-to-path mapping plus refreshed output artifacts.
+
+    Notes
+    -----
+    Manifest-backed OutputSets are archived as one validated logical recovery
+    unit. Use :func:`archive_run_output_files` for no-overwrite, per-key report
+    semantics for regular files.
     """
     return _resolve_tracker(tracker).archive_run_outputs(
         run_id,
         archive_root,
         keys=keys,
         mode=mode,
+        append=append,
+    )
+
+
+def archive_run_output_files(
+    run_id: str,
+    recovery_root: str | Path,
+    *,
+    keys: Sequence[str] | None = None,
+    preserve_existing: bool = True,
+    verify: bool = True,
+    append: bool = True,
+    tracker: Optional["Tracker"] = None,
+) -> "ArchivedRunOutputFilesReport":
+    """Archive regular run-output files with per-key copy and metadata status.
+
+    Parameters
+    ----------
+    run_id : str
+        Completed run whose regular output files should be archived.
+    recovery_root : str | Path
+        Root below which canonical URI-relative paths are created.
+    keys : sequence of str | None, optional
+        Output keys to archive; ``None`` selects all outputs.
+    preserve_existing : bool, default True
+        Whether a matching existing target may be retained.
+    verify : bool, default True
+        Whether copied or retained files require full-hash verification.
+    append : bool, default True
+        Whether successful registrations append recovery-root metadata.
+    tracker : Tracker | None, optional
+        Tracker that owns the historical run.
+
+    Returns
+    -------
+    ArchivedRunOutputFilesReport
+        Mapping-style per-key copy, verification, and metadata results.
+
+    Raises
+    ------
+    KeyError
+        If a requested output key is unknown, before target mutation.
+
+    Notes
+    -----
+    This file-only helper never overwrites a target. ``complete`` is an
+    invocation result, not a durable archive-workflow state claim.
+    """
+    return _resolve_tracker(tracker).archive_run_output_files(
+        run_id,
+        recovery_root,
+        keys=keys,
+        preserve_existing=preserve_existing,
+        verify=verify,
         append=append,
     )
 
@@ -1427,13 +1696,31 @@ def archive_current_run_outputs(
     mode: Literal["copy", "move"] = "copy",
     append: bool = True,
     tracker: Optional["Tracker"] = None,
-) -> dict[str, Path]:
-    """
-    Archive outputs for the currently active run into a stable recovery root.
+) -> ArchivedOutputs:
+    """Archive outputs for the current active run using legacy semantics.
 
-    This is the convenience form of ``archive_run_outputs(...)`` for workflows
-    that archive outputs immediately after logging them, without separately
-    pulling ``result.run.id`` or ``tracker.current_consist.run.id``.
+    Parameters
+    ----------
+    archive_root : str | Path
+        Root below which URI-relative output paths are recreated.
+    keys : sequence of str | None, optional
+        Output keys to archive; ``None`` selects all active-run outputs.
+    mode : {"copy", "move"}, default "copy"
+        Filesystem operation used for each output.
+    append : bool, default True
+        Whether to append the root to recovery-root metadata.
+    tracker : Tracker | None, optional
+        Tracker that owns the active run context.
+
+    Returns
+    -------
+    ArchivedOutputs
+        Read-only key-to-path mapping plus refreshed output artifacts.
+
+    Raises
+    ------
+    RuntimeError
+        If no run is active in the supplied tracker context.
     """
     return _resolve_tracker(tracker).archive_current_run_outputs(
         archive_root,
@@ -1495,6 +1782,7 @@ def log_artifact(
     key: Optional[str] = None,
     direction: str = "output",
     schema: Optional[Type[SQLModel]] = None,
+    strict_schema: bool = False,
     driver: Optional[str] = None,
     content_hash: Optional[str] = None,
     force_hash_override: bool = False,
@@ -1527,8 +1815,12 @@ def log_artifact(
         Specifies whether the artifact is an "input" or "output" for the
         current run. Defaults to "output".
     schema : Optional[Type[SQLModel]], optional
-        An optional SQLModel class that defines the expected schema for the artifact's data.
-        Its name will be stored in artifact metadata.
+        An optional SQLModel class that names the artifact's logical schema.
+        Its name will be stored in artifact metadata. This tags metadata; it
+        does not validate file contents by default.
+    strict_schema : bool, default False
+        Whether a schema tag should also mark the artifact as strict for
+        validation workflows. Schema tagging itself is non-strict by default.
     driver : Optional[str], optional
         Explicitly specify the driver (e.g., 'h5_table').
         If None, the driver is inferred from the file extension.
@@ -1582,6 +1874,7 @@ def log_artifact(
             key=key,
             direction=direction,
             schema=schema,
+            strict_schema=strict_schema,
             driver=driver,
             content_hash=content_hash,
             force_hash_override=force_hash_override,
@@ -1599,6 +1892,7 @@ def log_artifact(
         key=key,
         direction=direction,
         schema=schema,
+        strict_schema=strict_schema,
         driver=driver,
         content_hash=content_hash,
         force_hash_override=force_hash_override,
@@ -1829,6 +2123,7 @@ def log_output(
     path: ArtifactRef,
     key: Optional[str] = None,
     *,
+    artifact_kind: Literal["file", "directory"] = "file",
     schema: Optional[Type[SQLModel]] = None,
     driver: Optional[str] = None,
     content_hash: Optional[str] = None,
@@ -1852,6 +2147,10 @@ def log_output(
     key : Optional[str]
         Semantic name for the artifact (e.g. "processed_results"). Required if `path`
         is a file path.
+    artifact_kind : {"file", "directory"}, default "file"
+        Declare an immutable directory artifact with a complete persisted tree
+        manifest. The artifact retains its content driver (for example,
+        ``"zarr"``) for loading and type narrowing.
     schema : Optional[Type[SQLModel]]
         Optional SQLModel class defining the data structure.
     driver : Optional[str]
@@ -1885,6 +2184,25 @@ def log_output(
     ArtifactLike
         The logged artifact reference.
     """
+    if artifact_kind not in {"file", "directory"}:
+        raise ValueError("artifact_kind must be 'file' or 'directory'.")
+    if artifact_kind == "directory" and enabled:
+        return get_active_tracker().log_output(
+            path,
+            key=key,
+            artifact_kind=artifact_kind,
+            schema=schema,
+            driver=driver,
+            content_hash=content_hash,
+            force_hash_override=force_hash_override,
+            validate_content_hash=validate_content_hash,
+            reuse_if_unchanged=reuse_if_unchanged,
+            reuse_scope=reuse_scope,
+            facet=facet,
+            facet_schema_version=facet_schema_version,
+            facet_index=facet_index,
+            **meta,
+        )
     return log_artifact(
         path=path,
         key=key,
@@ -2715,7 +3033,7 @@ def is_spatial_artifact(artifact: ArtifactLike) -> TypeGuard[SpatialArtifact]:
     Returns
     -------
     bool
-        True if artifact driver is geojson, shapefile, or geopackage.
+        True if artifact driver is geojson, geoparquet, shapefile, or geopackage.
     """
     return artifact.driver in DriverType.spatial_drivers()
 
@@ -2939,6 +3257,16 @@ def load(
                 f"Invalid db_fallback={db_fallback!r}. Expected 'inputs-only', 'always', or 'never'."
             )
 
+        if artifact.driver == DriverType.GEOPARQUET.value:
+            raise FileNotFoundError(
+                f"GeoParquet artifact '{artifact.key}' (ID: {artifact.id}) not found.\n"
+                f" - Disk Path: {path} (Missing)\n"
+                " - Database: Ingested metadata only; GeoParquet geometry rows "
+                "cannot be reconstructed from the Consist database.\n"
+                "Hint: restore the GeoParquet file from the original artifact copy, "
+                "a recovery root, or rerun the producing workflow."
+            )
+
         if db_fallback == "never":
             raise FileNotFoundError(
                 f"Artifact '{artifact.key}' (ID: {artifact.id}) not found.\n"
@@ -3033,7 +3361,10 @@ def _load_from_disk(path: str, driver: str, **kwargs: Any) -> LoadResult:
             driver=driver,
             schema_id=None,
         )
-        relation = TABLE_DRIVERS.get(driver).load(info, conn, **load_kwargs)
+        relation = cast(
+            duckdb.DuckDBPyRelation,
+            TABLE_DRIVERS.get(driver).load(info, conn, **load_kwargs),
+        )
         if nrows is not None:
             relation = relation.limit(int(nrows))
         # Keep the connection alive for downstream relation materialization.
@@ -3049,9 +3380,14 @@ def _load_from_disk(path: str, driver: str, **kwargs: Any) -> LoadResult:
             schema_id=None,
         )
         return ARRAY_DRIVERS.get(driver).load(info)
-    elif driver in ("geojson", "shapefile", "geopackage"):
+    elif driver in DriverType.spatial_drivers():
         if gpd is None:
-            raise ImportError("geopandas required for spatial formats")
+            raise ImportError(
+                "geopandas is required for spatial formats. "
+                'Install with `pip install "consist[spatial]"`.'
+            )
+        if driver == DriverType.GEOPARQUET.value:
+            return gpd.read_parquet(path, **kwargs)
         return gpd.read_file(path, **kwargs)
     elif driver in ("h5", "hdf5"):
         if not tables:

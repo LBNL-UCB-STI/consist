@@ -35,6 +35,8 @@ import pandas as pd
 from pydantic import BaseModel
 
 from consist.core.error_messages import format_problem_cause_fix
+from consist.core.output_sets import register_output_sets, validate_cached_output_sets
+from consist.core.output_sets import build_output_set_captures_identity
 from consist.core.run_invocation import resolve_run_invocation
 from consist.core.run_options import resolve_runtime_kwargs_alias
 from consist.core.workflow import RunContext
@@ -49,12 +51,19 @@ from consist.types import (
     FacetLike,
     InputBindingMode,
     IdentityInputs,
+    OutputArtifactSpec,
     OutputPolicyOptions,
+    OutputPathRef,
+    OutputSet,
     RunInputRef,
 )
 
 if TYPE_CHECKING:
-    from consist.core.config_canonicalization import ConfigAdapter, ConfigPlan
+    from consist.core.config_canonicalization import (
+        CanonicalizationSnapshot,
+        ConfigAdapter,
+        ConfigPlan,
+    )
     from consist.core.run_invocation import ResolvedRunInvocation
     from consist.core.tracker import Tracker
 
@@ -127,7 +136,9 @@ class RunInvocationContext:
     config: Optional[Union[Dict[str, Any], BaseModel]]
     config_plan: Optional["ConfigPlan"]
     outputs: Optional[List[str]]
-    output_paths: Optional[Mapping[str, ArtifactRef]]
+    output_paths: Optional[Mapping[str, OutputPathRef]]
+    output_sets: Optional[Mapping[str, OutputSet]]
+    profile_file_schema: bool | Literal["if_changed"] | None
     inputs: Optional[Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]]
     output_mismatch: Literal["warn", "error", "ignore"]
     output_missing: Literal["warn", "error", "ignore"]
@@ -141,8 +152,44 @@ class RunInvocationContext:
     requested_input_paths: Optional[Dict[str, Path]]
     requested_input_materialization: Optional[str]
     requested_input_materialization_mode: Optional[str]
+    requested_input_artifact_ids: Optional[Mapping[str, str]]
     run_id: str
     start_kwargs: Dict[str, Any]
+
+
+def _output_spec_path(ref: OutputPathRef) -> ArtifactRef:
+    if isinstance(ref, OutputArtifactSpec):
+        return ref.path
+    return ref
+
+
+def _output_spec_log_kwargs(
+    ref: OutputPathRef,
+    *,
+    default_profile_file_schema: bool | Literal["if_changed"] | None,
+) -> Dict[str, Any]:
+    if not isinstance(ref, OutputArtifactSpec):
+        if default_profile_file_schema is None:
+            return {}
+        return {"profile_file_schema": default_profile_file_schema}
+
+    kwargs: Dict[str, Any] = {
+        "schema": ref.schema,
+        "strict_schema": False,
+        "driver": ref.driver,
+        "facet": ref.facet,
+        "facet_schema_version": ref.facet_schema_version,
+        "facet_index": ref.facet_index,
+        "profile_file_schema": (
+            default_profile_file_schema
+            if ref.profile_file_schema is None
+            else ref.profile_file_schema
+        ),
+        "file_schema_sample_rows": ref.file_schema_sample_rows,
+    }
+    if ref.meta is not None:
+        kwargs.update(dict(ref.meta))
+    return {key: value for key, value in kwargs.items() if value is not None}
 
 
 class RunTraceCoordinator:
@@ -271,11 +318,15 @@ class RunTraceCoordinator:
         stage: Optional[str] = None,
         code_identity_callable: Optional[Callable[..., Any]] = None,
         materialize_cached_output_paths: Optional[Dict[str, Path]] = None,
+        materialize_cached_output_set_roots: Optional[Dict[str, Path]] = None,
         materialize_cached_outputs_dir: Optional[Path] = None,
         materialize_cached_outputs_source_root: Optional[Path] = None,
+        output_sets: Optional[Mapping[str, OutputSet]] = None,
         requested_input_paths: Optional[Mapping[str, Any]] = None,
         requested_input_materialization: Optional[str] = None,
         requested_input_materialization_mode: Optional[str] = None,
+        requested_input_artifact_ids: Optional[Mapping[str, str]] = None,
+        profile_file_schema: bool | Literal["if_changed"] | None = None,
     ) -> Dict[str, Any]:
         """Build the kwargs payload passed into ``tracker.start_run``."""
         start_kwargs: Dict[str, Any] = {
@@ -293,6 +344,8 @@ class RunTraceCoordinator:
             "iteration": iteration,
             "parent_run_id": parent_run_id,
             "validate_cached_outputs": invocation.validate_cached_outputs,
+            "validate_materialized_inputs": invocation.validate_materialized_inputs,
+            "cache_hydration_failure": invocation.cache_hydration_failure,
             "cache_epoch": resolved_cache_epoch,
         }
         if invocation.code_identity is not None:
@@ -312,6 +365,16 @@ class RunTraceCoordinator:
                 str(key): str(Path(value))
                 for key, value in requested_input_paths.items()
             }
+        if requested_input_artifact_ids is not None:
+            start_kwargs["requested_input_artifact_ids"] = dict(
+                requested_input_artifact_ids
+            )
+        identity_overrides: dict[str, Any] = {}
+        capture_identity = build_output_set_captures_identity(output_sets)
+        if capture_identity is not None:
+            identity_overrides["__consist_output_set_captures__"] = capture_identity
+        if identity_overrides:
+            start_kwargs["_consist_identity_config_overrides"] = identity_overrides
         requested_mode = requested_input_materialization_mode or (
             "copy" if requested_input_materialization == "requested" else None
         )
@@ -325,10 +388,12 @@ class RunTraceCoordinator:
             "facet_index": invocation.facet_index,
             "cache_hydration": cache_hydration,
             "materialize_cached_output_paths": materialize_cached_output_paths,
+            "materialize_cached_output_set_roots": materialize_cached_output_set_roots,
             "materialize_cached_outputs_dir": materialize_cached_outputs_dir,
             "materialize_cached_outputs_source_root": (
                 materialize_cached_outputs_source_root
             ),
+            "profile_file_schema": profile_file_schema,
         }
         for key, value in optional_values.items():
             if value is not None:
@@ -340,7 +405,8 @@ class RunTraceCoordinator:
         *,
         tracker: "Tracker",
         cache_hydration: Optional[str],
-        output_paths: Optional[Mapping[str, ArtifactRef]],
+        output_paths: Optional[Mapping[str, OutputPathRef]],
+        output_sets: Optional[Mapping[str, OutputSet]],
         run_id: str,
         model: str,
         description: Optional[str],
@@ -348,23 +414,26 @@ class RunTraceCoordinator:
         iteration: Optional[int],
         parent_run_id: Optional[str],
         tags: Optional[List[str]],
-    ) -> tuple[Optional[Dict[str, Path]], Optional[Path]]:
+    ) -> tuple[Optional[Dict[str, Path]], Optional[Dict[str, Path]], Optional[Path]]:
         """Resolve cache-hydration output materialization targets, if requested."""
         materialize_cached_output_paths: Optional[Dict[str, Path]] = None
+        materialize_cached_output_set_roots: Optional[Dict[str, Path]] = None
         materialize_cached_outputs_dir: Optional[Path] = None
         if cache_hydration == "outputs-requested":
-            if output_paths is None:
+            if output_paths is None and output_sets is None:
                 raise ValueError(
                     format_problem_cause_fix(
                         problem=(
-                            "cache_hydration='outputs-requested' requires output_paths."
+                            "cache_hydration='outputs-requested' requires "
+                            "output_paths or output_sets."
                         ),
                         cause=(
                             "Requested-output hydration needs explicit destination "
                             "paths."
                         ),
                         fix=(
-                            "Declare output_paths={key: path} when using "
+                            "Declare output_paths={key: path} or "
+                            "output_sets={key: OutputSet(root=...)} when using "
                             "cache_hydration='outputs-requested'."
                         ),
                     )
@@ -379,14 +448,24 @@ class RunTraceCoordinator:
                 parent_run_id=parent_run_id,
                 tags=tags,
             )
-            materialize_cached_output_paths = {
-                str(output_key): self._helpers.resolve_output_path(
-                    tracker,
-                    ref,
-                    output_base_dir,
-                )
-                for output_key, ref in output_paths.items()
-            }
+            if output_paths is not None:
+                materialize_cached_output_paths = {
+                    str(output_key): self._helpers.resolve_output_path(
+                        tracker,
+                        _output_spec_path(ref),
+                        output_base_dir,
+                    )
+                    for output_key, ref in output_paths.items()
+                }
+            if output_sets is not None:
+                materialize_cached_output_set_roots = {
+                    str(output_key): self._helpers.resolve_output_path(
+                        tracker,
+                        output_set.root,
+                        output_base_dir,
+                    )
+                    for output_key, output_set in output_sets.items()
+                }
         elif cache_hydration == "outputs-all":
             materialize_cached_outputs_dir = self._helpers.preview_run_artifact_dir(
                 tracker,
@@ -399,7 +478,11 @@ class RunTraceCoordinator:
                 tags=tags,
             )
 
-        return materialize_cached_output_paths, materialize_cached_outputs_dir
+        return (
+            materialize_cached_output_paths,
+            materialize_cached_output_set_roots,
+            materialize_cached_outputs_dir,
+        )
 
     def _prepare_run_invocation_context(
         self,
@@ -427,11 +510,14 @@ class RunTraceCoordinator:
         stage: Optional[str],
         parent_run_id: Optional[str],
         outputs: Optional[List[str]],
-        output_paths: Optional[Mapping[str, ArtifactRef]],
+        output_paths: Optional[Mapping[str, OutputPathRef]],
+        output_sets: Optional[Mapping[str, OutputSet]],
+        profile_file_schema: bool | Literal["if_changed"] | None,
         cache_options: Optional[CacheOptions],
         output_policy: Optional[OutputPolicyOptions],
         execution_options: Optional[ExecutionOptions],
         runtime_kwargs: Optional[Mapping[str, Any]],
+        apply_step_defaults: Optional[bool],
     ) -> RunInvocationContext:
         tracker = self._tracker
         execution_options = resolve_runtime_kwargs_alias(
@@ -462,12 +548,13 @@ class RunTraceCoordinator:
             stage=stage,
             outputs=outputs,
             output_paths=output_paths,
+            output_sets=output_sets,
             cache_options=cache_options,
             output_policy=output_policy,
             execution_options=execution_options,
             default_name_template=None,
             allow_template=None,
-            apply_step_defaults=None,
+            apply_step_defaults=apply_step_defaults,
             consist_settings=tracker.settings,
             consist_workspace=tracker.run_dir,
             consist_state=tracker.current_consist,
@@ -483,6 +570,7 @@ class RunTraceCoordinator:
         requested_input_paths = invocation.input_paths
         requested_input_materialization = invocation.input_materialization
         requested_input_materialization_mode = invocation.input_materialization_mode
+        requested_input_artifact_ids = invocation.requested_input_artifact_ids
         if (
             input_binding != "none"
             and invocation.inputs is not None
@@ -558,17 +646,23 @@ class RunTraceCoordinator:
                         ),
                     )
                 )
+            requested_input_artifact_ids = {
+                key: str(input_artifacts_by_key[key].id)
+                for key in requested_input_paths
+            }
 
         if run_id is None:
             run_id = f"{resolved_name}_{uuid.uuid4().hex[:8]}"
 
         (
             materialize_cached_output_paths,
+            materialize_cached_output_set_roots,
             materialize_cached_outputs_dir,
         ) = self._resolve_cache_hydration_targets(
             tracker=tracker,
             cache_hydration=cache_hydration,
             output_paths=invocation.output_paths,
+            output_sets=invocation.output_sets,
             run_id=run_id,
             model=invocation.model,
             description=invocation.description,
@@ -612,15 +706,19 @@ class RunTraceCoordinator:
                 fn if invocation.executor == "python" and fn is not None else None
             ),
             materialize_cached_output_paths=materialize_cached_output_paths,
+            materialize_cached_output_set_roots=materialize_cached_output_set_roots,
             materialize_cached_outputs_dir=materialize_cached_outputs_dir,
             materialize_cached_outputs_source_root=(
                 Path(invocation.materialize_cached_outputs_source_root)
                 if invocation.materialize_cached_outputs_source_root is not None
                 else None
             ),
+            output_sets=invocation.output_sets,
             requested_input_paths=requested_input_paths,
             requested_input_materialization=requested_input_materialization,
             requested_input_materialization_mode=(requested_input_materialization_mode),
+            requested_input_artifact_ids=requested_input_artifact_ids,
+            profile_file_schema=profile_file_schema,
         )
 
         return RunInvocationContext(
@@ -629,6 +727,8 @@ class RunTraceCoordinator:
             config_plan=config_plan,
             outputs=invocation.outputs,
             output_paths=invocation.output_paths,
+            output_sets=invocation.output_sets,
+            profile_file_schema=profile_file_schema,
             inputs=invocation.inputs,
             output_mismatch=invocation.output_mismatch,
             output_missing=invocation.output_missing,
@@ -646,6 +746,7 @@ class RunTraceCoordinator:
             ),
             requested_input_materialization=requested_input_materialization,
             requested_input_materialization_mode=(requested_input_materialization_mode),
+            requested_input_artifact_ids=requested_input_artifact_ids,
             run_id=run_id,
             start_kwargs=start_kwargs,
         )
@@ -748,8 +849,9 @@ class RunTraceCoordinator:
         *,
         tracker: "Tracker",
         resolved_name: str,
-        output_paths: Optional[Mapping[str, ArtifactRef]],
+        output_paths: Optional[Mapping[str, OutputPathRef]],
         output_base_dir: Path,
+        profile_file_schema: bool | Literal["if_changed"] | None,
         on_missing_outputs: Callable[[str, List[str]], None],
     ) -> Dict[str, Artifact]:
         outputs_map: Dict[str, Artifact] = {}
@@ -758,23 +860,30 @@ class RunTraceCoordinator:
 
         with tracker.persistence.batch_artifact_writes():
             for output_key, ref in output_paths.items():
+                output_ref = _output_spec_path(ref)
                 ref_path = self._helpers.resolve_output_path(
-                    tracker, ref, output_base_dir
+                    tracker, output_ref, output_base_dir
                 )
                 if not ref_path.exists():
                     on_missing_outputs(f"Run {resolved_name!r}", [str(output_key)])
                     continue
-                if isinstance(ref, Artifact):
+                log_kwargs = _output_spec_log_kwargs(
+                    ref,
+                    default_profile_file_schema=profile_file_schema,
+                )
+                if isinstance(output_ref, Artifact):
                     outputs_map[output_key] = tracker.log_artifact(
-                        ref,
+                        output_ref,
                         key=output_key,
                         direction="output",
+                        **log_kwargs,
                     )
                 else:
                     outputs_map[output_key] = tracker.log_artifact(
                         ref_path,
                         key=output_key,
                         direction="output",
+                        **log_kwargs,
                     )
         return outputs_map
 
@@ -786,7 +895,9 @@ class RunTraceCoordinator:
         fn: Optional[Callable[..., Any]],
         resolved_name: str,
         outputs: Optional[List[str]],
-        output_paths: Optional[Mapping[str, ArtifactRef]],
+        output_paths: Optional[Mapping[str, OutputPathRef]],
+        output_sets: Optional[Mapping[str, OutputSet]],
+        profile_file_schema: bool | Literal["if_changed"] | None,
         result: Any,
         captured_outputs: Mapping[str, Artifact],
         on_missing_outputs: Callable[[str, List[str]], None],
@@ -798,6 +909,7 @@ class RunTraceCoordinator:
             resolved_name=resolved_name,
             output_paths=output_paths,
             output_base_dir=output_base_dir,
+            profile_file_schema=profile_file_schema,
             on_missing_outputs=on_missing_outputs,
         )
 
@@ -835,9 +947,14 @@ class RunTraceCoordinator:
                         "Single return value does not match declared outputs."
                     )
                 else:
+                    # Tabular return values are the primary inputs for typed and
+                    # grouped analysis, so capture a lightweight schema by
+                    # default. This lets downstream grouped views select these
+                    # artifacts without extra notebook-side plumbing.
                     outputs_map[outputs[0]] = tracker.log_dataframe(
                         result,
                         key=outputs[0],
+                        profile_file_schema=True,
                     )
             elif isinstance(result, pd.Series):
                 if len(outputs) != 1:
@@ -845,9 +962,12 @@ class RunTraceCoordinator:
                         "Single return value does not match declared outputs."
                     )
                 else:
+                    # Keep Series output behavior aligned with DataFrames: the
+                    # one-column frame should be queryable by grouped views.
                     outputs_map[outputs[0]] = tracker.log_dataframe(
                         result.to_frame(name=outputs[0]),
                         key=outputs[0],
+                        profile_file_schema=True,
                     )
             elif self._helpers.is_xarray_dataset(result):
                 if len(outputs) != 1:
@@ -917,6 +1037,24 @@ class RunTraceCoordinator:
             for output_key, artifact in logged_outputs.items():
                 outputs_map.setdefault(output_key, artifact)
 
+        if output_sets:
+            output_base_dir = tracker.run_artifact_dir()
+            try:
+                registered_sets = register_output_sets(
+                    tracker=tracker,
+                    output_sets=output_sets,
+                    config=(
+                        current_consist.config
+                        if isinstance(current_consist.config, Mapping)
+                        else None
+                    ),
+                    output_base_dir=output_base_dir,
+                    profile_file_schema=profile_file_schema,
+                )
+            except ValueError:
+                raise
+            outputs_map.update(registered_sets)
+
         return outputs_map
 
     def _execute_container_run(
@@ -926,7 +1064,7 @@ class RunTraceCoordinator:
         run_id: str,
         run: Any,
         resolved_name: str,
-        output_paths: Optional[Mapping[str, ArtifactRef]],
+        output_paths: Optional[Mapping[str, OutputPathRef]],
         container: Any,
         input_binding: InputBindingMode,
         resolved_inputs: List[ArtifactRef],
@@ -1013,7 +1151,16 @@ class RunTraceCoordinator:
 
         output_base_dir = tracker.run_artifact_dir()
         resolved_output_paths: Dict[str, Union[str, Path]] = {
-            str(key): self._helpers.resolve_output_path(tracker, ref, output_base_dir)
+            str(key): self._helpers.resolve_output_path(
+                tracker, _output_spec_path(ref), output_base_dir
+            )
+            for key, ref in output_paths.items()
+        }
+        output_log_kwargs = {
+            str(key): _output_spec_log_kwargs(
+                ref,
+                default_profile_file_schema=None,
+            )
             for key, ref in output_paths.items()
         }
 
@@ -1030,6 +1177,7 @@ class RunTraceCoordinator:
             backend_type=backend_type,
             pull_latest=pull_latest,
             lineage_mode=lineage_mode,
+            output_log_kwargs=output_log_kwargs,
         )
 
         outputs_map = dict(result.artifacts)
@@ -1058,7 +1206,44 @@ class RunTraceCoordinator:
         requested_input_paths: Optional[Mapping[str, Path]],
         capture_dir: Optional[Path],
         capture_pattern: str,
+        canonicalization: Optional["CanonicalizationSnapshot"] = None,
     ) -> tuple[Any, Dict[str, Artifact]]:
+        """
+        Execute one Python callable inside prepared run context.
+
+        Parameters
+        ----------
+        tracker, active_tracker : Tracker
+            Run tracker and tracker currently installed for the callable.
+        fn : callable, optional
+            Python function selected by the run invocation. It must be present
+            for this executor.
+        resolved_name : str
+            Resolved run name used in diagnostics and output handling.
+        config, inputs, runtime_kwargs_dict, inject_context, input_binding,
+        input_artifacts_by_key, requested_input_paths, capture_dir,
+        capture_pattern
+            Resolved invocation settings, inputs, and output-capture controls.
+        canonicalization : CanonicalizationSnapshot, optional
+            Immutable facts from the config plan to expose only through an
+            injected ``RunContext``.
+
+        Returns
+        -------
+        tuple[Any, dict[str, Artifact]]
+            Callable return value and artifacts logged from captured outputs.
+
+        Raises
+        ------
+        ValueError
+            If no callable is supplied or required runtime arguments are absent.
+
+        Notes
+        -----
+        Canonicalization observations are injected into Python context only;
+        they are not serialized into container commands, environment variables,
+        or mounts.
+        """
         runtime_kwargs = dict(runtime_kwargs_dict or {})
         required_runtime = getattr(fn, "__consist_runtime_required__", ())
         if required_runtime:
@@ -1189,7 +1374,10 @@ class RunTraceCoordinator:
             )
             if ctx_name not in call_kwargs:
                 if ctx_name in params or has_var_kw:
-                    call_kwargs[ctx_name] = RunContext(tracker)
+                    call_kwargs[ctx_name] = RunContext(
+                        tracker,
+                        canonicalization=canonicalization,
+                    )
                 else:
                     raise ValueError(
                         format_problem_cause_fix(
@@ -1263,13 +1451,16 @@ class RunTraceCoordinator:
         stage: Optional[str] = None,
         parent_run_id: Optional[str] = None,
         outputs: Optional[List[str]] = None,
-        output_paths: Optional[Mapping[str, ArtifactRef]] = None,
+        output_paths: Optional[Mapping[str, OutputPathRef]] = None,
+        output_sets: Optional[Mapping[str, OutputSet]] = None,
+        profile_file_schema: bool | Literal["if_changed"] | None = None,
         capture_dir: Optional[Path] = None,
         capture_pattern: str = "*",
         cache_options: Optional[CacheOptions] = None,
         output_policy: Optional[OutputPolicyOptions] = None,
         execution_options: Optional[ExecutionOptions] = None,
         runtime_kwargs: Optional[Mapping[str, Any]] = None,
+        _apply_step_defaults: Optional[bool] = None,
     ) -> RunResult:
         """Execute function/container run flow with tracker-level orchestration.
 
@@ -1328,6 +1519,10 @@ class RunTraceCoordinator:
             Declared output keys.
         output_paths : Mapping[str, ArtifactRef] | None, optional
             Explicit output path mapping.
+        output_sets : Mapping[str, OutputSet] | None, optional
+            Declared logical outputs whose roots contain multiple member files.
+            Each set requires ``root`` and ``include``. Expected members/counts
+            are optional validation checks.
         capture_dir : Path | None, optional
             Output-capture directory.
         capture_pattern : str, default "*"
@@ -1381,15 +1576,19 @@ class RunTraceCoordinator:
             parent_run_id=parent_run_id,
             outputs=outputs,
             output_paths=output_paths,
+            output_sets=output_sets,
+            profile_file_schema=profile_file_schema,
             cache_options=cache_options,
             output_policy=output_policy,
             execution_options=execution_options,
             runtime_kwargs=runtime_kwargs,
+            apply_step_defaults=_apply_step_defaults,
         )
         resolved_name = context.resolved_name
         config_plan = context.config_plan
         outputs = context.outputs
         output_paths = context.output_paths
+        output_sets = context.output_sets
         inputs = context.inputs
         output_mismatch = context.output_mismatch
         output_missing = context.output_missing
@@ -1424,9 +1623,20 @@ class RunTraceCoordinator:
 
             if active_tracker.is_cached:
                 cached_outputs = {a.key: a for a in current_consist.outputs}
+                validate_cached_output_sets(
+                    outputs=cached_outputs,
+                    output_sets=output_sets,
+                    config=(
+                        current_consist.config
+                        if isinstance(current_consist.config, Mapping)
+                        else None
+                    ),
+                )
                 expected_keys = set(outputs or [])
                 if output_paths:
                     expected_keys.update(output_paths.keys())
+                if output_sets:
+                    expected_keys.update(output_sets.keys())
                 missing = [k for k in expected_keys if k not in cached_outputs]
                 _handle_missing_outputs(f"Cache hit for run {resolved_name!r}", missing)
                 if expected_keys:
@@ -1443,13 +1653,15 @@ class RunTraceCoordinator:
                     cache_hit=True,
                 )
 
+            canonicalization = None
             if config_plan is not None:
-                tracker.apply_config_plan(
+                contribution = tracker.apply_config_plan(
                     config_plan,
                     run=current_consist.run,
                     ingest=config_plan_ingest,
                     profile_schema=config_plan_profile_schema,
                 )
+                canonicalization = contribution.canonicalization
 
             if executor == "container":
                 return self._execute_container_run(
@@ -1473,6 +1685,7 @@ class RunTraceCoordinator:
                 inputs=inputs,
                 runtime_kwargs_dict=runtime_kwargs_dict,
                 inject_context=inject_context,
+                canonicalization=canonicalization,
                 input_binding=input_binding,
                 input_artifacts_by_key=input_artifacts_by_key,
                 requested_input_paths=requested_input_paths,
@@ -1487,6 +1700,8 @@ class RunTraceCoordinator:
                 resolved_name=resolved_name,
                 outputs=outputs,
                 output_paths=output_paths,
+                output_sets=output_sets,
+                profile_file_schema=context.profile_file_schema,
                 result=result,
                 captured_outputs=captured_outputs,
                 on_missing_outputs=_handle_missing_outputs,
@@ -1527,7 +1742,7 @@ class RunTraceCoordinator:
         iteration: Optional[int] = None,
         parent_run_id: Optional[str] = None,
         outputs: Optional[List[str]] = None,
-        output_paths: Optional[Mapping[str, ArtifactRef]] = None,
+        output_paths: Optional[Mapping[str, OutputPathRef]] = None,
         capture_dir: Optional[Path] = None,
         capture_pattern: str = "*",
         cache_mode: str = "reuse",
@@ -1535,6 +1750,7 @@ class RunTraceCoordinator:
         cache_version: Optional[int] = None,
         cache_epoch: Optional[int] = None,
         validate_cached_outputs: str = "lazy",
+        validate_materialized_inputs: Optional[bool] = None,
         code_identity: Optional[CodeIdentityMode] = None,
         code_identity_extra_deps: Optional[List[str]] = None,
         output_mismatch: str = "warn",
@@ -1604,6 +1820,8 @@ class RunTraceCoordinator:
             Cache-epoch discriminator folded into run identity.
         validate_cached_outputs : str, default "lazy"
             Cached-output validation policy.
+        validate_materialized_inputs : bool or None, optional
+            Opt-in stale-input validation for ``inputs-missing`` cache hydration.
         code_identity : CodeIdentityMode | None, optional
             Code identity mode override for hash computation.
         code_identity_extra_deps : list[str] | None, optional
@@ -1647,12 +1865,14 @@ class RunTraceCoordinator:
             stage=None,
             outputs=outputs,
             output_paths=output_paths,
+            output_sets=None,
             cache_options=CacheOptions(
                 cache_mode=cache_mode,
                 cache_hydration=cache_hydration,
                 cache_version=cache_version,
                 cache_epoch=cache_epoch,
                 validate_cached_outputs=validate_cached_outputs,
+                validate_materialized_inputs=validate_materialized_inputs,
                 code_identity=code_identity,
                 code_identity_extra_deps=code_identity_extra_deps,
             ),
@@ -1701,11 +1921,13 @@ class RunTraceCoordinator:
 
         (
             materialize_cached_output_paths,
+            materialize_cached_output_set_roots,
             materialize_cached_outputs_dir,
         ) = self._resolve_cache_hydration_targets(
             tracker=tracker,
             cache_hydration=cache_hydration,
             output_paths=resolved_invocation.output_paths,
+            output_sets=resolved_invocation.output_sets,
             run_id=run_id,
             model=resolved_invocation.model,
             description=resolved_invocation.description,
@@ -1737,6 +1959,7 @@ class RunTraceCoordinator:
             iteration=iteration,
             parent_run_id=parent_run_id,
             materialize_cached_output_paths=materialize_cached_output_paths,
+            materialize_cached_output_set_roots=materialize_cached_output_set_roots,
             materialize_cached_outputs_dir=materialize_cached_outputs_dir,
             materialize_cached_outputs_source_root=(
                 Path(resolved_invocation.materialize_cached_outputs_source_root)
@@ -1744,6 +1967,7 @@ class RunTraceCoordinator:
                 is not None
                 else None
             ),
+            output_sets=resolved_invocation.output_sets,
         )
 
         def _handle_missing_outputs(label: str, missing: List[str]) -> None:
@@ -1781,6 +2005,7 @@ class RunTraceCoordinator:
                     resolved_name=resolved_name,
                     output_paths=resolved_invocation.output_paths,
                     output_base_dir=output_base_dir,
+                    profile_file_schema=None,
                     on_missing_outputs=_handle_missing_outputs,
                 )
 

@@ -12,12 +12,11 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Union, cast
 
 from consist.core.error_messages import format_problem_cause_fix
-from consist.core.metadata_resolver import MetadataResolver
+from consist.core.metadata_resolver import MetadataResolver, ResolvedStepIdentity
 from consist.core.run_options import merge_run_options
 from consist.core.settings import ConsistSettings
 from consist.models.run import ConsistRecord
 from consist.types import (
-    ArtifactRef,
     CacheOptions,
     CodeIdentityMode,
     ExecutionOptions,
@@ -25,6 +24,8 @@ from consist.types import (
     InputBindingMode,
     IdentityInputs,
     OutputPolicyOptions,
+    OutputPathRef,
+    OutputSet,
     PathLike,
     RunInputRef,
 )
@@ -73,6 +74,8 @@ class ResolvedRunInvocation:
         Resolved declared output keys.
     output_paths : Optional[Mapping[str, ArtifactRef]]
         Resolved declared output path mapping.
+    output_sets : Optional[Mapping[str, OutputSet]]
+        Resolved declared output-set mapping.
     cache_mode : str
         Effective cache mode with defaults applied.
     cache_hydration : Optional[str]
@@ -103,6 +106,9 @@ class ResolvedRunInvocation:
         Requested input-staging policy.
     input_materialization_mode : Optional[Literal["copy"]]
         Requested staging transport mode.
+    requested_input_artifact_ids : Optional[Mapping[str, str]]
+        Internal strict-binding mapping from callable parameter to tracked
+        artifact identifier for requested input staging.
     executor : Literal["python", "container"]
         Effective execution backend.
     container : Optional[Mapping[str, Any]]
@@ -128,12 +134,15 @@ class ResolvedRunInvocation:
     input_keys: Optional[Iterable[str] | str]
     optional_input_keys: Optional[Iterable[str] | str]
     outputs: Optional[List[str]]
-    output_paths: Optional[Mapping[str, ArtifactRef]]
+    output_paths: Optional[Mapping[str, OutputPathRef]]
+    output_sets: Optional[Mapping[str, OutputSet]]
     cache_mode: str
     cache_hydration: Optional[str]
+    cache_hydration_failure: Literal["warn", "miss"]
     cache_version: Optional[int]
     cache_epoch: Optional[int]
     validate_cached_outputs: str
+    validate_materialized_inputs: bool
     materialize_cached_outputs_source_root: Optional[PathLike]
     code_identity: Optional[CodeIdentityMode]
     code_identity_extra_deps: Optional[List[str]]
@@ -144,6 +153,7 @@ class ResolvedRunInvocation:
     input_paths: Optional[Mapping[str, PathLike]]
     input_materialization: Optional[Literal["requested"]]
     input_materialization_mode: Optional[Literal["copy"]]
+    requested_input_artifact_ids: Optional[Mapping[str, str]]
     executor: Literal["python", "container"]
     container: Optional[Mapping[str, Any]]
     runtime_kwargs: Optional[Dict[str, Any]]
@@ -225,7 +235,8 @@ def resolve_run_invocation(
     phase: Optional[str],
     stage: Optional[str],
     outputs: Optional[List[str]],
-    output_paths: Optional[Mapping[str, ArtifactRef]],
+    output_paths: Optional[Mapping[str, OutputPathRef]],
+    output_sets: Optional[Mapping[str, OutputSet]],
     cache_options: Optional[CacheOptions],
     output_policy: Optional[OutputPolicyOptions],
     execution_options: Optional[ExecutionOptions],
@@ -238,6 +249,7 @@ def resolve_run_invocation(
     missing_name_error: str,
     python_missing_fn_error: str,
     allow_python_without_fn: bool = False,
+    pre_resolved_step_identity: ResolvedStepIdentity | None = None,
 ) -> ResolvedRunInvocation:
     """
     Resolve and validate a run invocation into a normalized internal contract.
@@ -293,6 +305,8 @@ def resolve_run_invocation(
         Optional declared output keys.
     output_paths : Optional[Mapping[str, ArtifactRef]]
         Optional declared output path mapping.
+    output_sets : Optional[Mapping[str, OutputSet]]
+        Optional declared output-set mapping.
     cache_options : Optional[CacheOptions]
         Grouped cache options object.
     output_policy : Optional[OutputPolicyOptions]
@@ -352,9 +366,11 @@ def resolve_run_invocation(
 
     cache_mode = merged_options.cache_mode
     cache_hydration = merged_options.cache_hydration
+    cache_hydration_failure = merged_options.cache_hydration_failure
     cache_version = merged_options.cache_version
     cache_epoch = merged_options.cache_epoch
     validate_cached_outputs = merged_options.validate_cached_outputs
+    validate_materialized_inputs = merged_options.validate_materialized_inputs
     materialize_cached_outputs_source_root = (
         merged_options.materialize_cached_outputs_source_root
     )
@@ -367,6 +383,7 @@ def resolve_run_invocation(
     requested_input_paths = merged_options.input_paths
     requested_input_materialization = merged_options.input_materialization
     requested_input_materialization_mode = merged_options.input_materialization_mode
+    requested_input_artifact_ids = merged_options.requested_input_artifact_ids
     executor = merged_options.executor
     container = merged_options.container
     runtime_kwargs = merged_options.runtime_kwargs
@@ -552,6 +569,7 @@ def resolve_run_invocation(
         runtime_kwargs=runtime_kwargs_dict,
         outputs=outputs,
         output_paths=output_paths,
+        output_sets=output_sets,
         cache_mode=cache_mode,
         cache_hydration=cache_hydration,
         cache_version=cache_version,
@@ -559,6 +577,7 @@ def resolve_run_invocation(
         input_binding=input_binding,
         load_inputs=load_inputs,
         missing_name_error=missing_name_error,
+        pre_resolved_identity=pre_resolved_step_identity,
     )
 
     resolved_cache_mode = resolved.cache_mode
@@ -567,6 +586,29 @@ def resolve_run_invocation(
         resolved_cache_mode = "reuse"
     if resolved_validate_cached_outputs is None:
         resolved_validate_cached_outputs = "lazy"
+    if cache_hydration_failure not in {"warn", "miss"}:
+        raise ValueError("cache_hydration_failure must be one of: 'warn', 'miss'")
+    if (
+        cache_hydration_failure == "miss"
+        and resolved.cache_hydration != "outputs-requested"
+    ):
+        raise ValueError(
+            "cache_hydration_failure='miss' requires "
+            "cache_hydration='outputs-requested'"
+        )
+    resolved_validate_materialized_inputs = (
+        False if validate_materialized_inputs is None else validate_materialized_inputs
+    )
+    if not isinstance(resolved_validate_materialized_inputs, bool):
+        raise ValueError("validate_materialized_inputs must be a boolean")
+    if (
+        resolved_validate_materialized_inputs
+        and resolved.cache_hydration != "inputs-missing"
+    ):
+        raise ValueError(
+            "validate_materialized_inputs=True requires "
+            "cache_hydration='inputs-missing'"
+        )
 
     if requested_input_materialization is not None:
         if requested_input_materialization != "requested":
@@ -697,11 +739,16 @@ def resolve_run_invocation(
         optional_input_keys=resolved.optional_input_keys,
         outputs=resolved.outputs,
         output_paths=resolved.output_paths,
+        output_sets=(
+            dict(resolved.output_sets) if resolved.output_sets is not None else None
+        ),
         cache_mode=resolved_cache_mode,
         cache_hydration=resolved.cache_hydration,
+        cache_hydration_failure=cache_hydration_failure,
         cache_version=resolved.cache_version,
         cache_epoch=cache_epoch,
         validate_cached_outputs=resolved_validate_cached_outputs,
+        validate_materialized_inputs=resolved_validate_materialized_inputs,
         materialize_cached_outputs_source_root=(materialize_cached_outputs_source_root),
         code_identity=code_identity,
         code_identity_extra_deps=(
@@ -718,6 +765,11 @@ def resolve_run_invocation(
         ),
         input_materialization=requested_input_materialization,
         input_materialization_mode=requested_input_materialization_mode,
+        requested_input_artifact_ids=(
+            dict(requested_input_artifact_ids)
+            if requested_input_artifact_ids is not None
+            else None
+        ),
         executor=cast(Literal["python", "container"], executor),
         container=container,
         runtime_kwargs=runtime_kwargs_dict,
