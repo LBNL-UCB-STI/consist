@@ -99,9 +99,7 @@ class IdentityManager:
         key ordering and compact separators.
         """
         cleaned = self._clean_structure(obj, set())
-        return json.dumps(
-            cleaned, sort_keys=True, ensure_ascii=True, separators=(",", ":")
-        )
+        return self._canonical_json_token(cleaned)
 
     def canonical_json_sha256(self, obj: Any) -> str:
         """SHA256 hex digest of `canonical_json_str(obj)`."""
@@ -115,6 +113,11 @@ class IdentityManager:
         without excluding any keys.
         """
         return self._clean_structure(obj, set())
+
+    @staticmethod
+    def _canonical_json_token(obj: Any) -> str:
+        """Serialize a cleaned value using the canonical JSON token settings."""
+        return json.dumps(obj, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
 
     # --- Run Signature Calculation ---
 
@@ -620,18 +623,23 @@ class IdentityManager:
             return [self._clean_structure(x, exclude_keys) for x in obj]
 
         # 4. Handle Sets (CRITICAL for hashing)
-        # Sets must be sorted to ensure the hash is identical regardless of memory layout
         elif isinstance(obj, set):
+            cleaned_members = [self._clean_structure(x, exclude_keys) for x in obj]
+            # Preserve legacy natural ordering for comparable cleaned values so
+            # existing sortable-set hashes remain stable. Heterogeneous sets use
+            # canonical tokens to remove process-local iteration dependence.
             try:
-                # Attempt to sort; requires items to be comparable
-                return sorted([self._clean_structure(x, exclude_keys) for x in obj])
+                return sorted(cleaned_members)
             except TypeError:
-                # Fallback if items aren't comparable (rare in configs, but possible)
-                # We convert to list to allow JSON serialization, but warn about non-determinism
-                logging.warning(
-                    "Consist: Encountered unsortable set in config. Hash stability not guaranteed."
-                )
-                return [self._clean_structure(x, exclude_keys) for x in obj]
+                tokenized_members = [
+                    (
+                        self._canonical_json_token(member),
+                        member,
+                    )
+                    for member in cleaned_members
+                ]
+                tokenized_members.sort(key=lambda item: item[0])
+                return [member for _, member in tokenized_members]
 
         # 5. Handle Numpy conversions (Existing logic)
         if np:
