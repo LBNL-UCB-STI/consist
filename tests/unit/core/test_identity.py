@@ -20,6 +20,10 @@ It verifies the correctness of:
 
 import pytest
 import hashlib
+import json
+import logging
+import subprocess
+import sys
 import tempfile
 import os
 import time
@@ -42,6 +46,76 @@ except ImportError:
 
 class TestConfigHashing:
     """Tests the `compute_config_hash` method of `IdentityManager`."""
+
+    def test_mixed_type_sets_use_canonical_json_token_order(self):
+        im = IdentityManager()
+        config_a = {"tags": {"beta", 1, "alpha", (2, "nested")}}
+        config_b = {"tags": {(2, "nested"), "alpha", "beta", 1}}
+
+        normalized_a = im.normalize_json(config_a)
+        normalized_b = im.normalize_json(config_b)
+
+        assert normalized_a == {"tags": ["alpha", "beta", 1, [2, "nested"]]}
+        assert normalized_a == normalized_b
+        assert im.compute_config_hash(config_a) == im.compute_config_hash(config_b)
+        assert im.compute_run_config_hash(
+            config=config_a, model="demo"
+        ) == im.compute_run_config_hash(config=config_b, model="demo")
+
+    def test_sortable_sets_preserve_legacy_natural_order(self):
+        im = IdentityManager()
+        config = {"values": {2, 10}}
+
+        assert im.normalize_json(config) == {"values": [2, 10]}
+
+    def test_path_config_values_match_string_values(self):
+        im = IdentityManager()
+
+        assert im.normalize_json({"path": Path("config.yaml")}) == {
+            "path": "config.yaml"
+        }
+        assert im.compute_config_hash(
+            {"path": Path("config.yaml")}
+        ) == im.compute_config_hash({"path": "config.yaml"})
+
+    def test_mixed_type_set_run_hash_is_stable_across_python_hash_seeds(self):
+        child = """
+import json
+from consist.core.identity import IdentityManager
+from consist.core.validation import validate_config_structure
+
+identity = IdentityManager()
+config = {"tags": {"alpha", "beta", 1}}
+normalized = identity.normalize_json(config)
+validate_config_structure(normalized)
+config_hash = identity.compute_run_config_hash(config=normalized, model="demo")
+print(json.dumps({"config_hash": config_hash, "normalized": normalized}, sort_keys=True))
+"""
+        results = []
+        for seed in ("1", "2", "3", "4", "5"):
+            environment = os.environ.copy()
+            environment["PYTHONHASHSEED"] = seed
+            completed = subprocess.run(
+                [sys.executable, "-c", child],
+                check=True,
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            results.append(json.loads(completed.stdout))
+
+        assert len({json.dumps(result, sort_keys=True) for result in results}) == 1
+        assert results[0]["normalized"] == {"tags": ["alpha", "beta", 1]}
+
+    def test_unsupported_set_member_fails_without_best_effort_hash(self, caplog):
+        class Unsupported:
+            pass
+
+        with caplog.at_level(logging.WARNING):
+            with pytest.raises(TypeError, match="not JSON serializable"):
+                IdentityManager().compute_config_hash({"values": {Unsupported()}})
+
+        assert "Hash stability not guaranteed" not in caplog.text
 
     def test_canonicalization(self):
         """

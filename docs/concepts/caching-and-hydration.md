@@ -82,6 +82,16 @@ canonical config identity through `adapter=...`. Query-oriented facets are for
 filtering and grouping; do not rely on them as a replacement for identity
 inputs or config.
 
+Identity-bearing configurations are canonicalized deterministically across
+Python processes. Set members are recursively normalized. Members that remain
+mutually comparable retain Consist's legacy natural ordering; heterogeneous
+JSON-compatible sets such as `{"alpha", "beta", 1}` use compact, sorted JSON
+tokens instead, giving them one stable identity even when their members are not
+mutually comparable in Python. Values that cannot be represented in JSON fail
+during identity construction; they do not receive a warning and a best-effort
+hash. This contract does not perform Unicode normalization or coerce
+numerically distinct values.
+
 See [Config Management](config-management.md) for config/facet guidance.
 
 ### Input Identity
