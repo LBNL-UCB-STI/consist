@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import pickle
 from pathlib import Path
+import subprocess
+import sys
 from typing import Any, Dict
 
 import pytest
@@ -208,6 +211,77 @@ def test_execute_worker_run_success(run_dir: Path, tmp_path: Path):
     assert result_cached.cache_hit is True
     # Cache hit returns standard scalar_payload as None (since function is skipped)
     assert result_cached.scalar_payload is None
+
+
+def test_execute_worker_run_non_git_callable_edit_invalidates_cache_in_fresh_processes(
+    tmp_path: Path,
+):
+    module_root = tmp_path / "non_git_run_spec"
+    module_root.mkdir()
+    module_path = module_root / "tracked_step.py"
+    module_path.write_text(
+        "def run(config):\n    return 'mean'\n",
+        encoding="utf-8",
+    )
+    runner = """
+import json
+import sys
+from pathlib import Path
+
+from consist.core.orchestration import (
+    BatchRunSpec,
+    ExecutionSpec,
+    PythonCallableTarget,
+    execute_worker_run,
+)
+
+module_root = Path(sys.argv[1])
+sys.path.insert(0, str(module_root))
+exec_spec = ExecutionSpec(
+    run_id='exec-run-spec',
+    target=PythonCallableTarget(callable_ref='tracked_step:run'),
+    run_spec=BatchRunSpec(
+        run_id='run-spec',
+        model='run_spec_model',
+        config={'stable': True},
+    ),
+)
+result = execute_worker_run(
+    {
+        'run_dir': str(module_root / 'runs'),
+        'db_path': str(module_root / 'provenance.duckdb'),
+        'project_root': str(module_root),
+    },
+    exec_spec,
+)
+print(json.dumps({
+    'cache_hit': result.cache_hit,
+    'scalar_payload': result.scalar_payload,
+}))
+"""
+
+    def run_process() -> dict[str, object]:
+        completed = subprocess.run(
+            [sys.executable, "-c", runner, str(module_root)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return json.loads(completed.stdout)
+
+    first = run_process()
+    assert first == {"cache_hit": False, "scalar_payload": "mean"}
+
+    module_path.write_text(
+        "def run(config):\n    return 'sum'\n",
+        encoding="utf-8",
+    )
+
+    second = run_process()
+    assert second == {"cache_hit": False, "scalar_payload": "sum"}
+
+    third = run_process()
+    assert third == {"cache_hit": True, "scalar_payload": None}
 
 
 def test_execute_worker_run_failure(run_dir: Path, tmp_path: Path):

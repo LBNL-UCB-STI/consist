@@ -633,8 +633,7 @@ class TestCodeVersion:
     @patch("consist.core.identity.git")
     def test_git_error_handling(self, mock_git: MagicMock):
         """
-        Tests that get_code_version gracefully handles Git errors
-        (e.g., inside a container or not a git repo).
+        Git lookup failures must not become reusable sentinel identities.
         """
         im = IdentityManager()
 
@@ -645,21 +644,66 @@ class TestCodeVersion:
 
         mock_git.Repo.side_effect = mock_git.InvalidGitRepositoryError("Bad repo")
 
-        assert im.get_code_version() == "unknown_code_version"
+        with pytest.raises(RuntimeError) as exc_info:
+            im.get_code_version()
+
+        assert type(exc_info.value).__name__ == "CodeIdentityUnavailableError"
 
     def test_git_missing_module(self):
         """
-        Tests behavior when 'git' python module is not installed.
+        Missing Git must fail closed rather than return a stable sentinel.
         """
-        # We need to simulate the module being missing.
-        # This is hard if it's already imported.
-        # We can check the logic by patching the module level variable in identity.py if possible,
-        # or by checking if the real test environment has git.
-
-        # Easier approach: Patch `consist.core.identity.git` to be None
         with patch("consist.core.identity.git", None):
             im = IdentityManager()
-            assert im.get_code_version() == "no_git_module_found"
+            with pytest.raises(RuntimeError) as exc_info:
+                im.get_code_version()
+
+        assert type(exc_info.value).__name__ == "CodeIdentityUnavailableError"
+
+    def test_repo_git_falls_back_to_callable_module_when_git_is_unavailable(self):
+        def sample_func():
+            return "value"
+
+        with patch("consist.core.identity.git", None):
+            resolution = IdentityManager().resolve_code_identity(
+                mode="repo_git", func=sample_func
+            )
+
+        assert resolution.mode == "callable_module"
+        assert resolution.digest
+
+    @pytest.mark.parametrize(
+        ("mode", "inspection_method"),
+        [
+            ("callable_module", "getfile"),
+            ("callable_source", "getsource"),
+        ],
+    )
+    def test_explicit_callable_identity_does_not_retry_repo_git(
+        self, mode, inspection_method
+    ):
+        def sample_func():
+            return "value"
+
+        with patch(
+            f"consist.core.identity.inspect.{inspection_method}",
+            side_effect=OSError("callable source unavailable"),
+        ):
+            with pytest.raises(RuntimeError) as exc_info:
+                IdentityManager().resolve_code_identity(mode=mode, func=sample_func)
+
+        assert type(exc_info.value).__name__ == "CodeIdentityUnavailableError"
+
+    def test_callable_identity_failure_does_not_use_timestamp_fallback(self):
+        def sample_func():
+            return "value"
+
+        with patch(
+            "consist.core.identity.inspect.getfile",
+            side_effect=OSError("callable source unavailable"),
+        ):
+            with pytest.raises(RuntimeError, match="Code identity"):
+                IdentityManager().compute_callable_hash(sample_func)
 
     @patch("consist.core.identity.git")
     def test_callable_code_identity_does_not_use_repo_git_cache(
@@ -684,3 +728,19 @@ class TestCodeVersion:
 
         assert callable_hash != "abc12345"
         assert mock_git.Repo.call_count == 1
+
+    @patch("consist.core.identity.git")
+    def test_string_code_version_helper_returns_fallback_digest(
+        self, mock_git: MagicMock
+    ):
+        mock_git.Repo.side_effect = RuntimeError("not a repository")
+
+        def sample_func():
+            return "value"
+
+        digest = IdentityManager().resolve_code_version(
+            mode="repo_git", func=sample_func
+        )
+
+        assert digest
+        assert digest != "unknown_code_version"

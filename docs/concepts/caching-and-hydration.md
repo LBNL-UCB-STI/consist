@@ -52,8 +52,14 @@ signature = code identity + config identity + input identity
 
 ### Code Identity
 
-By default, Consist uses repository Git state. For function-shaped steps, you
-can narrow code identity with `CacheOptions`:
+By default, Consist uses repository Git state. Consist requires a truthful,
+non-empty code identity before it performs reusable cache lookup. For
+function-shaped steps outside a Git repository, the default `repo_git` request
+falls back to hashing the callable's defining module. The resolved mode is
+persisted as `callable_module`; it is never mislabeled as `repo_git`.
+
+For function-shaped steps, you can also select a code identity explicitly with
+`CacheOptions`:
 
 ```python
 from consist import CacheOptions
@@ -73,7 +79,17 @@ Supported modes are:
 | `callable_source` | Only the function source should drive code identity. |
 
 Use `code_identity_extra_deps` when a callable-scoped mode also depends on
-helper files.
+helper files. `callable_module` is the safer non-Git fallback because it also
+captures same-file helpers and constants.
+
+If repository identity is unavailable and no callable is present, Consist raises
+`CodeIdentityUnavailableError` before creating a reusable cache candidate. The
+same fail-closed behavior applies when an explicitly selected callable mode
+cannot inspect its callable; Consist never retries that request as `repo_git`
+and never uses a constant `unknown_code_version` or a timestamp nonce.
+
+Consequently, unchanged callable-module code outside Git can reuse a completed
+run, while editing that module produces a new code digest and a cache miss.
 
 ### Config Identity
 

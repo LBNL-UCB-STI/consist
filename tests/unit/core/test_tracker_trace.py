@@ -1,7 +1,12 @@
 from contextlib import contextmanager
+import json
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
+
+from consist.core.identity import CodeIdentityUnavailableError
 
 
 def test_tracker_trace_logs_output_paths_on_exception(tracker, tmp_path):
@@ -80,3 +85,65 @@ def test_tracker_trace_propagates_start_run_optional_kwargs(tracker, monkeypatch
         Path(str(captured_start_kwargs["materialize_cached_outputs_dir"]))
         == observed_run_dir
     )
+
+
+def test_tracker_trace_without_callable_identity_fails_before_cache_lookup(tmp_path):
+    runner = """
+import json
+import sys
+from pathlib import Path
+
+from consist.core.identity import CodeIdentityUnavailableError
+from consist.core.tracker import Tracker
+
+root = Path(sys.argv[1])
+tracker = Tracker(
+    run_dir=root / 'runs',
+    db_path=root / 'provenance.duckdb',
+    project_root=root,
+)
+
+def fail_lookup(*args, **kwargs):
+    raise AssertionError('cache lookup must not start')
+
+tracker.find_matching_run = fail_lookup
+try:
+    with tracker.trace('trace_without_identity'):
+        pass
+except CodeIdentityUnavailableError as exc:
+    print(json.dumps({'error': type(exc).__name__, 'active': tracker.current_consist is not None}))
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", runner, str(tmp_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(completed.stdout) == {
+        "error": "CodeIdentityUnavailableError",
+        "active": False,
+    }
+
+
+def test_scenario_trace_without_callable_identity_fails_before_cache_lookup(
+    tracker, monkeypatch
+):
+    with tracker.scenario("scenario_trace_without_identity") as scenario:
+
+        def unavailable_code_version():
+            raise CodeIdentityUnavailableError(
+                mode="repo_git", reason="repository identity unavailable"
+            )
+
+        def fail_lookup(*args, **kwargs):
+            pytest.fail("cache lookup must not start")
+
+        monkeypatch.setattr(
+            tracker.identity, "get_code_version", unavailable_code_version
+        )
+        monkeypatch.setattr(tracker, "find_matching_run", fail_lookup)
+
+        with pytest.raises(CodeIdentityUnavailableError, match="Code identity"):
+            with scenario.trace("trace_without_identity"):
+                pass

@@ -80,6 +80,10 @@ def _raise_unexpected_kwargs(kwargs: Mapping[str, Any]) -> None:
     raise TypeError(f"unexpected keyword arguments '{joined}'")
 
 
+def _scenario_header_code_identity() -> None:
+    """Anchor the structural Scenario header to Consist's workflow code."""
+
+
 @dataclass(frozen=True, slots=True)
 class StepIdentity:
     """One Scenario-owned, pre-resolved Python step identity.
@@ -1748,12 +1752,16 @@ class ScenarioContext:
         run_id = self.kwargs.pop("run_id", self.name)
         # Coupler is a runtime-only object and should not be serialized into run meta.
         self.kwargs.pop("coupler", None)
+        header_kwargs = dict(self.kwargs)
+        header_kwargs["_consist_code_identity_callable"] = (
+            _scenario_header_code_identity
+        )
         self.tracker.begin_run(
             run_id=run_id,
             model=self.model,
             config=self.config_arg,
             tags=self.tags,
-            **self.kwargs,
+            **header_kwargs,
         )
 
         # 2. Capture & Suspend

@@ -7,9 +7,9 @@ Manages the cryptographic identity of Runs and Artifacts.
 import logging
 import hashlib
 import json
-import time
 import inspect
 import fnmatch
+from dataclasses import dataclass
 from importlib import import_module
 from types import ModuleType
 from typing import (
@@ -21,9 +21,10 @@ from typing import (
     Callable,
     Set,
     Union,
-    Literal,
 )
 from pathlib import Path
+
+from consist.types import CodeIdentityMode
 
 # Try importing git, handle error if missing (optional dependency)
 git: Optional[ModuleType]
@@ -42,6 +43,33 @@ except ImportError:
 if TYPE_CHECKING:
     from consist.models.artifact import Artifact
     from consist.types import HashInput
+
+
+class CodeIdentityUnavailableError(RuntimeError):
+    """Raised when Consist cannot derive a safe identity for executed code."""
+
+    def __init__(self, *, mode: str, reason: str) -> None:
+        self.mode = mode
+        self.reason = reason
+        super().__init__(
+            f"Code identity unavailable for mode {mode!r}: {reason} "
+            "Run inside a Git repository or select/provide a supported callable "
+            "identity."
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CodeIdentityResolution:
+    """The actual code-identity mode and digest used for a run."""
+
+    mode: CodeIdentityMode
+    digest: str
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"repo_git", "callable_module", "callable_source"}:
+            raise ValueError(f"unknown code identity mode: {self.mode!r}")
+        if not isinstance(self.digest, str) or not self.digest.strip():
+            raise ValueError("code identity digest must not be empty")
 
 
 class IdentityManager:
@@ -177,30 +205,19 @@ class IdentityManager:
         Repo identity is cached per manager, but each lookup validates a cheap
         repository fingerprint so long-lived processes do not silently reuse stale
         code identity after HEAD or tracked Python diffs change.
+
+        Raises
+        ------
+        CodeIdentityUnavailableError
+            If GitPython is unavailable or ``project_root`` is not inside a
+            repository that can be inspected.
         """
         code_version: str
         if git is None:
-            code_version = "no_git_module_found"
-            self._repo_git_code_version_cache = code_version
-            self._repo_git_code_version_fingerprint_cache = code_version
-            return code_version
-
-        # NOTE:
-        # Tests patch `consist.core.identity.git` with a `MagicMock`. In that case,
-        # attributes like `git.InvalidGitRepositoryError` are *not* real exception
-        # classes, so catching them in an `except (...)` tuple raises:
-        #   "TypeError: catching classes that do not inherit from BaseException"
-        #
-        # To keep the production behavior and still support mocking, we defensively
-        # collect only real exception types from the module.
-        git_error_types: tuple[type[BaseException], ...] = tuple(
-            exc_type
-            for exc_type in (
-                getattr(git, "InvalidGitRepositoryError", None),
-                getattr(git, "NoSuchPathError", None),
+            raise CodeIdentityUnavailableError(
+                mode="repo_git",
+                reason="GitPython is not installed.",
             )
-            if isinstance(exc_type, type) and issubclass(exc_type, BaseException)
-        )
 
         try:
             # search_parent_directories=True helps if running from a subdir
@@ -216,17 +233,11 @@ class IdentityManager:
                 and self._repo_git_code_version_fingerprint_cache == fingerprint
             ):
                 return self._repo_git_code_version_cache
-        except Exception as e:
-            # NOTE:
-            # In production, we mainly care about "not a git repo" style failures;
-            # in tests, the `git` module may be mocked which can change exception
-            # semantics. We keep this conservative (never crash) and return a stable
-            # fallback string when anything goes wrong.
-            if git_error_types and isinstance(e, git_error_types):
-                code_version = "unknown_code_version"
-            else:
-                code_version = "unknown_code_version"
-            fingerprint = code_version
+        except Exception as exc:
+            raise CodeIdentityUnavailableError(
+                mode="repo_git",
+                reason=f"repository lookup failed: {exc}",
+            ) from exc
 
         self._repo_git_code_version_cache = code_version
         self._repo_git_code_version_fingerprint_cache = fingerprint
@@ -269,17 +280,22 @@ class IdentityManager:
         extra_deps : List[str], optional
             List of additional file paths (relative to project root) that this
             function depends on. Their content will be mixed into the hash.
+
+        Transparent decorators are unwrapped before inspection so orchestration
+        wrappers created with ``functools.wraps`` retain the identity of the
+        callable they execute.
         """
         hashes = []
 
         # 1. Base Strategy
         try:
+            identity_callable = inspect.unwrap(func)
             if strategy == "source":
-                src = inspect.getsource(func)
+                src = inspect.getsource(identity_callable)
                 hashes.append(f"src:{hashlib.sha256(src.encode('utf-8')).hexdigest()}")
 
             elif strategy == "module":
-                module_path = inspect.getfile(func)
+                module_path = inspect.getfile(identity_callable)
                 # We reuse the file checksum logic
                 file_hash = self._compute_file_checksum(module_path)
                 hashes.append(f"mod:{file_hash}")
@@ -287,12 +303,12 @@ class IdentityManager:
             else:
                 raise ValueError(f"Unknown code hashing strategy: {strategy}")
 
-        except (OSError, TypeError) as e:
-            # Fallback if inspect fails (e.g. dynamically defined functions, REPL)
-            logging.warning(
-                f"Could not inspect source for {func}: {e}. Fallback to timestamp."
-            )
-            hashes.append(f"fallback:{time.time()}")
+        except (OSError, TypeError, ValueError) as e:
+            mode = "callable_module" if strategy == "module" else "callable_source"
+            raise CodeIdentityUnavailableError(
+                mode=mode,
+                reason=f"callable inspection failed: {e}",
+            ) from e
 
         # 2. Extra Dependencies (e.g., utils.py, config files)
         if extra_deps:
@@ -314,7 +330,7 @@ class IdentityManager:
     def resolve_code_version(
         self,
         *,
-        mode: Literal["repo_git", "callable_module", "callable_source"] = "repo_git",
+        mode: CodeIdentityMode = "repo_git",
         func: Optional[Callable] = None,
         extra_deps: Optional[List[str]] = None,
     ) -> str:
@@ -330,15 +346,57 @@ class IdentityManager:
         extra_deps : Optional[List[str]], optional
             Additional dependency file paths folded into callable-scoped hashes.
         """
+        return self.resolve_code_identity(
+            mode=mode, func=func, extra_deps=extra_deps
+        ).digest
+
+    def resolve_code_identity(
+        self,
+        *,
+        mode: CodeIdentityMode = "repo_git",
+        func: Optional[Callable] = None,
+        extra_deps: Optional[List[str]] = None,
+    ) -> CodeIdentityResolution:
+        """Resolve the truthful code identity used by a run.
+
+        ``repo_git`` is preferred. If it is unavailable and a callable is known,
+        the resolution falls back to a digest of that callable's defining module.
+        Explicit callable modes never fall back to repository identity.
+        """
+        if mode not in {"repo_git", "callable_module", "callable_source"}:
+            raise ValueError(f"Unknown code identity mode: {mode!r}")
+
         if mode == "repo_git":
-            return self.get_code_version()
+            try:
+                return CodeIdentityResolution(
+                    mode="repo_git", digest=self.get_code_version()
+                )
+            except CodeIdentityUnavailableError:
+                if func is None:
+                    raise
+                return CodeIdentityResolution(
+                    mode="callable_module",
+                    digest=self.compute_callable_hash(
+                        func,
+                        strategy="module",
+                        extra_deps=extra_deps,
+                    ),
+                )
+
         if func is None:
-            raise ValueError(f"code identity mode {mode!r} requires a callable.")
+            raise CodeIdentityUnavailableError(
+                mode=mode,
+                reason="the selected callable identity mode requires a callable.",
+            )
+
         strategy = "module" if mode == "callable_module" else "source"
-        return self.compute_callable_hash(
-            func,
-            strategy=strategy,
-            extra_deps=extra_deps,
+        return CodeIdentityResolution(
+            mode=mode,
+            digest=self.compute_callable_hash(
+                func,
+                strategy=strategy,
+                extra_deps=extra_deps,
+            ),
         )
 
     # --- Component 2: Config Identity ---

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -1222,6 +1223,33 @@ def test_strict_binding_reuses_across_equivalent_selected_producers(
             "ordinary_input_count": 0,
             "strict_binding_identity": second_binding.identity_digest(),
         }
+
+
+def test_non_git_callable_identity_evidence_records_resolved_mode_and_digest(tracker):
+    from consist import ExecutionOptions
+    from consist.core.identity import CodeIdentityUnavailableError
+
+    def consume() -> None:
+        return None
+
+    with patch.object(
+        tracker.identity,
+        "get_code_version",
+        side_effect=CodeIdentityUnavailableError(
+            mode="repo_git", reason="repository identity unavailable"
+        ),
+    ):
+        result = tracker.run(
+            fn=consume,
+            name="non_git_consume",
+            execution_options=ExecutionOptions(input_binding="none"),
+        )
+
+    identity = result.run.identity_summary["code_identity"]
+    assert identity["mode"] == "callable_module"
+    assert result.run.git_hash == tracker.identity.compute_callable_hash(
+        consume, strategy="module"
+    )
 
 
 def test_strict_binding_keeps_ordinary_dependency_provenance_sensitive(

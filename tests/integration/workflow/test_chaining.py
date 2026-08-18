@@ -257,9 +257,7 @@ def test_container_chaining_with_caching(tracker: Tracker):
     mock_backend = MockChainingBackend()
 
     # Patch DockerBackend to use our mock
-    # FIX: Patch IdentityManager to return a stable code hash.
-    # Without this, if the repo is dirty, get_code_version() returns a timestamped hash
-    # which changes every second, causing a false Cache Miss.
+    # Keep this container test independent of the checkout's current code hash.
     with (
         patch(
             "consist.integrations.containers.api.DockerBackend",
