@@ -145,7 +145,9 @@ result = tracker.run(
         input_binding="paths",
         input_materialization="requested",
         input_materialization_mode="copy",
-        input_paths={"config_path": Path("./workspace/tool-config.yaml")},
+        input_paths={
+            "config_path": tracker.run_dir / "workspace" / "tool-config.yaml"
+        },
     ),
 )
 ```

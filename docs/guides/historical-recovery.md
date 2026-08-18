@@ -408,7 +408,9 @@ result = tracker.run(
     execution_options=ExecutionOptions(
         input_binding="paths",
         input_materialization="requested",
-        input_paths={"config_path": Path("./workspace/config.yaml")},
+        input_paths={
+            "config_path": tracker.run_dir / "workspace" / "config.yaml"
+        },
     ),
 )
 ```
@@ -427,12 +429,14 @@ outside a run lifecycle:
 ```python
 staged = tracker.stage_artifact(
     config_artifact,
-    destination=Path("./workspace/config.yaml"),
+    destination=tracker.run_dir / "workspace" / "config.yaml",
 )
 
 staged_many = tracker.stage_inputs(
     {"config_path": config_artifact},
-    destinations_by_key={"config_path": Path("./workspace/config.yaml")},
+    destinations_by_key={
+        "config_path": tracker.run_dir / "workspace" / "config.yaml"
+    },
 )
 ```
 
