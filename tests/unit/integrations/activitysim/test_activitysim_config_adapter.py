@@ -6,17 +6,24 @@ import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
-import yaml
-
 import pytest
 
-from consist.integrations.activitysim import ActivitySimConfigAdapter, ConfigOverrides
-from consist.core.config_canonicalization import ConfigAdapterOptions
-from consist.integrations.activitysim.config_adapter import (
+yaml = pytest.importorskip(
+    "yaml", reason="ActivitySim adapter tests require the PyYAML dependency"
+)
+
+from consist.integrations.activitysim import (  # noqa: E402
+    ActivitySimConfigAdapter,
+    ConfigOverrides,
+)
+from consist.core.config_canonicalization import ConfigAdapterOptions  # noqa: E402
+from consist.integrations.activitysim.config_adapter import (  # noqa: E402
     _bundle_configs,
     _digest_path_with_name,
 )
-from tests.helpers.activitysim_fixtures import build_activitysim_test_configs
+from tests.helpers.activitysim_fixtures import (  # noqa: E402
+    build_activitysim_test_configs,
+)
 
 
 def _find_ingestable(ingestables, table_name: str):
