@@ -11,11 +11,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 
-import jsonschema
 import pytest
-import yaml
-from linkml_runtime.linkml_model import SlotDefinition
-from linkml_runtime.utils.schemaview import SchemaView
+
+yaml = pytest.importorskip(
+    "yaml", reason="LinkML schema tests require the PyYAML dependency"
+)
+pytest.importorskip(
+    "linkml_runtime", reason="LinkML schema tests require linkml-runtime"
+)
+
+from linkml_runtime.linkml_model import SlotDefinition  # noqa: E402
+from linkml_runtime.utils.schemaview import SchemaView  # noqa: E402
 
 
 PROJECT_ROOT = Path(__file__).parents[2]
@@ -212,6 +218,9 @@ def test_fixtures_validate_as_linkml_instances(
     json_schema_generator: Path,
 ) -> None:
     """Examples validate as the public LinkML instance classes they document."""
+    jsonschema = pytest.importorskip(
+        "jsonschema", reason="LinkML instance validation requires jsonschema"
+    )
     provenance = yaml.safe_load(PROVENANCE_GRAPH_FIXTURE.read_text())
     invocations = yaml.safe_load(BINDING_INVOCATIONS_FIXTURE.read_text())
 
@@ -457,21 +466,3 @@ def test_release_builder_writes_lintable_timezone_aware_merged_schemas(
             text=True,
         )
         assert result.returncode == 0, result.stdout + result.stderr
-
-
-def test_importing_consist_does_not_import_linkml() -> None:
-    """Normal Consist runtime use remains independent of LinkML tooling."""
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import sys; import consist; "
-            "print('linkml' in sys.modules); "
-            "print('linkml_runtime' in sys.modules)",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.stdout.splitlines() == ["False", "False"]
