@@ -304,6 +304,52 @@ class TestInputHashing:
 
         assert repo.value != callable_module.value
 
+    @pytest.mark.parametrize(
+        "meta",
+        [
+            {
+                "hash_semantics": {
+                    "version": 1,
+                    "algorithm": "sha256",
+                    "kind": "file",
+                    "digest_contract": "file_stat",
+                    "source": "observed_fast",
+                }
+            },
+            {},
+        ],
+        ids=["fast-observation", "missing-semantics"],
+    )
+    def test_action_v2_keeps_weak_managed_inputs_provenance_sensitive(self, meta):
+        def artifact(run_id: str) -> Artifact:
+            return Artifact(
+                key="data",
+                container_uri="archive://data.csv",
+                driver="csv",
+                hash="a" * 64,
+                run_id=run_id,
+                meta=meta,
+            )
+
+        roles = [InputBindingRole(kind="named", role="data", input_index=0)]
+        identity = IdentityManager()
+        first = identity.compute_action_input_identity(
+            inputs=[artifact("producer_one")],
+            binding_roles=roles,
+            code_identity={"version": 1, "mode": "repo_git", "digest": "abc"},
+            signature_lookup=lambda run_id: f"signature:{run_id}",
+        )
+        second = identity.compute_action_input_identity(
+            inputs=[artifact("producer_two")],
+            binding_roles=roles,
+            code_identity={"version": 1, "mode": "repo_git", "digest": "abc"},
+            signature_lookup=lambda run_id: f"signature:{run_id}",
+        )
+
+        assert first.bindings[0].mode == "legacy-provenance-v1"
+        assert second.bindings[0].mode == "legacy-provenance-v1"
+        assert first.value != second.value
+
     def test_raw_file_inputs(self):
         """
         Tests hashing for raw file inputs (no run_id) using a path resolver.
