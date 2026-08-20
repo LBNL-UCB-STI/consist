@@ -8,18 +8,19 @@ keeps public API behavior in ``Tracker`` stable.
 
 from __future__ import annotations
 
-from collections.abc import Mapping as MappingABC
-from dataclasses import replace
-from datetime import datetime, timezone
 import logging
 import os
 import time
 import uuid
+from collections.abc import Mapping as MappingABC
+from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, TYPE_CHECKING, Union, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Union, cast
 
 from pydantic import BaseModel
 
+from consist.core._performance_attribution import _track_begin_run_phase
 from consist.core.artifacts import _infer_driver_from_path
 from consist.core.cache import (
     ActiveRunCacheOptions,
@@ -39,7 +40,6 @@ from consist.core.cache_miss_explainer import (
 from consist.core.context import pop_tracker, push_tracker
 from consist.core.error_messages import format_problem_cause_fix
 from consist.core.resolved_binding import _validate_strict_binding_invocation_context
-from consist.core._performance_attribution import _track_begin_run_phase
 from consist.core.validation import (
     validate_config_structure,
     validate_run_meta,
@@ -51,8 +51,8 @@ from consist.types import (
     ArtifactRef,
     CodeIdentityMode,
     FacetLike,
-    HashInputs,
     HasFacetSchemaVersion,
+    HashInputs,
 )
 
 if TYPE_CHECKING:
@@ -450,25 +450,19 @@ class RunLifecycleCoordinator:
 
         identity_mode = code_identity or "repo_git"
         with _track_begin_run_phase("lifecycle.resolve_code_identity"):
-            try:
-                git_hash = tracker.identity.resolve_code_version(
-                    mode=identity_mode,
-                    func=code_identity_callable,
-                    extra_deps=code_identity_extra_deps,
-                )
-            except Exception as exc:
-                logging.warning(
-                    "[Consist] Failed to resolve code identity mode=%s for run %s: %s. "
-                    "Falling back to repo git identity.",
-                    identity_mode,
-                    run_id,
-                    exc,
-                )
-                git_hash = tracker.identity.get_code_version()
+            code_identity_resolution = tracker.identity.resolve_code_identity(
+                mode=identity_mode,
+                func=code_identity_callable,
+                extra_deps=code_identity_extra_deps,
+            )
+            git_hash = code_identity_resolution.digest
+
+            # When CodeIdentityDescriptor/action-v2 construction
+            # lands on this branch, pass this exact resolved mode and digest into
+            # that descriptor instead of recomputing identity or defaulting mode.
 
         with _track_begin_run_phase("lifecycle.create_run_and_bind_state"):
-            if code_identity is not None:
-                kwargs["code_identity"] = identity_mode
+            kwargs["code_identity"] = code_identity_resolution.mode
             if code_identity_extra_deps:
                 kwargs["code_identity_extra_deps"] = list(code_identity_extra_deps)
 

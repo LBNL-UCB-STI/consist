@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
 import warnings
 from pathlib import Path
 from typing import Any
@@ -26,6 +29,59 @@ def _assert_problem_cause_fix(message: str) -> None:
     assert "Problem:" in message
     assert "Likely cause:" in message
     assert "Suggested fix:" in message
+
+
+def test_scenario_run_non_git_fallback_can_enter_with_callable_step(tmp_path: Path):
+    module_root = tmp_path / "non_git_scenario"
+    module_root.mkdir()
+    module_path = module_root / "tracked_step.py"
+    module_path.write_text(
+        "def run(ctx):\n    return 'mean'\n",
+        encoding="utf-8",
+    )
+    runner = """
+import json
+import sys
+from pathlib import Path
+
+from consist import ExecutionOptions
+from consist.core.tracker import Tracker
+
+module_root = Path(sys.argv[1])
+sys.path.insert(0, str(module_root))
+import tracked_step
+
+tracker = Tracker(
+    run_dir=module_root / 'runs',
+    db_path=module_root / 'provenance.duckdb',
+    project_root=module_root,
+)
+with tracker.scenario('scenario') as scenario:
+    result = scenario.run(
+        fn=tracked_step.run,
+        run_id='scenario-step',
+        execution_options=ExecutionOptions(inject_context='ctx'),
+    )
+header = tracker.get_run('scenario')
+print(json.dumps({
+    'cache_hit': result.cache_hit,
+    'step_code_identity': result.run.meta['code_identity'],
+    'header_code_identity': header.meta['code_identity'],
+}))
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", runner, str(module_root)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(completed.stdout) == {
+        "cache_hit": False,
+        "step_code_identity": "callable_module",
+        "header_code_identity": "callable_module",
+    }
 
 
 def test_scenario_run_updates_coupler_and_cache_hit(tracker):

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import json
 import logging
 from pathlib import Path
+import subprocess
+import sys
 from typing import Any, cast
 from unittest.mock import patch
 
@@ -450,6 +453,120 @@ def test_tracker_run_cache_options_callable_code_identity(tracker):
     assert first.run.git_hash == "callable_hash"
     assert second.cache_hit is True
     assert mock_callable_hash.call_count == 2
+
+
+def test_tracker_begin_run_without_callable_identity_fails_before_cache_lookup(
+    tmp_path: Path,
+):
+    runner = """
+import json
+import sys
+from pathlib import Path
+
+from consist.core.identity import CodeIdentityUnavailableError
+from consist.core.tracker import Tracker
+
+root = Path(sys.argv[1])
+tracker = Tracker(
+    run_dir=root / 'runs',
+    db_path=root / 'provenance.duckdb',
+    project_root=root,
+)
+
+def fail_lookup(*args, **kwargs):
+    raise AssertionError('cache lookup must not start')
+
+tracker.find_matching_run = fail_lookup
+try:
+    tracker.begin_run('no_callable_identity', 'external_step')
+except CodeIdentityUnavailableError as exc:
+    print(json.dumps({'error': type(exc).__name__, 'active': tracker.current_consist is not None}))
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", runner, str(tmp_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(completed.stdout) == {
+        "error": "CodeIdentityUnavailableError",
+        "active": False,
+    }
+
+
+def test_non_git_callable_edit_invalidates_cache_in_fresh_processes(tmp_path: Path):
+    module_root = tmp_path / "non_git_module"
+    module_root.mkdir()
+    module_path = module_root / "tracked_step.py"
+    module_path.write_text(
+        "def run(ctx):\n"
+        "    output = ctx.run_dir / 'result.txt'\n"
+        "    output.write_text('mean\\n')\n",
+        encoding="utf-8",
+    )
+    runner = """
+import json
+import sys
+from pathlib import Path
+
+module_root = Path(sys.argv[1])
+sys.path.insert(0, str(module_root))
+
+from consist import ExecutionOptions
+from consist.core.tracker import Tracker
+import tracked_step
+
+tracker = Tracker(
+    run_dir=module_root / "runs",
+    db_path=module_root / "provenance.duckdb",
+    project_root=module_root,
+)
+result = tracker.run(
+    fn=tracked_step.run,
+    output_paths={"result": "result.txt"},
+    execution_options=ExecutionOptions(inject_context="ctx"),
+)
+print(json.dumps({
+    "cache_hit": result.cache_hit,
+    "content": result.outputs["result"].path.read_text(),
+    "code_mode": result.run.identity_summary["code_identity"]["mode"],
+    "code_hash": result.run.git_hash,
+}))
+"""
+
+    def run_process() -> dict[str, object]:
+        completed = subprocess.run(
+            [sys.executable, "-c", runner, str(module_root)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return json.loads(completed.stdout)
+
+    first = run_process()
+    assert first["cache_hit"] is False
+    assert first["content"] == "mean\n"
+    assert first["code_mode"] == "callable_module"
+    assert first["code_hash"]
+
+    module_path.write_text(
+        "def run(ctx):\n"
+        "    output = ctx.run_dir / 'result.txt'\n"
+        "    output.write_text('sum\\n')\n",
+        encoding="utf-8",
+    )
+
+    second = run_process()
+    assert second["cache_hit"] is False
+    assert second["content"] == "sum\n"
+    assert second["code_mode"] == "callable_module"
+    assert second["code_hash"] != first["code_hash"]
+
+    third = run_process()
+    assert third["cache_hit"] is True
+    assert third["content"] == "sum\n"
+    assert third["code_hash"] == second["code_hash"]
 
 
 def test_run_context_run_dir_is_created(tracker):
