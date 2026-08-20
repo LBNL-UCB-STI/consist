@@ -112,9 +112,42 @@ See [Config Management](config-management.md) for config/facet guidance.
 
 ### Input Identity
 
-Declared `inputs={...}` contribute to lineage and input hashing. Produced
-Consist artifacts link through their producing run signature. Raw files are
-hashed according to the active hashing strategy.
+For the `run(...)`, `trace(...)`, and Scenario orchestration APIs, Consist asks
+whether this is the same action applied to the same bound inputs. The
+`sha256:action-v2:` input identity therefore includes:
+
+- the resolved code identity mode and digest
+- each input's role, such as `baseline`, `candidate`, or dependency position
+- selectors such as the artifact driver, table path, or array path
+- the strongest safe identity available for the artifact
+
+Roles matter. Swapping two artifacts between `baseline` and `candidate` is a
+cache miss even when the set of input artifacts is otherwise unchanged.
+
+When an artifact has an immutable content identity -- a full-file SHA-256 or a
+validated directory manifest -- Consist can recognize the same content even
+when a different upstream run produced it. Otherwise, Consist falls back to a
+provenance-sensitive identity. Fast filesystem observations and legacy hashes
+with unclear semantics do not enable content-based cache reuse.
+
+This makes an important workflow sequence possible:
+
+```text
+A v1 runs -> produces fully attested bytes X -> B runs on X
+A's code changes
+A v2 runs -> still produces fully attested bytes X -> unchanged B can hit cache
+A v3 runs -> produces bytes Y                  -> B misses and runs
+```
+
+Changing A's code always invalidates A itself; Consist does not predict whether
+new code will produce the same output. It can skip B only after A runs and B's
+own code, config, input role, selector, and attested input content all match a
+prior execution.
+
+Strict Scenario execution also includes the frozen binding identity in
+`action-v2`. Direct `begin_run(...)` and `start_run(...)` lifecycle calls retain
+legacy input hashing. Legacy and `action-v2` cache entries intentionally do not
+cross-match.
 
 Use `identity_inputs=[...]` for additional hash-only files or directories that
 should affect the signature without being passed as callable inputs.
