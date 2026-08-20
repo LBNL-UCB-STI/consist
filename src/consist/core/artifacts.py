@@ -3,6 +3,7 @@ import logging
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -648,6 +649,14 @@ class ArtifactManager:
                 hashing_strategy=self.tracker.identity.hashing_strategy,
                 source="caller_supplied",
             )
+            if not is_new_artifact:
+                # Reused artifacts may already be linked to completed runs. A
+                # caller-supplied override is a distinct, untrusted observation,
+                # so it must not rewrite that persisted artifact's identity.
+                artifact_obj.id = uuid.uuid4()
+                artifact_obj.content_id = None
+                artifact_obj.run_id = None
+                artifact_obj.created_at = datetime.now(timezone.utc)
         if mount_scheme and "mount_scheme" not in artifact_obj.meta:
             artifact_obj.meta["mount_scheme"] = mount_scheme
         if mount_root and "mount_root" not in artifact_obj.meta:
