@@ -101,6 +101,7 @@ class ActionBindingIdentity:
     role: str | int
     mode: Literal["content-v1", "legacy-provenance-v1"]
     value: str
+    fallback_reason: str | None = None
 
     def as_payload(self) -> dict[str, object]:
         return {
@@ -109,6 +110,13 @@ class ActionBindingIdentity:
             "mode": self.mode,
             "value": self.value,
         }
+
+    def as_evidence_payload(self) -> dict[str, object]:
+        """Return non-hashed metadata describing the selected identity strength."""
+        evidence: dict[str, object] = {"identity_strength": self.mode}
+        if self.fallback_reason is not None:
+            evidence["fallback_reason"] = self.fallback_reason
+        return evidence
 
 
 @dataclass(frozen=True, slots=True)
@@ -601,6 +609,35 @@ class IdentityManager:
         sig_parts.append(f"file:{file_hash}")
         return "|".join(sig_parts)
 
+    @staticmethod
+    def _action_binding_fallback_reason(artifact: "Artifact") -> str:
+        """Classify why an action binding cannot use immutable content identity."""
+        meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
+        semantics = meta.get("hash_semantics")
+        if not isinstance(semantics, Mapping):
+            return "missing_hash_semantics"
+        if semantics.get("source") == "caller_supplied":
+            return "caller_supplied_hash"
+        if semantics == {
+            "version": 1,
+            "algorithm": "sha256",
+            "kind": "file",
+            "digest_contract": "file_metadata",
+            "source": "computed_fast",
+        }:
+            return "fast_file_observation"
+        if semantics == {
+            "version": 1,
+            "algorithm": "sha256",
+            "kind": "directory",
+            "digest_contract": "legacy_directory_metadata",
+            "source": "computed_fast_directory",
+        }:
+            return "fast_directory_observation"
+        if semantics.get("kind") == "directory":
+            return "directory_without_manifest"
+        return "untrusted_hash_semantics"
+
     def compute_action_input_identity(
         self,
         *,
@@ -640,6 +677,7 @@ class IdentityManager:
             try:
                 value = str(ArtifactIdentity.from_artifact(artifact))
                 mode: Literal["content-v1", "legacy-provenance-v1"] = "content-v1"
+                fallback_reason = None
             except ValueError:
                 value = self._compute_legacy_input_signature(
                     artifact,
@@ -647,11 +685,13 @@ class IdentityManager:
                     signature_lookup=signature_lookup,
                 )
                 mode = "legacy-provenance-v1"
+                fallback_reason = self._action_binding_fallback_reason(artifact)
             binding = ActionBindingIdentity(
                 kind=role.kind,
                 role=role.role,
                 mode=mode,
                 value=value,
+                fallback_reason=fallback_reason,
             )
             resolved_bindings.append(binding)
             payload_bindings.append(
