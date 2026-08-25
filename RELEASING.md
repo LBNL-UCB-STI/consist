@@ -29,6 +29,8 @@ minor releases may include breaking changes.
 - Branch from the current `main`.
 - Update `CHANGELOG.md` with the user-facing changes for the release.
 - Bump `pyproject.toml` to the release version.
+- Do not edit `consist.__version__` directly; it is derived from the installed
+  distribution metadata.
 - Rewrite or refresh release-facing docs if the process has changed.
 - Update install guidance in `README.md` and `docs/` if this release changes
   the recommended installation path.
@@ -85,6 +87,27 @@ python -m venv --clear /tmp/consist-release-smoke
 /tmp/consist-release-smoke/bin/python -m pip install dist/*.whl
 /tmp/consist-release-smoke/bin/python -c "import consist; print(consist.__file__)"
 /tmp/consist-release-smoke/bin/consist --help
+```
+
+Verify that the wheel metadata and the public Python API both expose the
+version declared in `pyproject.toml`:
+
+```bash
+RELEASE_VERSION=$(
+  .venv/bin/python -c 'from pathlib import Path; import tomllib; print(tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"])'
+)
+
+RELEASE_VERSION="$RELEASE_VERSION" /tmp/consist-release-smoke/bin/python -c '
+import os
+from importlib.metadata import version
+
+import consist
+
+expected = os.environ["RELEASE_VERSION"]
+assert version("consist") == expected
+assert consist.__version__ == expected
+print(f"consist {consist.__version__}")
+'
 ```
 
 If the release changes optional dependency guidance, smoke-test at least one

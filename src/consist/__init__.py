@@ -5,6 +5,14 @@ This package provides the main public API for Consist, allowing users to interac
 the Tracker for managing runs, logging artifacts, and ingesting data.
 """
 
+from importlib.metadata import PackageNotFoundError, version as package_version
+
+
+try:
+    __version__ = package_version("consist")
+except PackageNotFoundError:
+    __version__ = "unknown"
+
 # Models
 from consist.models.run import Run, RunResult
 from consist.models.artifact import Artifact, ArchivedOutputs
@@ -205,6 +213,7 @@ from consist.core.step_contracts import (
 )
 
 __all__ = [
+    "__version__",
     # Core objects
     "Tracker",
     "Coupler",
