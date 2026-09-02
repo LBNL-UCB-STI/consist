@@ -52,8 +52,14 @@ signature = code identity + config identity + input identity
 
 ### Code Identity
 
-By default, Consist uses repository Git state. For function-shaped steps, you
-can narrow code identity with `CacheOptions`:
+By default, Consist uses repository Git state. Consist requires a truthful,
+non-empty code identity before it performs reusable cache lookup. For
+function-shaped steps outside a Git repository, the default `repo_git` request
+falls back to hashing the callable's defining module. The resolved mode is
+persisted as `callable_module`; it is never mislabeled as `repo_git`.
+
+For function-shaped steps, you can also select a code identity explicitly with
+`CacheOptions`:
 
 ```python
 from consist import CacheOptions
@@ -73,7 +79,17 @@ Supported modes are:
 | `callable_source` | Only the function source should drive code identity. |
 
 Use `code_identity_extra_deps` when a callable-scoped mode also depends on
-helper files.
+helper files. `callable_module` is the safer non-Git fallback because it also
+captures same-file helpers and constants.
+
+If repository identity is unavailable and no callable is present, Consist raises
+`CodeIdentityUnavailableError` before creating a reusable cache candidate. The
+same fail-closed behavior applies when an explicitly selected callable mode
+cannot inspect its callable; Consist never retries that request as `repo_git`
+and never uses a constant `unknown_code_version` or a timestamp nonce.
+
+Consequently, unchanged callable-module code outside Git can reuse a completed
+run, while editing that module produces a new code digest and a cache miss.
 
 ### Config Identity
 
@@ -81,6 +97,16 @@ helper files.
 canonical config identity through `adapter=...`. Query-oriented facets are for
 filtering and grouping; do not rely on them as a replacement for identity
 inputs or config.
+
+Identity-bearing configurations are canonicalized deterministically across
+Python processes. Set members are recursively normalized. Members that remain
+mutually comparable retain Consist's legacy natural ordering; heterogeneous
+JSON-compatible sets such as `{"alpha", "beta", 1}` use compact, sorted JSON
+tokens instead, giving them one stable identity even when their members are not
+mutually comparable in Python. Values that cannot be represented in JSON fail
+during identity construction; they do not receive a warning and a best-effort
+hash. This contract does not perform Unicode normalization or coerce
+numerically distinct values.
 
 See [Config Management](config-management.md) for config/facet guidance.
 
@@ -257,7 +283,9 @@ result = tracker.run(
         input_binding="paths",
         input_materialization="requested",
         input_materialization_mode="copy",
-        input_paths={"config_path": Path("./workspace/tool-config.yaml")},
+        input_paths={
+            "config_path": tracker.run_dir / "workspace" / "tool-config.yaml"
+        },
     ),
 )
 ```

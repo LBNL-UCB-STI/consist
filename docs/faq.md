@@ -12,7 +12,10 @@ Cache misses occur when the **Signature** changes. Check if:
 Use `CONSIST_CACHE_DEBUG=1` to log detailed signature components and identify exactly what changed.
 
 ### Can I use Consist without Git?
-Yes. If Git is not found, Consist falls back to a static `unknown_code_version`. However, this means code changes won't automatically invalidate your cache. We recommend using Git for full reproducibility.
+Yes. Function-shaped Python steps fall back from `repo_git` to a digest of
+their defining module, so unchanged code can reuse safely and edits invalidate
+the cache. Runs without a repository or known callable fail closed with
+`CodeIdentityUnavailableError` instead of using a constant code version.
 
 ### Does Consist work with massive files?
 Yes. Consist tracks files as **Artifacts**. It stores the path and hash but doesn't necessarily copy the bytes into the database unless you call `tracker.ingest()`. For multi-GB files, we recommend keeping them as "Cold Data" (on disk) and using `cache_hydration="metadata"` (the default).
@@ -54,7 +57,8 @@ These tools aren't mutually exclusive — Consist focuses on the lineage and cac
 At minimum, each tracked run captures:
 
 - **Status and timing**: started_at, ended_at, duration, success/failure
-- **Code version**: Git commit SHA (and dirty state) or a callable-source hash
+- **Code version**: Git commit SHA (and dirty state), a default `callable_module`
+  digest outside Git, or an explicitly selected `callable_source` digest
 - **Config snapshot**: the full config dict that affected the cache signature
 - **Input artifacts**: paths and content hashes for every file the run consumed
 - **Output artifacts**: paths, content hashes, and format metadata for everything the run produced

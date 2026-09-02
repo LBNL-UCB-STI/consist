@@ -136,13 +136,21 @@ first = tracker.run(
     execution_options=ExecutionOptions(
         input_binding="paths",
         input_materialization="requested",
-        input_paths={"data_path": Path("./workspace/input.csv")},
+        input_paths={
+            "data_path": tracker.run_dir / "workspace" / "input.csv"
+        },
     ),
 )
 ```
 
-That is the recommended pattern for subprocesses or legacy tools that expect
-fixed workspace-local input paths, and it still works on cache hits.
+By default, requested staging is restricted to the tracker run directory and
+configured mount roots. This example keeps a fixed path within the
+tracker-managed workspace, so it works on both cache misses and cache hits
+without weakening that safety boundary. If a subprocess genuinely requires a
+durable workspace outside `tracker.run_dir`, prefer configuring that directory
+as a mount root. For a one-off external destination, opt in on the tracker with
+`Tracker(..., allow_external_paths=True)` or set
+`CONSIST_ALLOW_EXTERNAL_PATHS=1`.
 
 The main Consist-specific onboarding cost in these examples is small but real:
 return `dict[str, Path]` instead of a bare `Path`, and declare

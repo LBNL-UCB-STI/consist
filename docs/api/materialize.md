@@ -251,7 +251,9 @@ result = tracker.run(
     execution_options=ExecutionOptions(
         input_binding="paths",
         input_materialization="requested",
-        input_paths={"config_path": Path("./workspace/config.yaml")},
+        input_paths={
+            "config_path": tracker.run_dir / "workspace" / "config.yaml"
+        },
     ),
 )
 ```
@@ -263,12 +265,11 @@ Use the low-level helpers when you already have resolved artifacts and need to
 stage them manually:
 
 ```python
-from pathlib import Path
-import consist
-
-staged = consist.stage_inputs(
+staged = tracker.stage_inputs(
     {"config_path": artifact},
-    destinations_by_key={"config_path": Path("./workspace/config.yaml")},
+    destinations_by_key={
+        "config_path": tracker.run_dir / "workspace" / "config.yaml"
+    },
 )
 ```
 

@@ -31,7 +31,9 @@ result = tracker.run(
     execution_options=ExecutionOptions(
         input_binding="paths",
         input_materialization="requested",
-        input_paths={"config_path": Path("./workspace/config.yaml")},
+        input_paths={
+            "config_path": tracker.run_dir / "workspace" / "config.yaml"
+        },
     ),
 )
 ```

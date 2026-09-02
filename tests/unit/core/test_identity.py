@@ -20,6 +20,10 @@ It verifies the correctness of:
 
 import pytest
 import hashlib
+import json
+import logging
+import subprocess
+import sys
 import tempfile
 import os
 import time
@@ -42,6 +46,76 @@ except ImportError:
 
 class TestConfigHashing:
     """Tests the `compute_config_hash` method of `IdentityManager`."""
+
+    def test_mixed_type_sets_use_canonical_json_token_order(self):
+        im = IdentityManager()
+        config_a = {"tags": {"beta", 1, "alpha", (2, "nested")}}
+        config_b = {"tags": {(2, "nested"), "alpha", "beta", 1}}
+
+        normalized_a = im.normalize_json(config_a)
+        normalized_b = im.normalize_json(config_b)
+
+        assert normalized_a == {"tags": ["alpha", "beta", 1, [2, "nested"]]}
+        assert normalized_a == normalized_b
+        assert im.compute_config_hash(config_a) == im.compute_config_hash(config_b)
+        assert im.compute_run_config_hash(
+            config=config_a, model="demo"
+        ) == im.compute_run_config_hash(config=config_b, model="demo")
+
+    def test_sortable_sets_preserve_legacy_natural_order(self):
+        im = IdentityManager()
+        config = {"values": {2, 10}}
+
+        assert im.normalize_json(config) == {"values": [2, 10]}
+
+    def test_path_config_values_match_string_values(self):
+        im = IdentityManager()
+
+        assert im.normalize_json({"path": Path("config.yaml")}) == {
+            "path": "config.yaml"
+        }
+        assert im.compute_config_hash(
+            {"path": Path("config.yaml")}
+        ) == im.compute_config_hash({"path": "config.yaml"})
+
+    def test_mixed_type_set_run_hash_is_stable_across_python_hash_seeds(self):
+        child = """
+import json
+from consist.core.identity import IdentityManager
+from consist.core.validation import validate_config_structure
+
+identity = IdentityManager()
+config = {"tags": {"alpha", "beta", 1}}
+normalized = identity.normalize_json(config)
+validate_config_structure(normalized)
+config_hash = identity.compute_run_config_hash(config=normalized, model="demo")
+print(json.dumps({"config_hash": config_hash, "normalized": normalized}, sort_keys=True))
+"""
+        results = []
+        for seed in ("1", "2", "3", "4", "5"):
+            environment = os.environ.copy()
+            environment["PYTHONHASHSEED"] = seed
+            completed = subprocess.run(
+                [sys.executable, "-c", child],
+                check=True,
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            results.append(json.loads(completed.stdout))
+
+        assert len({json.dumps(result, sort_keys=True) for result in results}) == 1
+        assert results[0]["normalized"] == {"tags": ["alpha", "beta", 1]}
+
+    def test_unsupported_set_member_fails_without_best_effort_hash(self, caplog):
+        class Unsupported:
+            pass
+
+        with caplog.at_level(logging.WARNING):
+            with pytest.raises(TypeError, match="not JSON serializable"):
+                IdentityManager().compute_config_hash({"values": {Unsupported()}})
+
+        assert "Hash stability not guaranteed" not in caplog.text
 
     def test_canonicalization(self):
         """
@@ -559,8 +633,7 @@ class TestCodeVersion:
     @patch("consist.core.identity.git")
     def test_git_error_handling(self, mock_git: MagicMock):
         """
-        Tests that get_code_version gracefully handles Git errors
-        (e.g., inside a container or not a git repo).
+        Git lookup failures must not become reusable sentinel identities.
         """
         im = IdentityManager()
 
@@ -571,21 +644,66 @@ class TestCodeVersion:
 
         mock_git.Repo.side_effect = mock_git.InvalidGitRepositoryError("Bad repo")
 
-        assert im.get_code_version() == "unknown_code_version"
+        with pytest.raises(RuntimeError) as exc_info:
+            im.get_code_version()
+
+        assert type(exc_info.value).__name__ == "CodeIdentityUnavailableError"
 
     def test_git_missing_module(self):
         """
-        Tests behavior when 'git' python module is not installed.
+        Missing Git must fail closed rather than return a stable sentinel.
         """
-        # We need to simulate the module being missing.
-        # This is hard if it's already imported.
-        # We can check the logic by patching the module level variable in identity.py if possible,
-        # or by checking if the real test environment has git.
-
-        # Easier approach: Patch `consist.core.identity.git` to be None
         with patch("consist.core.identity.git", None):
             im = IdentityManager()
-            assert im.get_code_version() == "no_git_module_found"
+            with pytest.raises(RuntimeError) as exc_info:
+                im.get_code_version()
+
+        assert type(exc_info.value).__name__ == "CodeIdentityUnavailableError"
+
+    def test_repo_git_falls_back_to_callable_module_when_git_is_unavailable(self):
+        def sample_func():
+            return "value"
+
+        with patch("consist.core.identity.git", None):
+            resolution = IdentityManager().resolve_code_identity(
+                mode="repo_git", func=sample_func
+            )
+
+        assert resolution.mode == "callable_module"
+        assert resolution.digest
+
+    @pytest.mark.parametrize(
+        ("mode", "inspection_method"),
+        [
+            ("callable_module", "getfile"),
+            ("callable_source", "getsource"),
+        ],
+    )
+    def test_explicit_callable_identity_does_not_retry_repo_git(
+        self, mode, inspection_method
+    ):
+        def sample_func():
+            return "value"
+
+        with patch(
+            f"consist.core.identity.inspect.{inspection_method}",
+            side_effect=OSError("callable source unavailable"),
+        ):
+            with pytest.raises(RuntimeError) as exc_info:
+                IdentityManager().resolve_code_identity(mode=mode, func=sample_func)
+
+        assert type(exc_info.value).__name__ == "CodeIdentityUnavailableError"
+
+    def test_callable_identity_failure_does_not_use_timestamp_fallback(self):
+        def sample_func():
+            return "value"
+
+        with patch(
+            "consist.core.identity.inspect.getfile",
+            side_effect=OSError("callable source unavailable"),
+        ):
+            with pytest.raises(RuntimeError, match="Code identity"):
+                IdentityManager().compute_callable_hash(sample_func)
 
     @patch("consist.core.identity.git")
     def test_callable_code_identity_does_not_use_repo_git_cache(
@@ -610,3 +728,19 @@ class TestCodeVersion:
 
         assert callable_hash != "abc12345"
         assert mock_git.Repo.call_count == 1
+
+    @patch("consist.core.identity.git")
+    def test_string_code_version_helper_returns_fallback_digest(
+        self, mock_git: MagicMock
+    ):
+        mock_git.Repo.side_effect = RuntimeError("not a repository")
+
+        def sample_func():
+            return "value"
+
+        digest = IdentityManager().resolve_code_version(
+            mode="repo_git", func=sample_func
+        )
+
+        assert digest
+        assert digest != "unknown_code_version"

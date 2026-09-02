@@ -199,7 +199,7 @@ This is the Merkle DAG at work: a change to any input propagates downstream auto
 Query the provenance database:
 
 ```bash
-python -m consist.cli runs --db-path ./runs/provenance.duckdb --limit 10
+python -m consist.cli runs --db-path ./provenance.duckdb --limit 10
 ```
 
 Each run shows its inputs, outputs, config hash, and status. Artifacts link to their producing runs, forming a complete lineage graph.
