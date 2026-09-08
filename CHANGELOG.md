@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog], and this project adheres to
 [Semantic Versioning].
 
+## [0.3.4] - 2026-09-08
+
+### Added
+
+- Add a public `consist.__version__` attribute derived from installed package
+  metadata, together with a release-check step that verifies the public API,
+  wheel metadata, and `pyproject.toml` agree by @zneedell ([#241](https://github.com/LBNL-UCB-STI/consist/pull/241)).
+- Add a self-contained native research-pipeline example with deterministic
+  run-local inputs, current input-binding APIs, cache-aware parameters, and an
+  end-to-end smoke test by @zneedell ([#235](https://github.com/LBNL-UCB-STI/consist/pull/235)).
+
+### Changed
+
+- Update the JOSS paper, bibliography, and diagram, incorporating review
+  suggestions from #230 by @zneedell
+  ([#244](https://github.com/LBNL-UCB-STI/consist/pull/244)).
+- Remove unused `ipykernel` and `pip` dependencies from the core runtime while
+  retaining notebook support in the `examples` extra; refresh the lockfile and
+  clarify release tooling installation by @zneedell
+  ([#236](https://github.com/LBNL-UCB-STI/consist/pull/236)).
+- Make optional-dependency tests skip at their relevant dependency boundary,
+  add explicit development dependencies for `PyYAML` and `jsonschema`, and
+  preserve the dependency-free `import consist` check for LinkML tooling by
+  @zneedell ([#235](https://github.com/LBNL-UCB-STI/consist/pull/235), [#238](https://github.com/LBNL-UCB-STI/consist/pull/238)).
+- Update documentation examples and contributor guidance to use `uv`,
+  tracker-managed run directories, and the current native workflow by
+  @zneedell ([#235](https://github.com/LBNL-UCB-STI/consist/pull/235), [#240](https://github.com/LBNL-UCB-STI/consist/pull/240)).
+- Update `mkdocs-material` to 9.7.7, update `mistune` to 3.3.3, and update `tornado` to 6.5.8 by dependabot[bot]
+  ([#242](https://github.com/LBNL-UCB-STI/consist/pull/242), [#243](https://github.com/LBNL-UCB-STI/consist/pull/243), [#245](https://github.com/LBNL-UCB-STI/consist/pull/245)).
+
+### Fixed
+
+- Make code identity safe and explicit outside a Git repository: known Python
+  callables use a module fallback, unsafe cache lookup fails closed, and the
+  resolved identity is used consistently in run metadata, signatures, and
+  cache keys by @zneedell
+  ([#239](https://github.com/LBNL-UCB-STI/consist/pull/239)).
+- Make configuration hashing deterministic for heterogeneous sets across
+  Python processes while preserving natural ordering for comparable sets and
+  clearly rejecting values that cannot be represented in JSON by @zneedell
+  ([#237](https://github.com/LBNL-UCB-STI/consist/pull/237)).
+- Correct getting-started and path-staging examples so requested inputs stay
+  within the tracker-managed run directory and the CLI uses the tutorial's
+  configured database path by @zneedell
+  ([#240](https://github.com/LBNL-UCB-STI/consist/pull/240)).
+
 ## [0.3.3] - 2026-08-03
 
 ### Fixed
