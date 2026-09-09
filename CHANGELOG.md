@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog], and this project adheres to
 [Semantic Versioning].
 
+## [Unreleased]
+
+### Changed
+
+- Move GitPython from the `ingest` extra to a dedicated `git` extra for
+  repository code identity, clarify the quickstart prerequisite for inline
+  `trace(...)` steps, and make unavailable Git commit errors actionable.
+
 ## [0.3.4] - 2026-09-08
 
 ### Added

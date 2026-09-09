@@ -48,13 +48,17 @@ if TYPE_CHECKING:
 class CodeIdentityUnavailableError(RuntimeError):
     """Raised when Consist cannot derive a safe identity for executed code."""
 
-    def __init__(self, *, mode: str, reason: str) -> None:
+    def __init__(
+        self, *, mode: str, reason: str, guidance: Optional[str] = None
+    ) -> None:
         self.mode = mode
         self.reason = reason
-        super().__init__(
-            f"Code identity unavailable for mode {mode!r}: {reason} "
+        self.guidance = guidance or (
             "Run inside a Git repository or select/provide a supported callable "
             "identity."
+        )
+        super().__init__(
+            f"Code identity unavailable for mode {mode!r}: {reason} {self.guidance}"
         )
 
 
@@ -217,6 +221,10 @@ class IdentityManager:
             raise CodeIdentityUnavailableError(
                 mode="repo_git",
                 reason="GitPython is not installed.",
+                guidance=(
+                    'Install GitPython with `pip install "consist[git]"`, then set '
+                    "project_root to a Git repository with at least one commit."
+                ),
             )
 
         try:
@@ -234,9 +242,18 @@ class IdentityManager:
             ):
                 return self._repo_git_code_version_cache
         except Exception as exc:
+            detail = str(exc)
+            reason = (
+                f"Could not resolve a Git commit from project root {self.project_root}"
+            )
+            if detail != str(self.project_root):
+                reason += f": {detail}"
             raise CodeIdentityUnavailableError(
                 mode="repo_git",
-                reason=f"repository lookup failed: {exc}",
+                reason=f"{reason}.",
+                guidance=(
+                    "Set project_root to a Git repository with at least one commit."
+                ),
             ) from exc
 
         self._repo_git_code_version_cache = code_version

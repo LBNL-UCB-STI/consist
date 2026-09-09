@@ -12,6 +12,22 @@ This tutorial uses a `Tracker` instance for explicitness. Elsewhere in the docs
 you will also see the `consist.*` module-level helpers; they expose the same
 operations through a more concise entry point.
 
+`run(...)` receives a Python callable, so Consist can use that callable's module
+as code identity outside a Git repository. `trace(...)` records an inline block
+with no callable to inspect; therefore, trace examples (including the
+trace-containing `scenario(...)` example) require GitPython and a Git repository
+with at least one commit:
+
+```bash
+pip install "consist[git]"
+```
+
+Run those examples from an existing project checkout, or pass that repository as
+`project_root` when creating `Tracker`. If you are following this tutorial in a
+new folder, initialize it and make an initial commit before running patterns 2
+and 3. If repository identity is unavailable, Consist fails closed rather than
+using an unsafe placeholder code version.
+
 ## Pattern 1: Cacheable Step (`run`)
 
 The same step can be expressed three ways. The recommended onboarding path is
