@@ -311,6 +311,7 @@ def test_run_with_config_overrides_hit_miss_behavior(tracker, tmp_path: Path):
     assert bundle.exists()
 
 
+@pytest.mark.heavy
 def test_run_with_config_overrides_hit_miss_behavior_fast_hashing(
     tracker, tmp_path: Path
 ):
@@ -471,6 +472,7 @@ def test_run_with_config_overrides_adds_manual_identity_inputs_and_auto_identity
     )
 
 
+@pytest.mark.heavy
 def test_run_with_config_overrides_respects_explicit_runtime_kwargs(
     tracker, tmp_path: Path
 ):
@@ -510,6 +512,7 @@ def test_run_with_config_overrides_respects_explicit_runtime_kwargs(
     assert seen == [explicit_config_dir]
 
 
+@pytest.mark.heavy
 def test_run_with_config_overrides_supports_custom_runtime_kwarg_mapping(
     tracker, tmp_path: Path
 ):
@@ -550,6 +553,7 @@ def test_run_with_config_overrides_supports_custom_runtime_kwarg_mapping(
     )
 
 
+@pytest.mark.heavy
 def test_run_with_config_overrides_merges_top_level_runtime_kwargs(
     tracker, tmp_path: Path
 ):
@@ -698,6 +702,7 @@ def test_run_with_config_overrides_off_mode_and_runtime_kwargs_identity_behavior
         }
 
 
+@pytest.mark.heavy
 def test_run_with_config_overrides_rejects_dual_runtime_kwargs_sources(
     tracker, tmp_path: Path
 ):
