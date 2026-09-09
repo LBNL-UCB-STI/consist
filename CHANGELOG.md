@@ -5,13 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog], and this project adheres to
 [Semantic Versioning].
 
-## [Unreleased]
+## [0.3.5] - 2026-09-09
 
 ### Changed
 
 - Move GitPython from the `ingest` extra to a dedicated `git` extra for
   repository code identity, clarify the quickstart prerequisite for inline
-  `trace(...)` steps, and make unavailable Git commit errors actionable.
+  `trace(...)` steps, and make unavailable Git commit errors actionable by
+  @zneedell ([#248](https://github.com/LBNL-UCB-STI/consist/pull/248)).
 
 ## [0.3.4] - 2026-09-08
 
@@ -724,6 +725,10 @@ The format is based on [Keep a Changelog], and this project adheres to
 [Semantic Versioning]: https://semver.org/spec/v2.0.0.html
 
 [Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.3.3...HEAD
+
+[0.3.5]: https://github.com/LBNL-UCB-STI/consist/compare/v0.3.4...v0.3.5
+
+[0.3.4]: https://github.com/LBNL-UCB-STI/consist/compare/v0.3.3...v0.3.4
 
 [0.3.3]: https://github.com/LBNL-UCB-STI/consist/compare/v0.3.2...v0.3.3
 
