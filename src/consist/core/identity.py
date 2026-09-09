@@ -242,12 +242,15 @@ class IdentityManager:
             ):
                 return self._repo_git_code_version_cache
         except Exception as exc:
+            detail = str(exc)
+            reason = (
+                f"Could not resolve a Git commit from project root {self.project_root}"
+            )
+            if detail != str(self.project_root):
+                reason += f": {detail}"
             raise CodeIdentityUnavailableError(
                 mode="repo_git",
-                reason=(
-                    f"Could not resolve a Git commit from project root "
-                    f"{self.project_root}: {exc}."
-                ),
+                reason=f"{reason}.",
                 guidance=(
                     "Set project_root to a Git repository with at least one commit."
                 ),

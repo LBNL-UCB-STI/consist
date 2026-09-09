@@ -675,6 +675,7 @@ class TestCodeVersion:
         message = str(exc_info.value)
         assert "Could not resolve a Git commit" in message
         assert f"project root {tmp_path}" in message
+        assert "not a repository" in message
         assert "at least one commit" in message
 
     def test_repo_git_falls_back_to_callable_module_when_git_is_unavailable(self):
