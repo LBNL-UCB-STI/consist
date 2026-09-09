@@ -25,7 +25,7 @@ from consist.core.identity import CodeIdentityUnavailableError
 try:
     tracker.run(fn=step)
 except CodeIdentityUnavailableError:
-    # Run inside a repository or select/provide a supported callable identity.
+    # Install consist[git] and run from a repository, or provide a callable identity.
     raise
 ```
 

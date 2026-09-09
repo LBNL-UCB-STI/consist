@@ -659,6 +659,23 @@ class TestCodeVersion:
                 im.get_code_version()
 
         assert type(exc_info.value).__name__ == "CodeIdentityUnavailableError"
+        assert 'pip install "consist[git]"' in str(exc_info.value)
+        assert "at least one commit" in str(exc_info.value)
+
+    @patch("consist.core.identity.git")
+    def test_git_repository_failure_explains_commit_requirement(
+        self, mock_git: MagicMock, tmp_path: Path
+    ):
+        mock_git.Repo.side_effect = RuntimeError("not a repository")
+
+        with pytest.raises(RuntimeError) as exc_info:
+            IdentityManager(project_root=tmp_path).get_code_version()
+
+        assert type(exc_info.value).__name__ == "CodeIdentityUnavailableError"
+        message = str(exc_info.value)
+        assert "Could not resolve a Git commit" in message
+        assert f"project root {tmp_path}" in message
+        assert "at least one commit" in message
 
     def test_repo_git_falls_back_to_callable_module_when_git_is_unavailable(self):
         def sample_func():

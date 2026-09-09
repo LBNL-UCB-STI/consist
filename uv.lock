@@ -686,6 +686,9 @@ examples = [
     { name = "notebook" },
     { name = "seaborn" },
 ]
+git = [
+    { name = "gitpython" },
+]
 hdf5 = [
     { name = "h5py" },
     { name = "tables" },
@@ -695,7 +698,6 @@ ibis = [
 ]
 ingest = [
     { name = "dlt" },
-    { name = "gitpython" },
 ]
 netcdf = [
     { name = "cftime" },
@@ -777,7 +779,7 @@ requires-dist = [
     { name = "geopandas", marker = "extra == 'all'", specifier = ">=0.14.0" },
     { name = "geopandas", marker = "extra == 'spatial'", specifier = ">=0.14.0" },
     { name = "gitpython", marker = "extra == 'all'", specifier = ">=3.1.50" },
-    { name = "gitpython", marker = "extra == 'ingest'", specifier = ">=3.1.50" },
+    { name = "gitpython", marker = "extra == 'git'", specifier = ">=3.1.50" },
     { name = "h5netcdf", marker = "extra == 'all'", specifier = ">=1.3.0" },
     { name = "h5netcdf", marker = "extra == 'netcdf'", specifier = ">=1.3.0" },
     { name = "h5py", marker = "extra == 'all'", specifier = ">=3.15.1" },
@@ -815,7 +817,7 @@ requires-dist = [
     { name = "zarr", marker = "extra == 'all'", specifier = ">=2.18,<3" },
     { name = "zarr", marker = "extra == 'zarr'", specifier = ">=2.18,<3" },
 ]
-provides-extras = ["docker", "ibis", "hdf5", "ingest", "activitysim", "beam", "netcdf", "netcdf4", "spatial", "zarr", "omx", "examples", "all"]
+provides-extras = ["git", "docker", "ibis", "hdf5", "ingest", "activitysim", "beam", "netcdf", "netcdf4", "spatial", "zarr", "omx", "examples", "all"]
 
 [package.metadata.requires-dev]
 bench = [{ name = "psutil", specifier = ">=7.1.3" }]

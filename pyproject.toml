@@ -36,10 +36,11 @@ consist = "consist.cli:app"
 
 [project.optional-dependencies]
 # Optional runtime integrations (install as needed).
+git = ["gitpython>=3.1.50"]
 docker = ["docker>=7.1.0"]
 ibis = ["ibis-framework[duckdb]"]
 hdf5 = ["h5py>=3.15.1", "tables>=3.10.2"]
-ingest = ["dlt>=1.27.0", "gitpython>=3.1.50"]
+ingest = ["dlt>=1.27.0"]
 activitysim = ["PyYAML>=6.0"]
 beam = ["pyhocon>=0.3.60"]
 netcdf = ["cftime>=1.6.0", "h5netcdf>=1.3.0", "xarray>=2024.9.0"]
