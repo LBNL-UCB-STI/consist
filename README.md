@@ -6,7 +6,7 @@
   <a href="https://github.com/LBNL-UCB-STI/consist/actions/workflows/ci.yml">
     <img src="https://github.com/LBNL-UCB-STI/consist/actions/workflows/ci.yml/badge.svg" alt="CI">
   </a>
-  <img src="https://img.shields.io/badge/python-3.11+-blue.svg" alt="Python 3.11+">
+  <a href="https://joss.theoj.org/papers/5731b244e6ff1c6a407f1eda046a0bcd"><img src="https://joss.theoj.org/papers/5731b244e6ff1c6a407f1eda046a0bcd/status.svg"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-BSD--3--Clause-blue.svg" alt="License BSD 3-Clause"></a>
 </p>
 
