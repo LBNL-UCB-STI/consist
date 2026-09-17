@@ -13,7 +13,7 @@ authors:
     corresponding: true
     orcid: 0000-0001-6190-5186
 affiliations:
-  - name: Lawrence Berkeley National Laboratory, United States
+  - name: Lawrence Berkeley National Laboratory
     index: 1
     ror: 02jbv0t02
 date: 16 June 2026
