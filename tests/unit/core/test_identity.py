@@ -33,6 +33,7 @@ from pathlib import Path
 
 # Import the class
 from consist.core.identity import IdentityManager
+from consist.core.run_resolution import InputBindingRole
 from consist.models.artifact import Artifact
 
 # Conditional numpy import for testing
@@ -188,6 +189,120 @@ class TestInputHashing:
         art3 = Artifact(key="a1", container_uri="x", driver="x", run_id="run_999")
         hash_c = im.compute_input_hash([art3, art2])
         assert hash_a != hash_c
+
+    def test_action_v2_reuses_attested_content_under_the_same_named_role(self):
+        digest = "a" * 64
+        first = Artifact(
+            key="upstream_one",
+            container_uri="archive://one.csv",
+            driver="csv",
+            hash=digest,
+            run_id="producer_one",
+            meta={
+                "hash_semantics": {
+                    "version": 1,
+                    "algorithm": "sha256",
+                    "kind": "file",
+                    "digest_contract": "raw_file_bytes",
+                    "source": "computed_full",
+                }
+            },
+        )
+        second = Artifact(
+            key="upstream_two",
+            container_uri="archive://two.csv",
+            driver="csv",
+            hash=digest,
+            run_id="producer_two",
+            meta=dict(first.meta),
+        )
+        roles = [InputBindingRole(kind="named", role="data", input_index=0)]
+        code_identity = {"version": 1, "mode": "repo_git", "digest": "abc"}
+
+        first_action = IdentityManager().compute_action_input_identity(
+            inputs=[first], binding_roles=roles, code_identity=code_identity
+        )
+        second_action = IdentityManager().compute_action_input_identity(
+            inputs=[second], binding_roles=roles, code_identity=code_identity
+        )
+
+        assert first_action.value.startswith("sha256:action-v2:")
+        assert first_action.value == second_action.value
+        assert first_action.bindings[0].mode == "content-v1"
+
+    def test_action_v2_distinguishes_swapped_named_roles(self):
+        def artifact(key: str, digest: str) -> Artifact:
+            return Artifact(
+                key=key,
+                container_uri=f"archive://{key}.csv",
+                driver="csv",
+                hash=digest,
+                run_id=f"producer_{key}",
+                meta={
+                    "hash_semantics": {
+                        "version": 1,
+                        "algorithm": "sha256",
+                        "kind": "file",
+                        "digest_contract": "raw_file_bytes",
+                        "source": "computed_full",
+                    }
+                },
+            )
+
+        left = artifact("left", "a" * 64)
+        right = artifact("right", "b" * 64)
+        roles = [
+            InputBindingRole(kind="named", role="left", input_index=0),
+            InputBindingRole(kind="named", role="right", input_index=1),
+        ]
+        identity = IdentityManager()
+        code_identity = {"version": 1, "mode": "callable_module", "digest": "abc"}
+
+        ordered = identity.compute_action_input_identity(
+            inputs=[left, right], binding_roles=roles, code_identity=code_identity
+        )
+        swapped = identity.compute_action_input_identity(
+            inputs=[right, left], binding_roles=roles, code_identity=code_identity
+        )
+
+        assert ordered.value != swapped.value
+
+    def test_action_v2_separates_code_identity_modes(self):
+        artifact = Artifact(
+            key="data",
+            container_uri="archive://data.csv",
+            driver="csv",
+            hash="a" * 64,
+            run_id="producer",
+            meta={
+                "hash_semantics": {
+                    "version": 1,
+                    "algorithm": "sha256",
+                    "kind": "file",
+                    "digest_contract": "raw_file_bytes",
+                    "source": "computed_full",
+                }
+            },
+        )
+        roles = [InputBindingRole(kind="named", role="data", input_index=0)]
+        identity = IdentityManager()
+
+        repo = identity.compute_action_input_identity(
+            inputs=[artifact],
+            binding_roles=roles,
+            code_identity={"version": 1, "mode": "repo_git", "digest": "same"},
+        )
+        callable_module = identity.compute_action_input_identity(
+            inputs=[artifact],
+            binding_roles=roles,
+            code_identity={
+                "version": 1,
+                "mode": "callable_module",
+                "digest": "same",
+            },
+        )
+
+        assert repo.value != callable_module.value
 
     def test_raw_file_inputs(self):
         """

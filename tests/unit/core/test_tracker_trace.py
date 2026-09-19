@@ -49,7 +49,7 @@ def test_tracker_trace_accepts_identity_kwargs(tracker, tmp_path):
     assert isinstance(run.meta.get("consist_hash_inputs"), dict)
 
 
-def test_tracker_trace_records_positional_and_dependency_roles(tracker, tmp_path):
+def test_tracker_trace_distinguishes_positional_and_dependency_roles(tracker, tmp_path):
     first = tmp_path / "first.txt"
     first.write_text("first\n", encoding="utf-8")
     second = tmp_path / "second.txt"
@@ -83,7 +83,7 @@ def test_tracker_trace_records_positional_and_dependency_roles(tracker, tmp_path
         pass
 
     reversed_run = tracker.last_run.run
-    assert run.input_hash == reversed_run.input_hash
+    assert run.input_hash != reversed_run.input_hash
     assert [
         binding["artifact_id"] for binding in run.meta["input_binding"]["bindings"]
     ] != [
