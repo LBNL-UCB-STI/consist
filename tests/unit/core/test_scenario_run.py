@@ -136,6 +136,23 @@ def test_scenario_run_resolves_coupler_inputs(tracker):
         )
 
 
+def test_scenario_run_records_named_input_roles(tracker, tmp_path: Path) -> None:
+    source = tmp_path / "source.txt"
+    source.write_text("source\n", encoding="utf-8")
+
+    with tracker.scenario("scenario_input_roles") as scenario:
+        result = scenario.run(
+            fn=lambda: None,
+            name="consume",
+            inputs={"source": source},
+        )
+
+    assert [
+        (binding["kind"], binding["role"])
+        for binding in result.run.meta["input_binding"]["bindings"]
+    ] == [("named", "source")]
+
+
 def test_scenario_run_does_not_rewarn_decorated_optional_input_keys(
     tracker, tmp_path
 ) -> None:
