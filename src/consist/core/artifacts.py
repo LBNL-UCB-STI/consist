@@ -26,6 +26,7 @@ from consist.core.container_policy import (
 )
 from consist.core.drivers import ARRAY_DRIVERS, TABLE_DRIVERS
 from consist.core.cache_output_logging import _demote_cache_hit
+from consist.core.resolved_binding import ArtifactIdentity
 from consist.core.validation import validate_artifact_key
 from consist.models.artifact import Artifact
 from consist.types import (
@@ -335,6 +336,8 @@ class ArtifactManager:
                 meta["recovery_roots"]
             )
         meta.pop("hash_semantics", None)
+        meta.pop("content_identity", None)
+        meta.pop("observation_identity", None)
         artifact_obj = None
         is_new_artifact = False
         resolved_abs_path = None
@@ -398,17 +401,17 @@ class ArtifactManager:
             return cloned
 
         def _attach_content_id(artifact: Artifact) -> None:
-            hash_value = hash_state.effective_hash or artifact.hash
             effective_driver = driver or artifact.driver
+            content_identity = artifact.meta.get("content_identity")
             if (
-                hash_value is None
+                not isinstance(content_identity, str)
                 or effective_driver is None
                 or self.tracker.db is None
             ):
                 return
             try:
                 content_row = self.tracker.db.get_or_create_artifact_content(
-                    content_hash=hash_value,
+                    content_hash=content_identity,
                     driver=effective_driver,
                 )
                 artifact.content_id = content_row.id
@@ -418,6 +421,50 @@ class ArtifactManager:
                     artifact.key,
                     exc,
                 )
+
+        def _record_identity_evidence(artifact: Artifact) -> None:
+            """Persist only identities that the logged semantics can prove."""
+            try:
+                artifact.meta["content_identity"] = str(
+                    ArtifactIdentity.from_artifact(artifact)
+                )
+                artifact.meta.pop("observation_identity", None)
+                return
+            except ValueError:
+                artifact.meta.pop("content_identity", None)
+
+            semantics = artifact.meta.get("hash_semantics")
+            hash_value = artifact.hash
+            if not isinstance(semantics, Mapping) or not isinstance(hash_value, str):
+                artifact.meta.pop("observation_identity", None)
+                return
+            if semantics == {
+                "version": 1,
+                "algorithm": "sha256",
+                "kind": "file",
+                "digest_contract": "file_metadata",
+                "source": "computed_fast",
+            }:
+                artifact.meta["observation_identity"] = f"stat-v1:file:{hash_value}"
+                return
+            if (
+                semantics
+                == {
+                    "version": 1,
+                    "algorithm": "sha256",
+                    "kind": "directory",
+                    "digest_contract": "legacy_directory_metadata",
+                    "source": "computed_fast_directory",
+                }
+                and resolved_abs_path
+            ):
+                artifact.meta["observation_identity"] = (
+                    self.tracker.identity.compute_fast_directory_observation(
+                        resolved_abs_path
+                    )
+                )
+                return
+            artifact.meta.pop("observation_identity", None)
 
         def _compute_content_hash(
             *,
@@ -580,8 +627,6 @@ class ArtifactManager:
         if artifact_obj.hash and hash_state.effective_hash is None:
             hash_state.effective_hash = artifact_obj.hash
 
-        _attach_content_id(artifact_obj)
-
         if schema:
             artifact_obj.meta["schema_name"] = schema.__name__
             if strict_schema:
@@ -607,6 +652,9 @@ class ArtifactManager:
             artifact_obj.meta["mount_scheme"] = mount_scheme
         if mount_root and "mount_root" not in artifact_obj.meta:
             artifact_obj.meta["mount_root"] = mount_root
+
+        _record_identity_evidence(artifact_obj)
+        _attach_content_id(artifact_obj)
 
         artifact_obj.abs_path = resolved_abs_path
         return artifact_obj
