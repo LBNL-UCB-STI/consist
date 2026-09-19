@@ -87,6 +87,13 @@ Use `run.identity_summary` to debug signature composition
 (`config_hash`, `input_hash`, `code_hash`, adapter metadata, and
 `identity_inputs` digests).
 
+For role-aware `action-v2` runs, `identity_summary["input_identity"]["bindings"]`
+also includes non-hashed `evidence`: `content-v1` means the binding used a
+verified immutable identity, while `legacy-provenance-v1` includes a stable
+`fallback_reason` explaining why Consist kept the conservative provenance
+identity. On a cache hit, `identity_summary["cache"]["source_run_id"]` is the
+prior execution that supplied the outputs; it is `None` for a miss.
+
 If you are diagnosing a cache miss, also inspect
 `run.meta["cache_miss_explanation"]` on the completed run. It records the
 likely reason the run missed cache, such as config drift, input drift, code

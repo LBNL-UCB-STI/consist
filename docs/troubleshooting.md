@@ -205,6 +205,14 @@ config type drift such as `0` versus `0.0`, changed input fingerprints, changed
 `run.meta["cache_miss_explanation"]`. For manual checks, compute the relevant
 code, config, and input hashes with `tracker.identity`.
 
+For `action-v2` runs, inspect
+`identity_summary["input_identity"]["bindings"][*]["evidence"]` to see
+whether a binding used verified content or a provenance fallback and why. If a
+run hit cache, `identity_summary["cache"]["source_run_id"]` identifies the
+earlier execution that supplied its outputs; compare that run's input links
+with the requested run's links when the same content came from a different
+producer occurrence.
+
 ### "How do I clear/reset cache?"
 
 **Diagnosis:** You either want to remove all history or keep history while

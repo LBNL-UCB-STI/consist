@@ -130,6 +130,368 @@ def test_cache_miss_explanation_records_identity_input_digest_changes():
     assert explanation.details["identity_inputs_changed"] == ["scenario_cfg"]
 
 
+def test_cache_miss_explanation_records_action_v2_fallback_mode_change() -> None:
+    current = Run(
+        id="current",
+        model_name="action_model",
+        config_hash="config",
+        input_hash="current_inputs",
+        git_hash="code",
+        meta={
+            "input_identity": {
+                "mode": "action-v2",
+                "bindings": [
+                    {
+                        "kind": "named",
+                        "role": "data",
+                        "mode": "legacy-provenance-v1",
+                        "value": "sha256:action-v2:current-secret",
+                        "selector": {
+                            "driver": "csv",
+                            "table_path": "/private/current",
+                            "array_path": None,
+                        },
+                        "evidence": {
+                            "identity_strength": "legacy-provenance-v1",
+                            "fallback_reason": "fast_file_observation",
+                        },
+                    }
+                ],
+            }
+        },
+    )
+    candidate = Run(
+        id="candidate",
+        model_name="action_model",
+        config_hash="config",
+        input_hash="candidate_inputs",
+        git_hash="code",
+        status="completed",
+        meta={
+            "input_identity": {
+                "mode": "action-v2",
+                "bindings": [
+                    {
+                        "kind": "named",
+                        "role": "data",
+                        "mode": "content-v1",
+                        "value": "sha256:file:candidate-secret",
+                        "selector": {
+                            "driver": "csv",
+                            "table_path": "/private/candidate",
+                            "array_path": None,
+                        },
+                    }
+                ],
+            }
+        },
+    )
+
+    class StubTracker:
+        db = object()
+        current_consist = None
+
+        def find_recent_completed_runs_for_model(
+            self, model_name: str, *, limit: int = 20
+        ) -> list[Run]:
+            assert model_name == "action_model"
+            assert limit == 20
+            return [candidate]
+
+    explanation = CacheMissExplainer(StubTracker()).explain(current)
+
+    assert explanation.details["action_v2_bindings"] == {
+        "fallback_bindings": [
+            {
+                "kind": "named",
+                "role": "data",
+                "fallback_reason": "fast_file_observation",
+            }
+        ],
+        "changed_bindings": [
+            {"kind": "named", "role": "data", "change": "identity_mode_changed"}
+        ],
+    }
+    serialized = str(explanation.details["action_v2_bindings"])
+    assert "private" not in serialized
+    assert "secret" not in serialized
+
+
+def test_cache_miss_explanation_compares_historical_action_v2_selector_metadata() -> (
+    None
+):
+    current = Run(
+        id="current",
+        model_name="action_model",
+        config_hash="config",
+        input_hash="current_inputs",
+        git_hash="code",
+        meta={
+            "input_identity": {
+                "mode": "action-v2",
+                "bindings": [
+                    {
+                        "kind": "named",
+                        "role": "data",
+                        "mode": "content-v1",
+                        "value": "sha256:file:same",
+                        "selector": {
+                            "driver": "h5",
+                            "table_path": "/tables/current",
+                            "array_path": None,
+                        },
+                    }
+                ],
+            }
+        },
+    )
+    candidate = Run(
+        id="candidate",
+        model_name="action_model",
+        config_hash="config",
+        input_hash="candidate_inputs",
+        git_hash="code",
+        status="completed",
+        meta={
+            "input_identity": {
+                "mode": "action-v2",
+                "bindings": [
+                    {
+                        "kind": "named",
+                        "role": "data",
+                        "mode": "content-v1",
+                        "value": "sha256:file:same",
+                        "selector": {
+                            "driver": "h5",
+                            "table_path": "/tables/candidate",
+                            "array_path": None,
+                        },
+                    }
+                ],
+            }
+        },
+    )
+
+    class StubTracker:
+        db = object()
+        current_consist = None
+
+        def find_recent_completed_runs_for_model(
+            self, model_name: str, *, limit: int = 20
+        ) -> list[Run]:
+            return [candidate]
+
+    explanation = CacheMissExplainer(StubTracker()).explain(current)
+
+    assert explanation.details["action_v2_bindings"] == {
+        "changed_bindings": [
+            {"kind": "named", "role": "data", "change": "selector_changed"}
+        ]
+    }
+
+
+def test_cache_miss_explanation_action_v2_detail_is_input_miss_only() -> None:
+    def action_meta() -> dict[str, object]:
+        return {
+            "input_identity": {
+                "mode": "action-v2",
+                "bindings": [
+                    {
+                        "kind": "named",
+                        "role": "data",
+                        "mode": "content-v1",
+                        "value": "sha256:file:same",
+                        "selector": {
+                            "driver": "csv",
+                            "table_path": None,
+                            "array_path": None,
+                        },
+                    }
+                ],
+            }
+        }
+
+    current = Run(
+        id="current",
+        model_name="action_model",
+        config_hash="current_config",
+        input_hash="same_inputs",
+        git_hash="code",
+        meta=action_meta(),
+    )
+    candidate = Run(
+        id="candidate",
+        model_name="action_model",
+        config_hash="candidate_config",
+        input_hash="same_inputs",
+        git_hash="code",
+        status="completed",
+        meta=action_meta(),
+    )
+
+    class StubTracker:
+        db = object()
+        current_consist = None
+
+        def find_recent_completed_runs_for_model(
+            self, model_name: str, *, limit: int = 20
+        ) -> list[Run]:
+            return [candidate]
+
+    explanation = CacheMissExplainer(StubTracker()).explain(current)
+
+    assert explanation.reason == "config_changed"
+    assert "action_v2_bindings" not in explanation.details
+
+
+def test_cache_miss_explanation_ignores_malformed_action_v2_metadata() -> None:
+    current = Run(
+        id="current",
+        model_name="action_model",
+        config_hash="config",
+        input_hash="current_inputs",
+        git_hash="code",
+        meta={"input_identity": {"mode": "action-v2", "bindings": ["bad"]}},
+    )
+    candidate = Run(
+        id="candidate",
+        model_name="action_model",
+        config_hash="config",
+        input_hash="candidate_inputs",
+        git_hash="code",
+        status="completed",
+        meta={"input_identity": {"mode": "action-v2", "bindings": []}},
+    )
+
+    class StubTracker:
+        db = object()
+        current_consist = None
+
+        def find_recent_completed_runs_for_model(
+            self, model_name: str, *, limit: int = 20
+        ) -> list[Run]:
+            return [candidate]
+
+    explanation = CacheMissExplainer(StubTracker()).explain(current)
+
+    assert "action_v2_bindings" not in explanation.details
+
+
+def test_cache_miss_explanation_records_added_and_removed_action_v2_roles() -> None:
+    def binding(role: str) -> dict[str, object]:
+        return {
+            "kind": "named",
+            "role": role,
+            "mode": "content-v1",
+            "value": f"sha256:file:{role}",
+            "selector": {
+                "driver": "csv",
+                "table_path": None,
+                "array_path": None,
+            },
+        }
+
+    current = Run(
+        id="current",
+        model_name="action_model",
+        config_hash="config",
+        input_hash="current_inputs",
+        git_hash="code",
+        meta={
+            "input_identity": {
+                "mode": "action-v2",
+                "bindings": [binding("added")],
+            }
+        },
+    )
+    candidate = Run(
+        id="candidate",
+        model_name="action_model",
+        config_hash="config",
+        input_hash="candidate_inputs",
+        git_hash="code",
+        status="completed",
+        meta={
+            "input_identity": {
+                "mode": "action-v2",
+                "bindings": [binding("removed")],
+            }
+        },
+    )
+
+    class StubTracker:
+        db = object()
+        current_consist = None
+
+        def find_recent_completed_runs_for_model(
+            self, model_name: str, *, limit: int = 20
+        ) -> list[Run]:
+            return [candidate]
+
+    explanation = CacheMissExplainer(StubTracker()).explain(current)
+
+    assert explanation.details["action_v2_bindings"] == {
+        "changed_bindings": [
+            {"kind": "named", "role": "added", "change": "binding_added"},
+            {"kind": "named", "role": "removed", "change": "binding_removed"},
+        ]
+    }
+
+
+def test_cache_miss_explanation_compares_empty_action_v2_binding_maps() -> None:
+    candidate = Run(
+        id="candidate",
+        model_name="action_model",
+        config_hash="config",
+        input_hash="candidate_inputs",
+        git_hash="code",
+        status="completed",
+        meta={
+            "input_identity": {
+                "mode": "action-v2",
+                "bindings": [
+                    {
+                        "kind": "named",
+                        "role": "data",
+                        "mode": "content-v1",
+                        "value": "sha256:file:candidate-secret",
+                        "selector": {
+                            "driver": "csv",
+                            "table_path": None,
+                            "array_path": None,
+                        },
+                    }
+                ],
+            }
+        },
+    )
+    current = Run(
+        id="current",
+        model_name="action_model",
+        config_hash="config",
+        input_hash="current_inputs",
+        git_hash="code",
+        meta={"input_identity": {"mode": "action-v2", "bindings": []}},
+    )
+
+    class StubTracker:
+        db = object()
+        current_consist = None
+
+        def find_recent_completed_runs_for_model(
+            self, model_name: str, *, limit: int = 20
+        ) -> list[Run]:
+            return [candidate]
+
+    explanation = CacheMissExplainer(StubTracker()).explain(current)
+
+    assert explanation.details["action_v2_bindings"] == {
+        "changed_bindings": [
+            {"kind": "named", "role": "data", "change": "binding_removed"}
+        ]
+    }
+
+
 def test_cache_miss_explanation_prefers_config_identity_manifest_diff():
     """Structured adapter manifests should explain config misses before fallbacks.
 

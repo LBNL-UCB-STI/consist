@@ -305,6 +305,194 @@ class TestInputHashing:
         assert repo.value != callable_module.value
 
     @pytest.mark.parametrize(
+        ("meta", "expected_mode", "expected_reason"),
+        [
+            (
+                {
+                    "hash_semantics": {
+                        "version": 1,
+                        "algorithm": "sha256",
+                        "kind": "file",
+                        "digest_contract": "file_metadata",
+                        "source": "computed_fast",
+                    }
+                },
+                "legacy-provenance-v1",
+                "fast_file_observation",
+            ),
+            (
+                {
+                    "hash_semantics": {
+                        "version": 1,
+                        "algorithm": "sha256",
+                        "kind": "directory",
+                        "digest_contract": "legacy_directory_metadata",
+                        "source": "computed_fast_directory",
+                    }
+                },
+                "legacy-provenance-v1",
+                "fast_directory_observation",
+            ),
+            (
+                {
+                    "hash_semantics": {
+                        "version": 1,
+                        "algorithm": "unknown",
+                        "kind": "unknown",
+                        "digest_contract": "unknown",
+                        "source": "caller_supplied",
+                    }
+                },
+                "legacy-provenance-v1",
+                "caller_supplied_hash",
+            ),
+            (
+                {
+                    "hash_semantics": {
+                        "version": 1,
+                        "algorithm": "sha256",
+                        "kind": "directory",
+                        "digest_contract": "legacy_directory_content",
+                        "source": "computed_full_directory",
+                    }
+                },
+                "legacy-provenance-v1",
+                "directory_without_manifest",
+            ),
+            (
+                {
+                    "hash_semantics": {
+                        "version": 1,
+                        "algorithm": "sha1",
+                        "kind": "file",
+                        "digest_contract": "raw_file_bytes",
+                        "source": "computed_full",
+                    }
+                },
+                "legacy-provenance-v1",
+                "untrusted_hash_semantics",
+            ),
+            ({}, "legacy-provenance-v1", "missing_hash_semantics"),
+            (
+                {
+                    "hash_semantics": {
+                        "version": 1,
+                        "algorithm": "sha256",
+                        "kind": "file",
+                        "digest_contract": "raw_file_bytes",
+                        "source": "computed_full",
+                    }
+                },
+                "content-v1",
+                None,
+            ),
+        ],
+        ids=[
+            "fast-file",
+            "fast-directory",
+            "caller-supplied",
+            "directory-without-manifest",
+            "untrusted-semantics",
+            "missing-semantics",
+            "trusted-content",
+        ],
+    )
+    def test_action_v2_records_nonhashed_binding_evidence(
+        self, meta, expected_mode, expected_reason
+    ):
+        artifact = Artifact(
+            key="data",
+            container_uri="archive://data",
+            driver="unknown",
+            hash="a" * 64,
+            run_id="producer",
+            meta=meta,
+        )
+
+        binding = (
+            IdentityManager()
+            .compute_action_input_identity(
+                inputs=[artifact],
+                binding_roles=[
+                    InputBindingRole(kind="named", role="data", input_index=0)
+                ],
+                code_identity={"version": 1, "mode": "repo_git", "digest": "abc"},
+            )
+            .bindings[0]
+        )
+
+        assert binding.mode == expected_mode
+        assert binding.as_evidence_payload() == {
+            "identity_strength": expected_mode,
+            **(
+                {"fallback_reason": expected_reason}
+                if expected_reason is not None
+                else {}
+            ),
+        }
+        assert binding.as_payload() == {
+            "kind": "named",
+            "role": "data",
+            "mode": expected_mode,
+            "value": binding.value,
+        }
+
+    def test_action_v2_fallback_evidence_does_not_change_digest_payload(self):
+        artifact = Artifact(
+            key="data",
+            container_uri="archive://data",
+            driver="csv",
+            hash="a" * 64,
+            run_id="producer",
+            meta={
+                "hash_semantics": {
+                    "version": 1,
+                    "algorithm": "sha256",
+                    "kind": "file",
+                    "digest_contract": "file_metadata",
+                    "source": "computed_fast",
+                }
+            },
+        )
+
+        identity = IdentityManager().compute_action_input_identity(
+            inputs=[artifact],
+            binding_roles=[InputBindingRole(kind="named", role="data", input_index=0)],
+            code_identity={"version": 1, "mode": "repo_git", "digest": "abc"},
+        )
+        expected_payload = {
+            "version": 2,
+            "code": {"version": 1, "mode": "repo_git", "digest": "abc"},
+            "bindings": [
+                {
+                    "kind": "named",
+                    "role": "data",
+                    "mode": "legacy-provenance-v1",
+                    "value": "driver:csv|key:data|run:producer|hash:" + "a" * 64,
+                    "selector": {
+                        "driver": "csv",
+                        "table_path": None,
+                        "array_path": None,
+                    },
+                }
+            ],
+        }
+        expected_digest = hashlib.sha256(
+            json.dumps(
+                expected_payload,
+                sort_keys=True,
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+        assert identity.value == f"sha256:action-v2:{expected_digest}"
+        assert identity.bindings[0].as_evidence_payload() == {
+            "identity_strength": "legacy-provenance-v1",
+            "fallback_reason": "fast_file_observation",
+        }
+
+    @pytest.mark.parametrize(
         "meta",
         [
             {
