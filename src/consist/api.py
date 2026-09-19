@@ -46,8 +46,13 @@ from consist.core.context import (
 from consist.core.admission import (  # noqa: F401
     AdmissionReference,
     AdmissionReport,
+    DeclaredDigestExpectation,
+    FileIdentity,
     check_admission_reference,
+    check_admission_reference_expected_identity,
     check_artifact_identity,
+    check_expected_identity,
+    compare_path_to_identity,
 )
 from consist.core.decorators import (
     define_step as define_step_decorator,

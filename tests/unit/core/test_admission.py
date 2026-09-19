@@ -9,11 +9,17 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+import consist.core.admission as admission
 from consist.core.admission import (
     AdmissionReference,
     AdmissionReport,
+    DeclaredDigestExpectation,
+    FileIdentity,
     check_admission_reference,
+    check_admission_reference_expected_identity,
     check_artifact_identity,
+    check_expected_identity,
+    compare_path_to_identity,
     hash_semantics_for_new_artifact,
 )
 from consist.models.artifact import Artifact
@@ -81,20 +87,307 @@ def test_public_package_exports_admission_api() -> None:
 
     assert consist.AdmissionReference is AdmissionReference
     assert consist.AdmissionReport is AdmissionReport
+    assert consist.FileIdentity is FileIdentity
+    assert consist.DeclaredDigestExpectation is DeclaredDigestExpectation
     assert consist.check_admission_reference is check_admission_reference
+    assert (
+        consist.check_admission_reference_expected_identity
+        is check_admission_reference_expected_identity
+    )
     assert consist.check_artifact_identity is check_artifact_identity
+    assert consist.check_expected_identity is check_expected_identity
+    assert consist.compare_path_to_identity is compare_path_to_identity
 
 
-def test_admission_report_rejects_non_v2_schema_version() -> None:
+def test_declared_digest_matching_file_is_verified_without_a_tracker(
+    tmp_path: Path,
+) -> None:
+    candidate = tmp_path / "initial_datastore.h5"
+    candidate.write_bytes(b"canonical external datastore")
+    expectation = DeclaredDigestExpectation(
+        identity=FileIdentity.parse(f"sha256:file:{_sha256(candidate.read_bytes())}"),
+        source_label="UrbanSim 2018 initial datastore",
+        source_uri="s3://governed-inputs/seattle/initial_datastore.h5",
+    )
+
+    report = check_expected_identity(
+        execution_path=candidate,
+        input_role="urbansim_initial_datastore",
+        expectation=expectation,
+    )
+
+    assert report.outcome == "verified"
+    assert report.report_schema_version == 3
+    assert report.expected_source == "declared_digest"
+    assert report.artifact_key is None
+    assert report.expected_run_id is None
+    assert report.expected_artifact_id == str(expectation.identity)
+    assert report.expected_source_label == expectation.source_label
+    assert report.expected_source_uri == expectation.source_uri
+    payload = json.loads(report.canonical_json())
+    assert report.canonical_json() == json.dumps(
+        payload, sort_keys=True, separators=(",", ":")
+    )
+    assert payload["physical_target_path"] == str(candidate.resolve())
+
+
+def test_declared_digest_runtime_reference_retains_context_without_artifact_key(
+    tmp_path: Path,
+) -> None:
+    candidate = tmp_path / "initial_datastore.h5"
+    candidate.write_bytes(b"canonical external datastore")
+    expectation = DeclaredDigestExpectation(
+        identity=FileIdentity.parse(f"sha256:file:{_sha256(candidate.read_bytes())}")
+    )
+    reference = AdmissionReference(
+        input_role="urbansim_initial_datastore",
+        execution_path=candidate,
+        config_key="urbansim.initial_datastore",
+        config_reference_key="urbansim.initial_datastore",
+        feed_key="seattle",
+        raw_config_value="inputs/initial_datastore.h5",
+        canonical_value="inputs/initial_datastore.h5",
+        configured_path="inputs/initial_datastore.h5",
+        consumer_path="/model/inputs/initial_datastore.h5",
+    )
+
+    report = check_admission_reference_expected_identity(
+        reference=reference,
+        expectation=expectation,
+    )
+
+    assert report.outcome == "verified"
+    assert report.artifact_key is None
+    assert report.expected_run_id is None
+    assert report.config_key == reference.config_key
+    assert report.config_reference_key == reference.config_reference_key
+    assert report.feed_key == reference.feed_key
+    assert report.raw_config_value == reference.raw_config_value
+    assert report.canonical_value == reference.canonical_value
+    assert report.configured_path == str(reference.configured_path)
+    assert report.consumer_path == reference.consumer_path
+
+
+def test_declared_digest_changed_file_is_mismatched(tmp_path: Path) -> None:
+    expected = tmp_path / "expected.h5"
+    expected.write_bytes(b"canonical external datastore")
+    candidate = tmp_path / "candidate.h5"
+    candidate.write_bytes(b"changed external datastore")
+
+    report = check_expected_identity(
+        execution_path=candidate,
+        input_role="urbansim_initial_datastore",
+        expectation=DeclaredDigestExpectation(
+            identity=FileIdentity.parse(f"sha256:file:{_sha256(expected.read_bytes())}")
+        ),
+    )
+
+    assert report.outcome == "mismatched"
+    assert report.expected_artifact_id != report.observed_artifact_id
+    assert report.reason == "Resolved file does not match the declared digest."
+
+
+@pytest.mark.parametrize("candidate_kind", ["directory", "git_lfs_pointer"])
+def test_declared_digest_preserves_candidate_failure_classifications(
+    tmp_path: Path, candidate_kind: str
+) -> None:
+    candidate = tmp_path / "initial_datastore.h5"
+    if candidate_kind == "directory":
+        candidate.mkdir()
+    else:
+        candidate.write_text(
+            "version https://git-lfs.github.com/spec/v1\n"
+            "oid sha256:0123456789abcdef\n"
+            "size 123\n",
+            encoding="utf-8",
+        )
+    expectation = DeclaredDigestExpectation(
+        identity=FileIdentity.parse(f"sha256:file:{'a' * 64}")
+    )
+
+    report = check_expected_identity(
+        execution_path=candidate,
+        input_role="urbansim_initial_datastore",
+        expectation=expectation,
+    )
+
+    if candidate_kind == "directory":
+        assert report.outcome == "unreadable"
+        _assert_observation(report, "file_unreadable")
+    else:
+        assert report.outcome == "unverified"
+        _assert_observation(report, "lfs")
+
+
+def test_declared_digest_reference_requires_an_input_role_when_no_artifact_key(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValidationError, match="input_role"):
+        AdmissionReference(execution_path=tmp_path / "initial_datastore.h5")
+
+
+def test_declared_digest_is_independent_of_tracker_hash_strategy(
+    tracker, tmp_path: Path
+) -> None:
+    candidate = tmp_path / "initial_datastore.h5"
+    candidate.write_bytes(b"canonical external datastore")
+    expectation = DeclaredDigestExpectation(
+        identity=FileIdentity.parse(f"sha256:file:{_sha256(candidate.read_bytes())}")
+    )
+
+    tracker.identity.hashing_strategy = "fast"
+    fast_report = check_expected_identity(
+        execution_path=candidate,
+        input_role="urbansim_initial_datastore",
+        expectation=expectation,
+    )
+    tracker.identity.hashing_strategy = "full"
+    full_report = check_expected_identity(
+        execution_path=candidate,
+        input_role="urbansim_initial_datastore",
+        expectation=expectation,
+    )
+
+    assert fast_report == full_report
+
+
+def test_prior_run_admission_hashes_a_successful_candidate_once(
+    monkeypatch, tracker, tmp_path: Path
+) -> None:
+    source = tmp_path / "archive-feed.zip"
+    source.write_bytes(b"expected bytes")
+    candidate = tmp_path / "runtime-feed.zip"
+    candidate.write_bytes(source.read_bytes())
+    _complete_run(tracker, "completed-run")
+    _record_input(
+        tracker,
+        run_id="completed-run",
+        key="raw_gtfs",
+        source_path=source,
+        digest=_sha256(source.read_bytes()),
+        semantics=FULL_FILE_SHA256,
+    )
+    original = admission.admission_file_identity
+    calls: list[Path] = []
+
+    def counted_identity(path: str | Path) -> str:
+        calls.append(Path(path))
+        return original(path)
+
+    monkeypatch.setattr(admission, "admission_file_identity", counted_identity)
+
+    report = check_artifact_identity(
+        tracker,
+        execution_path=candidate,
+        expected_run_id="completed-run",
+        artifact_key="raw_gtfs",
+    )
+
+    assert report.outcome == "verified"
+    assert calls == [candidate]
+
+
+def test_declared_digest_canonical_json_is_schema_v3_field_complete(
+    tmp_path: Path,
+) -> None:
+    candidate = tmp_path / "initial_datastore.h5"
+    candidate.write_bytes(b"canonical external datastore")
+    report = check_expected_identity(
+        execution_path=candidate,
+        input_role="urbansim_initial_datastore",
+        expectation=DeclaredDigestExpectation(
+            identity=FileIdentity.parse(
+                f"sha256:file:{_sha256(candidate.read_bytes())}"
+            )
+        ),
+    )
+
+    payload = json.loads(report.canonical_json())
+    assert report.canonical_json() == report.canonical_json()
+    assert set(payload) == {
+        "report_schema_version",
+        "outcome",
+        "input_role",
+        "artifact_key",
+        "config_key",
+        "config_reference_key",
+        "feed_key",
+        "raw_config_value",
+        "canonical_value",
+        "configured_path",
+        "execution_path",
+        "physical_target_path",
+        "consumer_path",
+        "expected_source",
+        "expected_source_label",
+        "expected_source_uri",
+        "expected_run_id",
+        "expected_artifact_id",
+        "observed_artifact_id",
+        "digest_algorithm",
+        "expected_bytes_source",
+        "expected_bytes_path",
+        "observations",
+        "recommended_action",
+        "reason",
+    }
+    assert payload["artifact_key"] is None
+    assert payload["expected_run_id"] is None
+    assert payload["expected_source_label"] is None
+    assert payload["expected_source_uri"] is None
+
+
+def test_file_identity_rejects_bare_or_noncanonical_digests() -> None:
+    digest = "a" * 64
+    for value in (
+        digest,
+        f"sha256:file:{digest.upper()}",
+        f"sha256:manifest-v1:{digest}",
+        "sha256:file:not-a-digest",
+    ):
+        with pytest.raises(ValueError, match="file identity"):
+            FileIdentity.parse(value)
+
+
+def test_declared_digest_value_objects_are_frozen() -> None:
+    identity = FileIdentity.parse(f"sha256:file:{'a' * 64}")
+    expectation = DeclaredDigestExpectation(identity=identity)
+
+    with pytest.raises(ValidationError, match="frozen"):
+        identity.value = f"sha256:file:{'b' * 64}"
+    with pytest.raises(ValidationError, match="frozen"):
+        expectation.source_label = "other source"
+
+
+def test_admission_report_rejects_unknown_schema_version() -> None:
     with pytest.raises(ValidationError, match="report_schema_version"):
         AdmissionReport(
-            report_schema_version=1,
+            report_schema_version=0,
             outcome="verified",
             input_role="raw_gtfs",
             artifact_key="raw_gtfs",
             execution_path="workspace/runtime/feed.zip",
             expected_run_id="completed-run",
         )
+
+
+@pytest.mark.parametrize("report_schema_version", [1, 2])
+def test_admission_report_reads_historical_schema_versions(
+    report_schema_version: int,
+) -> None:
+    report = AdmissionReport(
+        report_schema_version=report_schema_version,  # type: ignore[arg-type]
+        outcome="verified",
+        input_role="raw_gtfs",
+        artifact_key="raw_gtfs",
+        execution_path="workspace/runtime/feed.zip",
+        expected_run_id="completed-run",
+    )
+
+    assert report.report_schema_version == report_schema_version
+    assert report.expected_source == "prior_run"
+    assert report.expected_source_label is None
+    assert report.expected_source_uri is None
 
 
 def test_caller_hash_override_does_not_retain_cloned_full_hash_semantics(
@@ -229,7 +522,7 @@ def test_future_full_file_metadata_admits_matching_candidate_with_fast_tracker(
     payload = json.loads(canonical_json)
     assert canonical_json == json.dumps(payload, sort_keys=True, separators=(",", ":"))
     assert payload["input_role"] == "raw_gtfs"
-    assert payload["report_schema_version"] == 2
+    assert payload["report_schema_version"] == 3
     assert payload["execution_path"] == str(candidate)
     assert payload["physical_target_path"] == str(candidate.resolve())
     assert payload["consumer_path"] is None
@@ -287,7 +580,7 @@ def test_runtime_reference_preserves_launch_path_evidence(
     assert report.execution_path == str(staged)
     assert report.physical_target_path == str(staged.resolve())
     payload = json.loads(report.canonical_json())
-    assert payload["report_schema_version"] == 2
+    assert payload["report_schema_version"] == 3
     assert payload["config_key"] == "beam.warmStart.initialLinkstatsFilePath"
     assert payload["config_reference_key"] == "beam.warmStart.initialLinkstatsFilePath"
     assert payload["feed_key"] == "seattle"
