@@ -26,6 +26,7 @@ def test_manifest_omits_env_values():
 
     assert "environment" not in manifest
     assert "environment_hash" in manifest
+    assert "container_mount_modes" not in manifest
     assert "do-not-store" not in str(manifest)
 
 
@@ -132,3 +133,48 @@ def test_run_container_applies_output_log_kwargs(monkeypatch, tmp_path: Path) ->
     assert artifact.driver == "csv"
     assert artifact.meta["schema_name"] == "TaggedOutput"
     assert artifact.meta.get("has_strict_schema") is not True
+
+
+def test_run_container_validates_and_forwards_volume_modes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Explicit read-only mounts survive API validation on no-lineage launches."""
+    captured: dict[str, object] = {}
+
+    class FakeDockerBackend:
+        def __init__(self, pull_latest: bool = False) -> None:
+            self.pull_latest = pull_latest
+
+        def resolve_image_digest(self, image: str) -> str:
+            return image
+
+        def run(self, **kwargs: object) -> bool:
+            captured.update(kwargs)
+            return True
+
+    monkeypatch.setattr(container_api, "DockerBackend", FakeDockerBackend)
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    tracker = Tracker(run_dir=tmp_path / "runs")
+
+    run_container(
+        tracker=tracker,
+        run_id="volume-mode-probe",
+        image="example:latest",
+        command=["python", "-V"],
+        volumes={str(input_dir): "/input", str(output_dir): "/output"},
+        volume_modes={str(input_dir): "ro", str(output_dir): "rw"},
+        inputs=[],
+        outputs=[],
+        lineage_mode="none",
+        strict_mounts=False,
+    )
+
+    assert captured["volumes"] == {
+        str(input_dir.resolve()): "/input",
+        str(output_dir.resolve()): "/output",
+    }
+    assert captured["volume_modes"] == {
+        str(input_dir.resolve()): "ro",
+        str(output_dir.resolve()): "rw",
+    }

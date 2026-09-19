@@ -221,6 +221,46 @@ def test_docker_command_list_handling():
         assert call_kwargs["command"] == ["sh", "-c", "echo hi"]
 
 
+def test_docker_volume_modes_are_serialized_per_mount() -> None:
+    """Docker receives explicit read-only input and writable output mounts."""
+    mock_client = MagicMock()
+    mock_client.containers.run.return_value.wait.return_value = {"StatusCode": 0}
+    backend = DockerBackend(client=mock_client)
+
+    backend.run(
+        image="img",
+        command=["true"],
+        volumes={"/host/input": "/input", "/host/output": "/output"},
+        volume_modes={"/host/input": "ro", "/host/output": "rw"},
+        env={},
+    )
+
+    docker_volumes = mock_client.containers.run.call_args.kwargs["volumes"]
+    assert docker_volumes == {
+        "/host/input": {"bind": "/input", "mode": "ro"},
+        "/host/output": {"bind": "/output", "mode": "rw"},
+    }
+
+
+def test_singularity_volume_modes_are_serialized_per_bind() -> None:
+    """Singularity emits read-only input and writable output bind suffixes."""
+    with patch("os.makedirs"), patch("pathlib.Path.mkdir"):
+        backend = SingularityBackend(cache_base_options=["/tmp"])
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            backend.run(
+                image="my_image.sif",
+                command=["true"],
+                volumes={"/host/input": "/input", "/host/output": "/output"},
+                volume_modes={"/host/input": "ro", "/host/output": "rw"},
+                env={},
+            )
+
+    args = mock_run.call_args.args[0]
+    bind_arg = args[args.index("-B") + 1]
+    assert bind_arg == "/host/input:/input:ro,/host/output:/output:rw"
+
+
 # --- Additional Docker Tests ---
 
 

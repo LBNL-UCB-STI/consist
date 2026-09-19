@@ -1085,7 +1085,9 @@ def compute_config_pack_hash(
     """
     digest_map: dict[str, str] = {}
     for idx, root_dir in enumerate(root_dirs):
-        label = f"config_dir_{idx}:{root_dir}"
+        # Root position is semantic (ActivitySim overlays are ordered), but a
+        # workspace-specific absolute source path is not.
+        label = f"config_dir_{idx}"
         digest_map[label] = identity.digest_path(
             root_dir,
             hashing_strategy_override="full",
