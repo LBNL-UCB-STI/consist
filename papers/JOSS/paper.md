@@ -40,7 +40,7 @@ Existing tools address fragments of this problem. Snakemake [@molder2021snakemak
 
 Apache Hamilton [@hamilton2024] is the closest existing tool: it builds function-level DAGs with caching and Merkle-style identity propagation. However, Hamilton requires its steps to be pure Python functions, a major barrier for scientific workflows that rely on containers and subprocesses. It also lacks support for the complex configuration structures common in simulation pipelines and provides no analytical engine to make provenance metadata and artifact contents queryable.
 
-Consist fills this gap by combining non-invasive provenance tracking, deterministic identity-based caching with lineage propagation, and a queryable analytical surface for post-hoc comparison—without requiring a workflow DSL or external services.
+Consist fills this gap by combining non-invasive provenance tracking, deterministic identity-based caching with lineage propagation, and a queryable analytical surface for post-hoc comparison---without requiring a workflow DSL or external services.
 
 # Software Design
 
@@ -48,7 +48,7 @@ Consist fills this gap by combining non-invasive provenance tracking, determinis
 
 Consist's core mechanism is a deterministic three-part signature computed for each computational step: `signature = SHA256(code_hash || config_hash || input_hash)`. The code hash captures relevant implementation state (configurable from Git state, callable-scoped source code, or container manifest). The config hash captures a canonicalized dictionary of model settings. The input hash captures the identity of declared input artifacts, and when those artifacts were themselves produced by Consist, their identity incorporates the producing run's signature, inducing a Merkle-style DAG. A change to any upstream step propagates invalidation only through genuinely dependent downstream computations (\autoref{fig:diagram}).
 
-![Figure 1. Identity propagation across workflow steps. Each step's signature is computed from its code identity, configuration, and input identity. When Step B consumes an artifact produced by Step A, Signature A is incorporated into Step B's input identity (solid arrow), propagating cache invalidation through the workflow. The artifact's bytes are consumed separately at runtime (dashed arrow) and need not be materialized when a cache hit makes re-execution unnecessary.\label{fig:diagram}](diagram.pdf)
+![Identity propagation across workflow steps. Each step's signature is computed from its code identity, configuration, and input identity. When Step B consumes an artifact produced by Step A, Signature A is incorporated into Step B's input identity (solid arrow), propagating cache invalidation through the workflow. The artifact's bytes are consumed separately at runtime (dashed arrow) and need not be materialized when a cache hit makes re-execution unnecessary.\label{fig:diagram}](diagram.pdf)
 
 ## Why This Is Hard in Practice
 
@@ -70,19 +70,19 @@ Consist was developed to support PILATES, a workflow runtime used in the BEAM CO
 
 During PILATES integration, adding Consist required making model-step input and output bindings explicit. That process surfaced a latent cross-model dependency error: ActivitySim's population-source input was bound to a valid but wrong-year UrbanSim artifact, using the current-year datastore rather than the forecast-year population snapshot produced after ATLAS updates. The issue was difficult to detect from individual files alone because each artifact was internally valid; the lineage graph made the semantic mismatch between upstream artifact roles visible.
 
-Consist's caching also delivers practical savings: scenarios that vary ActivitySim or BEAM configurations can reuse cached upstream UrbanSim and ATLAS steps. Six example notebooks demonstrating these mechanics in self-contained workflows, covering cache behavior, scenario comparison, parameter sweeps, iterative extension, and cross-run analysis.
+Consist's caching also delivers practical savings: scenarios that vary ActivitySim or BEAM configurations can reuse cached upstream UrbanSim and ATLAS steps. Six example notebooks demonstrate these mechanics in self-contained workflows, covering cache behavior, scenario comparison, parameter sweeps, iterative extension, and cross-run analysis.
 
 # Availability
 
-Consist is available on PyPI (`pip install consist`) and developed openly at https://github.com/LBNL-UCB-STI/consist under a BSD 3-Clause license. Documentation including a quickstart, usage guide, API documentation, and the example notebook gallery is hosted at https://lbnl-ucb-sti.github.io/consist/latest/. The repository includes automated tests run via continuous integration and contribution guidelines (CONTRIBUTING.md) that include a code of conduct. Consist requires Python 3.11+ and depends on DuckDB, SQLModel, pandas, and PyArrow, with optional dependencies for spatial formats, xarray-based matrix views, and data ingestion via dlt.
+Consist is available on PyPI (`pip install consist`) and developed openly at https://github.com/LBNL-UCB-STI/consist under a BSD 3-Clause license. Documentation including a quickstart, usage guide, API documentation, and the example notebook gallery is hosted at https://lbnl-ucb-sti.github.io/consist/latest/. The repository includes automated tests run via continuous integration and contribution guidelines (`CONTRIBUTING.md`) that include a code of conduct. Consist requires Python 3.11+ and depends on DuckDB, SQLModel, pandas, and PyArrow, with optional dependencies for spatial formats, xarray-based matrix views, and data ingestion via dlt.
 
 # AI Usage Disclosure
 
-Anthropic Claude Opus 4.5-4.7 and OpenAI ChatGPT 5.2-5.5 used across software development, documentation, and paper editing. The authors reviewed, edited, and validated all AI-assisted text and code; AI-assisted software components were validated through automated tests and real-world research use in PILATES. All architectural decisions, technical claims, and domain-specific content reflect the authors' direct experience developing and deploying Consist.
+Anthropic Claude Opus 4.5--4.7 and OpenAI ChatGPT 5.2--5.5 were used across software development, documentation, and paper editing. The authors reviewed, edited, and validated all AI-assisted text and code; AI-assisted software components were validated through automated tests and real-world research use in PILATES. All architectural decisions, technical claims, and domain-specific content reflect the authors' direct experience developing and deploying Consist.
 
 # Acknowledgements
 
 This paper and the work described were sponsored by the U.S. Department of Energy (DOE) Vehicle Technologies Office (VTO) under the Systems and Modeling for Accelerated Research in Transportation (SMART) Mobility Laboratory Consortium, an
-initiative of the Energy Efficient Mobility Systems (EEMS) Program. Lawrence Berkeley National Laboratory operates under DOE Contract No.DE-AC02-05CH11231. The views expressed in the article do not necessarily represent the views of the DOE or the U.S. Government. The U.S. Government retains a nonexclusive, paid-up, irrevocable, worldwide license to publish or reproduce the published form of this work, or allow others to do so, for U.S. Government purposes.
+initiative of the Energy Efficient Mobility Systems (EEMS) Program. Lawrence Berkeley National Laboratory operates under DOE Contract No. DE-AC02-05CH11231. The views expressed in the article do not necessarily represent the views of the DOE or the U.S. Government. The U.S. Government retains a nonexclusive, paid-up, irrevocable, worldwide license to publish or reproduce the published form of this work, or allow others to do so, for U.S. Government purposes.
 
 # References
