@@ -685,6 +685,14 @@ def test_direct_zarr_output_logging_is_an_immutable_directory_artifact(
     assert logged.driver == "zarr"
     assert logged.meta["directory_artifact"] is True
     assert logged.hash == logged.meta["directory_manifest"]["tree_hash"]
+    assert logged.meta["content_identity"] == f"sha256:manifest-v1:{logged.hash}"
+    assert logged.content_id is not None
+    content = tracker.db.find_artifact_content(
+        content_hash=logged.meta["content_identity"],
+        driver="zarr",
+    )
+    assert content is not None
+    assert content.id == logged.content_id
     assert consist.is_zarr_artifact(logged)
 
 

@@ -166,40 +166,71 @@ def test_artifact_parent_compatibility_recreates_index_idempotently(
     assert rows == [("idx_artifact_parent_artifact_id",)]
 
 
-def test_content_id_backfill_is_explicit_not_automatic(tmp_path: Path) -> None:
+def test_content_id_backfill_only_uses_persisted_trusted_identity(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "content_backfill.db"
     db = DatabaseManager(str(db_path))
+    digest = "a" * 64
+    content_identity = f"sha256:file:{digest}"
 
     with db.session_scope() as session:
-        artifact = Artifact(
-            key="network",
-            container_uri="outputs://network.csv",
+        legacy = Artifact(
+            key="legacy_network",
+            container_uri="outputs://legacy_network.csv",
             driver="csv",
             hash="shared_hash",
             run_id="run_a",
         )
-        session.add(artifact)
+        trusted = Artifact(
+            key="trusted_network",
+            container_uri="outputs://trusted_network.csv",
+            driver="csv",
+            hash=digest,
+            run_id="run_b",
+            meta={
+                "hash_semantics": {
+                    "version": 1,
+                    "algorithm": "sha256",
+                    "kind": "file",
+                    "digest_contract": "raw_file_bytes",
+                    "source": "computed_full",
+                },
+                "content_identity": content_identity,
+            },
+        )
+        session.add_all([legacy, trusted])
         session.commit()
-        artifact_id = artifact.id
+        legacy_id = legacy.id
+        trusted_id = trusted.id
 
     reopened = DatabaseManager(str(db_path))
-    before = reopened.get_artifact(artifact_id)
+    legacy_before = reopened.get_artifact(legacy_id)
+    trusted_before = reopened.get_artifact(trusted_id)
 
-    assert before is not None
-    assert before.content_id is None
+    assert legacy_before is not None
+    assert legacy_before.content_id is None
+    assert trusted_before is not None
+    assert trusted_before.content_id is None
     assert (
         reopened.find_artifact_content(content_hash="shared_hash", driver="csv") is None
     )
 
     reopened.backfill_artifact_content_ids()
 
-    after = reopened.get_artifact(artifact_id)
+    legacy_after = reopened.get_artifact(legacy_id)
+    trusted_after = reopened.get_artifact(trusted_id)
 
-    assert after is not None
-    assert after.content_id is not None
-    content = reopened.find_artifact_content(content_hash="shared_hash", driver="csv")
+    assert legacy_after is not None
+    assert legacy_after.content_id is None
+    assert trusted_after is not None
+    assert trusted_after.content_id is not None
+    content = reopened.find_artifact_content(
+        content_hash=content_identity,
+        driver="csv",
+    )
     assert content is not None
-    assert after.content_id == content.id
+    assert trusted_after.content_id == content.id
 
 
 def test_find_schema_observation_for_content_id(tmp_path: Path) -> None:
