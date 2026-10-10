@@ -473,8 +473,77 @@ def test_tracker_run_reuses_attested_content_from_distinct_producers(
     assert second.cache_hit is True
     assert second.outputs["out"].path.read_text(encoding="utf-8") == "done\n"
     assert first.run.input_hash == second.run.input_hash
+    assert first.run.identity_summary["cache"]["source_run_id"] is None
+    assert second.run.identity_summary["cache"]["source_run_id"] == first.run.id
+    assert (
+        second.run.meta["input_identity"]["bindings"][0]["artifact_id"]
+        != (first.run.meta["input_identity"]["bindings"][0]["artifact_id"])
+    )
     assert first.run.meta["input_identity"]["bindings"][0]["mode"] == "content-v1"
     assert second.run.meta["input_identity"]["bindings"][0]["mode"] == "content-v1"
+
+
+def test_tracker_run_records_fast_input_fallback_without_content_reuse(
+    tmp_path: Path,
+) -> None:
+    tracker = Tracker(
+        run_dir=tmp_path / "runs",
+        db_path=tmp_path / "provenance.duckdb",
+        hashing_strategy="fast",
+    )
+
+    def produce(label: str) -> Artifact:
+        path = tmp_path / f"{label}.txt"
+        path.write_text("equivalent payload\n", encoding="utf-8")
+        with tracker.start_run(
+            f"produce_{label}",
+            "producer",
+            config={"producer": label},
+        ):
+            return tracker.log_artifact(path, key="data", direction="output")
+
+    first_input = produce("first")
+    second_input = produce("second")
+    calls: list[str] = []
+
+    def consume(ctx) -> None:
+        calls.append("called")
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "out.txt").write_text("done\n", encoding="utf-8")
+
+    options = ExecutionOptions(input_binding="none", inject_context="ctx")
+    first = tracker.run(
+        fn=consume,
+        name="consume_fast_observation",
+        inputs={"data": first_input},
+        output_paths={"out": "out.txt"},
+        execution_options=options,
+    )
+    second = tracker.run(
+        fn=consume,
+        name="consume_fast_observation",
+        inputs={"data": second_input},
+        output_paths={"out": "out.txt"},
+        execution_options=options,
+    )
+
+    expected_evidence = {
+        "identity_strength": "legacy-provenance-v1",
+        "fallback_reason": "fast_file_observation",
+    }
+    for result in (first, second):
+        binding = result.run.meta["input_identity"]["bindings"][0]
+        assert binding["mode"] == "legacy-provenance-v1"
+        assert binding["evidence"] == expected_evidence
+        assert binding["selector"] == {
+            "driver": "txt",
+            "table_path": None,
+            "array_path": None,
+        }
+    assert calls == ["called", "called"]
+    assert first.cache_hit is False
+    assert second.cache_hit is False
+    assert first.run.input_hash != second.run.input_hash
 
 
 def test_tracker_run_separates_same_content_container_selectors(

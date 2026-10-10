@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional, Protocol, Sequence, runtime_checkable
 
@@ -590,6 +590,109 @@ def _should_include_input_details(
     return "input_hash" in set(mismatched_components)
 
 
+def _action_v2_binding_map(
+    run: Run,
+) -> dict[tuple[str, str | int], Mapping[str, Any]] | None:
+    """Return well-formed persisted action-v2 bindings keyed by their role."""
+    identity = _get_run_meta_value(run, "input_identity")
+    if not isinstance(identity, Mapping) or identity.get("mode") != "action-v2":
+        return None
+    bindings = identity.get("bindings")
+    if not isinstance(bindings, list):
+        return None
+
+    result: dict[tuple[str, str | int], Mapping[str, Any]] = {}
+    for binding in bindings:
+        if not isinstance(binding, Mapping):
+            return None
+        kind = binding.get("kind")
+        role = binding.get("role")
+        mode = binding.get("mode")
+        value = binding.get("value")
+        if (
+            not isinstance(kind, str)
+            or not isinstance(role, (str, int))
+            or not isinstance(mode, str)
+            or not isinstance(value, str)
+        ):
+            return None
+        role_key = (kind, role)
+        if role_key in result:
+            return None
+        result[role_key] = binding
+    return result
+
+
+def _binding_selector(binding: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    selector = binding.get("selector")
+    if not isinstance(selector, Mapping):
+        return None
+    if not all(key in selector for key in ("driver", "table_path", "array_path")):
+        return None
+    return selector
+
+
+def _ordered_action_v2_role_pairs(
+    pairs: Iterable[tuple[str, str | int]],
+) -> list[tuple[str, str | int]]:
+    """Order persisted role pairs without comparing unlike role value types."""
+    return sorted(pairs, key=lambda item: (item[0], str(item[1])))
+
+
+def _action_v2_binding_details(run: Run, candidate: Run) -> dict[str, Any]:
+    """Summarize role-aware action-v2 input differences without raw identities."""
+    current_bindings = _action_v2_binding_map(run)
+    candidate_bindings = _action_v2_binding_map(candidate)
+    if current_bindings is None or candidate_bindings is None:
+        return {}
+
+    fallback_bindings: list[dict[str, Any]] = []
+    for (kind, role), binding in sorted(
+        current_bindings.items(), key=lambda item: (item[0][0], str(item[0][1]))
+    ):
+        evidence = binding.get("evidence")
+        if not isinstance(evidence, Mapping):
+            continue
+        fallback_reason = evidence.get("fallback_reason")
+        if isinstance(fallback_reason, str):
+            fallback_bindings.append(
+                {
+                    "kind": kind,
+                    "role": role,
+                    "fallback_reason": fallback_reason,
+                }
+            )
+
+    changed_bindings: list[dict[str, Any]] = []
+    current_roles = set(current_bindings)
+    candidate_roles = set(candidate_bindings)
+    for kind, role in _ordered_action_v2_role_pairs(current_roles - candidate_roles):
+        changed_bindings.append({"kind": kind, "role": role, "change": "binding_added"})
+    for kind, role in _ordered_action_v2_role_pairs(candidate_roles - current_roles):
+        changed_bindings.append(
+            {"kind": kind, "role": role, "change": "binding_removed"}
+        )
+    for kind, role in _ordered_action_v2_role_pairs(current_roles & candidate_roles):
+        current_binding = current_bindings[(kind, role)]
+        candidate_binding = candidate_bindings[(kind, role)]
+        if current_binding["mode"] != candidate_binding["mode"]:
+            change = "identity_mode_changed"
+        elif current_binding["value"] != candidate_binding["value"]:
+            change = "identity_value_changed"
+        elif _binding_selector(current_binding) != _binding_selector(candidate_binding):
+            change = "selector_changed"
+        else:
+            continue
+        changed_bindings.append({"kind": kind, "role": role, "change": change})
+
+    details: dict[str, Any] = {}
+    if fallback_bindings:
+        details["fallback_bindings"] = fallback_bindings
+    if changed_bindings:
+        details["changed_bindings"] = changed_bindings
+    return details
+
+
 def _config_snapshot_diff(left: Any, right: Any) -> tuple[dict[str, list[str]], bool]:
     left_payload = _flatten_config_payload(_normalize_config_source(left))
     right_payload = _flatten_config_payload(_normalize_config_source(right))
@@ -999,6 +1102,9 @@ class CacheMissExplainer:
             mismatched_components=mismatched,
         ):
             detail_payloads.append(_build_input_details(self._tracker, run, candidate))
+            action_v2_details = _action_v2_binding_details(run, candidate)
+            if action_v2_details:
+                detail_payloads.append({"action_v2_bindings": action_v2_details})
         if code_details:
             detail_payloads.append(code_details)
         details = _merge_detail_payloads(*detail_payloads)

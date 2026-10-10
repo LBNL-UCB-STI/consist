@@ -8,6 +8,8 @@ This document defines quality expectations for tests in Consist.
 - `integration`: cross-module behavior with DB/filesystem
 - `e2e`: minimal workflow smoke checks
 - `stress` / `benchmarks`: heavy, non-blocking for rapid iteration
+- `heavy`: intentionally slow integration variants, excluded from pull-request
+  CI and exercised by a targeted weekly/manual gate
 
 ## Required Test Behavior
 
@@ -63,6 +65,11 @@ Recommended sequence before merge:
 2. `ruff format --check src tests`
 3. `pytest -m "not heavy" tests/unit tests/integration tests/e2e`
 4. Optional focused coverage run for changed modules
+
+Run the gated ActivitySim workflow variants locally when changing
+`run_with_config_overrides` behavior:
+
+`pytest -m heavy tests/integration/activitysim`
 
 Use:
 `.venv/bin/python -m ...`

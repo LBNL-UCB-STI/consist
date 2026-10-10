@@ -708,6 +708,16 @@ class RunLifecycleCoordinator:
                         {
                             **binding.as_payload(),
                             "artifact_id": str(ordinary_inputs[role.input_index].id),
+                            "selector": {
+                                "driver": ordinary_inputs[role.input_index].driver,
+                                "table_path": ordinary_inputs[
+                                    role.input_index
+                                ].table_path,
+                                "array_path": ordinary_inputs[
+                                    role.input_index
+                                ].array_path,
+                            },
+                            "evidence": binding.as_evidence_payload(),
                         }
                         for role, binding in zip(
                             ordinary_binding_roles,
@@ -750,6 +760,18 @@ class RunLifecycleCoordinator:
                                     "artifact_id": str(
                                         current_consist.inputs[role.input_index].id
                                     ),
+                                    "selector": {
+                                        "driver": current_consist.inputs[
+                                            role.input_index
+                                        ].driver,
+                                        "table_path": current_consist.inputs[
+                                            role.input_index
+                                        ].table_path,
+                                        "array_path": current_consist.inputs[
+                                            role.input_index
+                                        ].array_path,
+                                    },
+                                    "evidence": binding.as_evidence_payload(),
                                 }
                                 for role, binding in zip(
                                     input_binding_roles,
