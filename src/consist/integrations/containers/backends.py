@@ -25,7 +25,7 @@ import shlex
 import subprocess
 import shutil
 from pathlib import Path
-from typing import Dict, List, Optional, Union, Any
+from typing import Dict, List, Optional, Union, Any, Literal, Mapping
 
 # Optional Docker Import
 try:
@@ -165,6 +165,7 @@ class ContainerBackend(abc.ABC):
         volumes: Dict[str, str],
         env: Dict[str, str],
         working_dir: Optional[str] = None,
+        volume_modes: Optional[Mapping[str, Literal["ro", "rw"]]] = None,
     ) -> bool:
         """
         Abstract method to run a command within a container.
@@ -307,6 +308,7 @@ class DockerBackend(ContainerBackend):
         volumes: Dict[str, str],
         env: Dict[str, str],
         working_dir: Optional[str] = None,
+        volume_modes: Optional[Mapping[str, Literal["ro", "rw"]]] = None,
     ) -> bool:
         """
         Runs a command within a Docker container.
@@ -347,7 +349,11 @@ class DockerBackend(ContainerBackend):
 
         # Ensure volume map is in Docker format: {host: {'bind': container, 'mode': 'rw'}}
         docker_volumes = {
-            host: {"bind": cont, "mode": "rw"} for host, cont in volumes.items()
+            host: {
+                "bind": cont,
+                "mode": (volume_modes or {}).get(host, "rw"),
+            }
+            for host, cont in volumes.items()
         }
 
         try:
@@ -521,6 +527,7 @@ class SingularityBackend(ContainerBackend):
         volumes: Dict[str, str],
         env: Dict[str, str],
         working_dir: Optional[str] = None,
+        volume_modes: Optional[Mapping[str, Literal["ro", "rw"]]] = None,
     ) -> bool:
         """
         Runs a command within a Singularity/Apptainer container.
@@ -563,7 +570,10 @@ class SingularityBackend(ContainerBackend):
         bind_list = []
         for host, cont in volumes.items():
             Path(host).mkdir(parents=True, exist_ok=True)
-            bind_list.append(f"{host}:{cont}")
+            mode = (volume_modes or {}).get(host)
+            bind_list.append(
+                f"{host}:{cont}" if mode is None else f"{host}:{cont}:{mode}"
+            )
 
         bind_str = ",".join(bind_list)
 

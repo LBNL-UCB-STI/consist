@@ -35,6 +35,7 @@ def test_config_hashing_sensitivity():
     config1 = base_def.to_hashable_config()
     assert "environment" not in config1
     assert "environment_hash" in config1
+    assert "volume_modes" not in config1
 
     # Case 1: Change Command
     base_cmd = base_def.model_copy(update={"command": ["run", "--fast"]})
@@ -50,3 +51,9 @@ def test_config_hashing_sensitivity():
     base_img = base_def.model_copy(update={"image_digest": "sha:456"})
     config4 = base_img.to_hashable_config()
     assert config1 != config4
+
+    base_mount_mode = base_def.model_copy(
+        update={"volume_modes": {"/host/input": "ro"}}
+    )
+    config5 = base_mount_mode.to_hashable_config()
+    assert config1 != config5

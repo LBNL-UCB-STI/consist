@@ -140,6 +140,7 @@ def _build_container_manifest(
     working_dir: Optional[str],
     backend_type: str,
     volumes: Dict[str, str],
+    volume_modes: Optional[Mapping[str, Literal["ro", "rw"]]] = None,
 ) -> Dict[str, Any]:
     """
     Build a stable manifest of container semantics for upstream hashing.
@@ -148,7 +149,7 @@ def _build_container_manifest(
     directories and are already covered by step-level inputs/outputs.
     """
     container_mounts = sorted(set(volumes.values()))
-    return {
+    manifest: Dict[str, Any] = {
         "image": image,
         "image_digest": image_digest,
         "command": command,
@@ -157,6 +158,14 @@ def _build_container_manifest(
         "backend": backend_type,
         "container_mounts": container_mounts,
     }
+    if volume_modes is not None:
+        manifest["container_mount_modes"] = sorted(
+            set(
+                (container_path, volume_modes.get(host_path, "rw"))
+                for host_path, container_path in volumes.items()
+            )
+        )
+    return manifest
 
 
 def _container_manifest_hash(manifest: Dict[str, Any]) -> str:
@@ -408,6 +417,7 @@ def run_container(
     lineage_mode: Literal["full", "none"] = "full",
     strict_mounts: bool = True,
     output_log_kwargs: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    volume_modes: Optional[Mapping[str, Literal["ro", "rw"]]] = None,
 ) -> ContainerResult:
     """
     Executes a containerized step with optional provenance tracking and caching via Consist.
@@ -437,6 +447,10 @@ def run_container(
         Host paths are resolved and validated against tracker mounts. When
         strict_mounts is False, any absolute host path is permitted.
         Relative paths are resolved against the first mount root.
+    volume_modes : Optional[Mapping[str, Literal["ro", "rw"]]]
+        Optional mount modes keyed by the same host paths as ``volumes``. Omitted
+        modes default to ``"rw"``. Every supplied key must identify a declared
+        volume.
     inputs : List[ArtifactRef]
         A list of paths (str/Path) or `Artifact` objects on the host machine that serve
         as inputs to the containerized process. These are logged as Consist inputs.
@@ -486,6 +500,13 @@ def run_container(
     """
     environment = environment or {}
     output_log_kwargs = output_log_kwargs or {}
+    supplied_volume_modes = dict(volume_modes or {})
+    unknown_mode_paths = set(supplied_volume_modes) - set(volumes)
+    if unknown_mode_paths:
+        unknown_paths = ", ".join(sorted(unknown_mode_paths))
+        raise ValueError(
+            f"Container mount modes reference unknown paths: {unknown_paths}"
+        )
 
     # 1. Initialize Backend
     if backend_type == "docker":
@@ -501,12 +522,20 @@ def run_container(
 
     allowed_roots = _container_allowed_roots(tracker)
     validated_volumes: Dict[str, str] = {}
+    validated_volume_modes: Dict[str, Literal["ro", "rw"]] = {}
     for host_path, container_path in volumes.items():
         validated_host = _validate_host_path(
             host_path, allowed_roots, strict_mounts=strict_mounts
         )
         validated_volumes[str(validated_host)] = container_path
+        mode = supplied_volume_modes.get(host_path, "rw")
+        if mode not in ("ro", "rw"):
+            raise ValueError(
+                f"Container mount mode for {host_path!r} must be either 'ro' or 'rw'."
+            )
+        validated_volume_modes[str(validated_host)] = mode
     volumes = validated_volumes
+    volume_modes = validated_volume_modes if supplied_volume_modes else None
 
     # Normalize outputs into (key, path) tuples
     output_specs: List[tuple[str, str]] = []
@@ -540,6 +569,7 @@ def run_container(
         working_dir=working_dir,
         backend_type=backend_type,
         volumes=volumes,
+        volume_modes=volume_modes,
     )
     manifest_hash = _container_manifest_hash(manifest)
 
@@ -552,6 +582,7 @@ def run_container(
         backend=backend_type,
         working_dir=working_dir,
         volumes=volumes,
+        volume_modes=volume_modes or {},
         declared_outputs=outputs_str,
         extra_args={},
     )
@@ -567,6 +598,16 @@ def run_container(
             p = Path(i).resolve()
             resolved_inputs.append(str(p))
 
+    backend_run_kwargs: Dict[str, Any] = {
+        "image": image,
+        "command": cmd_list,
+        "volumes": volumes,
+        "env": environment,
+        "working_dir": working_dir,
+    }
+    if volume_modes is not None:
+        backend_run_kwargs["volume_modes"] = volume_modes
+
     # Helper: The actual work of execution
     def _execute_backend_and_log_outputs(active_tracker: Tracker):
         # Ensure output directories exist on HOST before mounting
@@ -575,13 +616,7 @@ def run_container(
             Path(host_path).mkdir(parents=True, exist_ok=True)
 
         logger.info(f"🔄 [Consist] Executing Container: {run_id}")
-        success = backend.run(
-            image=image,
-            command=cmd_list,
-            volumes=volumes,
-            env=environment,
-            working_dir=working_dir,
-        )
+        success = backend.run(**backend_run_kwargs)
 
         if not success:
             raise RuntimeError(f"Container execution failed for run_id: {run_id}")
@@ -649,13 +684,7 @@ def run_container(
             for host_path in volumes.keys():
                 Path(host_path).mkdir(parents=True, exist_ok=True)
             logger.info(f"🔄 [Consist] Executing Container (no-lineage): {run_id}")
-            success = backend.run(
-                image=image,
-                command=cmd_list,
-                volumes=volumes,
-                env=environment,
-                working_dir=working_dir,
-            )
+            success = backend.run(**backend_run_kwargs)
             if not success:
                 raise RuntimeError(
                     f"Container execution failed for run_id (no-lineage): {run_id}"
@@ -704,13 +733,7 @@ def run_container(
         for host_path in volumes.keys():
             Path(host_path).mkdir(parents=True, exist_ok=True)
         logger.info(f"🔄 [Consist] Executing Container (no-lineage): {run_id}")
-        success = backend.run(
-            image=image,
-            command=cmd_list,
-            volumes=volumes,
-            env=environment,
-            working_dir=working_dir,
-        )
+        success = backend.run(**backend_run_kwargs)
         if not success:
             raise RuntimeError(
                 f"Container execution failed for run_id (no-lineage): {run_id}"

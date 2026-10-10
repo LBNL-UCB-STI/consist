@@ -1,6 +1,6 @@
 import hashlib
 import json
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Literal
 from pydantic import BaseModel
 
 
@@ -41,6 +41,7 @@ class ContainerDefinition(BaseModel):
 
     working_dir: Optional[str] = None
     volumes: Dict[str, str] = {}
+    volume_modes: Dict[str, Literal["ro", "rw"]] = {}
     declared_outputs: Optional[List[str]] = None
 
     # Extra args that might affect execution (e.g. resource limits)
@@ -70,6 +71,8 @@ class ContainerDefinition(BaseModel):
             "backend": self.backend,
             "extra_args": tuple(sorted((self.extra_args or {}).items())),
         }
+        if self.volume_modes:
+            cfg["volume_modes"] = tuple(sorted(self.volume_modes.items()))
         return cfg
 
 

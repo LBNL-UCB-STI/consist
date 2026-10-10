@@ -215,7 +215,7 @@ def test_log_artifact_on_cache_hit_with_content_hash_returns_cached_output(
         assert t.is_cached
 
 
-def test_log_input_reuses_existing_artifact_with_force_override(tracker, dummy_input):
+def test_log_input_force_override_preserves_existing_artifact(tracker, dummy_input):
     input_path = str(dummy_input)
 
     with tracker.start_run(
@@ -240,9 +240,22 @@ def test_log_input_reuses_existing_artifact_with_force_override(tracker, dummy_i
             force_hash_override=True,
         )
 
-    assert reused.id == produced.id
-    assert reused.run_id == produced.run_id
+    assert reused.id != produced.id
+    assert reused.run_id is None
     assert reused.hash == "override_hash"
+    persisted = tracker.db.get_artifact(produced.id)
+    assert persisted is not None
+    assert persisted.hash == produced.hash
+    assert persisted.meta["hash_semantics"]["source"] == "computed_full"
+
+    with tracker.start_run(
+        "run_C_input_after_override",
+        model="test_model",
+        inputs=[input_path],
+    ) as t:
+        selected = t.log_artifact(out_path, key="out", direction="input")
+
+    assert selected.id == produced.id
 
 
 def test_log_input_override_ignored_when_hash_differs(tracker, dummy_input, caplog):
