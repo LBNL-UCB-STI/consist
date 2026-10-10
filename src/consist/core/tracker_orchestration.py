@@ -39,6 +39,7 @@ from consist.core.output_sets import register_output_sets, validate_cached_outpu
 from consist.core.output_sets import build_output_set_captures_identity
 from consist.core.run_invocation import resolve_run_invocation
 from consist.core.run_options import resolve_runtime_kwargs_alias
+from consist.core.run_resolution import InputBindingRole, build_input_binding_roles
 from consist.core.workflow import RunContext
 from consist.models.artifact import Artifact, get_tracker_ref, set_tracker_ref
 from consist.models.run import RunResult
@@ -148,6 +149,7 @@ class RunInvocationContext:
     inject_context: Optional[Union[bool, str]]
     input_binding: InputBindingMode
     resolved_inputs: List[ArtifactRef]
+    input_binding_roles: list[InputBindingRole]
     input_artifacts_by_key: Dict[str, Artifact]
     requested_input_paths: Optional[Dict[str, Path]]
     requested_input_materialization: Optional[str]
@@ -308,6 +310,7 @@ class RunTraceCoordinator:
         run_id: str,
         config_for_run: Optional[Union[Dict[str, Any], BaseModel]],
         resolved_inputs: List[ArtifactRef],
+        input_binding_roles: list[InputBindingRole],
         cache_mode: str,
         cache_hydration: Optional[str],
         resolved_cache_epoch: int,
@@ -613,9 +616,18 @@ class RunTraceCoordinator:
                 stacklevel=2,
             )
 
+        inputs_for_resolution = invocation.inputs
+        if inputs_for_resolution is not None and not isinstance(
+            inputs_for_resolution, MappingABC
+        ):
+            inputs_for_resolution = list(inputs_for_resolution)
+        input_binding_roles = build_input_binding_roles(
+            inputs_for_resolution,
+            depends_on,
+        )
         resolved_inputs, input_artifacts_by_key = self._helpers.resolve_input_refs(
             tracker,
-            invocation.inputs,
+            inputs_for_resolution,
             depends_on,
             include_keyed_artifacts=(
                 invocation.executor == "python"
@@ -694,6 +706,7 @@ class RunTraceCoordinator:
             run_id=run_id,
             config_for_run=config_for_run,
             resolved_inputs=resolved_inputs,
+            input_binding_roles=input_binding_roles,
             cache_mode=cache_mode,
             cache_hydration=cache_hydration,
             resolved_cache_epoch=resolved_cache_epoch,
@@ -729,7 +742,7 @@ class RunTraceCoordinator:
             output_paths=invocation.output_paths,
             output_sets=invocation.output_sets,
             profile_file_schema=profile_file_schema,
-            inputs=invocation.inputs,
+            inputs=inputs_for_resolution,
             output_mismatch=invocation.output_mismatch,
             output_missing=invocation.output_missing,
             executor=invocation.executor,
@@ -738,6 +751,7 @@ class RunTraceCoordinator:
             inject_context=invocation.inject_context,
             input_binding=input_binding,
             resolved_inputs=resolved_inputs,
+            input_binding_roles=input_binding_roles,
             input_artifacts_by_key=input_artifacts_by_key,
             requested_input_paths=(
                 {str(key): Path(value) for key, value in requested_input_paths.items()}
@@ -1616,7 +1630,10 @@ class RunTraceCoordinator:
                 policy=output_mismatch,
             )
 
-        with tracker.start_run(**start_kwargs) as active_tracker:
+        with (
+            tracker._input_binding_roles_context(context.input_binding_roles),
+            tracker.start_run(**start_kwargs) as active_tracker,
+        ):
             current_consist = active_tracker.current_consist
             if current_consist is None:
                 raise RuntimeError("No active run context is available.")
@@ -1909,9 +1926,18 @@ class RunTraceCoordinator:
                 stacklevel=2,
             )
 
+        inputs_for_resolution = resolved_invocation.inputs
+        if inputs_for_resolution is not None and not isinstance(
+            inputs_for_resolution, MappingABC
+        ):
+            inputs_for_resolution = list(inputs_for_resolution)
+        input_binding_roles = build_input_binding_roles(
+            inputs_for_resolution,
+            depends_on,
+        )
         resolved_inputs, _ = self._helpers.resolve_input_refs(
             tracker,
-            resolved_invocation.inputs,
+            inputs_for_resolution,
             depends_on,
             include_keyed_artifacts=False,
         )
@@ -1952,6 +1978,7 @@ class RunTraceCoordinator:
             run_id=run_id,
             config_for_run=config_for_run,
             resolved_inputs=resolved_inputs,
+            input_binding_roles=input_binding_roles,
             cache_mode=resolved_invocation.cache_mode,
             cache_hydration=cache_hydration,
             resolved_cache_epoch=resolved_cache_epoch,
@@ -1977,7 +2004,10 @@ class RunTraceCoordinator:
                 policy=output_missing,
             )
 
-        with tracker.start_run(**start_kwargs) as active_tracker:
+        with (
+            tracker._input_binding_roles_context(input_binding_roles),
+            tracker.start_run(**start_kwargs) as active_tracker,
+        ):
             current_consist = active_tracker.current_consist
             if current_consist is None:
                 raise RuntimeError("No active run context is available.")

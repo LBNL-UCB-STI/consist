@@ -78,6 +78,33 @@ def test_resolve_input_refs_preserves_keyed_artifacts_and_depends_on(
     assert resolved_inputs[1] == dep_path
 
 
+def test_input_binding_roles_are_canonical_and_preserve_input_positions() -> None:
+    roles = run_resolution.build_input_binding_roles(
+        inputs={"zeta": "z", "alpha": "a"},
+        depends_on=["dependency"],
+    )
+
+    assert roles == [
+        run_resolution.InputBindingRole(kind="named", role="alpha", input_index=1),
+        run_resolution.InputBindingRole(kind="named", role="zeta", input_index=0),
+        run_resolution.InputBindingRole(kind="dependency", role=0, input_index=2),
+    ]
+
+
+def test_input_binding_roles_preserve_iterable_order_and_duplicates() -> None:
+    repeated = object()
+
+    roles = run_resolution.build_input_binding_roles(
+        inputs=[repeated, repeated],
+        depends_on=None,
+    )
+
+    assert roles == [
+        run_resolution.InputBindingRole(kind="positional", role=0, input_index=0),
+        run_resolution.InputBindingRole(kind="positional", role=1, input_index=1),
+    ]
+
+
 def test_resolve_output_path_handles_uri_relative_and_absolute_refs(
     tracker, tmp_path: Path
 ) -> None:
