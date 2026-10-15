@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Tuple
 import pytest
-from sqlmodel import col, delete
+from sqlmodel import col, delete, select
 
 import consist
 from consist.core.tracker import Tracker
@@ -279,17 +279,114 @@ def test_scenario_resume_fallback_to_completed_outputs(
         assert "role_1" in sc_new.coupler
         assert "role_2" in sc_new.coupler
 
-    # Verify fallback backfilled the snapshot in DuckDB
+    # Verify fallback backfilled the snapshot in DuckDB under original scenario ID
     backfilled = db.get_run_coupler_snapshot(
         res2.run.id, phase="post", must_exist=False
     )
     assert "role_1" in backfilled
     assert "role_2" in backfilled
 
+    with db.session_scope() as session:
+        rows = session.exec(
+            select(RunCouplerSnapshot).where(
+                col(RunCouplerSnapshot.run_id) == res2.run.id,
+                col(RunCouplerSnapshot.phase) == "post",
+            )
+        ).all()
+        assert len(rows) == 2
+        for r in rows:
+            assert r.scenario_run_id == legacy_scen_id
 
-test_resume_with_fallback_to_completed_outputs = (
-    test_scenario_resume_fallback_to_completed_outputs
-)
+
+def test_scenario_resume_fallback_pre_phase_excludes_step_outputs(
+    tracker_setup: Tuple[Tracker, Path, Path], tmp_path: Path
+) -> None:
+    tracker, _, _ = tracker_setup
+    db = tracker.db
+    assert db is not None
+
+    f1 = tmp_path / "step1.txt"
+    f2 = tmp_path / "step2.txt"
+
+    def step1_fn() -> None:
+        f1.write_text("s1\n")
+        tracker.log_artifact(f1, key="role_1")
+
+    def step2_fn() -> None:
+        f2.write_text("s2\n")
+        tracker.log_artifact(f2, key="role_2")
+
+    with tracker.scenario("legacy_scen_pre") as sc:
+        sc.run(step1_fn, name="s1")
+        res2 = sc.run(step2_fn, name="s2")
+        legacy_scen_id = sc.run_id
+
+    # Wipe run_coupler_snapshot rows for this scenario
+    with db.session_scope() as session:
+        session.exec(
+            delete(RunCouplerSnapshot).where(
+                col(RunCouplerSnapshot.scenario_run_id) == legacy_scen_id
+            )
+        )
+        session.commit()
+
+    # Restore with phase="pre" on res2.run.id
+    # It should include role_1 (from s1), but NOT role_2 (from s2 itself)
+    with tracker.scenario("resumed_scen_pre") as sc_new:
+        restored = sc_new.restore_coupler_snapshot(
+            run_id=res2.run.id,
+            phase="pre",
+            fallback_to_completed_outputs=True,
+        )
+        assert "role_1" in restored
+        assert "role_2" not in restored
+        assert "role_1" in sc_new.coupler
+        assert "role_2" not in sc_new.coupler
+
+
+def test_scenario_resume_fallback_preserves_execution_order(
+    tracker_setup: Tuple[Tracker, Path, Path], tmp_path: Path
+) -> None:
+    tracker, _, _ = tracker_setup
+    db = tracker.db
+    assert db is not None
+
+    f_z = tmp_path / "z_file.txt"
+    f_a = tmp_path / "a_file.txt"
+
+    # Step "z_first" runs FIRST and writes "shared_role"
+    def step_z() -> None:
+        f_z.write_text("from_z\n")
+        tracker.log_artifact(f_z, key="shared_role")
+
+    # Step "a_second" runs SECOND and overwrites "shared_role"
+    def step_a() -> None:
+        f_a.write_text("from_a\n")
+        tracker.log_artifact(f_a, key="shared_role")
+
+    with tracker.scenario("order_scen") as sc:
+        sc.run(step_z, name="z_first")
+        res_a = sc.run(step_a, name="a_second")
+        scen_id = sc.run_id
+
+    # Wipe snapshots
+    with db.session_scope() as session:
+        session.exec(
+            delete(RunCouplerSnapshot).where(
+                col(RunCouplerSnapshot.scenario_run_id) == scen_id
+            )
+        )
+        session.commit()
+
+    # Fallback restore for the scenario should respect execution order:
+    # "a_second" was executed after "z_first", so its version of "shared_role" should win
+    with tracker.scenario("resumed_order") as sc_new:
+        restored = sc_new.restore_coupler_snapshot(
+            scenario_run_id=scen_id,
+            fallback_to_completed_outputs=True,
+        )
+        assert "shared_role" in restored
+        assert restored["shared_role"].hash == res_a.outputs["shared_role"].hash
 
 
 def test_scenario_diff_snapshots_across_scenarios(
