@@ -1,7 +1,7 @@
 import pytest
 import importlib
 from pathlib import Path
-from typing import List, Dict, Optional, Union
+from typing import List, Dict, Optional, Union, Mapping, Literal
 from unittest.mock import patch
 
 # Import Consist components
@@ -64,6 +64,7 @@ class MockBackend(ContainerBackend):
         volumes: Dict[str, str],
         env: Dict[str, str],
         working_dir: Optional[str] = None,
+        volume_modes: Optional[Mapping[str, Literal["ro", "rw"]]] = None,
     ) -> bool:
         """
         Simulates running a command within a container.

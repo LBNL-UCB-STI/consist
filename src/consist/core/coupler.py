@@ -161,6 +161,17 @@ class CouplerView:
     def __setitem__(self, key: str, artifact: Any) -> None:
         self.set(key, artifact)
 
+    def clear(self) -> None:
+        """Clear all stored artifacts in this view namespace."""
+        for key in list(self.keys()):
+            self._coupler._artifacts.pop(self._qualify(key), None)
+
+    def __len__(self) -> int:
+        return len(list(self.keys()))
+
+    def __iter__(self) -> Iterable[str]:
+        return iter(self.keys())
+
 
 @dataclass
 class DeclaredOutput:

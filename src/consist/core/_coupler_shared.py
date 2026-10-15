@@ -9,7 +9,17 @@ from __future__ import annotations
 
 import builtins
 import warnings
-from typing import Any, Callable, Generic, Mapping, MutableMapping, Protocol, TypeVar
+from typing import (
+    Any,
+    Callable,
+    Generic,
+    Iterable,
+    Iterator,
+    Mapping,
+    MutableMapping,
+    Protocol,
+    TypeVar,
+)
 
 
 class DeclaredOutputLike(Protocol):
@@ -177,6 +187,30 @@ class CouplerMapMixin(Generic[TArtifact, TDeclaredOutput]):
                 UserWarning,
                 stacklevel=2,
             )
+
+    def clear(self) -> None:
+        """Clear all stored artifacts."""
+        self._artifacts.clear()
+
+    def __len__(self) -> int:
+        """Return the number of stored artifacts."""
+        return len(self._artifacts)
+
+    def __iter__(self) -> Iterator[str]:
+        """Iterate over stored artifact keys."""
+        return iter(self._artifacts)
+
+    def keys(self) -> Iterable[str]:
+        """Return an iterable of stored artifact keys."""
+        return self._artifacts.keys()
+
+    def items(self) -> Iterable[tuple[str, TArtifact]]:
+        """Return an iterable of (key, artifact) pairs."""
+        return self._artifacts.items()
+
+    def values(self) -> Iterable[TArtifact]:
+        """Return an iterable of stored artifacts."""
+        return self._artifacts.values()
 
     def update(
         self, artifacts: Mapping[str, TArtifact] | None = None, /, **kwargs: TArtifact

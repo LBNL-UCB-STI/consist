@@ -119,6 +119,7 @@ from consist.models.artifact import Artifact, ArchivedOutputs, set_tracker_ref
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
 from consist.models.run import (
     ConsistRecord,
+    CouplerSnapshotPhase,
     Run,
     RunArtifacts,
     RunBindingInvocation,
@@ -2034,6 +2035,8 @@ class Tracker:
         cache_epoch: Optional[int] = None,
         coupler: Optional["Coupler"] = None,
         require_outputs: Optional[Iterable[str]] = None,
+        resume_from_run_id: Optional[str] = None,
+        resume_phase: CouplerSnapshotPhase = "post",
         **kwargs: Any,
     ) -> ScenarioContext:
         """
@@ -2079,6 +2082,11 @@ class Tracker:
             Optional Coupler instance to use for the scenario.
         require_outputs : Optional[Iterable[str]], optional
             Declare required outputs at scenario creation time.
+        resume_from_run_id : Optional[str], optional
+            If specified, restores the coupler snapshot from this run ID upon entering
+            the scenario.
+        resume_phase : CouplerSnapshotPhase, default "post"
+            The snapshot phase ("init", "pre", or "post") to restore when resuming.
         **kwargs : Any
             Additional metadata or arguments for the header run (including `facet_from`).
 
@@ -2109,6 +2117,8 @@ class Tracker:
             cache_epoch=cache_epoch,
             coupler=coupler,
             require_outputs=require_outputs,
+            resume_from_run_id=resume_from_run_id,
+            resume_phase=resume_phase,
             **kwargs,
         )
 
@@ -4987,6 +4997,66 @@ class Tracker:
 
     def load_run_output(self, run_id: str, key: str, **kwargs: Any) -> Any:
         return self._history_service.load_run_output(run_id, key, **kwargs)
+
+    def get_coupler_snapshot(
+        self,
+        run_id: str,
+        phase: CouplerSnapshotPhase = "post",
+        *,
+        must_exist: bool = False,
+    ) -> Dict[str, Artifact]:
+        """
+        Retrieve artifacts mapped by role_key for a given run_id and snapshot phase.
+
+        Parameters
+        ----------
+        run_id : str
+            The run identifier whose coupler snapshot should be retrieved.
+        phase : CouplerSnapshotPhase, default "post"
+            The lifecycle phase ("init", "pre", or "post").
+        must_exist : bool, default False
+            If True, raises KeyError when no snapshot exists for the given run_id
+            and phase. If False, returns an empty dictionary.
+
+        Returns
+        -------
+        Dict[str, Artifact]
+            Mapping of role keys to Artifact objects with tracker references attached.
+        """
+        if self.db is None:
+            if must_exist:
+                raise RuntimeError(
+                    "Metadata database is required to retrieve coupler snapshots."
+                )
+            return {}
+        artifacts = self.db.get_run_coupler_snapshot(
+            run_id=run_id, phase=phase, must_exist=must_exist
+        )
+        for artifact in artifacts.values():
+            set_tracker_ref(artifact, self)
+        return artifacts
+
+    def diff_coupler_snapshots(
+        self,
+        left_run_id: str,
+        right_run_id: str,
+        *,
+        left_phase: CouplerSnapshotPhase = "post",
+        right_phase: CouplerSnapshotPhase = "post",
+    ) -> pd.DataFrame:
+        """
+        Compare two coupler snapshots and return differences as a DataFrame.
+        """
+        if self.db is None:
+            raise RuntimeError(
+                "Metadata database is required to diff coupler snapshots."
+            )
+        return self.db.diff_coupler_snapshots(
+            left_run_id=left_run_id,
+            right_run_id=right_run_id,
+            left_phase=left_phase,
+            right_phase=right_phase,
+        )
 
     def find_matching_run(
         self,
