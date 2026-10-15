@@ -5138,12 +5138,14 @@ def _render_exec_result(result: "CommandExecutionResult") -> None:
         if result.run.model_name:
             grid.add_row("Model", result.run.model_name)
     grid.add_row("Duration", f"{result.duration:.3f}s")
-    grid.add_row("Inputs", str(len(result.inputs)))
-    grid.add_row("Outputs", str(len(result.outputs)))
+    grid.add_row("Inputs", f"{len(result.inputs)} hashed")
+    grid.add_row("Outputs", f"{len(result.outputs)} verified")
     if result.stdout_path:
         grid.add_row("Stdout Log", str(result.stdout_path))
     if result.stderr_path:
         grid.add_row("Stderr Log", str(result.stderr_path))
+    if result.run:
+        grid.add_row("Inspect", f"consist show {result.run.id}")
     if result.error:
         grid.add_row("Error", f"[red]{result.error}[/red]")
 
@@ -5295,7 +5297,7 @@ def exec_cmd(
         False,
         "--quiet",
         "-q",
-        help="Suppress live stdout/stderr streaming.",
+        help="Silence Consist's summary banner, emitting only child process output and exit code.",
     ),
     json_output: bool = typer.Option(
         False,
@@ -5354,19 +5356,40 @@ def exec_cmd(
             dry_run=dry_run,
             shell=shell,
             accept_suggested=accept_suggested,
-            stream_output=not quiet and not json_output,
+            stream_output=not json_output,
             tags=tags,
             description=description,
             check=False,
         )
     except (FileNotFoundError, ValueError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
-        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR) from exc
+        raise typer.Exit(CLI_EXIT_USAGE_ERROR) from exc
 
     if json_output:
         if dry_run and result.plan:
             typer.echo(json.dumps(result.plan, indent=2))
         else:
+            artifacts_list = []
+            for k, art in result.inputs.items():
+                artifacts_list.append(
+                    {
+                        "key": k,
+                        "direction": "input",
+                        "path": str(art.path),
+                        "hash": art.hash,
+                        "id": str(art.id),
+                    }
+                )
+            for k, art in result.outputs.items():
+                artifacts_list.append(
+                    {
+                        "key": k,
+                        "direction": "output",
+                        "path": str(art.path),
+                        "hash": art.hash,
+                        "id": str(art.id),
+                    }
+                )
             json_data = {
                 "run_id": result.run.id if result.run else None,
                 "name": result.run.model_name if result.run else effective_name,
@@ -5380,6 +5403,7 @@ def exec_cmd(
                 "duration": result.duration,
                 "stdout_path": str(result.stdout_path) if result.stdout_path else None,
                 "stderr_path": str(result.stderr_path) if result.stderr_path else None,
+                "artifacts": artifacts_list,
                 "inputs": {
                     k: {"path": str(art.path), "hash": art.hash, "id": str(art.id)}
                     for k, art in result.inputs.items()
@@ -5409,9 +5433,7 @@ def exec_cmd(
 
     if not quiet:
         _render_exec_result(result)
-        if result.exit_code != 0 and result.error:
-            typer.echo(f"Error: {result.error}")
-    elif result.exit_code != 0 and result.error:
+    if result.exit_code != 0 and result.error:
         typer.echo(f"Error: {result.error}")
 
     if result.exit_code != 0:

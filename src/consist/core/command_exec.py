@@ -301,6 +301,27 @@ def compare_with_baseline(
     }
 
 
+def _safe_stream_write(stream: Any, chunk: bytes) -> None:
+    """
+    Safely write byte chunk to a stream target without disrupting pipe draining.
+    Handles raw binary streams (.buffer) and text streams (e.g. StringIO / wrappers).
+    """
+    if stream is None or not chunk:
+        return
+    try:
+        buf = getattr(stream, "buffer", None)
+        if buf is not None:
+            buf.write(chunk)
+            buf.flush()
+        else:
+            text = chunk.decode("utf-8", errors="replace")
+            stream.write(text)
+            stream.flush()
+    except Exception:
+        # Never let stream display or pipe errors disrupt pipe draining
+        pass
+
+
 def execute_command(
     tracker: "Tracker",
     name: str,
@@ -396,10 +417,12 @@ def execute_command(
         cand_out_dir = Path(outputs_dir)
         if cand_out_dir.is_absolute():
             resolved_outputs_dir = cand_out_dir
-        elif (resolved_cwd / cand_out_dir).exists():
+        elif cwd is not None:
             resolved_outputs_dir = (resolved_cwd / cand_out_dir).resolve()
-        else:
+        elif (invocation_cwd / cand_out_dir).exists():
             resolved_outputs_dir = (invocation_cwd / cand_out_dir).resolve()
+        else:
+            resolved_outputs_dir = (resolved_cwd / cand_out_dir).resolve()
 
     # Discover suggested inputs from argv
     suggested = discover_suggested_inputs(
@@ -473,12 +496,13 @@ def execute_command(
         )
 
     # Snapshot outputs_dir pre-execution
-    outputs_dir_snapshot: Dict[Path, int] = {}
+    outputs_dir_snapshot: Dict[Path, Tuple[int, int]] = {}
     if resolved_outputs_dir and resolved_outputs_dir.exists():
         for f in resolved_outputs_dir.rglob("*"):
             if f.is_file():
                 try:
-                    outputs_dir_snapshot[f.resolve()] = f.stat().st_mtime_ns
+                    st = f.stat()
+                    outputs_dir_snapshot[f.resolve()] = (st.st_mtime_ns, st.st_size)
                 except OSError:
                     pass
 
@@ -544,17 +568,21 @@ def execute_command(
         sink_file: Any,
         target_stream: Optional[Any],
     ) -> None:
+        if pipe is None:
+            return
         try:
             while True:
                 chunk = pipe.read(4096)
                 if not chunk:
                     break
                 sink_chunks.append(chunk)
-                sink_file.write(chunk)
-                sink_file.flush()
-                if target_stream:
-                    target_stream.write(chunk)
-                    target_stream.flush()
+                try:
+                    sink_file.write(chunk)
+                    sink_file.flush()
+                except Exception:
+                    pass
+                if target_stream is not None:
+                    _safe_stream_write(target_stream, chunk)
         except Exception:
             pass
         finally:
@@ -574,13 +602,16 @@ def execute_command(
             stderr=subprocess.PIPE,
         )
 
+        out_target = sys.stdout if stream_output else None
+        err_target = sys.stderr if stream_output else None
+
         out_thread = threading.Thread(
             target=_stream_reader,
             args=(
                 proc.stdout,
                 stdout_chunks,
                 out_file,
-                sys.stdout.buffer if stream_output else None,
+                out_target,
             ),
             daemon=True,
         )
@@ -590,7 +621,7 @@ def execute_command(
                 proc.stderr,
                 stderr_chunks,
                 err_file,
-                sys.stderr.buffer if stream_output else None,
+                err_target,
             ),
             daemon=True,
         )
@@ -601,6 +632,81 @@ def execute_command(
         proc.wait()
         out_thread.join(timeout=3.0)
         err_thread.join(timeout=3.0)
+
+    except FileNotFoundError as exc:
+        duration = round(time.monotonic() - start_time, 4)
+        exit_code = 127
+        err_msg = f"Command not found: {cmd_list[0]}"
+        run.meta["command"]["exit_code"] = exit_code
+        run.meta["command"]["duration"] = duration
+        run.meta["command"]["error"] = err_msg
+        tracker.end_run(status="failed", error=exc)
+        res = CommandExecutionResult(
+            run=run,
+            inputs=logged_inputs,
+            outputs={},
+            exit_code=exit_code,
+            stdout="",
+            stderr=str(exc),
+            stdout_path=stdout_file_path,
+            stderr_path=stderr_file_path,
+            duration=duration,
+            command=cmd_list,
+            dry_run=False,
+        )
+        if check:
+            raise CommandExecutionError(err_msg, result=res) from exc
+        return res
+
+    except PermissionError as exc:
+        duration = round(time.monotonic() - start_time, 4)
+        exit_code = 126
+        err_msg = f"Permission denied executing command: {cmd_list[0]}"
+        run.meta["command"]["exit_code"] = exit_code
+        run.meta["command"]["duration"] = duration
+        run.meta["command"]["error"] = err_msg
+        tracker.end_run(status="failed", error=exc)
+        res = CommandExecutionResult(
+            run=run,
+            inputs=logged_inputs,
+            outputs={},
+            exit_code=exit_code,
+            stdout="",
+            stderr=str(exc),
+            stdout_path=stdout_file_path,
+            stderr_path=stderr_file_path,
+            duration=duration,
+            command=cmd_list,
+            dry_run=False,
+        )
+        if check:
+            raise CommandExecutionError(err_msg, result=res) from exc
+        return res
+
+    except OSError as exc:
+        duration = round(time.monotonic() - start_time, 4)
+        exit_code = 127
+        err_msg = f"Failed to execute command '{cmd_list[0]}': {exc}"
+        run.meta["command"]["exit_code"] = exit_code
+        run.meta["command"]["duration"] = duration
+        run.meta["command"]["error"] = err_msg
+        tracker.end_run(status="failed", error=exc)
+        res = CommandExecutionResult(
+            run=run,
+            inputs=logged_inputs,
+            outputs={},
+            exit_code=exit_code,
+            stdout="",
+            stderr=str(exc),
+            stdout_path=stdout_file_path,
+            stderr_path=stderr_file_path,
+            duration=duration,
+            command=cmd_list,
+            dry_run=False,
+        )
+        if check:
+            raise CommandExecutionError(err_msg, result=res) from exc
+        return res
 
     except KeyboardInterrupt:
         if proc:
@@ -618,12 +724,42 @@ def execute_command(
         )
         raise
 
+    except Exception as exc:
+        duration = round(time.monotonic() - start_time, 4)
+        exit_code = 1
+        err_msg = f"Unexpected execution error: {exc}"
+        run.meta["command"]["exit_code"] = exit_code
+        run.meta["command"]["duration"] = duration
+        run.meta["command"]["error"] = err_msg
+        tracker.end_run(status="failed", error=exc)
+        res = CommandExecutionResult(
+            run=run,
+            inputs=logged_inputs,
+            outputs={},
+            exit_code=exit_code,
+            stdout="",
+            stderr=str(exc),
+            stdout_path=stdout_file_path,
+            stderr_path=stderr_file_path,
+            duration=duration,
+            command=cmd_list,
+            dry_run=False,
+        )
+        if check:
+            raise CommandExecutionError(err_msg, result=res) from exc
+        return res
+
     finally:
         out_file.close()
         err_file.close()
 
     duration = round(time.monotonic() - start_time, 4)
-    exit_code = proc.returncode if proc else 1
+    raw_code = proc.returncode if proc else 1
+    if raw_code < 0:
+        exit_code = 128 + abs(raw_code)
+        run.meta["command"]["signal"] = abs(raw_code)
+    else:
+        exit_code = raw_code
 
     stdout_str = b"".join(stdout_chunks).decode("utf-8", errors="replace")
     stderr_str = b"".join(stderr_chunks).decode("utf-8", errors="replace")
@@ -635,7 +771,12 @@ def execute_command(
 
     # Check process exit code
     if exit_code != 0:
-        err_msg = f"Command failed with exit code {exit_code}"
+        if raw_code < 0:
+            err_msg = (
+                f"Command terminated by signal {abs(raw_code)} (exit code {exit_code})"
+            )
+        else:
+            err_msg = f"Command failed with exit code {exit_code}"
         run.meta["command"]["error"] = err_msg
         tracker.end_run(status="failed", error=RuntimeError(err_msg))
 
@@ -697,17 +838,23 @@ def execute_command(
             if f.is_file():
                 try:
                     f_res = f.resolve()
-                    mtime = f.stat().st_mtime_ns
+                    st = f.stat()
+                    curr_tuple = (st.st_mtime_ns, st.st_size)
                     if (
                         f_res not in outputs_dir_snapshot
-                        or mtime > outputs_dir_snapshot[f_res]
+                        or curr_tuple != outputs_dir_snapshot[f_res]
                     ):
                         if f_res not in declared_output_paths:
                             rel_key = str(f.relative_to(resolved_outputs_dir))
+                            final_key = rel_key
+                            counter = 1
+                            while final_key in logged_outputs:
+                                final_key = f"{rel_key}_{counter}"
+                                counter += 1
                             art = tracker.log_artifact(
-                                f, key=rel_key, direction="output"
+                                f, key=final_key, direction="output"
                             )
-                            logged_outputs[rel_key] = art
+                            logged_outputs[final_key] = art
                 except OSError:
                     pass
 
