@@ -71,7 +71,13 @@ from consist.integrations.ibis import (
     ibis_view as _ibis_view,
 )
 from consist.models.artifact import Artifact, ArchivedOutputs, get_tracker_ref
-from consist.models.run import ConsistRecord, Run, RunResult, resolve_run_result_output
+from consist.models.run import (
+    ConsistRecord,
+    CouplerSnapshotPhase,
+    Run,
+    RunResult,
+    resolve_run_result_output,
+)
 from consist.models.run_config_kv import RunConfigKV
 from consist.core.tracker import Tracker
 from consist.protocols import ArtifactRecordLike
@@ -1146,6 +1152,40 @@ def get_run_result(
     """
     return _resolve_tracker(tracker).get_run_result(
         run_id, keys=keys, validate=validate
+    )
+
+
+def get_coupler_snapshot(
+    run_id: str,
+    phase: CouplerSnapshotPhase = "post",
+    *,
+    must_exist: bool = False,
+    tracker: Optional["Tracker"] = None,
+) -> Dict[str, Artifact]:
+    """
+    Retrieve artifacts mapped by role_key for a given run_id and snapshot phase.
+    """
+    return _resolve_tracker(tracker).get_coupler_snapshot(
+        run_id=run_id, phase=phase, must_exist=must_exist
+    )
+
+
+def diff_coupler_snapshots(
+    left_run_id: str,
+    right_run_id: str,
+    *,
+    left_phase: CouplerSnapshotPhase = "post",
+    right_phase: CouplerSnapshotPhase = "post",
+    tracker: Optional["Tracker"] = None,
+) -> pd.DataFrame:
+    """
+    Compare two coupler snapshots and return differences as a DataFrame.
+    """
+    return _resolve_tracker(tracker).diff_coupler_snapshots(
+        left_run_id=left_run_id,
+        right_run_id=right_run_id,
+        left_phase=left_phase,
+        right_phase=right_phase,
     )
 
 

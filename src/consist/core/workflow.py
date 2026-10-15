@@ -23,7 +23,16 @@ from typing import (
 )
 
 from consist import Artifact
-from consist.models.run import ConsistRecord, RunResult
+from consist.models.run import (
+    ConsistRecord,
+    RunResult,
+    CouplerSnapshotPhase,
+    RunCouplerSnapshot,
+    Run,
+    RunArtifactLink,
+)
+from sqlmodel import select, col
+from sqlalchemy import func
 from typing import TYPE_CHECKING
 from consist.core.coupler import Coupler
 from consist.core.orchestration import (
@@ -464,6 +473,8 @@ class ScenarioContext:
         coupler: Optional[Coupler] = None,
         require_outputs: Optional[Iterable[str]] = None,
         output_sets: Optional[Mapping[str, OutputSet]] = None,
+        resume_from_run_id: Optional[str] = None,
+        resume_phase: CouplerSnapshotPhase = "post",
         **kwargs: Any,
     ):
         self.tracker = tracker
@@ -478,6 +489,10 @@ class ScenarioContext:
         self.name_template = name_template
         self.cache_epoch = cache_epoch
         self.output_sets = output_sets
+        self.resume_from_run_id = resume_from_run_id
+        self._resume_from_run_id = resume_from_run_id
+        self.resume_phase = resume_phase
+        self._resume_phase = resume_phase
 
         # Internal State
         self._header_record: Optional[ConsistRecord] = None
@@ -486,6 +501,7 @@ class ScenarioContext:
         self._first_step_started: bool = False
         self._last_step_name: Optional[str] = None
         self._step_identity_owner = object()
+        self._step_ordinal: int = 0
 
         # ARTIFACT STORAGE ARCHITECTURE
         # ==============================
@@ -684,6 +700,251 @@ class ScenarioContext:
             The collected artifacts keyed by their (possibly prefixed) names.
         """
         return self.coupler.collect_by_keys(artifacts, *keys, prefix=prefix)
+
+    def capture_coupler_snapshot(
+        self,
+        phase: CouplerSnapshotPhase,
+        run_id: Optional[str] = None,
+        step_ordinal: Optional[int] = None,
+    ) -> None:
+        """
+        Persist a relational snapshot of the current coupler state.
+
+        Parameters
+        ----------
+        phase : CouplerSnapshotPhase
+            The lifecycle phase ("init", "pre", or "post").
+        run_id : Optional[str], default None
+            Run identifier for the snapshot. Defaults to the scenario run_id.
+        step_ordinal : Optional[int], default None
+            Step ordinal within the scenario. Defaults to self._step_ordinal.
+        """
+        if self.tracker.db is None:
+            return
+        target_run_id = run_id or self.run_id
+        ordinal = self._step_ordinal if step_ordinal is None else step_ordinal
+        artifacts = dict(self.coupler.items())
+        self.tracker.db.sync_run_coupler_snapshot(
+            run_id=target_run_id,
+            phase=phase,
+            scenario_run_id=self.run_id,
+            step_ordinal=ordinal,
+            artifacts_by_key=artifacts,
+        )
+
+    def _maybe_capture_init_snapshot(self) -> None:
+        """
+        Capture the initial coupler seed snapshot (phase='init', step_ordinal=0)
+        before the first child step begins if the coupler contains seeded artifacts.
+        """
+        if (
+            not self._first_step_started
+            and self._step_ordinal == 0
+            and len(self.coupler) > 0
+        ):
+            self.capture_coupler_snapshot(
+                phase="init", run_id=self.run_id, step_ordinal=0
+            )
+
+    def restore_coupler_snapshot(
+        self,
+        run_id: Optional[str] = None,
+        *,
+        scenario_run_id: Optional[str] = None,
+        phase: CouplerSnapshotPhase = "post",
+        year: Optional[int] = None,
+        iteration: Optional[int] = None,
+        stage: Optional[str] = None,
+        model_name: Optional[str] = None,
+        before_step_ordinal: Optional[int] = None,
+        clear_existing: bool = False,
+        fallback_to_completed_outputs: bool = True,
+    ) -> Dict[str, Artifact]:
+        """
+        Restore coupler artifacts from DuckDB snapshots or completed step outputs.
+
+        Parameters
+        ----------
+        run_id : Optional[str], default None
+            If provided, loads snapshot for this specific run_id and phase.
+            If None, finds the latest matching snapshot in the scenario.
+        scenario_run_id : Optional[str], default None
+            Target scenario run ID when querying snapshots or fallback outputs.
+            Defaults to self.run_id if not provided.
+        phase : CouplerSnapshotPhase, default "post"
+            Snapshot phase to restore ("init", "pre", or "post").
+        year : Optional[int], default None
+            Filter for latest snapshot matching year.
+        iteration : Optional[int], default None
+            Filter for latest snapshot matching iteration.
+        stage : Optional[str], default None
+            Filter for latest snapshot matching stage.
+        model_name : Optional[str], default None
+            Filter for latest snapshot matching model_name.
+        before_step_ordinal : Optional[int], default None
+            Filter for snapshots strictly before this step ordinal.
+        clear_existing : bool, default False
+            If True, clears the coupler before applying the restored artifacts.
+            If False, overlays onto the existing coupler contents.
+        fallback_to_completed_outputs : bool, default True
+            If True and no snapshot rows are found, synthesizes the coupler state
+            from completed child step outputs in DuckDB.
+
+        Returns
+        -------
+        Dict[str, Artifact]
+            The dictionary of restored artifacts keyed by role_key.
+        """
+        if self.tracker.db is None:
+            return {}
+
+        if clear_existing:
+            self.coupler.clear()
+
+        artifacts: Dict[str, Artifact] = {}
+        restored_step_ordinal: int = 0
+        target_scenario_id = scenario_run_id or self.run_id
+
+        if run_id is not None:
+            artifacts = self.tracker.db.get_run_coupler_snapshot(
+                run_id, phase=phase, must_exist=False
+            )
+            if artifacts:
+                with self.tracker.db.session_scope() as session:
+                    ord_val = session.exec(
+                        select(func.max(RunCouplerSnapshot.step_ordinal)).where(
+                            col(RunCouplerSnapshot.run_id) == run_id,
+                            col(RunCouplerSnapshot.phase) == phase,
+                        )
+                    ).first()
+                    if ord_val is not None:
+                        restored_step_ordinal = int(ord_val)
+            else:
+                # Check if run_id was a scenario header ID with step snapshots
+                found = self.tracker.db.find_latest_scenario_coupler_snapshot(
+                    run_id,
+                    phase=phase,
+                    year=year,
+                    iteration=iteration,
+                    stage=stage,
+                    model_name=model_name,
+                    before_step_ordinal=before_step_ordinal,
+                )
+                if found is not None:
+                    _, matched_ordinal, artifacts = found
+                    restored_step_ordinal = matched_ordinal
+                elif fallback_to_completed_outputs:
+                    with self.tracker.db.session_scope() as session:
+                        target_run = session.get(Run, run_id)
+                        parent_id = target_scenario_id
+                        created_at_cutoff = None
+                        if target_run is not None:
+                            if target_run.parent_run_id:
+                                parent_id = target_run.parent_run_id
+                                created_at_cutoff = target_run.created_at
+                            else:
+                                parent_id = target_run.id
+                                created_at_cutoff = None
+
+                        query = (
+                            select(Artifact)
+                            .join(
+                                RunArtifactLink,
+                                col(RunArtifactLink.artifact_id) == col(Artifact.id),
+                            )
+                            .join(Run, col(RunArtifactLink.run_id) == col(Run.id))
+                            .where(
+                                col(Run.parent_run_id) == parent_id,
+                                col(Run.status) == "completed",
+                                col(RunArtifactLink.direction) == "output",
+                            )
+                        )
+                        if created_at_cutoff is not None:
+                            query = query.where(
+                                (col(Run.created_at) < created_at_cutoff)
+                                | (
+                                    (col(Run.created_at) == created_at_cutoff)
+                                    & (col(Run.id) <= run_id)
+                                )
+                            )
+                        query = query.order_by(
+                            col(Run.created_at).asc(),
+                            col(Run.id).asc(),
+                        )
+                        results = session.exec(query).all()
+                        for art in results:
+                            if art.key:
+                                session.expunge(art)
+                                artifacts[art.key] = art
+
+                    if artifacts:
+                        producer_runs = {art.run_id for art in results if art.run_id}
+                        restored_step_ordinal = (
+                            len(producer_runs) if producer_runs else 1
+                        )
+                        self.tracker.db.sync_run_coupler_snapshot(
+                            run_id=run_id,
+                            phase=phase,
+                            scenario_run_id=target_scenario_id,
+                            step_ordinal=restored_step_ordinal,
+                            artifacts_by_key=artifacts,
+                        )
+        else:
+            found = self.tracker.db.find_latest_scenario_coupler_snapshot(
+                target_scenario_id,
+                phase=phase,
+                year=year,
+                iteration=iteration,
+                stage=stage,
+                model_name=model_name,
+                before_step_ordinal=before_step_ordinal,
+            )
+            if found is not None:
+                _, matched_ordinal, artifacts = found
+                restored_step_ordinal = matched_ordinal
+            elif fallback_to_completed_outputs:
+                with self.tracker.db.session_scope() as session:
+                    query = (
+                        select(Artifact)
+                        .join(
+                            RunArtifactLink,
+                            col(RunArtifactLink.artifact_id) == col(Artifact.id),
+                        )
+                        .join(Run, col(RunArtifactLink.run_id) == col(Run.id))
+                        .where(
+                            col(Run.parent_run_id) == target_scenario_id,
+                            col(Run.status) == "completed",
+                            col(RunArtifactLink.direction) == "output",
+                        )
+                    )
+                    if year is not None:
+                        query = query.where(col(Run.year) == year)
+                    if iteration is not None:
+                        query = query.where(col(Run.iteration) == iteration)
+                    if stage is not None:
+                        query = query.where(col(Run.stage) == stage)
+                    if model_name is not None:
+                        query = query.where(col(Run.model_name) == model_name)
+
+                    query = query.order_by(
+                        col(Run.created_at).asc(),
+                        col(Run.id).asc(),
+                    )
+                    results = session.exec(query).all()
+                    for art in results:
+                        if art.key:
+                            session.expunge(art)
+                            artifacts[art.key] = art
+                    run_ids = {art.run_id for art in results if art.run_id}
+                    if run_ids:
+                        restored_step_ordinal = len(run_ids)
+
+        if artifacts:
+            self.coupler.update(artifacts)
+        if restored_step_ordinal > 0:
+            self._step_ordinal = max(self._step_ordinal, restored_step_ordinal)
+
+        return artifacts
 
     def _coerce_keys(self, value: Optional[Iterable[str] | str]) -> List[str]:
         if value is None:
@@ -1303,8 +1564,11 @@ class ScenarioContext:
                 ),
             )
 
+        self._maybe_capture_init_snapshot()
         self._first_step_started = True
         self._last_step_name = resolved_name
+        self._step_ordinal += 1
+        self.capture_coupler_snapshot(phase="pre", run_id=run_id)
 
         effective_cache_hydration = (
             resolved_cache_hydration
@@ -1557,8 +1821,11 @@ class ScenarioContext:
         if parent_run_id is None:
             parent_run_id = self.run_id
 
+        self._maybe_capture_init_snapshot()
         self._first_step_started = True
         self._last_step_name = resolved_name
+        self._step_ordinal += 1
+        self.capture_coupler_snapshot(phase="pre", run_id=run_id)
 
         effective_cache_hydration = (
             resolved_cache_hydration or self.step_cache_hydration
@@ -1735,6 +2002,8 @@ class ScenarioContext:
         finally:
             self.tracker.current_consist = current_state
 
+        self.capture_coupler_snapshot(phase="post", run_id=child_run.id)
+
     def __enter__(self) -> "ScenarioContext":
         # Enforce No Nesting
         if self.tracker.current_consist is not None:
@@ -1773,6 +2042,21 @@ class ScenarioContext:
         # Note: We leave the tracker pushed to the global context stack.
         # This ensures calls to `consist.log_artifact()` fail with our custom error
         # rather than "No active tracker".
+
+        self._step_ordinal = 0
+        if self.tracker.db:
+            self._step_ordinal = self.tracker.db.get_max_coupler_snapshot_ordinal(
+                self.run_id
+            )
+            resume_id = self._resume_from_run_id or self.resume_from_run_id
+            resume_phase = self._resume_phase or self.resume_phase
+            if resume_id:
+                self.restore_coupler_snapshot(
+                    run_id=resume_id,
+                    phase=resume_phase,
+                    fallback_to_completed_outputs=True,
+                    clear_existing=False,
+                )
 
         return self
 

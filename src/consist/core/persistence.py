@@ -24,10 +24,11 @@ from typing import (
     TYPE_CHECKING,
     Literal,
     Iterator,
+    Mapping,
 )
 
 import pandas as pd
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import aliased
 from sqlalchemy.pool import NullPool
 from sqlmodel import create_engine, Session, select, SQLModel, col, delete
@@ -55,9 +56,11 @@ from consist.models.artifact_schema import (
 )
 from consist.models.config_facet import ConfigFacet
 from consist.models.run import (
+    CouplerSnapshotPhase,
     Run,
     RunArtifactLink,
     RunBindingInvocation,
+    RunCouplerSnapshot,
     resolve_canonical_run_meta_field,
 )
 from consist.models.run_config_kv import RunConfigKV
@@ -434,6 +437,7 @@ class DatabaseManager:
                     getattr(ArtifactSchemaObservation, "__table__"),
                     getattr(ArtifactSchemaRelation, "__table__"),
                     getattr(ArtifactContent, "__table__"),
+                    getattr(RunCouplerSnapshot, "__table__"),
                 ],
             )
             # DuckDB self-referential FK on run.parent_run_id blocks status updates.
@@ -3950,3 +3954,324 @@ class DatabaseManager:
         except Exception as e:
             logging.warning(f"Failed to fetch history: {e}")
             return pd.DataFrame()
+
+    def sync_run_coupler_snapshot(
+        self,
+        *,
+        scenario_run_id: str,
+        run_id: str,
+        phase: CouplerSnapshotPhase,
+        step_ordinal: int,
+        artifacts_by_key: Optional[Mapping[str, Artifact]] = None,
+        artifacts: Optional[Mapping[str, Artifact]] = None,
+    ) -> None:
+        """
+        Record a relational snapshot of the coupler for a run and phase.
+
+        Deletes any pre-existing snapshot rows for the same (run_id, phase) and inserts
+        rows for each artifact in the provided mapping.
+        """
+        target_artifacts = (
+            artifacts_by_key if artifacts_by_key is not None else (artifacts or {})
+        )
+
+        def _do_sync():
+            with self.session_scope() as session:
+                session.exec(
+                    delete(RunCouplerSnapshot).where(
+                        col(RunCouplerSnapshot.run_id) == run_id,
+                        col(RunCouplerSnapshot.phase) == phase,
+                    )
+                )
+                rows: list[RunCouplerSnapshot] = []
+                for role_key, artifact in target_artifacts.items():
+                    try:
+                        art_id = getattr(artifact, "id", None)
+                        producer_id = getattr(artifact, "run_id", None)
+                    except Exception:
+                        merged = session.merge(artifact)
+                        art_id = merged.id
+                        producer_id = merged.run_id
+                    if art_id is None:
+                        continue
+                    if isinstance(art_id, str):
+                        art_id = uuid.UUID(art_id)
+                    rows.append(
+                        RunCouplerSnapshot(
+                            run_id=run_id,
+                            phase=phase,
+                            role_key=role_key,
+                            scenario_run_id=scenario_run_id,
+                            step_ordinal=step_ordinal,
+                            artifact_id=art_id,
+                            producer_run_id=producer_id,
+                        )
+                    )
+                if rows:
+                    session.add_all(rows)
+                session.commit()
+
+        self.execute_with_retry(_do_sync, operation_name="sync_run_coupler_snapshot")
+
+    def get_run_coupler_snapshot(
+        self,
+        run_id: str,
+        *args: Any,
+        phase: CouplerSnapshotPhase = "post",
+        must_exist: bool = False,
+    ) -> dict[str, Artifact]:
+        """
+        Retrieve artifacts mapped by role_key for a given run_id and snapshot phase.
+
+        Parameters
+        ----------
+        run_id : str
+            The run identifier.
+        phase : CouplerSnapshotPhase, default "post"
+            The snapshot phase ("init", "pre", or "post").
+        must_exist : bool, default False
+            If True and no snapshot records are found, raises KeyError.
+
+        Returns
+        -------
+        dict[str, Artifact]
+            Mapping of role_key to Artifact.
+        """
+        if args:
+            phase = args[0]
+
+        def _do_get():
+            with self.session_scope() as session:
+                statement = (
+                    select(RunCouplerSnapshot.role_key, Artifact)
+                    .join(Artifact, RunCouplerSnapshot.artifact_id == Artifact.id)
+                    .where(
+                        col(RunCouplerSnapshot.run_id) == run_id,
+                        col(RunCouplerSnapshot.phase) == phase,
+                    )
+                )
+                results = session.exec(statement).all()
+                result_map: dict[str, Artifact] = {}
+                for role_key, artifact in results:
+                    session.expunge(artifact)
+                    result_map[role_key] = artifact
+                if not result_map and must_exist:
+                    raise KeyError(
+                        f"No coupler snapshot found for run_id={run_id!r}, phase={phase!r}"
+                    )
+                return result_map
+
+        return self.execute_with_retry(
+            _do_get, operation_name="get_run_coupler_snapshot"
+        )
+
+    def get_max_coupler_snapshot_ordinal(
+        self,
+        scenario_run_id: str,
+    ) -> int:
+        """
+        Return the maximum step_ordinal recorded for a scenario run, or 0 if none exist.
+        """
+
+        def _do_get():
+            with self.session_scope() as session:
+                stmt = select(
+                    func.coalesce(func.max(RunCouplerSnapshot.step_ordinal), 0)
+                ).where(col(RunCouplerSnapshot.scenario_run_id) == scenario_run_id)
+                val = session.exec(stmt).first()
+                return int(val) if val is not None else 0
+
+        return self.execute_with_retry(
+            _do_get, operation_name="get_max_coupler_snapshot_ordinal"
+        )
+
+    def find_latest_scenario_coupler_snapshot(
+        self,
+        scenario_run_id: str,
+        *,
+        phase: Optional[CouplerSnapshotPhase] = "post",
+        year: Optional[int] = None,
+        iteration: Optional[int] = None,
+        stage: Optional[str] = None,
+        model_name: Optional[str] = None,
+        before_step_ordinal: Optional[int] = None,
+    ) -> Optional[Tuple[str, int, Dict[str, Artifact]]]:
+        """
+        Find the latest coupler snapshot for a scenario matching the given filters.
+
+        Joins RunCouplerSnapshot with Run to filter by step metadata.
+        Orders by step_ordinal descending, updated_at descending.
+
+        Returns
+        -------
+        Optional[Tuple[str, int, Dict[str, Artifact]]]
+            A tuple of (run_id, step_ordinal, artifacts_dict) or None if not found.
+        """
+
+        def _do_find():
+            with self.session_scope() as session:
+                query = (
+                    select(
+                        RunCouplerSnapshot.run_id,
+                        RunCouplerSnapshot.phase,
+                        RunCouplerSnapshot.step_ordinal,
+                    )
+                    .outerjoin(Run, col(RunCouplerSnapshot.run_id) == col(Run.id))
+                    .where(col(RunCouplerSnapshot.scenario_run_id) == scenario_run_id)
+                )
+                if phase is not None:
+                    query = query.where(col(RunCouplerSnapshot.phase) == phase)
+                if year is not None:
+                    query = query.where(col(Run.year) == year)
+                if iteration is not None:
+                    query = query.where(col(Run.iteration) == iteration)
+                if stage is not None:
+                    query = query.where(col(Run.stage) == stage)
+                if model_name is not None:
+                    query = query.where(col(Run.model_name) == model_name)
+                if before_step_ordinal is not None:
+                    query = query.where(
+                        col(RunCouplerSnapshot.step_ordinal) < before_step_ordinal
+                    )
+
+                query = query.order_by(
+                    col(RunCouplerSnapshot.step_ordinal).desc(),
+                    col(RunCouplerSnapshot.updated_at).desc(),
+                ).limit(1)
+
+                row = session.exec(query).first()
+                if row is None:
+                    return None
+                return (str(row[0]), row[1], int(row[2]))
+
+        found = self.execute_with_retry(
+            _do_find, operation_name="find_latest_scenario_coupler_snapshot"
+        )
+        if found is None:
+            return None
+        matched_run_id, matched_phase, matched_ordinal = found
+        artifacts = self.get_run_coupler_snapshot(
+            run_id=matched_run_id, phase=matched_phase, must_exist=False
+        )
+        return (matched_run_id, matched_ordinal, artifacts)
+
+    def diff_coupler_snapshots(
+        self,
+        left_run_id: Optional[str] = None,
+        right_run_id: Optional[str] = None,
+        *,
+        left_phase: CouplerSnapshotPhase = "post",
+        right_phase: CouplerSnapshotPhase = "post",
+        left_artifacts: Optional[Mapping[str, Artifact]] = None,
+        right_artifacts: Optional[Mapping[str, Artifact]] = None,
+    ) -> pd.DataFrame:
+        """
+        Compare two coupler snapshots and compute per-role diff status.
+
+        Parameters
+        ----------
+        left_run_id : Optional[str]
+            Run ID for the left snapshot.
+        left_phase : CouplerSnapshotPhase, default "post"
+            Phase for the left snapshot (defaults to "post").
+        right_run_id : Optional[str]
+            Run ID for the right snapshot.
+        right_phase : CouplerSnapshotPhase, default "post"
+            Phase for the right snapshot (defaults to "post").
+        left_artifacts : Optional[Mapping[str, Artifact]]
+            Direct mapping of artifacts for left side (overrides left_run_id).
+        right_artifacts : Optional[Mapping[str, Artifact]]
+            Direct mapping of artifacts for right side (overrides right_run_id).
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with columns:
+            role_key, status, left_artifact_id, right_artifact_id, left_hash,
+            right_hash, left_producer_run_id, right_producer_run_id.
+            Status is one of: "added", "removed", "modified", "unchanged".
+        """
+        if left_artifacts is None:
+            if left_run_id is not None:
+                l_phase = left_phase or "post"
+                left_artifacts = self.get_run_coupler_snapshot(
+                    left_run_id, phase=l_phase, must_exist=False
+                )
+            else:
+                left_artifacts = {}
+
+        if right_artifacts is None:
+            if right_run_id is not None:
+                r_phase = right_phase or "post"
+                right_artifacts = self.get_run_coupler_snapshot(
+                    right_run_id, phase=r_phase, must_exist=False
+                )
+            else:
+                right_artifacts = {}
+
+        columns = [
+            "role_key",
+            "status",
+            "left_artifact_id",
+            "right_artifact_id",
+            "left_hash",
+            "right_hash",
+            "left_producer_run_id",
+            "right_producer_run_id",
+        ]
+
+        all_keys = sorted(set(left_artifacts.keys()) | set(right_artifacts.keys()))
+        rows = []
+        for key in all_keys:
+            la = left_artifacts.get(key)
+            ra = right_artifacts.get(key)
+
+            left_id = (
+                str(la.id)
+                if (la is not None and getattr(la, "id", None) is not None)
+                else None
+            )
+            right_id = (
+                str(ra.id)
+                if (ra is not None and getattr(ra, "id", None) is not None)
+                else None
+            )
+
+            left_hash = (
+                (getattr(la, "hash", None) or getattr(la, "content_hash", None))
+                if la is not None
+                else None
+            )
+            right_hash = (
+                (getattr(ra, "hash", None) or getattr(ra, "content_hash", None))
+                if ra is not None
+                else None
+            )
+
+            left_prod = getattr(la, "run_id", None) if la is not None else None
+            right_prod = getattr(ra, "run_id", None) if ra is not None else None
+
+            if la is None and ra is not None:
+                status = "added"
+            elif la is not None and ra is None:
+                status = "removed"
+            else:
+                if left_id != right_id or left_hash != right_hash:
+                    status = "modified"
+                else:
+                    status = "unchanged"
+
+            rows.append(
+                {
+                    "role_key": key,
+                    "status": status,
+                    "left_artifact_id": left_id,
+                    "right_artifact_id": right_id,
+                    "left_hash": left_hash,
+                    "right_hash": right_hash,
+                    "left_producer_run_id": left_prod,
+                    "right_producer_run_id": right_prod,
+                }
+            )
+
+        return pd.DataFrame(rows, columns=columns)
