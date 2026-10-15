@@ -14,7 +14,12 @@ except PackageNotFoundError:
     __version__ = "unknown"
 
 # Models
-from consist.models.run import Run, RunResult
+from consist.models.run import (
+    CouplerSnapshotPhase,
+    Run,
+    RunCouplerSnapshot,
+    RunResult,
+)
 from consist.models.artifact import Artifact, ArchivedOutputs
 from consist.models.gtfs import (
     GTFS_SCHEMA_BY_TABLE_NAME,
@@ -115,6 +120,8 @@ from consist.api import (
     cached_output,
     cached_artifacts,
     get_run_result,
+    get_coupler_snapshot,
+    diff_coupler_snapshots,
     hydrate_run_outputs,
     hydrate_run_outputs_to_destinations,
     materialize_run_outputs,
@@ -239,6 +246,8 @@ __all__ = [
     "CanonicalizationSnapshot",
     "Run",
     "RunResult",
+    "CouplerSnapshotPhase",
+    "RunCouplerSnapshot",
     "Artifact",
     "ArchivedOutputs",
     "RunSet",
@@ -347,6 +356,8 @@ __all__ = [
     "cached_output",
     "cached_artifacts",
     "get_run_result",
+    "get_coupler_snapshot",
+    "diff_coupler_snapshots",
     "hydrate_run_outputs",
     "hydrate_run_outputs_to_destinations",
     "materialize_run_outputs",

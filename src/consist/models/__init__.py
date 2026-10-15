@@ -15,7 +15,7 @@ from consist.models.artifact_schema import (
     ArtifactSchemaRelation,
 )
 from consist.models.config_facet import ConfigFacet
-from consist.models.run import Run
+from consist.models.run import CouplerSnapshotPhase, Run, RunCouplerSnapshot
 from consist.models.run_config_kv import RunConfigKV
 from consist.models.activitysim import (
     ActivitySimCoefficientsCache,
@@ -85,4 +85,6 @@ __all__ = [
     "GTFS_TABLE_NAMES",
     "Run",
     "RunConfigKV",
+    "RunCouplerSnapshot",
+    "CouplerSnapshotPhase",
 ]
