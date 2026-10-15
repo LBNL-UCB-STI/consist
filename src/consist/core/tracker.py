@@ -5007,6 +5007,21 @@ class Tracker:
     ) -> Dict[str, Artifact]:
         """
         Retrieve artifacts mapped by role_key for a given run_id and snapshot phase.
+
+        Parameters
+        ----------
+        run_id : str
+            The run identifier whose coupler snapshot should be retrieved.
+        phase : CouplerSnapshotPhase, default "post"
+            The lifecycle phase ("init", "pre", or "post").
+        must_exist : bool, default False
+            If True, raises KeyError when no snapshot exists for the given run_id
+            and phase. If False, returns an empty dictionary.
+
+        Returns
+        -------
+        Dict[str, Artifact]
+            Mapping of role keys to Artifact objects with tracker references attached.
         """
         if self.db is None:
             if must_exist:
@@ -5014,9 +5029,12 @@ class Tracker:
                     "Metadata database is required to retrieve coupler snapshots."
                 )
             return {}
-        return self.db.get_run_coupler_snapshot(
+        artifacts = self.db.get_run_coupler_snapshot(
             run_id=run_id, phase=phase, must_exist=must_exist
         )
+        for artifact in artifacts.values():
+            set_tracker_ref(artifact, self)
+        return artifacts
 
     def diff_coupler_snapshots(
         self,

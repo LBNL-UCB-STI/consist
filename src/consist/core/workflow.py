@@ -20,19 +20,15 @@ from typing import (
     Iterator,
     Union,
     cast,
+    Tuple,
 )
 
-from consist import Artifact
+from consist.models.artifact import Artifact, set_tracker_ref
 from consist.models.run import (
     ConsistRecord,
     RunResult,
     CouplerSnapshotPhase,
-    RunCouplerSnapshot,
-    Run,
-    RunArtifactLink,
 )
-from sqlmodel import select, col
-from sqlalchemy import func
 from typing import TYPE_CHECKING
 from consist.core.coupler import Coupler
 from consist.core.orchestration import (
@@ -490,9 +486,7 @@ class ScenarioContext:
         self.cache_epoch = cache_epoch
         self.output_sets = output_sets
         self.resume_from_run_id = resume_from_run_id
-        self._resume_from_run_id = resume_from_run_id
         self.resume_phase = resume_phase
-        self._resume_phase = resume_phase
 
         # Internal State
         self._header_record: Optional[ConsistRecord] = None
@@ -729,7 +723,7 @@ class ScenarioContext:
             phase=phase,
             scenario_run_id=self.run_id,
             step_ordinal=ordinal,
-            artifacts_by_key=artifacts,
+            artifacts=artifacts,
         )
 
     def _maybe_capture_init_snapshot(self) -> None:
@@ -806,19 +800,11 @@ class ScenarioContext:
         target_scenario_id = scenario_run_id or self.run_id
 
         if run_id is not None:
-            artifacts = self.tracker.db.get_run_coupler_snapshot(
+            artifacts, step_ord = self.tracker.db.get_run_coupler_snapshot_details(
                 run_id, phase=phase, must_exist=False
             )
             if artifacts:
-                with self.tracker.db.session_scope() as session:
-                    ord_val = session.exec(
-                        select(func.max(RunCouplerSnapshot.step_ordinal)).where(
-                            col(RunCouplerSnapshot.run_id) == run_id,
-                            col(RunCouplerSnapshot.phase) == phase,
-                        )
-                    ).first()
-                    if ord_val is not None:
-                        restored_step_ordinal = int(ord_val)
+                restored_step_ordinal = step_ord
             else:
                 # Check if run_id was a scenario header ID with step snapshots
                 found = self.tracker.db.find_latest_scenario_coupler_snapshot(
@@ -834,61 +820,19 @@ class ScenarioContext:
                     _, matched_ordinal, artifacts = found
                     restored_step_ordinal = matched_ordinal
                 elif fallback_to_completed_outputs:
-                    with self.tracker.db.session_scope() as session:
-                        target_run = session.get(Run, run_id)
-                        parent_id = target_scenario_id
-                        created_at_cutoff = None
-                        if target_run is not None:
-                            if target_run.parent_run_id:
-                                parent_id = target_run.parent_run_id
-                                created_at_cutoff = target_run.created_at
-                            else:
-                                parent_id = target_run.id
-                                created_at_cutoff = None
-
-                        query = (
-                            select(Artifact)
-                            .join(
-                                RunArtifactLink,
-                                col(RunArtifactLink.artifact_id) == col(Artifact.id),
-                            )
-                            .join(Run, col(RunArtifactLink.run_id) == col(Run.id))
-                            .where(
-                                col(Run.parent_run_id) == parent_id,
-                                col(Run.status) == "completed",
-                                col(RunArtifactLink.direction) == "output",
-                            )
-                        )
-                        if created_at_cutoff is not None:
-                            query = query.where(
-                                (col(Run.created_at) < created_at_cutoff)
-                                | (
-                                    (col(Run.created_at) == created_at_cutoff)
-                                    & (col(Run.id) <= run_id)
-                                )
-                            )
-                        query = query.order_by(
-                            col(Run.created_at).asc(),
-                            col(Run.id).asc(),
-                        )
-                        results = session.exec(query).all()
-                        for art in results:
-                            if art.key:
-                                session.expunge(art)
-                                artifacts[art.key] = art
-
-                    if artifacts:
-                        producer_runs = {art.run_id for art in results if art.run_id}
-                        restored_step_ordinal = (
-                            len(producer_runs) if producer_runs else 1
-                        )
-                        self.tracker.db.sync_run_coupler_snapshot(
+                    artifacts, restored_step_ordinal = (
+                        self.tracker.db.synthesize_coupler_snapshot_from_history(
                             run_id=run_id,
-                            phase=phase,
                             scenario_run_id=target_scenario_id,
-                            step_ordinal=restored_step_ordinal,
-                            artifacts_by_key=artifacts,
+                            phase=phase,
+                            year=year,
+                            iteration=iteration,
+                            stage=stage,
+                            model_name=model_name,
+                            before_step_ordinal=before_step_ordinal,
+                            backfill=True,
                         )
+                    )
         else:
             found = self.tracker.db.find_latest_scenario_coupler_snapshot(
                 target_scenario_id,
@@ -903,48 +847,68 @@ class ScenarioContext:
                 _, matched_ordinal, artifacts = found
                 restored_step_ordinal = matched_ordinal
             elif fallback_to_completed_outputs:
-                with self.tracker.db.session_scope() as session:
-                    query = (
-                        select(Artifact)
-                        .join(
-                            RunArtifactLink,
-                            col(RunArtifactLink.artifact_id) == col(Artifact.id),
-                        )
-                        .join(Run, col(RunArtifactLink.run_id) == col(Run.id))
-                        .where(
-                            col(Run.parent_run_id) == target_scenario_id,
-                            col(Run.status) == "completed",
-                            col(RunArtifactLink.direction) == "output",
-                        )
+                artifacts, restored_step_ordinal = (
+                    self.tracker.db.synthesize_coupler_snapshot_from_history(
+                        run_id=None,
+                        scenario_run_id=target_scenario_id,
+                        phase=phase,
+                        year=year,
+                        iteration=iteration,
+                        stage=stage,
+                        model_name=model_name,
+                        before_step_ordinal=before_step_ordinal,
+                        backfill=True,
                     )
-                    if year is not None:
-                        query = query.where(col(Run.year) == year)
-                    if iteration is not None:
-                        query = query.where(col(Run.iteration) == iteration)
-                    if stage is not None:
-                        query = query.where(col(Run.stage) == stage)
-                    if model_name is not None:
-                        query = query.where(col(Run.model_name) == model_name)
-
-                    query = query.order_by(
-                        col(Run.created_at).asc(),
-                        col(Run.id).asc(),
-                    )
-                    results = session.exec(query).all()
-                    for art in results:
-                        if art.key:
-                            session.expunge(art)
-                            artifacts[art.key] = art
-                    run_ids = {art.run_id for art in results if art.run_id}
-                    if run_ids:
-                        restored_step_ordinal = len(run_ids)
+                )
 
         if artifacts:
+            for art in artifacts.values():
+                set_tracker_ref(art, self.tracker)
             self.coupler.update(artifacts)
         if restored_step_ordinal > 0:
-            self._step_ordinal = max(self._step_ordinal, restored_step_ordinal)
+            if phase == "pre":
+                effective_ordinal = max(0, restored_step_ordinal - 1)
+            else:
+                effective_ordinal = restored_step_ordinal
+            self._step_ordinal = max(self._step_ordinal, effective_ordinal)
 
         return artifacts
+
+    def find_latest_coupler_snapshot(
+        self,
+        *,
+        scenario_run_id: Optional[str] = None,
+        phase: Optional[CouplerSnapshotPhase] = None,
+        year: Optional[int] = None,
+        iteration: Optional[int] = None,
+        stage: Optional[str] = None,
+        model_name: Optional[str] = None,
+        before_step_ordinal: Optional[int] = None,
+    ) -> Optional[Tuple[str, int, Dict[str, Artifact]]]:
+        """
+        Find the latest coupler snapshot for this scenario (or a specified scenario)
+        matching the given filters.
+
+        Delegates to DatabaseManager.find_latest_scenario_coupler_snapshot.
+        """
+        if self.tracker.db is None:
+            return None
+        target_scenario_id = scenario_run_id or self.run_id
+        result = self.tracker.db.find_latest_scenario_coupler_snapshot(
+            target_scenario_id,
+            phase=phase,
+            year=year,
+            iteration=iteration,
+            stage=stage,
+            model_name=model_name,
+            before_step_ordinal=before_step_ordinal,
+        )
+        if result is None:
+            return None
+        matched_run_id, matched_ordinal, artifacts = result
+        for art in artifacts.values():
+            set_tracker_ref(art, self.tracker)
+        return (matched_run_id, matched_ordinal, artifacts)
 
     def _coerce_keys(self, value: Optional[Iterable[str] | str]) -> List[str]:
         if value is None:
@@ -2048,12 +2012,10 @@ class ScenarioContext:
             self._step_ordinal = self.tracker.db.get_max_coupler_snapshot_ordinal(
                 self.run_id
             )
-            resume_id = self._resume_from_run_id or self.resume_from_run_id
-            resume_phase = self._resume_phase or self.resume_phase
-            if resume_id:
+            if self.resume_from_run_id:
                 self.restore_coupler_snapshot(
-                    run_id=resume_id,
-                    phase=resume_phase,
+                    run_id=self.resume_from_run_id,
+                    phase=self.resume_phase,
                     fallback_to_completed_outputs=True,
                     clear_existing=False,
                 )
