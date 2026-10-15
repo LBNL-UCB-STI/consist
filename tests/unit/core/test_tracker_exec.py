@@ -350,3 +350,98 @@ def test_tracker_exec_keyboard_interrupt(tracker: Tracker):
                 argv=[sys.executable, "-c", "pass"],
                 stream_output=False,
             )
+
+
+def test_tracker_exec_stream_output_with_stringio(tracker: Tracker):
+    import io
+
+    fake_stdout = io.StringIO()
+    with patch("sys.stdout", fake_stdout):
+        res = tracker.exec(
+            name="test_stringio_stream",
+            argv=[sys.executable, "-c", "print('hello stringio')"],
+            stream_output=True,
+        )
+    assert res.is_success
+    assert "hello stringio" in fake_stdout.getvalue()
+
+
+def test_tracker_exec_command_not_found_records_failed_127(tracker: Tracker):
+    res = tracker.exec(
+        name="test_not_found",
+        argv=["nonexistent_command_xyz_987"],
+        stream_output=False,
+        check=False,
+    )
+    assert not res.is_success
+    assert res.exit_code == 127
+    assert res.run is not None
+    assert res.run.status == "failed"
+    assert "Command not found: nonexistent_command_xyz_987" in res.error
+
+    # Verify DuckDB persisted the failed status
+    found = tracker.find_runs(model="test_not_found")
+    assert len(found) >= 1
+    assert found[0].status == "failed"
+
+
+def test_tracker_exec_permission_denied_records_failed_126(tracker: Tracker):
+    with patch("subprocess.Popen", side_effect=PermissionError("Permission denied")):
+        res = tracker.exec(
+            name="test_perm_denied",
+            argv=["/restricted/binary"],
+            stream_output=False,
+            check=False,
+        )
+    assert not res.is_success
+    assert res.exit_code == 126
+    assert res.run is not None
+    assert res.run.status == "failed"
+    assert "Permission denied executing command" in res.error
+
+
+def test_tracker_exec_signal_conversion(tracker: Tracker):
+    import io
+
+    with patch("subprocess.Popen") as mock_popen:
+        mock_proc = mock_popen.return_value
+        mock_proc.stdout = io.BytesIO(b"")
+        mock_proc.stderr = io.BytesIO(b"")
+        mock_proc.returncode = -9  # SIGKILL
+        mock_proc.wait.return_value = -9
+
+        res = tracker.exec(
+            name="test_signal",
+            argv=["fake_cmd"],
+            stream_output=False,
+            check=False,
+        )
+    assert not res.is_success
+    assert res.exit_code == 137  # 128 + 9
+    assert res.run is not None
+    assert res.run.status == "failed"
+    assert res.run.meta["command"]["signal"] == 9
+
+
+def test_tracker_exec_outputs_dir_relative_to_cwd(tracker: Tracker, tmp_path: Path):
+    sub_cwd = tmp_path / "work"
+    sub_cwd.mkdir()
+    rel_out_dir = Path("results")
+
+    py_cmd = [
+        sys.executable,
+        "-c",
+        "import pathlib; (pathlib.Path('results')).mkdir(exist_ok=True); (pathlib.Path('results/out.txt')).write_text('cwd output')",
+    ]
+
+    res = tracker.exec(
+        name="test_cwd_rel_outputs_dir",
+        argv=py_cmd,
+        cwd=sub_cwd,
+        outputs_dir=rel_out_dir,
+        stream_output=False,
+    )
+
+    assert res.is_success
+    assert "out.txt" in res.outputs
+    assert (sub_cwd / "results" / "out.txt").is_file()

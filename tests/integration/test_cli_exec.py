@@ -76,12 +76,14 @@ def test_cli_exec_quiet_suppresses_stdout(tmp_path: Path):
         "--",
         sys.executable,
         "-c",
-        "print('this should not be streamed')",
+        "print('child output')",
     ]
 
     res = runner.invoke(app, cmd)
     assert res.exit_code == 0
-    assert "this should not be streamed" not in res.stdout
+    assert "child output" in res.stdout
+    assert "Consist Exec Summary" not in res.stdout
+    assert "COMPLETED" not in res.stdout
 
 
 def test_cli_exec_dry_run_and_json(tmp_path: Path):
@@ -149,6 +151,32 @@ def test_cli_exec_dry_run_and_json(tmp_path: Path):
     assert result_data["status"] == "completed"
     assert "raw" in result_data["inputs"]
     assert "out" in result_data["outputs"]
+    assert "artifacts" in result_data
+    assert len(result_data["artifacts"]) == 2
+    art_keys = {a["key"] for a in result_data["artifacts"]}
+    assert "raw" in art_keys
+    assert "out" in art_keys
+
+
+def test_cli_exec_command_not_found_exits_127(tmp_path: Path):
+    init_res = runner.invoke(app, ["init", "--path", str(tmp_path)])
+    assert init_res.exit_code == 0
+
+    cmd = [
+        "exec",
+        "--db-path",
+        str(tmp_path / ".consist" / "provenance.duckdb"),
+        "--run-dir",
+        str(tmp_path / "runs"),
+        "--name",
+        "missing_bin_run",
+        "--",
+        "nonexistent_command_binary_12345",
+    ]
+
+    res = runner.invoke(app, cmd)
+    assert res.exit_code == 127
+    assert "Command not found: nonexistent_command_binary_12345" in res.stdout
 
 
 def test_cli_exec_non_zero_exit_propagates(tmp_path: Path):
