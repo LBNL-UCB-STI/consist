@@ -142,6 +142,7 @@ from consist.types import (
 )
 
 if TYPE_CHECKING:
+    from consist.core.command_exec import CommandExecutionResult
     from consist.core.coupler import Coupler
     from consist.core.materialize import (
         HydratedRunOutputsResult,
@@ -1789,6 +1790,98 @@ class Tracker:
             identity_label=identity_label,
             override_runtime_kwargs=override_runtime_kwargs,
             **run_kwargs,
+        )
+
+    def exec(
+        self,
+        name: str,
+        argv: Sequence[str] | str,
+        *,
+        inputs: Optional[Mapping[str, Path | str]] = None,
+        outputs: Optional[Mapping[str, Path | str]] = None,
+        outputs_dir: Optional[Path | str] = None,
+        cwd: Optional[Path | str] = None,
+        env: Optional[Mapping[str, str]] = None,
+        dry_run: bool = False,
+        shell: bool = False,
+        accept_suggested: bool = False,
+        stream_output: bool = True,
+        log_dir: Optional[Path | str] = None,
+        tags: Optional[List[str]] = None,
+        description: Optional[str] = None,
+        compare_baseline: bool = True,
+        check: bool = False,
+        run_id: Optional[str] = None,
+        **kwargs: Any,
+    ) -> "CommandExecutionResult":
+        """
+        Execute an external command and record its provenance boundary in Consist.
+
+        Parameters
+        ----------
+        name : str
+            Semantic identifier for the command run.
+        argv : Sequence[str] | str
+            The command and arguments to execute.
+        inputs : Optional[Mapping[str, Path | str]]
+            Declared input files mapped by role/key.
+        outputs : Optional[Mapping[str, Path | str]]
+            Declared output files mapped by role/key.
+        outputs_dir : Optional[Path | str]
+            Directory monitored for newly generated or modified files.
+        cwd : Optional[Path | str]
+            Working directory for execution.
+        env : Optional[Mapping[str, str]]
+            Custom environment variables for subprocess.
+        dry_run : bool
+            If True, only inspect and plan without executing.
+        shell : bool
+            If True, run command through shell.
+        accept_suggested : bool
+            If True, automatically declare existing files in argv as inputs.
+        stream_output : bool
+            If True, stream stdout/stderr live to sys.stdout/sys.stderr.
+        log_dir : Optional[Path | str]
+            Directory to store stdout.log and stderr.log sidecars.
+        tags : Optional[List[str]]
+            Tags for the run.
+        description : Optional[str]
+            Description for the run.
+        compare_baseline : bool
+            If True, compare inputs/outputs/duration against the most recent run.
+        check : bool
+            If True, raise CommandExecutionError on non-zero exit or missing outputs.
+        run_id : Optional[str]
+            Explicit run ID.
+        **kwargs : Any
+            Additional keyword arguments forwarded to begin_run.
+
+        Returns
+        -------
+        CommandExecutionResult
+        """
+        from consist.core.command_exec import execute_command
+
+        return execute_command(
+            tracker=self,
+            name=name,
+            argv=argv,
+            inputs=inputs,
+            outputs=outputs,
+            outputs_dir=outputs_dir,
+            cwd=cwd,
+            env=env,
+            dry_run=dry_run,
+            shell=shell,
+            accept_suggested=accept_suggested,
+            stream_output=stream_output,
+            log_dir=log_dir,
+            tags=tags,
+            description=description,
+            compare_baseline=compare_baseline,
+            check=check,
+            run_id=run_id,
+            **kwargs,
         )
 
     @contextmanager
