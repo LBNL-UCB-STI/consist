@@ -1,7 +1,7 @@
 # Artifact Admission
 
 Artifact admission verifies that a regular file about to enter a workflow has
-the same bytes as either one exact input from an explicitly selected completed
+the same bytes as either one exact artifact from an explicitly selected completed
 run or a declared `sha256:file:<64 lowercase hex>` identity. It is separate
 from cache lookup: admission always computes a full raw-file SHA-256 identity,
 while `Artifact.hash` may represent a fast, directory, or caller-supplied
@@ -27,10 +27,37 @@ if report.outcome != "verified":
     raise RuntimeError(report.canonical_json())
 ```
 
-The expected run must be `completed` and must have exactly one input link with
-the requested artifact key. Historical hashes without explicit full-file
-semantics remain unverified unless a distinct immutable `expected_bytes_path`
-corroborates the stored historical fingerprint.
+The expected run must be `completed` and must have a unique link matching the
+requested artifact key and `expected_direction` (`"any"` by default, or
+explicitly constrained to `"input"` or `"output"`). Historical hashes without
+explicit full-file semantics remain unverified unless a distinct immutable
+`expected_bytes_path` corroborates the stored historical fingerprint.
+
+## Cross-tracker & output expectations
+
+When a downstream stage needs to admit an output produced in a separate
+upstream provenance database, pass `source_tracker_db` (opened strictly
+read-only without schema initialization) or construct a typed
+`PriorRunExpectation`:
+
+```python
+from consist import PriorRunExpectation, check_prior_run_expectation
+
+expectation = PriorRunExpectation(
+    expected_run_id="upstream-beam-run",
+    artifact_key="transit_skims",
+    expected_direction="output",
+    source_tracker_db="beam/provenance.duckdb",
+)
+
+report = check_prior_run_expectation(
+    execution_path="inputs/transit_skims.omx",
+    expectation=expectation,
+)
+```
+
+For runtime-resolved paths, combine `AdmissionReference` with
+`check_admission_reference_prior_run_expectation(...)`.
 
 ## Runtime-resolved inputs
 
@@ -87,12 +114,14 @@ execution, configuration, and consumer-path evidence as the prior-run wrapper.
 
 ## Report schema compatibility
 
-New reports use schema version 3. It retains `consumer_path` from v2 and adds
-the declared-digest shape: nullable `artifact_key` and `expected_run_id`, plus
-optional `expected_source_label` and `expected_source_uri`. Sidecars retain
-their own `report_schema_version`; readers may still parse historical v1/v2
-reports and should treat fields absent from those versions as unavailable.
-Consist does not rewrite existing sidecars.
+New reports use schema version 3. It retains `consumer_path` from v2, adds the
+declared-digest shape (nullable `artifact_key` and `expected_run_id`, plus
+optional `expected_source_label` and `expected_source_uri`), and records
+`expected_direction` and optional `source_tracker_db` on prior-run reports.
+Sidecars retain their own `report_schema_version`; historical v1/v2 prior-run
+reports default `expected_direction` to `"input"`, and readers should treat
+other fields absent from older versions as unavailable. Consist does not
+rewrite existing sidecars.
 
 ## Public API
 
@@ -102,7 +131,19 @@ Consist does not rewrite existing sidecars.
       show_root_heading: true
       show_root_toc_entry: true
 
+::: consist.core.admission.PriorRunExpectation
+    options:
+      show_source: false
+      show_root_heading: true
+      show_root_toc_entry: true
+
 ::: consist.core.admission.check_artifact_identity
+    options:
+      show_source: false
+      show_root_heading: true
+      show_root_toc_entry: true
+
+::: consist.core.admission.check_prior_run_expectation
     options:
       show_source: false
       show_root_heading: true
@@ -115,6 +156,12 @@ Consist does not rewrite existing sidecars.
       show_root_toc_entry: true
 
 ::: consist.core.admission.check_admission_reference
+    options:
+      show_source: false
+      show_root_heading: true
+      show_root_toc_entry: true
+
+::: consist.core.admission.check_admission_reference_prior_run_expectation
     options:
       show_source: false
       show_root_heading: true

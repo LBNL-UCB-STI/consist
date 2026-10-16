@@ -849,6 +849,7 @@ def test_same_key_output_link_does_not_make_a_single_input_ambiguous(
         expected_run_id="completed-run",
         artifact_key="raw_gtfs",
         input_role="gtfs_feed",
+        expected_direction="input",
     )
 
     assert report.outcome == "verified"
@@ -992,7 +993,7 @@ def test_non_regular_or_missing_candidate_is_file_unreadable(
     [
         ("missing_run", "run"),
         ("non_completed", "completed"),
-        ("missing_input", "input"),
+        ("missing_input", "absent"),
         ("ambiguous_input", "ambiguous"),
     ],
 )

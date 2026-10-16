@@ -17,11 +17,12 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 from sqlmodel import col, select
 
+from consist.core.persistence import DatabaseManager
 from consist.models.artifact import Artifact
 from consist.models.run import Run, RunArtifactLink
 
@@ -79,6 +80,66 @@ class DeclaredDigestExpectation(BaseModel):
         if value is not None and not value:
             raise ValueError("declared digest source metadata must not be empty")
         return value
+
+
+class PriorRunExpectation(BaseModel):
+    """
+    Caller expectation for an artifact produced or consumed by a prior run.
+
+    Supports validating candidates against inputs or outputs of prior runs,
+    stored in the current tracker's provenance database or an external
+    provenance database (``source_tracker_db``).
+
+    Attributes
+    ----------
+    expected_run_id : str
+        Explicit run ID that must identify a completed run.
+    artifact_key : str
+        Exact artifact key that must identify the artifact link.
+    expected_direction : {"input", "output", "any"}, default "any"
+        Direction of the artifact link on the prior run.
+    source_tracker_db : str or pathlib.Path or None, optional
+        Path to an external DuckDB provenance database. If None, the current
+        tracker's provenance database is queried.
+    expected_bytes_path : str or pathlib.Path or None, optional
+        Distinct immutable expected-byte fallback for a historical artifact
+        whose stored hash lacks explicit full-file semantics.
+    input_role : str or None, optional
+        Logical role to record in the report. Defaults to ``artifact_key``.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    expected_run_id: str
+    artifact_key: str
+    expected_direction: Literal["input", "output", "any"] = "any"
+    source_tracker_db: str | Path | None = None
+    expected_bytes_path: str | Path | None = None
+    input_role: str | None = None
+
+    @field_validator("expected_run_id", "artifact_key")
+    @classmethod
+    def _validate_non_empty(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError("expected_run_id and artifact_key must not be empty")
+        return value
+
+    @field_validator("input_role")
+    @classmethod
+    def _validate_input_role(cls, value: str | None) -> str | None:
+        if value is not None and (not value or not value.strip()):
+            raise ValueError("input_role must not be empty or blank")
+        return value
+
+    @property
+    def run_id(self) -> str:
+        """Alias for expected_run_id."""
+        return self.expected_run_id
+
+    @property
+    def direction(self) -> Literal["input", "output", "any"]:
+        """Alias for expected_direction."""
+        return self.expected_direction
 
 
 class AdmissionReference(BaseModel):
@@ -210,6 +271,10 @@ class AdmissionReport(BaseModel):
         a generally valid action.
     reason : str or None
         Human-readable explanation for the outcome.
+    expected_direction : {"input", "output", "any"} or None, optional
+        Expected artifact direction when resolved against a prior run.
+    source_tracker_db : str or None, optional
+        External DuckDB provenance database path supplying the expected run.
 
     Notes
     -----
@@ -244,6 +309,18 @@ class AdmissionReport(BaseModel):
     observations: tuple[str, ...] = ()
     recommended_action: str | None = None
     reason: str | None = None
+    expected_direction: Literal["input", "output", "any"] | None = None
+    source_tracker_db: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_prior_run_direction(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if data.get("expected_source", "prior_run") == "prior_run":
+                if data.get("expected_direction") is None:
+                    data = dict(data)
+                    data["expected_direction"] = "any"
+        return data
 
     @model_validator(mode="after")
     def _validate_expected_source_fields(self) -> "AdmissionReport":
@@ -252,10 +329,22 @@ class AdmissionReport(BaseModel):
                 raise ValueError(
                     "prior-run admission reports require artifact_key and expected_run_id"
                 )
-        elif self.artifact_key is not None or self.expected_run_id is not None:
-            raise ValueError(
-                "declared-digest admission reports must not contain a prior-run artifact key or run id"
-            )
+            if self.expected_direction not in ("input", "output", "any"):
+                raise ValueError(
+                    "prior-run admission reports require expected_direction to be 'input', 'output', or 'any'"
+                )
+        elif self.expected_source == "declared_digest":
+            if self.artifact_key is not None or self.expected_run_id is not None:
+                raise ValueError(
+                    "declared-digest admission reports must not contain a prior-run artifact key or run id"
+                )
+            if (
+                self.expected_direction is not None
+                or self.source_tracker_db is not None
+            ):
+                raise ValueError(
+                    "declared-digest admission reports must not contain expected_direction or source_tracker_db"
+                )
         return self
 
     def canonical_json(self) -> str:
@@ -272,8 +361,12 @@ class AdmissionReport(BaseModel):
         The returned string has no trailing newline or ephemeral timestamp.
         Identical report values therefore produce identical serialized text.
         """
+        payload = self.model_dump(mode="json")
+        if self.expected_source == "declared_digest":
+            payload.pop("expected_direction", None)
+            payload.pop("source_tracker_db", None)
         return json.dumps(
-            self.model_dump(mode="json"),
+            payload,
             ensure_ascii=False,
             separators=(",", ":"),
             sort_keys=True,
@@ -430,14 +523,21 @@ def _known_admission_identity(artifact: Artifact) -> str | None:
     -------
     str or None
         ``sha256:file:<hex>`` when the artifact records Consist-computed raw
-        regular-file SHA-256 semantics, otherwise ``None``.
+        regular-file SHA-256 semantics or explicit admission identity,
+        otherwise ``None``.
 
     Notes
     -----
     Admission intentionally rejects cache fingerprints, directory hashes, and
     caller-supplied hashes even when they happen to be hexadecimal SHA-256 text.
     """
-    semantics = artifact.meta.get("hash_semantics") if artifact.meta else None
+    meta = artifact.meta if isinstance(artifact.meta, Mapping) else None
+    if meta and isinstance(meta.get("admission_file_identity"), str):
+        explicit_identity = meta["admission_file_identity"]
+        if _FILE_IDENTITY.fullmatch(explicit_identity):
+            return explicit_identity
+
+    semantics = meta.get("hash_semantics") if meta else None
     if not isinstance(semantics, Mapping):
         return None
     if dict(semantics) != {
@@ -471,6 +571,8 @@ def _report(
     recommended_action: str | None = None,
     reason: str | None = None,
     expected_source: ExpectedIdentitySource = "prior_run",
+    expected_direction: Literal["input", "output", "any"] | None = None,
+    source_tracker_db: str | None = None,
 ) -> AdmissionReport:
     """
     Construct one policy-neutral admission report from normalized evidence.
@@ -490,12 +592,16 @@ def _report(
     expected_artifact_id, observed_artifact_id, expected_bytes_source,
     expected_bytes_path, recommended_action, reason
         Optional expected, observed, fallback, and human-facing evidence fields.
+    expected_direction, source_tracker_db
+        Direction filter and external provenance database path when applicable.
 
     Returns
     -------
     AdmissionReport
         Frozen schema-v3 report ready for caller policy handling or serialization.
     """
+    if expected_source == "prior_run" and expected_direction is None:
+        expected_direction = "any"
     return AdmissionReport(
         outcome=outcome,
         input_role=input_role,
@@ -513,6 +619,8 @@ def _report(
         observations=observations,
         recommended_action=recommended_action,
         reason=reason,
+        expected_direction=expected_direction,
+        source_tracker_db=source_tracker_db,
     )
 
 
@@ -580,6 +688,8 @@ def _report_candidate_failure(
     expected_source_uri: str | None = None,
     expected_bytes_source: Literal["explicit_immutable_path"] | None = None,
     expected_bytes_path: str | None = None,
+    expected_direction: Literal["input", "output", "any"] | None = None,
+    source_tracker_db: str | None = None,
 ) -> AdmissionReport:
     """Render a candidate read failure without claiming an observed identity."""
     assert observation.outcome is not None
@@ -601,6 +711,8 @@ def _report_candidate_failure(
         observations=observation.observations,
         recommended_action=observation.recommended_action,
         reason=observation.reason,
+        expected_direction=expected_direction,
+        source_tracker_db=source_tracker_db,
     )
 
 
@@ -616,6 +728,8 @@ def _compare_observed_identity(
     expected_source_uri: str | None = None,
     expected_bytes_source: Literal["explicit_immutable_path"] | None = None,
     expected_bytes_path: str | None = None,
+    expected_direction: Literal["input", "output", "any"] | None = None,
+    source_tracker_db: str | None = None,
 ) -> AdmissionReport:
     """Compare one already-read candidate identity with an expected identity."""
     observed_identity = observation.observed_identity
@@ -647,6 +761,8 @@ def _compare_observed_identity(
                 else "Resolved file does not match the declared digest."
             )
         ),
+        expected_direction=expected_direction,
+        source_tracker_db=source_tracker_db,
     )
 
 
@@ -662,6 +778,8 @@ def compare_path_to_identity(
     expected_source_uri: str | None = None,
     expected_bytes_source: Literal["explicit_immutable_path"] | None = None,
     expected_bytes_path: str | None = None,
+    expected_direction: Literal["input", "output", "any"] | None = None,
+    source_tracker_db: str | None = None,
 ) -> AdmissionReport:
     """Compare one readable regular file with a typed expected raw-file identity.
 
@@ -683,6 +801,8 @@ def compare_path_to_identity(
             expected_source_uri=expected_source_uri,
             expected_bytes_source=expected_bytes_source,
             expected_bytes_path=expected_bytes_path,
+            expected_direction=expected_direction,
+            source_tracker_db=source_tracker_db,
         )
     return _compare_observed_identity(
         observation,
@@ -695,45 +815,45 @@ def compare_path_to_identity(
         expected_source_uri=expected_source_uri,
         expected_bytes_source=expected_bytes_source,
         expected_bytes_path=expected_bytes_path,
+        expected_direction=expected_direction,
+        source_tracker_db=source_tracker_db,
     )
 
 
-def _expected_input_artifact(
-    tracker: "Tracker", *, expected_run_id: str, artifact_key: str
+def _expected_artifact(
+    database: DatabaseManager,
+    *,
+    expected_run_id: str,
+    artifact_key: str,
+    expected_direction: Literal["input", "output", "any"] = "any",
 ) -> tuple[Artifact | None, str | None]:
     """
-    Resolve one exact expected input without key-collapsing history helpers.
+    Resolve one exact expected artifact without key-collapsing history helpers.
 
     Parameters
     ----------
-    tracker : Tracker
-        Tracker whose provenance database stores the expected run.
+    database : DatabaseManager
+        Provenance database storing the expected run.
     expected_run_id : str
         Explicit run ID that must identify a completed run.
     artifact_key : str
-        Exact key that must select one ``direction="input"`` artifact link.
+        Exact key that must select one artifact link.
+    expected_direction : {"input", "output", "any"}, default "any"
+        Direction filter for the artifact link on the prior run.
 
     Returns
     -------
     tuple[Artifact or None, str or None]
-        The uniquely selected input artifact and no error code, or ``None`` and
+        The uniquely selected artifact and no error code, or ``None`` and
         a stable observation code describing an absent, non-completed, or
         ambiguous expectation.
-
-    Raises
-    ------
-    RuntimeError
-        If the tracker has no provenance database.
 
     Notes
     -----
     This helper deliberately does not use convenience lookups that collapse
     duplicate keys across history. Admission must retain ambiguity rather than
-    selecting an arbitrary prior input.
+    selecting an arbitrary prior artifact.
     """
-    database = tracker.db
-    if database is None:
-        raise RuntimeError("Artifact admission requires a provenance database.")
     with database.session_scope() as session:
         run = session.get(Run, expected_run_id)
         if run is None:
@@ -747,15 +867,27 @@ def _expected_input_artifact(
                 Artifact.id == RunArtifactLink.artifact_id,  # ty: ignore[invalid-argument-type]
             )
             .where(RunArtifactLink.run_id == expected_run_id)
-            .where(RunArtifactLink.direction == "input")
             .where(Artifact.key == artifact_key)
-            .order_by(col(Artifact.id))
         )
+        if expected_direction in ("input", "output"):
+            statement = statement.where(RunArtifactLink.direction == expected_direction)
+        statement = statement.order_by(col(Artifact.id))
         matches = list(session.exec(statement).all())
+
     if not matches:
-        return None, "expected_input_role_absent"
+        if expected_direction == "output":
+            return None, "expected_output_role_absent"
+        if expected_direction == "input":
+            return None, "expected_input_role_absent"
+        return None, "expected_role_absent"
+
     if len(matches) != 1:
-        return None, "expected_input_role_ambiguous"
+        if expected_direction == "output":
+            return None, "expected_output_role_ambiguous"
+        if expected_direction == "input":
+            return None, "expected_input_role_ambiguous"
+        return None, "expected_role_ambiguous"
+
     return matches[0], None
 
 
@@ -791,30 +923,31 @@ def _paths_are_same(candidate: Path, expected: Path) -> bool:
 
 
 def check_artifact_identity(
-    tracker: "Tracker",
+    tracker: "Tracker" | None = None,
     *,
     execution_path: str | Path,
     expected_run_id: str,
     artifact_key: str,
     expected_bytes_path: str | Path | None = None,
     input_role: str | None = None,
+    expected_direction: Literal["input", "output", "any"] = "any",
+    source_tracker_db: str | Path | None = None,
 ) -> AdmissionReport:
     """
-    Compare a resolved file with one input from an explicit completed run.
+    Compare a resolved file with one artifact from an explicit completed run.
 
     Parameters
     ----------
-    tracker : Tracker
-        Tracker whose provenance database contains the expected run and input
-        artifact.
+    tracker : Tracker or None, optional
+        Tracker whose provenance database contains the expected run and artifact,
+        unless ``source_tracker_db`` is specified.
     execution_path : str or pathlib.Path
         Resolved regular file that the receiving workflow intends to consume.
     expected_run_id : str
-        Exact completed run ID supplying the expected input identity. Consist
+        Exact completed run ID supplying the expected identity. Consist
         does not select or infer a baseline run automatically.
     artifact_key : str
-        Exact artifact key that must identify one ``direction="input"`` link on
-        the expected run.
+        Exact artifact key that must identify one link on the expected run.
     expected_bytes_path : str or pathlib.Path or None, optional
         Distinct immutable copy of the historical bytes used only when the
         stored artifact hash lacks explicit full-file semantics. Its full-file
@@ -823,6 +956,11 @@ def check_artifact_identity(
     input_role : str or None, optional
         Stronger logical role to record in the report. Defaults to
         ``artifact_key`` and does not alter expected-artifact lookup.
+    expected_direction : {"input", "output", "any"}, default "any"
+        Direction filter for the artifact link on the prior run. Defaults to
+        "any" to admit both inputs and outputs of prior runs.
+    source_tracker_db : str or pathlib.Path or None, optional
+        External DuckDB provenance database path supplying the expected run.
 
     Returns
     -------
@@ -833,7 +971,8 @@ def check_artifact_identity(
     Raises
     ------
     RuntimeError
-        If ``tracker`` has no configured provenance database.
+        If neither ``source_tracker_db`` nor ``tracker`` has a configured
+        provenance database.
 
     Notes
     -----
@@ -856,7 +995,31 @@ def check_artifact_identity(
         if report.outcome != "verified":
             raise RuntimeError(report.canonical_json())
     """
+    if source_tracker_db is None and (tracker is None or tracker.db is None):
+        raise RuntimeError("Artifact admission requires a provenance database.")
+
     role = input_role or artifact_key
+    source_db_str: str | None = None
+    if source_tracker_db is not None:
+        source_db_file = Path(source_tracker_db).expanduser()
+        source_db_str = _resolved_path(source_db_file) or str(source_db_file)
+        if not source_db_file.is_file():
+            candidate = Path(execution_path).expanduser()
+            return _report(
+                outcome="unverified",
+                execution_path=candidate,
+                physical_target_path=_resolved_path(candidate),
+                expected_run_id=expected_run_id,
+                artifact_key=artifact_key,
+                input_role=role,
+                observations=("source_tracker_db_unreadable",),
+                reason=(
+                    f"Source tracker database does not exist or is not a readable regular file: {source_tracker_db}"
+                ),
+                expected_direction=expected_direction,
+                source_tracker_db=source_db_str,
+            )
+
     observation = _observe_candidate(execution_path)
     candidate = observation.execution_path
     physical_target_path = observation.physical_target_path
@@ -867,12 +1030,67 @@ def check_artifact_identity(
             expected_run_id=expected_run_id,
             artifact_key=artifact_key,
             input_role=role,
+            expected_direction=expected_direction,
+            source_tracker_db=source_db_str,
         )
     observed_identity = observation.observed_identity
 
-    artifact, expected_error = _expected_input_artifact(
-        tracker, expected_run_id=expected_run_id, artifact_key=artifact_key
-    )
+    owns_db = False
+    db: DatabaseManager | None = None
+    if source_tracker_db is not None:
+        try:
+            db = DatabaseManager(
+                str(source_db_file),
+                skip_schema_init=True,
+                read_only=True,
+            )
+            owns_db = True
+        except Exception as exc:
+            return _report(
+                outcome="unverified",
+                execution_path=candidate,
+                physical_target_path=physical_target_path,
+                expected_run_id=expected_run_id,
+                artifact_key=artifact_key,
+                input_role=role,
+                observed_artifact_id=str(observed_identity),
+                observations=("source_tracker_db_unreadable",),
+                reason=f"Failed to open source tracker database '{source_tracker_db}': {exc}",
+                expected_direction=expected_direction,
+                source_tracker_db=source_db_str,
+            )
+    else:
+        assert tracker is not None and tracker.db is not None
+        db = tracker.db
+
+    try:
+        try:
+            artifact, expected_error = _expected_artifact(
+                db,
+                expected_run_id=expected_run_id,
+                artifact_key=artifact_key,
+                expected_direction=expected_direction,
+            )
+        except Exception as exc:
+            if owns_db:
+                return _report(
+                    outcome="unverified",
+                    execution_path=candidate,
+                    physical_target_path=physical_target_path,
+                    expected_run_id=expected_run_id,
+                    artifact_key=artifact_key,
+                    input_role=role,
+                    observed_artifact_id=str(observed_identity),
+                    observations=("source_tracker_db_unreadable",),
+                    reason=f"Failed to read source tracker database '{source_tracker_db}': {exc}",
+                    expected_direction=expected_direction,
+                    source_tracker_db=source_db_str,
+                )
+            raise
+    finally:
+        if owns_db and db is not None:
+            db.engine.dispose()
+
     if expected_error is not None:
         return _report(
             outcome="unverified",
@@ -883,6 +1101,8 @@ def check_artifact_identity(
             input_role=role,
             observed_artifact_id=str(observed_identity),
             observations=(expected_error,),
+            expected_direction=expected_direction,
+            source_tracker_db=source_db_str,
         )
     assert artifact is not None
 
@@ -909,6 +1129,8 @@ def check_artifact_identity(
                     "expected_bytes_not_distinct",
                 ),
                 reason="Expected bytes must be a distinct readable regular file.",
+                expected_direction=expected_direction,
+                source_tracker_db=source_db_str,
             )
         try:
             if _is_git_lfs_pointer(expected_path):
@@ -924,6 +1146,8 @@ def check_artifact_identity(
                     expected_bytes_path=expected_audit_path,
                     observations=("looks_like_git_lfs_pointer",),
                     recommended_action="Run git lfs pull to materialize the expected bytes.",
+                    expected_direction=expected_direction,
+                    source_tracker_db=source_db_str,
                 )
             expected_identity = admission_file_identity(expected_path)
         except OSError as exc:
@@ -939,6 +1163,8 @@ def check_artifact_identity(
                 expected_bytes_path=expected_audit_path,
                 observations=("expected_artifact_unverifiable",),
                 reason=str(exc),
+                expected_direction=expected_direction,
+                source_tracker_db=source_db_str,
             )
         stored_hash = artifact.hash
         if (
@@ -963,6 +1189,8 @@ def check_artifact_identity(
                 reason=(
                     "Expected bytes did not corroborate the historical artifact hash."
                 ),
+                expected_direction=expected_direction,
+                source_tracker_db=source_db_str,
             )
 
     if expected_identity is None:
@@ -975,6 +1203,8 @@ def check_artifact_identity(
             input_role=role,
             observed_artifact_id=str(observed_identity),
             observations=("expected_artifact_unverifiable",),
+            expected_direction=expected_direction,
+            source_tracker_db=source_db_str,
         )
 
     return _compare_observed_identity(
@@ -986,61 +1216,15 @@ def check_artifact_identity(
         input_role=role,
         expected_bytes_source=expected_source,
         expected_bytes_path=expected_audit_path,
+        expected_direction=expected_direction,
+        source_tracker_db=source_db_str,
     )
 
 
-def check_admission_reference(
-    tracker: "Tracker",
-    *,
-    reference: AdmissionReference,
-    expected_run_id: str,
-    expected_bytes_path: str | Path | None = None,
+def _attach_reference_context(
+    report: AdmissionReport, reference: AdmissionReference
 ) -> AdmissionReport:
-    """
-    Check a runtime-resolved input without recreating consumer path logic.
-
-    The byte comparison delegates to :func:`check_artifact_identity`; this
-    wrapper only attaches caller-proven runtime path evidence to its report.
-
-    Parameters
-    ----------
-    tracker : Tracker
-        Tracker whose provenance database contains the expected prior run.
-    reference : AdmissionReference
-        Frozen runtime context containing the host execution path and optional
-        configuration and consumer-path evidence.
-    expected_run_id : str
-        Explicit completed run that supplies the expected input identity.
-    expected_bytes_path : str or pathlib.Path, optional
-        Distinct immutable expected-byte fallback for a historical artifact
-        whose stored hash lacks explicit full-file semantics.
-
-    Returns
-    -------
-    AdmissionReport
-        The base identity report enriched with validated reference context.
-
-    Raises
-    ------
-    RuntimeError
-        If the tracker has no configured provenance database.
-
-    Notes
-    -----
-    ``physical_target_path`` remains derived by the underlying checker from
-    ``reference.execution_path``. This API records a final consumer path but
-    intentionally does not infer or validate host/container mapping itself.
-    """
-    if reference.artifact_key is None:
-        raise ValueError("prior-run admission references require artifact_key")
-    report = check_artifact_identity(
-        tracker,
-        execution_path=reference.execution_path,
-        expected_run_id=expected_run_id,
-        artifact_key=reference.artifact_key,
-        expected_bytes_path=expected_bytes_path,
-        input_role=reference.input_role,
-    )
+    """Attach configuration and consumer path runtime context from an AdmissionReference."""
     return AdmissionReport.model_validate(
         {
             **report.model_dump(),
@@ -1057,6 +1241,72 @@ def check_admission_reference(
             "consumer_path": reference.consumer_path,
         }
     )
+
+
+def check_admission_reference(
+    tracker: "Tracker" | None = None,
+    *,
+    reference: AdmissionReference,
+    expected_run_id: str,
+    expected_bytes_path: str | Path | None = None,
+    expected_direction: Literal["input", "output", "any"] = "any",
+    source_tracker_db: str | Path | None = None,
+) -> AdmissionReport:
+    """
+    Check a runtime-resolved input without recreating consumer path logic.
+
+    The byte comparison delegates to :func:`check_artifact_identity`; this
+    wrapper only attaches caller-proven runtime path evidence to its report.
+
+    Parameters
+    ----------
+    tracker : Tracker or None, optional
+        Tracker whose provenance database contains the expected prior run.
+    reference : AdmissionReference
+        Frozen runtime context containing the host execution path and optional
+        configuration and consumer-path evidence.
+    expected_run_id : str
+        Explicit completed run that supplies the expected input identity.
+    expected_bytes_path : str or pathlib.Path, optional
+        Distinct immutable expected-byte fallback for a historical artifact
+        whose stored hash lacks explicit full-file semantics.
+    expected_direction : {"input", "output", "any"}, default "any"
+        Direction filter for the artifact link on the prior run. Defaults to
+        "any" to admit both inputs and outputs of prior runs.
+    source_tracker_db : str or pathlib.Path or None, optional
+        External DuckDB provenance database path supplying the expected run.
+
+    Returns
+    -------
+    AdmissionReport
+        The base identity report enriched with validated reference context.
+
+    Raises
+    ------
+    ValueError
+        If ``reference.artifact_key`` is None.
+    RuntimeError
+        If neither ``source_tracker_db`` nor ``tracker`` has a provenance database.
+
+    Notes
+    -----
+    ``physical_target_path`` remains derived by the underlying checker from
+    ``reference.execution_path``. This API records a final consumer path but
+    intentionally does not infer or validate host/container mapping itself.
+    """
+    if reference.artifact_key is None:
+        raise ValueError("prior-run admission references require artifact_key")
+    report = check_artifact_identity(
+        tracker,
+        execution_path=reference.execution_path,
+        expected_run_id=expected_run_id,
+        artifact_key=reference.artifact_key,
+        expected_bytes_path=expected_bytes_path,
+        input_role=reference.input_role,
+        expected_direction=expected_direction,
+        source_tracker_db=source_tracker_db,
+    )
+    return _attach_reference_context(report, reference)
 
 
 def check_expected_identity(
@@ -1104,19 +1354,107 @@ def check_admission_reference_expected_identity(
         input_role=reference.input_role,
         expectation=expectation,
     )
-    return AdmissionReport.model_validate(
-        {
-            **report.model_dump(),
-            "config_key": reference.config_key,
-            "config_reference_key": reference.config_reference_key,
-            "feed_key": reference.feed_key,
-            "raw_config_value": reference.raw_config_value,
-            "canonical_value": reference.canonical_value,
-            "configured_path": (
-                str(reference.configured_path)
-                if reference.configured_path is not None
-                else None
-            ),
-            "consumer_path": reference.consumer_path,
-        }
+    return _attach_reference_context(report, reference)
+
+
+def check_prior_run_expectation(
+    tracker: "Tracker" | None = None,
+    *,
+    execution_path: str | Path,
+    expectation: PriorRunExpectation,
+    input_role: str | None = None,
+) -> AdmissionReport:
+    """
+    Compare a resolved file with a prior run expectation.
+
+    Parameters
+    ----------
+    tracker : Tracker or None, optional
+        Tracker whose provenance database contains the expected run, unless
+        ``expectation.source_tracker_db`` is specified.
+    execution_path : str or pathlib.Path
+        Resolved regular file that the receiving workflow intends to consume.
+    expectation : PriorRunExpectation
+        Expected prior run parameters (run_id, artifact_key, direction, db, bytes).
+    input_role : str or None, optional
+        Logical role to record in the report. Overrides ``expectation.input_role``.
+
+    Returns
+    -------
+    AdmissionReport
+        Versioned report containing the outcome, expected and observed
+        identities, audit paths, and supporting observations.
+    """
+    role = input_role if input_role is not None else expectation.input_role
+    return check_artifact_identity(
+        tracker,
+        execution_path=execution_path,
+        expected_run_id=expectation.expected_run_id,
+        artifact_key=expectation.artifact_key,
+        expected_bytes_path=expectation.expected_bytes_path,
+        input_role=role,
+        expected_direction=expectation.expected_direction,
+        source_tracker_db=expectation.source_tracker_db,
     )
+
+
+def check_admission_reference_prior_run_expectation(
+    tracker: "Tracker" | None = None,
+    *,
+    reference: AdmissionReference,
+    expectation: PriorRunExpectation,
+) -> AdmissionReport:
+    """
+    Check a runtime-resolved input reference against a prior run expectation.
+
+    Parameters
+    ----------
+    tracker : Tracker or None, optional
+        Tracker whose provenance database contains the expected run, unless
+        ``expectation.source_tracker_db`` is specified.
+    reference : AdmissionReference
+        Caller runtime context containing execution path and optional config details.
+    expectation : PriorRunExpectation
+        Expected prior run parameters.
+
+    Returns
+    -------
+    AdmissionReport
+        Enriched admission report with caller runtime context.
+
+    Raises
+    ------
+    ValueError
+        If ``reference.artifact_key`` is present and does not match
+        ``expectation.artifact_key``.
+    """
+    if (
+        reference.artifact_key is not None
+        and reference.artifact_key != expectation.artifact_key
+    ):
+        raise ValueError(
+            f"Admission reference artifact_key '{reference.artifact_key}' "
+            f"does not match expectation artifact_key '{expectation.artifact_key}'"
+        )
+    artifact_key = (
+        reference.artifact_key
+        if reference.artifact_key is not None
+        else expectation.artifact_key
+    )
+    input_role = (
+        reference.input_role
+        if reference.input_role is not None
+        else expectation.input_role
+    )
+
+    report = check_artifact_identity(
+        tracker,
+        execution_path=reference.execution_path,
+        expected_run_id=expectation.expected_run_id,
+        artifact_key=artifact_key,
+        expected_bytes_path=expectation.expected_bytes_path,
+        input_role=input_role,
+        expected_direction=expectation.expected_direction,
+        source_tracker_db=expectation.source_tracker_db,
+    )
+    return _attach_reference_context(report, reference)

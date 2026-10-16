@@ -39,9 +39,10 @@ implementation work inside Consist itself.
   `consist.refs(...)`, and `BindingResult` as the default path.
 - Existing workflow with cache misses, stale outputs, missing files, or weird
   scenario behavior: start with the debugging reference.
-- Prior-run input conformance, requested-output hydration failures, or exact
-  historical recovery problems: start with the debugging reference and use the
-  public admission and recovery APIs before reading source.
+- Prior-run or cross-tracker artifact admission, requested-output hydration
+  failures, or exact historical recovery problems: start with the debugging
+  reference and use the public admission and recovery APIs before reading
+  source.
 - Run inspection, baseline vs policy comparison, or SQL analysis: start with
   the analysis reference.
 - Multi-file logical outputs: use `OutputSet` guidance in the instrumentation
