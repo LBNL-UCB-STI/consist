@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -225,8 +226,11 @@ def test_cli_exec_missing_declared_output_fails(tmp_path: Path):
 
     res = runner.invoke(app, cmd)
     assert res.exit_code == 1
-    expected_msg = f"Declared output 'target' at '{missing_out}' was not created."
-    assert expected_msg in res.stdout
+    assert "FAILED" in res.stdout
+    cleaned = re.sub(r"\s*│\s*", "", res.stdout)
+    assert "Declared output 'target'" in cleaned
+    assert missing_out.name in cleaned
+    assert "was not created" in cleaned
 
 
 def test_cli_exec_upward_discovery(tmp_path: Path, monkeypatch):
@@ -302,3 +306,78 @@ def test_cli_exec_accept_suggested(tmp_path: Path):
     assert len(data["inputs"]) >= 1
     input_paths = [inp["path"] for inp in data["inputs"].values()]
     assert str(in_file.resolve()) in input_paths
+
+
+def test_cli_exec_shell_compound_command(tmp_path: Path):
+    init_res = runner.invoke(app, ["init", "--path", str(tmp_path)])
+    assert init_res.exit_code == 0
+
+    out_file = tmp_path / "piped.txt"
+    cmd = [
+        "exec",
+        "--db-path",
+        str(tmp_path / ".consist" / "provenance.duckdb"),
+        "--run-dir",
+        str(tmp_path / "runs"),
+        "--shell",
+        "-o",
+        f"piped={out_file}",
+        "--",
+        f"{sys.executable} -c \"print('piped output')\" > {out_file}",
+    ]
+    res = runner.invoke(app, cmd)
+    assert res.exit_code == 0
+    assert "COMPLETED" in res.stdout
+    assert out_file.read_text().strip() == "piped output"
+
+
+def test_cli_exec_keyboard_interrupt(tmp_path: Path, monkeypatch):
+    init_res = runner.invoke(app, ["init", "--path", str(tmp_path)])
+    assert init_res.exit_code == 0
+
+    from consist.core.tracker import Tracker
+
+    def raise_interrupt(*args, **kwargs):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(Tracker, "exec", raise_interrupt)
+
+    cmd = [
+        "exec",
+        "--db-path",
+        str(tmp_path / ".consist" / "provenance.duckdb"),
+        "--run-dir",
+        str(tmp_path / "runs"),
+        "--",
+        sys.executable,
+        "-c",
+        "pass",
+    ]
+    res = runner.invoke(app, cmd)
+    assert res.exit_code == 130
+
+
+def test_cli_exec_quiet_error_to_stderr(tmp_path: Path):
+    init_res = runner.invoke(app, ["init", "--path", str(tmp_path)])
+    assert init_res.exit_code == 0
+
+    missing_out = tmp_path / "not_created.txt"
+    cmd = [
+        "exec",
+        "--db-path",
+        str(tmp_path / ".consist" / "provenance.duckdb"),
+        "--run-dir",
+        str(tmp_path / "runs"),
+        "--quiet",
+        "-o",
+        f"target={missing_out}",
+        "--",
+        sys.executable,
+        "-c",
+        "pass",
+    ]
+    res = runner.invoke(app, cmd)
+    assert res.exit_code == 1
+    assert "Consist Exec Summary" not in res.stdout
+    assert "Error:" in res.stderr
+    assert "not_created.txt" in res.stderr

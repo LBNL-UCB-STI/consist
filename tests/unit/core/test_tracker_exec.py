@@ -445,3 +445,63 @@ def test_tracker_exec_outputs_dir_relative_to_cwd(tracker: Tracker, tmp_path: Pa
     assert res.is_success
     assert "out.txt" in res.outputs
     assert (sub_cwd / "results" / "out.txt").is_file()
+
+
+def test_tracker_exec_empty_argv_raises(tracker: Tracker):
+    with pytest.raises(ValueError, match="argv must not be empty"):
+        tracker.exec(name="test_empty", argv=[])
+
+
+def test_tracker_exec_missing_declared_output_meta(tracker: Tracker, tmp_path: Path):
+    missing_file = tmp_path / "never_created.txt"
+    res = tracker.exec(
+        name="test_missing_out_meta",
+        argv=[sys.executable, "-c", "pass"],
+        outputs={"missing": missing_file},
+        stream_output=False,
+        check=False,
+    )
+    assert not res.is_success
+    assert res.exit_code == 1
+    assert res.run is not None
+    assert res.run.status == "failed"
+    assert res.run.meta["command"]["process_exit_code"] == 0
+    assert res.run.meta["command"]["exit_code"] == 1
+
+
+def test_tracker_exec_bounded_memory_streaming(tracker: Tracker, tmp_path: Path):
+    py_cmd = [
+        sys.executable,
+        "-c",
+        "print('A' * 1000)",
+    ]
+    res = tracker.exec(
+        name="test_bounded_stream",
+        argv=py_cmd,
+        max_memory_stream_bytes=64,
+        stream_output=False,
+    )
+    assert res.is_success
+    assert len(res.stdout.encode("utf-8")) <= 64
+    assert res.stdout_path is not None
+    disk_content = res.stdout_path.read_text().strip()
+    assert len(disk_content) == 1000
+    assert disk_content == "A" * 1000
+
+
+def test_tracker_exec_shell_argument_string_and_suggested_inputs(
+    tracker: Tracker, tmp_path: Path
+):
+    out_file = tmp_path / "shell_out.txt"
+    cmd_str = f"{sys.executable} -c \"print('shell execution')\" > {out_file}"
+    res = tracker.exec(
+        name="test_shell_str",
+        argv=cmd_str,
+        shell=True,
+        outputs={"out": out_file},
+        stream_output=False,
+    )
+    assert res.is_success
+    assert out_file.read_text().strip() == "shell execution"
+    assert res.run is not None
+    assert res.run.meta["command"]["argv"] == [cmd_str]

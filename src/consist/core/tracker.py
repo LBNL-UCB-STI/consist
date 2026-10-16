@@ -1812,6 +1812,7 @@ class Tracker:
         compare_baseline: bool = True,
         check: bool = False,
         run_id: Optional[str] = None,
+        max_memory_stream_bytes: int = 4 * 1024 * 1024,
         **kwargs: Any,
     ) -> "CommandExecutionResult":
         """
@@ -1853,6 +1854,8 @@ class Tracker:
             If True, raise CommandExecutionError on non-zero exit or missing outputs.
         run_id : Optional[str]
             Explicit run ID.
+        max_memory_stream_bytes : int
+            Maximum number of bytes to accumulate in-memory for stdout and stderr (default: 4MB).
         **kwargs : Any
             Additional keyword arguments forwarded to begin_run.
 
@@ -1881,6 +1884,7 @@ class Tracker:
             compare_baseline=compare_baseline,
             check=check,
             run_id=run_id,
+            max_memory_stream_bytes=max_memory_stream_bytes,
             **kwargs,
         )
 

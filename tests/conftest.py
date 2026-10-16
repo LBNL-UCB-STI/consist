@@ -1,15 +1,4 @@
-# ruff: noqa: E402
-import sys
 from pathlib import Path
-
-_worktree_src = str(Path(__file__).resolve().parent.parent / "src")
-if _worktree_src in sys.path:
-    sys.path.remove(_worktree_src)
-sys.path.insert(0, _worktree_src)
-for mod in list(sys.modules.keys()):
-    if mod == "consist" or mod.startswith("consist."):
-        del sys.modules[mod]
-
 from typing import Iterator
 from unittest.mock import patch
 

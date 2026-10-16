@@ -23,15 +23,9 @@ from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
-    Dict,
     Iterable,
-    List,
     Mapping,
-    Optional,
     Sequence,
-    Set,
-    Tuple,
-    Union,
 )
 
 from pydantic import ConfigDict, Field as PydanticField
@@ -46,7 +40,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_FILE_HASH_CHUNK_SIZE = 8 * 1024 * 1024
+MAX_MEMORY_STREAM_BYTES = 4 * 1024 * 1024  # 4 MB max in-memory capture per stream
 _DEFAULT_ENV_ALLOWLIST = frozenset(
     {
         "PATH",
@@ -62,33 +56,22 @@ _DEFAULT_ENV_ALLOWLIST = frozenset(
 )
 
 
-def _compute_file_sha256(path: Path) -> str:
-    """Compute SHA-256 hex digest for a file."""
-    sha256 = hashlib.sha256()
-    with path.open("rb") as f:
-        while True:
-            chunk = f.read(_FILE_HASH_CHUNK_SIZE)
-            if not chunk:
-                break
-            sha256.update(chunk)
-    return sha256.hexdigest()
-
-
 class CommandExecutionResult(RunResult):
     """
     Structured result of a command execution tracked by Consist.
     """
 
-    run: Optional[Run] = None
-    inputs: Dict[str, Artifact] = PydanticField(default_factory=dict)
+    run: Run | None = None
+    inputs: dict[str, Artifact] = PydanticField(default_factory=dict)
+    outputs: dict[str, Artifact] = PydanticField(default_factory=dict)
     exit_code: int = 0
     stdout: str = ""
     stderr: str = ""
-    stdout_path: Optional[Path] = None
-    stderr_path: Optional[Path] = None
+    stdout_path: Path | None = None
+    stderr_path: Path | None = None
     duration: float = 0.0
-    command: List[str] = PydanticField(default_factory=list)
-    plan: Optional[Dict[str, Any]] = None
+    command: list[str] = PydanticField(default_factory=list)
+    plan: dict[str, Any] | None = None
     dry_run: bool = False
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -103,7 +86,7 @@ class CommandExecutionResult(RunResult):
         )
 
     @property
-    def error(self) -> Optional[str]:
+    def error(self) -> str | None:
         """Return the error message recorded on the run, if any."""
         if self.run and self.run.meta:
             cmd_meta = self.run.meta.get("command")
@@ -126,9 +109,9 @@ class CommandExecutionError(RuntimeError):
 
 
 def compute_env_digest(
-    custom_env: Optional[Mapping[str, str]] = None,
-    allowlist: Optional[Iterable[str]] = None,
-) -> Tuple[str, Dict[str, str]]:
+    custom_env: Mapping[str, str] | None = None,
+    allowlist: Iterable[str] | None = None,
+) -> tuple[str, dict[str, str]]:
     """
     Compute a deterministic SHA-256 digest of relevant environment variables.
     """
@@ -136,7 +119,7 @@ def compute_env_digest(
     if custom_env:
         keys_to_check.update(custom_env.keys())
 
-    filtered_env: Dict[str, str] = {}
+    filtered_env: dict[str, str] = {}
     for key in sorted(keys_to_check):
         if custom_env and key in custom_env:
             filtered_env[key] = str(custom_env[key])
@@ -151,16 +134,16 @@ def compute_env_digest(
 def discover_suggested_inputs(
     argv: Sequence[str],
     base_dir: Path,
-    declared_outputs: Set[Path],
-) -> List[Tuple[str, Path]]:
+    declared_outputs: set[Path],
+) -> list[tuple[str, Path]]:
     """
     Discover regular files mentioned in argv (skipping argv[0]) that are not declared outputs.
     """
     if len(argv) <= 1:
         return []
 
-    suggested: List[Tuple[str, Path]] = []
-    seen_paths: Set[Path] = set()
+    suggested: list[tuple[str, Path]] = []
+    seen_paths: set[Path] = set()
 
     for token in argv[1:]:
         if not token or token.startswith("-") or "://" in token:
@@ -198,11 +181,11 @@ def compare_with_baseline(
     tracker: "Tracker",
     model_name: str,
     current_run_id: str,
-    current_command: List[str],
-    current_inputs: Dict[str, Artifact],
-    current_outputs: Dict[str, Artifact],
+    current_command: list[str],
+    current_inputs: dict[str, Artifact],
+    current_outputs: dict[str, Artifact],
     current_duration: float,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """
     Compare the current run against the most recent completed run of the same model name.
     """
@@ -256,8 +239,8 @@ def compare_with_baseline(
     base_inp_keys = set(baseline_artifacts.inputs.keys())
     added_inputs = sorted(curr_inp_keys - base_inp_keys)
     removed_inputs = sorted(base_inp_keys - curr_inp_keys)
-    modified_inputs: List[str] = []
-    unchanged_inputs: List[str] = []
+    modified_inputs: list[str] = []
+    unchanged_inputs: list[str] = []
     for k in sorted(curr_inp_keys.intersection(base_inp_keys)):
         if current_inputs[k].hash != baseline_artifacts.inputs[k].hash:
             modified_inputs.append(k)
@@ -268,15 +251,15 @@ def compare_with_baseline(
     base_out_keys = set(baseline_artifacts.outputs.keys())
     added_outputs = sorted(curr_out_keys - base_out_keys)
     removed_outputs = sorted(base_out_keys - curr_out_keys)
-    modified_outputs: List[str] = []
-    unchanged_outputs: List[str] = []
+    modified_outputs: list[str] = []
+    unchanged_outputs: list[str] = []
     for k in sorted(curr_out_keys.intersection(base_out_keys)):
         if current_outputs[k].hash != baseline_artifacts.outputs[k].hash:
             modified_outputs.append(k)
         else:
             unchanged_outputs.append(k)
 
-    duration_delta: Optional[float] = None
+    duration_delta: float | None = None
     if baseline_duration is not None and current_duration is not None:
         duration_delta = round(current_duration - float(baseline_duration), 3)
 
@@ -327,21 +310,22 @@ def execute_command(
     name: str,
     argv: Sequence[str] | str,
     *,
-    inputs: Optional[Mapping[str, Path | str]] = None,
-    outputs: Optional[Mapping[str, Path | str]] = None,
-    outputs_dir: Optional[Path | str] = None,
-    cwd: Optional[Path | str] = None,
-    env: Optional[Mapping[str, str]] = None,
+    inputs: Mapping[str, Path | str] | None = None,
+    outputs: Mapping[str, Path | str] | None = None,
+    outputs_dir: Path | str | None = None,
+    cwd: Path | str | None = None,
+    env: Mapping[str, str] | None = None,
     dry_run: bool = False,
     shell: bool = False,
     accept_suggested: bool = False,
     stream_output: bool = True,
-    log_dir: Optional[Path | str] = None,
-    tags: Optional[List[str]] = None,
-    description: Optional[str] = None,
+    log_dir: Path | str | None = None,
+    tags: list[str] | None = None,
+    description: str | None = None,
     compare_baseline: bool = True,
     check: bool = False,
-    run_id: Optional[str] = None,
+    run_id: str | None = None,
+    max_memory_stream_bytes: int = MAX_MEMORY_STREAM_BYTES,
     **kwargs: Any,
 ) -> CommandExecutionResult:
     """
@@ -352,35 +336,48 @@ def execute_command(
 
     # Normalize argv
     if isinstance(argv, str):
+        if not argv.strip():
+            raise ValueError("argv must not be empty.")
         if shell:
-            cmd_to_spawn: Union[str, List[str]] = argv
-            cmd_list = shlex.split(argv)
+            cmd_to_spawn: str | list[str] = argv
+            cmd_list = [argv]
         else:
             cmd_list = shlex.split(argv)
+            if not cmd_list:
+                raise ValueError("argv must not be empty.")
             cmd_to_spawn = cmd_list
     else:
-        cmd_list = [str(x) for x in argv]
+        raw_cmd = [str(x) for x in argv]
+        if not raw_cmd or (len(raw_cmd) == 1 and not raw_cmd[0].strip()):
+            raise ValueError("argv must not be empty.")
+        cmd_list = raw_cmd
         if shell:
-            cmd_to_spawn = " ".join(shlex.quote(x) for x in cmd_list)
+            cmd_to_spawn = raw_cmd[0] if len(raw_cmd) == 1 else " ".join(raw_cmd)
         else:
-            cmd_to_spawn = cmd_list
+            cmd_to_spawn = raw_cmd
 
     # Compute environment digest
     env_digest, filtered_env = compute_env_digest(env)
 
     # Resolve declared inputs
-    resolved_inputs: Dict[str, Path] = {}
+    resolved_inputs: dict[str, Path] = {}
     if inputs:
         for k, v in inputs.items():
             cand = Path(v)
             if cand.is_absolute():
                 p = cand
+            elif cwd is not None and (resolved_cwd / cand).exists():
+                p = (resolved_cwd / cand).resolve()
             elif (invocation_cwd / cand).exists():
                 p = (invocation_cwd / cand).resolve()
             elif (resolved_cwd / cand).exists():
                 p = (resolved_cwd / cand).resolve()
             else:
-                p = (invocation_cwd / cand).resolve()
+                p = (
+                    (resolved_cwd / cand).resolve()
+                    if cwd is not None
+                    else (invocation_cwd / cand).resolve()
+                )
 
             if not p.exists():
                 raise FileNotFoundError(
@@ -389,7 +386,7 @@ def execute_command(
             resolved_inputs[str(k)] = p
 
     # Resolve declared outputs
-    resolved_outputs: Dict[str, Path] = {}
+    resolved_outputs: dict[str, Path] = {}
     if outputs:
         for k, v in outputs.items():
             cand = Path(v)
@@ -412,7 +409,7 @@ def execute_command(
         )
 
     # Resolve outputs_dir
-    resolved_outputs_dir: Optional[Path] = None
+    resolved_outputs_dir: Path | None = None
     if outputs_dir:
         cand_out_dir = Path(outputs_dir)
         if cand_out_dir.is_absolute():
@@ -424,12 +421,15 @@ def execute_command(
         else:
             resolved_outputs_dir = (resolved_cwd / cand_out_dir).resolve()
 
-    # Discover suggested inputs from argv
-    suggested = discover_suggested_inputs(
-        cmd_list,
-        base_dir=resolved_cwd,
-        declared_outputs=output_paths_set,
-    )
+    # Discover suggested inputs from argv (skip when shell=True)
+    if shell:
+        suggested: list[tuple[str, Path]] = []
+    else:
+        suggested = discover_suggested_inputs(
+            cmd_list,
+            base_dir=resolved_cwd,
+            declared_outputs=output_paths_set,
+        )
 
     if accept_suggested:
         for s_key, s_path in suggested:
@@ -444,20 +444,17 @@ def execute_command(
 
     # Dry-run handling
     if dry_run:
-        input_fingerprints: Dict[str, Dict[str, Any]] = {}
+        input_fingerprints: dict[str, dict[str, Any]] = {}
         for k, p in resolved_inputs.items():
-            if p.is_file():
-                input_fingerprints[k] = {
-                    "path": str(p),
-                    "hash": _compute_file_sha256(p),
-                }
-            elif p.is_dir():
-                input_fingerprints[k] = {
-                    "path": str(p),
-                    "type": "directory",
-                }
+            fingerprint: dict[str, Any] = {
+                "path": str(p),
+                "hash": tracker.identity.compute_file_checksum(p),
+            }
+            if p.is_dir():
+                fingerprint["type"] = "directory"
+            input_fingerprints[k] = fingerprint
 
-        output_inspection: Dict[str, Dict[str, Any]] = {}
+        output_inspection: dict[str, dict[str, Any]] = {}
         for k, p in resolved_outputs.items():
             output_inspection[k] = {
                 "path": str(p),
@@ -468,7 +465,7 @@ def execute_command(
             {"key": k, "path": str(p)} for k, p in suggested if p not in input_paths_set
         ]
 
-        plan: Dict[str, Any] = {
+        plan: dict[str, Any] = {
             "name": name,
             "command": cmd_list,
             "shell": shell,
@@ -496,7 +493,7 @@ def execute_command(
         )
 
     # Snapshot outputs_dir pre-execution
-    outputs_dir_snapshot: Dict[Path, Tuple[int, int]] = {}
+    outputs_dir_snapshot: dict[Path, tuple[int, int]] = {}
     if resolved_outputs_dir and resolved_outputs_dir.exists():
         for f in resolved_outputs_dir.rglob("*"):
             if f.is_file():
@@ -522,7 +519,7 @@ def execute_command(
     )
 
     # Log declared inputs
-    logged_inputs: Dict[str, Artifact] = {}
+    logged_inputs: dict[str, Artifact] = {}
     for k, p in resolved_inputs.items():
         art = tracker.log_artifact(p, key=k, direction="input")
         logged_inputs[k] = art
@@ -556,26 +553,35 @@ def execute_command(
         merged_env.update(env)
 
     start_time = time.monotonic()
-    stdout_chunks: List[bytes] = []
-    stderr_chunks: List[bytes] = []
+    stdout_chunks: list[bytes] = []
+    stderr_chunks: list[bytes] = []
 
     out_file = stdout_file_path.open("wb")
     err_file = stderr_file_path.open("wb")
 
     def _stream_reader(
         pipe: Any,
-        sink_chunks: List[bytes],
+        sink_chunks: list[bytes],
         sink_file: Any,
-        target_stream: Optional[Any],
+        target_stream: Any | None,
+        max_memory_bytes: int,
     ) -> None:
         if pipe is None:
             return
+        accumulated_bytes = 0
         try:
             while True:
                 chunk = pipe.read(4096)
                 if not chunk:
                     break
-                sink_chunks.append(chunk)
+                if accumulated_bytes < max_memory_bytes:
+                    allowed = max_memory_bytes - accumulated_bytes
+                    if len(chunk) <= allowed:
+                        sink_chunks.append(chunk)
+                        accumulated_bytes += len(chunk)
+                    else:
+                        sink_chunks.append(chunk[:allowed])
+                        accumulated_bytes = max_memory_bytes
                 try:
                     sink_file.write(chunk)
                     sink_file.flush()
@@ -590,6 +596,31 @@ def execute_command(
                 pipe.close()
             except Exception:
                 pass
+
+    def _abort_spawn(
+        exit_code: int, error_msg: str, exc: BaseException
+    ) -> CommandExecutionResult:
+        duration = round(time.monotonic() - start_time, 4)
+        run.meta["command"]["exit_code"] = exit_code
+        run.meta["command"]["duration"] = duration
+        run.meta["command"]["error"] = error_msg
+        tracker.end_run(status="failed", error=exc)
+        res = CommandExecutionResult(
+            run=run,
+            inputs=logged_inputs,
+            outputs={},
+            exit_code=exit_code,
+            stdout="",
+            stderr=str(exc),
+            stdout_path=stdout_file_path,
+            stderr_path=stderr_file_path,
+            duration=duration,
+            command=cmd_list,
+            dry_run=False,
+        )
+        if check:
+            raise CommandExecutionError(error_msg, result=res) from exc
+        return res
 
     proc = None
     try:
@@ -612,6 +643,7 @@ def execute_command(
                 stdout_chunks,
                 out_file,
                 out_target,
+                max_memory_stream_bytes,
             ),
             daemon=True,
         )
@@ -622,6 +654,7 @@ def execute_command(
                 stderr_chunks,
                 err_file,
                 err_target,
+                max_memory_stream_bytes,
             ),
             daemon=True,
         )
@@ -634,79 +667,17 @@ def execute_command(
         err_thread.join(timeout=3.0)
 
     except FileNotFoundError as exc:
-        duration = round(time.monotonic() - start_time, 4)
-        exit_code = 127
-        err_msg = f"Command not found: {cmd_list[0]}"
-        run.meta["command"]["exit_code"] = exit_code
-        run.meta["command"]["duration"] = duration
-        run.meta["command"]["error"] = err_msg
-        tracker.end_run(status="failed", error=exc)
-        res = CommandExecutionResult(
-            run=run,
-            inputs=logged_inputs,
-            outputs={},
-            exit_code=exit_code,
-            stdout="",
-            stderr=str(exc),
-            stdout_path=stdout_file_path,
-            stderr_path=stderr_file_path,
-            duration=duration,
-            command=cmd_list,
-            dry_run=False,
-        )
-        if check:
-            raise CommandExecutionError(err_msg, result=res) from exc
-        return res
+        return _abort_spawn(127, f"Command not found: {cmd_list[0]}", exc)
 
     except PermissionError as exc:
-        duration = round(time.monotonic() - start_time, 4)
-        exit_code = 126
-        err_msg = f"Permission denied executing command: {cmd_list[0]}"
-        run.meta["command"]["exit_code"] = exit_code
-        run.meta["command"]["duration"] = duration
-        run.meta["command"]["error"] = err_msg
-        tracker.end_run(status="failed", error=exc)
-        res = CommandExecutionResult(
-            run=run,
-            inputs=logged_inputs,
-            outputs={},
-            exit_code=exit_code,
-            stdout="",
-            stderr=str(exc),
-            stdout_path=stdout_file_path,
-            stderr_path=stderr_file_path,
-            duration=duration,
-            command=cmd_list,
-            dry_run=False,
+        return _abort_spawn(
+            126, f"Permission denied executing command: {cmd_list[0]}", exc
         )
-        if check:
-            raise CommandExecutionError(err_msg, result=res) from exc
-        return res
 
     except OSError as exc:
-        duration = round(time.monotonic() - start_time, 4)
-        exit_code = 127
-        err_msg = f"Failed to execute command '{cmd_list[0]}': {exc}"
-        run.meta["command"]["exit_code"] = exit_code
-        run.meta["command"]["duration"] = duration
-        run.meta["command"]["error"] = err_msg
-        tracker.end_run(status="failed", error=exc)
-        res = CommandExecutionResult(
-            run=run,
-            inputs=logged_inputs,
-            outputs={},
-            exit_code=exit_code,
-            stdout="",
-            stderr=str(exc),
-            stdout_path=stdout_file_path,
-            stderr_path=stderr_file_path,
-            duration=duration,
-            command=cmd_list,
-            dry_run=False,
+        return _abort_spawn(
+            127, f"Failed to execute command '{cmd_list[0]}': {exc}", exc
         )
-        if check:
-            raise CommandExecutionError(err_msg, result=res) from exc
-        return res
 
     except KeyboardInterrupt:
         if proc:
@@ -715,6 +686,10 @@ def execute_command(
                 proc.wait(timeout=2.0)
             except subprocess.TimeoutExpired:
                 proc.kill()
+                try:
+                    proc.wait(timeout=2.0)
+                except Exception:
+                    pass
         run.meta["command"]["interrupted"] = True
         run.meta["command"]["exit_code"] = 130
         run.meta["command"]["error"] = "Process interrupted by user (SIGINT)"
@@ -725,31 +700,20 @@ def execute_command(
         raise
 
     except Exception as exc:
-        duration = round(time.monotonic() - start_time, 4)
-        exit_code = 1
-        err_msg = f"Unexpected execution error: {exc}"
-        run.meta["command"]["exit_code"] = exit_code
-        run.meta["command"]["duration"] = duration
-        run.meta["command"]["error"] = err_msg
-        tracker.end_run(status="failed", error=exc)
-        res = CommandExecutionResult(
-            run=run,
-            inputs=logged_inputs,
-            outputs={},
-            exit_code=exit_code,
-            stdout="",
-            stderr=str(exc),
-            stdout_path=stdout_file_path,
-            stderr_path=stderr_file_path,
-            duration=duration,
-            command=cmd_list,
-            dry_run=False,
-        )
-        if check:
-            raise CommandExecutionError(err_msg, result=res) from exc
-        return res
+        return _abort_spawn(1, f"Unexpected execution error: {exc}", exc)
 
     finally:
+        if proc is not None:
+            try:
+                if proc.stdout is not None and not proc.stdout.closed:
+                    proc.stdout.close()
+            except Exception:
+                pass
+            try:
+                if proc.stderr is not None and not proc.stderr.closed:
+                    proc.stderr.close()
+            except Exception:
+                pass
         out_file.close()
         err_file.close()
 
@@ -765,9 +729,10 @@ def execute_command(
     stderr_str = b"".join(stderr_chunks).decode("utf-8", errors="replace")
 
     run.meta["command"]["exit_code"] = exit_code
+    run.meta["command"]["process_exit_code"] = exit_code
     run.meta["command"]["duration"] = duration
 
-    logged_outputs: Dict[str, Artifact] = {}
+    logged_outputs: dict[str, Artifact] = {}
 
     # Check process exit code
     if exit_code != 0:
@@ -798,7 +763,7 @@ def execute_command(
         return res
 
     # Verify declared outputs
-    missing_outputs: List[Tuple[str, Any]] = []
+    missing_outputs: list[tuple[str, Any]] = []
     for k, p in resolved_outputs.items():
         if not p.exists():
             missing_outputs.append((k, outputs[k] if (outputs and k in outputs) else p))
@@ -806,6 +771,7 @@ def execute_command(
     if missing_outputs:
         first_key, first_path = missing_outputs[0]
         err_msg = f"Declared output '{first_key}' at '{first_path}' was not created."
+        run.meta["command"]["exit_code"] = 1
         run.meta["command"]["error"] = err_msg
         tracker.end_run(status="failed", error=RuntimeError(err_msg))
 

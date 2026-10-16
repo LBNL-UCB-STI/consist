@@ -260,6 +260,20 @@ def _escape_like_pattern(value: str) -> str:
     return value
 
 
+def _safe_is_file(p: Path) -> bool:
+    try:
+        return p.is_file()
+    except OSError:
+        return False
+
+
+def _safe_is_dir(p: Path) -> bool:
+    try:
+        return p.is_dir()
+    except OSError:
+        return False
+
+
 def find_project_root_and_db(
     start_dir: Optional[Path | str] = None,
 ) -> Tuple[Optional[Path], Optional[Path]]:
@@ -271,16 +285,21 @@ def find_project_root_and_db(
     2. provenance.duckdb -> root is dir, db is provenance.duckdb
     3. .consist/ directory -> root is dir, db is .consist/provenance.duckdb
     """
-    start = Path(start_dir).resolve() if start_dir else Path.cwd().resolve()
-    for directory in [start, *start.parents]:
+    try:
+        start = Path(start_dir).resolve() if start_dir else Path.cwd().resolve()
+        dirs = [start, *start.parents]
+    except OSError:
+        return None, None
+
+    for directory in dirs:
         consist_db = directory / ".consist" / "provenance.duckdb"
-        if consist_db.is_file():
+        if _safe_is_file(consist_db):
             return directory, consist_db
         root_db = directory / "provenance.duckdb"
-        if root_db.is_file():
+        if _safe_is_file(root_db):
             return directory, root_db
         consist_dir = directory / ".consist"
-        if consist_dir.is_dir():
+        if _safe_is_dir(consist_dir):
             return directory, consist_db
     return None, None
 
@@ -294,22 +313,19 @@ def find_db_path(explicit_path: Optional[str] = None) -> str:
     if env_path := os.getenv("CONSIST_DB"):
         return env_path
 
-    # Check upward discovery from current directory
-    _proj_root, discovered_db = find_project_root_and_db()
-    if discovered_db and discovered_db.exists():
-        return str(discovered_db)
-
     # Check current directory
-    if Path("provenance.duckdb").exists():
+    if _safe_is_file(Path("provenance.duckdb")):
         return "provenance.duckdb"
 
     # Check common subdirectories
     for subdir in [".", "data", "db", ".consist"]:
         candidate = Path(subdir) / "provenance.duckdb"
-        if candidate.exists():
+        if _safe_is_file(candidate):
             return str(candidate)
 
-    if discovered_db:
+    # Check upward discovery from parent directories
+    _proj_root, discovered_db = find_project_root_and_db()
+    if discovered_db and _safe_is_file(discovered_db):
         return str(discovered_db)
 
     # Fall back to default
@@ -5361,6 +5377,8 @@ def exec_cmd(
             description=description,
             check=False,
         )
+    except KeyboardInterrupt:
+        raise typer.Exit(code=130)
     except (FileNotFoundError, ValueError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(CLI_EXIT_USAGE_ERROR) from exc
@@ -5433,8 +5451,8 @@ def exec_cmd(
 
     if not quiet:
         _render_exec_result(result)
-    if result.exit_code != 0 and result.error:
-        typer.echo(f"Error: {result.error}")
+    elif result.exit_code != 0 and result.error:
+        typer.echo(f"Error: {result.error}", err=True)
 
     if result.exit_code != 0:
         raise typer.Exit(code=result.exit_code)
