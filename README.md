@@ -87,11 +87,12 @@ into the callable instead of loading input files. Those same paths are still has
 and recorded for cache identity and lineage. For tools that need inputs copied to
 specific local filenames, see [Usage Guide](docs/usage-guide.md#path-staging-example).
 
-### Or Track Any CLI Command (Zero Code Changes)
+### Tracking CLI Commands
 
-Already running scripts, compiled binaries, or legacy workflows from the shell?
-Initialize a workspace once and prefix any command with `consist exec` to
-record input/output hashes, logs, and run-over-run diffs without modifying your code:
+For workflows that run from the shell, such as compiled binaries, R or Julia scripts,
+or legacy pipelines, initialize a workspace with `consist init` and prefix commands
+with `consist exec`. Consist records input and output hashes, sidecar logs, and
+run-over-run diffs without modifying the underlying tool:
 
 ```bash
 consist init

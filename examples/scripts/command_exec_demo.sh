@@ -110,10 +110,10 @@ TRANSIT_BIAS=0.35
 EOF
 
 # Consist automatically diffs against Run #1:
-# - inputs_modified:   [params]
-# - inputs_unchanged:  [zones]
-# - outputs_modified:  [flows]
-# - outputs_unchanged: [convergence]
+# - inputs.modified:   [params]
+# - inputs.unchanged:  [zones]
+# - outputs.modified:  [flows]
+# - outputs.unchanged: [convergence.txt]
 $CONSIST_CMD exec \
   --name gravity_calibration \
   --input params=inputs/calibration.env \

@@ -344,9 +344,9 @@ you want provenance tracking without wrapping the step in a Python function.
 2. **Process Supervision & Logs**: The child process is executed with live
    terminal streaming while stdout and stderr are captured to dedicated
    sidecar log files (`stdout.log`, `stderr.log`) in the run directory.
-3. **Strict Output Verification**: Process exit code `0` is **not enough**. Every
-   declared output must exist on disk and pass artifact admission/hashing. If
-   an output is missing, Consist marks the run `failed` with exit code `1`.
+3. **Strict Output Verification**: The process must exit with code `0` and
+   produce every declared output file on disk. If a declared output is missing,
+   Consist marks the run `failed` with exit code `1`.
 4. **Baseline Comparison**: Successive executions sharing the same `--name`
    automatically compare against the prior completed run, reporting modified
    inputs, unchanged artifacts, and duration deltas.
@@ -383,7 +383,8 @@ you want provenance tracking without wrapping the step in a Python function.
 
     print(result.exit_code)       # 0
     print(result.stdout_path)     # Path to sidecar stdout.log
-    print(result.artifacts)       # Registered input and output artifacts
+    print(result.inputs)          # Logged input artifacts by key
+    print(result.outputs)         # Verified output artifacts by key
     ```
 
 ## External Tools and Containers

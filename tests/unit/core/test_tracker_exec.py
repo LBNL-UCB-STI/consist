@@ -279,8 +279,14 @@ def test_tracker_exec_baseline_comparison(tracker: Tracker, tmp_path: Path):
     in_file = tmp_path / "data.csv"
     in_file.write_text("version 1")
     out_file = tmp_path / "output.csv"
+    steady_file = tmp_path / "steady.txt"
 
-    script = f"import pathlib; pathlib.Path('{out_file}').write_text('out1')"
+    script = (
+        f"import pathlib; "
+        f"txt = pathlib.Path('{in_file}').read_text(); "
+        f"pathlib.Path('{out_file}').write_text('derived:' + txt); "
+        f"pathlib.Path('{steady_file}').write_text('constant')"
+    )
     py_cmd = [sys.executable, "-c", script]
 
     # Run 1: initial baseline
@@ -288,12 +294,12 @@ def test_tracker_exec_baseline_comparison(tracker: Tracker, tmp_path: Path):
         name="my_model",
         argv=py_cmd,
         inputs={"data": in_file},
-        outputs={"out": out_file},
+        outputs={"out": out_file, "steady": steady_file},
         stream_output=False,
     )
     assert res1.is_success
 
-    # Modify input file for run 2
+    # Modify input file for run 2 (which also causes out_file to be overwritten with new bytes)
     time.sleep(0.01)
     in_file.write_text("version 2")
 
@@ -301,19 +307,81 @@ def test_tracker_exec_baseline_comparison(tracker: Tracker, tmp_path: Path):
         name="my_model",
         argv=py_cmd,
         inputs={"data": in_file},
-        outputs={"out": out_file},
+        outputs={"out": out_file, "steady": steady_file},
         stream_output=False,
         compare_baseline=True,
     )
     assert res2.is_success
+    assert res2.outputs["out"].hash != res1.outputs["out"].hash
+    assert res2.outputs["steady"].hash == res1.outputs["steady"].hash
     assert res2.run.meta is not None
     cmd_meta = res2.run.meta.get("command", {})
     baseline_comp = cmd_meta.get("baseline_comparison")
     assert baseline_comp is not None
     assert baseline_comp["baseline_run_id"] == res1.run.id
     assert baseline_comp["command_changed"] is False
-    # "data" input was modified
+    # "data" input and "out" output were modified; "steady" output was unchanged
     assert "data" in baseline_comp["inputs"]["modified"]
+    assert "out" in baseline_comp["outputs"]["modified"]
+    assert "steady" in baseline_comp["outputs"]["unchanged"]
+
+
+def test_tracker_exec_input_modified_out_of_band_after_upstream_output(
+    tracker: Tracker, tmp_path: Path
+):
+    shared_file = tmp_path / "intermediate.csv"
+    downstream_out = tmp_path / "final.csv"
+
+    # Step 1 produces intermediate.csv as an output
+    step1 = tracker.exec(
+        name="producer",
+        argv=[
+            sys.executable,
+            "-c",
+            f"import pathlib; pathlib.Path('{shared_file}').write_text('v1')",
+        ],
+        outputs={"inter": shared_file},
+        stream_output=False,
+    )
+    assert step1.is_success
+    v1_hash = step1.outputs["inter"].hash
+
+    # Step 2 consumes intermediate.csv without out-of-band edits -> preserves upstream lineage
+    step2_run1 = tracker.exec(
+        name="consumer",
+        argv=[
+            sys.executable,
+            "-c",
+            f"import pathlib; pathlib.Path('{downstream_out}').write_text(pathlib.Path('{shared_file}').read_text())",
+        ],
+        inputs={"inter": shared_file},
+        outputs={"final": downstream_out},
+        stream_output=False,
+    )
+    assert step2_run1.is_success
+    assert step2_run1.inputs["inter"].hash == v1_hash
+    assert step2_run1.inputs["inter"].run_id == step1.run.id
+
+    # Now a user edits intermediate.csv out-of-band on disk without re-running Step 1
+    shared_file.write_text("v2_edited_by_hand")
+
+    step2_run2 = tracker.exec(
+        name="consumer",
+        argv=[
+            sys.executable,
+            "-c",
+            f"import pathlib; pathlib.Path('{downstream_out}').write_text(pathlib.Path('{shared_file}').read_text())",
+        ],
+        inputs={"inter": shared_file},
+        outputs={"final": downstream_out},
+        stream_output=False,
+        compare_baseline=True,
+    )
+    assert step2_run2.is_success
+    assert step2_run2.inputs["inter"].hash != v1_hash
+    baseline_comp = step2_run2.run.meta["command"]["baseline_comparison"]
+    assert "inter" in baseline_comp["inputs"]["modified"]
+    assert "final" in baseline_comp["outputs"]["modified"]
 
 
 def test_consist_api_exec_delegates(tracker: Tracker, tmp_path: Path):

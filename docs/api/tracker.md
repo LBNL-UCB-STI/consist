@@ -291,13 +291,14 @@ result = tracker.exec(
 ```
 
 `tracker.exec(...)` returns a `CommandExecutionResult` object containing:
-- `run`: The created `Run` model instance.
+- `run`: The created `Run` model instance (or `None` when `dry_run=True`).
+- `inputs`: Dictionary of logged input `Artifact` instances keyed by input role.
+- `outputs`: Dictionary of verified output `Artifact` instances keyed by output role.
 - `exit_code`: Process exit code (or `1` if an expected output was missing).
-- `stdout_path`: Path to the persisted `stdout.log` sidecar file in the run directory.
-- `stderr_path`: Path to the persisted `stderr.log` sidecar file in the run directory.
-- `stdout_text` / `stderr_text`: In-memory output text (bounded at 4 MB).
-- `artifacts`: Dictionary of logged input and output artifacts.
+- `stdout` / `stderr`: In-memory output text (bounded by `max_memory_stream_bytes`, default 4 MB).
+- `stdout_path` / `stderr_path`: Paths to the persisted `stdout.log` and `stderr.log` sidecar files in the run directory.
 - `duration`: Wall-clock execution duration in seconds.
+- `plan`: Inspection dictionary populated when `dry_run=True`.
 
 ::: consist.core.tracker.Tracker
     options:
