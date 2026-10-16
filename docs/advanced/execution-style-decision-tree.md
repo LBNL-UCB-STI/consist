@@ -6,7 +6,7 @@ surfaces.
 ```text
 Start
  |
- +-- Is the step an external CLI command / script you don't want to wrap in a Python function?
+ +-- Is the step an external CLI command, script, or binary?
  |      |
  |      +-- Yes --> Use `consist exec` (CLI) or `tracker.exec(...)` (Python)
  |

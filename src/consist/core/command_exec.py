@@ -527,13 +527,21 @@ def execute_command(
         model=name,
         tags=tags,
         description=description,
+        cache_mode=kwargs.pop("cache_mode", "overwrite"),
         **kwargs,
     )
 
     # Log declared inputs
     logged_inputs: dict[str, Artifact] = {}
     for k, p in resolved_inputs.items():
-        art = tracker.log_artifact(p, key=k, direction="input")
+        computed_hash = tracker.identity.compute_file_checksum(p)
+        art = tracker.log_artifact(
+            p,
+            key=k,
+            direction="input",
+            content_hash=computed_hash,
+            force_hash_override=True,
+        )
         logged_inputs[k] = art
 
     # Determine log sidecar paths

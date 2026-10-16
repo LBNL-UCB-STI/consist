@@ -80,7 +80,7 @@ The CLI discovers the provenance database in this order:
 3. **Upward directory search**: Consist walks upward from the current working
    directory looking for `.consist/provenance.duckdb`, `provenance.duckdb`, or
    a `.consist/` directory. This allows `consist exec`, `consist runs`, and
-   other inspection commands to work seamlessly from any subdirectory.
+   other inspection commands to work from any subdirectory.
 4. Common local subdirectories (`./data/`, `./db/`, `./.consist/`)
 
 ## Artifact Path Resolution
@@ -202,7 +202,7 @@ consist exec \
 - **Directory Monitoring**: `--outputs-dir PATH`. Scans the directory before and after execution, registering newly created or modified files as output artifacts.
 - **Suggested Inputs**: Consist inspects `argv` tokens for existing file paths.
   - `--dry-run`: Previews resolved paths, calculated digests, and suggested undeclared inputs without executing the command or modifying DuckDB.
-  - `--accept-suggested`: Automatically registers any existing files spotted in `argv` as input artifacts.
+  - `--accept-suggested`: Automatically registers any existing files detected in `argv` as input artifacts.
 
 #### Baseline Comparison
 When running a command with `--name <NAME>`, Consist searches DuckDB for the most recent completed run with the same name and automatically displays a **Baseline Comparison** panel reporting:
