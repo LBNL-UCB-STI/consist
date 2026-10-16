@@ -78,11 +78,14 @@ from consist.api import (
     AdmissionReport,  # noqa: F401
     DeclaredDigestExpectation,  # noqa: F401
     FileIdentity,  # noqa: F401
+    PriorRunExpectation,  # noqa: F401
     RunContext,
     check_admission_reference,  # noqa: F401
     check_admission_reference_expected_identity,  # noqa: F401
+    check_admission_reference_prior_run_expectation,  # noqa: F401
     check_artifact_identity,  # noqa: F401
     check_expected_identity,  # noqa: F401
+    check_prior_run_expectation,  # noqa: F401
     compare_path_to_identity,  # noqa: F401
     load,
     load_df,
@@ -234,6 +237,7 @@ __all__ = [
     "AdmissionReport",
     "DeclaredDigestExpectation",
     "FileIdentity",
+    "PriorRunExpectation",
     "AdmissionEvidence",
     "ArtifactIdentity",
     "BoundArtifact",
@@ -325,8 +329,10 @@ __all__ = [
     "run",
     "check_admission_reference",
     "check_admission_reference_expected_identity",
+    "check_admission_reference_prior_run_expectation",
     "check_artifact_identity",
     "check_expected_identity",
+    "check_prior_run_expectation",
     "compare_path_to_identity",
     "ref",
     "refs",
