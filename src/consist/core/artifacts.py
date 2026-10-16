@@ -517,11 +517,9 @@ class ArtifactManager:
                 return
             _validate_content_hash()
             existing_hash = getattr(artifact, "hash", None)
-            if (
-                existing_hash
-                and existing_hash != hash_state.effective_hash
-                and not force_hash_override
-            ):
+            if existing_hash == hash_state.effective_hash:
+                return
+            if existing_hash and not force_hash_override:
                 logging.warning(
                     "[Consist Warning] Ignoring content_hash override for artifact key=%s uri=%s "
                     "(existing hash differs). Use force_hash_override=True to override.",

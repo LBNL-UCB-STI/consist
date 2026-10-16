@@ -14,11 +14,13 @@ For tiered guidance:
 | Entry point | Use when | Notes |
 |---|---|---|
 | [`Tracker.run`](tracker.md#consist.core.tracker.Tracker.run) | You want explicit tracker ownership for one cache-aware function | Preferred single-step entry point |
+| [`Tracker.exec`](tracker.md#command-execution-exec) | You want to execute a CLI command or binary and record provenance | Returns `CommandExecutionResult` |
 | [`Tracker.trace`](tracker.md#consist.core.tracker.Tracker.trace) | You need inline execution with explicit tracker control | Block executes every time |
 | [`consist.scenario`](api_helpers.md#consist.api.scenario) | You need multi-step workflows with shared scenario context | Returns [`ScenarioContext`](workflow.md#scenario-context) |
 | [`ScenarioContext.run`](workflow.md#consist.core.workflow.ScenarioContext.run) | You are inside a scenario and want cache-aware steps | Step-level equivalent of `Tracker.run`; also accepts `binding=BindingResult(...)` for orchestrator-resolved inputs |
 | [`ScenarioContext.map_runs`](workflow.md#consist.core.workflow.ScenarioContext.map_runs) | You are inside a scenario and want one child run per sweep row | Process-backed fan-out for independent parameter sweeps |
 | [`ScenarioContext.trace`](workflow.md#consist.core.workflow.ScenarioContext.trace) | You are inside a scenario and need inline step execution | Step-level equivalent of `Tracker.trace` |
+| [`consist.exec`](api_helpers.md#consist.api.exec) | You want to execute a CLI command using the active/default tracker | Forwards to `Tracker.exec` |
 | [`consist.run`](api_helpers.md#consist.api.run) | You need the legacy context-resolving convenience wrapper | Deprecated compatibility wrapper around `Tracker.run` |
 | [`consist.trace`](api_helpers.md#consist.api.trace) | You need the legacy context-resolving tracing wrapper | Deprecated compatibility wrapper around `Tracker.trace` |
 | [`consist.start_run`](api_helpers.md#consist.api.start_run) | You need the legacy context-resolving lifecycle wrapper | Deprecated compatibility wrapper around `Tracker.start_run` |

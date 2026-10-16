@@ -46,6 +46,7 @@ from consist.runset import AlignedPair, RunSet
 # Core
 from consist.core.tracker import Tracker
 from consist.core.coupler import Coupler
+from consist.core.command_exec import CommandExecutionError, CommandExecutionResult
 from consist.core.config_canonicalization import (
     CanonicalizationArtifactMember,
     CanonicalizationReference,
@@ -86,6 +87,7 @@ from consist.api import (
     RelationConnectionLeakWarning,
     to_df,
     run,
+    exec,
     ref,
     refs,
     trace,
@@ -222,6 +224,8 @@ __all__ = [
     # Core objects
     "Tracker",
     "Coupler",
+    "CommandExecutionError",
+    "CommandExecutionResult",
     "RunContext",
     "AdmissionReference",
     "AdmissionReport",
@@ -314,6 +318,7 @@ __all__ = [
     "RelationConnectionLeakWarning",
     "to_df",
     "run",
+    "exec",
     "check_admission_reference",
     "check_admission_reference_expected_identity",
     "check_artifact_identity",

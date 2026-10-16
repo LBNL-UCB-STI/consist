@@ -20,6 +20,7 @@ The API reference is organized into two tiers:
 | If you need | Start here | Why |
 |---|---|---|
 | One cache-aware function call | [`Tracker.run`](tracker.md#consist.core.tracker.Tracker.run) | Explicit tracker ownership without compatibility warnings |
+| External CLI command, script, or binary | [`Tracker.exec`](tracker.md#command-execution-exec) | Zero-wrapper execution recording, sidecar logging, and baseline diffs |
 | Multi-step workflow with shared context | [`consist.scenario`](api_helpers.md#consist.api.scenario) | Groups steps and lineage under one scenario header |
 | Always-execute run-scoped block | [`Tracker.trace`](tracker.md#consist.core.tracker.Tracker.trace) | Records provenance but executes block every time |
 | Multi-run grouping and pairwise comparison | [`RunSet`](runset.md#runset-and-alignment) / [`consist.run_set`](api_helpers.md#consist.api.run_set) | Fluent partitioning, recency selection, and alignment |
