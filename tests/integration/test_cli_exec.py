@@ -271,6 +271,46 @@ def test_cli_exec_upward_discovery(tmp_path: Path, monkeypatch):
     assert "nested_run" in model_names
 
 
+def test_cli_exec_upward_discovery_without_existing_db(tmp_path: Path, monkeypatch):
+    # Only create the .consist directory, without initializing provenance.duckdb
+    consist_dir = tmp_path / ".consist"
+    consist_dir.mkdir()
+
+    nested_dir = tmp_path / "sub" / "folder"
+    nested_dir.mkdir(parents=True)
+
+    monkeypatch.chdir(nested_dir)
+
+    out_file = nested_dir / "out.txt"
+    cmd = [
+        "exec",
+        "--name",
+        "nested_uninit_run",
+        "-o",
+        f"out={out_file}",
+        "--",
+        sys.executable,
+        "-c",
+        f"import pathlib; pathlib.Path('{out_file}').write_text('done')",
+    ]
+
+    res = runner.invoke(app, cmd)
+    assert res.exit_code == 0
+    assert "COMPLETED" in res.stdout
+
+    # Verify that the DB was created in parent's .consist and not in nested_dir
+    db_file = consist_dir / "provenance.duckdb"
+    assert db_file.is_file()
+    assert not (nested_dir / "provenance.duckdb").exists()
+
+    from consist.core.tracker import Tracker
+
+    tr = Tracker(db_path=str(db_file), run_dir=tmp_path / "runs")
+    runs = tr.find_runs()
+    model_names = [r.model_name for r in runs]
+    assert "nested_uninit_run" in model_names
+
+
 def test_cli_exec_accept_suggested(tmp_path: Path):
     init_res = runner.invoke(app, ["init", "--path", str(tmp_path)])
     assert init_res.exit_code == 0

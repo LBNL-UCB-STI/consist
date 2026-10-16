@@ -96,6 +96,16 @@ class CommandExecutionResult(RunResult):
                 return str(self.run.meta["error"])
         return None
 
+    @property
+    def stdout_text(self) -> str:
+        """Alias for stdout."""
+        return self.stdout
+
+    @property
+    def stderr_text(self) -> str:
+        """Alias for stderr."""
+        return self.stderr
+
 
 class CommandExecutionError(RuntimeError):
     """
@@ -334,6 +344,8 @@ def execute_command(
     invocation_cwd = Path.cwd().resolve()
     resolved_cwd = Path(cwd).resolve() if cwd is not None else invocation_cwd
 
+    max_memory_stream_bytes = max(0, int(max_memory_stream_bytes))
+
     # Normalize argv
     if isinstance(argv, str):
         if not argv.strip():
@@ -343,12 +355,12 @@ def execute_command(
             cmd_list = [argv]
         else:
             cmd_list = shlex.split(argv)
-            if not cmd_list:
+            if not cmd_list or not any(x.strip() for x in cmd_list):
                 raise ValueError("argv must not be empty.")
             cmd_to_spawn = cmd_list
     else:
         raw_cmd = [str(x) for x in argv]
-        if not raw_cmd or (len(raw_cmd) == 1 and not raw_cmd[0].strip()):
+        if not raw_cmd or not any(x.strip() for x in raw_cmd):
             raise ValueError("argv must not be empty.")
         cmd_list = raw_cmd
         if shell:
@@ -602,6 +614,7 @@ def execute_command(
     ) -> CommandExecutionResult:
         duration = round(time.monotonic() - start_time, 4)
         run.meta["command"]["exit_code"] = exit_code
+        run.meta["command"]["process_exit_code"] = exit_code
         run.meta["command"]["duration"] = duration
         run.meta["command"]["error"] = error_msg
         tracker.end_run(status="failed", error=exc)
@@ -680,23 +693,41 @@ def execute_command(
         )
 
     except KeyboardInterrupt:
-        if proc:
-            proc.terminate()
-            try:
-                proc.wait(timeout=2.0)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+        try:
+            if proc:
+                try:
+                    proc.terminate()
+                except (ProcessLookupError, OSError):
+                    pass
                 try:
                     proc.wait(timeout=2.0)
-                except Exception:
+                except (subprocess.TimeoutExpired, KeyboardInterrupt):
+                    try:
+                        proc.kill()
+                    except (ProcessLookupError, OSError):
+                        pass
+                    try:
+                        proc.wait(timeout=2.0)
+                    except (Exception, KeyboardInterrupt):
+                        pass
+                except (Exception, KeyboardInterrupt):
                     pass
-        run.meta["command"]["interrupted"] = True
-        run.meta["command"]["exit_code"] = 130
-        run.meta["command"]["error"] = "Process interrupted by user (SIGINT)"
-        tracker.end_run(
-            status="failed",
-            error=KeyboardInterrupt("Process interrupted by user (SIGINT)"),
-        )
+        finally:
+            if run.meta is None:
+                run.meta = {}
+            if "command" not in run.meta:
+                run.meta["command"] = {}
+            run.meta["command"]["interrupted"] = True
+            run.meta["command"]["exit_code"] = 130
+            run.meta["command"]["process_exit_code"] = 130
+            run.meta["command"]["error"] = "Process interrupted by user (SIGINT)"
+            try:
+                tracker.end_run(
+                    status="failed",
+                    error=KeyboardInterrupt("Process interrupted by user (SIGINT)"),
+                )
+            except Exception:
+                pass
         raise
 
     except Exception as exc:
@@ -714,8 +745,14 @@ def execute_command(
                     proc.stderr.close()
             except Exception:
                 pass
-        out_file.close()
-        err_file.close()
+        try:
+            out_file.close()
+        except Exception:
+            pass
+        try:
+            err_file.close()
+        except Exception:
+            pass
 
     duration = round(time.monotonic() - start_time, 4)
     raw_code = proc.returncode if proc else 1
