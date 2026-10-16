@@ -274,6 +274,31 @@ For override runs, Consist persists standardized run metadata:
 `run.meta["resolved_config_identity"]` with `mode`, `adapter`, `label`, `path`,
 and `digest`.
 
+## Command Execution (`exec`)
+
+Use `Tracker.exec(...)` to supervise and record an external CLI binary, script,
+or shell command without creating a Python wrapper callable.
+
+```python
+result = tracker.exec(
+    name="calibrate_demand",
+    argv=["./bin/simulate", "--config", "configs/base.yaml"],
+    inputs={"config": "configs/base.yaml"},
+    outputs={"summary": "outputs/summary.csv"},
+    outputs_dir="outputs/",
+    cwd=".",
+)
+```
+
+`tracker.exec(...)` returns a `CommandExecutionResult` object containing:
+- `run`: The created `Run` model instance.
+- `exit_code`: Process exit code (or `1` if an expected output was missing).
+- `stdout_path`: Path to the persisted `stdout.log` sidecar file in the run directory.
+- `stderr_path`: Path to the persisted `stderr.log` sidecar file in the run directory.
+- `stdout_text` / `stderr_text`: In-memory output text (bounded at 4 MB).
+- `artifacts`: Dictionary of logged input and output artifacts.
+- `duration`: Wall-clock execution duration in seconds.
+
 ::: consist.core.tracker.Tracker
     options:
       show_source: false
@@ -285,6 +310,7 @@ and `digest`.
         - begin_run
         - start_run
         - run
+        - exec
         - run_with_config_overrides
         - trace
         - scenario

@@ -87,6 +87,23 @@ into the callable instead of loading input files. Those same paths are still has
 and recorded for cache identity and lineage. For tools that need inputs copied to
 specific local filenames, see [Usage Guide](docs/usage-guide.md#path-staging-example).
 
+### Or Track Any CLI Command (Zero Code Changes)
+
+Already running scripts, compiled binaries, or legacy workflows from the shell?
+Initialize a workspace once and prefix any command with `consist exec` to
+record input/output hashes, logs, and run-over-run diffs without modifying your code:
+
+```bash
+consist init
+
+consist exec \
+  --name traffic_assignment \
+  --input network=inputs/network.xml \
+  --input config=configs/calibration.yaml \
+  --output link_flows=outputs/link_flows.parquet \
+  -- ./bin/run_traffic_sim --config configs/calibration.yaml --threads 8
+```
+
 ## Documentation
 
 | Start here | Use it for |

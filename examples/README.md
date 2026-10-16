@@ -23,6 +23,11 @@ Examples are tiered:
   Python workflows.
 - `scripts/artifact_recovery_materialization.py`: compact recovery example that
   archives one artifact and materializes it into a fresh workspace root.
+- `scripts/command_exec_demo.sh`: language-agnostic shell script demonstrating
+  `consist init` and `consist exec` wrapping a pure `/bin/sh` + `awk` model.
+- `scripts/command_exec_calibration_audit.py`: Python script demonstrating
+  `tracker.exec(...)` for black-box CLI supervision, boundary inspection,
+  baseline diffing, and missing-output failure detection.
 
 ## Advanced tier
 
@@ -56,6 +61,9 @@ For manual lifecycle/decorator APIs (`start_run`, `begin_run/end_run`,
 3. Open one of the notebooks in `examples/` and run all cells.
 4. Run the self-contained native pipeline from repo root:
    - `uv run python examples/scripts/research_pipeline_native.py`
+5. Run the command execution showcases:
+   - Shell CLI demo: `bash examples/scripts/command_exec_demo.sh`
+   - Python audit demo: `uv run python examples/scripts/command_exec_calibration_audit.py`
 
 The native pipeline writes a Zarr output, so the `--group dev` environment
 above supplies its `xarray` and `zarr` dependencies. For a smaller runtime-only

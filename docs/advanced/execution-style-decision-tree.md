@@ -6,6 +6,10 @@ surfaces.
 ```text
 Start
  |
+ +-- Is the step an external CLI command / script you don't want to wrap in a Python function?
+ |      |
+ |      +-- Yes --> Use `consist exec` (CLI) or `tracker.exec(...)` (Python)
+ |
  +-- Is this a multi-step workflow with dependencies between steps?
  |      |
  |      +-- Yes --> Use scenario(...)
@@ -40,6 +44,7 @@ Start
 
 ## Rule of thumb
 
+- Prefer **`exec`** for external CLI commands, non-Python scripts, and black-box binaries.
 - Prefer **`run`** for expensive deterministic steps.
 - Prefer **`trace`** for diagnostics, side effects, and always-execute blocks.
 - Prefer **`scenario`** whenever steps depend on each other.
