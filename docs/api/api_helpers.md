@@ -13,8 +13,8 @@ a tracker object to every call.
 
 ## High-traffic helpers
 
-- Run execution: `consist.run`, `consist.scenario`, `consist.trace`,
-  `consist.start_run`
+- Run execution: `consist.exec`, `consist.run`, `consist.scenario`,
+  `consist.trace`, `consist.start_run`
 - Input wiring: `consist.ref`, `consist.refs`
 - Context and output paths: `consist.use_tracker`, `consist.output_dir`,
   `consist.output_path`
@@ -91,6 +91,7 @@ For class-level equivalents, see [Tracker](tracker.md) and
       members:
         - view
         - use_tracker
+        - exec
         - run
         - ref
         - refs
