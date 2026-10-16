@@ -351,6 +351,14 @@ def test_tracker_exec_keyboard_interrupt(tracker: Tracker):
                 stream_output=False,
             )
 
+    runs = tracker.find_runs(model="test_interrupt")
+    assert len(runs) >= 1
+    run = runs[0]
+    assert run.status == "failed"
+    assert run.meta["command"]["interrupted"] is True
+    assert run.meta["command"]["exit_code"] == 130
+    assert run.meta["command"]["process_exit_code"] == 130
+
 
 def test_tracker_exec_stream_output_with_stringio(tracker: Tracker):
     import io
@@ -448,8 +456,9 @@ def test_tracker_exec_outputs_dir_relative_to_cwd(tracker: Tracker, tmp_path: Pa
 
 
 def test_tracker_exec_empty_argv_raises(tracker: Tracker):
-    with pytest.raises(ValueError, match="argv must not be empty"):
-        tracker.exec(name="test_empty", argv=[])
+    for empty_val in [[], "", "   ", [""], ["", "  "]]:
+        with pytest.raises(ValueError, match="argv must not be empty"):
+            tracker.exec(name="test_empty", argv=empty_val)
 
 
 def test_tracker_exec_missing_declared_output_meta(tracker: Tracker, tmp_path: Path):
@@ -483,10 +492,62 @@ def test_tracker_exec_bounded_memory_streaming(tracker: Tracker, tmp_path: Path)
     )
     assert res.is_success
     assert len(res.stdout.encode("utf-8")) <= 64
+    assert res.stdout_text == res.stdout
+    assert res.stderr_text == res.stderr
     assert res.stdout_path is not None
     disk_content = res.stdout_path.read_text().strip()
     assert len(disk_content) == 1000
     assert disk_content == "A" * 1000
+
+    # Test max_memory_stream_bytes=0
+    res_zero = tracker.exec(
+        name="test_zero_memory_stream",
+        argv=py_cmd,
+        max_memory_stream_bytes=0,
+        stream_output=False,
+    )
+    assert res_zero.is_success
+    assert res_zero.stdout == ""
+    assert res_zero.stdout_path is not None
+    assert res_zero.stdout_path.read_text().strip() == "A" * 1000
+
+    # Test output exceeding 4MB default limit
+    py_cmd_large = [
+        sys.executable,
+        "-c",
+        "import sys; sys.stdout.write('X' * (5 * 1024 * 1024))",
+    ]
+    res_large = tracker.exec(
+        name="test_large_stream",
+        argv=py_cmd_large,
+        stream_output=False,
+    )
+    assert res_large.is_success
+    assert len(res_large.stdout.encode("utf-8")) <= 4 * 1024 * 1024
+    assert res_large.stdout_path is not None
+    assert res_large.stdout_path.stat().st_size == 5 * 1024 * 1024
+
+
+def test_tracker_exec_binary_output(tracker: Tracker):
+    py_cmd = [
+        sys.executable,
+        "-c",
+        "import sys; sys.stdout.buffer.write(b'out \\x80\\xff\\xfe ok\\n'); sys.stderr.buffer.write(b'err \\x81\\x82 err\\n')",
+    ]
+    res = tracker.exec(
+        name="test_binary_output",
+        argv=py_cmd,
+        stream_output=False,
+    )
+    assert res.is_success
+    assert "out " in res.stdout
+    assert "\ufffd" in res.stdout
+    assert "err " in res.stderr
+    assert "\ufffd" in res.stderr
+    assert res.stdout_path is not None
+    assert res.stderr_path is not None
+    assert res.stdout_path.read_bytes() == b"out \x80\xff\xfe ok\n"
+    assert res.stderr_path.read_bytes() == b"err \x81\x82 err\n"
 
 
 def test_tracker_exec_shell_argument_string_and_suggested_inputs(

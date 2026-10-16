@@ -325,7 +325,9 @@ def find_db_path(explicit_path: Optional[str] = None) -> str:
 
     # Check upward discovery from parent directories
     _proj_root, discovered_db = find_project_root_and_db()
-    if discovered_db and _safe_is_file(discovered_db):
+    if discovered_db and (
+        _safe_is_file(discovered_db) or _safe_is_dir(discovered_db.parent)
+    ):
         return str(discovered_db)
 
     # Fall back to default
