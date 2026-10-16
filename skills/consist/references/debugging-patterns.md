@@ -61,10 +61,19 @@ CONSIST_CACHE_TIMING=1 CONSIST_CACHE_DEBUG=1 /path/to/python script.py
 
 ## Prior-Run Admission Debugging
 
-- Use the public `check_artifact_identity(...)` API or
-  `check_admission_reference(...)` when a receiving workflow must compare one
-  resolved regular file with one exact input from an explicitly selected,
-  completed prior run.
+- Use `check_artifact_identity(...)`, `check_prior_run_expectation(...)`,
+  `check_admission_reference(...)`, or
+  `check_admission_reference_prior_run_expectation(...)` when a receiving
+  workflow must compare one resolved regular file against a unique artifact from
+  an explicitly selected, completed prior run.
+- By default, prior-run admission matches a unique artifact link in any
+  direction (`expected_direction="any"`). Pass `expected_direction="input"` or
+  `"output"` (or set it on `PriorRunExpectation`) when a run links the same key
+  as both input and output or when direction must be enforced.
+- For cross-tracker handoffs, set `source_tracker_db=...` on
+  `PriorRunExpectation`, `check_artifact_identity(...)`, or
+  `check_admission_reference(...)` to query an external DuckDB file in
+  read-only mode without needing an active `Tracker` instance.
 - Treat `AdmissionReport` as evidence, not workflow policy. The downstream
   caller decides whether `verified`, `mismatched`, `unverified`, or `unreadable`
   is fatal, warning-only, or acceptable.

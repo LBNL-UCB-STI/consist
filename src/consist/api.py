@@ -48,10 +48,13 @@ from consist.core.admission import (  # noqa: F401
     AdmissionReport,
     DeclaredDigestExpectation,
     FileIdentity,
+    PriorRunExpectation,
     check_admission_reference,
     check_admission_reference_expected_identity,
+    check_admission_reference_prior_run_expectation,
     check_artifact_identity,
     check_expected_identity,
+    check_prior_run_expectation,
     compare_path_to_identity,
 )
 from consist.core.decorators import (
