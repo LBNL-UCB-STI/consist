@@ -127,7 +127,27 @@ FLOAT32_MATRICES_V1_POLICY = ArrayCanonicalizationPolicy(
 def resolve_canonicalization_policy(
     policy: ArrayCanonicalizationPolicy | LogicalProfileName | None = None,
 ) -> ArrayCanonicalizationPolicy:
-    """Resolve a profile name or policy instance to an ``ArrayCanonicalizationPolicy``."""
+    """
+    Resolve a profile name or policy instance to an ``ArrayCanonicalizationPolicy``.
+
+    Parameters
+    ----------
+    policy : ArrayCanonicalizationPolicy or {"preserve_canonical", "float32_matrices_v1"} or None, optional
+        Either a named canonicalization profile or an explicit
+        ``ArrayCanonicalizationPolicy`` instance. Defaults to
+        ``"preserve_canonical"`` when ``None``.
+
+    Returns
+    -------
+    ArrayCanonicalizationPolicy
+        Resolved immutable canonicalization policy.
+
+    Raises
+    ------
+    ValueError
+        If ``policy`` is not a recognized profile name or
+        ``ArrayCanonicalizationPolicy`` instance.
+    """
     if policy is None or policy == "preserve_canonical":
         return PRESERVE_CANONICAL_POLICY
     if policy == "float32_matrices_v1":
@@ -141,7 +161,26 @@ def resolve_canonicalization_policy(
 
 
 def normalize_logical_matrices_identity(raw_val: str) -> str:
-    """Normalize a 64-hex digest or ``sha256:logical_matrices:<64hex>`` URI."""
+    """
+    Normalize a 64-hex digest or ``sha256:logical_matrices:<64hex>`` URI.
+
+    Parameters
+    ----------
+    raw_val : str
+        Either a bare 64-character hexadecimal SHA-256 digest or a prefixed
+        ``sha256:logical_matrices:<64hex>`` string.
+
+    Returns
+    -------
+    str
+        Canonical lowercase ``sha256:logical_matrices:<64 lowercase hex>`` URI.
+
+    Raises
+    ------
+    ValueError
+        If ``raw_val`` is not a string, uses an incompatible ``sha256:``
+        scheme prefix, or does not contain a valid 64-character hex digest.
+    """
     if not isinstance(raw_val, str):
         raise ValueError("logical matrices identity must be a string")
     val = raw_val.strip()
@@ -161,12 +200,25 @@ def normalize_logical_matrices_identity(raw_val: str) -> str:
 
 
 def canonicalize_float32_array(arr: np.ndarray) -> bytes:
-    """Return little-endian float32 bytes with canonical IEEE-754 bit patterns.
+    """
+    Return little-endian float32 bytes with canonical IEEE-754 bit patterns.
 
-    Matches BEAM ``SkimsProvenanceMetadata``:
-    - Any NaN (quiet or signaling, +/-) -> canonical quiet NaN ``0x7fc00000``
-    - Negative zero (``-0.0f``) and positive zero (``+0.0f``) -> ``+0.0f`` (``0x00000000``)
-    - Stored in C-contiguous row-major little-endian order.
+    Parameters
+    ----------
+    arr : numpy.ndarray
+        Input array-like object to convert to ``<f4`` and canonicalize.
+
+    Returns
+    -------
+    bytes
+        C-contiguous row-major little-endian ``<f4`` byte representation with
+        ``-0.0f`` normalized to ``+0.0f`` (``0x00000000``) and all ``NaN``
+        payloads normalized to canonical quiet ``NaN`` (``0x7fc00000``).
+
+    Notes
+    -----
+    Matches the floating-point canonicalization contract of BEAM's Scala
+    ``OmxSkimWriter`` / ``SkimsProvenanceMetadata``.
     """
     f32 = np.ascontiguousarray(arr, dtype="<f4")
     u32 = f32.view("<u4")
@@ -179,11 +231,21 @@ def canonicalize_float32_array(arr: np.ndarray) -> bytes:
 
 
 def canonicalize_float64_array(arr: np.ndarray) -> bytes:
-    """Return little-endian float64 bytes with canonical IEEE-754 bit patterns.
+    """
+    Return little-endian float64 bytes with canonical IEEE-754 bit patterns.
 
-    - Any NaN (quiet or signaling, +/-) -> canonical quiet NaN ``0x7ff8000000000000``
-    - Negative zero (``-0.0``) and positive zero (``+0.0``) -> ``+0.0`` (``0x0000000000000000``)
-    - Stored in C-contiguous row-major little-endian order.
+    Parameters
+    ----------
+    arr : numpy.ndarray
+        Input array-like object to convert to ``<f8`` and canonicalize.
+
+    Returns
+    -------
+    bytes
+        C-contiguous row-major little-endian ``<f8`` byte representation with
+        ``-0.0`` normalized to ``+0.0`` (``0x0000000000000000``) and all
+        ``NaN`` payloads normalized to canonical quiet ``NaN``
+        (``0x7ff8000000000000``).
     """
     f64 = np.ascontiguousarray(arr, dtype="<f8")
     u64 = f64.view("<u8")
@@ -196,7 +258,21 @@ def canonicalize_float64_array(arr: np.ndarray) -> bytes:
 
 
 def canonicalize_float16_array(arr: np.ndarray) -> bytes:
-    """Return little-endian float16 bytes with canonical IEEE-754 bit patterns."""
+    """
+    Return little-endian float16 bytes with canonical IEEE-754 bit patterns.
+
+    Parameters
+    ----------
+    arr : numpy.ndarray
+        Input array-like object to convert to ``<f2`` and canonicalize.
+
+    Returns
+    -------
+    bytes
+        C-contiguous row-major little-endian ``<f2`` byte representation with
+        ``-0.0`` normalized to ``+0.0`` (``0x0000``) and all ``NaN`` payloads
+        normalized to canonical quiet ``NaN`` (``0x7e00``).
+    """
     f16 = np.ascontiguousarray(arr, dtype="<f2")
     u16 = f16.view("<u2")
     needs_copy = bool(np.any(f16 == 0.0) or np.any(np.isnan(f16)))
@@ -212,7 +288,31 @@ def canonicalize_float_array(
     *,
     target_dtype: Literal["preserve", "float32", "float64"] = "preserve",
 ) -> np.ndarray:
-    """Return a C-contiguous little-endian float array with canonicalized ``-0.0`` and ``NaN`` bits."""
+    """
+    Return a C-contiguous little-endian float array with canonicalized ``-0.0`` and ``NaN`` bits.
+
+    Parameters
+    ----------
+    arr : numpy.ndarray
+        Input floating-point (or numeric, when ``target_dtype`` is explicit)
+        array to canonicalize.
+    target_dtype : {"preserve", "float32", "float64"}, default "preserve"
+        Target floating-point width. ``"preserve"`` retains the input float
+        width (``float16``, ``float32``, or ``float64``) while normalizing
+        endianness and IEEE-754 bit patterns.
+
+    Returns
+    -------
+    numpy.ndarray
+        Canonicalized C-contiguous little-endian NumPy array with the same
+        shape as ``arr``.
+
+    Raises
+    ------
+    ValueError
+        If ``target_dtype="preserve"`` and ``arr`` does not have a supported
+        floating-point dtype.
+    """
     raw = np.asarray(arr)
     if target_dtype == "float32" or (
         target_dtype == "preserve" and raw.dtype.kind == "f" and raw.dtype.itemsize == 4
@@ -405,7 +505,34 @@ def compute_array_entry_sha256(
     policy: ArrayCanonicalizationPolicy | LogicalProfileName = "preserve_canonical",
     na_value: Any = None,
 ) -> str:
-    """Compute the standalone canonical SHA-256 hex digest for a single named array."""
+    """
+    Compute the standalone canonical SHA-256 hex digest for a single named array.
+
+    Parameters
+    ----------
+    name : str
+        Logical array name written into the framing header (e.g., ``"DIST__AM"``
+        or ``"lookup/zone_number"``).
+    arr : numpy.ndarray
+        Array-like object to canonicalize and hash.
+    policy : ArrayCanonicalizationPolicy or {"preserve_canonical", "float32_matrices_v1"}, default "preserve_canonical"
+        Canonicalization policy controlling dtype preservation/coercion,
+        floating-point bit normalization, and ``NA`` attribute framing.
+    na_value : Any, optional
+        Optional fill-value metadata to include when
+        ``policy.include_na_attribute`` is ``True``.
+
+    Returns
+    -------
+    str
+        64-character lowercase hexadecimal SHA-256 digest of the framed array entry.
+
+    Raises
+    ------
+    ValueError
+        If ``policy`` is invalid or ``arr`` has an unsupported dtype under the
+        active policy.
+    """
     resolved_policy = resolve_canonicalization_policy(policy)
     hasher = hashlib.sha256()
     _stream_dataset_into_hasher(
@@ -519,12 +646,43 @@ def compute_logical_matrices_sha256(
     lookups: Mapping[str, np.ndarray | Sequence[Any]] | None = None,
     policy: ArrayCanonicalizationPolicy | LogicalProfileName = "preserve_canonical",
 ) -> str:
-    """Compute the canonical logical SHA-256 hex digest over lookup and data arrays.
+    """
+    Compute the canonical logical SHA-256 hex digest over lookup and data arrays.
+
+    Parameters
+    ----------
+    matrices : Mapping[str, numpy.ndarray] or Iterable[tuple[str, numpy.ndarray]]
+        Data matrices keyed by matrix name. Mapping or Sequence inputs are
+        sorted lexicographically by UTF-8 key; streaming iterators must yield
+        ``(name, array)`` pairs in sorted key order.
+    zone_ids : Sequence[int] or numpy.ndarray or None, optional
+        Optional 1D zone identifier array. Under ``"preserve_canonical"``,
+        included as ``"lookup/zone_number"`` when not already present in
+        ``lookups``. Under ``"float32_matrices_v1"``, coerced to ``<i4`` and
+        hashed as ``"lookup/zone_number"`` (defaulting to ``1..N`` when absent).
+    lookups : Mapping[str, numpy.ndarray or Sequence[Any]] or None, optional
+        Optional mapping of lookup/coordinate arrays. Under
+        ``"preserve_canonical"``, every lookup array is hashed in sorted key
+        order under ``"lookup/<key>"`` with its native dtype preserved.
+    policy : ArrayCanonicalizationPolicy or {"preserve_canonical", "float32_matrices_v1"}, default "preserve_canonical"
+        Canonicalization policy or named profile.
 
     Returns
     -------
     str
         64-character lowercase hexadecimal SHA-256 digest.
+
+    Raises
+    ------
+    ValueError
+        If ``matrices`` is empty, a streaming iterator yields unsorted keys, or
+        any lookup/data array cannot be canonicalized under ``policy``.
+
+    Notes
+    -----
+    Each entry is framed with 4-byte little-endian length-prefixed UTF-8 strings
+    for ``name``, ``dtype``, and ``shape``, followed by C-contiguous
+    little-endian array bytes.
     """
     resolved_policy = resolve_canonicalization_policy(policy)
 
@@ -637,10 +795,37 @@ def compute_omx_logical_matrices_sha256(
     policy: ArrayCanonicalizationPolicy | LogicalProfileName = "preserve_canonical",
     chunk_rows: int = _DEFAULT_CHUNK_ROWS,
 ) -> str:
-    """Compute the canonical logical matrices SHA-256 hex digest for an OMX/HDF5 file.
+    """
+    Compute the canonical logical matrices SHA-256 hex digest for an OMX/HDF5 file.
 
-    Streams one dataset (and row chunk) at a time in sorted UTF-8 key order so
-    multi-gigabyte OMX files are hashed in constant memory.
+    Parameters
+    ----------
+    omx_path_or_handle : str or pathlib.Path or h5py.File
+        Filesystem path to an OpenMatrix (``.omx``) or HDF5 (``.h5``/``.hdf5``)
+        file, or an already-open ``h5py.File``-like object.
+    policy : ArrayCanonicalizationPolicy or {"preserve_canonical", "float32_matrices_v1"}, default "preserve_canonical"
+        Canonicalization policy controlling lookup resolution, dtype handling,
+        and HDF5 group paths.
+    chunk_rows : int, default 512
+        Number of leading-dimension rows streamed per chunk to bound peak memory
+        when hashing multi-gigabyte containers.
+
+    Returns
+    -------
+    str
+        64-character lowercase hexadecimal SHA-256 digest.
+
+    Raises
+    ------
+    ValueError
+        If no data group or matrices are found, or if an array cannot be
+        canonicalized under ``policy``.
+
+    Notes
+    -----
+    Streams one dataset and row chunk at a time in sorted UTF-8 key order so
+    multi-gigabyte OMX files are hashed in constant memory regardless of HDF5
+    chunk layout, compression filter, or write timestamp.
     """
     resolved_policy = resolve_canonicalization_policy(policy)
     if isinstance(omx_path_or_handle, (str, Path)):
@@ -793,8 +978,32 @@ def compute_zarr_logical_matrices_sha256(
     policy: ArrayCanonicalizationPolicy | LogicalProfileName = "preserve_canonical",
     chunk_rows: int = _DEFAULT_CHUNK_ROWS,
 ) -> str:
-    """Compute the canonical logical matrices SHA-256 hex digest for a Zarr store.
+    """
+    Compute the canonical logical matrices SHA-256 hex digest for a Zarr store.
 
+    Parameters
+    ----------
+    zarr_path : str or pathlib.Path
+        Filesystem path to a Zarr directory store.
+    policy : ArrayCanonicalizationPolicy or {"preserve_canonical", "float32_matrices_v1"}, default "preserve_canonical"
+        Canonicalization policy controlling coordinate inclusion, dtype
+        handling, and optional 3D dimension unstacking (``policy.unstack_dim``).
+    chunk_rows : int, default 512
+        Number of leading-dimension rows streamed per chunk to bound peak memory.
+
+    Returns
+    -------
+    str
+        64-character lowercase hexadecimal SHA-256 digest.
+
+    Raises
+    ------
+    ValueError
+        If ``zarr_path`` is not a directory, contains no data variables, or
+        cannot be canonicalized under ``policy``.
+
+    Notes
+    -----
     Supports both 2D/N-D Zarr variables and 3D+ variables unstacked along
     ``policy.unstack_dim`` (for example ``unstack_dim="time_period"`` so a 3D
     Zarr ``DIST(time_period, otaz, dtaz)`` produces the exact same digest as an
@@ -934,7 +1143,28 @@ def _compute_zarr_logical_matrices_sha256_from_xarray(
 
 
 def admission_directory_identity(path: str | Path) -> str:
-    """Compute Consist's canonical directory admission identity ``sha256:manifest-v1:<hex>``."""
+    """
+    Compute Consist's canonical directory admission identity.
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        Directory path whose deterministic tree manifest should be hashed.
+
+    Returns
+    -------
+    str
+        Self-describing directory manifest identity in the form
+        ``sha256:manifest-v1:<64 lowercase hex>``.
+
+    Raises
+    ------
+    ValueError
+        If ``path`` is not a readable directory or contains symlinks rejected by
+        Consist's directory manifest builder.
+    OSError
+        If any member file in ``path`` cannot be read.
+    """
     manifest = build_directory_manifest(Path(path))
     return f"sha256:manifest-v1:{manifest['tree_hash']}"
 
@@ -956,7 +1186,38 @@ def _decode_attr_value(val: Any) -> Any:
 
 @dataclass(frozen=True, slots=True)
 class MatrixContainerSummary:
-    """Domain-agnostic structural and cryptographic summary of an array container."""
+    """
+    Domain-agnostic structural and cryptographic summary of an array container.
+
+    Attributes
+    ----------
+    artifact_path : str
+        Filesystem path of the inspected container or file.
+    artifact_format : {"omx", "h5", "zarr", "directory", "file"}
+        Detected container format.
+    container_identity : str
+        Byte-level container identity (``sha256:file:<hex>`` for files or
+        ``sha256:manifest-v1:<hex>`` for Zarr/directories).
+    size_bytes : int
+        Total byte size of the file or non-symlink files in the directory.
+    logical_identity : str or None
+        Canonical logical array identity (``sha256:logical_matrices:<hex>``)
+        when embedded in container attributes or computed on demand.
+    logical_profile : {"preserve_canonical", "float32_matrices_v1"}
+        Canonicalization profile used or recorded for ``logical_identity``.
+    shape : tuple[int, ...] or None
+        Shape of the first discovered data variable/dataset, if any.
+    coord_keys : tuple[str, ...]
+        Sorted lookup or coordinate names discovered in the container.
+    variable_count : int
+        Total number of discovered data matrices/variables.
+    variable_names : tuple[str, ...]
+        Sorted names of discovered data matrices/variables.
+    root_attributes : Mapping[str, Any]
+        Decoded container-level root attributes.
+    facets : Mapping[str, Any]
+        Optional caller-extracted facet mapping derived from ``variable_names``.
+    """
 
     artifact_path: str
     artifact_format: Literal["omx", "h5", "zarr", "directory", "file"]
@@ -974,7 +1235,45 @@ class MatrixContainerSummary:
 
 @dataclass(frozen=True, slots=True)
 class ArtifactProvenanceSidecar:
-    """Portable ``.provenance.json`` sidecar representation."""
+    """
+    Portable ``.provenance.json`` sidecar representation.
+
+    Attributes
+    ----------
+    schema_version : str
+        Sidecar schema version identifier (``"consist.artifact_provenance.v1"``).
+    artifact_name : str
+        Basename of the described artifact.
+    artifact_format : str
+        Detected artifact format (``"omx"``, ``"h5"``, ``"zarr"``, ``"directory"``,
+        or ``"file"``).
+    container_identity : str
+        Container-level admission identity (``sha256:file:<hex>`` or
+        ``sha256:manifest-v1:<hex>``).
+    size_bytes : int
+        Total byte size of the artifact.
+    logical_identity : str or None
+        Canonical logical array identity (``sha256:logical_matrices:<hex>``),
+        if available.
+    logical_profile : {"preserve_canonical", "float32_matrices_v1"}
+        Canonicalization profile associated with ``logical_identity``.
+    shape : tuple[int, ...] or None
+        Shape of the primary matrix/variable, if available.
+    coord_keys : tuple[str, ...]
+        Sorted lookup or coordinate names.
+    variable_count : int
+        Number of data matrices/variables in the container.
+    variable_names : tuple[str, ...]
+        Sorted names of data matrices/variables.
+    producer_run_id : str or None, optional
+        Run ID of the producer run, if supplied.
+    producer_meta : Mapping[str, Any]
+        Additional producer metadata recorded in the sidecar.
+    root_attributes : Mapping[str, Any]
+        Decoded root attributes from the container.
+    facets : Mapping[str, Any]
+        Extracted facet dictionary from ``key_facet_parser``, if supplied.
+    """
 
     schema_version: str
     artifact_name: str
@@ -1000,7 +1299,35 @@ def inspect_matrix_container(
     compute_logical_hash: bool = False,
     key_facet_parser: Callable[[str], Mapping[str, Any]] | None = None,
 ) -> MatrixContainerSummary:
-    """Inspect an OMX, HDF5, or Zarr container without domain-specific coupling."""
+    """
+    Inspect an OMX, HDF5, or Zarr container without domain-specific coupling.
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        Filesystem path to the file or directory container to inspect.
+    policy : ArrayCanonicalizationPolicy or {"preserve_canonical", "float32_matrices_v1"}, default "preserve_canonical"
+        Canonicalization policy used when locating HDF5 groups or computing a
+        logical array hash.
+    compute_logical_hash : bool, default False
+        When ``True``, streams the container contents to compute
+        ``logical_identity`` even if not already embedded in root attributes.
+        For Zarr stores without an embedded ``logical_identity``, the logical
+        hash is computed automatically when data variables are present.
+    key_facet_parser : Callable[[str], Mapping[str, Any]] or None, optional
+        Optional callback invoked on each discovered variable name to populate
+        aggregated facet lists in ``MatrixContainerSummary.facets``.
+
+    Returns
+    -------
+    MatrixContainerSummary
+        Immutable structural and cryptographic summary of the container.
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``path`` does not exist.
+    """
     from consist.core.admission import admission_file_identity
 
     p = Path(path)
@@ -1138,7 +1465,19 @@ def inspect_matrix_container(
 
 
 def artifact_provenance_sidecar_path(artifact_path: str | Path) -> Path:
-    """Return the co-located ``<artifact>.provenance.json`` path."""
+    """
+    Return the co-located ``<artifact>.provenance.json`` path.
+
+    Parameters
+    ----------
+    artifact_path : str or pathlib.Path
+        Path to the target file or directory artifact.
+
+    Returns
+    -------
+    pathlib.Path
+        Sibling path named ``<artifact_path.name>.provenance.json``.
+    """
     p = Path(artifact_path)
     return p.parent / f"{p.name}.provenance.json"
 
@@ -1153,7 +1492,40 @@ def write_artifact_provenance_sidecar(
     key_facet_parser: Callable[[str], Mapping[str, Any]] | None = None,
     extra_metadata: Mapping[str, Any] | None = None,
 ) -> tuple[Path, dict[str, Any]]:
-    """Inspect ``artifact_path`` and atomically write ``<artifact_path>.provenance.json``."""
+    """
+    Inspect ``artifact_path`` and atomically write ``<artifact_path>.provenance.json``.
+
+    Parameters
+    ----------
+    artifact_path : str or pathlib.Path
+        File or directory container to inspect.
+    policy : ArrayCanonicalizationPolicy or {"preserve_canonical", "float32_matrices_v1"}, default "preserve_canonical"
+        Canonicalization policy used when inspecting ``artifact_path`` and
+        computing its logical hash.
+    compute_logical_hash : bool, default False
+        Whether to compute the streaming logical array digest if not already
+        embedded in root attributes.
+    producer_run_id : str or None, optional
+        Optional producer run identifier recorded under ``producer.run_id``.
+    producer_meta : Mapping[str, Any] or None, optional
+        Optional additional metadata merged into the ``producer`` object.
+    key_facet_parser : Callable[[str], Mapping[str, Any]] or None, optional
+        Optional parser extracting facet key-values from each matrix/variable name.
+    extra_metadata : Mapping[str, Any] or None, optional
+        Optional extra fields merged into ``container_metadata``.
+
+    Returns
+    -------
+    tuple[pathlib.Path, dict[str, Any]]
+        Tuple of ``(sidecar_path, payload_dict)`` written to disk.
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``artifact_path`` does not exist.
+    OSError
+        If the sidecar file cannot be written.
+    """
     p = Path(artifact_path)
     summary = inspect_matrix_container(
         p,
@@ -1201,7 +1573,29 @@ def write_artifact_provenance_sidecar(
 
 
 def read_artifact_provenance_sidecar(sidecar_path: str | Path) -> dict[str, Any]:
-    """Read and validate a Consist ``.provenance.json`` sidecar."""
+    """
+    Read and validate a Consist ``.provenance.json`` sidecar.
+
+    Parameters
+    ----------
+    sidecar_path : str or pathlib.Path
+        Filesystem path to the ``.provenance.json`` file.
+
+    Returns
+    -------
+    dict[str, Any]
+        Validated sidecar payload dictionary with normalized
+        ``logical_identity`` and ``logical_profile`` fields.
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``sidecar_path`` does not exist or is not a regular file.
+    ValueError
+        If the JSON payload is not an object, does not match
+        ``ARTIFACT_PROVENANCE_SCHEMA_VERSION``, or contains an invalid
+        ``logical_identity`` digest.
+    """
     p = Path(sidecar_path)
     if not p.is_file():
         raise FileNotFoundError(f"Artifact provenance sidecar does not exist: {p}")
