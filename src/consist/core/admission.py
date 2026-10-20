@@ -59,6 +59,12 @@ class AdmissionIdentity(BaseModel):
     - ``sha256:file:<hex>``
     - ``sha256:manifest-v1:<hex>``
     - ``sha256:logical_matrices:<hex>``
+
+    Attributes
+    ----------
+    value : str
+        Canonical self-describing identity string in the form
+        ``sha256:<file|manifest-v1|logical_matrices>:<64 lowercase hex>``.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -76,18 +82,51 @@ class AdmissionIdentity(BaseModel):
 
     @property
     def kind(self) -> AdmissionIdentityKind:
-        """Return the identity kind segment."""
+        """
+        Return the identity kind segment.
+
+        Returns
+        -------
+        {"file", "manifest-v1", "logical_matrices"}
+            Kind segment extracted from ``value``.
+        """
         kind_part = self.value.split(":", 2)[1]
         return cast(AdmissionIdentityKind, kind_part)
 
     @property
     def hex_digest(self) -> str:
-        """Return the 64-character lowercase hexadecimal SHA-256 digest."""
+        """
+        Return the 64-character lowercase hexadecimal SHA-256 digest.
+
+        Returns
+        -------
+        str
+            Lowercase 64-character SHA-256 hex digest.
+        """
         return self.value.split(":", 2)[2]
 
     @classmethod
     def parse(cls, value: str) -> "AdmissionIdentity":
-        """Parse one canonical admission identity."""
+        """
+        Parse one canonical admission identity.
+
+        Parameters
+        ----------
+        value : str
+            Self-describing SHA-256 identity string.
+
+        Returns
+        -------
+        AdmissionIdentity
+            A ``FileIdentity`` instance when ``value`` uses the ``sha256:file:``
+            scheme, or an ``AdmissionIdentity`` instance for ``manifest-v1``
+            and ``logical_matrices`` schemes.
+
+        Raises
+        ------
+        ValueError
+            If ``value`` does not match a supported canonical admission scheme.
+        """
         if isinstance(value, str) and _FILE_IDENTITY.fullmatch(value):
             return FileIdentity(value=value)
         return cls(value=value)
@@ -106,7 +145,15 @@ class AdmissionIdentity(BaseModel):
 
 
 class FileIdentity(AdmissionIdentity):
-    """One canonical SHA-256 identity for the raw bytes of a regular file."""
+    """
+    One canonical SHA-256 identity for the raw bytes of a regular file.
+
+    Attributes
+    ----------
+    value : str
+        Canonical raw-file SHA-256 identity in the form
+        ``sha256:file:<64 lowercase hexadecimal characters>``.
+    """
 
     @field_validator("value")
     @classmethod
@@ -119,12 +166,45 @@ class FileIdentity(AdmissionIdentity):
 
     @classmethod
     def parse(cls, value: str) -> "FileIdentity":
-        """Parse one canonical raw-file SHA-256 identity."""
+        """
+        Parse one canonical raw-file SHA-256 identity.
+
+        Parameters
+        ----------
+        value : str
+            Canonical file identity string in the form
+            ``sha256:file:<64 lowercase hex>``.
+
+        Returns
+        -------
+        FileIdentity
+            Validated ``FileIdentity`` instance.
+
+        Raises
+        ------
+        ValueError
+            If ``value`` is not a valid ``sha256:file:<64 lowercase hex>`` string.
+        """
         return cls(value=value)
 
 
 class DeclaredDigestExpectation(BaseModel):
-    """A locally declared file, directory, or logical-array identity and optional source context."""
+    """
+    A locally declared file, directory, or logical-array identity and optional source context.
+
+    Attributes
+    ----------
+    identity : AdmissionIdentity
+        Expected canonical admission identity (``sha256:file:<hex>``,
+        ``sha256:manifest-v1:<hex>``, or ``sha256:logical_matrices:<hex>``).
+        Strings matching those schemes are coerced automatically.
+    source_label : str or None, optional
+        Human-readable label describing the declared digest source.
+    source_uri : str or None, optional
+        Opaque URI or location describing the declared digest source.
+    logical_profile : {"preserve_canonical", "float32_matrices_v1"}, default "preserve_canonical"
+        Canonicalization profile used when ``identity.kind == "logical_matrices"``.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -234,7 +314,43 @@ class PriorRunExpectation(BaseModel):
         logical_profile: LogicalProfileName | None = None,
         expected_logical_hash: str | None = None,
     ) -> "PriorRunExpectation":
-        """Construct a PriorRunExpectation from a resolved Consist Artifact."""
+        """
+        Construct a ``PriorRunExpectation`` from a resolved Consist ``Artifact``.
+
+        Parameters
+        ----------
+        artifact : Artifact
+            Consist artifact whose ``key``, ``run_id``, and optional
+            ``meta["logical_identity"]`` / ``meta["logical_profile"]`` seed the
+            expectation.
+        expected_run_id : str or None, optional
+            Explicit run ID override. Required when ``artifact.run_id`` is ``None``.
+        expected_direction : {"input", "output", "any"}, default "any"
+            Expected link direction on the prior run.
+        source_tracker_db : str or pathlib.Path or None, optional
+            External DuckDB provenance database path.
+        expected_bytes_path : str or pathlib.Path or None, optional
+            Immutable fallback file path for historical hash corroboration.
+        input_role : str or None, optional
+            Logical role to record in the admission report.
+        identity_scheme : {"auto", "container", "logical"}, default "auto"
+            Identity comparison mode.
+        logical_profile : {"preserve_canonical", "float32_matrices_v1"} or None, optional
+            Canonicalization profile override.
+        expected_logical_hash : str or None, optional
+            Explicit logical array digest override.
+
+        Returns
+        -------
+        PriorRunExpectation
+            Populated expectation model.
+
+        Raises
+        ------
+        ValueError
+            If neither ``expected_run_id`` nor ``artifact.run_id`` is available,
+            or if ``expected_logical_hash`` is malformed.
+        """
         run_id = expected_run_id or (
             str(artifact.run_id) if artifact.run_id is not None else None
         )
@@ -270,12 +386,26 @@ class PriorRunExpectation(BaseModel):
 
     @property
     def run_id(self) -> str:
-        """Alias for expected_run_id."""
+        """
+        Return the expected run identifier.
+
+        Returns
+        -------
+        str
+            Alias for ``expected_run_id``.
+        """
         return self.expected_run_id
 
     @property
     def direction(self) -> Literal["input", "output", "any"]:
-        """Alias for expected_direction."""
+        """
+        Return the expected artifact link direction.
+
+        Returns
+        -------
+        {"input", "output", "any"}
+            Alias for ``expected_direction``.
+        """
         return self.expected_direction
 
 
@@ -1047,8 +1177,53 @@ def compare_path_to_identity(
     source_tracker_db: str | None = None,
     logical_profile: LogicalProfileName = "preserve_canonical",
 ) -> AdmissionReport:
-    """Compare one candidate path with a typed expected admission identity.
+    """
+    Compare one candidate path with a typed expected admission identity.
 
+    Parameters
+    ----------
+    execution_path : str or pathlib.Path
+        Candidate file or directory path to hash and compare.
+    expected_identity : AdmissionIdentity or str
+        Canonical expected identity (``sha256:file:<hex>``,
+        ``sha256:manifest-v1:<hex>``, or ``sha256:logical_matrices:<hex>``).
+    input_role : str
+        Logical input role recorded in the returned ``AdmissionReport``.
+    expected_source : {"prior_run", "declared_digest"}
+        Source of the expected identity.
+    artifact_key : str or None, optional
+        Artifact key when ``expected_source="prior_run"``.
+    expected_run_id : str or None, optional
+        Run ID when ``expected_source="prior_run"``.
+    expected_source_label : str or None, optional
+        Optional human-readable source label for declared digests.
+    expected_source_uri : str or None, optional
+        Optional source URI for declared digests.
+    expected_bytes_source : {"explicit_immutable_path"} or None, optional
+        Evidence source used to corroborate a historical artifact hash.
+    expected_bytes_path : str or None, optional
+        Resolved path of the corroborating immutable file, if any.
+    expected_direction : {"input", "output", "any"} or None, optional
+        Expected artifact link direction on the prior run.
+    source_tracker_db : str or None, optional
+        Resolved path of an external provenance database, if used.
+    logical_profile : {"preserve_canonical", "float32_matrices_v1"}, default "preserve_canonical"
+        Canonicalization profile used when ``expected_identity`` has kind
+        ``"logical_matrices"``.
+
+    Returns
+    -------
+    AdmissionReport
+        Policy-neutral admission report describing the verification outcome.
+
+    Raises
+    ------
+    ValueError
+        If ``expected_identity`` cannot be parsed as a valid
+        ``AdmissionIdentity``.
+
+    Notes
+    -----
     This source-neutral primitive computes a full SHA-256 over the candidate's
     raw file bytes, directory manifest, or canonical logical arrays according to
     ``expected_identity.kind`` and does not read a Tracker, consult a registry,
@@ -1178,6 +1353,59 @@ def check_artifact_identity(
 ) -> AdmissionReport:
     """
     Compare a resolved file or directory with one artifact from an explicit completed run.
+
+    Parameters
+    ----------
+    tracker : Tracker or None, optional
+        Consist tracker owning the provenance database. May be ``None`` when
+        ``source_tracker_db`` is provided.
+    execution_path : str or pathlib.Path
+        Candidate file or directory path to verify before workflow execution.
+    expected_run_id : str
+        Explicit completed run ID that produced or consumed the expected artifact.
+    artifact_key : str
+        Exact artifact key linked to ``expected_run_id``.
+    expected_bytes_path : str or pathlib.Path or None, optional
+        Distinct immutable file path used to corroborate a historical artifact
+        hash that lacks explicit full-file hash semantics.
+    input_role : str or None, optional
+        Logical role recorded in the report. Defaults to ``artifact_key``.
+    expected_direction : {"input", "output", "any"}, default "any"
+        Constraint on the artifact link direction on ``expected_run_id``.
+    source_tracker_db : str or pathlib.Path or None, optional
+        Optional path to an external DuckDB provenance database opened strictly
+        read-only without schema initialization.
+    identity_scheme : {"auto", "container", "logical"}, default "auto"
+        Comparison mode:
+        - ``"container"``: require exact raw-file bytes (``sha256:file:<hex>``)
+          or directory manifest (``sha256:manifest-v1:<hex>``).
+        - ``"logical"``: require canonical logical array equivalence
+          (``sha256:logical_matrices:<hex>``).
+        - ``"auto"``: check container identity first and, if container bytes or
+          formats differ (e.g., ``.omx`` vs. ``.zarr``), fall back to logical
+          array identity when available.
+    logical_profile : {"preserve_canonical", "float32_matrices_v1"} or None, optional
+        Canonicalization profile used when computing logical array identity.
+        When ``None``, inferred from the prior-run artifact metadata or defaults
+        to ``"preserve_canonical"``.
+    expected_logical_hash : str or None, optional
+        Optional caller-supplied ``sha256:logical_matrices:<hex>`` (or 64-hex)
+        digest overriding or supplementing the prior artifact's metadata.
+
+    Returns
+    -------
+    AdmissionReport
+        Policy-neutral admission report describing the verification result and
+        supporting observations.
+
+    Raises
+    ------
+    RuntimeError
+        If neither ``source_tracker_db`` nor a tracker with an active provenance
+        database is supplied.
+    ValueError
+        If ``expected_logical_hash`` is provided and is not a valid 64-character
+        hexadecimal SHA-256 digest or ``sha256:logical_matrices:<hex>`` URI.
     """
     if source_tracker_db is None and (tracker is None or tracker.db is None):
         raise RuntimeError("Artifact admission requires a provenance database.")
@@ -1597,6 +1825,48 @@ def check_admission_reference(
 ) -> AdmissionReport:
     """
     Check a runtime-resolved input without recreating consumer path logic.
+
+    Parameters
+    ----------
+    tracker : Tracker or None, optional
+        Consist tracker owning the provenance database. May be ``None`` when
+        ``source_tracker_db`` is provided.
+    reference : AdmissionReference
+        Caller-proven runtime path and configuration evidence. Must include a
+        non-null ``artifact_key``.
+    expected_run_id : str
+        Explicit completed run ID supplying the expected artifact.
+    expected_bytes_path : str or pathlib.Path or None, optional
+        Distinct immutable file path used to corroborate a historical artifact
+        hash that lacks explicit full-file hash semantics.
+    expected_direction : {"input", "output", "any"}, default "any"
+        Constraint on the artifact link direction on ``expected_run_id``.
+    source_tracker_db : str or pathlib.Path or None, optional
+        Optional path to an external DuckDB provenance database opened strictly
+        read-only.
+    identity_scheme : {"auto", "container", "logical"}, default "auto"
+        Whether to verify container bytes, logical array contents, or try
+        container first with logical fallback.
+    logical_profile : {"preserve_canonical", "float32_matrices_v1"} or None, optional
+        Canonicalization profile used when computing logical array identity.
+    expected_logical_hash : str or None, optional
+        Optional caller-supplied ``sha256:logical_matrices:<hex>`` (or 64-hex)
+        digest overriding or supplementing the prior artifact's metadata.
+
+    Returns
+    -------
+    AdmissionReport
+        Policy-neutral admission report enriched with the configuration and
+        consumer path fields from ``reference``.
+
+    Raises
+    ------
+    ValueError
+        If ``reference.artifact_key`` is ``None`` or ``expected_logical_hash``
+        is malformed.
+    RuntimeError
+        If neither ``source_tracker_db`` nor a tracker with an active provenance
+        database is supplied.
     """
     if reference.artifact_key is None:
         raise ValueError("prior-run admission references require artifact_key")
@@ -1622,7 +1892,30 @@ def check_expected_identity(
     input_role: str,
     expectation: DeclaredDigestExpectation,
 ) -> AdmissionReport:
-    """Compare one file or directory to a caller-declared, typed digest."""
+    """
+    Compare one file or directory to a caller-declared, typed digest.
+
+    Parameters
+    ----------
+    execution_path : str or pathlib.Path
+        Candidate file or directory path to verify.
+    input_role : str
+        Non-empty logical role recorded in the report.
+    expectation : DeclaredDigestExpectation
+        Declared digest expectation containing an ``AdmissionIdentity``
+        (``file``, ``manifest-v1``, or ``logical_matrices``), optional source
+        metadata, and ``logical_profile``.
+
+    Returns
+    -------
+    AdmissionReport
+        Policy-neutral admission report with ``expected_source="declared_digest"``.
+
+    Raises
+    ------
+    ValueError
+        If ``input_role`` is empty.
+    """
     if not input_role:
         raise ValueError("declared-digest admission requires input_role")
     return compare_path_to_identity(
@@ -1641,7 +1934,28 @@ def check_admission_reference_expected_identity(
     reference: AdmissionReference,
     expectation: DeclaredDigestExpectation,
 ) -> AdmissionReport:
-    """Compare a runtime-resolved file to a declared digest without a Tracker."""
+    """
+    Compare a runtime-resolved file or directory to a declared digest without a Tracker.
+
+    Parameters
+    ----------
+    reference : AdmissionReference
+        Caller-proven runtime path and configuration evidence. Must have
+        ``artifact_key=None`` and a non-empty ``input_role``.
+    expectation : DeclaredDigestExpectation
+        Declared digest expectation to verify against ``reference.execution_path``.
+
+    Returns
+    -------
+    AdmissionReport
+        Policy-neutral admission report enriched with the configuration and
+        consumer path fields from ``reference``.
+
+    Raises
+    ------
+    ValueError
+        If ``reference.artifact_key`` is not ``None``.
+    """
     if reference.artifact_key is not None:
         raise ValueError(
             "declared-digest admission references must not contain artifact_key"
@@ -1663,7 +1977,34 @@ def check_prior_run_expectation(
     input_role: str | None = None,
 ) -> AdmissionReport:
     """
-    Compare a resolved file or directory with a prior run expectation.
+    Compare a resolved file or directory with a ``PriorRunExpectation``.
+
+    Parameters
+    ----------
+    tracker : Tracker or None, optional
+        Consist tracker owning the provenance database. May be ``None`` when
+        ``expectation.source_tracker_db`` is provided.
+    execution_path : str or pathlib.Path
+        Candidate file or directory path to verify.
+    expectation : PriorRunExpectation
+        Typed prior-run expectation specifying ``expected_run_id``,
+        ``artifact_key``, ``expected_direction``, ``source_tracker_db``,
+        ``identity_scheme``, ``logical_profile``, and optional
+        ``expected_logical_hash``.
+    input_role : str or None, optional
+        Optional logical role override. When ``None``, falls back to
+        ``expectation.input_role`` and then ``expectation.artifact_key``.
+
+    Returns
+    -------
+    AdmissionReport
+        Policy-neutral admission report describing the verification outcome.
+
+    Raises
+    ------
+    RuntimeError
+        If neither ``expectation.source_tracker_db`` nor a tracker with an
+        active provenance database is supplied.
     """
     role = input_role if input_role is not None else expectation.input_role
     return check_artifact_identity(
@@ -1688,7 +2029,34 @@ def check_admission_reference_prior_run_expectation(
     expectation: PriorRunExpectation,
 ) -> AdmissionReport:
     """
-    Check a runtime-resolved input reference against a prior run expectation.
+    Check a runtime-resolved input reference against a ``PriorRunExpectation``.
+
+    Parameters
+    ----------
+    tracker : Tracker or None, optional
+        Consist tracker owning the provenance database. May be ``None`` when
+        ``expectation.source_tracker_db`` is provided.
+    reference : AdmissionReference
+        Caller-proven runtime path and configuration evidence. If
+        ``reference.artifact_key`` is set, it must match
+        ``expectation.artifact_key``.
+    expectation : PriorRunExpectation
+        Typed prior-run expectation to verify against ``reference.execution_path``.
+
+    Returns
+    -------
+    AdmissionReport
+        Policy-neutral admission report enriched with the configuration and
+        consumer path fields from ``reference``.
+
+    Raises
+    ------
+    ValueError
+        If ``reference.artifact_key`` is set and differs from
+        ``expectation.artifact_key``.
+    RuntimeError
+        If neither ``expectation.source_tracker_db`` nor a tracker with an
+        active provenance database is supplied.
     """
     if (
         reference.artifact_key is not None

@@ -1,11 +1,12 @@
 # Artifact Admission
 
-Artifact admission verifies that a regular file about to enter a workflow has
-the same bytes as either one exact artifact from an explicitly selected completed
-run or a declared `sha256:file:<64 lowercase hex>` identity. It is separate
-from cache lookup: admission always computes a full raw-file SHA-256 identity,
-while `Artifact.hash` may represent a fast, directory, or caller-supplied
-fingerprint.
+Artifact admission verifies that a regular file, directory container, or logical
+array container about to enter a workflow matches either one exact artifact from
+an explicitly selected completed run or a declared canonical identity
+(`sha256:file:<64 hex>`, `sha256:manifest-v1:<64 hex>`, or
+`sha256:logical_matrices:<64 hex>`). It is separate from cache lookup: admission
+computes explicit verification identities rather than relying unconditionally on
+fast, directory, or caller-supplied `Artifact.hash` fingerprints.
 
 Consist reports evidence without deciding workflow policy. Callers such as
 PILATES can classify an `AdmissionReport` as fatal, warning-only, or acceptable
@@ -83,16 +84,17 @@ report = check_admission_reference(
 
 ## Declared digests
 
-Use a declared digest when a workflow has a locally governed canonical file
-identity but no prior Consist run. `FileIdentity` rejects bare, uppercase, and
-non-file identities before Consist reads candidate bytes. A successful report
-only proves equality with the declaration; it does not authenticate the source
-label or URI, create a trusted `Artifact`, or change cache hashing defaults.
+Use a declared digest when a workflow has a locally governed canonical identity
+but no prior Consist run. `AdmissionIdentity` (or `FileIdentity` for raw files)
+rejects bare, uppercase, and unsupported identity prefixes before Consist reads
+candidate bytes. A successful report only proves equality with the declaration;
+it does not authenticate the source label or URI, create a trusted `Artifact`,
+or change cache hashing defaults.
 
 ```python
 from consist import (
+    AdmissionIdentity,
     DeclaredDigestExpectation,
-    FileIdentity,
     check_expected_identity,
 )
 
@@ -100,7 +102,7 @@ report = check_expected_identity(
     execution_path="inputs/initial_datastore.h5",
     input_role="urbansim_initial_datastore",
     expectation=DeclaredDigestExpectation(
-        identity=FileIdentity.parse("sha256:file:<64 lowercase hex>"),
+        identity=AdmissionIdentity.parse("sha256:file:<64 lowercase hex>"),
         source_label="UrbanSim initial datastore",
         source_uri="s3://governed-inputs/seattle/initial_datastore.h5",
     ),
@@ -112,12 +114,82 @@ For a runtime-resolved path, construct an `AdmissionReference` without an
 `check_admission_reference_expected_identity(...)`. It retains the same
 execution, configuration, and consumer-path evidence as the prior-run wrapper.
 
+## Directory & logical array admission
+
+Admission supports directory artifacts (`sha256:manifest-v1:<64 hex>`) and
+format-neutral logical array containers (`sha256:logical_matrices:<64 hex>`)
+across `.omx`/`.h5` and `.zarr` containers.
+
+### Identity schemes (`identity_scheme`)
+
+Both `PriorRunExpectation` and `DeclaredDigestExpectation` accept
+`identity_scheme`:
+
+- `"auto"` (default): uses a stored or sidecar `sha256:logical_matrices:...`
+  identity when present, or falls back to container identity (`sha256:file:...`
+  for regular files, `sha256:manifest-v1:...` for directory artifacts such as
+  `.zarr`).
+- `"container"`: forces byte-for-byte file (`sha256:file:...`) or directory
+  manifest (`sha256:manifest-v1:...`) verification.
+- `"logical"`: forces logical array verification (`sha256:logical_matrices:...`),
+  enabling cross-format verification when an upstream `.zarr` container is
+  materialized or converted to `.omx` (or vice versa).
+
+### Canonicalization profiles (`logical_profile` & `ArrayCanonicalizationPolicy`)
+
+Logical array hashing is governed by `ArrayCanonicalizationPolicy` or its named
+profiles via `logical_profile`:
+
+- `"preserve_canonical"` (default): preserves native numeric dtypes (`float64`,
+  `float32`, `float16`, signed/unsigned integers, booleans) in canonical
+  little-endian form while normalizing non-signaling IEEE 754 `NaN` bit patterns
+  and `-0.0` for floating-point arrays. Includes `/lookup` zone mappings in OMX
+  containers alongside `/data` matrices.
+- `"float32_matrices_v1"`: explicit opt-in profile that casts floating-point
+  matrices under `/data` to canonical little-endian `float32` (`<f4`) with
+  canonical `NaN` (`0x7FC00000`) and `+0.0` (`0x00000000`) normalization,
+  matching external JVM/Scala writers that emit `float32` logical matrix
+  digests.
+
+```python
+from consist import (
+    PriorRunExpectation,
+    check_prior_run_expectation,
+    compute_omx_logical_matrices_sha256,
+    write_artifact_provenance_sidecar,
+)
+
+# Compute a logical digest and write a .provenance.json sidecar
+digest = compute_omx_logical_matrices_sha256(
+    "outputs/skims.omx",
+    policy="preserve_canonical",
+)
+write_artifact_provenance_sidecar(
+    "outputs/skims.omx",
+    content_hash=digest,
+    logical_profile="preserve_canonical",
+    producer="skim_builder",
+)
+
+# Admit a downstream OMX file against an upstream Zarr output by logical content
+report = check_prior_run_expectation(
+    execution_path="inputs/skims.omx",
+    expectation=PriorRunExpectation(
+        expected_run_id="upstream-skim-run",
+        artifact_key="skims_zarr",
+        expected_direction="output",
+        identity_scheme="logical",
+        logical_profile="preserve_canonical",
+    ),
+)
+```
+
 ## Report schema compatibility
 
-New reports use schema version 3. It retains `consumer_path` from v2, adds the
-declared-digest shape (nullable `artifact_key` and `expected_run_id`, plus
-optional `expected_source_label` and `expected_source_uri`), and records
-`expected_direction` and optional `source_tracker_db` on prior-run reports.
+New reports use schema version 4. It retains `consumer_path` from v2, the
+declared-digest shape and `expected_direction` / `source_tracker_db` from v3,
+and adds `identity_scheme`, `logical_profile`, `expected_identity_source`, and
+`actual_identity_source` for directory and logical array admission.
 Sidecars retain their own `report_schema_version`; historical v1/v2 prior-run
 reports default `expected_direction` to `"input"`, and readers should treat
 other fields absent from older versions as unavailable. Consist does not
@@ -167,6 +239,12 @@ rewrite existing sidecars.
       show_root_heading: true
       show_root_toc_entry: true
 
+::: consist.core.admission.AdmissionIdentity
+    options:
+      show_source: false
+      show_root_heading: true
+      show_root_toc_entry: true
+
 ::: consist.core.admission.FileIdentity
     options:
       show_source: false
@@ -186,6 +264,68 @@ rewrite existing sidecars.
       show_root_toc_entry: true
 
 ::: consist.core.admission.check_admission_reference_expected_identity
+    options:
+      show_source: false
+      show_root_heading: true
+      show_root_toc_entry: true
+
+## Logical array & container identity helpers
+
+::: consist.core.logical_array_identity.ArrayCanonicalizationPolicy
+    options:
+      show_source: false
+      show_root_heading: true
+      show_root_toc_entry: true
+
+::: consist.core.logical_array_identity.MatrixContainerSummary
+    options:
+      show_source: false
+      show_root_heading: true
+      show_root_toc_entry: true
+
+::: consist.core.logical_array_identity.ArtifactProvenanceSidecar
+    options:
+      show_source: false
+      show_root_heading: true
+      show_root_toc_entry: true
+
+::: consist.core.logical_array_identity.compute_logical_matrices_sha256
+    options:
+      show_source: false
+      show_root_heading: true
+      show_root_toc_entry: true
+
+::: consist.core.logical_array_identity.compute_omx_logical_matrices_sha256
+    options:
+      show_source: false
+      show_root_heading: true
+      show_root_toc_entry: true
+
+::: consist.core.logical_array_identity.compute_zarr_logical_matrices_sha256
+    options:
+      show_source: false
+      show_root_heading: true
+      show_root_toc_entry: true
+
+::: consist.core.logical_array_identity.admission_directory_identity
+    options:
+      show_source: false
+      show_root_heading: true
+      show_root_toc_entry: true
+
+::: consist.core.logical_array_identity.inspect_matrix_container
+    options:
+      show_source: false
+      show_root_heading: true
+      show_root_toc_entry: true
+
+::: consist.core.logical_array_identity.write_artifact_provenance_sidecar
+    options:
+      show_source: false
+      show_root_heading: true
+      show_root_toc_entry: true
+
+::: consist.core.logical_array_identity.read_artifact_provenance_sidecar
     options:
       show_source: false
       show_root_heading: true
