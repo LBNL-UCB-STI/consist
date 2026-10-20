@@ -74,12 +74,25 @@ from consist.core.workflow import StepIdentity
 
 # API
 from consist.api import (
+    ARTIFACT_PROVENANCE_SCHEMA_VERSION,  # noqa: F401
+    FLOAT32_MATRICES_V1_POLICY,  # noqa: F401
+    PRESERVE_CANONICAL_POLICY,  # noqa: F401
+    AdmissionIdentity,  # noqa: F401
     AdmissionReference,  # noqa: F401
     AdmissionReport,  # noqa: F401
+    ArrayCanonicalizationPolicy,  # noqa: F401
+    ArtifactProvenanceSidecar,  # noqa: F401
     DeclaredDigestExpectation,  # noqa: F401
     FileIdentity,  # noqa: F401
+    MatrixContainerSummary,  # noqa: F401
     PriorRunExpectation,  # noqa: F401
     RunContext,
+    admission_directory_identity,  # noqa: F401
+    admission_file_identity,  # noqa: F401
+    artifact_provenance_sidecar_path,  # noqa: F401
+    canonicalize_float32_array,  # noqa: F401
+    canonicalize_float64_array,  # noqa: F401
+    canonicalize_float_array,  # noqa: F401
     check_admission_reference,  # noqa: F401
     check_admission_reference_expected_identity,  # noqa: F401
     check_admission_reference_prior_run_expectation,  # noqa: F401
@@ -87,6 +100,15 @@ from consist.api import (
     check_expected_identity,  # noqa: F401
     check_prior_run_expectation,  # noqa: F401
     compare_path_to_identity,  # noqa: F401
+    compute_array_entry_sha256,  # noqa: F401
+    compute_logical_matrices_sha256,  # noqa: F401
+    compute_omx_logical_matrices_sha256,  # noqa: F401
+    compute_zarr_logical_matrices_sha256,  # noqa: F401
+    inspect_matrix_container,  # noqa: F401
+    normalize_logical_matrices_identity,  # noqa: F401
+    read_artifact_provenance_sidecar,  # noqa: F401
+    resolve_canonicalization_policy,  # noqa: F401
+    write_artifact_provenance_sidecar,  # noqa: F401
     load,
     load_df,
     load_relation,
@@ -233,8 +255,15 @@ __all__ = [
     "Tracker",
     "Coupler",
     "RunContext",
+    "AdmissionIdentity",
     "AdmissionReference",
     "AdmissionReport",
+    "ArrayCanonicalizationPolicy",
+    "ArtifactProvenanceSidecar",
+    "MatrixContainerSummary",
+    "ARTIFACT_PROVENANCE_SCHEMA_VERSION",
+    "PRESERVE_CANONICAL_POLICY",
+    "FLOAT32_MATRICES_V1_POLICY",
     "DeclaredDigestExpectation",
     "FileIdentity",
     "PriorRunExpectation",
@@ -327,6 +356,12 @@ __all__ = [
     "RelationConnectionLeakWarning",
     "to_df",
     "run",
+    "admission_directory_identity",
+    "admission_file_identity",
+    "artifact_provenance_sidecar_path",
+    "canonicalize_float32_array",
+    "canonicalize_float64_array",
+    "canonicalize_float_array",
     "check_admission_reference",
     "check_admission_reference_expected_identity",
     "check_admission_reference_prior_run_expectation",
@@ -334,6 +369,15 @@ __all__ = [
     "check_expected_identity",
     "check_prior_run_expectation",
     "compare_path_to_identity",
+    "compute_array_entry_sha256",
+    "compute_logical_matrices_sha256",
+    "compute_omx_logical_matrices_sha256",
+    "compute_zarr_logical_matrices_sha256",
+    "inspect_matrix_container",
+    "normalize_logical_matrices_identity",
+    "read_artifact_provenance_sidecar",
+    "resolve_canonicalization_policy",
+    "write_artifact_provenance_sidecar",
     "ref",
     "refs",
     "trace",
