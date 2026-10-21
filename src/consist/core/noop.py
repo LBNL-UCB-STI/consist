@@ -8,7 +8,9 @@ import logging
 from typing import (
     Any,
     Dict,
+    Iterable,
     Iterator,
+    Literal,
     Mapping,
     MutableMapping,
     Optional,
@@ -29,6 +31,7 @@ from consist.protocols import TrackerLike
 from consist.types import ExecutionOptions, OutputSet
 
 from consist.models.run import Run, CouplerSnapshotPhase
+from consist.core.workflow import RestoredCouplerSnapshotResult
 
 
 @dataclass
@@ -375,11 +378,34 @@ class NoopScenarioContext:
         before_step_ordinal: Optional[int] = None,
         clear_existing: bool = False,
         fallback_to_completed_outputs: bool = True,
-    ) -> Dict[str, Any]:
+        target_root: Optional[Union[str, Path]] = None,
+        source_root: Optional[Union[str, Path]] = None,
+        remappable_schemes: Optional[
+            Union[Iterable[str], Mapping[str, Union[str, Path]]]
+        ] = None,
+        prune_unrecoverable: bool = False,
+        validate_content_hash: Literal["never", "if-present", "always"] = "never",
+    ) -> RestoredCouplerSnapshotResult:
         """Noop implementation of restore_coupler_snapshot."""
+        _ = (
+            run_id,
+            scenario_run_id,
+            phase,
+            year,
+            iteration,
+            stage,
+            model_name,
+            before_step_ordinal,
+            fallback_to_completed_outputs,
+            target_root,
+            source_root,
+            remappable_schemes,
+            prune_unrecoverable,
+            validate_content_hash,
+        )
         if clear_existing:
             self.coupler.clear()
-        return {}
+        return RestoredCouplerSnapshotResult()
 
     def find_latest_coupler_snapshot(
         self,

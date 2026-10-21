@@ -386,11 +386,20 @@ class Artifact(SQLModel, table=True):
         """
         Resolve this artifact to a filesystem Path.
 
-        Uses the tracker when available to handle mount-aware URIs. If that
-        canonical resolution does not exist but a runtime ``abs_path`` is set
-        (for example after historical hydration or archive ``move``), this
-        falls back to ``abs_path`` before returning the raw URI.
+        When a runtime ``abs_path`` is set and exists on disk (for example after
+        historical hydration, workspace materialization, or archive ``move``),
+        it takes precedence. Otherwise this uses the attached tracker when
+        available to handle mount-aware URIs, falling back to ``abs_path`` or
+        the raw URI.
         """
+        if self.abs_path:
+            abs_candidate = Path(self.abs_path)
+            try:
+                if abs_candidate.exists():
+                    return abs_candidate
+            except OSError:
+                pass
+
         tracker_ref = get_tracker_ref(self)
         if tracker_ref is not None:
             tracker_obj = tracker_ref()
@@ -399,7 +408,7 @@ class Artifact(SQLModel, table=True):
                     resolved = Path(tracker_obj.resolve_uri(self.container_uri))
                     if resolved.exists() or not self.abs_path:
                         return resolved
-                except Exception:
+                except (ValueError, RuntimeError, OSError, TypeError):
                     resolved = None
 
         if self.abs_path:
@@ -411,12 +420,33 @@ class Artifact(SQLModel, table=True):
         Resolve this artifact to a filesystem path.
 
         When ``tracker`` is provided, URI resolution uses that tracker
-        explicitly. Otherwise this falls back to the attached tracker context
-        (if any), then any runtime ``abs_path`` captured during hydration or
-        archive ``move``, then the raw URI path.
+        explicitly unless ``tracker`` is the already-attached tracker for an
+        artifact with an existing runtime ``abs_path`` (such as an artifact
+        materialized into an alternate ``target_root``). Otherwise this falls
+        back to the attached tracker context (if any), then any runtime
+        ``abs_path`` captured during hydration or archive ``move``, then the
+        raw URI path.
         """
         if tracker is not None:
-            return Path(tracker.resolve_uri(self.container_uri))
+            if self.abs_path:
+                tracker_ref = get_tracker_ref(self)
+                attached_tracker = tracker_ref() if tracker_ref is not None else None
+                if attached_tracker is tracker:
+                    abs_candidate = Path(self.abs_path)
+                    try:
+                        if abs_candidate.exists():
+                            return abs_candidate
+                    except OSError:
+                        pass
+            try:
+                resolved = Path(tracker.resolve_uri(self.container_uri))
+                if resolved.exists() or not self.abs_path:
+                    return resolved
+            except (ValueError, RuntimeError, OSError, TypeError):
+                pass
+            if self.abs_path:
+                return Path(self.abs_path)
+            return Path(self.container_uri)
         return self.path
 
     def accessibility(
