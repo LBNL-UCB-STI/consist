@@ -1,4 +1,5 @@
 import atexit
+import copy
 import time
 import logging
 import re
@@ -277,31 +278,12 @@ _DB_CALL_PROFILER = _DBCallProfiler()
 
 def _clone_artifact_content(row: ArtifactContent) -> ArtifactContent:
     """Return a detached copy safe to reuse outside the originating session."""
-    return ArtifactContent(
-        id=row.id,
-        content_hash=row.content_hash,
-        driver=row.driver,
-        created_at=row.created_at,
-        meta=dict(row.meta or {}),
-    )
+    return copy.deepcopy(row)
 
 
 def _clone_artifact(row: Artifact) -> Artifact:
     """Return a detached artifact copy safe to reuse outside a DB session."""
-    return Artifact(
-        id=row.id,
-        key=row.key,
-        container_uri=row.container_uri,
-        table_path=row.table_path,
-        array_path=row.array_path,
-        driver=row.driver,
-        hash=row.hash,
-        content_id=row.content_id,
-        parent_artifact_id=row.parent_artifact_id,
-        run_id=row.run_id,
-        meta=dict(row.meta or {}),
-        created_at=row.created_at,
-    )
+    return copy.deepcopy(row)
 
 
 def _artifact_has_content_dependents(session: Session, artifact_id: uuid.UUID) -> bool:

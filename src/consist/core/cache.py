@@ -4,7 +4,6 @@ import os
 import shutil
 import tempfile
 import uuid
-import weakref
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
@@ -31,7 +30,7 @@ from consist.core.resolved_binding import (
     ArtifactIdentity,
     create_execution_snapshot,
 )
-from consist.models.artifact import Artifact
+from consist.models.artifact import Artifact, set_tracker_ref
 from consist.models.run import ConsistRecord, Run, RunArtifacts
 
 if TYPE_CHECKING:
@@ -810,7 +809,7 @@ def hydrate_cache_hit_outputs(
         # This ensures mutations to artifact.meta in active run don't affect cached run.
         cloned = deepcopy(art)
         # Attach tracker ref so Artifact.path can lazily resolve URIs on demand.
-        cloned._tracker = weakref.ref(tracker)
+        set_tracker_ref(cloned, tracker)
         record.outputs.append(cloned)
 
     # Ensure the new (cached) run has DB links to its hydrated outputs.
