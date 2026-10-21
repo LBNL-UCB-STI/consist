@@ -49,7 +49,7 @@ from consist.core.directory_artifacts import (
     validate_shapefile_bundle_destination,
 )
 from consist.core.stores import get_hot_data_engine
-from consist.models.artifact import Artifact
+from consist.models.artifact import Artifact, _private_state
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
@@ -733,24 +733,12 @@ def _detach_artifact_for_hydration(
     hydrated_path: Path | None,
 ) -> Artifact:
     clone = artifact.model_copy(deep=True)
-    private_state = getattr(clone, "__pydantic_private__", None)
-    if private_state is None:
-        with suppress(Exception):
-            object.__setattr__(clone, "__pydantic_private__", {})
-        private_state = getattr(clone, "__pydantic_private__", None)
-    if isinstance(private_state, dict):
+    private_state = _private_state(clone)
+    if private_state is not None:
         private_state["_tracker"] = None
-        private_state["_abs_path"] = (
-            str(hydrated_path.resolve()) if hydrated_path is not None else None
-        )
     with suppress(Exception):
         object.__setattr__(clone, "_tracker", None)
-    with suppress(Exception):
-        object.__setattr__(
-            clone,
-            "_abs_path",
-            str(hydrated_path.resolve()) if hydrated_path is not None else None,
-        )
+    clone.abs_path = str(hydrated_path.resolve()) if hydrated_path is not None else None
     return clone
 
 

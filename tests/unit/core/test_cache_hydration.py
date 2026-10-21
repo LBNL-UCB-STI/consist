@@ -2662,3 +2662,72 @@ def test_tracker_run_cache_hit_hydrates_requested_output_set_members(
     hydrated_root = tracker_b.run_artifact_dir(second.run) / "annual"
     assert (hydrated_root / "annual_2030.csv").read_text() == "year,value\n2030,1\n"
     assert (hydrated_root / "annual_2035.csv").read_text() == "year,value\n2035,2\n"
+
+
+def test_cache_hit_and_hydrated_outputs_support_set_artifact_recovery_roots(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "provenance.db")
+    tracker_a = Tracker(run_dir=tmp_path / "runs_a", db_path=db_path)
+    _init_core_tables(tracker_a)
+
+    def write_step(ctx) -> None:
+        out_dir = ctx.run_dir / "outputs"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "step_result.csv").write_text("data\n100\n", encoding="utf-8")
+
+    # 1. Run producer step
+    res_a = tracker_a.run(
+        fn=write_step,
+        name="step_producer",
+        config={"param": 1},
+        output_paths={"res": "outputs/step_result.csv"},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    assert res_a.cache_hit is False
+    assert "res" in res_a.outputs
+
+    # 2. Run step again in tracker_b to trigger cache hit
+    tracker_b = Tracker(run_dir=tmp_path / "runs_b", db_path=db_path)
+    _init_core_tables(tracker_b)
+
+    res_b = tracker_b.run(
+        fn=write_step,
+        name="step_producer",
+        config={"param": 1},
+        output_paths={"res": "outputs/step_result.csv"},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    assert res_b.cache_hit is True
+    cached_art = res_b.outputs["res"]
+
+    # 3. Attaching recovery roots on cached output artifact must succeed without ObjectDereferencedError
+    archive_root_1 = tmp_path / "archive_1"
+    archive_root_1.mkdir()
+    tracker_b.set_artifact_recovery_roots(cached_art, [archive_root_1], append=True)
+
+    persisted = tracker_b.db.get_artifact(cached_art.id)
+    assert persisted is not None
+    assert str(archive_root_1.resolve()) in persisted.meta.get("recovery_roots", [])
+
+    # 4. Output hydration path: hydrate_run_outputs produces detached clones via materialize.py
+    hydrated_result = tracker_b.hydrate_run_outputs(
+        res_b.run.id,
+        target_root=tracker_b.run_dir / "hydrated",
+    )
+    hydrated_art = hydrated_result["res"].artifact
+    archive_root_2 = tmp_path / "archive_2"
+    archive_root_2.mkdir()
+
+    # Attaching recovery roots on hydrated output artifact must also succeed without ObjectDereferencedError
+    tracker_b.set_artifact_recovery_roots(hydrated_art, [archive_root_2], append=True)
+    persisted_after = tracker_b.db.get_artifact(hydrated_art.id)
+    assert persisted_after is not None
+    assert str(archive_root_2.resolve()) in persisted_after.meta.get(
+        "recovery_roots", []
+    )
+
+    if tracker_a.engine:
+        tracker_a.engine.dispose()
+    if tracker_b.engine:
+        tracker_b.engine.dispose()

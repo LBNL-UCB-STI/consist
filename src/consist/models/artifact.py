@@ -7,6 +7,7 @@ run_artifact_link table for provenance and caching.
 
 from __future__ import annotations
 
+import copy
 import uuid
 import weakref
 from dataclasses import dataclass
@@ -331,10 +332,17 @@ class Artifact(SQLModel, table=True):
             yet been resolved or set.
         """
         private_state = _private_state(self)
-        if private_state is None:
-            return None
-        abs_path = private_state.get("_abs_path")
-        return abs_path if isinstance(abs_path, str) else None
+        if private_state is not None:
+            abs_path = private_state.get("_abs_path")
+            if isinstance(abs_path, (str, Path)):
+                return str(abs_path)
+        try:
+            abs_path = object.__getattribute__(self, "_abs_path")
+            if isinstance(abs_path, (str, Path)):
+                return str(abs_path)
+        except AttributeError:
+            pass
+        return None
 
     @property
     def recovery_roots(self) -> list[str]:
@@ -359,16 +367,19 @@ class Artifact(SQLModel, table=True):
         return self.accessibility().locations
 
     @abs_path.setter
-    def abs_path(self, value: str) -> None:
+    def abs_path(self, value: Optional[str | Path]) -> None:
         """
         Sets the runtime-only absolute path of this artifact.
 
         Parameters
         ----------
-        value : str
-            The absolute file system path to set for the artifact.
+        value : Optional[str | Path]
+            The absolute file system path to set for the artifact, or None to clear.
         """
-        self._abs_path = value
+        resolved_val = str(value) if value is not None else None
+        self._abs_path = resolved_val
+        if "_abs_path" in self.__dict__:
+            self.__dict__["_abs_path"] = resolved_val
 
     @property
     def path(self) -> Path:
@@ -596,6 +607,112 @@ class Artifact(SQLModel, table=True):
         """
         return f"Artifact(key={self.key}, path={self.container_uri})"
 
+    def __deepcopy__(self, memo: Optional[dict[int, Any]] = None) -> "Artifact":
+        """Produce a clean detached clone without inheriting dead ORM instance state.
+
+        Standard copy.deepcopy / BaseModel.__deepcopy__ on a SQLAlchemy/SQLModel
+        instance copies `_sa_instance_state`, leaving the cloned state with a dead
+        weak reference that raises ObjectDereferencedError on attribute mutation.
+        """
+        if memo is None:
+            memo = {}
+        elif id(self) in memo:
+            return memo[id(self)]
+
+        # Read model field values. We access attributes via getattr if expired or not
+        # yet present in self.__dict__, ensuring attached ORM instances refresh cleanly.
+        raw_values = {
+            k: self.__dict__[k] if k in self.__dict__ else getattr(self, k)
+            for k in self.__class__.model_fields
+            if not k.startswith("_")
+        }
+        raw_meta = raw_values.pop("meta", {})
+
+        cloned = self.__class__(**raw_values, meta={})
+        memo[id(self)] = cloned
+
+        # Deep-copy mutable meta now that self is registered in memo
+        # (preventing infinite recursion on circular graphs)
+        cloned.meta = copy.deepcopy(raw_meta, memo)
+
+        # Copy any non-private, non-ORM custom attributes set on __dict__
+        for k, v in self.__dict__.items():
+            if not k.startswith("_") and k not in self.__class__.model_fields:
+                try:
+                    setattr(cloned, k, copy.deepcopy(v, memo))
+                except Exception:
+                    cloned.__dict__[k] = copy.deepcopy(v, memo)
+
+        # Preserve field set tracking
+        cloned.__pydantic_fields_set__ = set(self.__pydantic_fields_set__)
+
+        # Re-attach private runtime state (e.g., _tracker, _abs_path) whether stored
+        # in __pydantic_private__ or directly in __dict__ on ORM-loaded instances.
+        src_private = _private_state(self)
+        dst_private = _private_state(cloned)
+        if src_private is not None and dst_private is not None:
+            for k, v in src_private.items():
+                if k == "_tracker":
+                    dst_private[k] = v  # Preserve weakref as-is
+                else:
+                    dst_private[k] = copy.deepcopy(v, memo)
+
+        tracker_ref = get_tracker_ref(self)
+        if tracker_ref is not None:
+            if dst_private is not None:
+                dst_private["_tracker"] = tracker_ref
+            else:
+                try:
+                    object.__setattr__(cloned, "_tracker", tracker_ref)
+                except (AttributeError, TypeError):
+                    pass
+
+        abs_path = self.abs_path or self.__dict__.get("_abs_path")
+        if isinstance(abs_path, (str, Path)):
+            cloned.abs_path = str(abs_path)
+
+        return cloned
+
+    def __copy__(self) -> "Artifact":
+        """Produce a clean shallow clone without inheriting dead ORM instance state."""
+        raw_values = {
+            k: self.__dict__[k] if k in self.__dict__ else getattr(self, k)
+            for k in self.__class__.model_fields
+            if not k.startswith("_")
+        }
+
+        cloned = self.__class__(**raw_values)
+
+        for k, v in self.__dict__.items():
+            if not k.startswith("_") and k not in self.__class__.model_fields:
+                try:
+                    setattr(cloned, k, v)
+                except Exception:
+                    cloned.__dict__[k] = v
+
+        cloned.__pydantic_fields_set__ = set(self.__pydantic_fields_set__)
+
+        src_private = _private_state(self)
+        dst_private = _private_state(cloned)
+        if src_private is not None and dst_private is not None:
+            dst_private.update(src_private)
+
+        tracker_ref = get_tracker_ref(self)
+        if tracker_ref is not None:
+            if dst_private is not None:
+                dst_private["_tracker"] = tracker_ref
+            else:
+                try:
+                    object.__setattr__(cloned, "_tracker", tracker_ref)
+                except (AttributeError, TypeError):
+                    pass
+
+        abs_path = self.abs_path or self.__dict__.get("_abs_path")
+        if isinstance(abs_path, (str, Path)):
+            cloned.abs_path = str(abs_path)
+
+        return cloned
+
 
 class ArtifactContent(SQLModel, table=True):
     """
@@ -629,6 +746,57 @@ class ArtifactContent(SQLModel, table=True):
         sa_column=Column(JSON),
         description="Optional content-scoped metadata such as schema fingerprints.",
     )
+
+    def __deepcopy__(self, memo: Optional[dict[int, Any]] = None) -> "ArtifactContent":
+        """Produce a clean detached clone without inheriting dead ORM instance state."""
+        if memo is None:
+            memo = {}
+        elif id(self) in memo:
+            return memo[id(self)]
+
+        raw_values = {
+            k: self.__dict__[k] if k in self.__dict__ else getattr(self, k)
+            for k in self.__class__.model_fields
+            if not k.startswith("_")
+        }
+        raw_meta = raw_values.pop("meta", {})
+
+        cloned = self.__class__(**raw_values, meta={})
+        memo[id(self)] = cloned
+
+        cloned.meta = copy.deepcopy(raw_meta, memo)
+
+        for k, v in self.__dict__.items():
+            if not k.startswith("_") and k not in self.__class__.model_fields:
+                try:
+                    setattr(cloned, k, copy.deepcopy(v, memo))
+                except Exception:
+                    cloned.__dict__[k] = copy.deepcopy(v, memo)
+
+        cloned.__pydantic_fields_set__ = set(self.__pydantic_fields_set__)
+
+        return cloned
+
+    def __copy__(self) -> "ArtifactContent":
+        """Produce a clean shallow clone without inheriting dead ORM instance state."""
+        raw_values = {
+            k: self.__dict__[k] if k in self.__dict__ else getattr(self, k)
+            for k in self.__class__.model_fields
+            if not k.startswith("_")
+        }
+
+        cloned = self.__class__(**raw_values)
+
+        for k, v in self.__dict__.items():
+            if not k.startswith("_") and k not in self.__class__.model_fields:
+                try:
+                    setattr(cloned, k, v)
+                except Exception:
+                    cloned.__dict__[k] = v
+
+        cloned.__pydantic_fields_set__ = set(self.__pydantic_fields_set__)
+
+        return cloned
 
     def __str__(self) -> str:
         return (
