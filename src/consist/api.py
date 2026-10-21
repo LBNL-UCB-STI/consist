@@ -1443,6 +1443,7 @@ def materialize_artifact(
     on_missing: Literal["warn", "raise"] = "warn",
     validate_content_hash: Literal["never", "if-present", "always"] = "if-present",
     allow_external_paths: Optional[bool] = None,
+    scheme_prefixes: Optional[Mapping[str, Union[str, Path]]] = None,
     tracker: Optional["Tracker"] = None,
 ) -> "MaterializedArtifact":
     """
@@ -1460,6 +1461,7 @@ def materialize_artifact(
         on_missing=on_missing,
         validate_content_hash=validate_content_hash,
         allow_external_paths=allow_external_paths,
+        scheme_prefixes=scheme_prefixes,
     )
 
 

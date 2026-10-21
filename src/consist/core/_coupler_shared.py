@@ -228,6 +228,11 @@ class CouplerMapMixin(Generic[TArtifact, TDeclaredOutput]):
         self._validate_artifact_key(key)
         return self._artifacts.get(key)
 
+    def pop(self, key: str, default: TArtifact | None = None) -> TArtifact | None:
+        """Remove and return artifact for ``key``, or ``default`` if unset."""
+        self._validate_artifact_key(key)
+        return self._artifacts.pop(key, default)
+
     def require(self, key: str) -> TArtifact:
         """Return artifact for ``key`` or raise a helpful ``KeyError``."""
         artifact = self.get(key)
