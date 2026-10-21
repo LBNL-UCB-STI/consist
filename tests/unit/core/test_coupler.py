@@ -275,3 +275,50 @@ def test_coupler_view_rejects_empty_namespace() -> None:
 
     with pytest.raises(ValueError, match="cannot be empty"):
         coupler.view("///")
+
+
+def test_coupler_pop() -> None:
+    coupler = Coupler()
+    art_a = _artifact(key="a")
+    coupler.set("a", art_a)
+
+    # Pop existing
+    popped = coupler.pop("a")
+    assert popped == art_a
+    assert "a" not in coupler
+    assert coupler.get("a") is None
+
+    # Pop missing returns default (None)
+    assert coupler.pop("a") is None
+    sentinel = _artifact(key="sentinel")
+    assert coupler.pop("missing", sentinel) == sentinel
+
+    # Invalid key triggers validation
+    with pytest.raises(ValueError):
+        coupler.pop("")
+    with pytest.raises(ValueError):
+        coupler.pop("   ")
+
+
+def test_coupler_view_pop() -> None:
+    coupler = Coupler()
+    beam = coupler.view("beam")
+    plans = _artifact(key="plans")
+    beam.set("plans", plans)
+
+    assert "beam/plans" in coupler
+    assert "plans" in beam
+
+    popped = beam.pop("plans")
+    assert popped == plans
+    assert "plans" not in beam
+    assert "beam/plans" not in coupler
+
+    # Pop missing returns default
+    assert beam.pop("plans") is None
+    default_art = _artifact(key="default")
+    assert beam.pop("missing", default_art) == default_art
+
+    # Invalid key triggers validation
+    with pytest.raises(ValueError):
+        beam.pop("")

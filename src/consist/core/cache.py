@@ -64,7 +64,9 @@ class CacheFs(Protocol):
         roots: str | os.PathLike[str] | Sequence[str | os.PathLike[str]] | None,
     ) -> list[str]: ...
 
-    def get_remappable_relative_path(self, uri: str) -> Path | None: ...
+    def get_remappable_relative_path(
+        self, uri: str, *, scheme_prefixes: Optional[Mapping[str, str | Path]] = None
+    ) -> Path | None: ...
 
     def get_historical_root(
         self,

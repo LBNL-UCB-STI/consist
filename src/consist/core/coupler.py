@@ -73,6 +73,9 @@ class CouplerView:
     def get(self, key: str) -> Optional[Any]:
         return self._coupler.get(self._qualify(key))
 
+    def pop(self, key: str, default: Optional[Any] = None) -> Optional[Any]:
+        return self._coupler.pop(self._qualify(key), default)
+
     def require(self, key: str) -> Any:
         return self._coupler.require(self._qualify(key))
 
@@ -164,7 +167,7 @@ class CouplerView:
     def clear(self) -> None:
         """Clear all stored artifacts in this view namespace."""
         for key in list(self.keys()):
-            self._coupler._artifacts.pop(self._qualify(key), None)
+            self.pop(key, None)
 
     def __len__(self) -> int:
         return len(list(self.keys()))

@@ -447,7 +447,7 @@ def test_materialize_artifact_blocks_symlink_parent_in_recovery_source(
     assert not (tmp_path / "restore" / "outputs" / "a.csv").exists()
 
 
-def test_materialize_artifact_blocks_directory_sources(tmp_path: Path) -> None:
+def test_materialize_artifact_supports_directory_sources(tmp_path: Path) -> None:
     recovery_root = tmp_path / "archive"
     source_dir = recovery_root / "outputs" / "dir"
     source_dir.mkdir(parents=True)
@@ -474,8 +474,11 @@ def test_materialize_artifact_blocks_directory_sources(tmp_path: Path) -> None:
         validate_content_hash="never",
     )
 
-    assert result.status == "unsupported_directory"
-    assert not result.resolvable
+    assert result.status == "materialized_from_recovery_root"
+    assert result.resolvable
+    assert (tmp_path / "restore" / "outputs" / "dir" / "part.txt").read_text(
+        encoding="utf-8"
+    ) == "x"
 
 
 def test_materialize_artifact_direct_fallback_uses_tracker_uri_before_cwd(
