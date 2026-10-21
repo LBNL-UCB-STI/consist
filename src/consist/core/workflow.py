@@ -434,7 +434,7 @@ class RunContext:
             yield cap
 
 
-@dataclass(frozen=True, eq=False)
+@dataclass(frozen=True, slots=True)
 class RestoredCouplerSnapshotResult(MappingABC[str, Artifact]):
     """Key-indexed recovery result for coupler snapshot restoration.
 
@@ -457,30 +457,6 @@ class RestoredCouplerSnapshotResult(MappingABC[str, Artifact]):
 
     def __contains__(self, key: object) -> bool:
         return key in self.artifacts
-
-    def __eq__(self, other: object) -> bool:
-        if isinstance(other, RestoredCouplerSnapshotResult):
-            return (
-                self.artifacts == other.artifacts
-                and self.pruned_keys == other.pruned_keys
-                and self.outcomes == other.outcomes
-            )
-        if isinstance(other, MappingABC):
-            if len(self.artifacts) != len(other):
-                return False
-            try:
-                return dict(self.artifacts) == dict(other)
-            except (TypeError, ValueError):
-                return False
-        return NotImplemented
-
-    def __repr__(self) -> str:
-        return (
-            f"RestoredCouplerSnapshotResult("
-            f"artifacts={self.artifacts!r}, "
-            f"pruned_keys={self.pruned_keys!r}, "
-            f"outcomes={self.outcomes!r})"
-        )
 
 
 class ScenarioContext:

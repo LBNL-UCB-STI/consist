@@ -64,8 +64,9 @@ def test_default_backward_compatibility_and_noop_parity(tmp_path: Path) -> None:
     )
     assert isinstance(res_noop, RestoredCouplerSnapshotResult)
     assert isinstance(res_noop, Mapping)
-    assert res_noop == {}
-    assert {} == res_noop
+    assert res_noop == RestoredCouplerSnapshotResult()
+    assert res_noop != RestoredCouplerSnapshotResult(pruned_keys=("x",))
+    assert dict(res_noop) == {}
     assert len(res_noop) == 0
     assert not res_noop
     # Coupler should retain prior key since clear_existing was False
@@ -75,7 +76,7 @@ def test_default_backward_compatibility_and_noop_parity(tmp_path: Path) -> None:
         clear_existing=True,
         prune_unrecoverable=True,
     )
-    assert res_noop_clear == {}
+    assert res_noop_clear == RestoredCouplerSnapshotResult()
     assert len(noop_sc.coupler) == 0
 
     # 2. Standard ScenarioContext without target_root or prune_unrecoverable
