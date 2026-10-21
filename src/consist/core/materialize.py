@@ -71,6 +71,7 @@ HydrationStatus = Literal[
 
 MaterializedArtifactStatus = Literal[
     "already_present",
+    "preserved_existing",
     "materialized_from_source_root",
     "materialized_from_historical_root",
     "materialized_from_recovery_root",
