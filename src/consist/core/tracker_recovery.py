@@ -123,6 +123,7 @@ class TrackerRecoveryService(_TrackerServiceBase):
         on_missing: Literal["warn", "raise"] = "warn",
         validate_content_hash: Literal["never", "if-present", "always"] = "if-present",
         allow_external_paths: Optional[bool] = None,
+        scheme_prefixes: Optional[Mapping[str, Union[str, Path]]] = None,
     ) -> "MaterializedArtifact":
         """Materialize one artifact below a caller-selected target root.
 
@@ -142,6 +143,8 @@ class TrackerRecoveryService(_TrackerServiceBase):
             Content-hash validation policy for materialized bytes.
         allow_external_paths : bool | None, optional
             Override for the tracker's external-destination policy.
+        scheme_prefixes : mapping, optional
+            Explicit mapping of URI scheme to relative path prefix.
 
         Returns
         -------
@@ -188,6 +191,7 @@ class TrackerRecoveryService(_TrackerServiceBase):
             preserve_existing=preserve_existing,
             on_missing=on_missing,
             validate_content_hash=validate_content_hash,
+            scheme_prefixes=scheme_prefixes,
         )
 
     def stage_inputs(
