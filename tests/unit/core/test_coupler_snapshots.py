@@ -409,7 +409,8 @@ def test_noop_scenario_context_snapshot_methods() -> None:
         sc.capture_coupler_snapshot(phase="post", run_id="r1", step_ordinal=1)
         # restore
         restored = sc.restore_coupler_snapshot(run_id="r1", phase="post")
-        assert restored == {}
+        assert not restored
+        assert restored.artifacts == {}
         # find_latest
         found = sc.find_latest_coupler_snapshot(scenario_run_id="noop_scen")
         assert found is None
