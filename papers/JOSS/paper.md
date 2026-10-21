@@ -78,7 +78,7 @@ Consist is available on PyPI (`pip install consist`) and developed openly at htt
 
 # AI Usage Disclosure
 
-Anthropic Claude Opus 4.5--4.7 and OpenAI ChatGPT 5.2--5.5 were used across software development, documentation, and paper editing. The authors reviewed, edited, and validated all AI-assisted text and code; AI-assisted software components were validated through automated tests and real-world research use in PILATES. All architectural decisions, technical claims, and domain-specific content reflect the authors' direct experience developing and deploying Consist.
+Anthropic Claude Opus 4.5--4.7 and OpenAI ChatGPT 5.2--5.5 were used across software development, documentation, and paper editing. The author reviewed, edited, and validated all AI-assisted text and code; AI-assisted software components were validated through automated tests and real-world research use in PILATES. All architectural decisions, technical claims, and domain-specific content reflect the author's direct experience developing and deploying Consist.
 
 # Acknowledgements
 
