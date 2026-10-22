@@ -246,6 +246,12 @@ class RunLifecycleCoordinator:
 
             validate_run_strings(model_name=model, description=description, tags=tags)
 
+            if "_consist_input_binding_roles" in kwargs:
+                raise ValueError(
+                    "raw input binding role controls are not supported on public "
+                    "Tracker APIs"
+                )
+
             raw_strict_controls = {
                 key
                 for key in (
@@ -293,6 +299,7 @@ class RunLifecycleCoordinator:
             requested_input_artifact_ids_raw = kwargs.pop(
                 "requested_input_artifact_ids", None
             )
+            input_binding_roles = tracker._input_binding_roles.get()
             requested_input_strict_snapshot = strict_binding_context is not None
             strict_binding_json = (
                 strict_binding_context.evidence_json
@@ -629,6 +636,24 @@ class RunLifecycleCoordinator:
                 if parent_candidates:
                     run.parent_run_id = parent_candidates[-1]
 
+        if input_binding_roles:
+            if len(input_binding_roles) != len(current_consist.inputs):
+                raise ValueError(
+                    "input binding role protocol mismatch: role count does not match "
+                    "logged input count"
+                )
+            run.meta["input_binding"] = {
+                "version": "roles-v1",
+                "bindings": [
+                    {
+                        "kind": role.kind,
+                        "role": role.role,
+                        "artifact_id": str(current_consist.inputs[role.input_index].id),
+                    }
+                    for role in input_binding_roles
+                ],
+            }
+
         if strict_binding_context is not None:
             with _track_begin_run_phase("input_signature.strict"):
                 strict_binding_context = _validate_strict_binding_invocation_context(
@@ -675,6 +700,7 @@ class RunLifecycleCoordinator:
                         current_consist.inputs,
                         path_resolver=tracker.resolve_uri,
                         signature_lookup=tracker._resolve_run_signature,
+                        binding_roles=input_binding_roles,
                     )
                     run.input_hash = input_hash
                     run.signature = tracker.identity.calculate_run_signature(
