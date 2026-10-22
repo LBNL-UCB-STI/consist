@@ -205,7 +205,7 @@ Notes:
 
 ### consist admission doctor
 
-Diagnose whether one resolved regular file matches exactly one named input on an
+Diagnose whether one resolved regular file matches a unique named artifact on an
 explicit, **completed** baseline run. This is a file-admission diagnostic: it
 does not change run status, copy files, or apply policy on its own.
 
@@ -217,7 +217,7 @@ consist admission doctor \
   --file ./inputs/gtfs.zip
 ```
 
-The baseline must have exactly one `input` link with `--artifact-key`. When its
+The baseline must have exactly one artifact link with `--artifact-key`. When its
 stored identity is an explicitly recorded full-file SHA-256, Consist compares
 the supplied `--file` directly to it. Historical hashes and cache fingerprints
 without those semantics are deliberately not promoted to admission identities.

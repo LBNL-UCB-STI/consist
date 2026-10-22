@@ -14,6 +14,7 @@ from typing import (
     Optional,
     Sequence,
     Union,
+    Tuple,
 )
 import uuid
 
@@ -27,7 +28,7 @@ from consist.core.validation import validate_artifact_key
 from consist.protocols import TrackerLike
 from consist.types import ExecutionOptions, OutputSet
 
-from consist.models.run import Run
+from consist.models.run import Run, CouplerSnapshotPhase
 
 
 @dataclass
@@ -230,8 +231,17 @@ class NoopScenarioContext:
     Scenario-like context that executes without provenance tracking.
     """
 
-    def __init__(self, name: str, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        name: str,
+        *,
+        resume_from_run_id: Optional[str] = None,
+        resume_phase: CouplerSnapshotPhase = "post",
+        **kwargs: Any,
+    ) -> None:
         self.name = name
+        self.resume_from_run_id = resume_from_run_id
+        self.resume_phase = resume_phase
         self.kwargs = kwargs
         self.coupler = NoopCoupler()
         self._inputs: Dict[str, NoopArtifact] = {}
@@ -343,6 +353,48 @@ class NoopScenarioContext:
     def trace(self, name: str, **kwargs: Any) -> Iterator[NoopRunContext]:
         yield NoopRunContext()
 
+    def capture_coupler_snapshot(
+        self,
+        phase: CouplerSnapshotPhase = "post",
+        run_id: Optional[str] = None,
+        step_ordinal: Optional[int] = None,
+    ) -> None:
+        """Noop implementation of capture_coupler_snapshot."""
+        return None
+
+    def restore_coupler_snapshot(
+        self,
+        run_id: Optional[str] = None,
+        *,
+        scenario_run_id: Optional[str] = None,
+        phase: CouplerSnapshotPhase = "post",
+        year: Optional[int] = None,
+        iteration: Optional[int] = None,
+        stage: Optional[str] = None,
+        model_name: Optional[str] = None,
+        before_step_ordinal: Optional[int] = None,
+        clear_existing: bool = False,
+        fallback_to_completed_outputs: bool = True,
+    ) -> Dict[str, Any]:
+        """Noop implementation of restore_coupler_snapshot."""
+        if clear_existing:
+            self.coupler.clear()
+        return {}
+
+    def find_latest_coupler_snapshot(
+        self,
+        *,
+        scenario_run_id: Optional[str] = None,
+        phase: Optional[CouplerSnapshotPhase] = None,
+        year: Optional[int] = None,
+        iteration: Optional[int] = None,
+        stage: Optional[str] = None,
+        model_name: Optional[str] = None,
+        before_step_ordinal: Optional[int] = None,
+    ) -> Optional[Tuple[str, int, Dict[str, Any]]]:
+        """Noop implementation of find_latest_coupler_snapshot."""
+        return None
+
 
 class NoopTracker(TrackerLike):
     """
@@ -436,6 +488,42 @@ class NoopTracker(TrackerLike):
             runtime_kwargs=resolved_runtime_kwargs,
             inject_context=resolved_inject_context,
             output_base_dir=self._output_base_dir,
+        )
+
+    def get_coupler_snapshot(
+        self,
+        run_id: str,
+        phase: CouplerSnapshotPhase = "post",
+        *,
+        must_exist: bool = False,
+    ) -> Dict[str, Any]:
+        self._warn_disabled()
+        if must_exist:
+            raise KeyError(f"No snapshot found for run {run_id}")
+        return {}
+
+    def diff_coupler_snapshots(
+        self,
+        left_run_id: str,
+        right_run_id: str,
+        *,
+        left_phase: CouplerSnapshotPhase = "post",
+        right_phase: CouplerSnapshotPhase = "post",
+    ) -> Any:
+        self._warn_disabled()
+        import pandas as pd
+
+        return pd.DataFrame(
+            columns=[
+                "role_key",
+                "status",
+                "left_artifact_id",
+                "right_artifact_id",
+                "left_hash",
+                "right_hash",
+                "left_producer_run_id",
+                "right_producer_run_id",
+            ]
         )
 
 

@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field as PydanticField
 
-from sqlalchemy import Column, JSON, String
+from sqlalchemy import Column, Index, JSON, String
 from sqlmodel import Field, SQLModel
 from consist.core.materialize_options import (
     VALID_MATERIALIZE_DB_FALLBACK as _VALID_MATERIALIZE_DB_FALLBACK,
@@ -108,6 +108,44 @@ class RunBindingInvocation(SQLModel, table=True):
     cache_outcome: str = Field(index=True)
     binding_json: str
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+CouplerSnapshotPhase = Literal["init", "pre", "post"]
+
+
+class RunCouplerSnapshot(SQLModel, table=True):
+    """
+    Normalized relational snapshot of ScenarioContext.coupler bindings at a
+    specific run boundary.
+    """
+
+    __tablename__ = "run_coupler_snapshot"
+    __table_args__ = (
+        Index(
+            "ix_run_coupler_snapshot_scenario_ordinal",
+            "scenario_run_id",
+            "step_ordinal",
+            "phase",
+        ),
+        Index(
+            "ix_run_coupler_snapshot_scenario_role",
+            "scenario_run_id",
+            "role_key",
+        ),
+    )
+
+    run_id: str = Field(
+        primary_key=True, index=True, sa_column_kwargs={"autoincrement": False}
+    )
+    phase: str = Field(primary_key=True, index=True)
+    role_key: str = Field(primary_key=True, index=True)
+    scenario_run_id: str = Field(index=True)
+    step_ordinal: int = Field(default=0, index=True)
+    artifact_id: uuid.UUID = Field(
+        sa_type=UUIDType, index=True, sa_column_kwargs={"autoincrement": False}
+    )
+    producer_run_id: Optional[str] = Field(default=None, index=True)
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class Run(SQLModel, table=True):
@@ -302,6 +340,7 @@ class Run(SQLModel, table=True):
             "cache": {
                 "mode": meta.get("cache_mode"),
                 "hit": meta.get("cache_hit"),
+                "source_run_id": meta.get("cache_source"),
                 "epoch": meta.get("cache_epoch"),
                 "version": meta.get("cache_version"),
             },

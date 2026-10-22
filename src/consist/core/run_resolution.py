@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping as MappingABC
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import importlib
 from pathlib import Path
@@ -29,6 +30,55 @@ if TYPE_CHECKING:
 
 
 UTC = timezone.utc
+
+
+@dataclass(frozen=True, slots=True)
+class InputBindingRole:
+    """Caller-visible role for one resolved ordinary input."""
+
+    kind: str
+    role: str | int
+    input_index: int
+
+
+def build_input_binding_roles(
+    inputs: Optional[Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]],
+    depends_on: Optional[List[RunInputRef]],
+) -> list[InputBindingRole]:
+    """Build canonical non-hashing role evidence for invocation inputs."""
+    roles: list[InputBindingRole] = []
+    input_index = 0
+    if inputs is not None:
+        if isinstance(inputs, MappingABC):
+            named_roles: list[InputBindingRole] = []
+            for key in inputs:
+                if not isinstance(key, str):
+                    raise TypeError(
+                        f"inputs mapping keys must be str (got {type(key)})."
+                    )
+                named_roles.append(
+                    InputBindingRole(kind="named", role=key, input_index=input_index)
+                )
+                input_index += 1
+            roles.extend(sorted(named_roles, key=lambda entry: str(entry.role)))
+        else:
+            for ordinal, _ in enumerate(inputs):
+                roles.append(
+                    InputBindingRole(
+                        kind="positional", role=ordinal, input_index=input_index
+                    )
+                )
+                input_index += 1
+
+    if depends_on:
+        for ordinal, _ in enumerate(depends_on):
+            roles.append(
+                InputBindingRole(
+                    kind="dependency", role=ordinal, input_index=input_index
+                )
+            )
+            input_index += 1
+    return roles
 
 
 def resolve_input_reference(

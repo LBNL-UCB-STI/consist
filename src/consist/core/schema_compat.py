@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from sqlmodel import col, select
 
+from consist.core.resolved_binding import ArtifactIdentity
 from consist.models.artifact import Artifact, ArtifactContent
 from consist.models.run import Run, resolve_canonical_run_meta_field
 
@@ -49,13 +50,14 @@ def apply_run_stage_phase_compatibility(db: DatabaseManager) -> None:
 
 def backfill_artifact_content_ids(db: DatabaseManager) -> None:
     """
-    Best-effort backfill of `artifact.content_id` from existing hash+driver pairs.
+    Best-effort backfill of ``artifact.content_id`` from persisted typed identities.
 
     This is an explicit maintenance action rather than part of normal DB startup.
-    Rows without a hash are left with NULL content_id.
+    Legacy rows without a trusted, persisted identity are left with NULL
+    ``content_id``.
 
-    This is intentionally compatibility-oriented code: it uses ``artifact.hash``
-    as the source of truth only to populate the newer shared content identity.
+    This is intentionally conservative compatibility code. It never interprets
+    an untyped historical ``Artifact.hash`` as a content identity.
     """
     if not db._table_has_column(table_name="artifact", column_name="content_id"):
         return
@@ -70,20 +72,23 @@ def backfill_artifact_content_ids(db: DatabaseManager) -> None:
             for artifact in artifacts:
                 if artifact.content_id is not None:
                     continue
-                if not artifact.hash or not artifact.driver:
+                if not artifact.driver:
                     continue
-                key = (artifact.hash, artifact.driver)
+                content_identity = _persisted_content_identity(artifact)
+                if content_identity is None:
+                    continue
+                key = (content_identity, artifact.driver)
                 content_id = content_cache.get(key)
                 if content_id is None:
                     statement = (
                         select(ArtifactContent)
-                        .where(ArtifactContent.content_hash == artifact.hash)
+                        .where(ArtifactContent.content_hash == content_identity)
                         .where(ArtifactContent.driver == artifact.driver)
                     )
                     content_row = session.exec(statement.limit(1)).first()
                     if content_row is None:
                         content_row = ArtifactContent(
-                            content_hash=artifact.hash,
+                            content_hash=content_identity,
                             driver=artifact.driver,
                             meta={},
                         )
@@ -98,6 +103,21 @@ def backfill_artifact_content_ids(db: DatabaseManager) -> None:
                 session.commit()
     except Exception as exc:
         logging.warning("Failed to backfill artifact.content_id values: %s", exc)
+
+
+def _persisted_content_identity(artifact: Artifact) -> str | None:
+    """Return a recorded typed identity only when its stored evidence proves it."""
+    meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+    recorded_identity = meta.get("content_identity")
+    if not isinstance(recorded_identity, str):
+        return None
+    try:
+        verified_identity = str(ArtifactIdentity.from_artifact(artifact))
+    except ValueError:
+        return None
+    if recorded_identity != verified_identity:
+        return None
+    return recorded_identity
 
 
 def backfill_run_stage_phase_from_meta(db: DatabaseManager) -> None:

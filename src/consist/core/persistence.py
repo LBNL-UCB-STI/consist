@@ -24,10 +24,11 @@ from typing import (
     TYPE_CHECKING,
     Literal,
     Iterator,
+    Mapping,
 )
 
 import pandas as pd
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import aliased
 from sqlalchemy.pool import NullPool
 from sqlmodel import create_engine, Session, select, SQLModel, col, delete
@@ -55,9 +56,11 @@ from consist.models.artifact_schema import (
 )
 from consist.models.config_facet import ConfigFacet
 from consist.models.run import (
+    CouplerSnapshotPhase,
     Run,
     RunArtifactLink,
     RunBindingInvocation,
+    RunCouplerSnapshot,
     resolve_canonical_run_meta_field,
 )
 from consist.models.run_config_kv import RunConfigKV
@@ -395,14 +398,21 @@ class DatabaseManager:
         lock_base_sleep_seconds: float = 0.1,
         lock_max_sleep_seconds: float = 2.0,
         skip_schema_init: bool = False,
+        read_only: bool = False,
     ):
         self.db_path = db_path
         self._lock_retries = max(1, int(lock_retries))
         self._lock_base_sleep_seconds = max(0.0, float(lock_base_sleep_seconds))
         self._lock_max_sleep_seconds = max(0.0, float(lock_max_sleep_seconds))
-        self._skip_schema_init = skip_schema_init
+        self._skip_schema_init = skip_schema_init or read_only
+        self._read_only = read_only
         # Using NullPool ensures the file lock is released when the session closes
-        self.engine = create_engine(f"duckdb:///{db_path}", poolclass=NullPool)
+        connect_args = {"read_only": True} if read_only else {}
+        self.engine = create_engine(
+            f"duckdb:///{db_path}",
+            poolclass=NullPool,
+            connect_args=connect_args,
+        )
         self._session_ctx: contextvars.ContextVar[Session | None] = (
             contextvars.ContextVar("consist_session", default=None)
         )
@@ -434,6 +444,7 @@ class DatabaseManager:
                     getattr(ArtifactSchemaObservation, "__table__"),
                     getattr(ArtifactSchemaRelation, "__table__"),
                     getattr(ArtifactContent, "__table__"),
+                    getattr(RunCouplerSnapshot, "__table__"),
                 ],
             )
             # DuckDB self-referential FK on run.parent_run_id blocks status updates.
@@ -3950,3 +3961,540 @@ class DatabaseManager:
         except Exception as e:
             logging.warning(f"Failed to fetch history: {e}")
             return pd.DataFrame()
+
+    def sync_run_coupler_snapshot(
+        self,
+        *,
+        scenario_run_id: str,
+        run_id: str,
+        phase: CouplerSnapshotPhase,
+        step_ordinal: int,
+        artifacts: Optional[Mapping[str, Artifact]] = None,
+    ) -> None:
+        """
+        Record a relational snapshot of the coupler for a run and phase.
+
+        Deletes any pre-existing snapshot rows for the same (run_id, phase) and inserts
+        rows for each artifact in the provided mapping.
+        """
+        target_artifacts = artifacts or {}
+
+        def _do_sync():
+            with self.session_scope() as session:
+                session.exec(
+                    delete(RunCouplerSnapshot).where(
+                        col(RunCouplerSnapshot.run_id) == run_id,
+                        col(RunCouplerSnapshot.phase) == phase,
+                    )
+                )
+                rows: list[RunCouplerSnapshot] = []
+                for role_key, artifact in target_artifacts.items():
+                    try:
+                        art_id = getattr(artifact, "id", None)
+                        producer_id = getattr(artifact, "run_id", None)
+                    except Exception:
+                        merged = session.merge(artifact)
+                        art_id = merged.id
+                        producer_id = merged.run_id
+                    if art_id is None:
+                        continue
+                    if isinstance(art_id, str):
+                        art_id = uuid.UUID(art_id)
+                    rows.append(
+                        RunCouplerSnapshot(
+                            run_id=run_id,
+                            phase=phase,
+                            role_key=role_key,
+                            scenario_run_id=scenario_run_id,
+                            step_ordinal=step_ordinal,
+                            artifact_id=art_id,
+                            producer_run_id=producer_id,
+                        )
+                    )
+                if rows:
+                    session.add_all(rows)
+                session.commit()
+
+        self.execute_with_retry(_do_sync, operation_name="sync_run_coupler_snapshot")
+
+    def get_run_coupler_snapshot_details(
+        self,
+        run_id: str,
+        phase: CouplerSnapshotPhase = "post",
+        *,
+        must_exist: bool = False,
+    ) -> Tuple[Dict[str, Artifact], int]:
+        """
+        Retrieve artifacts mapped by role_key and the maximum step_ordinal
+        for a given run_id and snapshot phase.
+
+        Note: An empty snapshot ({}) stores 0 rows in DuckDB, so calling this with
+        must_exist=True will raise KeyError if no snapshot rows are stored for
+        the given run_id and phase.
+        """
+
+        def _do_get():
+            with self.session_scope() as session:
+                statement = (
+                    select(
+                        RunCouplerSnapshot.role_key,
+                        Artifact,
+                        RunCouplerSnapshot.step_ordinal,
+                    )
+                    .join(
+                        Artifact,
+                        col(RunCouplerSnapshot.artifact_id) == col(Artifact.id),
+                    )
+                    .where(
+                        col(RunCouplerSnapshot.run_id) == run_id,
+                        col(RunCouplerSnapshot.phase) == phase,
+                    )
+                )
+                results = session.exec(statement).all()
+                result_map: dict[str, Artifact] = {}
+                max_ordinal = 0
+                for role_key, artifact, step_ordinal in results:
+                    session.expunge(artifact)
+                    result_map[role_key] = artifact
+                    if step_ordinal is not None and step_ordinal > max_ordinal:
+                        max_ordinal = step_ordinal
+                if not result_map and must_exist:
+                    raise KeyError(
+                        f"No coupler snapshot found for run_id={run_id!r}, phase={phase!r}"
+                    )
+                return result_map, max_ordinal
+
+        return self.execute_with_retry(
+            _do_get, operation_name="get_run_coupler_snapshot_details"
+        )
+
+    def get_run_coupler_snapshot(
+        self,
+        run_id: str,
+        phase: CouplerSnapshotPhase = "post",
+        *,
+        must_exist: bool = False,
+    ) -> Dict[str, Artifact]:
+        """
+        Retrieve artifacts mapped by role_key for a given run_id and snapshot phase.
+
+        Note: An empty snapshot ({}) stores 0 rows in DuckDB, so calling this with
+        must_exist=True will raise KeyError if no snapshot rows are stored for
+        the given run_id and phase.
+
+        Parameters
+        ----------
+        run_id : str
+            The run identifier.
+        phase : CouplerSnapshotPhase, default "post"
+            The snapshot phase ("init", "pre", or "post").
+        must_exist : bool, default False
+            If True and no snapshot records are found, raises KeyError.
+
+        Returns
+        -------
+        Dict[str, Artifact]
+            Mapping of role_key to Artifact.
+        """
+        artifacts, _ = self.get_run_coupler_snapshot_details(
+            run_id=run_id, phase=phase, must_exist=must_exist
+        )
+        return artifacts
+
+    def get_max_coupler_snapshot_ordinal(
+        self,
+        scenario_run_id: str,
+    ) -> int:
+        """
+        Return the maximum step_ordinal recorded for a scenario run, or 0 if none exist.
+        """
+
+        def _do_get():
+            with self.session_scope() as session:
+                stmt = select(
+                    func.coalesce(func.max(RunCouplerSnapshot.step_ordinal), 0)
+                ).where(col(RunCouplerSnapshot.scenario_run_id) == scenario_run_id)
+                val = session.exec(stmt).first()
+                return int(val) if val is not None else 0
+
+        return self.execute_with_retry(
+            _do_get, operation_name="get_max_coupler_snapshot_ordinal"
+        )
+
+    def find_latest_scenario_coupler_snapshot(
+        self,
+        scenario_run_id: str,
+        *,
+        phase: Optional[CouplerSnapshotPhase] = "post",
+        year: Optional[int] = None,
+        iteration: Optional[int] = None,
+        stage: Optional[str] = None,
+        model_name: Optional[str] = None,
+        before_step_ordinal: Optional[int] = None,
+    ) -> Optional[Tuple[str, int, Dict[str, Artifact]]]:
+        """
+        Find the latest coupler snapshot for a scenario matching the given filters.
+
+        Joins RunCouplerSnapshot with Run to filter by step metadata.
+        Orders by step_ordinal descending, updated_at descending.
+
+        Returns
+        -------
+        Optional[Tuple[str, int, Dict[str, Artifact]]]
+            A tuple of (run_id, step_ordinal, artifacts_dict) or None if not found.
+        """
+
+        def _do_find():
+            with self.session_scope() as session:
+                query = (
+                    select(
+                        RunCouplerSnapshot.run_id,
+                        RunCouplerSnapshot.phase,
+                        RunCouplerSnapshot.step_ordinal,
+                    )
+                    .outerjoin(Run, col(RunCouplerSnapshot.run_id) == col(Run.id))
+                    .where(col(RunCouplerSnapshot.scenario_run_id) == scenario_run_id)
+                )
+                if phase is not None:
+                    query = query.where(col(RunCouplerSnapshot.phase) == phase)
+                if year is not None:
+                    query = query.where(col(Run.year) == year)
+                if iteration is not None:
+                    query = query.where(col(Run.iteration) == iteration)
+                if stage is not None:
+                    query = query.where(col(Run.stage) == stage)
+                if model_name is not None:
+                    query = query.where(col(Run.model_name) == model_name)
+                if before_step_ordinal is not None:
+                    query = query.where(
+                        col(RunCouplerSnapshot.step_ordinal) < before_step_ordinal
+                    )
+
+                query = query.order_by(
+                    col(RunCouplerSnapshot.step_ordinal).desc(),
+                    col(RunCouplerSnapshot.updated_at).desc(),
+                ).limit(1)
+
+                row = session.exec(query).first()
+                if row is None:
+                    return None
+                matched_run_id, matched_phase, matched_ordinal = (
+                    str(row[0]),
+                    row[1],
+                    int(row[2]),
+                )
+
+                art_stmt = (
+                    select(RunCouplerSnapshot.role_key, Artifact)
+                    .join(
+                        Artifact,
+                        col(RunCouplerSnapshot.artifact_id) == col(Artifact.id),
+                    )
+                    .where(
+                        col(RunCouplerSnapshot.run_id) == matched_run_id,
+                        col(RunCouplerSnapshot.phase) == matched_phase,
+                    )
+                )
+                art_results = session.exec(art_stmt).all()
+                result_map: dict[str, Artifact] = {}
+                for role_key, artifact in art_results:
+                    session.expunge(artifact)
+                    result_map[role_key] = artifact
+
+                return (matched_run_id, matched_ordinal, result_map)
+
+        return self.execute_with_retry(
+            _do_find, operation_name="find_latest_scenario_coupler_snapshot"
+        )
+
+    def synthesize_coupler_snapshot_from_history(
+        self,
+        *,
+        scenario_run_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        phase: CouplerSnapshotPhase = "post",
+        year: Optional[int] = None,
+        iteration: Optional[int] = None,
+        stage: Optional[str] = None,
+        model_name: Optional[str] = None,
+        before_step_ordinal: Optional[int] = None,
+        backfill: bool = True,
+    ) -> Tuple[Dict[str, Artifact], int]:
+        """
+        Synthesize coupler state from completed child run outputs in DuckDB history.
+
+        Handles both scenario header runs and child step runs. Excludes the target run's
+        own outputs when phase='pre'. Preserves execution order regardless of timestamp
+        coincidence or lexical run ID ordering. Backfills the synthesized snapshot into
+        the run_coupler_snapshot table under the run's original scenario ID.
+        """
+
+        def _do_synthesize() -> Tuple[
+            Dict[str, Artifact], int, Optional[str], Optional[str], bool
+        ]:
+            with self.session_scope() as session:
+                target_run = session.get(Run, run_id) if run_id is not None else None
+                if run_id is not None and target_run is None:
+                    return {}, 0, None, None, False
+
+                if target_run is not None:
+                    if target_run.parent_run_id is not None:
+                        parent_id = target_run.parent_run_id
+                        backfill_scenario_id = target_run.parent_run_id
+                        backfill_run_id = target_run.id
+                        is_child_target = True
+                    else:
+                        parent_id = target_run.id
+                        backfill_scenario_id = target_run.id
+                        backfill_run_id = target_run.id
+                        is_child_target = False
+                else:
+                    if scenario_run_id is None:
+                        return {}, 0, None, None, False
+                    parent_id = scenario_run_id
+                    backfill_scenario_id = scenario_run_id
+                    backfill_run_id = None
+                    is_child_target = False
+
+                if not parent_id:
+                    return {}, 0, None, None, False
+
+                stmt = (
+                    select(Run)
+                    .where(
+                        col(Run.parent_run_id) == parent_id,
+                    )
+                    .order_by(
+                        col(Run.created_at).asc(),
+                        col(Run.started_at).asc(),
+                        col(Run.id).asc(),
+                    )
+                )
+                all_child_runs = session.exec(stmt).all()
+
+                target_index = None
+                if is_child_target and run_id is not None:
+                    for idx, r in enumerate(all_child_runs):
+                        if r.id == run_id:
+                            target_index = idx
+                            break
+
+                can_backfill = (
+                    year is None
+                    and iteration is None
+                    and stage is None
+                    and model_name is None
+                    and before_step_ordinal is None
+                )
+
+                if is_child_target and target_index is not None:
+                    target_ordinal = target_index + 1
+                    inferred_ordinal = target_ordinal
+                    if phase == "pre":
+                        candidate_runs = all_child_runs[:target_index]
+                    else:
+                        candidate_runs = all_child_runs[: target_index + 1]
+                else:
+                    candidate_runs = all_child_runs
+
+                candidate_ids = {r.id for r in candidate_runs}
+                selected_runs: list[Run] = []
+                for idx, r in enumerate(all_child_runs):
+                    if r.id not in candidate_ids:
+                        continue
+                    if r.status != "completed":
+                        continue
+                    ord_val = idx + 1
+                    if (
+                        before_step_ordinal is not None
+                        and ord_val >= before_step_ordinal
+                    ):
+                        continue
+                    if year is not None and r.year != year:
+                        continue
+                    if iteration is not None and r.iteration != iteration:
+                        continue
+                    if stage is not None and r.stage != stage:
+                        continue
+                    if model_name is not None and r.model_name != model_name:
+                        continue
+                    selected_runs.append(r)
+
+                if is_child_target and target_index is not None:
+                    pass
+                else:
+                    if selected_runs:
+                        last_run_id = selected_runs[-1].id
+                        inferred_ordinal = next(
+                            (
+                                idx + 1
+                                for idx, r in enumerate(all_child_runs)
+                                if r.id == last_run_id
+                            ),
+                            len(selected_runs),
+                        )
+                    else:
+                        inferred_ordinal = 0
+
+                if not selected_runs:
+                    return (
+                        {},
+                        inferred_ordinal,
+                        backfill_scenario_id,
+                        backfill_run_id,
+                        can_backfill,
+                    )
+
+                selected_run_ids = [r.id for r in selected_runs]
+                run_order = {rid: i for i, rid in enumerate(selected_run_ids)}
+
+                art_stmt = (
+                    select(Artifact, RunArtifactLink.run_id)
+                    .join(
+                        RunArtifactLink,
+                        col(RunArtifactLink.artifact_id) == col(Artifact.id),
+                    )
+                    .where(
+                        col(RunArtifactLink.run_id).in_(selected_run_ids),
+                        col(RunArtifactLink.direction) == "output",
+                    )
+                )
+                results = session.exec(art_stmt).all()
+
+                sorted_results = sorted(
+                    results,
+                    key=lambda item: (
+                        run_order.get(item[1], 0),
+                        str(getattr(item[0], "created_at", "") or ""),
+                    ),
+                )
+
+                artifacts: Dict[str, Artifact] = {}
+                for art, _ in sorted_results:
+                    if art.key:
+                        session.expunge(art)
+                        artifacts[art.key] = art
+
+                return (
+                    artifacts,
+                    inferred_ordinal,
+                    backfill_scenario_id,
+                    backfill_run_id,
+                    can_backfill,
+                )
+
+        (
+            artifacts,
+            inferred_ordinal,
+            backfill_scenario_id,
+            backfill_run_id,
+            can_backfill,
+        ) = self.execute_with_retry(
+            _do_synthesize,
+            operation_name="synthesize_coupler_snapshot_from_history",
+        )
+
+        if (
+            backfill
+            and can_backfill
+            and backfill_run_id is not None
+            and artifacts
+            and backfill_scenario_id is not None
+        ):
+            self.sync_run_coupler_snapshot(
+                scenario_run_id=backfill_scenario_id,
+                run_id=backfill_run_id,
+                phase=phase,
+                step_ordinal=inferred_ordinal,
+                artifacts=artifacts,
+            )
+
+        return artifacts, inferred_ordinal
+
+    def diff_coupler_snapshots(
+        self,
+        left_run_id: str,
+        right_run_id: str,
+        *,
+        left_phase: CouplerSnapshotPhase = "post",
+        right_phase: CouplerSnapshotPhase = "post",
+    ) -> pd.DataFrame:
+        """
+        Compare two coupler snapshots and compute per-role diff status.
+
+        Parameters
+        ----------
+        left_run_id : str
+            Run ID for the left snapshot.
+        right_run_id : str
+            Run ID for the right snapshot.
+        left_phase : CouplerSnapshotPhase, default "post"
+            Phase for the left snapshot (defaults to "post").
+        right_phase : CouplerSnapshotPhase, default "post"
+            Phase for the right snapshot (defaults to "post").
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with columns:
+            role_key, status, left_artifact_id, right_artifact_id, left_hash,
+            right_hash, left_producer_run_id, right_producer_run_id.
+            Status is one of: "added", "removed", "modified", "unchanged".
+        """
+        left_artifacts = self.get_run_coupler_snapshot(
+            left_run_id, phase=left_phase, must_exist=False
+        )
+        right_artifacts = self.get_run_coupler_snapshot(
+            right_run_id, phase=right_phase, must_exist=False
+        )
+
+        columns = [
+            "role_key",
+            "status",
+            "left_artifact_id",
+            "right_artifact_id",
+            "left_hash",
+            "right_hash",
+            "left_producer_run_id",
+            "right_producer_run_id",
+        ]
+
+        all_keys = sorted(set(left_artifacts.keys()) | set(right_artifacts.keys()))
+        rows = []
+        for key in all_keys:
+            la = left_artifacts.get(key)
+            ra = right_artifacts.get(key)
+
+            left_id = str(la.id) if (la is not None and la.id is not None) else None
+            right_id = str(ra.id) if (ra is not None and ra.id is not None) else None
+
+            left_hash = la.hash if la is not None else None
+            right_hash = ra.hash if ra is not None else None
+
+            left_prod = la.run_id if la is not None else None
+            right_prod = ra.run_id if ra is not None else None
+
+            if la is None and ra is not None:
+                status = "added"
+            elif la is not None and ra is None:
+                status = "removed"
+            else:
+                if left_id != right_id or left_hash != right_hash:
+                    status = "modified"
+                else:
+                    status = "unchanged"
+
+            rows.append(
+                {
+                    "role_key": key,
+                    "status": status,
+                    "left_artifact_id": left_id,
+                    "right_artifact_id": right_id,
+                    "left_hash": left_hash,
+                    "right_hash": right_hash,
+                    "left_producer_run_id": left_prod,
+                    "right_producer_run_id": right_prod,
+                }
+            )
+
+        return pd.DataFrame(rows, columns=columns)
