@@ -1109,7 +1109,7 @@ def test_artifact_deepcopy_memo_identity_preservation():
     assert cloned_container[0].key == "memo_test"
 
 
-def test_artifact_model_copy_with_updates():
+def test_artifact_model_copy_with_updates(tmp_path):
     tracker = MagicMock()
     art = Artifact(
         key="original_key",
@@ -1125,6 +1125,7 @@ def test_artifact_model_copy_with_updates():
         deep=True,
         update={"key": "updated_key", "driver": "parquet", "meta": {"orig": 2}},
     )
+    gc.collect()
 
     assert cloned.key == "updated_key"
     assert cloned.driver == "parquet"
@@ -1132,6 +1133,17 @@ def test_artifact_model_copy_with_updates():
     assert cloned.meta == {"orig": 2}
     assert cloned.abs_path == "/path/to/original.csv"
     assert _deref_tracker(cloned) is tracker
+    assert cloned._sa_instance_state.obj() is cloned
+
+    # Verify merging a model_copy(deep=True, update=...) clone into a session where
+    # the original artifact row is already persistent does not lose its primary key
+    # identity or raise a duplicate primary key constraint error on autoflush.
+    db = DatabaseManager(str(tmp_path / "model_copy_update_merge.duckdb"))
+    db.sync_artifacts(artifacts=[art], run_id="run_out", direction="output")
+    db.sync_artifacts(artifacts=[cloned], run_id="run_in", direction="input")
+    persisted = db.get_artifact(art.id)
+    assert persisted is not None
+    assert persisted.driver == "parquet"
 
 
 def test_artifact_abs_path_setter_accepts_none():

@@ -3273,18 +3273,22 @@ def load(
     """
 
     # 1. Resolve Tracker
+    explicit_tracker = tracker is not None
+    attached_tracker: Optional[Tracker] = None
+    tracker_ref = get_tracker_ref(artifact)
+    if tracker_ref:
+        ref_candidate = tracker_ref()
+        if isinstance(ref_candidate, Tracker):
+            attached_tracker = ref_candidate
+
     if tracker is None:
         try:
             tracker = get_active_tracker()
         except RuntimeError:
             tracker = None
 
-    if tracker is None:
-        tracker_ref = get_tracker_ref(artifact)
-        if tracker_ref:
-            attached_tracker = tracker_ref()
-            if isinstance(attached_tracker, Tracker):
-                tracker = attached_tracker
+    if tracker is None and attached_tracker is not None:
+        tracker = attached_tracker
 
     if tracker is None:
         # If we have a resolved path available, allow direct disk loading without a tracker.
@@ -3297,9 +3301,23 @@ def load(
             )
 
     # 2. Determine Physical Path
-    # If we have a tracker, use it to resolve. Else fallback to runtime cache.
+    # If we have a tracker, use it to resolve unless a materialized runtime abs_path
+    # on the attached tracker is already present on disk.
     if tracker:
-        path = tracker.resolve_uri(artifact.container_uri)
+        if (
+            (not explicit_tracker or tracker is attached_tracker)
+            and artifact.abs_path
+            and Path(artifact.abs_path).exists()
+        ):
+            path = artifact.abs_path
+        else:
+            path = tracker.resolve_uri(artifact.container_uri)
+            if (
+                not Path(path).exists()
+                and artifact.abs_path
+                and Path(artifact.abs_path).exists()
+            ):
+                path = artifact.abs_path
     else:
         path = artifact.path
 

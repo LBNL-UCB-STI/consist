@@ -29,6 +29,10 @@ from consist.models.run import (
     RunResult,
     CouplerSnapshotPhase,
 )
+from consist.core.materialize import (
+    MaterializedArtifact,
+    materialize_artifact,
+)
 from typing import TYPE_CHECKING
 from consist.core.coupler import Coupler
 from consist.core.orchestration import (
@@ -430,6 +434,31 @@ class RunContext:
             yield cap
 
 
+@dataclass(frozen=True, slots=True)
+class RestoredCouplerSnapshotResult(MappingABC[str, Artifact]):
+    """Key-indexed recovery result for coupler snapshot restoration.
+
+    Provides mapping semantics over the restored artifacts while exposing
+    diagnostic metadata such as pruned keys and materialization outcomes.
+    """
+
+    artifacts: Dict[str, Artifact] = field(default_factory=dict)
+    pruned_keys: Tuple[str, ...] = ()
+    outcomes: Dict[str, MaterializedArtifact] = field(default_factory=dict)
+
+    def __getitem__(self, key: str) -> Artifact:
+        return self.artifacts[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.artifacts)
+
+    def __len__(self) -> int:
+        return len(self.artifacts)
+
+    def __contains__(self, key: object) -> bool:
+        return key in self.artifacts
+
+
 class ScenarioContext:
     """
     A context manager for grouping multiple steps into a single "scenario".
@@ -740,6 +769,102 @@ class ScenarioContext:
                 phase="init", run_id=self.run_id, step_ordinal=0
             )
 
+    def _classify_coupler_artifact_scheme(
+        self,
+        artifact: Artifact,
+        effective_remappable_schemes: Mapping[str, Path],
+    ) -> Literal["workspace_managed", "external_mount"]:
+        """Classify artifact container URI as workspace-managed or external mount."""
+        uri = artifact.container_uri
+        if not uri:
+            return "workspace_managed"
+        if "://" not in uri:
+            return "workspace_managed"
+        scheme = uri.split("://", 1)[0]
+        if scheme in ("file", "workspace"):
+            return "workspace_managed"
+        if scheme in effective_remappable_schemes:
+            return "workspace_managed"
+        return "external_mount"
+
+    def _extract_recovery_roots(
+        self,
+        artifact: Artifact,
+        source_root: Optional[Union[str, Path]] = None,
+    ) -> List[str]:
+        """Extract and preserve recovery roots, appending source_root if provided."""
+        roots: List[str] = list(artifact.recovery_roots)
+        if source_root is not None:
+            source_root_str = str(Path(source_root).resolve())
+            if source_root_str not in roots:
+                roots.append(source_root_str)
+        return roots
+
+    def _check_or_materialize_local_artifact(
+        self,
+        art: Artifact,
+        key: str,
+        source_root: Optional[Path],
+        effective_remappable_schemes: Mapping[str, Path],
+        validate_content_hash: Literal["never", "if-present", "always"],
+    ) -> MaterializedArtifact:
+        """Check for local artifact presence or recover into tracker.run_dir."""
+        existing_path: Optional[Path] = None
+        try:
+            candidate = Path(self.tracker.resolve_uri(art.container_uri))
+            if candidate.exists():
+                existing_path = candidate
+        except (ValueError, RuntimeError, OSError, TypeError):
+            pass
+
+        if existing_path is None and art.abs_path:
+            try:
+                candidate = Path(art.abs_path)
+                if candidate.exists():
+                    existing_path = candidate
+            except (ValueError, RuntimeError, OSError, TypeError):
+                pass
+
+        if existing_path is not None:
+            resolved_existing = existing_path.resolve()
+            detached = art.model_copy(deep=True)
+            detached.abs_path = str(resolved_existing)
+            return MaterializedArtifact(
+                artifact=detached,
+                key=key,
+                path=resolved_existing,
+                source_path=None,
+                target_path=resolved_existing,
+                status="preserved_existing",
+                resolvable=True,
+            )
+
+        if self.tracker.run_dir:
+            return materialize_artifact(
+                self.tracker,
+                art,
+                target_root=Path(self.tracker.run_dir).resolve(),
+                source_root=source_root,
+                allowed_base=None,
+                preserve_existing=True,
+                on_missing="warn",
+                validate_content_hash=validate_content_hash,
+                scheme_prefixes=effective_remappable_schemes,
+            )
+
+        detached_missing = art.model_copy(deep=True)
+        detached_missing.abs_path = None
+        return MaterializedArtifact(
+            artifact=detached_missing,
+            key=key,
+            path=None,
+            source_path=None,
+            target_path=None,
+            status="missing_source",
+            message=f"Artifact {key!r} not found at local paths.",
+            resolvable=False,
+        )
+
     def restore_coupler_snapshot(
         self,
         run_id: Optional[str] = None,
@@ -753,7 +878,14 @@ class ScenarioContext:
         before_step_ordinal: Optional[int] = None,
         clear_existing: bool = False,
         fallback_to_completed_outputs: bool = True,
-    ) -> Dict[str, Artifact]:
+        target_root: Optional[Union[str, Path]] = None,
+        source_root: Optional[Union[str, Path]] = None,
+        remappable_schemes: Optional[
+            Union[Iterable[str], Mapping[str, Union[str, Path]]]
+        ] = None,
+        prune_unrecoverable: bool = False,
+        validate_content_hash: Literal["never", "if-present", "always"] = "never",
+    ) -> RestoredCouplerSnapshotResult:
         """
         Restore coupler artifacts from DuckDB snapshots or completed step outputs.
 
@@ -783,14 +915,27 @@ class ScenarioContext:
         fallback_to_completed_outputs : bool, default True
             If True and no snapshot rows are found, synthesizes the coupler state
             from completed child step outputs in DuckDB.
+        target_root : Optional[Union[str, Path]], default None
+            Root below which restored artifacts are rematerialized.
+        source_root : Optional[Union[str, Path]], default None
+            Source directory containing historical artifacts to copy from.
+        remappable_schemes : Optional[Union[Iterable[str], Mapping[str, Union[str, Path]]]], default None
+            URI scheme mappings or overrides for resolving sub-mount paths.
+        prune_unrecoverable : bool, default False
+            If True, artifacts whose bytes are missing or unrecoverable are omitted
+            from the returned mapping and evicted from the scenario coupler.
+        validate_content_hash : {"never", "if-present", "always"}, default "never"
+            Policy for content hash verification during materialization. Defaults
+            to "never" to prevent startup latency regressions.
 
         Returns
         -------
-        Dict[str, Artifact]
-            The dictionary of restored artifacts keyed by role_key.
+        RestoredCouplerSnapshotResult
+            Mapping of restored artifacts keyed by role_key, with diagnostic
+            metadata for pruned keys and materialization outcomes.
         """
         if self.tracker.db is None:
-            return {}
+            return RestoredCouplerSnapshotResult()
 
         if clear_existing:
             self.coupler.clear()
@@ -861,10 +1006,159 @@ class ScenarioContext:
                     )
                 )
 
-        if artifacts:
-            for art in artifacts.values():
+        if target_root is None and not prune_unrecoverable:
+            if artifacts:
+                for art in artifacts.values():
+                    set_tracker_ref(art, self.tracker)
+                self.coupler.update(artifacts)
+            if restored_step_ordinal > 0:
+                if phase == "pre":
+                    effective_ordinal = max(0, restored_step_ordinal - 1)
+                else:
+                    effective_ordinal = restored_step_ordinal
+                self._step_ordinal = max(self._step_ordinal, effective_ordinal)
+            return RestoredCouplerSnapshotResult(artifacts=artifacts)
+
+        resolved_target_root: Path
+        if target_root is not None:
+            resolved_target_root = Path(target_root).resolve()
+            resolved_target_root.mkdir(parents=True, exist_ok=True)
+        elif self.tracker.run_dir:
+            resolved_target_root = Path(self.tracker.run_dir).resolve()
+        else:
+            resolved_target_root = Path.cwd().resolve()
+
+        resolved_source_root = (
+            Path(source_root).resolve() if source_root is not None else None
+        )
+
+        effective_remappable_schemes: Dict[str, Path] = {"workspace": Path(".")}
+        for scheme, mount_path in self.tracker.fs.mounts.items():
+            try:
+                resolved_mount = Path(mount_path).resolve()
+                rel = resolved_mount.relative_to(resolved_target_root)
+                effective_remappable_schemes[scheme] = rel
+            except (ValueError, RuntimeError):
+                pass
+
+        if remappable_schemes is not None:
+            if isinstance(remappable_schemes, Mapping):
+                for scheme, prefix in remappable_schemes.items():
+                    effective_remappable_schemes[scheme] = Path(prefix)
+            elif isinstance(remappable_schemes, Iterable):
+                for scheme in remappable_schemes:
+                    if scheme in effective_remappable_schemes:
+                        continue
+                    if scheme in self.tracker.fs.mounts:
+                        try:
+                            rel = (
+                                Path(self.tracker.fs.mounts[scheme])
+                                .resolve()
+                                .relative_to(resolved_target_root)
+                            )
+                            effective_remappable_schemes[scheme] = rel
+                        except (ValueError, RuntimeError):
+                            effective_remappable_schemes[scheme] = Path(scheme)
+                    else:
+                        effective_remappable_schemes[scheme] = Path(scheme)
+
+        normalize_validate_hash: Literal["never", "if-present", "always"]
+        if validate_content_hash in ("never", "always"):
+            normalize_validate_hash = validate_content_hash
+        else:
+            normalize_validate_hash = "if-present"
+
+        restored_artifacts: Dict[str, Artifact] = {}
+        outcomes: Dict[str, MaterializedArtifact] = {}
+        pruned_keys_list: List[str] = []
+
+        for key, art in artifacts.items():
+            scheme_classification = self._classify_coupler_artifact_scheme(
+                art, effective_remappable_schemes
+            )
+            if scheme_classification == "external_mount":
                 set_tracker_ref(art, self.tracker)
-            self.coupler.update(artifacts)
+                restored_artifacts[key] = art
+                self.coupler.set(key, art)
+                outcomes[key] = MaterializedArtifact(
+                    artifact=art,
+                    key=key,
+                    path=art.as_path(self.tracker),
+                    source_path=None,
+                    target_path=art.as_path(self.tracker),
+                    status="preserved_existing",
+                    resolvable=True,
+                )
+                continue
+
+            if target_root is not None:
+                outcome = materialize_artifact(
+                    self.tracker,
+                    art,
+                    target_root=resolved_target_root,
+                    source_root=resolved_source_root,
+                    allowed_base=None,
+                    preserve_existing=True,
+                    on_missing="warn",
+                    validate_content_hash=normalize_validate_hash,
+                    scheme_prefixes=effective_remappable_schemes,
+                )
+            else:
+                outcome = self._check_or_materialize_local_artifact(
+                    art=art,
+                    key=key,
+                    source_root=resolved_source_root,
+                    effective_remappable_schemes=effective_remappable_schemes,
+                    validate_content_hash=normalize_validate_hash,
+                )
+
+            outcomes[key] = outcome
+
+            if outcome.resolvable:
+                hydrated_art = outcome.artifact
+                if outcome.path is not None:
+                    hydrated_art.abs_path = str(outcome.path)
+                meta = dict(hydrated_art.meta or {})
+
+                uri = hydrated_art.container_uri
+                if (
+                    not uri
+                    or uri.startswith("workspace://")
+                    or uri.startswith("./")
+                    or "://" not in uri
+                ):
+                    meta["mount_root"] = str(resolved_target_root)
+                else:
+                    scheme = uri.split("://", 1)[0]
+                    prefix = effective_remappable_schemes.get(scheme)
+                    if prefix is not None:
+                        meta["mount_root"] = str(
+                            (resolved_target_root / prefix).resolve()
+                        )
+                    else:
+                        meta["mount_root"] = str(resolved_target_root)
+
+                recovery_roots = self._extract_recovery_roots(
+                    hydrated_art, source_root=source_root
+                )
+                if recovery_roots or "recovery_roots" in meta:
+                    meta["recovery_roots"] = recovery_roots
+                hydrated_art.meta = meta
+                set_tracker_ref(hydrated_art, self.tracker)
+
+                restored_artifacts[key] = hydrated_art
+                self.coupler.set(key, hydrated_art)
+            else:
+                if prune_unrecoverable:
+                    if not clear_existing:
+                        self.coupler.pop(key, None)
+                    pruned_keys_list.append(key)
+                else:
+                    unresolvable_art = outcome.artifact
+                    set_tracker_ref(unresolvable_art, self.tracker)
+                    restored_artifacts[key] = unresolvable_art
+                    self.coupler.set(key, unresolvable_art)
+
         if restored_step_ordinal > 0:
             if phase == "pre":
                 effective_ordinal = max(0, restored_step_ordinal - 1)
@@ -872,7 +1166,11 @@ class ScenarioContext:
                 effective_ordinal = restored_step_ordinal
             self._step_ordinal = max(self._step_ordinal, effective_ordinal)
 
-        return artifacts
+        return RestoredCouplerSnapshotResult(
+            artifacts=restored_artifacts,
+            pruned_keys=tuple(pruned_keys_list),
+            outcomes=outcomes,
+        )
 
     def find_latest_coupler_snapshot(
         self,
