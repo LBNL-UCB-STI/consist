@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from consist.integrations.activitysim import ActivitySimConfigAdapter
 from tests.helpers.activitysim_fixtures import build_activitysim_test_configs
 
 
+@pytest.mark.heavy
 def test_activitysim_config_across_multiple_scenarios(tracker, tmp_path: Path):
     """
     End-to-end test: canonicalize ActivitySim config across multiple scenarios.

@@ -203,6 +203,18 @@ if explanation:
 Common reasons include config drift, input drift, code drift, invalid cached
 outputs, or no similar prior run.
 
+For an `action-v2` run, `summary["input_identity"]["bindings"]` records the
+requested binding occurrence. Each binding's `evidence` says whether Consist
+used verified content (`identity_strength == "content-v1"`) or conservatively
+used provenance (`"legacy-provenance-v1"`), with a stable `fallback_reason`
+when the latter applies. The role and selector remain part of action identity;
+the evidence is explanatory metadata and does not change cache matching.
+
+On a cache hit, `summary["cache"]["source_run_id"]` identifies the prior run
+that supplied the reused outputs. Compare that source run's input links with the
+requested run's input links when the same content was supplied by a different
+upstream occurrence.
+
 ## Hydration vs Filesystem Materialization
 
 Hydration recovers information about an artifact:
