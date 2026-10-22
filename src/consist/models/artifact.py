@@ -743,6 +743,35 @@ class Artifact(SQLModel, table=True):
 
         return cloned
 
+    def model_copy(
+        self,
+        *,
+        update: Optional[MappingABC[str, Any]] = None,
+        deep: bool = False,
+    ) -> "Artifact":
+        """Produce a clean detached clone without deepcopying ``_sa_instance_state``.
+
+        Pydantic 2.14+ optimizes ``BaseModel.model_copy(deep=True, update=...)``
+        by calling ``__copy__()`` and then ``deepcopy()`` on each non-updated key
+        in ``copied.__dict__``, which includes ``_sa_instance_state``. Deepcopying
+        ``_sa_instance_state`` creates a new ``InstanceState`` whose weakref points
+        to an unreferenced ``Artifact`` in the temporary ``memo`` dict; once GC
+        runs, ``_sa_instance_state.obj()`` becomes ``None`` and SQLAlchemy's
+        ``Session.merge()`` treats the artifact as a brand-new row with unset PK.
+        """
+        cloned = self.__deepcopy__() if deep else self.__copy__()
+        if update:
+            for k, v in update.items():
+                if k in self.__class__.model_fields or not k.startswith("_"):
+                    try:
+                        setattr(cloned, k, copy.deepcopy(v) if deep else v)
+                    except Exception:
+                        cloned.__dict__[k] = copy.deepcopy(v) if deep else v
+                else:
+                    cloned.__dict__[k] = copy.deepcopy(v) if deep else v
+            cloned.__pydantic_fields_set__.update(update.keys())
+        return cloned
+
 
 class ArtifactContent(SQLModel, table=True):
     """
@@ -826,6 +855,26 @@ class ArtifactContent(SQLModel, table=True):
 
         cloned.__pydantic_fields_set__ = set(self.__pydantic_fields_set__)
 
+        return cloned
+
+    def model_copy(
+        self,
+        *,
+        update: Optional[MappingABC[str, Any]] = None,
+        deep: bool = False,
+    ) -> "ArtifactContent":
+        """Produce a clean detached clone without deepcopying ``_sa_instance_state``."""
+        cloned = self.__deepcopy__() if deep else self.__copy__()
+        if update:
+            for k, v in update.items():
+                if k in self.__class__.model_fields or not k.startswith("_"):
+                    try:
+                        setattr(cloned, k, copy.deepcopy(v) if deep else v)
+                    except Exception:
+                        cloned.__dict__[k] = copy.deepcopy(v) if deep else v
+                else:
+                    cloned.__dict__[k] = copy.deepcopy(v) if deep else v
+            cloned.__pydantic_fields_set__.update(update.keys())
         return cloned
 
     def __str__(self) -> str:
