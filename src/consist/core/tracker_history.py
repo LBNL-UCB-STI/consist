@@ -350,10 +350,11 @@ class TrackerHistoryService(_TrackerServiceBase):
                 set_tracker_ref(artifact, self._tracker)
                 primary_path = Path(self.resolve_uri(artifact.container_uri))
                 resolved_path = primary_path
-                if not primary_path.exists() and run is not None:
-                    hist_path = self.resolve_historical_path(artifact, run)
-                    if hist_path.exists():
-                        resolved_path = hist_path
+                if not primary_path.exists():
+                    if artifact.abs_path and Path(artifact.abs_path).exists():
+                        resolved_path = Path(artifact.abs_path)
+                    elif run is not None:
+                        resolved_path = self.resolve_historical_path(artifact, run)
                 if existing_only and not resolved_path.exists():
                     continue
                 resolved_for_run[key] = resolved_path

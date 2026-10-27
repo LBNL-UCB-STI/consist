@@ -153,19 +153,8 @@ XarrayDatasetType = Any
 
 # Import loaders for specific formats lazily on first use
 _UNSET = object()
-xr: Any = _UNSET
 tables: Any = _UNSET
 gpd: Any = _UNSET
-
-
-def _get_xr() -> Optional[ModuleType]:
-    global xr
-    if xr is _UNSET:
-        try:
-            xr = importlib.import_module("xarray")
-        except ImportError:
-            xr = None
-    return xr
 
 
 def _get_tables() -> Optional[ModuleType]:
@@ -3566,10 +3555,7 @@ def load(
             raise RuntimeError(
                 f"Artifact {artifact.key} is missing from disk, but marked as ingested. Provide a tracker with a DB connection to load it."
             )
-        db_kwargs = dict(kwargs)
-        if columns is not None:
-            db_kwargs["columns"] = columns
-        return _load_from_db(artifact, tracker, **db_kwargs)
+        return _load_from_db(artifact, tracker, **load_kwargs)
 
     # 5. Failure
     raise FileNotFoundError(
@@ -3769,14 +3755,11 @@ def to_df(relation: duckdb.DuckDBPyRelation, *, close: bool = True) -> pd.DataFr
     parquet_fallback = _RELATION_PARQUET_FALLBACKS.get(relation)
     try:
         return relation.df()
-    except (OSError, duckdb.Error) as exc:
+    except (OSError, duckdb.IOException) as exc:
         if parquet_fallback is None or not _is_enodata_error(exc):
             raise
         path, columns, nrows = parquet_fallback
-        df = _load_parquet_arrow_no_mmap(path, columns).to_pandas()
-        if nrows is not None:
-            df = df.iloc[:nrows]
-        return df
+        return _load_parquet_arrow_no_mmap(path, columns, nrows=nrows).to_pandas()
     finally:
         if close:
             _close_relation_connection(relation)
@@ -3835,13 +3818,20 @@ def load_relation(
     tracker: Optional["Tracker"] = None,
     *,
     db_fallback: str = "inputs-only",
+    columns: Optional[Sequence[str]] = None,
     **kwargs: Any,
 ) -> Iterator[duckdb.DuckDBPyRelation]:
     """
     Context manager that yields a DuckDB Relation and ensures the underlying
     connection is closed on exit.
     """
-    result = load(artifact, tracker=tracker, db_fallback=db_fallback, **kwargs)
+    result = load(
+        artifact,
+        tracker=tracker,
+        db_fallback=db_fallback,
+        columns=columns,
+        **kwargs,
+    )
     if not isinstance(result, duckdb.DuckDBPyRelation):
         raise TypeError("load_relation requires a tabular artifact.")
     try:

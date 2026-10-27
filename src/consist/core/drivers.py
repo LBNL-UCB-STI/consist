@@ -180,9 +180,34 @@ def _is_enodata_error(exc: BaseException) -> bool:
     return False
 
 
-def _load_parquet_arrow_no_mmap(path: str, columns: Sequence[str]):
+def _load_parquet_arrow_no_mmap(
+    path: str,
+    columns: Sequence[str],
+    *,
+    nrows: Optional[int] = None,
+):
     pq = importlib.import_module("pyarrow.parquet")
     col_list = list(columns) if columns else None
+    if nrows is not None and nrows >= 0:
+        try:
+            pf = pq.ParquetFile(path, memory_map=False)
+            row_groups: list[int] = []
+            accumulated = 0
+            for rg_idx in range(pf.num_row_groups):
+                row_groups.append(rg_idx)
+                accumulated += pf.metadata.row_group(rg_idx).num_rows
+                if accumulated >= nrows:
+                    break
+            table = (
+                pf.read_row_groups(row_groups, columns=col_list)
+                if row_groups
+                else pf.read(columns=col_list)
+            )
+            return table.slice(0, nrows)
+        except Exception:
+            return pq.read_table(path, columns=col_list, memory_map=False).slice(
+                0, nrows
+            )
     return pq.read_table(path, columns=col_list, memory_map=False)
 
 
@@ -221,7 +246,7 @@ class ParquetDriver:
         )
         try:
             return conn.sql(query)
-        except (OSError, duckdb.Error) as exc:
+        except (OSError, duckdb.IOException) as exc:
             if not _is_enodata_error(exc):
                 raise
             arrow_table = _load_parquet_arrow_no_mmap(info.container_uri, columns)
@@ -485,6 +510,21 @@ class OpenMatrixArrayDriver:
             )
         ]
 
+    @staticmethod
+    def _load_with_h5py(container_uri: str, xr_module: Any):
+        try:
+            h5py = importlib.import_module("h5py")
+        except Exception as exc:
+            raise ImportError(
+                "openmatrix or h5py required for OpenMatrix arrays."
+            ) from exc
+        with open_h5py_read_only(container_uri, h5py_module=h5py) as f:
+            data_vars: Dict[str, Tuple[Tuple[str, str], Any]] = {}
+            for name, obj in f.items():
+                if hasattr(obj, "shape"):
+                    data_vars[name] = (("row", "col"), obj[()])
+            return xr_module.Dataset(data_vars=data_vars)
+
     def load(self, info: ArrayInfo):
         try:
             xr = importlib.import_module("xarray")
@@ -495,18 +535,7 @@ class OpenMatrixArrayDriver:
         except Exception:
             omx = None
         if omx is None:
-            try:
-                h5py = importlib.import_module("h5py")
-            except Exception as exc:
-                raise ImportError(
-                    "openmatrix or h5py required for OpenMatrix arrays."
-                ) from exc
-            with open_h5py_read_only(info.container_uri, h5py_module=h5py) as f:
-                data_vars: Dict[str, Tuple[Tuple[str, str], Any]] = {}
-                for name, obj in f.items():
-                    if hasattr(obj, "shape"):
-                        data_vars[name] = (("row", "col"), obj[()])
-                return xr.Dataset(data_vars=data_vars)
+            return self._load_with_h5py(info.container_uri, xr)
 
         try:
             with omx.open_file(info.container_uri, mode="r") as f:
@@ -516,18 +545,7 @@ class OpenMatrixArrayDriver:
                 return xr.Dataset(data_vars=data_vars)
         except Exception:
             # Fall back to raw HDF5 layout for OMX-like files without /data groups.
-            try:
-                h5py = importlib.import_module("h5py")
-            except Exception as exc:
-                raise ImportError(
-                    "openmatrix or h5py required for OpenMatrix arrays."
-                ) from exc
-            with open_h5py_read_only(info.container_uri, h5py_module=h5py) as f:
-                data_vars: Dict[str, Tuple[Tuple[str, str], Any]] = {}
-                for name, obj in f.items():
-                    if hasattr(obj, "shape"):
-                        data_vars[name] = (("row", "col"), obj[()])
-                return xr.Dataset(data_vars=data_vars)
+            return self._load_with_h5py(info.container_uri, xr)
 
     def schema(self, info: ArrayInfo):
         return None

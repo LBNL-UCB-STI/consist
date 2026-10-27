@@ -311,8 +311,16 @@ def _profile_call_name(name: str, profile_label: Optional[str] = None) -> str:
     return f"{name}[{profile_label}]"
 
 
+_NON_RETRYABLE_DB_ERROR_MARKERS = (
+    "database does not exist",
+    "no such file or directory",
+)
+
+
 def _is_retryable_db_error(message: str) -> bool:
     normalized = message.lower()
+    if any(marker in normalized for marker in _NON_RETRYABLE_DB_ERROR_MARKERS):
+        return False
     return any(marker in normalized for marker in _RETRYABLE_DB_ERROR_MARKERS)
 
 
@@ -388,6 +396,10 @@ class DatabaseManager:
         self._lock_max_sleep_seconds = max(0.0, float(lock_max_sleep_seconds))
         self._skip_schema_init = skip_schema_init or read_only
         self._read_only = read_only
+        if read_only and db_path != ":memory:" and not Path(db_path).exists():
+            raise FileNotFoundError(
+                f"Database file does not exist for read-only access: {db_path}"
+            )
         # Using NullPool ensures the file lock is released when the session closes
         connect_args = {"read_only": True} if read_only else {}
         self.engine = create_engine(
@@ -3023,7 +3035,10 @@ class DatabaseManager:
 
         try:
             return self.execute_with_retry(_query)
-        except Exception:
+        except Exception as exc:
+            logging.warning(
+                "[Consist] Failed to bulk-fetch output artifacts for runs: %s", exc
+            )
             return {}, {run_id: {} for run_id in unique_run_ids}
 
     def find_artifacts(

@@ -12,6 +12,7 @@ import shutil
 import tempfile
 from types import MappingProxyType
 import uuid
+import weakref
 from pathlib import Path
 from typing import (
     Any,
@@ -358,17 +359,33 @@ class Tracker:
 
         configured_db_path = os.fspath(db_path) if db_path is not None else None
         self._original_db_path: str | None = configured_db_path
+        if isinstance(local_snapshot, str) and not local_snapshot.strip():
+            raise ValueError("local_snapshot cannot be an empty string.")
         self.local_snapshot: bool | Path | str = local_snapshot
         self._snapshot_temp_dir: Optional[Path] = None
+        self._snapshot_finalizer: Optional[weakref.finalize] = None
         self.snapshot_db_path: Optional[Path] = None
 
-        effective_db_path = configured_db_path
+        self.builtin_schemas = list(builtin_schemas or ())
+        builtin_schema_names = set(self.builtin_schemas)
+        unknown_builtin_schemas = builtin_schema_names.difference({"gtfs"})
+        if unknown_builtin_schemas:
+            unknown_list = ", ".join(sorted(unknown_builtin_schemas))
+            raise ValueError(f"Unknown builtin_schemas: {unknown_list}")
+
+        snapshot_enabled = local_snapshot is not False and local_snapshot is not None
         if (
-            local_snapshot is not False
-            and local_snapshot is not None
+            (snapshot_enabled or self.access_mode == "read_only")
             and configured_db_path
             and configured_db_path != ":memory:"
+            and not Path(configured_db_path).exists()
         ):
+            raise FileNotFoundError(
+                f"Database file does not exist: {configured_db_path}"
+            )
+
+        effective_db_path = configured_db_path
+        if snapshot_enabled and configured_db_path and configured_db_path != ":memory:":
             src_db = Path(configured_db_path)
             if local_snapshot is True or local_snapshot == "auto":
                 scratch_base = (
@@ -381,6 +398,9 @@ class Tracker:
                     tempfile.mkdtemp(prefix="consist_db_snapshot_", dir=scratch_base)
                 )
                 self._snapshot_temp_dir = temp_dir
+                self._snapshot_finalizer = weakref.finalize(
+                    self, shutil.rmtree, temp_dir, ignore_errors=True
+                )
                 dest_db = temp_dir / src_db.name
             else:
                 target = Path(local_snapshot)
@@ -390,11 +410,20 @@ class Tracker:
                 else:
                     target.parent.mkdir(parents=True, exist_ok=True)
                     dest_db = target
-            if src_db.exists():
-                shutil.copy2(src_db, dest_db)
-                src_wal = Path(f"{src_db}.wal")
-                if src_wal.exists():
-                    shutil.copy2(src_wal, Path(f"{dest_db}.wal"))
+            try:
+                if src_db.exists():
+                    shutil.copy2(src_db, dest_db)
+                    src_wal = Path(f"{src_db}.wal")
+                    if src_wal.exists():
+                        shutil.copy2(src_wal, Path(f"{dest_db}.wal"))
+            except Exception:
+                if self._snapshot_finalizer is not None:
+                    self._snapshot_finalizer.detach()
+                    self._snapshot_finalizer = None
+                if self._snapshot_temp_dir is not None:
+                    shutil.rmtree(self._snapshot_temp_dir, ignore_errors=True)
+                    self._snapshot_temp_dir = None
+                raise
             self.snapshot_db_path = dest_db
             effective_db_path = os.fspath(dest_db)
 
@@ -422,19 +451,28 @@ class Tracker:
         self.db_skip_schema_init = db_skip_schema_init
 
         if effective_db_path:
-            metadata_db = DatabaseManager(
-                effective_db_path,
-                lock_retries=self._db_lock_retries,
-                lock_base_sleep_seconds=self._db_lock_base_sleep_seconds,
-                lock_max_sleep_seconds=self._db_lock_max_sleep_seconds,
-                read_only=(self.access_mode == "read_only"),
-                skip_schema_init=db_skip_schema_init,
-            )
-            self.metadata_store = MetadataStore(db=metadata_db)
-            self.hot_data_store = HotDataStore(
-                db_path=effective_db_path,
-                metadata_store=self.metadata_store,
-            )
+            try:
+                metadata_db = DatabaseManager(
+                    effective_db_path,
+                    lock_retries=self._db_lock_retries,
+                    lock_base_sleep_seconds=self._db_lock_base_sleep_seconds,
+                    lock_max_sleep_seconds=self._db_lock_max_sleep_seconds,
+                    read_only=(self.access_mode == "read_only"),
+                    skip_schema_init=db_skip_schema_init,
+                )
+                self.metadata_store = MetadataStore(db=metadata_db)
+                self.hot_data_store = HotDataStore(
+                    db_path=effective_db_path,
+                    metadata_store=self.metadata_store,
+                )
+            except Exception:
+                if self._snapshot_finalizer is not None:
+                    self._snapshot_finalizer.detach()
+                    self._snapshot_finalizer = None
+                if self._snapshot_temp_dir is not None:
+                    shutil.rmtree(self._snapshot_temp_dir, ignore_errors=True)
+                    self._snapshot_temp_dir = None
+                raise
 
         self.persistence = ProvenanceWriter(self)
 
@@ -471,14 +509,8 @@ class Tracker:
         # a schema by the artifact's schema_name (e.g., "MyDataSchema") if the
         # tracker was initialized with schemas=[MyDataSchema, ...].
         self._registered_schemas: Dict[str, Type[SQLModel]] = {}
-        self.builtin_schemas = list(builtin_schemas or ())
         registered_schemas: list[Type[SQLModel]] = []
         seen_schema_names: set[str] = set()
-        builtin_schema_names = set(builtin_schemas or ())
-        unknown_builtin_schemas = builtin_schema_names.difference({"gtfs"})
-        if unknown_builtin_schemas:
-            unknown_list = ", ".join(sorted(unknown_builtin_schemas))
-            raise ValueError(f"Unknown builtin_schemas: {unknown_list}")
 
         builtin_registered_schemas: list[Type[SQLModel]] = []
         if "gtfs" in builtin_schema_names:
@@ -739,6 +771,10 @@ class Tracker:
         compat_db = self._compat_attr("_compat_db")
         if compat_db is not None and compat_db.engine is not None:
             compat_db.engine.dispose()
+        snapshot_finalizer = self._compat_attr("_snapshot_finalizer")
+        if snapshot_finalizer is not None:
+            snapshot_finalizer.detach()
+            self._snapshot_finalizer = None
         snapshot_temp_dir = self._compat_attr("_snapshot_temp_dir")
         if snapshot_temp_dir is not None:
             shutil.rmtree(snapshot_temp_dir, ignore_errors=True)
@@ -3166,7 +3202,13 @@ class Tracker:
             **meta,
         )
 
-    def load(self, artifact: Artifact, **kwargs: Any) -> Any:
+    def load(
+        self,
+        artifact: Artifact,
+        *,
+        columns: Optional[Sequence[str]] = None,
+        **kwargs: Any,
+    ) -> Any:
         """
         Load an artifact using the public API while binding this tracker context.
 
@@ -3177,6 +3219,8 @@ class Tracker:
         ----------
         artifact : Artifact
             The artifact to load.
+        columns : Optional[Sequence[str]], optional
+            Optional subset of column names to project when loading tabular artifacts.
         **kwargs : Any
             Loader-specific options forwarded to ``consist.load``.
 
@@ -3187,7 +3231,7 @@ class Tracker:
         """
         from consist.api import load as api_load
 
-        return api_load(artifact, tracker=self, **kwargs)
+        return api_load(artifact, tracker=self, columns=columns, **kwargs)
 
     def log_h5_container(
         self,

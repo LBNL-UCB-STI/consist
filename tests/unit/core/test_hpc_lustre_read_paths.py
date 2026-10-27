@@ -323,7 +323,15 @@ def test_columns_projection_across_load_apis_and_db_fallback(
     )
     assert list(df_run_out.columns) == ["income", "person_id"]
 
-    # 5. Database fallback ("Ghost Mode") with columns=...
+    # 5. tracker.load(..., columns=...) and consist.load_relation(..., columns=...)
+    rel_tracker = tracker.load(art, columns=["person_id"])
+    assert list(consist.to_df(rel_tracker).columns) == ["person_id"]
+    with consist.load_relation(
+        art, tracker=tracker, columns=["age", "income"]
+    ) as rel_ctx:
+        assert list(rel_ctx.df().columns) == ["age", "income"]
+
+    # 6. Database fallback ("Ghost Mode") with columns=...
     pq_path.unlink()
     df_db = consist.load_df(
         art,
@@ -334,6 +342,62 @@ def test_columns_projection_across_load_apis_and_db_fallback(
     assert list(df_db.columns) == ["person_id", "age"]
     assert sorted(df_db["person_id"].tolist()) == [1, 2, 3]
     tracker.close()
+
+
+def test_read_only_and_local_snapshot_validation_and_missing_db_errors(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs"
+    missing_db = tmp_path / "missing.duckdb"
+
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        Tracker(run_dir=run_dir, db_path=missing_db, access_mode="read_only")
+
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        Tracker(run_dir=run_dir, db_path=missing_db, local_snapshot=True)
+
+    with pytest.raises(ValueError, match="local_snapshot cannot be an empty string"):
+        Tracker(run_dir=run_dir, db_path=missing_db, local_snapshot="   ")
+
+
+def test_resolve_run_output_paths_historical_fallback_when_run_dir_differs(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "provenance.duckdb"
+    orig_run_dir = tmp_path / "orig_runs"
+    writer = Tracker(run_dir=orig_run_dir, db_path=db_path)
+
+    hist_file = orig_run_dir / "hist.parquet"
+    hist_file.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({"x": [1]}).to_parquet(hist_file, index=False)
+
+    with writer.start_run("hist_run", "model"):
+        writer.log_artifact(hist_file, key="hist_out", direction="output")
+    writer.close()
+
+    # Open a reader pointed at a different run_dir so primary_path does not exist
+    other_run_dir = tmp_path / "other_runs"
+    with Tracker(
+        run_dir=other_run_dir,
+        db_path=db_path,
+        access_mode="read_only",
+    ) as reader:
+        resolved_all = reader.resolve_run_output_paths(
+            ["hist_run"], existing_only=False
+        )
+        assert resolved_all["hist_run"]["hist_out"] == hist_file.resolve()
+
+        # When historical file is also removed, existing_only=False still returns
+        # the historical path rather than the non-existent other_run_dir path.
+        hist_file.unlink()
+        resolved_missing = reader.resolve_run_output_paths(
+            ["hist_run"], existing_only=False
+        )
+        assert resolved_missing["hist_run"]["hist_out"] == hist_file.resolve()
+        resolved_existing = reader.resolve_run_output_paths(
+            ["hist_run"], existing_only=True
+        )
+        assert resolved_existing["hist_run"] == {}
 
 
 def test_parquet_enodata_fallback_retries_with_pyarrow_no_mmap(
