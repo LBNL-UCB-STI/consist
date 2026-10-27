@@ -19,5 +19,10 @@ updates:
     open-pull-requests-limit: 1
     groups:
       python-dependencies:
+        applies-to: version-updates
+        patterns:
+          - "*"
+      python-security-updates:
+        applies-to: security-updates
         patterns:
           - "*"
