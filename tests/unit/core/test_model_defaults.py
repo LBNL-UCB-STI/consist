@@ -130,6 +130,8 @@ def test_run_identity_summary_projects_strict_input_identity() -> None:
     run = Run(
         id="strict_identity_run",
         model_name="activitysim",
+        config_hash="cfg",
+        git_hash="git",
         meta={
             "input_identity": {
                 "mode": "resolved-binding-content-v1",

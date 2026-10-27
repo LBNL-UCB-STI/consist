@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from sqlmodel import Field, Session, SQLModel, select
+from sqlmodel import Field, Session, SQLModel, col, select
 
 from consist.integrations.beam import BeamConfigAdapter, BeamIngestSpec
 from consist.models.beam import BeamConfigCache, BeamConfigIngestRunLink
@@ -46,7 +46,7 @@ class BeamVehicleTypesCache(SQLModel, table=True):
     __tablename__ = "beam_vehicletypes_cache"
     __table_args__ = {"schema": "global_tables"}
 
-    id: int = Field(primary_key=True)
+    id: int | None = Field(default=None, primary_key=True)
     value: str
     content_hash: str = Field(index=True)
 
@@ -70,5 +70,5 @@ def test_beam_tabular_ingest_by_key(tracker, tmp_path: Path):
     tracker.end_run()
 
     with Session(tracker.engine) as session:
-        rows = session.exec(select(BeamVehicleTypesCache.id)).all()
+        rows = session.exec(select(col(BeamVehicleTypesCache.id))).all()
     assert rows

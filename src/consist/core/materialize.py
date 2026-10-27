@@ -26,6 +26,7 @@ import shutil
 import tempfile
 from pathlib import Path
 from typing import (
+    Any,
     Iterable,
     Literal,
     Mapping,
@@ -37,7 +38,7 @@ from typing import (
 )
 
 import pandas as pd
-from sqlalchemy import MetaData, Table, select
+from sqlalchemy import Column, MetaData, Table, select, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from consist.core.container_policy import validate_recovery_registration_policy
@@ -3897,6 +3898,48 @@ def stage_inputs(
     )
 
 
+def _load_global_table_metadata(table_name: str, hot_data_engine: Any) -> Table:
+    """Construct a SQLAlchemy Table for ``global_tables.<table_name>`` without dialect reflection."""
+    metadata = MetaData()
+    try:
+        with hot_data_engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT column_name "
+                    "FROM information_schema.columns "
+                    "WHERE table_catalog = current_database() "
+                    "AND table_schema = 'global_tables' "
+                    "AND table_name = :table_name "
+                    "ORDER BY ordinal_position"
+                ),
+                {"table_name": table_name},
+            ).fetchall()
+    except SQLAlchemyError as e:
+        raise RuntimeError(
+            f"Failed to reflect table 'global_tables.{table_name}': {e}"
+        ) from e
+
+    if not rows:
+        raise RuntimeError(
+            f"Failed to reflect table 'global_tables.{table_name}': "
+            "table does not exist or has no columns."
+        )
+
+    column_names = list(dict.fromkeys(str(row[0]) for row in rows))
+    columns = [Column(name) for name in column_names]
+    try:
+        return Table(
+            table_name,
+            metadata,
+            *columns,
+            schema="global_tables",
+        )
+    except SQLAlchemyError as e:
+        raise RuntimeError(
+            f"Failed to reflect table 'global_tables.{table_name}': {e}"
+        ) from e
+
+
 def materialize_ingested_artifact_from_db(
     *,
     artifact: Artifact,
@@ -3958,18 +4001,7 @@ def materialize_ingested_artifact_from_db(
     if not isinstance(table_name, str) or not table_name:
         raise ValueError("Artifact table name is missing; cannot reconstruct from DB.")
 
-    metadata = MetaData()
-    try:
-        table = Table(
-            table_name,
-            metadata,
-            schema="global_tables",
-            autoload_with=hot_data_engine,
-        )
-    except SQLAlchemyError as e:
-        raise RuntimeError(
-            f"Failed to reflect table 'global_tables.{table_name}': {e}"
-        ) from e
+    table = _load_global_table_metadata(table_name, hot_data_engine)
 
     if "consist_artifact_id" not in table.c:
         raise RuntimeError(

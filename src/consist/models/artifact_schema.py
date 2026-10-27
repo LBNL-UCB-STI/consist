@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import Column, Integer, JSON, String
+from sqlalchemy import Column, DateTime, Integer, JSON, String
 from sqlmodel import Field, SQLModel
 
 from consist.models.artifact import UUIDType
@@ -48,7 +48,10 @@ class ArtifactSchema(SQLModel, table=True):
         sa_column=Column(JSON, nullable=True),
         description="Full schema profile JSON (may be omitted when too large).",
     )
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        sa_type=DateTime,
+    )
 
 
 class ArtifactSchemaField(SQLModel, table=True):
@@ -120,7 +123,11 @@ class ArtifactSchemaObservation(SQLModel, table=True):
         description="Source of schema observation (duckdb|file|dlt|...).",
     )
     sample_rows: Optional[int] = Field(default=None)
-    observed_at: datetime = Field(default_factory=lambda: datetime.now(UTC), index=True)
+    observed_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        index=True,
+        sa_type=DateTime,
+    )
 
 
 class ArtifactSchemaRelation(SQLModel, table=True):

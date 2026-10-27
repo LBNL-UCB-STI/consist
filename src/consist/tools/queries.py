@@ -40,16 +40,18 @@ def get_runs(
 
 def get_summary(session: Session) -> Dict[str, object]:
     """Returns a high-level summary of the database."""
-    total_runs = session.exec(select(func.count(Run.id))).one()
+    total_runs = session.exec(select(func.count(col(Run.id)))).one()
     completed_runs = session.exec(
-        select(func.count(Run.id)).where(Run.status == "completed")
+        select(func.count(col(Run.id))).where(Run.status == "completed")
     ).one()
     failed_runs = session.exec(
-        select(func.count(Run.id)).where(Run.status == "failed")
+        select(func.count(col(Run.id))).where(Run.status == "failed")
     ).one()
-    total_artifacts = session.exec(select(func.count(Artifact.id))).one()
+    total_artifacts = session.exec(select(func.count(col(Artifact.id)))).one()
 
-    models_stmt = select(Run.model_name, func.count(Run.id)).group_by(Run.model_name)
+    models_stmt = select(Run.model_name, func.count(col(Run.id))).group_by(
+        Run.model_name
+    )
     models_dist = session.exec(models_stmt).all()
 
     first_run_date = session.exec(select(func.min(Run.created_at))).one()

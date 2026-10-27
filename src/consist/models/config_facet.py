@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Union
 
-from sqlalchemy import Column, JSON, String
+from sqlalchemy import Column, DateTime, JSON, String
 from sqlmodel import Field, SQLModel
 
 UTC = timezone.utc
@@ -53,4 +53,7 @@ class ConfigFacet(SQLModel, table=True):
         description="Compact facet JSON (intentionally small).",
     )
 
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        sa_type=DateTime,
+    )

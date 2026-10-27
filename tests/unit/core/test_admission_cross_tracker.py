@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -123,13 +124,18 @@ def test_prior_run_expectation_properties() -> None:
 
 def test_prior_run_expectation_forbids_alias_constructor_kwargs() -> None:
     """Verify alias kwargs ('run_id', 'direction') are forbidden in constructor."""
+    alias_kwargs: dict[str, Any] = {
+        "run_id": "run-123",
+        "artifact_key": "model_weights",
+    }
     with pytest.raises(ValidationError):
-        PriorRunExpectation(**{"run_id": "run-123", "artifact_key": "model_weights"})
+        PriorRunExpectation(**alias_kwargs)
+    direction_kwargs: dict[str, Any] = {"direction": "output"}
     with pytest.raises(ValidationError):
         PriorRunExpectation(
             expected_run_id="run-123",
             artifact_key="model_weights",
-            **{"direction": "output"},
+            **direction_kwargs,
         )
 
 

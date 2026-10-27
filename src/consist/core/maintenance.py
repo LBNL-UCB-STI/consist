@@ -3014,7 +3014,10 @@ class DatabaseMaintenance:
 
         with self.db.session_scope() as session:
             links = session.exec(
-                select(RunArtifactLink.artifact_id, RunArtifactLink.run_id)
+                select(
+                    col(RunArtifactLink.artifact_id),
+                    col(RunArtifactLink.run_id),
+                )
             ).all()
 
         linked_runs_by_artifact: dict[uuid.UUID, set[str]] = {}

@@ -737,7 +737,7 @@ def parse_materialize_cached_outputs_kwargs(
 
     return (
         cache_hydration,
-        cast(Literal["warn", "miss"], cache_hydration_failure),
+        cache_hydration_failure,
         materialize_cached_output_paths,
         materialize_cached_output_set_roots,
         materialize_cached_outputs_dir,

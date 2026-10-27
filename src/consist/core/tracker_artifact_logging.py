@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Literal, Optional, TYPE_CHECKING, Type, Union, cast
+from typing import Any, Dict, Literal, Optional, TYPE_CHECKING, Type, Union
 
 from sqlmodel import SQLModel
 
@@ -387,10 +387,7 @@ class ArtifactLoggingCoordinator:
                         artifact=artifact_obj,
                         run=tracker.current_consist.run,
                         resolved_path=str(resolved_path),
-                        driver=cast(
-                            Literal["csv", "parquet", "gtfs", "h5_table"],
-                            resolved_driver,
-                        ),
+                        driver=resolved_driver,
                         sample_rows=sample_rows,
                         source="file",
                         reuse_if_unchanged=profile_mode == "if_changed",

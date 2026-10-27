@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping, MutableMapping, Optional, TYPE_CHECKING
+from typing import (
+    Any,
+    Iterable,
+    Iterator,
+    Mapping,
+    MutableMapping,
+    Optional,
+    TYPE_CHECKING,
+)
 
 from consist.core._coupler_shared import CouplerMapMixin
 from consist.models.artifact import Artifact
@@ -172,7 +180,7 @@ class CouplerView:
     def __len__(self) -> int:
         return len(list(self.keys()))
 
-    def __iter__(self) -> Iterable[str]:
+    def __iter__(self) -> Iterator[str]:
         return iter(self.keys())
 
 

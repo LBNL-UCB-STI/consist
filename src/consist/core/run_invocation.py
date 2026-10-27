@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Union, cast
+from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Union
 
 from consist.core.error_messages import format_problem_cause_fix
 from consist.core.metadata_resolver import MetadataResolver, ResolvedStepIdentity
@@ -756,8 +756,8 @@ def resolve_run_invocation(
             if code_identity_extra_deps is not None
             else None
         ),
-        output_mismatch=cast(Literal["warn", "error", "ignore"], output_mismatch),
-        output_missing=cast(Literal["warn", "error", "ignore"], output_missing),
+        output_mismatch=output_mismatch,
+        output_missing=output_missing,
         input_binding=resolved_input_binding,
         load_inputs=resolved.load_inputs,
         input_paths=(
@@ -770,7 +770,7 @@ def resolve_run_invocation(
             if requested_input_artifact_ids is not None
             else None
         ),
-        executor=cast(Literal["python", "container"], executor),
+        executor=executor,
         container=container,
         runtime_kwargs=runtime_kwargs_dict,
         inject_context=inject_context,

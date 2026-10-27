@@ -1216,6 +1216,8 @@ def test_materialize_planned_outputs_captures_copy_failures_in_warn_mode(
 def test_materialize_run_outputs_db_fallback_restores_ingested_csv(
     tracker, run_dir: Path
 ) -> None:
+    import warnings
+
     output_path = run_dir / "outputs" / "table.csv"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame({"value": [1, 2]}).to_csv(output_path, index=False)
@@ -1226,17 +1228,66 @@ def test_materialize_run_outputs_db_fallback_restores_ingested_csv(
     tracker.ingest(artifact)
     output_path.unlink()
 
-    result = tracker.materialize_run_outputs(
-        "producer",
-        target_root=run_dir / "restored",
-        db_fallback="if_ingested",
-    )
+    with warnings.catch_warnings(record=True) as caught_warnings:
+        warnings.simplefilter("always")
+        result = tracker.materialize_run_outputs(
+            "producer",
+            target_root=run_dir / "restored",
+            db_fallback="if_ingested",
+        )
+
+    index_reflection_warnings = [
+        w for w in caught_warnings if "reflection on indices" in str(w.message)
+    ]
+    assert not index_reflection_warnings
 
     restored_path = run_dir / "restored" / "outputs" / "table.csv"
     assert result.materialized_from_db == {"table": str(restored_path.resolve())}
     assert restored_path.exists()
     restored = pd.read_csv(restored_path)
     assert restored["value"].tolist() == [1, 2]
+
+
+def test_materialize_run_outputs_db_fallback_handles_attached_catalog_with_same_table(
+    tracker, run_dir: Path
+) -> None:
+    output_path = run_dir / "outputs" / "table.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({"value": [10, 20]}).to_csv(output_path, index=False)
+
+    with tracker.start_run(
+        "producer_attached", model="producer", cache_mode="overwrite"
+    ):
+        artifact = tracker.log_artifact(output_path, key="table", direction="output")
+
+    tracker.ingest(artifact)
+    output_path.unlink()
+
+    attached_db = run_dir / "attached_other.duckdb"
+    with tracker.engine.begin() as conn:
+        conn.exec_driver_sql(f"ATTACH '{attached_db}' AS attached_other")
+        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS attached_other.global_tables")
+        conn.exec_driver_sql(
+            'CREATE TABLE attached_other.global_tables."table" '
+            "(consist_artifact_id VARCHAR, value BIGINT, extra_col VARCHAR)"
+        )
+
+    try:
+        result = tracker.materialize_run_outputs(
+            "producer_attached",
+            target_root=run_dir / "restored_attached",
+            db_fallback="if_ingested",
+        )
+    finally:
+        with tracker.engine.begin() as conn:
+            conn.exec_driver_sql("DETACH DATABASE IF EXISTS attached_other")
+
+    restored_path = run_dir / "restored_attached" / "outputs" / "table.csv"
+    assert result.materialized_from_db == {"table": str(restored_path.resolve())}
+    assert restored_path.exists()
+    restored = pd.read_csv(restored_path)
+    assert restored["value"].tolist() == [10, 20]
+    assert "extra_col" not in restored.columns
 
 
 def test_materialize_run_outputs_allows_current_mount_root_as_target(

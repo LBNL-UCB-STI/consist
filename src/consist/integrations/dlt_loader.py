@@ -348,13 +348,14 @@ def _handle_openmatrix_metadata(path: str) -> Iterable[Dict[str, Any]]:
         raise ImportError(
             "h5py or openmatrix is required for OpenMatrix (pip install h5py openmatrix)"
         )
+    h5py_mod = h5py
 
     try:
-        with h5py.File(path, "r") as f:
+        with h5py_mod.File(path, "r") as f:
 
             def walk_matrices(group, prefix=""):
                 for key, item in group.items():
-                    if isinstance(item, h5py.Dataset):
+                    if isinstance(item, h5py_mod.Dataset):
                         # This is a matrix dataset
                         yield {
                             "matrix_name": key,
@@ -367,7 +368,7 @@ def _handle_openmatrix_metadata(path: str) -> Iterable[Dict[str, Any]]:
                                 _json_dumps(dict(item.attrs)) if item.attrs else "{}"
                             ),
                         }
-                    elif isinstance(item, h5py.Group):
+                    elif isinstance(item, h5py_mod.Group):
                         yield from walk_matrices(
                             item, prefix + "/" + key if prefix else "/" + key
                         )
@@ -480,9 +481,10 @@ def _handle_parquet_path(path: str, ctx: Dict[str, Any]) -> Tuple[Any, bool]:
         required for processing Parquet files.
     """
     if pa and pq:
+        pq_mod = pq
 
         def parquet_stream():
-            pf = pq.ParquetFile(path)
+            pf = pq_mod.ParquetFile(path)
             for batch in pf.iter_batches():
                 df_batch = batch.to_pandas()
                 for k, v in ctx.items():

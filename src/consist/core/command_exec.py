@@ -61,7 +61,7 @@ class CommandExecutionResult(RunResult):
     Structured result of a command execution tracked by Consist.
     """
 
-    run: Run | None = None
+    run: Any = None
     inputs: dict[str, Artifact] = PydanticField(default_factory=dict)
     outputs: dict[str, Artifact] = PydanticField(default_factory=dict)
     exit_code: int = 0

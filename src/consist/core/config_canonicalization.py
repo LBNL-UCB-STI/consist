@@ -521,15 +521,14 @@ class CanonicalizationResult(NamedTuple):
 
 
 class _IngestableDataFrameMixin:
-    ingestables: list[IngestSpec]
-
     def to_df(
         self, table_names: Union[str, Iterable[str]], *, run_id: Optional[str] = None
     ):
         """
         Return rows from matching table(s) as a Pandas DataFrame.
         """
-        return _ingestable_df(self.ingestables, table_names, run_id=run_id)
+        ingestables: list[IngestSpec] = cast(Any, self).ingestables
+        return _ingestable_df(ingestables, table_names, run_id=run_id)
 
     def constants_df(self, *, run_id: Optional[str] = None):
         """

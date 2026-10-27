@@ -468,7 +468,7 @@ def test_explicit_tracker_load_ignores_artifact_runtime_path(tmp_path: Path) -> 
     with tracker_a.start_run("producer", model="test"):
         artifact = tracker_a.log_output(source_a, key="out")
 
-    loaded = consist.load(artifact, tracker=tracker_b, db_fallback="never")
+    loaded = cast(Any, consist.load(artifact, tracker=tracker_b, db_fallback="never"))
 
     assert loaded.fetchone() == (2,)
 
@@ -721,7 +721,7 @@ def test_hydrated_zarr_directory_loads_through_zarr_driver(
         db_fallback="never",
     )
 
-    loaded = consist.load(hydrated["skims"].artifact)
+    loaded: Any = consist.load(hydrated["skims"].artifact)
 
     assert hydrated["skims"].artifact.driver == "zarr"
     assert loaded["skim"].values.tolist() == [1.0, 2.0]

@@ -1,5 +1,5 @@
-from sqlalchemy import func, select
-from sqlmodel import Session, SQLModel
+from sqlalchemy import func
+from sqlmodel import Session, SQLModel, select
 
 from consist.models.beam import BeamConfigCache, BeamConfigIngestRunLink
 
