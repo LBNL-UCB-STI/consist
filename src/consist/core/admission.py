@@ -1,10 +1,11 @@
 """
-Verify external files against identities recorded by completed prior runs.
+Verify external files against prior-run or declared raw-file identities.
 
 Admission identity is deliberately separate from Consist's cache fingerprinting.
 It always uses a full SHA-256 digest of a regular file's raw bytes and returns a
 policy-neutral report; callers such as PILATES decide whether an observation is
-fatal. Version 1 resolves expected identities from one explicit prior run.
+fatal. Expected identities may come from an explicit prior run or a typed local
+declaration, but neither source changes cache identity or artifacts on its own.
 """
 
 from __future__ import annotations
@@ -14,10 +15,11 @@ import json
 import os
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 from sqlmodel import col, select
 
 from consist.models.artifact import Artifact
@@ -27,11 +29,56 @@ if TYPE_CHECKING:
     from consist.core.tracker import Tracker
 
 
-ADMISSION_REPORT_SCHEMA_VERSION = 2
+ADMISSION_REPORT_SCHEMA_VERSION = 3
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+_FILE_IDENTITY = re.compile(r"sha256:file:[0-9a-f]{64}")
 _GIT_LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1\n"
 
 AdmissionOutcome = Literal["verified", "mismatched", "unverified", "unreadable"]
+ExpectedIdentitySource = Literal["prior_run", "declared_digest"]
+
+
+class FileIdentity(BaseModel):
+    """One canonical SHA-256 identity for the raw bytes of a regular file."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    value: str
+
+    @field_validator("value")
+    @classmethod
+    def _validate_value(cls, value: str) -> str:
+        if not _FILE_IDENTITY.fullmatch(value):
+            raise ValueError(
+                "file identity must be sha256:file:<64 lowercase hexadecimal characters>"
+            )
+        return value
+
+    @classmethod
+    def parse(cls, value: str) -> "FileIdentity":
+        """Parse one canonical raw-file SHA-256 identity."""
+        return cls(value=value)
+
+    def __str__(self) -> str:
+        """Return the canonical self-describing identity."""
+        return self.value
+
+
+class DeclaredDigestExpectation(BaseModel):
+    """A locally declared raw-file identity and optional opaque source context."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    identity: FileIdentity
+    source_label: str | None = None
+    source_uri: str | None = None
+
+    @field_validator("source_label", "source_uri")
+    @classmethod
+    def _validate_optional_text(cls, value: str | None) -> str | None:
+        if value is not None and not value:
+            raise ValueError("declared digest source metadata must not be empty")
+        return value
 
 
 class AdmissionReference(BaseModel):
@@ -47,8 +94,10 @@ class AdmissionReference(BaseModel):
 
     Attributes
     ----------
-    artifact_key : str
-        Exact persisted input-artifact key to resolve on the expected run.
+    artifact_key : str, optional
+        Exact persisted input-artifact key to resolve on the expected run. It
+        may be absent only when a declared-digest entry point supplies the
+        expected identity directly; then ``input_role`` is required.
     execution_path : str or pathlib.Path
         Host-readable regular file whose bytes Consist checks.
     input_role : str, optional
@@ -78,7 +127,7 @@ class AdmissionReference(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    artifact_key: str
+    artifact_key: str | None = None
     execution_path: str | Path
     input_role: str | None = None
     config_key: str | None = None
@@ -88,6 +137,14 @@ class AdmissionReference(BaseModel):
     canonical_value: str | None = None
     configured_path: str | Path | None = None
     consumer_path: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_lookup_or_role(self) -> "AdmissionReference":
+        if self.artifact_key is None and not self.input_role:
+            raise ValueError(
+                "input_role is required when artifact_key is absent for declared-digest admission"
+            )
+        return self
 
 
 class AdmissionReport(BaseModel):
@@ -106,8 +163,9 @@ class AdmissionReport(BaseModel):
         be read as a regular file.
     input_role : str
         Logical role supplied by the caller, defaulting to ``artifact_key``.
-    artifact_key : str
-        Exact persisted input-artifact key selected on the expected run.
+    artifact_key : str or None
+        Exact persisted input-artifact key selected on the expected run, or
+        ``None`` for a declared-digest check.
     config_key : str or None
         Source configuration key when supplied by a future runtime adapter.
     config_reference_key : str or None
@@ -126,10 +184,13 @@ class AdmissionReport(BaseModel):
         Resolved physical target used for path-audit and alias detection.
     consumer_path : str or None
         Final path supplied to the consumer, such as a container path.
-    expected_source : {"prior_run"}
-        Source used to resolve the expected identity in the V1 contract.
-    expected_run_id : str
-        Explicit completed run supplying the expected input artifact.
+    expected_source : {"prior_run", "declared_digest"}
+        Source used to resolve the expected identity.
+    expected_source_label, expected_source_uri : str or None
+        Opaque optional metadata retained for a declared identity source.
+    expected_run_id : str or None
+        Explicit completed run supplying the expected input artifact, when the
+        expectation comes from a prior run.
     expected_artifact_id : str or None
         Trusted self-describing expected identity, such as
         ``sha256:file:<hex>``.
@@ -158,10 +219,10 @@ class AdmissionReport(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    report_schema_version: Literal[2] = ADMISSION_REPORT_SCHEMA_VERSION
+    report_schema_version: Literal[1, 2, 3] = ADMISSION_REPORT_SCHEMA_VERSION
     outcome: AdmissionOutcome
     input_role: str
-    artifact_key: str
+    artifact_key: str | None
     config_key: str | None = None
     config_reference_key: str | None = None
     feed_key: str | None = None
@@ -171,8 +232,10 @@ class AdmissionReport(BaseModel):
     execution_path: str
     physical_target_path: str | None = None
     consumer_path: str | None = None
-    expected_source: Literal["prior_run"] = "prior_run"
-    expected_run_id: str
+    expected_source: ExpectedIdentitySource = "prior_run"
+    expected_source_label: str | None = None
+    expected_source_uri: str | None = None
+    expected_run_id: str | None
     expected_artifact_id: str | None = None
     observed_artifact_id: str | None = None
     digest_algorithm: Literal["sha256"] = "sha256"
@@ -181,6 +244,19 @@ class AdmissionReport(BaseModel):
     observations: tuple[str, ...] = ()
     recommended_action: str | None = None
     reason: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_expected_source_fields(self) -> "AdmissionReport":
+        if self.expected_source == "prior_run":
+            if self.artifact_key is None or self.expected_run_id is None:
+                raise ValueError(
+                    "prior-run admission reports require artifact_key and expected_run_id"
+                )
+        elif self.artifact_key is not None or self.expected_run_id is not None:
+            raise ValueError(
+                "declared-digest admission reports must not contain a prior-run artifact key or run id"
+            )
+        return self
 
     def canonical_json(self) -> str:
         """
@@ -382,16 +458,19 @@ def _report(
     outcome: AdmissionOutcome,
     execution_path: Path,
     physical_target_path: str | None,
-    expected_run_id: str,
-    artifact_key: str,
+    expected_run_id: str | None,
+    artifact_key: str | None,
     input_role: str,
     observations: tuple[str, ...],
     expected_artifact_id: str | None = None,
     observed_artifact_id: str | None = None,
+    expected_source_label: str | None = None,
+    expected_source_uri: str | None = None,
     expected_bytes_source: Literal["explicit_immutable_path"] | None = None,
     expected_bytes_path: str | None = None,
     recommended_action: str | None = None,
     reason: str | None = None,
+    expected_source: ExpectedIdentitySource = "prior_run",
 ) -> AdmissionReport:
     """
     Construct one policy-neutral admission report from normalized evidence.
@@ -404,8 +483,8 @@ def _report(
         Candidate path supplied for admission.
     physical_target_path : str, optional
         Resolved audit path derived from the candidate.
-    expected_run_id, artifact_key, input_role
-        Explicit expected-run selector and report role fields.
+    expected_source, expected_run_id, artifact_key, input_role
+        Expected-identity provenance and report role fields.
     observations : tuple[str, ...]
         Stable machine-readable facts supporting the outcome.
     expected_artifact_id, observed_artifact_id, expected_bytes_source,
@@ -415,7 +494,7 @@ def _report(
     Returns
     -------
     AdmissionReport
-        Frozen schema-v2 report ready for caller policy handling or serialization.
+        Frozen schema-v3 report ready for caller policy handling or serialization.
     """
     return AdmissionReport(
         outcome=outcome,
@@ -423,14 +502,199 @@ def _report(
         artifact_key=artifact_key,
         execution_path=str(execution_path),
         physical_target_path=physical_target_path,
+        expected_source=expected_source,
         expected_run_id=expected_run_id,
         expected_artifact_id=expected_artifact_id,
         observed_artifact_id=observed_artifact_id,
+        expected_source_label=expected_source_label,
+        expected_source_uri=expected_source_uri,
         expected_bytes_source=expected_bytes_source,
         expected_bytes_path=expected_bytes_path,
         observations=observations,
         recommended_action=recommended_action,
         reason=reason,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _CandidateObservation:
+    """One observed candidate path and its full-file admission identity."""
+
+    execution_path: Path
+    physical_target_path: str | None
+    observed_identity: FileIdentity | None
+    outcome: AdmissionOutcome | None = None
+    observations: tuple[str, ...] = ()
+    recommended_action: str | None = None
+    reason: str | None = None
+
+
+def _observe_candidate(path: str | Path) -> _CandidateObservation:
+    """Read one candidate once with the admission-v1 file classifications."""
+    candidate = Path(path).expanduser()
+    physical_target_path = _resolved_path(candidate)
+    if not candidate.is_file():
+        return _CandidateObservation(
+            execution_path=candidate,
+            physical_target_path=physical_target_path,
+            observed_identity=None,
+            outcome="unreadable",
+            observations=("file_unreadable",),
+            reason="Admission requires a readable regular file.",
+        )
+    try:
+        if _is_git_lfs_pointer(candidate):
+            return _CandidateObservation(
+                execution_path=candidate,
+                physical_target_path=physical_target_path,
+                observed_identity=None,
+                outcome="unverified",
+                observations=("looks_like_git_lfs_pointer",),
+                recommended_action="Run git lfs pull to materialize the file bytes.",
+            )
+        return _CandidateObservation(
+            execution_path=candidate,
+            physical_target_path=physical_target_path,
+            observed_identity=FileIdentity.parse(admission_file_identity(candidate)),
+        )
+    except OSError as exc:
+        return _CandidateObservation(
+            execution_path=candidate,
+            physical_target_path=physical_target_path,
+            observed_identity=None,
+            outcome="unreadable",
+            observations=("file_unreadable",),
+            reason=str(exc),
+        )
+
+
+def _report_candidate_failure(
+    observation: _CandidateObservation,
+    *,
+    expected_source: ExpectedIdentitySource,
+    expected_run_id: str | None,
+    artifact_key: str | None,
+    input_role: str,
+    expected_identity: FileIdentity | None = None,
+    expected_source_label: str | None = None,
+    expected_source_uri: str | None = None,
+    expected_bytes_source: Literal["explicit_immutable_path"] | None = None,
+    expected_bytes_path: str | None = None,
+) -> AdmissionReport:
+    """Render a candidate read failure without claiming an observed identity."""
+    assert observation.outcome is not None
+    return _report(
+        outcome=observation.outcome,
+        execution_path=observation.execution_path,
+        physical_target_path=observation.physical_target_path,
+        expected_source=expected_source,
+        expected_run_id=expected_run_id,
+        artifact_key=artifact_key,
+        input_role=input_role,
+        expected_artifact_id=(
+            str(expected_identity) if expected_identity is not None else None
+        ),
+        expected_source_label=expected_source_label,
+        expected_source_uri=expected_source_uri,
+        expected_bytes_source=expected_bytes_source,
+        expected_bytes_path=expected_bytes_path,
+        observations=observation.observations,
+        recommended_action=observation.recommended_action,
+        reason=observation.reason,
+    )
+
+
+def _compare_observed_identity(
+    observation: _CandidateObservation,
+    *,
+    expected_identity: FileIdentity,
+    expected_source: ExpectedIdentitySource,
+    expected_run_id: str | None,
+    artifact_key: str | None,
+    input_role: str,
+    expected_source_label: str | None = None,
+    expected_source_uri: str | None = None,
+    expected_bytes_source: Literal["explicit_immutable_path"] | None = None,
+    expected_bytes_path: str | None = None,
+) -> AdmissionReport:
+    """Compare one already-read candidate identity with an expected identity."""
+    observed_identity = observation.observed_identity
+    assert observed_identity is not None
+    outcome: AdmissionOutcome = (
+        "verified" if observed_identity == expected_identity else "mismatched"
+    )
+    return _report(
+        outcome=outcome,
+        execution_path=observation.execution_path,
+        physical_target_path=observation.physical_target_path,
+        expected_source=expected_source,
+        expected_run_id=expected_run_id,
+        artifact_key=artifact_key,
+        input_role=input_role,
+        expected_artifact_id=str(expected_identity),
+        observed_artifact_id=str(observed_identity),
+        expected_source_label=expected_source_label,
+        expected_source_uri=expected_source_uri,
+        expected_bytes_source=expected_bytes_source,
+        expected_bytes_path=expected_bytes_path,
+        observations=("matched",) if outcome == "verified" else ("mismatched",),
+        reason=(
+            None
+            if outcome == "verified"
+            else (
+                "Resolved file does not match the expected prior-run artifact."
+                if expected_source == "prior_run"
+                else "Resolved file does not match the declared digest."
+            )
+        ),
+    )
+
+
+def compare_path_to_identity(
+    *,
+    execution_path: str | Path,
+    expected_identity: FileIdentity,
+    input_role: str,
+    expected_source: ExpectedIdentitySource,
+    artifact_key: str | None = None,
+    expected_run_id: str | None = None,
+    expected_source_label: str | None = None,
+    expected_source_uri: str | None = None,
+    expected_bytes_source: Literal["explicit_immutable_path"] | None = None,
+    expected_bytes_path: str | None = None,
+) -> AdmissionReport:
+    """Compare one readable regular file with a typed expected raw-file identity.
+
+    This source-neutral primitive computes a full SHA-256 over the candidate's
+    raw bytes and does not read a Tracker, consult a registry, or use a
+    cache-hashing strategy. The resolver that supplied ``expected_identity``
+    remains responsible for any source-specific lookup or trust decision.
+    """
+    observation = _observe_candidate(execution_path)
+    if observation.observed_identity is None:
+        return _report_candidate_failure(
+            observation,
+            expected_source=expected_source,
+            expected_run_id=expected_run_id,
+            artifact_key=artifact_key,
+            input_role=input_role,
+            expected_identity=expected_identity,
+            expected_source_label=expected_source_label,
+            expected_source_uri=expected_source_uri,
+            expected_bytes_source=expected_bytes_source,
+            expected_bytes_path=expected_bytes_path,
+        )
+    return _compare_observed_identity(
+        observation,
+        expected_identity=expected_identity,
+        expected_source=expected_source,
+        expected_run_id=expected_run_id,
+        artifact_key=artifact_key,
+        input_role=input_role,
+        expected_source_label=expected_source_label,
+        expected_source_uri=expected_source_uri,
+        expected_bytes_source=expected_bytes_source,
+        expected_bytes_path=expected_bytes_path,
     )
 
 
@@ -592,45 +856,19 @@ def check_artifact_identity(
         if report.outcome != "verified":
             raise RuntimeError(report.canonical_json())
     """
-    candidate = Path(execution_path).expanduser()
-    physical_target_path = _resolved_path(candidate)
     role = input_role or artifact_key
-
-    if not candidate.is_file():
-        return _report(
-            outcome="unreadable",
-            execution_path=candidate,
-            physical_target_path=physical_target_path,
+    observation = _observe_candidate(execution_path)
+    candidate = observation.execution_path
+    physical_target_path = observation.physical_target_path
+    if observation.observed_identity is None:
+        return _report_candidate_failure(
+            observation,
+            expected_source="prior_run",
             expected_run_id=expected_run_id,
             artifact_key=artifact_key,
             input_role=role,
-            observations=("file_unreadable",),
-            reason="Admission requires a readable regular file.",
         )
-    try:
-        if _is_git_lfs_pointer(candidate):
-            return _report(
-                outcome="unverified",
-                execution_path=candidate,
-                physical_target_path=physical_target_path,
-                expected_run_id=expected_run_id,
-                artifact_key=artifact_key,
-                input_role=role,
-                observations=("looks_like_git_lfs_pointer",),
-                recommended_action="Run git lfs pull to materialize the file bytes.",
-            )
-        observed_identity = admission_file_identity(candidate)
-    except OSError as exc:
-        return _report(
-            outcome="unreadable",
-            execution_path=candidate,
-            physical_target_path=physical_target_path,
-            expected_run_id=expected_run_id,
-            artifact_key=artifact_key,
-            input_role=role,
-            observations=("file_unreadable",),
-            reason=str(exc),
-        )
+    observed_identity = observation.observed_identity
 
     artifact, expected_error = _expected_input_artifact(
         tracker, expected_run_id=expected_run_id, artifact_key=artifact_key
@@ -643,7 +881,7 @@ def check_artifact_identity(
             expected_run_id=expected_run_id,
             artifact_key=artifact_key,
             input_role=role,
-            observed_artifact_id=observed_identity,
+            observed_artifact_id=str(observed_identity),
             observations=(expected_error,),
         )
     assert artifact is not None
@@ -663,7 +901,7 @@ def check_artifact_identity(
                 expected_run_id=expected_run_id,
                 artifact_key=artifact_key,
                 input_role=role,
-                observed_artifact_id=observed_identity,
+                observed_artifact_id=str(observed_identity),
                 expected_bytes_source=expected_source,
                 expected_bytes_path=expected_audit_path,
                 observations=(
@@ -681,7 +919,7 @@ def check_artifact_identity(
                     expected_run_id=expected_run_id,
                     artifact_key=artifact_key,
                     input_role=role,
-                    observed_artifact_id=observed_identity,
+                    observed_artifact_id=str(observed_identity),
                     expected_bytes_source=expected_source,
                     expected_bytes_path=expected_audit_path,
                     observations=("looks_like_git_lfs_pointer",),
@@ -696,7 +934,7 @@ def check_artifact_identity(
                 expected_run_id=expected_run_id,
                 artifact_key=artifact_key,
                 input_role=role,
-                observed_artifact_id=observed_identity,
+                observed_artifact_id=str(observed_identity),
                 expected_bytes_source=expected_source,
                 expected_bytes_path=expected_audit_path,
                 observations=("expected_artifact_unverifiable",),
@@ -715,7 +953,7 @@ def check_artifact_identity(
                 expected_run_id=expected_run_id,
                 artifact_key=artifact_key,
                 input_role=role,
-                observed_artifact_id=observed_identity,
+                observed_artifact_id=str(observed_identity),
                 expected_bytes_source=expected_source,
                 expected_bytes_path=expected_audit_path,
                 observations=(
@@ -735,30 +973,19 @@ def check_artifact_identity(
             expected_run_id=expected_run_id,
             artifact_key=artifact_key,
             input_role=role,
-            observed_artifact_id=observed_identity,
+            observed_artifact_id=str(observed_identity),
             observations=("expected_artifact_unverifiable",),
         )
 
-    outcome: AdmissionOutcome = (
-        "verified" if observed_identity == expected_identity else "mismatched"
-    )
-    return _report(
-        outcome=outcome,
-        execution_path=candidate,
-        physical_target_path=physical_target_path,
+    return _compare_observed_identity(
+        observation,
+        expected_identity=FileIdentity.parse(expected_identity),
+        expected_source="prior_run",
         expected_run_id=expected_run_id,
         artifact_key=artifact_key,
         input_role=role,
-        expected_artifact_id=expected_identity,
-        observed_artifact_id=observed_identity,
         expected_bytes_source=expected_source,
         expected_bytes_path=expected_audit_path,
-        observations=("matched",) if outcome == "verified" else ("mismatched",),
-        reason=(
-            None
-            if outcome == "verified"
-            else "Resolved file does not match the expected prior-run artifact."
-        ),
     )
 
 
@@ -804,6 +1031,8 @@ def check_admission_reference(
     ``reference.execution_path``. This API records a final consumer path but
     intentionally does not infer or validate host/container mapping itself.
     """
+    if reference.artifact_key is None:
+        raise ValueError("prior-run admission references require artifact_key")
     report = check_artifact_identity(
         tracker,
         execution_path=reference.execution_path,
@@ -811,6 +1040,69 @@ def check_admission_reference(
         artifact_key=reference.artifact_key,
         expected_bytes_path=expected_bytes_path,
         input_role=reference.input_role,
+    )
+    return AdmissionReport.model_validate(
+        {
+            **report.model_dump(),
+            "config_key": reference.config_key,
+            "config_reference_key": reference.config_reference_key,
+            "feed_key": reference.feed_key,
+            "raw_config_value": reference.raw_config_value,
+            "canonical_value": reference.canonical_value,
+            "configured_path": (
+                str(reference.configured_path)
+                if reference.configured_path is not None
+                else None
+            ),
+            "consumer_path": reference.consumer_path,
+        }
+    )
+
+
+def check_expected_identity(
+    *,
+    execution_path: str | Path,
+    input_role: str,
+    expectation: DeclaredDigestExpectation,
+) -> AdmissionReport:
+    """Compare one file to a caller-declared, typed raw-file digest.
+
+    The declaration is an expected identity, not evidence that its publisher or
+    source URI is trusted. Consist verifies only equality with the raw bytes of
+    ``execution_path`` and never creates an ``Artifact`` or consults a Tracker.
+    """
+    if not input_role:
+        raise ValueError("declared-digest admission requires input_role")
+    return compare_path_to_identity(
+        execution_path=execution_path,
+        expected_identity=expectation.identity,
+        expected_source="declared_digest",
+        input_role=input_role,
+        expected_source_label=expectation.source_label,
+        expected_source_uri=expectation.source_uri,
+    )
+
+
+def check_admission_reference_expected_identity(
+    *,
+    reference: AdmissionReference,
+    expectation: DeclaredDigestExpectation,
+) -> AdmissionReport:
+    """Compare a runtime-resolved file to a declared digest without a Tracker.
+
+    ``AdmissionReference`` retains caller-proven execution, configuration, and
+    consumer-path context. A declared-digest reference must not carry an
+    artifact key because no prior-run artifact was resolved for this check.
+    """
+    if reference.artifact_key is not None:
+        raise ValueError(
+            "declared-digest admission references must not contain artifact_key"
+        )
+    assert reference.input_role is not None
+    report = check_expected_identity(
+        execution_path=reference.execution_path,
+        input_role=reference.input_role,
+        expectation=expectation,
     )
     return AdmissionReport.model_validate(
         {

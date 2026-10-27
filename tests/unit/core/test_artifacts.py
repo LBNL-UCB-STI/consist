@@ -7,6 +7,7 @@ import pytest
 
 from consist import is_spatial_artifact
 from consist.core.artifacts import ArtifactManager
+from consist.core.identity import IdentityManager
 from consist.core.persistence import DatabaseManager
 from consist.models.artifact import Artifact
 from consist.models.artifact import ArtifactContent
@@ -133,13 +134,95 @@ def test_create_artifact_hashes_once_for_reuse_and_validation(tmp_path):
     assert tracker.identity.compute_file_checksum.call_count == 1
 
 
+def test_create_artifact_does_not_dedupe_fast_file_observations(tmp_path):
+    tracker = MagicMock()
+    tracker.resolve_uri = lambda uri: f"/abs/{uri}"
+    tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
+    tracker.mounts = {}
+    tracker.identity.hashing_strategy = "fast"
+    tracker.identity.compute_file_checksum.return_value = "f" * 64
+    tracker.db = MagicMock()
+
+    source = tmp_path / "fast.csv"
+    source.write_text("value\n1\n", encoding="utf-8")
+
+    artifact = ArtifactManager(tracker).create_artifact(
+        path=source,
+        key="fast_input",
+        run_id="run_a",
+    )
+
+    assert artifact.content_id is None
+    assert artifact.meta["observation_identity"] == f"stat-v1:file:{'f' * 64}"
+    tracker.db.get_or_create_artifact_content.assert_not_called()
+
+
+def test_create_artifact_persists_typed_full_file_content_identity(tmp_path):
+    tracker = MagicMock()
+    tracker.resolve_uri = lambda uri: f"/abs/{uri}"
+    tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
+    tracker.mounts = {}
+    tracker.identity.hashing_strategy = "full"
+    digest = "a" * 64
+    tracker.identity.compute_file_checksum.return_value = digest
+    content_identity = f"sha256:file:{digest}"
+    content_row = ArtifactContent(content_hash=content_identity, driver="csv")
+    tracker.db = MagicMock()
+    tracker.db.get_or_create_artifact_content.return_value = content_row
+
+    source = tmp_path / "full.csv"
+    source.write_text("value\n1\n", encoding="utf-8")
+
+    artifact = ArtifactManager(tracker).create_artifact(
+        path=source,
+        key="full_input",
+        run_id="run_a",
+    )
+
+    assert artifact.meta["content_identity"] == content_identity
+    assert artifact.content_id == content_row.id
+    tracker.db.get_or_create_artifact_content.assert_called_once_with(
+        content_hash=content_identity,
+        driver="csv",
+    )
+
+
+def test_create_artifact_records_fast_directory_observation_without_content_id(
+    tmp_path,
+):
+    tracker = MagicMock()
+    tracker.resolve_uri = lambda uri: f"/abs/{uri}"
+    tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
+    tracker.mounts = {}
+    tracker.identity = IdentityManager(hashing_strategy="fast")
+    tracker.db = MagicMock()
+
+    directory = tmp_path / "fast_directory"
+    (directory / "nested").mkdir(parents=True)
+    (directory / "nested" / "payload.bin").write_bytes(b"payload")
+
+    artifact = ArtifactManager(tracker).create_artifact(
+        path=directory,
+        key="fast_directory",
+        run_id="run_a",
+        driver="other",
+    )
+
+    assert artifact.content_id is None
+    assert artifact.meta["observation_identity"].startswith("stat-v2:directory:")
+    tracker.db.get_or_create_artifact_content.assert_not_called()
+
+
 def test_create_artifacts_share_content_id_when_hashes_match(tmp_path):
     tracker = MagicMock()
     tracker.resolve_uri = lambda uri: f"/abs/{uri}"
     tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
     tracker.mounts = {"outputs": str(tmp_path)}
-    tracker.identity.compute_file_checksum.return_value = "shared_hash"
-    content_row = ArtifactContent(content_hash="shared_hash", driver="parquet")
+    tracker.identity.hashing_strategy = "full"
+    digest = "b" * 64
+    tracker.identity.compute_file_checksum.return_value = digest
+    content_identity = f"sha256:file:{digest}"
+    content_row = ArtifactContent(content_hash=content_identity, driver="parquet")
     tracker.db = MagicMock()
     tracker.db.get_or_create_artifact_content.return_value = content_row
 
@@ -154,14 +237,12 @@ def test_create_artifacts_share_content_id_when_hashes_match(tmp_path):
         path=path_a,
         key="shared",
         run_id="run_a",
-        content_hash="shared_hash",
         driver="parquet",
     )
     art_b = manager.create_artifact(
         path=path_b,
         key="shared",
         run_id="run_b",
-        content_hash="shared_hash",
         driver="parquet",
     )
 
@@ -171,14 +252,11 @@ def test_create_artifacts_share_content_id_when_hashes_match(tmp_path):
     assert art_a.content_id == art_b.content_id == content_row.id
 
 
-def test_attach_content_id_uses_artifact_driver_when_arg_missing():
+def test_legacy_artifact_hash_does_not_attach_content_id():
     tracker = MagicMock()
     tracker.resolve_uri = lambda uri: f"/abs/{uri}"
     tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
-    tracker.identity.compute_file_checksum.return_value = "hash_from_obj"
-    content_row = ArtifactContent(content_hash="hash_from_obj", driver="parquet")
     tracker.db = MagicMock()
-    tracker.db.get_or_create_artifact_content.return_value = content_row
 
     manager = ArtifactManager(tracker)
 
@@ -192,13 +270,11 @@ def test_attach_content_id_uses_artifact_driver_when_arg_missing():
 
     out = manager.create_artifact(path=existing, run_id="run_x")
 
-    assert out.content_id is not None
-    tracker.db.get_or_create_artifact_content.assert_called_with(
-        content_hash="hash_from_obj", driver="parquet"
-    )
+    assert out.content_id is None
+    tracker.db.get_or_create_artifact_content.assert_not_called()
 
 
-def test_attach_content_id_handles_deepcopied_detached_artifact(tmp_path, caplog):
+def test_legacy_detached_artifact_remains_without_content_id(tmp_path, caplog):
     db = DatabaseManager(str(tmp_path / "artifact_replay.db"))
 
     with db.session_scope() as session:
@@ -232,13 +308,13 @@ def test_attach_content_id_handles_deepcopied_detached_artifact(tmp_path, caplog
     assert out is not replayed
     assert out.id == replayed.id
     assert out.hash == replayed.hash == "shared_hash"
-    assert content is not None
-    assert out.content_id == content.id
+    assert content is None
+    assert out.content_id is None
     assert "Failed to record artifact content identity" not in caplog.text
     assert out.parent_artifact_id is None
 
 
-def test_create_artifact_handles_driver_override_on_deepcopied_detached_artifact(
+def test_legacy_detached_artifact_driver_override_does_not_create_content_identity(
     tmp_path, caplog
 ):
     db = DatabaseManager(str(tmp_path / "artifact_driver_override.db"))
@@ -282,9 +358,9 @@ def test_create_artifact_handles_driver_override_on_deepcopied_detached_artifact
     assert replayed.driver == "parquet"
     assert persisted is not None
     assert persisted.driver == "csv"
-    assert content is not None
-    assert persisted.content_id == content.id
-    assert replayed.content_id != content.id
+    assert content is None
+    assert persisted.content_id is None
+    assert replayed.content_id is None
     assert "Failed to record artifact content identity" not in caplog.text
 
 
@@ -372,8 +448,8 @@ def test_create_artifact_clones_reused_input_artifact_before_mutation(tmp_path, 
     assert out is not reused_parent
     assert out.id == reused_parent.id
     assert reused_parent.content_id is None
-    assert content is not None
-    assert out.content_id == content.id
+    assert content is None
+    assert out.content_id is None
     assert "Failed to record artifact content identity" not in caplog.text
 
 

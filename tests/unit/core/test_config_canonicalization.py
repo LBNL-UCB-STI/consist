@@ -34,6 +34,36 @@ def test_compute_config_pack_hash_is_stable_in_fast_mode(tmp_path: Path):
     assert hash_a == hash_b
 
 
+def test_compute_config_pack_hash_is_portable_and_content_sensitive(
+    tmp_path: Path,
+) -> None:
+    """Workspace prefixes must not affect ordered configuration content identity."""
+    first_config_dir = tmp_path / "workspace-a" / "configs"
+    second_config_dir = tmp_path / "workspace-b" / "configs"
+    for config_dir in (first_config_dir, second_config_dir):
+        config_dir.mkdir(parents=True)
+        (config_dir / "settings.yaml").write_text(
+            "sample_rate: 0.25\n", encoding="utf-8"
+        )
+
+    identity = IdentityManager(project_root=tmp_path)
+    first_hash = compute_config_pack_hash(
+        root_dirs=[first_config_dir], identity=identity
+    )
+    second_hash = compute_config_pack_hash(
+        root_dirs=[second_config_dir], identity=identity
+    )
+
+    assert first_hash == second_hash
+    (second_config_dir / "settings.yaml").write_text(
+        "sample_rate: 0.5\n", encoding="utf-8"
+    )
+    changed_hash = compute_config_pack_hash(
+        root_dirs=[second_config_dir], identity=identity
+    )
+    assert changed_hash != first_hash
+
+
 def test_canonicalization_snapshot_keeps_reference_facts_immutable(
     tmp_path: Path,
 ) -> None:

@@ -8,6 +8,7 @@ import subprocess
 import sys
 from typing import Any, cast
 from unittest.mock import patch
+from uuid import UUID
 
 import pandas as pd
 import pytest
@@ -21,6 +22,8 @@ from consist.core.config_canonicalization import (
     ConfigPlan,
     canonical_identity_from_config,
 )
+from consist.core.resolved_binding import ArtifactIdentity
+from consist.core.run_resolution import InputBindingRole
 from consist.core.tracker import Tracker
 from consist.models.artifact import Artifact
 from consist.models.run import RunResult
@@ -424,6 +427,441 @@ def test_tracker_run_cache_hit_skips_callable(tracker):
     assert calls == ["called"]
     assert first.outputs["out"].path.read_text() == "calls=1\n"
     assert second.cache_hit is True
+
+
+def test_tracker_run_reuses_attested_content_from_distinct_producers(
+    tracker, tmp_path: Path
+) -> None:
+    def produce(label: str) -> Artifact:
+        path = tmp_path / f"{label}.txt"
+        path.write_text("equivalent payload\n", encoding="utf-8")
+        with tracker.start_run(
+            f"produce_{label}",
+            "producer",
+            config={"producer": label},
+        ):
+            return tracker.log_artifact(path, key="data", direction="output")
+
+    first_input = produce("first")
+    second_input = produce("second")
+    assert first_input.run_id != second_input.run_id
+    assert first_input.meta["content_identity"] == second_input.meta["content_identity"]
+
+    calls: list[str] = []
+
+    def consume(ctx) -> None:
+        calls.append("called")
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "out.txt").write_text("done\n", encoding="utf-8")
+
+    options = ExecutionOptions(input_binding="none", inject_context="ctx")
+    first = tracker.run(
+        fn=consume,
+        name="consume_equivalent_content",
+        inputs={"data": first_input},
+        output_paths={"out": "out.txt"},
+        execution_options=options,
+    )
+    second = tracker.run(
+        fn=consume,
+        name="consume_equivalent_content",
+        inputs={"data": second_input},
+        output_paths={"out": "out.txt"},
+        execution_options=options,
+    )
+
+    assert calls == ["called"]
+    assert first.cache_hit is False
+    assert second.cache_hit is True
+    assert second.outputs["out"].path.read_text(encoding="utf-8") == "done\n"
+    assert first.run.input_hash == second.run.input_hash
+    assert first.run.identity_summary["cache"]["source_run_id"] is None
+    assert second.run.identity_summary["cache"]["source_run_id"] == first.run.id
+    assert (
+        second.run.meta["input_identity"]["bindings"][0]["artifact_id"]
+        != (first.run.meta["input_identity"]["bindings"][0]["artifact_id"])
+    )
+    assert first.run.meta["input_identity"]["bindings"][0]["mode"] == "content-v1"
+    assert second.run.meta["input_identity"]["bindings"][0]["mode"] == "content-v1"
+
+
+def test_tracker_run_records_fast_input_fallback_without_content_reuse(
+    tmp_path: Path,
+) -> None:
+    tracker = Tracker(
+        run_dir=tmp_path / "runs",
+        db_path=tmp_path / "provenance.duckdb",
+        hashing_strategy="fast",
+    )
+
+    def produce(label: str) -> Artifact:
+        path = tmp_path / f"{label}.txt"
+        path.write_text("equivalent payload\n", encoding="utf-8")
+        with tracker.start_run(
+            f"produce_{label}",
+            "producer",
+            config={"producer": label},
+        ):
+            return tracker.log_artifact(path, key="data", direction="output")
+
+    first_input = produce("first")
+    second_input = produce("second")
+    calls: list[str] = []
+
+    def consume(ctx) -> None:
+        calls.append("called")
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "out.txt").write_text("done\n", encoding="utf-8")
+
+    options = ExecutionOptions(input_binding="none", inject_context="ctx")
+    first = tracker.run(
+        fn=consume,
+        name="consume_fast_observation",
+        inputs={"data": first_input},
+        output_paths={"out": "out.txt"},
+        execution_options=options,
+    )
+    second = tracker.run(
+        fn=consume,
+        name="consume_fast_observation",
+        inputs={"data": second_input},
+        output_paths={"out": "out.txt"},
+        execution_options=options,
+    )
+
+    expected_evidence = {
+        "identity_strength": "legacy-provenance-v1",
+        "fallback_reason": "fast_file_observation",
+    }
+    for result in (first, second):
+        binding = result.run.meta["input_identity"]["bindings"][0]
+        assert binding["mode"] == "legacy-provenance-v1"
+        assert binding["evidence"] == expected_evidence
+        assert binding["selector"] == {
+            "driver": "txt",
+            "table_path": None,
+            "array_path": None,
+        }
+    assert calls == ["called", "called"]
+    assert first.cache_hit is False
+    assert second.cache_hit is False
+    assert first.run.input_hash != second.run.input_hash
+
+
+def test_action_v2_content_binding_survives_later_caller_hash_logging_after_reopen(
+    tmp_path: Path,
+) -> None:
+    """A later untrusted observation must not rewrite an earlier trusted input."""
+    db_path = tmp_path / "provenance.duckdb"
+    tracker = Tracker(run_dir=tmp_path / "runs", db_path=db_path)
+    datastore = tmp_path / "usim_datastore.h5"
+    datastore.write_bytes(b"HDF5 datastore bytes")
+
+    with tracker.start_run("produce_datastore", "activitysim"):
+        trusted = tracker.log_artifact(
+            datastore,
+            key="usim_datastore_h5",
+            direction="output",
+            driver="h5",
+        )
+
+    def consume() -> None:
+        tracker.log_artifact(
+            trusted,
+            key="usim_datastore_h5",
+            direction="input",
+            content_hash=trusted.hash,
+            force_hash_override=True,
+        )
+
+    result = tracker.run(
+        fn=consume,
+        name="consume_datastore",
+        inputs={"usim_datastore_h5": trusted},
+        execution_options=ExecutionOptions(input_binding="none"),
+    )
+
+    binding = result.run.meta["input_identity"]["bindings"][0]
+    assert binding["mode"] == "content-v1"
+    assert binding["artifact_id"] == str(trusted.id)
+
+    tracker.db.engine.dispose()
+    reopened = Tracker(run_dir=tmp_path / "runs", db_path=db_path)
+    persisted = reopened.db.get_artifact(UUID(binding["artifact_id"]))
+
+    assert persisted is not None
+    assert ArtifactIdentity.from_artifact(persisted) == ArtifactIdentity.from_artifact(
+        trusted
+    )
+
+
+def test_action_v2_records_caller_hash_input_as_legacy_after_reopen(
+    tmp_path: Path,
+) -> None:
+    """Caller-provided hashes remain untrusted after persistence."""
+    db_path = tmp_path / "provenance.duckdb"
+    tracker = Tracker(run_dir=tmp_path / "runs", db_path=db_path)
+    datastore = tmp_path / "usim_datastore.h5"
+    datastore.write_bytes(b"caller-provided HDF5 datastore bytes")
+
+    with tracker.start_run("record_external_datastore", "activitysim"):
+        untrusted = tracker.log_artifact(
+            datastore,
+            key="usim_datastore_h5",
+            direction="output",
+            driver="h5",
+            content_hash="a" * 64,
+            force_hash_override=True,
+        )
+
+    result = tracker.run(
+        fn=lambda: None,
+        name="consume_external_datastore",
+        inputs={"usim_datastore_h5": untrusted},
+        execution_options=ExecutionOptions(input_binding="none"),
+    )
+
+    tracker.db.engine.dispose()
+    reopened = Tracker(run_dir=tmp_path / "runs", db_path=db_path)
+    persisted = reopened.db.get_artifact(untrusted.id)
+    binding = reopened.get_run(result.run.id).identity_summary["input_identity"][
+        "bindings"
+    ][0]
+
+    assert persisted is not None
+    assert persisted.meta["hash_semantics"]["source"] == "caller_supplied"
+    assert binding["mode"] == "legacy-provenance-v1"
+    assert binding["evidence"] == {
+        "identity_strength": "legacy-provenance-v1",
+        "fallback_reason": "caller_supplied_hash",
+    }
+
+
+def test_tracker_run_separates_same_content_container_selectors(
+    tracker, tmp_path: Path
+) -> None:
+    container = tmp_path / "container.h5"
+    container.write_bytes(b"shared container bytes")
+    left = tracker.artifacts.create_artifact(
+        container,
+        run_id="producer_left",
+        key="data",
+        driver="h5",
+        table_path="/tables/left",
+    )
+    right = tracker.artifacts.create_artifact(
+        container,
+        run_id="producer_right",
+        key="data",
+        driver="h5",
+        table_path="/tables/right",
+    )
+    assert left.meta["content_identity"] == right.meta["content_identity"]
+
+    calls: list[str] = []
+
+    def consume(ctx) -> None:
+        calls.append("called")
+        ctx.run_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.run_dir / "out.txt").write_text("done\n", encoding="utf-8")
+
+    options = ExecutionOptions(input_binding="none", inject_context="ctx")
+    first = tracker.run(
+        fn=consume,
+        name="consume_selected_table",
+        inputs={"data": left},
+        output_paths={"out": "out.txt"},
+        execution_options=options,
+    )
+    second = tracker.run(
+        fn=consume,
+        name="consume_selected_table",
+        inputs={"data": right},
+        output_paths={"out": "out.txt"},
+        execution_options=options,
+    )
+
+    assert calls == ["called", "called"]
+    assert first.cache_hit is False
+    assert second.cache_hit is False
+    assert first.run.input_hash != second.run.input_hash
+
+
+def test_tracker_run_uses_canonical_input_binding_evidence_for_action_v2(
+    tracker, tmp_path: Path, monkeypatch
+) -> None:
+    alpha = tmp_path / "alpha.txt"
+    alpha.write_text("alpha\n", encoding="utf-8")
+    beta = tmp_path / "beta.txt"
+    beta.write_text("beta\n", encoding="utf-8")
+    dependency = tmp_path / "dependency.txt"
+    dependency.write_text("dependency\n", encoding="utf-8")
+
+    def step() -> None:
+        pass
+
+    captured_binding_roles = []
+    original_compute_action_input_identity = (
+        tracker.identity.compute_action_input_identity
+    )
+
+    def capture_action_input_identity(**kwargs):
+        captured_binding_roles.append(kwargs["binding_roles"])
+        return original_compute_action_input_identity(**kwargs)
+
+    monkeypatch.setattr(
+        tracker.identity,
+        "compute_action_input_identity",
+        capture_action_input_identity,
+    )
+
+    first = tracker.run(
+        fn=step,
+        name="role_evidence",
+        inputs={"zeta": beta, "alpha": alpha},
+        depends_on=[dependency],
+    )
+    second = tracker.run(
+        fn=step,
+        name="role_evidence",
+        inputs={"alpha": alpha, "zeta": beta},
+        depends_on=[dependency],
+    )
+
+    first_binding = first.run.meta["input_binding"]
+    second_binding = second.run.meta["input_binding"]
+    assert first_binding["version"] == "roles-v1"
+    assert second_binding["version"] == "roles-v1"
+    first_roles = [
+        (binding["kind"], binding["role"]) for binding in first_binding["bindings"]
+    ]
+    second_roles = [
+        (binding["kind"], binding["role"]) for binding in second_binding["bindings"]
+    ]
+    assert (
+        first_roles
+        == second_roles
+        == [
+            ("named", "alpha"),
+            ("named", "zeta"),
+            ("dependency", 0),
+        ]
+    )
+    assert [binding["kind"] for binding in first_binding["bindings"]] == [
+        "named",
+        "named",
+        "dependency",
+    ]
+    assert [binding["role"] for binding in first_binding["bindings"]] == [
+        "alpha",
+        "zeta",
+        0,
+    ]
+    assert all(binding["artifact_id"] for binding in first_binding["bindings"])
+    assert [
+        (role.kind, role.role, role.input_index) for role in captured_binding_roles[0]
+    ] == [("named", "alpha", 1), ("named", "zeta", 0), ("dependency", 0, 2)]
+    assert first.run.input_hash.startswith("sha256:action-v2:")
+    assert first.run.meta["input_identity"]["mode"] == "action-v2"
+    assert first.run.input_hash == second.run.input_hash
+    assert second.cache_hit is True
+
+
+def test_tracker_run_distinguishes_swapped_named_bindings_in_action_v2(
+    tracker, tmp_path: Path
+) -> None:
+    alpha = tmp_path / "alpha.txt"
+    alpha.write_text("alpha\n", encoding="utf-8")
+    beta = tmp_path / "beta.txt"
+    beta.write_text("beta\n", encoding="utf-8")
+
+    first = tracker.run(
+        fn=lambda: None,
+        name="swapped_roles",
+        inputs={"left": alpha, "right": beta},
+        cache_options=CacheOptions(cache_mode="overwrite"),
+    )
+    second = tracker.run(
+        fn=lambda: None,
+        name="swapped_roles",
+        inputs={"left": beta, "right": alpha},
+        cache_options=CacheOptions(cache_mode="overwrite"),
+    )
+
+    def role_artifact_ids(result) -> dict[str, str]:
+        return {
+            binding["role"]: binding["artifact_id"]
+            for binding in result.run.meta["input_binding"]["bindings"]
+        }
+
+    assert role_artifact_ids(first) != role_artifact_ids(second)
+    assert first.run.input_hash != second.run.input_hash
+
+
+def test_tracker_run_action_v2_does_not_reuse_a_legacy_lifecycle_cache_key(
+    tracker, tmp_path: Path
+) -> None:
+    source = tmp_path / "source.txt"
+    source.write_text("source\n", encoding="utf-8")
+
+    with tracker.start_run(
+        "legacy_input_identity",
+        "action_boundary",
+        config={"version": 1},
+        inputs=[source],
+    ):
+        legacy = tracker.current_consist.run
+
+    action = tracker.run(
+        fn=lambda: None,
+        name="action_boundary",
+        config={"version": 1},
+        inputs={"data": source},
+    )
+
+    assert not legacy.input_hash.startswith("sha256:action-v2:")
+    assert action.run.input_hash.startswith("sha256:action-v2:")
+    assert action.cache_hit is False
+
+
+def test_tracker_run_preserves_duplicate_named_bindings(
+    tracker, tmp_path: Path
+) -> None:
+    source = tmp_path / "source.txt"
+    source.write_text("source\n", encoding="utf-8")
+    artifact = tracker.artifacts.create_artifact(
+        source,
+        run_id=None,
+        key="source",
+        direction="input",
+    )
+
+    result = tracker.run(
+        fn=lambda: None,
+        name="duplicate_roles",
+        inputs={"left": artifact, "right": artifact},
+    )
+
+    bindings = result.run.meta["input_binding"]["bindings"]
+    assert [binding["role"] for binding in bindings] == ["left", "right"]
+    assert bindings[0]["artifact_id"] == bindings[1]["artifact_id"]
+
+
+def test_begin_run_rejects_forged_input_binding_roles(tracker, tmp_path: Path) -> None:
+    source = tmp_path / "source.txt"
+    source.write_text("source\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="input binding role"):
+        tracker.begin_run(
+            "forged_roles",
+            "forged_roles",
+            inputs=[source],
+            _consist_input_binding_roles=[
+                InputBindingRole(kind="named", role="forged", input_index=0)
+            ],
+        )
+
+    assert tracker.current_consist is None
 
 
 def test_tracker_run_cache_options_callable_code_identity(tracker):
