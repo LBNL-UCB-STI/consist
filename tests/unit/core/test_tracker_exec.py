@@ -120,6 +120,7 @@ def test_tracker_exec_non_zero_exit_marks_failed(tracker: Tracker):
     assert "fatal crash" in res.stderr
     assert res.run is not None
     assert res.run.status == "failed"
+    assert res.error is not None
     assert "Command failed with exit code 42" in res.error
 
     # With check=True, raises CommandExecutionError
@@ -453,6 +454,7 @@ def test_tracker_exec_command_not_found_records_failed_127(tracker: Tracker):
     assert res.exit_code == 127
     assert res.run is not None
     assert res.run.status == "failed"
+    assert res.error is not None
     assert "Command not found: nonexistent_command_xyz_987" in res.error
 
     # Verify DuckDB persisted the failed status
@@ -473,6 +475,7 @@ def test_tracker_exec_permission_denied_records_failed_126(tracker: Tracker):
     assert res.exit_code == 126
     assert res.run is not None
     assert res.run.status == "failed"
+    assert res.error is not None
     assert "Permission denied executing command" in res.error
 
 

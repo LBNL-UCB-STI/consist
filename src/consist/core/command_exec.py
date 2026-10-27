@@ -218,10 +218,9 @@ def compare_with_baseline(
 
             baseline_id = baseline_run.id
             baseline_meta = baseline_run.meta or {}
-            baseline_cmd_meta = (
-                baseline_meta.get("command")
-                if isinstance(baseline_meta.get("command"), dict)
-                else {}
+            raw_cmd_meta = baseline_meta.get("command")
+            baseline_cmd_meta: dict[str, Any] = (
+                raw_cmd_meta if isinstance(raw_cmd_meta, dict) else {}
             )
             baseline_command = baseline_cmd_meta.get("argv", [])
             baseline_duration = baseline_cmd_meta.get("duration")
@@ -556,7 +555,7 @@ def execute_command(
     # Populate initial run metadata
     if run.meta is None:
         run.meta = {}
-    run.meta["command"] = {
+    command_meta: dict[str, Any] = {
         "argv": cmd_list,
         "shell": shell,
         "cwd": str(resolved_cwd),
@@ -566,6 +565,7 @@ def execute_command(
         "stderr_path": str(stderr_file_path),
         "started_at": datetime.now(timezone.utc).isoformat(),
     }
+    run.meta["command"] = command_meta
 
     # Setup execution environment
     merged_env = os.environ.copy()
@@ -618,13 +618,13 @@ def execute_command(
                 pass
 
     def _abort_spawn(
-        exit_code: int, error_msg: str, exc: BaseException
+        exit_code: int, error_msg: str, exc: Exception
     ) -> CommandExecutionResult:
         duration = round(time.monotonic() - start_time, 4)
-        run.meta["command"]["exit_code"] = exit_code
-        run.meta["command"]["process_exit_code"] = exit_code
-        run.meta["command"]["duration"] = duration
-        run.meta["command"]["error"] = error_msg
+        command_meta["exit_code"] = exit_code
+        command_meta["process_exit_code"] = exit_code
+        command_meta["duration"] = duration
+        command_meta["error"] = error_msg
         tracker.end_run(status="failed", error=exc)
         res = CommandExecutionResult(
             run=run,
@@ -723,16 +723,15 @@ def execute_command(
         finally:
             if run.meta is None:
                 run.meta = {}
-            if "command" not in run.meta:
-                run.meta["command"] = {}
-            run.meta["command"]["interrupted"] = True
-            run.meta["command"]["exit_code"] = 130
-            run.meta["command"]["process_exit_code"] = 130
-            run.meta["command"]["error"] = "Process interrupted by user (SIGINT)"
+            run.meta["command"] = command_meta
+            command_meta["interrupted"] = True
+            command_meta["exit_code"] = 130
+            command_meta["process_exit_code"] = 130
+            command_meta["error"] = "Process interrupted by user (SIGINT)"
             try:
                 tracker.end_run(
                     status="failed",
-                    error=KeyboardInterrupt("Process interrupted by user (SIGINT)"),
+                    error=RuntimeError("Process interrupted by user (SIGINT)"),
                 )
             except Exception:
                 pass
@@ -766,16 +765,16 @@ def execute_command(
     raw_code = proc.returncode if proc else 1
     if raw_code < 0:
         exit_code = 128 + abs(raw_code)
-        run.meta["command"]["signal"] = abs(raw_code)
+        command_meta["signal"] = abs(raw_code)
     else:
         exit_code = raw_code
 
     stdout_str = b"".join(stdout_chunks).decode("utf-8", errors="replace")
     stderr_str = b"".join(stderr_chunks).decode("utf-8", errors="replace")
 
-    run.meta["command"]["exit_code"] = exit_code
-    run.meta["command"]["process_exit_code"] = exit_code
-    run.meta["command"]["duration"] = duration
+    command_meta["exit_code"] = exit_code
+    command_meta["process_exit_code"] = exit_code
+    command_meta["duration"] = duration
 
     logged_outputs: dict[str, Artifact] = {}
 
@@ -787,7 +786,7 @@ def execute_command(
             )
         else:
             err_msg = f"Command failed with exit code {exit_code}"
-        run.meta["command"]["error"] = err_msg
+        command_meta["error"] = err_msg
         tracker.end_run(status="failed", error=RuntimeError(err_msg))
 
         res = CommandExecutionResult(
@@ -816,8 +815,8 @@ def execute_command(
     if missing_outputs:
         first_key, first_path = missing_outputs[0]
         err_msg = f"Declared output '{first_key}' at '{first_path}' was not created."
-        run.meta["command"]["exit_code"] = 1
-        run.meta["command"]["error"] = err_msg
+        command_meta["exit_code"] = 1
+        command_meta["error"] = err_msg
         tracker.end_run(status="failed", error=RuntimeError(err_msg))
 
         res = CommandExecutionResult(
@@ -882,7 +881,7 @@ def execute_command(
                 current_duration=duration,
             )
             if baseline_diff:
-                run.meta["command"]["baseline_comparison"] = baseline_diff
+                command_meta["baseline_comparison"] = baseline_diff
         except Exception as exc:
             logger.debug("Failed to compute baseline comparison: %s", exc)
 
