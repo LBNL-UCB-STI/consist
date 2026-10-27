@@ -635,8 +635,9 @@ def _iter_sorted_matrices(
 ) -> Iterator[tuple[str, np.ndarray]]:
     """Yield ``(name, array)`` in strict lexicographical UTF-8 key order."""
     if isinstance(matrices, Mapping):
-        for key in sorted(matrices.keys()):
-            yield str(key), np.asarray(matrices[key])
+        mapping_matrices = cast(Mapping[str, np.ndarray], matrices)
+        for key in sorted(mapping_matrices.keys()):
+            yield str(key), np.asarray(mapping_matrices[key])
         return
 
     if isinstance(matrices, Sequence):

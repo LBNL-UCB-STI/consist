@@ -1805,6 +1805,7 @@ def _ensure_yaml() -> None:
 
 def _load_yaml(path: Path) -> Dict[str, Any]:
     _ensure_yaml()
+    assert yaml is not None
     with path.open("r", encoding="utf-8") as handle:
         data = yaml.safe_load(handle) or {}
     if isinstance(data, dict):
@@ -2303,6 +2304,7 @@ def _apply_yaml_override(
     if not _has_nested_key(data, keys):
         raise KeyError(f"Override key not found: {key} in {file_name}")
     _set_nested_value(data, keys, value)
+    assert yaml is not None
     with path.open("w", encoding="utf-8") as handle:
         yaml.safe_dump(data, handle, sort_keys=False)
 

@@ -145,9 +145,16 @@ def test_discover_output_set_members_prunes_excluded_subtrees_when_recursive(
 
 def test_output_set_child_destinations_rejects_traversal_metadata() -> None:
     parent_id = uuid.uuid4()
-    parent = Artifact(id=parent_id, key="annual", driver="artifact_set")
+    parent = Artifact(
+        id=parent_id,
+        key="annual",
+        container_uri="inputs://annual",
+        driver="artifact_set",
+    )
     child = Artifact(
         key="annual__escape",
+        container_uri="inputs://annual/../escape.csv",
+        driver="csv",
         parent_artifact_id=parent_id,
         meta={
             "output_set_member": True,
@@ -165,9 +172,16 @@ def test_output_set_child_destinations_rejects_traversal_metadata() -> None:
 
 def test_output_set_child_destinations_rejects_absolute_metadata() -> None:
     parent_id = uuid.uuid4()
-    parent = Artifact(id=parent_id, key="annual", driver="artifact_set")
+    parent = Artifact(
+        id=parent_id,
+        key="annual",
+        container_uri="inputs://annual",
+        driver="artifact_set",
+    )
     child = Artifact(
         key="annual__absolute",
+        container_uri="inputs://annual/escape.csv",
+        driver="csv",
         parent_artifact_id=parent_id,
         meta={
             "output_set_member": True,
@@ -185,9 +199,16 @@ def test_output_set_child_destinations_rejects_absolute_metadata() -> None:
 
 def test_validate_cached_output_sets_rejects_traversal_metadata() -> None:
     parent_id = uuid.uuid4()
-    parent = Artifact(id=parent_id, key="annual", driver="artifact_set")
+    parent = Artifact(
+        id=parent_id,
+        key="annual",
+        container_uri="inputs://annual",
+        driver="artifact_set",
+    )
     child = Artifact(
         key="annual__escape",
+        container_uri="inputs://annual/../escape.csv",
+        driver="csv",
         parent_artifact_id=parent_id,
         meta={
             "output_set_member": True,

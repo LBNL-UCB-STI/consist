@@ -1508,7 +1508,7 @@ def schema_capture_file(
         artifact=artifact,
         run=run,
         resolved_path=str(resolved_path),
-        driver=cast(Literal["csv", "parquet", "gtfs", "h5_table"], driver),
+        driver=driver,
         sample_rows=sample_rows,
         source="file",
         reuse_if_unchanged=if_changed,
@@ -1606,7 +1606,7 @@ def schema_export(
         raise typer.Exit(CLI_EXIT_USAGE_ERROR)
     resolved_prefer_source: Optional[Literal["file", "duckdb"]] = None
     if prefer_source is not None:
-        resolved_prefer_source = cast(Literal["file", "duckdb"], prefer_source)
+        resolved_prefer_source = prefer_source
 
     tracker = get_tracker(db_path)
     if artifact_key is not None:

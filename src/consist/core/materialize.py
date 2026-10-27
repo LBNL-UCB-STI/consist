@@ -3907,7 +3907,8 @@ def _load_global_table_metadata(table_name: str, hot_data_engine: Any) -> Table:
                 text(
                     "SELECT column_name "
                     "FROM information_schema.columns "
-                    "WHERE table_schema = 'global_tables' "
+                    "WHERE table_catalog = current_database() "
+                    "AND table_schema = 'global_tables' "
                     "AND table_name = :table_name "
                     "ORDER BY ordinal_position"
                 ),
@@ -3924,7 +3925,8 @@ def _load_global_table_metadata(table_name: str, hot_data_engine: Any) -> Table:
             "table does not exist or has no columns."
         )
 
-    columns = [Column(str(row[0])) for row in rows]
+    column_names = list(dict.fromkeys(str(row[0]) for row in rows))
+    columns = [Column(name) for name in column_names]
     try:
         return Table(
             table_name,

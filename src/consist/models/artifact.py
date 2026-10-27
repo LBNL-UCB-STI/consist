@@ -27,7 +27,7 @@ from typing import (
 )
 
 from pydantic import PrivateAttr
-from sqlalchemy import JSON, Column, UniqueConstraint
+from sqlalchemy import DateTime, JSON, Column, UniqueConstraint
 from sqlalchemy.dialects.postgresql import (
     UUID as PG_UUID,
 )  # Import for potential postgresql compatibility
@@ -305,7 +305,10 @@ class Artifact(SQLModel, table=True):
     meta: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
 
     # Audit
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        sa_type=DateTime,
+    )
 
     # --- Runtime State (Not persisted) ---
     # PrivateAttr is used here to store data that is not part of the SQLModel schema
@@ -800,6 +803,7 @@ class ArtifactContent(SQLModel, table=True):
     )
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC),
+        sa_type=DateTime,
         description="Timestamp when this content identity was first recorded.",
     )
     meta: Dict[str, Any] = Field(

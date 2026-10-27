@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from sqlalchemy import Column, JSON, String
+from sqlalchemy import Column, DateTime, JSON, String
 from sqlmodel import Field, SQLModel
 
 from consist.models.artifact import UUIDType
@@ -67,4 +67,7 @@ class ArtifactKV(SQLModel, table=True):
         description="Reserved for future compatibility.",
     )
 
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        sa_type=DateTime,
+    )

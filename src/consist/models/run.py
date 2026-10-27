@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field as PydanticField
 
-from sqlalchemy import Column, Index, JSON, String
+from sqlalchemy import Column, DateTime, Index, JSON, String
 from sqlmodel import Field, SQLModel
 from consist.core.materialize_options import (
     VALID_MATERIALIZE_DB_FALLBACK as _VALID_MATERIALIZE_DB_FALLBACK,
@@ -107,7 +107,10 @@ class RunBindingInvocation(SQLModel, table=True):
     cache_source_run_id: Optional[str] = Field(default=None, index=True)
     cache_outcome: str = Field(index=True)
     binding_json: str
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        sa_type=DateTime,
+    )
 
 
 CouplerSnapshotPhase = Literal["init", "pre", "post"]
@@ -145,7 +148,10 @@ class RunCouplerSnapshot(SQLModel, table=True):
         sa_type=UUIDType, index=True, sa_column_kwargs={"autoincrement": False}
     )
     producer_run_id: Optional[str] = Field(default=None, index=True)
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        sa_type=DateTime,
+    )
 
 
 class Run(SQLModel, table=True):
@@ -236,12 +242,21 @@ class Run(SQLModel, table=True):
     meta: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
 
     # Timing
-    started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    ended_at: Optional[datetime] = Field(default=None)
+    started_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        sa_type=DateTime,
+    )
+    ended_at: Optional[datetime] = Field(default=None, sa_type=DateTime)
 
     # Audit (record timestamps, distinct from execution timing)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        sa_type=DateTime,
+    )
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        sa_type=DateTime,
+    )
 
     @property
     def duration_seconds(self) -> Optional[float]:
