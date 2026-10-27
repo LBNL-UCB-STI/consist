@@ -291,12 +291,18 @@ def _rows_hash(rows: list[dict[str, Any]]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _frame_to_nullable_records(frame: pd.DataFrame) -> list[dict[str, Any]]:
+    return [
+        {str(col): (None if pd.isna(value) else value) for col, value in row.items()}
+        for row in frame.to_dict(orient="records")
+    ]
+
+
 def _table_rows(df: pd.DataFrame, *, feed_key: str) -> list[dict[str, Any]]:
     frame = df.copy()
     if "feed_key" not in frame.columns:
         frame.insert(0, "feed_key", feed_key)
-    frame = frame.where(pd.notnull(frame), None)
-    records = [dict(row) for row in frame.to_dict(orient="records")]
+    records = _frame_to_nullable_records(frame)
     return sorted(
         records,
         key=lambda row: json.dumps(
@@ -613,9 +619,7 @@ def canonicalize_gtfs_bundle(
         if schema_model is None:
             continue
         frame_for_ingest = _ingest_frame(frame)
-        rows = frame_for_ingest.where(pd.notnull(frame_for_ingest), None).to_dict(
-            orient="records"
-        )
+        rows = _frame_to_nullable_records(frame_for_ingest)
         ingestables.append(
             IngestSpec(
                 table_name=table_name,

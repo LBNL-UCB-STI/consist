@@ -467,7 +467,7 @@ class AlignedPair:
     on: str
     left: RunSet
     right: RunSet
-    keys: List[object]
+    keys: List[Any]
 
     def _resolve_diff_tracker(self) -> "Tracker":
         left_tracker = self.left._tracker
