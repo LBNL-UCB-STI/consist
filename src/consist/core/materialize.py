@@ -42,14 +42,18 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from consist.core.container_policy import validate_recovery_registration_policy
 from consist.core.directory_artifacts import (
+    build_directory_manifest,
+    build_shapefile_bundle_manifest,
     materialize_directory_tree,
     materialize_shapefile_bundle,
     validate_directory_destination,
     validate_directory_manifest,
+    validate_directory_tree,
     validate_shapefile_bundle_destination,
+    validate_shapefile_bundle_root,
 )
 from consist.core.stores import get_hot_data_engine
-from consist.models.artifact import Artifact
+from consist.models.artifact import Artifact, _private_state
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
@@ -67,6 +71,7 @@ HydrationStatus = Literal[
 
 MaterializedArtifactStatus = Literal[
     "already_present",
+    "preserved_existing",
     "materialized_from_source_root",
     "materialized_from_historical_root",
     "materialized_from_recovery_root",
@@ -733,24 +738,12 @@ def _detach_artifact_for_hydration(
     hydrated_path: Path | None,
 ) -> Artifact:
     clone = artifact.model_copy(deep=True)
-    private_state = getattr(clone, "__pydantic_private__", None)
-    if private_state is None:
-        with suppress(Exception):
-            object.__setattr__(clone, "__pydantic_private__", {})
-        private_state = getattr(clone, "__pydantic_private__", None)
-    if isinstance(private_state, dict):
+    private_state = _private_state(clone)
+    if private_state is not None:
         private_state["_tracker"] = None
-        private_state["_abs_path"] = (
-            str(hydrated_path.resolve()) if hydrated_path is not None else None
-        )
     with suppress(Exception):
         object.__setattr__(clone, "_tracker", None)
-    with suppress(Exception):
-        object.__setattr__(
-            clone,
-            "_abs_path",
-            str(hydrated_path.resolve()) if hydrated_path is not None else None,
-        )
+    clone.abs_path = str(hydrated_path.resolve()) if hydrated_path is not None else None
     return clone
 
 
@@ -798,17 +791,26 @@ def _is_directory_artifact(artifact: Artifact) -> bool:
 def _is_file_bundle_artifact(artifact: Artifact) -> bool:
     """Return whether an artifact has the strict Shapefile bundle contract."""
     meta = artifact.meta if isinstance(artifact.meta, dict) else {}
-    return meta.get("file_bundle_artifact") is True
+    return (
+        meta.get("file_bundle_artifact") is True
+        or meta.get("file_bundle") == "shapefile"
+    )
 
 
 def _shapefile_bundle_metadata(artifact: Artifact) -> tuple[str, dict[str, object]]:
     meta = artifact.meta if isinstance(artifact.meta, dict) else {}
     entry = meta.get("file_bundle_entry")
-    manifest = meta.get("file_bundle_manifest")
-    if not isinstance(entry, str) or Path(entry).name != entry:
-        raise ValueError(
-            f"shapefile bundle artifact {artifact.key!r} has no valid entry"
-        )
+    if not (isinstance(entry, str) and Path(entry).name == entry):
+        uri = artifact.container_uri or ""
+        uri_path = uri.split("://", 1)[-1] if "://" in uri else uri
+        entry_name = Path(uri_path).name
+        if entry_name:
+            entry = entry_name
+        else:
+            raise ValueError(
+                f"shapefile bundle artifact {artifact.key!r} has no valid entry"
+            )
+    manifest = meta.get("file_bundle_manifest") or meta.get("directory_manifest")
     if not isinstance(manifest, Mapping):
         raise ValueError(f"shapefile bundle artifact {artifact.key!r} has no manifest")
     normalized = validate_directory_manifest(manifest)
@@ -1290,6 +1292,7 @@ def _derive_remappable_relative_path(
     tracker: "Tracker",
     *,
     artifact: Artifact,
+    scheme_prefixes: Mapping[str, str | Path] | None = None,
 ) -> Path | None:
     """Derive the safe URI-relative layout for an artifact.
 
@@ -1299,13 +1302,65 @@ def _derive_remappable_relative_path(
         Tracker that owns filesystem URI policy.
     artifact : Artifact
         Artifact whose canonical URI is inspected.
+    scheme_prefixes : mapping, optional
+        Explicit mapping of URI scheme to relative path prefix.
 
     Returns
     -------
     Path | None
         Portable relative path, or ``None`` for an unmappable URI.
     """
-    return tracker.fs.get_remappable_relative_path(artifact.container_uri)
+    if not artifact.container_uri:
+        return None
+
+    uri = artifact.container_uri
+    scheme: str | None = None
+    if "://" in uri:
+        scheme = uri.split("://", 1)[0]
+
+    merged_prefixes: dict[str, str | Path] = (
+        dict(scheme_prefixes) if scheme_prefixes is not None else {}
+    )
+
+    if scheme and scheme not in ("file", "workspace") and scheme not in merged_prefixes:
+        inferred: Path | None = None
+        if scheme in tracker.fs.mounts and tracker.run_dir:
+            try:
+                mount_resolved = Path(tracker.fs.mounts[scheme]).resolve()
+                run_resolved = Path(tracker.run_dir).resolve()
+                rel = mount_resolved.relative_to(run_resolved)
+                if rel != Path("."):
+                    inferred = rel
+            except (ValueError, RuntimeError):
+                pass
+        if inferred is None:
+            owning_run = _get_artifact_run(tracker, artifact=artifact)
+            if owning_run is not None and isinstance(owning_run.meta, dict):
+                run_mounts = owning_run.meta.get("mounts")
+                phys_run_dir = owning_run.meta.get("_physical_run_dir")
+                if (
+                    isinstance(run_mounts, dict)
+                    and scheme in run_mounts
+                    and phys_run_dir
+                ):
+                    try:
+                        mount_resolved = Path(run_mounts[scheme]).resolve()
+                        run_resolved = Path(phys_run_dir).resolve()
+                        rel = mount_resolved.relative_to(run_resolved)
+                        if rel != Path("."):
+                            inferred = rel
+                    except (ValueError, RuntimeError):
+                        pass
+        if inferred is not None:
+            merged_prefixes[scheme] = inferred
+
+    prefixes_arg = (
+        merged_prefixes
+        if (scheme_prefixes is not None or bool(merged_prefixes))
+        else None
+    )
+
+    return tracker.fs.get_remappable_relative_path(uri, scheme_prefixes=prefixes_arg)
 
 
 def _derive_historical_root(
@@ -1521,12 +1576,14 @@ def _direct_artifact_source_path(
             return candidate
 
     if "://" in uri:
-        scheme, _ = uri.split("://", 1)
+        scheme, raw_rel_path = uri.split("://", 1)
         mounts = tracker.fs.mounts
         if scheme in mounts:
-            candidate = Path(mounts[scheme]) / relative_path
-            if candidate.exists():
-                return candidate
+            unprefixed_rel = tracker.fs.normalize_remappable_relative_path(raw_rel_path)
+            if unprefixed_rel is not None:
+                candidate = Path(mounts[scheme]) / unprefixed_rel
+                if candidate.exists():
+                    return candidate
 
     try:
         candidate = Path(tracker.resolve_uri(artifact.container_uri)).resolve()
@@ -1578,6 +1635,13 @@ def _select_materialize_artifact_source(
         for root in _artifact_recovery_roots(tracker, artifact=artifact)
     )
 
+    unprefixed_rel = (
+        tracker.fs.normalize_remappable_relative_path(
+            artifact.container_uri.split("://", 1)[1]
+        )
+        if "://" in artifact.container_uri
+        else None
+    )
     seen_roots: set[str] = set()
     for source_kind, root in candidate_roots:
         resolved_root = Path(root).resolve()
@@ -1588,6 +1652,10 @@ def _select_materialize_artifact_source(
         candidate = resolved_root / relative_path
         if candidate.exists():
             return candidate, source_kind, True
+        if unprefixed_rel is not None and unprefixed_rel != relative_path:
+            fallback_candidate = resolved_root / unprefixed_rel
+            if fallback_candidate.exists():
+                return fallback_candidate, source_kind, True
 
     direct_source = _direct_artifact_source_path(
         tracker,
@@ -1644,6 +1712,7 @@ def materialize_artifact(
     preserve_existing: bool,
     on_missing: Literal["warn", "raise"],
     validate_content_hash: Literal["never", "if-present", "always"],
+    scheme_prefixes: Mapping[str, str | Path] | None = None,
 ) -> MaterializedArtifact:
     """Materialize one artifact into a target root using recovery metadata.
 
@@ -1665,6 +1734,8 @@ def materialize_artifact(
         Policy for unavailable bytes and materialization failures.
     validate_content_hash : {"never", "if-present", "always"}
         Content-validation policy for source and destination bytes.
+    scheme_prefixes : mapping, optional
+        Explicit mapping of URI scheme to relative path prefix.
 
     Returns
     -------
@@ -1693,7 +1764,11 @@ def materialize_artifact(
                 resolvable=False,
             )
 
-    relative_path = _derive_remappable_relative_path(tracker, artifact=artifact)
+    relative_path = _derive_remappable_relative_path(
+        tracker,
+        artifact=artifact,
+        scheme_prefixes=scheme_prefixes,
+    )
     if relative_path is None:
         return _make_materialized_artifact(
             artifact,
@@ -1765,39 +1840,189 @@ def materialize_artifact(
     should_validate = bool(expected_hash) and validate_content_hash != "never"
 
     if destination.exists() and preserve_existing:
-        if destination.is_dir():
+        if _is_file_bundle_artifact(artifact):
+            if destination.is_dir():
+                return _make_materialized_artifact(
+                    artifact,
+                    status="failed",
+                    path=None,
+                    source_path=source_path,
+                    target_path=destination,
+                    message=(
+                        f"Destination {destination} exists but is a directory; "
+                        "expected Shapefile entry."
+                    ),
+                    resolvable=False,
+                )
+            if should_validate:
+                meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+                entry = meta.get("file_bundle_entry")
+                if not (isinstance(entry, str) and Path(entry).name == entry):
+                    entry = destination.name
+                manifest = meta.get("file_bundle_manifest") or meta.get(
+                    "directory_manifest"
+                )
+                if manifest is not None:
+                    try:
+                        validate_shapefile_bundle_root(
+                            destination.parent,
+                            entry,
+                            manifest,
+                            require_clean_root=False,
+                        )
+                    except (ValueError, OSError) as exc:
+                        return _make_materialized_artifact(
+                            artifact,
+                            status="hash_mismatch",
+                            path=None,
+                            source_path=source_path,
+                            target_path=destination,
+                            message=(
+                                f"Existing destination hash does not match artifact "
+                                f"{artifact.key!r}: {exc}"
+                            ),
+                            resolvable=False,
+                        )
+                elif expected_hash:
+                    try:
+                        built = build_shapefile_bundle_manifest(destination)
+                        if built["tree_hash"] != expected_hash:
+                            return _make_materialized_artifact(
+                                artifact,
+                                status="hash_mismatch",
+                                path=None,
+                                source_path=source_path,
+                                target_path=destination,
+                                message=(
+                                    f"Existing destination hash does not match artifact "
+                                    f"{artifact.key!r}."
+                                ),
+                                resolvable=False,
+                            )
+                    except (ValueError, OSError) as exc:
+                        return _make_materialized_artifact(
+                            artifact,
+                            status="hash_mismatch",
+                            path=None,
+                            source_path=source_path,
+                            target_path=destination,
+                            message=(
+                                f"Existing destination validation failed for "
+                                f"{artifact.key!r}: {exc}"
+                            ),
+                            resolvable=False,
+                        )
             return _make_materialized_artifact(
                 artifact,
-                status="unsupported_directory",
-                path=None,
+                status="already_present",
+                path=destination,
                 source_path=source_path,
                 target_path=destination,
-                message=(
-                    "Directory artifact materialization is not supported yet; "
-                    "directory manifest support is required for safe recovery."
-                ),
-                resolvable=False,
+                resolvable=True,
             )
-        if should_validate and _compute_file_sha256(destination) != expected_hash:
+
+        elif _is_directory_artifact(artifact) or destination.is_dir():
+            if not destination.is_dir():
+                return _make_materialized_artifact(
+                    artifact,
+                    status="failed",
+                    path=None,
+                    source_path=source_path,
+                    target_path=destination,
+                    message=f"Destination {destination} exists but is not a directory.",
+                    resolvable=False,
+                )
+            if should_validate:
+                manifest = (
+                    artifact.meta.get("directory_manifest")
+                    if isinstance(artifact.meta, dict)
+                    else None
+                )
+                if manifest is not None:
+                    try:
+                        validate_directory_tree(destination, manifest)
+                    except (ValueError, OSError) as exc:
+                        return _make_materialized_artifact(
+                            artifact,
+                            status="hash_mismatch",
+                            path=None,
+                            source_path=source_path,
+                            target_path=destination,
+                            message=(
+                                f"Existing destination hash does not match artifact "
+                                f"{artifact.key!r}: {exc}"
+                            ),
+                            resolvable=False,
+                        )
+                elif expected_hash:
+                    try:
+                        dest_manifest = build_directory_manifest(destination)
+                        if dest_manifest.get("tree_hash") != expected_hash:
+                            return _make_materialized_artifact(
+                                artifact,
+                                status="hash_mismatch",
+                                path=None,
+                                source_path=source_path,
+                                target_path=destination,
+                                message=(
+                                    f"Existing destination hash does not match artifact "
+                                    f"{artifact.key!r}."
+                                ),
+                                resolvable=False,
+                            )
+                    except (ValueError, OSError) as exc:
+                        return _make_materialized_artifact(
+                            artifact,
+                            status="hash_mismatch",
+                            path=None,
+                            source_path=source_path,
+                            target_path=destination,
+                            message=(
+                                f"Existing destination validation failed for "
+                                f"{artifact.key!r}: {exc}"
+                            ),
+                            resolvable=False,
+                        )
             return _make_materialized_artifact(
                 artifact,
-                status="hash_mismatch",
-                path=None,
+                status="already_present",
+                path=destination,
                 source_path=source_path,
                 target_path=destination,
-                message=(
-                    f"Existing destination hash does not match artifact {artifact.key!r}."
-                ),
-                resolvable=False,
+                resolvable=True,
             )
-        return _make_materialized_artifact(
-            artifact,
-            status="already_present",
-            path=destination,
-            source_path=source_path,
-            target_path=destination,
-            resolvable=True,
-        )
+
+        else:
+            if destination.is_dir():
+                return _make_materialized_artifact(
+                    artifact,
+                    status="failed",
+                    path=None,
+                    source_path=source_path,
+                    target_path=destination,
+                    message=f"Destination {destination} exists but is a directory.",
+                    resolvable=False,
+                )
+            if should_validate and _compute_file_sha256(destination) != expected_hash:
+                return _make_materialized_artifact(
+                    artifact,
+                    status="hash_mismatch",
+                    path=None,
+                    source_path=source_path,
+                    target_path=destination,
+                    message=(
+                        f"Existing destination hash does not match artifact {artifact.key!r}."
+                    ),
+                    resolvable=False,
+                )
+            return _make_materialized_artifact(
+                artifact,
+                status="already_present",
+                path=destination,
+                source_path=source_path,
+                target_path=destination,
+                resolvable=True,
+            )
 
     if source_path is None or source_kind is None:
         msg = f"No source bytes found for artifact {artifact.key!r}."
@@ -1827,19 +2052,297 @@ def materialize_artifact(
             resolvable=False,
         )
 
-    if source_path.is_dir():
+    if _is_file_bundle_artifact(artifact):
+        meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+        entry = meta.get("file_bundle_entry")
+        if not (isinstance(entry, str) and Path(entry).name == entry):
+            entry = destination.name
+
+        manifest = meta.get("file_bundle_manifest") or meta.get("directory_manifest")
+
+        if source_path.is_dir():
+            source_bundle_root = source_path
+        elif source_path.is_file():
+            source_bundle_root = source_path.parent
+        else:
+            msg = (
+                f"Source path {source_path} is neither a regular file nor a directory."
+            )
+            if on_missing == "raise":
+                raise RuntimeError(msg)
+            return _make_materialized_artifact(
+                artifact,
+                status="failed",
+                path=None,
+                source_path=source_path,
+                target_path=destination,
+                message=msg,
+                resolvable=False,
+            )
+
+        if should_validate:
+            if manifest is not None:
+                try:
+                    validate_shapefile_bundle_root(
+                        source_bundle_root,
+                        entry,
+                        manifest,
+                        require_clean_root=False,
+                    )
+                except (ValueError, OSError) as exc:
+                    return _make_materialized_artifact(
+                        artifact,
+                        status="hash_mismatch",
+                        path=None,
+                        source_path=source_path,
+                        target_path=destination,
+                        message=(
+                            f"Source hash does not match artifact {artifact.key!r}: {exc}"
+                        ),
+                        resolvable=False,
+                    )
+            elif expected_hash:
+                try:
+                    source_entry_file = (
+                        source_bundle_root / entry
+                        if (source_bundle_root / entry).is_file()
+                        else source_path
+                    )
+                    built = build_shapefile_bundle_manifest(source_entry_file)
+                    if built["tree_hash"] != expected_hash:
+                        return _make_materialized_artifact(
+                            artifact,
+                            status="hash_mismatch",
+                            path=None,
+                            source_path=source_path,
+                            target_path=destination,
+                            message=f"Source hash does not match artifact {artifact.key!r}.",
+                            resolvable=False,
+                        )
+                except (ValueError, OSError) as exc:
+                    return _make_materialized_artifact(
+                        artifact,
+                        status="hash_mismatch",
+                        path=None,
+                        source_path=source_path,
+                        target_path=destination,
+                        message=f"Source validation failed for {artifact.key!r}: {exc}",
+                        resolvable=False,
+                    )
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        members_to_copy: list[str] = []
+        if (
+            manifest is not None
+            and isinstance(manifest, Mapping)
+            and "entries" in manifest
+        ):
+            members_to_copy = [
+                e["path"]
+                for e in manifest["entries"]
+                if isinstance(e, Mapping) and "path" in e
+            ]
+        else:
+            stem = Path(entry).stem
+            try:
+                with os.scandir(source_bundle_root) as scan:
+                    for child in scan:
+                        if child.is_file() and (
+                            child.name == entry or child.name.startswith(f"{stem}.")
+                        ):
+                            members_to_copy.append(child.name)
+            except OSError as exc:
+                if on_missing == "raise":
+                    raise RuntimeError(
+                        f"Failed scanning bundle source {source_bundle_root}: {exc}"
+                    ) from exc
+                return _make_materialized_artifact(
+                    artifact,
+                    status="failed",
+                    path=None,
+                    source_path=source_path,
+                    target_path=destination,
+                    message=str(exc),
+                    resolvable=False,
+                )
+
+        try:
+            for member_name in members_to_copy:
+                src_member = source_bundle_root / member_name
+                dst_member = destination.parent / member_name
+                _materialize_path(
+                    source=src_member,
+                    destination=dst_member,
+                    preserve_existing=preserve_existing,
+                )
+        except (OSError, shutil.Error, RuntimeError, ValueError) as exc:
+            if on_missing == "raise":
+                raise RuntimeError(
+                    f"Failed to materialize bundle {artifact.key!r}: {exc}"
+                ) from exc
+            return _make_materialized_artifact(
+                artifact,
+                status="failed",
+                path=None,
+                source_path=source_path,
+                target_path=destination,
+                message=str(exc),
+                resolvable=False,
+            )
+
+        if should_validate and manifest is not None:
+            try:
+                validate_shapefile_bundle_root(
+                    destination.parent,
+                    entry,
+                    manifest,
+                    require_clean_root=False,
+                )
+            except (ValueError, OSError) as exc:
+                return _make_materialized_artifact(
+                    artifact,
+                    status="hash_mismatch",
+                    path=None,
+                    source_path=source_path,
+                    target_path=destination,
+                    message=(
+                        f"Destination validation failed for {artifact.key!r}: {exc}"
+                    ),
+                    resolvable=False,
+                )
+
         return _make_materialized_artifact(
             artifact,
-            status="unsupported_directory",
-            path=None,
+            status=_materialized_status_for_source(source_kind),
+            path=destination,
             source_path=source_path,
             target_path=destination,
-            message=(
-                "Directory artifact materialization is not supported yet; "
-                "directory manifest support is required for safe recovery."
-            ),
-            resolvable=False,
+            resolvable=True,
         )
+
+    if _is_directory_artifact(artifact) or source_path.is_dir():
+        if not source_path.is_dir():
+            msg = f"Source path is not a directory: {source_path}"
+            if on_missing == "raise":
+                raise RuntimeError(msg)
+            return _make_materialized_artifact(
+                artifact,
+                status="failed",
+                path=None,
+                source_path=source_path,
+                target_path=destination,
+                message=msg,
+                resolvable=False,
+            )
+
+        manifest = (
+            artifact.meta.get("directory_manifest")
+            if isinstance(artifact.meta, dict)
+            else None
+        )
+
+        if should_validate:
+            if manifest:
+                try:
+                    materialized = materialize_directory_tree(
+                        source_path,
+                        destination,
+                        manifest,
+                        preserve_existing=preserve_existing,
+                    )
+                except (ValueError, OSError) as exc:
+                    return _make_materialized_artifact(
+                        artifact,
+                        status="hash_mismatch",
+                        path=None,
+                        source_path=source_path,
+                        target_path=destination,
+                        message=(
+                            f"Directory validation failed for artifact "
+                            f"{artifact.key!r}: {exc}"
+                        ),
+                        resolvable=False,
+                    )
+                if not materialized:
+                    return _make_materialized_artifact(
+                        artifact,
+                        status="already_present",
+                        path=destination,
+                        source_path=source_path,
+                        target_path=destination,
+                        resolvable=True,
+                    )
+                return _make_materialized_artifact(
+                    artifact,
+                    status=_materialized_status_for_source(source_kind),
+                    path=destination,
+                    source_path=source_path,
+                    target_path=destination,
+                    resolvable=True,
+                )
+            elif expected_hash:
+                try:
+                    src_manifest = build_directory_manifest(source_path)
+                    if src_manifest.get("tree_hash") != expected_hash:
+                        return _make_materialized_artifact(
+                            artifact,
+                            status="hash_mismatch",
+                            path=None,
+                            source_path=source_path,
+                            target_path=destination,
+                            message=f"Source hash does not match artifact {artifact.key!r}.",
+                            resolvable=False,
+                        )
+                except (ValueError, OSError) as exc:
+                    return _make_materialized_artifact(
+                        artifact,
+                        status="hash_mismatch",
+                        path=None,
+                        source_path=source_path,
+                        target_path=destination,
+                        message=f"Validation failed for {artifact.key!r}: {exc}",
+                        resolvable=False,
+                    )
+
+        try:
+            materialized, skipped_existing = _materialize_path(
+                source=source_path,
+                destination=destination,
+                preserve_existing=preserve_existing,
+            )
+        except (OSError, shutil.Error, RuntimeError, ValueError) as exc:
+            if on_missing == "raise":
+                raise RuntimeError(
+                    f"Failed to materialize directory artifact {artifact.key!r}: {exc}"
+                ) from exc
+            return _make_materialized_artifact(
+                artifact,
+                status="failed",
+                path=None,
+                source_path=source_path,
+                target_path=destination,
+                message=str(exc),
+                resolvable=False,
+            )
+
+        if skipped_existing:
+            return _make_materialized_artifact(
+                artifact,
+                status="already_present",
+                path=destination,
+                source_path=source_path,
+                target_path=destination,
+                resolvable=True,
+            )
+        if materialized:
+            return _make_materialized_artifact(
+                artifact,
+                status=_materialized_status_for_source(source_kind),
+                path=destination,
+                source_path=source_path,
+                target_path=destination,
+                resolvable=True,
+            )
 
     if not source_path.is_file():
         msg = f"Source path is not a regular file: {source_path}"

@@ -61,6 +61,17 @@ class FileSystemManager:
                         f"Resolved to {resolved}, outside mount {mount_root}."
                     ) from exc
                 path_str = str(resolved)
+            elif scheme == "workspace":
+                workspace_root = self.run_dir.resolve()
+                resolved = (workspace_root / rel_path).resolve()
+                try:
+                    resolved.relative_to(workspace_root)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Path traversal detected in URI {uri!r}. "
+                        f"Resolved to {resolved}, outside mount {workspace_root}."
+                    ) from exc
+                path_str = str(resolved)
             elif scheme == "file":
                 path_str = rel_path
 
@@ -276,14 +287,23 @@ class FileSystemManager:
             return None
         return Path(*normalized_parts)
 
-    def get_remappable_relative_path(self, uri: str) -> Optional[Path]:
+    def get_remappable_relative_path(
+        self,
+        uri: str,
+        *,
+        scheme_prefixes: Optional[Mapping[str, Union[str, Path]]] = None,
+    ) -> Optional[Path]:
         """
         Derive a portable relative layout for a rematerializable artifact URI.
         """
         if uri.startswith("workspace://"):
-            return self.normalize_remappable_relative_path(
-                uri.replace("workspace://", "", 1).lstrip("/")
-            )
+            rel_candidate = uri.replace("workspace://", "", 1).lstrip("/")
+            if scheme_prefixes is not None and "workspace" in scheme_prefixes:
+                prefix = scheme_prefixes["workspace"]
+                return self.normalize_remappable_relative_path(
+                    str(Path(prefix) / rel_candidate)
+                )
+            return self.normalize_remappable_relative_path(rel_candidate)
 
         if uri.startswith("./"):
             return self.normalize_remappable_relative_path(uri[2:])
@@ -293,6 +313,36 @@ class FileSystemManager:
 
         scheme, rel_path = uri.split("://", 1)
         if scheme == "file":
+            return None
+
+        if scheme == "workspace":
+            rel_candidate = rel_path.lstrip("/")
+            if scheme_prefixes is not None and "workspace" in scheme_prefixes:
+                prefix = scheme_prefixes["workspace"]
+                return self.normalize_remappable_relative_path(
+                    str(Path(prefix) / rel_candidate)
+                )
+            return self.normalize_remappable_relative_path(rel_candidate)
+
+        prefix: Optional[Union[str, Path]] = None
+        if scheme_prefixes is not None and scheme in scheme_prefixes:
+            prefix = scheme_prefixes[scheme]
+        elif scheme in self.mounts and self.run_dir:
+            try:
+                mount_resolved = Path(self.mounts[scheme]).resolve()
+                run_resolved = Path(self.run_dir).resolve()
+                rel = mount_resolved.relative_to(run_resolved)
+                if rel != Path("."):
+                    prefix = rel
+            except (ValueError, RuntimeError):
+                pass
+
+        if prefix is not None:
+            clean_rel = rel_path.lstrip("/")
+            candidate = Path(prefix) / clean_rel
+            return self.normalize_remappable_relative_path(str(candidate))
+
+        if scheme_prefixes is not None:
             return None
 
         return self.normalize_remappable_relative_path(rel_path)
@@ -341,12 +391,36 @@ class FileSystemManager:
             return None
 
         if mounts_snapshot and isinstance(mounts_snapshot.get(scheme), str):
-            path = Path(mounts_snapshot[scheme])
-            return path.resolve() if resolve else path.absolute()
+            mount_path = Path(mounts_snapshot[scheme])
+            if original_run_dir:
+                try:
+                    orig_dir_path = Path(original_run_dir)
+                    rel = mount_path.resolve().relative_to(orig_dir_path.resolve())
+                    if rel != Path("."):
+                        return (
+                            orig_dir_path.resolve()
+                            if resolve
+                            else orig_dir_path.absolute()
+                        )
+                except (ValueError, RuntimeError):
+                    pass
+            return mount_path.resolve() if resolve else mount_path.absolute()
 
         if artifact_mount_root:
-            path = Path(artifact_mount_root)
-            return path.resolve() if resolve else path.absolute()
+            mount_path = Path(artifact_mount_root)
+            if original_run_dir:
+                try:
+                    orig_dir_path = Path(original_run_dir)
+                    rel = mount_path.resolve().relative_to(orig_dir_path.resolve())
+                    if rel != Path("."):
+                        return (
+                            orig_dir_path.resolve()
+                            if resolve
+                            else orig_dir_path.absolute()
+                        )
+                except (ValueError, RuntimeError):
+                    pass
+            return mount_path.resolve() if resolve else mount_path.absolute()
 
         return None
 
@@ -357,6 +431,7 @@ class FileSystemManager:
         original_run_dir: Optional[str],
         mounts_snapshot: Optional[Dict[str, str]] = None,
         artifact_mount_root: Optional[str] = None,
+        scheme_prefixes: Optional[Mapping[str, Union[str, Path]]] = None,
     ) -> Optional[tuple[Path, Path]]:
         """Derive a historical root plus portable relative URI layout.
 
@@ -370,6 +445,8 @@ class FileSystemManager:
             Historical mount roots recorded by URI scheme.
         artifact_mount_root : str | None, optional
             Artifact-specific fallback mount root.
+        scheme_prefixes : mapping of str to str | Path, optional
+            Prefix overrides by scheme for relative path derivation.
 
         Returns
         -------
@@ -382,7 +459,9 @@ class FileSystemManager:
         This is stricter than :meth:`resolve_historical_path` because it only
         returns layouts safe for recovery-oriented materialization.
         """
-        relative_path = self.get_remappable_relative_path(uri)
+        relative_path = self.get_remappable_relative_path(
+            uri, scheme_prefixes=scheme_prefixes
+        )
         if relative_path is None:
             return None
 

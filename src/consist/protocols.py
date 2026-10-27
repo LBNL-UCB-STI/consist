@@ -47,6 +47,9 @@ class ArtifactRecordLike(ArtifactLike, Protocol):
     @property
     def driver(self) -> str: ...
 
+    @property
+    def abs_path(self) -> Optional[str]: ...
+
 
 @runtime_checkable
 class RunResultLike(Protocol):

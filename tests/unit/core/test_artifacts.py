@@ -1,3 +1,5 @@
+import copy
+import gc
 import logging
 from copy import deepcopy
 from pathlib import Path
@@ -6,11 +8,19 @@ from unittest.mock import MagicMock
 import pytest
 
 from consist import is_spatial_artifact
-from consist.core.artifacts import ArtifactManager
+from consist.core.artifacts import ArtifactManager, _clone_artifact_for_meta_update
 from consist.core.identity import IdentityManager
-from consist.core.persistence import DatabaseManager
-from consist.models.artifact import Artifact
-from consist.models.artifact import ArtifactContent
+from consist.core.persistence import (
+    DatabaseManager,
+    _clone_artifact,
+    _clone_artifact_content,
+)
+from consist.models.artifact import (
+    Artifact,
+    ArtifactContent,
+    get_tracker_ref,
+    set_tracker_ref,
+)
 from consist.models.artifact_facet import ArtifactFacet
 from consist.models.artifact_schema import ArtifactSchema
 from consist.models.artifact_schema import ArtifactSchemaObservation
@@ -927,3 +937,421 @@ def test_sync_artifact_with_facet_bundle_preserves_existing_nonnull_content_id_w
     assert persisted.content_id == content_a_id
     assert persisted.meta["marker"] == "updated"
     assert persisted.meta["facet_applied"] is True
+
+
+def _deref_tracker(artifact: Artifact):
+    ref = get_tracker_ref(artifact)
+    assert ref is not None
+    return ref()
+
+
+def test_artifact_deepcopy_and_copy_on_transient_instance():
+    tracker = MagicMock()
+    art = Artifact(
+        key="transient",
+        container_uri="outputs://transient.csv",
+        driver="csv",
+        hash="hash123",
+        meta={"nested": {"inner_key": "inner_val"}, "list": [1, 2, 3]},
+    )
+    art.abs_path = "/tmp/transient.csv"
+    set_tracker_ref(art, tracker)
+
+    # Deepcopy via standard copy module
+    deep_cloned = copy.deepcopy(art)
+    assert deep_cloned is not art
+    assert deep_cloned.key == art.key
+    assert deep_cloned.container_uri == art.container_uri
+    assert deep_cloned.hash == art.hash
+    assert deep_cloned.abs_path == "/tmp/transient.csv"
+    assert _deref_tracker(deep_cloned) is tracker
+    assert deep_cloned.__pydantic_fields_set__ == art.__pydantic_fields_set__
+
+    # Deepcopy isolation: mutating nested meta does not affect original
+    deep_cloned.meta["nested"]["inner_key"] = "modified"
+    deep_cloned.meta["list"].append(4)
+    assert art.meta["nested"]["inner_key"] == "inner_val"
+    assert art.meta["list"] == [1, 2, 3]
+
+    # Model_copy(deep=True)
+    model_deep = art.model_copy(deep=True)
+    assert model_deep is not art
+    assert model_deep.abs_path == "/tmp/transient.csv"
+    assert _deref_tracker(model_deep) is tracker
+    model_deep.meta["nested"]["inner_key"] = "model_modified"
+    assert art.meta["nested"]["inner_key"] == "inner_val"
+
+    # Shallow copy via copy.copy
+    shallow_cloned = copy.copy(art)
+    assert shallow_cloned is not art
+    assert shallow_cloned.key == art.key
+    assert shallow_cloned.abs_path == "/tmp/transient.csv"
+    assert _deref_tracker(shallow_cloned) is tracker
+
+    # Shallow copy via model_copy(deep=False)
+    model_shallow = art.model_copy(deep=False)
+    assert model_shallow is not art
+    assert model_shallow.key == art.key
+    assert model_shallow.abs_path == "/tmp/transient.csv"
+    assert _deref_tracker(model_shallow) is tracker
+
+
+def test_artifact_deepcopy_avoids_object_dereferenced_error_after_gc(tmp_path):
+    db = DatabaseManager(str(tmp_path / "deepcopy_test.duckdb"))
+    tracker = MagicMock()
+
+    with db.session_scope() as session:
+        art = Artifact(
+            key="persisted_art",
+            container_uri="outputs://persisted.csv",
+            driver="csv",
+            hash="persisted_hash",
+            run_id="run_1",
+            meta={"initial": "value", "nested": {"k": "v"}},
+        )
+        session.add(art)
+        session.commit()
+        session.refresh(art)
+
+        set_tracker_ref(art, tracker)
+        art.abs_path = "/tmp/abs/persisted.csv"
+
+        # Clone using all four copy variants
+        c_deepcopy = copy.deepcopy(art)
+        c_model_deep = art.model_copy(deep=True)
+        c_copy = copy.copy(art)
+        c_model_shallow = art.model_copy(deep=False)
+
+    # Simulate original entity and session going out of scope and getting garbage-collected
+    art_id = art.id
+    del art
+    del session
+    gc.collect()
+
+    # Verify that mutating ORM-instrumented attributes does NOT raise ObjectDereferencedError
+    for clone in [c_deepcopy, c_model_deep, c_copy, c_model_shallow]:
+        assert clone.abs_path == "/tmp/abs/persisted.csv"
+        assert _deref_tracker(clone) is tracker
+
+        # Mutate meta directly on the clone
+        clone.meta = {"updated": "directly"}
+        assert clone.meta == {"updated": "directly"}
+
+    # Verify that db.update_artifact_meta succeeds and commits cleanly
+    db.update_artifact_meta(
+        c_deepcopy, {"db_update": "from_deepcopy"}, raise_on_error=True
+    )
+    persisted = db.get_artifact(art_id)
+    assert persisted is not None
+    assert persisted.meta["db_update"] == "from_deepcopy"
+
+    # Verify model_copy(deep=True) also works with db.update_artifact_meta
+    db.update_artifact_meta(
+        c_model_deep, {"db_update": "from_model_deep"}, raise_on_error=True
+    )
+    persisted = db.get_artifact(art_id)
+    assert persisted is not None
+    assert persisted.meta["db_update"] == "from_model_deep"
+
+
+def test_artifact_deepcopy_on_db_loaded_instance_with_uninitialized_pydantic_private(
+    tmp_path,
+):
+    db = DatabaseManager(str(tmp_path / "uninitialized_private_test.duckdb"))
+    tracker = MagicMock()
+
+    with db.session_scope() as session:
+        art = Artifact(
+            key="db_loaded_art",
+            container_uri="outputs://db_loaded.csv",
+            driver="csv",
+            hash="loaded_hash",
+            run_id="run_loaded",
+            meta={"step": 1},
+        )
+        session.add(art)
+        session.commit()
+        art_id = art.id
+
+    # Query fresh instance directly from DB (bypasses __init__, so __pydantic_private__ may be None)
+    loaded = db.get_artifact(art_id)
+    assert loaded is not None
+
+    set_tracker_ref(loaded, tracker)
+    loaded.abs_path = "/path/to/loaded.csv"
+
+    cloned = copy.deepcopy(loaded)
+    model_cloned = loaded.model_copy(deep=True)
+
+    del loaded
+    gc.collect()
+
+    for c in [cloned, model_cloned]:
+        assert c.abs_path == "/path/to/loaded.csv"
+        assert _deref_tracker(c) is tracker
+        c.meta = {"step": 2}
+        assert c.meta == {"step": 2}
+
+
+def test_artifact_deepcopy_memo_identity_preservation():
+    art = Artifact(
+        key="memo_test",
+        container_uri="outputs://memo.csv",
+        driver="csv",
+        hash="memo_hash",
+        meta={"key": "val"},
+    )
+    container = [art, art]
+    cloned_container = copy.deepcopy(container)
+
+    assert cloned_container[0] is not art
+    assert cloned_container[0] is cloned_container[1]
+    assert cloned_container[0].key == "memo_test"
+
+
+def test_artifact_model_copy_with_updates(tmp_path):
+    tracker = MagicMock()
+    art = Artifact(
+        key="original_key",
+        container_uri="outputs://original.csv",
+        driver="csv",
+        hash="original_hash",
+        meta={"orig": 1},
+    )
+    art.abs_path = "/path/to/original.csv"
+    set_tracker_ref(art, tracker)
+
+    cloned = art.model_copy(
+        deep=True,
+        update={"key": "updated_key", "driver": "parquet", "meta": {"orig": 2}},
+    )
+    gc.collect()
+
+    assert cloned.key == "updated_key"
+    assert cloned.driver == "parquet"
+    assert cloned.hash == "original_hash"
+    assert cloned.meta == {"orig": 2}
+    assert cloned.abs_path == "/path/to/original.csv"
+    assert _deref_tracker(cloned) is tracker
+    assert cloned._sa_instance_state.obj() is cloned
+
+    # Verify merging a model_copy(deep=True, update=...) clone into a session where
+    # the original artifact row is already persistent does not lose its primary key
+    # identity or raise a duplicate primary key constraint error on autoflush.
+    db = DatabaseManager(str(tmp_path / "model_copy_update_merge.duckdb"))
+    db.sync_artifacts(artifacts=[art], run_id="run_out", direction="output")
+    db.sync_artifacts(artifacts=[cloned], run_id="run_in", direction="input")
+    persisted = db.get_artifact(art.id)
+    assert persisted is not None
+    assert persisted.driver == "parquet"
+
+
+def test_artifact_abs_path_setter_accepts_none():
+    art = Artifact(
+        key="path_test",
+        container_uri="outputs://path.csv",
+        driver="csv",
+        hash="h",
+    )
+    art.abs_path = "/test/path"
+    assert art.abs_path == "/test/path"
+
+    art.abs_path = None
+    assert art.abs_path is None
+
+
+def test_artifact_content_copy_and_deepcopy(tmp_path):
+    db = DatabaseManager(str(tmp_path / "content_test.duckdb"))
+
+    with db.session_scope() as session:
+        content = ArtifactContent(
+            content_hash="content_hash_123",
+            driver="csv",
+            meta={"schema": {"columns": ["a", "b"]}},
+        )
+        session.add(content)
+        session.commit()
+        session.refresh(content)
+
+        c_deep = copy.deepcopy(content)
+        c_model_deep = content.model_copy(deep=True)
+        c_shallow = copy.copy(content)
+        c_model_shallow = content.model_copy(deep=False)
+
+    del content
+    del session
+    gc.collect()
+
+    for c in [c_deep, c_model_deep, c_shallow, c_model_shallow]:
+        assert c.content_hash == "content_hash_123"
+        assert c.driver == "csv"
+        # Mutation should not raise ObjectDereferencedError
+        c.meta = {"schema": {"columns": ["x"]}}
+        assert c.meta == {"schema": {"columns": ["x"]}}
+
+    # Deepcopy isolation
+    c_deep.meta["schema"]["columns"].append("y")
+    assert c_deep.meta["schema"]["columns"] == ["x", "y"]
+    assert c_model_deep.meta["schema"]["columns"] == ["x"]
+
+    # Memo identity preservation
+    content_list = [c_deep, c_deep]
+    cloned_list = copy.deepcopy(content_list)
+    assert cloned_list[0] is not c_deep
+    assert cloned_list[0] is cloned_list[1]
+
+
+def test_cloning_helpers_delegate_safely():
+    original = Artifact(
+        key="helper_test",
+        container_uri="outputs://helper.csv",
+        driver="csv",
+        hash="helper_hash",
+        meta={"nested": {"count": 1}},
+    )
+    original.abs_path = "/tmp/helper.csv"
+
+    # _clone_artifact_for_meta_update
+    cloned_for_meta = _clone_artifact_for_meta_update(original)
+    assert cloned_for_meta is not original
+    assert cloned_for_meta.abs_path == "/tmp/helper.csv"
+    cloned_for_meta.meta["nested"]["count"] = 2
+    assert original.meta["nested"]["count"] == 1  # Deepcopy isolation
+
+    # persistence._clone_artifact and _clone_artifact_content
+    p_clone = _clone_artifact(original)
+    assert p_clone is not original
+    p_clone.meta["nested"]["count"] = 4
+    assert original.meta["nested"]["count"] == 1
+
+    content_row = ArtifactContent(
+        content_hash="h1",
+        driver="csv",
+        meta={"schema": {"c": 1}},
+    )
+    pc_clone = _clone_artifact_content(content_row)
+    assert pc_clone is not content_row
+    pc_clone.meta["schema"]["c"] = 2
+    assert content_row.meta["schema"]["c"] == 1
+
+
+def test_artifact_and_content_copy_with_expired_attributes(tmp_path):
+    """Confirm copying expired ORM instances reloads attributes and produces clean detached clones."""
+    db = DatabaseManager(str(tmp_path / "expired_test.duckdb"))
+
+    with db.session_scope() as session:
+        art = Artifact(
+            key="expired_art_key",
+            container_uri="outputs://expired.csv",
+            driver="csv",
+            hash="expired_hash_123",
+            meta={"tags": ["fast", "cold"]},
+        )
+        content = ArtifactContent(
+            content_hash="content_expired_hash_456",
+            driver="csv",
+            meta={"schema": {"columns": ["col_a", "col_b"]}},
+        )
+        session.add(art)
+        session.add(content)
+        session.commit()
+
+        # 1. Directly after commit() without refresh(), attributes are expired in session.
+        # __dict__ contains only '_sa_instance_state'.
+        assert "_sa_instance_state" in art.__dict__
+        assert "key" not in art.__dict__
+        assert "content_hash" not in content.__dict__
+
+        cloned_art = copy.deepcopy(art)
+        shallow_art = copy.copy(art)
+        cloned_content = copy.deepcopy(content)
+        shallow_content = copy.copy(content)
+
+        for a in [cloned_art, shallow_art]:
+            assert a.id == art.id
+            assert a.key == "expired_art_key"
+            assert a.container_uri == "outputs://expired.csv"
+            assert a.driver == "csv"
+            assert a.hash == "expired_hash_123"
+            assert a.meta == {"tags": ["fast", "cold"]}
+            # Mutation on detached clone must not raise ObjectDereferencedError
+            a.meta = {"tags": ["updated"]}
+            assert a.meta == {"tags": ["updated"]}
+
+        for c in [cloned_content, shallow_content]:
+            assert c.content_hash == "content_expired_hash_456"
+            assert c.driver == "csv"
+            assert c.meta == {"schema": {"columns": ["col_a", "col_b"]}}
+            c.meta = {"schema": {"columns": ["col_x"]}}
+            assert c.meta == {"schema": {"columns": ["col_x"]}}
+
+        # 2. Test after explicit session.expire()
+        session.refresh(art)
+        session.refresh(content)
+        session.expire(art)
+        session.expire(content)
+        assert "key" not in art.__dict__
+        assert "content_hash" not in content.__dict__
+
+        cloned_art_after_expire = copy.deepcopy(art)
+        cloned_content_after_expire = copy.deepcopy(content)
+
+        assert cloned_art_after_expire.key == "expired_art_key"
+        assert cloned_art_after_expire.id == art.id
+        assert cloned_content_after_expire.content_hash == "content_expired_hash_456"
+
+        cloned_art_after_expire.meta = {"tags": ["expired_mutation"]}
+        assert cloned_art_after_expire.meta == {"tags": ["expired_mutation"]}
+
+
+def test_artifact_deepcopy_circular_reference():
+    """Verify that deepcopy preserves instance identity on self-referential graph structures."""
+    art = Artifact(
+        key="circular_key",
+        container_uri="outputs://circular.csv",
+        driver="csv",
+        hash="h_circ",
+    )
+    art.meta = {"self": art}
+
+    cloned = copy.deepcopy(art)
+
+    assert cloned is not art
+    assert cloned.key == "circular_key"
+    assert cloned.meta["self"] is cloned
+
+
+def test_artifact_copy_preserves_custom_attributes():
+    """Verify non-model custom attributes attached to __dict__ are cloned."""
+    art = Artifact(
+        key="custom_attr_key",
+        container_uri="outputs://custom.csv",
+        driver="csv",
+        hash="h_custom",
+    )
+    object.__setattr__(art, "extra_metric", {"runtime_sec": 42.5})
+
+    cloned = copy.deepcopy(art)
+    assert hasattr(cloned, "extra_metric")
+    assert cloned.extra_metric == {"runtime_sec": 42.5}
+    assert cloned.extra_metric is not art.extra_metric  # Deep-copied
+
+    shallow = copy.copy(art)
+    assert hasattr(shallow, "extra_metric")
+    assert shallow.extra_metric == {"runtime_sec": 42.5}
+    assert shallow.extra_metric is art.extra_metric  # Shallow-copied
+
+
+def test_artifact_abs_path_setter_accepts_path_object():
+    """Verify abs_path setter accepts pathlib.Path objects and stores normalized string."""
+    art = Artifact(
+        key="path_test",
+        container_uri="outputs://path.csv",
+        driver="csv",
+        hash="h_path",
+    )
+    art.abs_path = Path("/data/runs/output.parquet")
+    assert art.abs_path == "/data/runs/output.parquet"
+
+    cloned = copy.deepcopy(art)
+    assert cloned.abs_path == "/data/runs/output.parquet"

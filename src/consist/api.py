@@ -44,15 +44,43 @@ from consist.core.context import (
     use_tracker as _use_tracker,
 )
 from consist.core.admission import (  # noqa: F401
+    AdmissionIdentity,
     AdmissionReference,
     AdmissionReport,
     DeclaredDigestExpectation,
     FileIdentity,
+    PriorRunExpectation,
+    admission_file_identity,
     check_admission_reference,
     check_admission_reference_expected_identity,
+    check_admission_reference_prior_run_expectation,
     check_artifact_identity,
     check_expected_identity,
+    check_prior_run_expectation,
     compare_path_to_identity,
+)
+from consist.core.logical_array_identity import (  # noqa: F401
+    ARTIFACT_PROVENANCE_SCHEMA_VERSION,
+    FLOAT32_MATRICES_V1_POLICY,
+    PRESERVE_CANONICAL_POLICY,
+    ArrayCanonicalizationPolicy,
+    ArtifactProvenanceSidecar,
+    LogicalProfileName,
+    MatrixContainerSummary,
+    admission_directory_identity,
+    artifact_provenance_sidecar_path,
+    canonicalize_float32_array,
+    canonicalize_float64_array,
+    canonicalize_float_array,
+    compute_array_entry_sha256,
+    compute_logical_matrices_sha256,
+    compute_omx_logical_matrices_sha256,
+    compute_zarr_logical_matrices_sha256,
+    inspect_matrix_container,
+    normalize_logical_matrices_identity,
+    read_artifact_provenance_sidecar,
+    resolve_canonicalization_policy,
+    write_artifact_provenance_sidecar,
 )
 from consist.core.decorators import (
     define_step as define_step_decorator,
@@ -71,7 +99,13 @@ from consist.integrations.ibis import (
     ibis_view as _ibis_view,
 )
 from consist.models.artifact import Artifact, ArchivedOutputs, get_tracker_ref
-from consist.models.run import ConsistRecord, Run, RunResult, resolve_run_result_output
+from consist.models.run import (
+    ConsistRecord,
+    CouplerSnapshotPhase,
+    Run,
+    RunResult,
+    resolve_run_result_output,
+)
 from consist.models.run_config_kv import RunConfigKV
 from consist.core.tracker import Tracker
 from consist.protocols import ArtifactRecordLike
@@ -1149,6 +1183,40 @@ def get_run_result(
     )
 
 
+def get_coupler_snapshot(
+    run_id: str,
+    phase: CouplerSnapshotPhase = "post",
+    *,
+    must_exist: bool = False,
+    tracker: Optional["Tracker"] = None,
+) -> Dict[str, Artifact]:
+    """
+    Retrieve artifacts mapped by role_key for a given run_id and snapshot phase.
+    """
+    return _resolve_tracker(tracker).get_coupler_snapshot(
+        run_id=run_id, phase=phase, must_exist=must_exist
+    )
+
+
+def diff_coupler_snapshots(
+    left_run_id: str,
+    right_run_id: str,
+    *,
+    left_phase: CouplerSnapshotPhase = "post",
+    right_phase: CouplerSnapshotPhase = "post",
+    tracker: Optional["Tracker"] = None,
+) -> pd.DataFrame:
+    """
+    Compare two coupler snapshots and return differences as a DataFrame.
+    """
+    return _resolve_tracker(tracker).diff_coupler_snapshots(
+        left_run_id=left_run_id,
+        right_run_id=right_run_id,
+        left_phase=left_phase,
+        right_phase=right_phase,
+    )
+
+
 def materialize_run_outputs(
     run_id: str,
     *,
@@ -1375,6 +1443,7 @@ def materialize_artifact(
     on_missing: Literal["warn", "raise"] = "warn",
     validate_content_hash: Literal["never", "if-present", "always"] = "if-present",
     allow_external_paths: Optional[bool] = None,
+    scheme_prefixes: Optional[Mapping[str, Union[str, Path]]] = None,
     tracker: Optional["Tracker"] = None,
 ) -> "MaterializedArtifact":
     """
@@ -1392,6 +1461,7 @@ def materialize_artifact(
         on_missing=on_missing,
         validate_content_hash=validate_content_hash,
         allow_external_paths=allow_external_paths,
+        scheme_prefixes=scheme_prefixes,
     )
 
 
@@ -3203,18 +3273,22 @@ def load(
     """
 
     # 1. Resolve Tracker
+    explicit_tracker = tracker is not None
+    attached_tracker: Optional[Tracker] = None
+    tracker_ref = get_tracker_ref(artifact)
+    if tracker_ref:
+        ref_candidate = tracker_ref()
+        if isinstance(ref_candidate, Tracker):
+            attached_tracker = ref_candidate
+
     if tracker is None:
         try:
             tracker = get_active_tracker()
         except RuntimeError:
             tracker = None
 
-    if tracker is None:
-        tracker_ref = get_tracker_ref(artifact)
-        if tracker_ref:
-            attached_tracker = tracker_ref()
-            if isinstance(attached_tracker, Tracker):
-                tracker = attached_tracker
+    if tracker is None and attached_tracker is not None:
+        tracker = attached_tracker
 
     if tracker is None:
         # If we have a resolved path available, allow direct disk loading without a tracker.
@@ -3227,9 +3301,23 @@ def load(
             )
 
     # 2. Determine Physical Path
-    # If we have a tracker, use it to resolve. Else fallback to runtime cache.
+    # If we have a tracker, use it to resolve unless a materialized runtime abs_path
+    # on the attached tracker is already present on disk.
     if tracker:
-        path = tracker.resolve_uri(artifact.container_uri)
+        if (
+            (not explicit_tracker or tracker is attached_tracker)
+            and artifact.abs_path
+            and Path(artifact.abs_path).exists()
+        ):
+            path = artifact.abs_path
+        else:
+            path = tracker.resolve_uri(artifact.container_uri)
+            if (
+                not Path(path).exists()
+                and artifact.abs_path
+                and Path(artifact.abs_path).exists()
+            ):
+                path = artifact.abs_path
     else:
         path = artifact.path
 

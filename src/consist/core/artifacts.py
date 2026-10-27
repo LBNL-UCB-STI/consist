@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import logging
 import uuid
@@ -192,20 +193,7 @@ def _container_policy_updates(
 
 
 def _clone_artifact_for_meta_update(artifact: Artifact) -> Artifact:
-    return Artifact(
-        id=artifact.id,
-        key=artifact.key,
-        container_uri=artifact.container_uri,
-        table_path=artifact.table_path,
-        array_path=artifact.array_path,
-        driver=artifact.driver,
-        hash=artifact.hash,
-        content_id=artifact.content_id,
-        parent_artifact_id=artifact.parent_artifact_id,
-        run_id=artifact.run_id,
-        meta=dict(artifact.meta or {}),
-        created_at=artifact.created_at,
-    )
+    return copy.deepcopy(artifact)
 
 
 def _list_h5_dataset_names(
@@ -371,35 +359,16 @@ class ArtifactManager:
             array_path_override: Optional[str],
             parent_artifact_id_override: Optional[uuid.UUID],
         ) -> Artifact:
-            cloned = Artifact(
-                id=artifact.id,
-                key=artifact.key,
-                container_uri=artifact.container_uri,
-                table_path=(
-                    table_path_override
-                    if table_path_override is not None
-                    else artifact.table_path
-                ),
-                array_path=(
-                    array_path_override
-                    if array_path_override is not None
-                    else artifact.array_path
-                ),
-                driver=driver_override or artifact.driver,
-                hash=artifact.hash,
-                content_id=artifact.content_id,
-                parent_artifact_id=(
-                    parent_artifact_id_override
-                    if parent_artifact_id_override is not None
-                    else artifact.parent_artifact_id
-                ),
-                run_id=artifact.run_id,
-                meta=dict(artifact.meta or {}),
-                created_at=artifact.created_at,
-            )
-            if artifact.abs_path:
-                cloned.abs_path = artifact.abs_path
-            return cloned
+            updates: dict[str, Any] = {}
+            if driver_override:
+                updates["driver"] = driver_override
+            if table_path_override is not None:
+                updates["table_path"] = table_path_override
+            if array_path_override is not None:
+                updates["array_path"] = array_path_override
+            if parent_artifact_id_override is not None:
+                updates["parent_artifact_id"] = parent_artifact_id_override
+            return artifact.model_copy(deep=True, update=updates or None)
 
         def _attach_content_id(artifact: Artifact) -> None:
             effective_driver = driver or artifact.driver
