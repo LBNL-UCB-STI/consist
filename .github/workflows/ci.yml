@@ -14,64 +14,38 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: tests (${{ matrix.os }}, py${{ matrix.python-version }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Keep the matrix small to reduce CI time/credits.
-          - os: ubuntu-latest
-            python-version: "3.11"
-            coverage: true
-          - os: ubuntu-latest
-            python-version: "3.12"
-            coverage: false
-
-    # .python-version currently selects 3.13 locally.  Pin uv to the matrix
-    # interpreter so each CI leg actually exercises the advertised version.
+  quality:
+    name: quality (ruff, ty, schemas)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
-      UV_PYTHON: ${{ matrix.python-version }}
+      UV_PYTHON: "3.13"
 
     steps:
       - uses: actions/checkout@v7
 
-      - name: Set up Python
-        uses: actions/setup-python@v7
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
         with:
-          python-version: ${{ matrix.python-version }}
+          enable-cache: true
 
-      # Use uv for fast, lockfile-based installs + caching.
-      - name: Install uv
-        run: python -m pip install --upgrade uv
-
-      - name: Install dependencies (Linux)
-        if: runner.os == 'Linux'
+      - name: Install quality & schema dependencies
         run: >
           uv sync --frozen
           --group dev
+          --group typecheck
           --extra all
 
-      - name: Install dependencies (Windows)
-        if: runner.os == 'Windows'
-        run: >
-          uv sync --frozen
-          --group dev
-          --extra all
-
-      - name: Ruff
-        if: runner.os == 'Linux' && matrix.python-version == '3.12'
+      - name: Ruff check
         run: uv run -m ruff check src tests
 
       - name: Ruff format
-        if: runner.os == 'Linux' && matrix.python-version == '3.12'
         run: uv run -m ruff format --check src tests
 
+      - name: Type check (ty)
+        run: uv run -m ty check src tests
+
       - name: Verify LinkML provenance release assets
-        if: runner.os == 'Linux' && matrix.python-version == '3.12'
         run: |
           uv build --out-dir provenance-dist
           unzip -l provenance-dist/consist-*.whl | grep -F "consist/schemas/provenance.yaml"
@@ -82,8 +56,28 @@ jobs:
             --output provenance-schema-release
           (cd provenance-schema-release && sha256sum -c SHA256SUMS)
 
+  test:
+    name: tests (ubuntu-latest, py3.11, coverage)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      UV_PYTHON: "3.11"
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: >
+          uv sync --frozen
+          --group dev
+          --extra all
+
       - name: Pytest (skip heavy, coverage)
-        if: ${{ matrix.coverage }}
         run: >
           uv run -m pytest -q
           -m "not heavy"
@@ -94,16 +88,7 @@ jobs:
           --cov-report=json:coverage.json
           --cov-fail-under=80
 
-      - name: Pytest (skip heavy)
-        if: ${{ !matrix.coverage }}
-        run: >
-          uv run -m pytest -q
-          -m "not heavy"
-          tests/unit tests/integration tests/e2e
-          --durations=40
-
       - name: Coverage Guardrails (Critical Modules)
-        if: runner.os == 'Linux' && matrix.python-version == '3.11'
         run: |
           uv run python - <<'PY'
           import json
@@ -137,7 +122,6 @@ jobs:
           PY
 
       - name: Coverage Guardrails (CLI)
-        if: runner.os == 'Linux' && matrix.python-version == '3.11'
         run: |
           uv run python - <<'PY'
           import json
@@ -161,7 +145,6 @@ jobs:
           PY
 
       - name: CLI startup benchmark
-        if: runner.os == 'Linux' && matrix.python-version == '3.11'
         run: |
           mkdir -p ci-artifacts
           uv run python scripts/benchmarks/cli_startup_benchmark.py \
@@ -170,9 +153,48 @@ jobs:
             --out ci-artifacts/cli-startup-benchmark.json
 
       - name: Upload CLI startup benchmark
-        if: runner.os == 'Linux' && matrix.python-version == '3.11'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
         with:
           name: cli-startup-benchmark-${{ github.sha }}
           path: ci-artifacts/cli-startup-benchmark.json
           if-no-files-found: error
+
+  smoke:
+    name: smoke (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: ubuntu-latest
+            python-version: "3.13"
+          - os: macos-latest
+            python-version: "3.13"
+
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: >
+          uv sync --frozen
+          --group dev
+
+      - name: Smoke pytest (core tracker, exec, CLI)
+        run: >
+          uv run -m pytest -q
+          tests/unit/core/test_persistence.py
+          tests/unit/core/test_tracker_run.py
+          tests/unit/core/test_tracker_exec.py
+          tests/unit/cli/test_cli.py
+          --durations=10
