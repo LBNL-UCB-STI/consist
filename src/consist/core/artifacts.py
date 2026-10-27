@@ -27,6 +27,7 @@ from consist.core.container_policy import (
     apply_container_policy_meta,
 )
 from consist.core.drivers import ARRAY_DRIVERS, TABLE_DRIVERS
+from consist.core.logical_array_identity import open_h5py_read_only
 from consist.core.cache_output_logging import _demote_cache_hit
 from consist.core.resolved_binding import ArtifactIdentity
 from consist.core.validation import validate_artifact_key
@@ -209,7 +210,7 @@ def _list_h5_dataset_names(
 
     dataset_names: list[str] = []
     try:
-        with h5py.File(str(path_obj), "r") as handle:
+        with open_h5py_read_only(str(path_obj), h5py_module=h5py) as handle:
 
             def visit_datasets(name: str, obj: Any) -> None:
                 if isinstance(obj, h5py.Dataset) and filter_fn(name):
@@ -684,7 +685,7 @@ class ArtifactManager:
         table_artifacts: List[tuple[Artifact, Any]] = []
 
         try:
-            with h5py.File(str(path_obj), "r") as f:
+            with open_h5py_read_only(str(path_obj), h5py_module=h5py) as f:
 
                 def visit_datasets(name: str, obj: Any) -> None:
                     if isinstance(obj, h5py.Dataset):
@@ -1117,7 +1118,7 @@ class ArtifactManager:
                 import h5py
             except ImportError as e:
                 raise ImportError("h5py is required to hash HDF5 tables.") from e
-            with h5py.File(str(path_obj), "r") as h5_file:
+            with open_h5py_read_only(str(path_obj), h5py_module=h5py) as h5_file:
                 try:
                     dataset = h5_file[table_path]
                 except KeyError:

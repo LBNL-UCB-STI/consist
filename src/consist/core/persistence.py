@@ -2967,6 +2967,65 @@ class DatabaseManager:
         except Exception:
             return []
 
+    def get_output_artifacts_by_run_ids(
+        self,
+        run_ids: Sequence[str],
+        *,
+        keys: Optional[Sequence[str]] = None,
+    ) -> Tuple[Dict[str, Run], Dict[str, Dict[str, Artifact]]]:
+        """
+        Fetch runs and their output artifacts in bulk for multiple run IDs.
+
+        Returns a tuple of ``(runs_by_id, outputs_by_run_id)`` where
+        ``outputs_by_run_id`` maps each run ID to a dictionary of ``{key: Artifact}``.
+        """
+        unique_run_ids = list(dict.fromkeys(run_ids))
+        if not unique_run_ids:
+            return {}, {}
+        key_filter = list(dict.fromkeys(keys)) if keys is not None else None
+        if key_filter is not None and not key_filter:
+            return {}, {run_id: {} for run_id in unique_run_ids}
+
+        def _query():
+            with self.session_scope() as session:
+                run_stmt = select(Run).where(col(Run.id).in_(unique_run_ids))
+                runs = list(session.exec(run_stmt).all())
+                runs_by_id: Dict[str, Run] = {}
+                for run in runs:
+                    _ = run.meta
+                    session.expunge(run)
+                    runs_by_id[run.id] = run
+
+                art_stmt = (
+                    select(Artifact, RunArtifactLink.run_id)
+                    .join(
+                        RunArtifactLink,
+                        Artifact.id == RunArtifactLink.artifact_id,  # ty: ignore[invalid-argument-type]
+                    )
+                    .where(col(RunArtifactLink.run_id).in_(unique_run_ids))
+                    .where(RunArtifactLink.direction == "output")
+                )
+                if key_filter is not None:
+                    art_stmt = art_stmt.where(col(Artifact.key).in_(key_filter))
+                art_stmt = art_stmt.order_by(
+                    col(Artifact.created_at), col(Artifact.key), col(Artifact.id)
+                )
+                rows = list(session.exec(art_stmt).all())
+                outputs_by_run: Dict[str, Dict[str, Artifact]] = {
+                    run_id: {} for run_id in unique_run_ids
+                }
+                for artifact, linked_run_id in rows:
+                    _ = artifact.meta
+                    session.expunge(artifact)
+                    if linked_run_id in outputs_by_run:
+                        outputs_by_run[linked_run_id][artifact.key] = artifact
+                return runs_by_id, outputs_by_run
+
+        try:
+            return self.execute_with_retry(_query)
+        except Exception:
+            return {}, {run_id: {} for run_id in unique_run_ids}
+
     def find_artifacts(
         self,
         *,

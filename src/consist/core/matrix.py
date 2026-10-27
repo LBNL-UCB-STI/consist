@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 from importlib import import_module
 from types import ModuleType
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Any, List, Optional
 
 import pandas as pd
 from sqlmodel import select, col
@@ -27,15 +27,21 @@ from sqlmodel import select, col
 from consist.models.artifact import Artifact
 from consist.models.run import Run
 
-xr: Optional[ModuleType]
-try:
-    xr = import_module("xarray")
-except ImportError:
-    xr = None
+_UNSET = object()
+xr: Any = _UNSET
+
+
+def _get_xr() -> Optional[ModuleType]:
+    global xr
+    if xr is _UNSET:
+        try:
+            xr = import_module("xarray")
+        except ImportError:
+            xr = None
+    return xr
+
 
 if TYPE_CHECKING:
-    from typing import Any
-
     XrDataset = Any
     from consist.core.tracker import Tracker
 
@@ -119,7 +125,8 @@ class MatrixViewFactory:
         RuntimeError
             If the `Tracker` instance does not have a configured database connection.
         """
-        if xr is None:
+        xr_module = _get_xr()
+        if xr_module is None:
             raise ImportError("xarray is required.")
         if not self.tracker.engine:
             raise RuntimeError("Database connection required.")
@@ -146,7 +153,7 @@ class MatrixViewFactory:
             query = query.where(Run.status == status)
         df = pd.read_sql(query, self.tracker.engine)
         if df.empty:
-            return xr.Dataset()
+            return xr_module.Dataset()
 
         # 2. Lazy Open & Stack
         datasets = []
@@ -155,7 +162,7 @@ class MatrixViewFactory:
             try:
                 path = self.tracker.resolve_uri(container_uri)
 
-                ds = xr.open_zarr(path, consolidated=False)
+                ds = xr_module.open_zarr(path, consolidated=False)
                 if variables:
                     ds = ds[variables]
 
@@ -175,8 +182,8 @@ class MatrixViewFactory:
                 continue
 
         if not datasets:
-            return xr.Dataset()
+            return xr_module.Dataset()
 
         # 3. Combine
         # Use concat to keep dimensions dense (avoiding sparse NaNs)
-        return xr.concat(datasets, dim="run_id")
+        return xr_module.concat(datasets, dim="run_id")

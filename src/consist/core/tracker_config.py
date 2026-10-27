@@ -35,6 +35,7 @@ class TrackerConfig(BaseModel):
     openlineage_enabled: bool = False
     openlineage_namespace: Optional[str] = None
     db_skip_schema_init: bool = False
+    local_snapshot: bool | Path | str = False
 
     def to_init_kwargs(self) -> dict[str, Any]:
         """
@@ -56,4 +57,5 @@ class TrackerConfig(BaseModel):
             "openlineage_enabled": self.openlineage_enabled,
             "openlineage_namespace": self.openlineage_namespace,
             "db_skip_schema_init": self.db_skip_schema_init,
+            "local_snapshot": self.local_snapshot,
         }

@@ -8,6 +8,8 @@ from dataclasses import replace
 from datetime import date, datetime
 import logging
 import os
+import shutil
+import tempfile
 from types import MappingProxyType
 import uuid
 from pathlib import Path
@@ -270,6 +272,7 @@ class Tracker:
         openlineage_enabled: bool = False,
         openlineage_namespace: Optional[str] = None,
         db_skip_schema_init: bool = False,
+        local_snapshot: bool | Path | str = False,
     ):
         """
         Orchestrate provenance tracking and intelligent caching for simulation workflows.
@@ -354,10 +357,51 @@ class Tracker:
         self.allow_external_paths = bool(allow_external_paths)
 
         configured_db_path = os.fspath(db_path) if db_path is not None else None
+        self._original_db_path: str | None = configured_db_path
+        self.local_snapshot: bool | Path | str = local_snapshot
+        self._snapshot_temp_dir: Optional[Path] = None
+        self.snapshot_db_path: Optional[Path] = None
+
+        effective_db_path = configured_db_path
+        if (
+            local_snapshot is not False
+            and local_snapshot is not None
+            and configured_db_path
+            and configured_db_path != ":memory:"
+        ):
+            src_db = Path(configured_db_path)
+            if local_snapshot is True or local_snapshot == "auto":
+                scratch_base = (
+                    os.environ.get("SLURM_TMPDIR")
+                    or os.environ.get("TMPDIR")
+                    or tempfile.gettempdir()
+                )
+                Path(scratch_base).mkdir(parents=True, exist_ok=True)
+                temp_dir = Path(
+                    tempfile.mkdtemp(prefix="consist_db_snapshot_", dir=scratch_base)
+                )
+                self._snapshot_temp_dir = temp_dir
+                dest_db = temp_dir / src_db.name
+            else:
+                target = Path(local_snapshot)
+                if target.is_dir() or not target.suffix:
+                    target.mkdir(parents=True, exist_ok=True)
+                    dest_db = target / src_db.name
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    dest_db = target
+            if src_db.exists():
+                shutil.copy2(src_db, dest_db)
+                src_wal = Path(f"{src_db}.wal")
+                if src_wal.exists():
+                    shutil.copy2(src_wal, Path(f"{dest_db}.wal"))
+            self.snapshot_db_path = dest_db
+            effective_db_path = os.fspath(dest_db)
+
         self.metadata_store: MetadataStore | None = None
         self.hot_data_store: HotDataStore | None = None
         self._compat_db: DatabaseManager | None = None
-        self._compat_db_path: str | None = configured_db_path
+        self._compat_db_path: str | None = effective_db_path
 
         self.identity = IdentityManager(
             project_root=project_root, hashing_strategy=hashing_strategy
@@ -377,17 +421,18 @@ class Tracker:
         self._db_lock_max_sleep_seconds = self.settings.db_lock_max_sleep_seconds
         self.db_skip_schema_init = db_skip_schema_init
 
-        if configured_db_path:
+        if effective_db_path:
             metadata_db = DatabaseManager(
-                configured_db_path,
+                effective_db_path,
                 lock_retries=self._db_lock_retries,
                 lock_base_sleep_seconds=self._db_lock_base_sleep_seconds,
                 lock_max_sleep_seconds=self._db_lock_max_sleep_seconds,
+                read_only=(self.access_mode == "read_only"),
                 skip_schema_init=db_skip_schema_init,
             )
             self.metadata_store = MetadataStore(db=metadata_db)
             self.hot_data_store = HotDataStore(
-                db_path=configured_db_path,
+                db_path=effective_db_path,
                 metadata_store=self.metadata_store,
             )
 
@@ -454,7 +499,7 @@ class Tracker:
             logging.warning(
                 "[Consist] Schemas provided but no database configured. Views will not be created."
             )
-        if self.metadata_store:
+        if self.metadata_store and self.access_mode != "read_only":
             for schema in registered_schemas:
                 self.view(schema)
 
@@ -660,7 +705,11 @@ class Tracker:
 
         return TrackerConfig(
             run_dir=self.run_dir,
-            db_path=self._compat_db_path,
+            db_path=(
+                self._original_db_path
+                if self._compat_attr("local_snapshot")
+                else self._compat_db_path
+            ),
             mounts=self.mounts,
             archive_mounts=self.archive_mounts,
             project_root=str(self.identity.project_root),
@@ -674,7 +723,32 @@ class Tracker:
             openlineage_enabled=self.openlineage_enabled,
             openlineage_namespace=self.openlineage_namespace,
             db_skip_schema_init=self.db_skip_schema_init,
+            local_snapshot=self._compat_attr("local_snapshot") or False,
         )
+
+    def close(self) -> None:
+        """
+        Dispose database engines and clean up any temporary local snapshot directory.
+        """
+        hot_store = self._compat_attr("hot_data_store")
+        if hot_store is not None:
+            hot_store.dispose_engine()
+        metadata_store = self._compat_attr("metadata_store")
+        if metadata_store is not None and metadata_store.db is not None:
+            metadata_store.db.engine.dispose()
+        compat_db = self._compat_attr("_compat_db")
+        if compat_db is not None and compat_db.engine is not None:
+            compat_db.engine.dispose()
+        snapshot_temp_dir = self._compat_attr("_snapshot_temp_dir")
+        if snapshot_temp_dir is not None:
+            shutil.rmtree(snapshot_temp_dir, ignore_errors=True)
+            self._snapshot_temp_dir = None
+
+    def __enter__(self) -> "Tracker":
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.close()
 
     def get_registered_schema(
         self,
@@ -5077,6 +5151,19 @@ class Tracker:
             validate=validate,
         )
 
+    def resolve_run_output_paths(
+        self,
+        run_ids: Sequence[str],
+        *,
+        keys: Optional[Sequence[str]] = None,
+        existing_only: bool = False,
+    ) -> dict[str, dict[str, Path]]:
+        return self._history_service.resolve_run_output_paths(
+            run_ids,
+            keys=keys,
+            existing_only=existing_only,
+        )
+
     def get_run_inputs(self, run_id: str) -> Dict[str, Artifact]:
         return self._history_service.get_run_inputs(run_id)
 
@@ -5094,8 +5181,20 @@ class Tracker:
             direction=direction,
         )
 
-    def load_run_output(self, run_id: str, key: str, **kwargs: Any) -> Any:
-        return self._history_service.load_run_output(run_id, key, **kwargs)
+    def load_run_output(
+        self,
+        run_id: str,
+        key: str,
+        *,
+        columns: Optional[Sequence[str]] = None,
+        **kwargs: Any,
+    ) -> Any:
+        return self._history_service.load_run_output(
+            run_id,
+            key,
+            columns=columns,
+            **kwargs,
+        )
 
     def get_coupler_snapshot(
         self,
@@ -5808,6 +5907,7 @@ _TRACKER_WRAPPER_DOCS = {
     "get_config_bundle": TrackerHistoryService.get_config_bundle,
     "get_artifacts_for_run": TrackerHistoryService.get_artifacts_for_run,
     "get_run_outputs": TrackerHistoryService.get_run_outputs,
+    "resolve_run_output_paths": TrackerHistoryService.resolve_run_output_paths,
     "get_run_result": TrackerHistoryService.get_run_result,
     "get_run_inputs": TrackerHistoryService.get_run_inputs,
     "get_run_artifact": TrackerHistoryService.get_run_artifact,
