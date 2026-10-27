@@ -311,8 +311,16 @@ def _profile_call_name(name: str, profile_label: Optional[str] = None) -> str:
     return f"{name}[{profile_label}]"
 
 
+_NON_RETRYABLE_DB_ERROR_MARKERS = (
+    "database does not exist",
+    "no such file or directory",
+)
+
+
 def _is_retryable_db_error(message: str) -> bool:
     normalized = message.lower()
+    if any(marker in normalized for marker in _NON_RETRYABLE_DB_ERROR_MARKERS):
+        return False
     return any(marker in normalized for marker in _RETRYABLE_DB_ERROR_MARKERS)
 
 
@@ -388,6 +396,10 @@ class DatabaseManager:
         self._lock_max_sleep_seconds = max(0.0, float(lock_max_sleep_seconds))
         self._skip_schema_init = skip_schema_init or read_only
         self._read_only = read_only
+        if read_only and db_path != ":memory:" and not Path(db_path).exists():
+            raise FileNotFoundError(
+                f"Database file does not exist for read-only access: {db_path}"
+            )
         # Using NullPool ensures the file lock is released when the session closes
         connect_args = {"read_only": True} if read_only else {}
         self.engine = create_engine(
@@ -2966,6 +2978,68 @@ class DatabaseManager:
             return self.execute_with_retry(_query)
         except Exception:
             return []
+
+    def get_output_artifacts_by_run_ids(
+        self,
+        run_ids: Sequence[str],
+        *,
+        keys: Optional[Sequence[str]] = None,
+    ) -> Tuple[Dict[str, Run], Dict[str, Dict[str, Artifact]]]:
+        """
+        Fetch runs and their output artifacts in bulk for multiple run IDs.
+
+        Returns a tuple of ``(runs_by_id, outputs_by_run_id)`` where
+        ``outputs_by_run_id`` maps each run ID to a dictionary of ``{key: Artifact}``.
+        """
+        unique_run_ids = list(dict.fromkeys(run_ids))
+        if not unique_run_ids:
+            return {}, {}
+        key_filter = list(dict.fromkeys(keys)) if keys is not None else None
+        if key_filter is not None and not key_filter:
+            return {}, {run_id: {} for run_id in unique_run_ids}
+
+        def _query():
+            with self.session_scope() as session:
+                run_stmt = select(Run).where(col(Run.id).in_(unique_run_ids))
+                runs = list(session.exec(run_stmt).all())
+                runs_by_id: Dict[str, Run] = {}
+                for run in runs:
+                    _ = run.meta
+                    session.expunge(run)
+                    runs_by_id[run.id] = run
+
+                art_stmt = (
+                    select(Artifact, RunArtifactLink.run_id)
+                    .join(
+                        RunArtifactLink,
+                        Artifact.id == RunArtifactLink.artifact_id,  # ty: ignore[invalid-argument-type]
+                    )
+                    .where(col(RunArtifactLink.run_id).in_(unique_run_ids))
+                    .where(RunArtifactLink.direction == "output")
+                )
+                if key_filter is not None:
+                    art_stmt = art_stmt.where(col(Artifact.key).in_(key_filter))
+                art_stmt = art_stmt.order_by(
+                    col(Artifact.created_at), col(Artifact.key), col(Artifact.id)
+                )
+                rows = list(session.exec(art_stmt).all())
+                outputs_by_run: Dict[str, Dict[str, Artifact]] = {
+                    run_id: {} for run_id in unique_run_ids
+                }
+                for artifact, linked_run_id in rows:
+                    _ = artifact.meta
+                    session.expunge(artifact)
+                    if linked_run_id in outputs_by_run:
+                        outputs_by_run[linked_run_id][artifact.key] = artifact
+                return runs_by_id, outputs_by_run
+
+        try:
+            return self.execute_with_retry(_query)
+        except Exception as exc:
+            logging.warning(
+                "[Consist] Failed to bulk-fetch output artifacts for runs: %s", exc
+            )
+            return {}, {run_id: {} for run_id in unique_run_ids}
 
     def find_artifacts(
         self,

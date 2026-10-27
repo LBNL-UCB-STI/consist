@@ -519,6 +519,7 @@ class Artifact(SQLModel, table=True):
         tracker: Optional["Tracker"] = None,
         *,
         db_fallback: Literal["inputs-only", "always", "never"] = "inputs-only",
+        columns: Optional[Sequence[str]] = None,
         close: bool = True,
         **kwargs: Any,
     ) -> "pd.DataFrame":
@@ -535,6 +536,7 @@ class Artifact(SQLModel, table=True):
             self,
             tracker=tracker,
             db_fallback=db_fallback,
+            columns=columns,
             close=close,
             **kwargs,
         )

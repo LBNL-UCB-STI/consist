@@ -3,7 +3,7 @@ from __future__ import annotations
 import itertools
 import os
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Literal, Optional
+from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence
 
 import pandas as pd
 
@@ -308,6 +308,59 @@ class TrackerHistoryService(_TrackerServiceBase):
         """
         return self.get_artifacts_for_run(run_id).outputs
 
+    def resolve_run_output_paths(
+        self,
+        run_ids: Sequence[str],
+        *,
+        keys: Optional[Sequence[str]] = None,
+        existing_only: bool = False,
+    ) -> dict[str, dict[str, Path]]:
+        """
+        Resolve output artifact filesystem paths for multiple runs in bulk.
+
+        Parameters
+        ----------
+        run_ids : Sequence[str]
+            Run identifiers to resolve outputs for. Order is preserved in the
+            returned dictionary.
+        keys : Optional[Sequence[str]], optional
+            Optional subset of artifact keys to include.
+        existing_only : bool, default False
+            When True, omit paths that do not currently exist on disk.
+
+        Returns
+        -------
+        dict[str, dict[str, Path]]
+            Mapping of ``{run_id: {artifact_key: Path}}``.
+        """
+        ordered_run_ids = list(dict.fromkeys(run_ids))
+        result: dict[str, dict[str, Path]] = {run_id: {} for run_id in ordered_run_ids}
+        if not ordered_run_ids or not self.db:
+            return result
+
+        runs_by_id, outputs_by_run_id = self.db.get_output_artifacts_by_run_ids(
+            ordered_run_ids,
+            keys=keys,
+        )
+        for run_id in ordered_run_ids:
+            run = runs_by_id.get(run_id)
+            outputs = outputs_by_run_id.get(run_id, {})
+            resolved_for_run: dict[str, Path] = {}
+            for key, artifact in outputs.items():
+                set_tracker_ref(artifact, self._tracker)
+                primary_path = Path(self.resolve_uri(artifact.container_uri))
+                resolved_path = primary_path
+                if not primary_path.exists():
+                    if artifact.abs_path and Path(artifact.abs_path).exists():
+                        resolved_path = Path(artifact.abs_path)
+                    elif run is not None:
+                        resolved_path = self.resolve_historical_path(artifact, run)
+                if existing_only and not resolved_path.exists():
+                    continue
+                resolved_for_run[key] = resolved_path
+            result[run_id] = resolved_for_run
+        return result
+
     def get_run_result(
         self,
         run_id: str,
@@ -404,7 +457,14 @@ class TrackerHistoryService(_TrackerServiceBase):
                     return art
         return next(iter(collection.values()), None)
 
-    def load_run_output(self, run_id: str, key: str, **kwargs: Any) -> Any:
+    def load_run_output(
+        self,
+        run_id: str,
+        key: str,
+        *,
+        columns: Optional[Sequence[str]] = None,
+        **kwargs: Any,
+    ) -> Any:
         """
         Load one output artifact from a historical run.
         """
@@ -413,6 +473,8 @@ class TrackerHistoryService(_TrackerServiceBase):
             raise ValueError(
                 f"No output artifact found for run_id={run_id!r} key={key!r}."
             )
+        if columns is not None:
+            kwargs["columns"] = columns
         return self.load(artifact, **kwargs)
 
     def find_matching_run(

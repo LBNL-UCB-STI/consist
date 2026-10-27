@@ -87,7 +87,15 @@ from consist.core.decorators import (
     define_step as define_step_decorator,
     require_runtime_kwargs as require_runtime_kwargs_decorator,
 )
-from consist.core.drivers import ARRAY_DRIVERS, TABLE_DRIVERS, ArrayInfo, TableInfo
+from consist.core.drivers import (
+    ARRAY_DRIVERS,
+    TABLE_DRIVERS,
+    ArrayInfo,
+    TableInfo,
+    _is_enodata_error,
+    _load_parquet_arrow_no_mmap,
+    _normalize_columns,
+)
 from consist.core.gtfs import GTFS_BUNDLE_SOURCE_KEY, GtfsCanonicalizationResult
 from consist.core.noop import NoopRunContext, NoopScenarioContext
 from consist.core.run_options import raise_legacy_policy_kwargs_error
@@ -143,24 +151,31 @@ if TYPE_CHECKING:
 GeoDataFrameType = Any
 XarrayDatasetType = Any
 
-# Import loaders for specific formats
-xr: Optional[ModuleType]
-try:
-    xr = importlib.import_module("xarray")
-except ImportError:
-    xr = None
+# Import loaders for specific formats lazily on first use
+_UNSET = object()
+tables: Any = _UNSET
+gpd: Any = _UNSET
 
-tables: Optional[ModuleType]
-try:
-    tables = importlib.import_module("tables")
-except ImportError:
-    tables = None
 
-gpd: Optional[ModuleType]
-try:
-    gpd = importlib.import_module("geopandas")
-except ImportError:
-    gpd = None
+def _get_tables() -> Optional[ModuleType]:
+    global tables
+    if tables is _UNSET:
+        try:
+            tables = importlib.import_module("tables")
+        except ImportError:
+            tables = None
+    return tables
+
+
+def _get_gpd() -> Optional[ModuleType]:
+    global gpd
+    if gpd is _UNSET:
+        try:
+            gpd = importlib.import_module("geopandas")
+        except ImportError:
+            gpd = None
+    return gpd
+
 
 T = TypeVar("T", bound=SQLModel)
 
@@ -1379,6 +1394,39 @@ def materialize_run_outputs(
         preserve_existing=preserve_existing,
         on_missing=on_missing,
         db_fallback=db_fallback,
+    )
+
+
+def resolve_run_output_paths(
+    run_ids: Sequence[str],
+    *,
+    keys: Sequence[str] | None = None,
+    existing_only: bool = False,
+    tracker: Optional["Tracker"] = None,
+) -> dict[str, dict[str, Path]]:
+    """
+    Resolve output artifact filesystem paths for multiple runs in bulk.
+
+    Parameters
+    ----------
+    run_ids : Sequence[str]
+        Run identifiers to inspect.
+    keys : Sequence[str] | None, optional
+        Optional subset of artifact keys to resolve per run.
+    existing_only : bool, default False
+        When True, omit paths that do not exist on disk.
+    tracker : Optional[Tracker], optional
+        Tracker instance to use. If omitted, resolves the active/default tracker.
+
+    Returns
+    -------
+    dict[str, dict[str, Path]]
+        Mapping from ``run_id`` to ``{artifact_key: resolved_path}``.
+    """
+    return _resolve_tracker(tracker).resolve_run_output_paths(
+        run_ids,
+        keys=keys,
+        existing_only=existing_only,
     )
 
 
@@ -3272,6 +3320,7 @@ def load(
     tracker: Optional["Tracker"] = None,
     *,
     db_fallback: str = "inputs-only",
+    columns: Optional[Sequence[str]] = None,
     **kwargs: Any,
 ) -> duckdb.DuckDBPyRelation: ...
 
@@ -3282,6 +3331,7 @@ def load(
     tracker: Optional["Tracker"] = None,
     *,
     db_fallback: str = "inputs-only",
+    columns: Optional[Sequence[str]] = None,
     **kwargs: Any,
 ) -> duckdb.DuckDBPyRelation: ...
 
@@ -3292,6 +3342,7 @@ def load(
     tracker: Optional["Tracker"] = None,
     *,
     db_fallback: str = "inputs-only",
+    columns: Optional[Sequence[str]] = None,
     **kwargs: Any,
 ) -> duckdb.DuckDBPyRelation: ...
 
@@ -3302,6 +3353,7 @@ def load(
     tracker: Optional["Tracker"] = None,
     *,
     db_fallback: str = "inputs-only",
+    columns: Optional[Sequence[str]] = None,
     **kwargs: Any,
 ) -> LoadResult: ...
 
@@ -3312,6 +3364,7 @@ def load(
     tracker: Optional["Tracker"] = None,
     *,
     db_fallback: str = "inputs-only",
+    columns: Optional[Sequence[str]] = None,
     **kwargs: Any,
 ) -> LoadResult: ...
 
@@ -3321,6 +3374,7 @@ def load(
     tracker: Optional["Tracker"] = None,
     *,
     db_fallback: str = "inputs-only",
+    columns: Optional[Sequence[str]] = None,
     **kwargs: Any,
 ) -> LoadResult:
     """
@@ -3423,6 +3477,8 @@ def load(
     # Only pass caller-provided kwargs to the loader; artifact.meta can contain
     # flags (e.g., schema_name) not accepted by pandas/xarray readers.
     load_kwargs = dict(kwargs)
+    if columns is not None:
+        load_kwargs["columns"] = columns
 
     # Driver-specific hints from metadata
     if (
@@ -3499,7 +3555,7 @@ def load(
             raise RuntimeError(
                 f"Artifact {artifact.key} is missing from disk, but marked as ingested. Provide a tracker with a DB connection to load it."
             )
-        return _load_from_db(artifact, tracker, **kwargs)
+        return _load_from_db(artifact, tracker, **load_kwargs)
 
     # 5. Failure
     raise FileNotFoundError(
@@ -3561,6 +3617,12 @@ def _load_from_disk(path: str, driver: str, **kwargs: Any) -> LoadResult:
             relation = relation.limit(int(nrows))
         # Keep the connection alive for downstream relation materialization.
         _RELATION_CONNECTIONS[relation] = conn
+        if driver == DriverType.PARQUET.value:
+            _RELATION_PARQUET_FALLBACKS[relation] = (
+                path,
+                _normalize_columns(load_kwargs.get("columns")),
+                int(nrows) if nrows is not None else None,
+            )
         _maybe_warn_relation_leaks()
         return relation
     elif driver in DriverType.array_drivers():
@@ -3573,16 +3635,17 @@ def _load_from_disk(path: str, driver: str, **kwargs: Any) -> LoadResult:
         )
         return ARRAY_DRIVERS.get(driver).load(info)
     elif driver in DriverType.spatial_drivers():
-        if gpd is None:
+        gpd_module = _get_gpd()
+        if gpd_module is None:
             raise ImportError(
                 "geopandas is required for spatial formats. "
                 'Install with `pip install "consist[spatial]"`.'
             )
         if driver == DriverType.GEOPARQUET.value:
-            return gpd.read_parquet(path, **kwargs)
-        return gpd.read_file(path, **kwargs)
+            return gpd_module.read_parquet(path, **kwargs)
+        return gpd_module.read_file(path, **kwargs)
     elif driver in ("h5", "hdf5"):
-        if not tables:
+        if not _get_tables():
             raise ImportError("PyTables is required.")
         return pd.HDFStore(path, mode="r")
     else:
@@ -3605,8 +3668,10 @@ def _load_from_db(
     artifact_id = str(artifact.id).replace("'", "''")
     conn = duckdb.connect(hot_data_db_path, read_only=True)
     quoted_table = _quote_ident(table_name)
+    columns = _normalize_columns(kwargs.get("columns"))
+    select_sql = ", ".join(_quote_ident(col) for col in columns) if columns else "*"
     relation = conn.sql(
-        f"SELECT * FROM global_tables.{quoted_table} "
+        f"SELECT {select_sql} FROM global_tables.{quoted_table} "
         f"WHERE consist_artifact_id = '{artifact_id}'"
     )
     nrows = kwargs.get("nrows")
@@ -3619,6 +3684,7 @@ def _load_from_db(
 
 
 def _close_relation_connection(relation: duckdb.DuckDBPyRelation) -> None:
+    _RELATION_PARQUET_FALLBACKS.pop(relation, None)
     conn = _RELATION_CONNECTIONS.pop(relation, None)
     if conn is None:
         conn = getattr(relation, "_consist_conn", None)
@@ -3634,6 +3700,7 @@ def _close_relation_connection(relation: duckdb.DuckDBPyRelation) -> None:
 
 
 _RELATION_CONNECTIONS: "weakref.WeakKeyDictionary[duckdb.DuckDBPyRelation, duckdb.DuckDBPyConnection]" = weakref.WeakKeyDictionary()
+_RELATION_PARQUET_FALLBACKS: "weakref.WeakKeyDictionary[duckdb.DuckDBPyRelation, tuple[str, list[str], Optional[int]]]" = weakref.WeakKeyDictionary()
 
 
 class RelationConnectionLeakWarning(RuntimeWarning):
@@ -3685,8 +3752,14 @@ def to_df(relation: duckdb.DuckDBPyRelation, *, close: bool = True) -> pd.DataFr
     """
     if not hasattr(relation, "df"):
         raise TypeError("to_df expects a DuckDB Relation.")
+    parquet_fallback = _RELATION_PARQUET_FALLBACKS.get(relation)
     try:
         return relation.df()
+    except (OSError, duckdb.IOException) as exc:
+        if parquet_fallback is None or not _is_enodata_error(exc):
+            raise
+        path, columns, nrows = parquet_fallback
+        return _load_parquet_arrow_no_mmap(path, columns, nrows=nrows).to_pandas()
     finally:
         if close:
             _close_relation_connection(relation)
@@ -3697,6 +3770,7 @@ def load_df(
     tracker: Optional["Tracker"] = None,
     *,
     db_fallback: str = "inputs-only",
+    columns: Optional[Sequence[str]] = None,
     close: bool = True,
     **kwargs: Any,
 ) -> pd.DataFrame:
@@ -3711,13 +3785,21 @@ def load_df(
         Tracker to use for resolving paths or DB fallback.
     db_fallback : str, default "inputs-only"
         Controls when DB recovery is allowed for ingested artifacts.
+    columns : Optional[Sequence[str]], optional
+        Optional subset of column names to project when loading.
     close : bool, default True
         Whether to close the underlying DuckDB connection after materialization
         when the load returns a Relation.
     **kwargs : Any
         Additional loader options.
     """
-    result = load(artifact, tracker=tracker, db_fallback=db_fallback, **kwargs)
+    result = load(
+        artifact,
+        tracker=tracker,
+        db_fallback=db_fallback,
+        columns=columns,
+        **kwargs,
+    )
     if isinstance(result, duckdb.DuckDBPyRelation):
         # Relations are intended to be short-lived; close the underlying
         # connection by default after materialization. TODO: consider a bulk
@@ -3736,13 +3818,20 @@ def load_relation(
     tracker: Optional["Tracker"] = None,
     *,
     db_fallback: str = "inputs-only",
+    columns: Optional[Sequence[str]] = None,
     **kwargs: Any,
 ) -> Iterator[duckdb.DuckDBPyRelation]:
     """
     Context manager that yields a DuckDB Relation and ensures the underlying
     connection is closed on exit.
     """
-    result = load(artifact, tracker=tracker, db_fallback=db_fallback, **kwargs)
+    result = load(
+        artifact,
+        tracker=tracker,
+        db_fallback=db_fallback,
+        columns=columns,
+        **kwargs,
+    )
     if not isinstance(result, duckdb.DuckDBPyRelation):
         raise TypeError("load_relation requires a tabular artifact.")
     try:

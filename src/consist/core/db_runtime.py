@@ -164,8 +164,16 @@ class _DBCallProfiler:
 DB_CALL_PROFILER = _DBCallProfiler()
 
 
+NON_RETRYABLE_DB_ERROR_MARKERS = (
+    "database does not exist",
+    "no such file or directory",
+)
+
+
 def is_retryable_db_error(message: str) -> bool:
     normalized = message.lower()
+    if any(marker in normalized for marker in NON_RETRYABLE_DB_ERROR_MARKERS):
+        return False
     return any(marker in normalized for marker in RETRYABLE_DB_ERROR_MARKERS)
 
 

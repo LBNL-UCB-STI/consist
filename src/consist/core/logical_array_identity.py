@@ -45,6 +45,25 @@ _PRIMARY_LOOKUP_KEYS = (
 _DEFAULT_CHUNK_ROWS = 512
 
 
+def open_h5py_read_only(path: str | Path, *, h5py_module: Any = None) -> Any:
+    """Open an HDF5 file in read-only mode with Lustre-safe locking defaults.
+
+    When ``HDF5_USE_FILE_LOCKING`` is not set in the environment, passes
+    ``locking=False`` to ``h5py.File(..., "r")`` so concurrent read-only opens
+    on network filesystems (such as Lustre without ``flock``) do not fail or
+    block. Respects ``HDF5_USE_FILE_LOCKING`` when explicitly set by the user,
+    and falls back cleanly if an older ``h5py`` version or test fake does not
+    accept the ``locking`` keyword argument.
+    """
+    h5py = h5py_module if h5py_module is not None else importlib.import_module("h5py")
+    if "HDF5_USE_FILE_LOCKING" not in os.environ:
+        try:
+            return h5py.File(path, "r", locking=False)
+        except TypeError:
+            return h5py.File(path, "r")
+    return h5py.File(path, "r")
+
+
 @dataclass(frozen=True, slots=True)
 class ArrayCanonicalizationPolicy:
     """Controls how logical arrays and coordinates are normalized before hashing.
@@ -829,9 +848,8 @@ def compute_omx_logical_matrices_sha256(
     """
     resolved_policy = resolve_canonicalization_policy(policy)
     if isinstance(omx_path_or_handle, (str, Path)):
-        h5py = importlib.import_module("h5py")
         omx_path = Path(omx_path_or_handle)
-        with h5py.File(omx_path, "r") as h5f:
+        with open_h5py_read_only(omx_path) as h5f:
             return _compute_omx_logical_matrices_sha256_from_h5(
                 h5f,
                 omx_path=omx_path,
@@ -1395,8 +1413,7 @@ def inspect_matrix_container(
 
         if artifact_format in {"omx", "h5"}:
             try:
-                h5py = importlib.import_module("h5py")
-                with h5py.File(p, "r") as h5f:
+                with open_h5py_read_only(p) as h5f:
                     root_attrs = {
                         str(k): _decode_attr_value(v) for k, v in h5f.attrs.items()
                     }

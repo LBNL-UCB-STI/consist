@@ -30,12 +30,20 @@ from pathlib import Path
 from consist.types import CodeIdentityMode
 from consist.core.resolved_binding import ArtifactIdentity
 
-# Try importing git, handle error if missing (optional dependency)
-git: Optional[ModuleType]
-try:
-    git = import_module("git")
-except ImportError:
-    git = None
+# Try importing git lazily on first use, handle error if missing (optional dependency)
+_UNSET = object()
+git: Any = _UNSET
+
+
+def _get_git() -> Optional[ModuleType]:
+    global git
+    if git is _UNSET:
+        try:
+            git = import_module("git")
+        except ImportError:
+            git = None
+    return git
+
 
 # Try importing numpy for type checking
 np: Optional[ModuleType]
@@ -274,7 +282,8 @@ class IdentityManager:
             repository that can be inspected.
         """
         code_version: str
-        if git is None:
+        git_module = _get_git()
+        if git_module is None:
             raise CodeIdentityUnavailableError(
                 mode="repo_git",
                 reason="GitPython is not installed.",
@@ -287,7 +296,7 @@ class IdentityManager:
         try:
             # search_parent_directories=True helps if running from a subdir
             if self._repo_git_repo_cache is None:
-                self._repo_git_repo_cache = git.Repo(
+                self._repo_git_repo_cache = git_module.Repo(
                     self.project_root, search_parent_directories=True
                 )
             code_version, fingerprint = self._repo_git_code_version(
