@@ -15,6 +15,10 @@
   that should skip user code on cache hits.
 - Use `consist.trace(...)` or `Tracker.trace(...)` when the body must still run
   on cache hits.
+- Use `consist exec` (CLI) or `Tracker.exec(...)` / `consist.exec(...)` (Python)
+  to execute external commands, non-Python scripts (R, Julia, C++), or
+  black-box binaries with declared boundary verification, sidecar logging, and
+  automatic baseline diffing without wrapping them in Python callables.
 - Use `consist.scenario(...)` or `tracker.scenario(...)` for multi-step
   workflows, repeated sweeps, and explicit step-to-step artifacts.
 - Use `binding=BindingResult(...)` on `sc.run(...)` when an external planner or

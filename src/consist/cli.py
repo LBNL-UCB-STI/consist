@@ -70,6 +70,7 @@ from consist.tools import queries
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from consist.core.command_exec import CommandExecutionResult
     from consist.models.artifact import Artifact
     from consist.models.run import Run
 
@@ -259,47 +260,108 @@ def _escape_like_pattern(value: str) -> str:
     return value
 
 
+def _safe_is_file(p: Path) -> bool:
+    try:
+        return p.is_file()
+    except OSError:
+        return False
+
+
+def _safe_is_dir(p: Path) -> bool:
+    try:
+        return p.is_dir()
+    except OSError:
+        return False
+
+
+def find_project_root_and_db(
+    start_dir: Optional[Path | str] = None,
+) -> Tuple[Optional[Path], Optional[Path]]:
+    """
+    Find project root and database by walking up parent directories.
+
+    Checks in each directory from start_dir up to filesystem root:
+    1. .consist/provenance.duckdb -> root is dir, db is .consist/provenance.duckdb
+    2. provenance.duckdb -> root is dir, db is provenance.duckdb
+    3. .consist/ directory -> root is dir, db is .consist/provenance.duckdb
+    """
+    try:
+        start = Path(start_dir).resolve() if start_dir else Path.cwd().resolve()
+        dirs = [start, *start.parents]
+    except OSError:
+        return None, None
+
+    for directory in dirs:
+        consist_db = directory / ".consist" / "provenance.duckdb"
+        if _safe_is_file(consist_db):
+            return directory, consist_db
+        root_db = directory / "provenance.duckdb"
+        if _safe_is_file(root_db):
+            return directory, root_db
+        consist_dir = directory / ".consist"
+        if _safe_is_dir(consist_dir):
+            return directory, consist_db
+    return None, None
+
+
 def find_db_path(explicit_path: Optional[str] = None) -> str:
-    """Find the provenance database, checking common locations."""
+    """Find the provenance database, checking explicit path, env, upward discovery, then defaults."""
     if explicit_path:
         return explicit_path
 
     # Check environment variable
-    import os
-
     if env_path := os.getenv("CONSIST_DB"):
         return env_path
 
     # Check current directory
-    if Path("provenance.duckdb").exists():
+    if _safe_is_file(Path("provenance.duckdb")):
         return "provenance.duckdb"
 
     # Check common subdirectories
     for subdir in [".", "data", "db", ".consist"]:
         candidate = Path(subdir) / "provenance.duckdb"
-        if candidate.exists():
+        if _safe_is_file(candidate):
             return str(candidate)
+
+    # Check upward discovery from parent directories
+    _proj_root, discovered_db = find_project_root_and_db()
+    if discovered_db and (
+        _safe_is_file(discovered_db) or _safe_is_dir(discovered_db.parent)
+    ):
+        return str(discovered_db)
 
     # Fall back to default
     return "provenance.duckdb"
 
 
-# Then update get_tracker:
 def get_tracker(
     db_path: Optional[str] = None,
     *,
     run_dir: Optional[Path | str] = None,
     mounts: Optional[Dict[str, str]] = None,
+    create_if_missing: bool = False,
 ) -> Tracker:
     """Initializes and returns a Tracker instance."""
     resolved_path = find_db_path(db_path)
-    if not Path(resolved_path).exists():
+    if not create_if_missing and not Path(resolved_path).exists():
         console.print(f"[red]Database not found at {resolved_path}[/red]")
         console.print(
             "[yellow]Hint: Use --db-path to specify location or set CONSIST_DB environment variable[/yellow]"
         )
         raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
-    tracker_run_dir = Path(run_dir) if run_dir is not None else Path(".")
+
+    if run_dir is not None:
+        tracker_run_dir = Path(run_dir)
+    else:
+        proj_root, _ = find_project_root_and_db()
+        if proj_root:
+            if (proj_root / "runs").is_dir():
+                tracker_run_dir = proj_root / "runs"
+            else:
+                tracker_run_dir = proj_root
+        else:
+            tracker_run_dir = Path(".")
+
     tracker_mounts = dict(mounts or {})
     if run_dir is not None and "workspace" not in tracker_mounts:
         tracker_mounts["workspace"] = str(tracker_run_dir.expanduser().resolve())
@@ -308,6 +370,29 @@ def get_tracker(
         db_path=resolved_path,
         mounts=tracker_mounts or None,
     )
+
+
+def _parse_role_path_mappings(
+    values: Optional[List[str]], option_name: str
+) -> Dict[str, str]:
+    if not values:
+        return {}
+    res: Dict[str, str] = {}
+    for item in values:
+        item = item.strip()
+        if "=" not in item:
+            raise ValueError(
+                f"Invalid {option_name} format '{item}'; expected role=PATH"
+            )
+        role, path_val = item.split("=", 1)
+        role = role.strip()
+        path_val = path_val.strip()
+        if not role or not path_val:
+            raise ValueError(
+                f"Invalid {option_name} format '{item}'; role and PATH cannot be empty"
+            )
+        res[role] = path_val
+    return res
 
 
 def _render_admission_report(report: AdmissionReport) -> None:
@@ -3378,6 +3463,8 @@ class ConsistShell(cmd.Cmd):
     _SCHEMA_SUBCOMMANDS: Tuple[str, ...] = ("capture-file", "export", "apply-fks")
     _VIEWS_SUBCOMMANDS: Tuple[str, ...] = ("create",)
     _CLI_ROOT_COMMANDS: Tuple[str, ...] = (
+        "init",
+        "exec",
         "search",
         "validate",
         "scenarios",
@@ -3393,6 +3480,8 @@ class ConsistShell(cmd.Cmd):
         "db",
     )
     _PASSTHROUGH_COMMANDS: Tuple[str, ...] = (
+        "init",
+        "exec",
         "search",
         "validate",
         "scenario",
@@ -4990,6 +5079,385 @@ def shell(
         run_dir=run_dir,
         mount_overrides=mount_overrides,
     ).cmdloop()
+
+
+def _render_dry_run_plan(plan: Dict[str, Any]) -> None:
+    """Render a structured dry-run execution plan."""
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="bold cyan")
+    grid.add_column()
+    grid.add_row("Name", plan.get("name", ""))
+    cmd_list = plan.get("command", [])
+    grid.add_row("Command", " ".join(shlex.quote(c) for c in cmd_list))
+    grid.add_row("Working Dir", plan.get("cwd", ""))
+    grid.add_row("Env Digest", plan.get("env_digest", "")[:16] + "...")
+    if plan.get("outputs_dir"):
+        grid.add_row("Outputs Dir", str(plan["outputs_dir"]))
+
+    console.print(
+        Panel(
+            grid,
+            title="[bold yellow]Consist Exec Plan (Dry Run)[/bold yellow]",
+            border_style="yellow",
+        )
+    )
+
+    inputs = plan.get("inputs", {})
+    if inputs:
+        inp_table = Table(title="Declared Inputs", border_style="dim")
+        inp_table.add_column("Key", style="cyan")
+        inp_table.add_column("Path", style="dim")
+        inp_table.add_column("Hash / Type", style="green")
+        for k, v in inputs.items():
+            inp_table.add_row(
+                k, str(v.get("path", "")), str(v.get("hash", v.get("type", "")))
+            )
+        console.print(inp_table)
+
+    outputs = plan.get("outputs", {})
+    if outputs:
+        out_table = Table(title="Declared Outputs", border_style="dim")
+        out_table.add_column("Key", style="cyan")
+        out_table.add_column("Path", style="dim")
+        out_table.add_column("Exists Pre-run", style="yellow")
+        for k, v in outputs.items():
+            out_table.add_row(
+                k, str(v.get("path", "")), "Yes" if v.get("exists") else "No"
+            )
+        console.print(out_table)
+
+    suggested = plan.get("suggested_inputs", [])
+    if suggested:
+        sugg_table = Table(
+            title="Suggested Inputs from argv (use --accept-suggested to include)",
+            border_style="dim",
+        )
+        sugg_table.add_column("Key", style="cyan")
+        sugg_table.add_column("Path", style="dim")
+        for item in suggested:
+            sugg_table.add_row(str(item.get("key", "")), str(item.get("path", "")))
+        console.print(sugg_table)
+
+
+def _render_exec_result(result: "CommandExecutionResult") -> None:
+    """Render execution summary and baseline comparison panels."""
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="bold cyan")
+    grid.add_column(overflow="fold")
+
+    status_str = (
+        "[green]COMPLETED[/green]"
+        if result.is_success
+        else f"[red]FAILED[/red] (exit code {result.exit_code})"
+    )
+    grid.add_row("Status", status_str)
+    if result.run:
+        grid.add_row("Run ID", result.run.id)
+        if result.run.model_name:
+            grid.add_row("Model", result.run.model_name)
+    grid.add_row("Duration", f"{result.duration:.3f}s")
+    grid.add_row("Inputs", f"{len(result.inputs)} hashed")
+    grid.add_row("Outputs", f"{len(result.outputs)} verified")
+    if result.stdout_path:
+        grid.add_row("Stdout Log", str(result.stdout_path))
+    if result.stderr_path:
+        grid.add_row("Stderr Log", str(result.stderr_path))
+    if result.run:
+        grid.add_row("Inspect", f"consist show {result.run.id}")
+    if result.error:
+        grid.add_row("Error", f"[red]{result.error}[/red]")
+
+    title_color = "green" if result.is_success else "red"
+    console.print(
+        Panel(
+            grid,
+            title=f"[bold {title_color}]Consist Exec Summary[/bold {title_color}]",
+            border_style=title_color,
+        )
+    )
+
+    if (
+        result.run
+        and result.run.meta
+        and isinstance(result.run.meta.get("command"), dict)
+    ):
+        base_comp = result.run.meta["command"].get("baseline_comparison")
+        if base_comp:
+            base_grid = Table.grid(padding=(0, 2))
+            base_grid.add_column(style="bold cyan")
+            base_grid.add_column()
+            base_grid.add_row("Baseline Run", str(base_comp.get("baseline_run_id", "")))
+            cmd_status = (
+                "[yellow]Changed[/yellow]"
+                if base_comp.get("command_changed")
+                else "[green]Identical[/green]"
+            )
+            base_grid.add_row("Command", cmd_status)
+
+            dur_delta = base_comp.get("duration_delta")
+            if dur_delta is not None:
+                delta_str = f"+{dur_delta}s" if dur_delta > 0 else f"{dur_delta}s"
+                base_grid.add_row("Duration Delta", delta_str)
+
+            inp_diff = base_comp.get("inputs", {})
+            inp_summary = (
+                f"+{len(inp_diff.get('added', []))} "
+                f"-{len(inp_diff.get('removed', []))} "
+                f"~{len(inp_diff.get('modified', []))} "
+                f"={len(inp_diff.get('unchanged', []))}"
+            )
+            base_grid.add_row("Input Artifacts", inp_summary)
+
+            out_diff = base_comp.get("outputs", {})
+            out_summary = (
+                f"+{len(out_diff.get('added', []))} "
+                f"-{len(out_diff.get('removed', []))} "
+                f"~{len(out_diff.get('modified', []))} "
+                f"={len(out_diff.get('unchanged', []))}"
+            )
+            base_grid.add_row("Output Artifacts", out_summary)
+
+            console.print(
+                Panel(
+                    base_grid,
+                    title="[bold]Baseline Comparison[/bold]",
+                    border_style="blue",
+                )
+            )
+
+
+@app.command("init")
+def init_cmd(
+    path: Optional[Path] = typer.Option(
+        None,
+        "--path",
+        "-p",
+        help="Directory to initialize Consist in (defaults to current working directory).",
+    ),
+    db_name: str = typer.Option(
+        "provenance.duckdb",
+        "--db-name",
+        help="Database file name inside .consist/.",
+    ),
+) -> None:
+    """Initialize a Consist project directory structure (.consist/, runs/, DuckDB database)."""
+    target_dir = Path(path).resolve() if path else Path.cwd().resolve()
+    consist_dir = target_dir / ".consist"
+    runs_dir = target_dir / "runs"
+    db_file = consist_dir / db_name
+
+    consist_dir.mkdir(parents=True, exist_ok=True)
+    runs_dir.mkdir(parents=True, exist_ok=True)
+
+    get_tracker(str(db_file), run_dir=runs_dir, create_if_missing=True)
+
+    console.print(f"[green]✓ Initialized Consist project in {target_dir}[/green]")
+    console.print(f"  • Marker directory: [dim]{consist_dir}[/dim]")
+    console.print(f"  • Runs directory:   [dim]{runs_dir}[/dim]")
+    console.print(f"  • Database:         [dim]{db_file}[/dim]")
+
+
+@app.command(
+    "exec",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def exec_cmd(
+    ctx: typer.Context,
+    command: Optional[List[str]] = typer.Argument(
+        None, help="Command and arguments to execute."
+    ),
+    input: Optional[List[str]] = typer.Option(
+        None,
+        "--input",
+        "-i",
+        "--inputs",
+        help="Declared input artifact in role=PATH format (repeatable).",
+    ),
+    output: Optional[List[str]] = typer.Option(
+        None,
+        "--output",
+        "-o",
+        "--outputs",
+        help="Declared output artifact in role=PATH format (repeatable).",
+    ),
+    outputs_dir: Optional[Path] = typer.Option(
+        None,
+        "--outputs-dir",
+        help="Directory to monitor for newly generated or modified files.",
+    ),
+    cwd: Optional[Path] = typer.Option(
+        None,
+        "--cwd",
+        help="Working directory for command execution.",
+    ),
+    name: Optional[str] = typer.Option(
+        None,
+        "--name",
+        "-n",
+        help="Semantic identifier for the run (defaults to command name).",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Inspect boundaries, compute digests, and preview execution plan without running.",
+    ),
+    accept_suggested: bool = typer.Option(
+        False,
+        "--accept-suggested",
+        help="Automatically declare existing files found in argv as inputs.",
+    ),
+    shell: bool = typer.Option(
+        False,
+        "--shell",
+        help="Execute command through shell.",
+    ),
+    quiet: bool = typer.Option(
+        False,
+        "--quiet",
+        "-q",
+        help="Silence Consist's summary banner, emitting only child process output and exit code.",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Output execution plan or result as JSON.",
+    ),
+    db_path: Optional[str] = typer.Option(
+        None,
+        "--db-path",
+        help="Path to the DuckDB provenance database.",
+    ),
+    run_dir: Optional[str] = typer.Option(
+        None,
+        "--run-dir",
+        help="Path to the run directory.",
+    ),
+    tags: Optional[List[str]] = typer.Option(
+        None,
+        "--tag",
+        "-t",
+        "--tags",
+        help="Tags to associate with the run.",
+    ),
+    description: Optional[str] = typer.Option(
+        None,
+        "--description",
+        "-d",
+        help="Description for the run.",
+    ),
+) -> None:
+    """Execute an external command and record process-level provenance directly in DuckDB."""
+    cmd_tokens = list(command or []) + list(ctx.args or [])
+    if not cmd_tokens:
+        console.print("[red]Error: No command specified to execute.[/red]")
+        raise typer.Exit(CLI_EXIT_USAGE_ERROR)
+
+    effective_name = name or Path(cmd_tokens[0]).name
+
+    try:
+        parsed_inputs = _parse_role_path_mappings(input, "--input")
+        parsed_outputs = _parse_role_path_mappings(output, "--output")
+    except ValueError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(CLI_EXIT_USAGE_ERROR) from exc
+
+    tracker = get_tracker(db_path, run_dir=run_dir, create_if_missing=True)
+
+    try:
+        result = tracker.exec(
+            name=effective_name,
+            argv=cmd_tokens,
+            inputs=parsed_inputs or None,
+            outputs=parsed_outputs or None,
+            outputs_dir=outputs_dir,
+            cwd=cwd,
+            dry_run=dry_run,
+            shell=shell,
+            accept_suggested=accept_suggested,
+            stream_output=not json_output,
+            tags=tags,
+            description=description,
+            check=False,
+        )
+    except KeyboardInterrupt:
+        raise typer.Exit(code=130)
+    except (FileNotFoundError, ValueError) as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(CLI_EXIT_USAGE_ERROR) from exc
+
+    if json_output:
+        if dry_run and result.plan:
+            typer.echo(json.dumps(result.plan, indent=2))
+        else:
+            artifacts_list = []
+            for k, art in result.inputs.items():
+                artifacts_list.append(
+                    {
+                        "key": k,
+                        "direction": "input",
+                        "path": str(art.path),
+                        "hash": art.hash,
+                        "id": str(art.id),
+                    }
+                )
+            for k, art in result.outputs.items():
+                artifacts_list.append(
+                    {
+                        "key": k,
+                        "direction": "output",
+                        "path": str(art.path),
+                        "hash": art.hash,
+                        "id": str(art.id),
+                    }
+                )
+            json_data = {
+                "run_id": result.run.id if result.run else None,
+                "name": result.run.model_name if result.run else effective_name,
+                "command": result.command,
+                "exit_code": result.exit_code,
+                "status": (
+                    result.run.status
+                    if result.run
+                    else ("completed" if result.exit_code == 0 else "failed")
+                ),
+                "duration": result.duration,
+                "stdout_path": str(result.stdout_path) if result.stdout_path else None,
+                "stderr_path": str(result.stderr_path) if result.stderr_path else None,
+                "artifacts": artifacts_list,
+                "inputs": {
+                    k: {"path": str(art.path), "hash": art.hash, "id": str(art.id)}
+                    for k, art in result.inputs.items()
+                },
+                "outputs": {
+                    k: {"path": str(art.path), "hash": art.hash, "id": str(art.id)}
+                    for k, art in result.outputs.items()
+                },
+                "error": result.error,
+            }
+            if (
+                result.run
+                and result.run.meta
+                and isinstance(result.run.meta.get("command"), dict)
+            ):
+                cmd_meta = result.run.meta["command"]
+                if "baseline_comparison" in cmd_meta:
+                    json_data["baseline_comparison"] = cmd_meta["baseline_comparison"]
+            typer.echo(json.dumps(json_data, indent=2))
+        if result.exit_code != 0:
+            raise typer.Exit(code=result.exit_code)
+        return
+
+    if dry_run and result.plan:
+        _render_dry_run_plan(result.plan)
+        return
+
+    if not quiet:
+        _render_exec_result(result)
+    elif result.exit_code != 0 and result.error:
+        typer.echo(f"Error: {result.error}", err=True)
+
+    if result.exit_code != 0:
+        raise typer.Exit(code=result.exit_code)
 
 
 if __name__ == "__main__":

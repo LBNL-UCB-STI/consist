@@ -6,6 +6,7 @@ patterns for new projects and onboarding docs/examples.
 ## Core execution patterns
 
 - **Cacheable function step**: [`Tracker.run`](tracker.md#consist.core.tracker.Tracker.run)
+- **Command execution step**: [`Tracker.exec`](tracker.md#command-execution-exec) / [`consist.exec`](api_helpers.md#consist.api.exec)
 - **Always-execute traced step**: [`Tracker.trace`](tracker.md#consist.core.tracker.Tracker.trace)
 - **Workflow composition**: [`consist.scenario`](api_helpers.md#consist.api.scenario),
   [`ScenarioContext.run`](workflow.md#consist.core.workflow.ScenarioContext.run),

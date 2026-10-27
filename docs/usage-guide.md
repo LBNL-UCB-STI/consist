@@ -13,6 +13,7 @@ If you are new to Consist, start with the
 | Need | Start with | Why |
 |---|---|---|
 | One Python callable with declared inputs and outputs | `Tracker.run(...)` | Smallest cache-aware execution surface. |
+| External CLI command, shell script, or binary | `consist exec ...` or `Tracker.exec(...)` | Records declared input/output boundaries, exit status, sidecar logs, and baseline diffs without wrapping in a Python function. |
 | Multi-step workflow with explicit handoffs | `tracker.scenario(...).run(...)` | Groups related steps and caches each child step independently. |
 | Independent parameter sweep or Monte Carlo fan-out | `tracker.scenario(...).map_runs(...)` | Runs one child run per registry row and returns a batch summary. |
 | Inline lifecycle block or custom logging | `tracker.trace(...)` or `sc.trace(...)` | Use when the body needs direct access to the active run context. |
@@ -328,6 +329,63 @@ Important distinction:
 - `run(...)` can skip callable execution on a cache hit.
 - `trace(...)` enters your Python block; use it when explicit lifecycle control
   matters more than skip-on-hit function execution.
+
+## Command Execution: `consist exec` & `Tracker.exec(...)`
+
+Use command execution when a step runs as an external CLI binary, shell script,
+or non-Python runtime (such as R, Julia, C++, Fortran, or legacy pipelines) and
+you want provenance tracking without wrapping the step in a Python function.
+
+### Key Contract
+
+1. **Boundary Verification**: Declared inputs are checked for existence and
+   fingerprinted *before* spawning the child process. Inputs and outputs must be
+   disjoint.
+2. **Process Supervision & Logs**: The child process is executed with live
+   terminal streaming while stdout and stderr are captured to dedicated
+   sidecar log files (`stdout.log`, `stderr.log`) in the run directory.
+3. **Strict Output Verification**: The process must exit with code `0` and
+   produce every declared output file on disk. If a declared output is missing,
+   Consist marks the run `failed` with exit code `1`.
+4. **Baseline Comparison**: Successive executions sharing the same `--name`
+   automatically compare against the prior completed run, reporting modified
+   inputs, unchanged artifacts, and duration deltas.
+
+=== "CLI (`consist exec`)"
+
+    ```bash
+    consist exec \
+      --name corridor_calibration \
+      --input params=configs/calibration.env \
+      --input zones=data/zones.csv \
+      --output flows=outputs/corridor_flows.csv \
+      --outputs-dir outputs/ \
+      -- ./run_gravity_model.sh configs/calibration.env data/zones.csv outputs/
+    ```
+
+=== "Python (`Tracker.exec`)"
+
+    ```python
+    from consist import Tracker
+
+    tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
+
+    result = tracker.exec(
+        name="corridor_calibration",
+        argv=["./run_gravity_model.sh", "configs/calibration.env", "data/zones.csv", "outputs/"],
+        inputs={
+            "params": "configs/calibration.env",
+            "zones": "data/zones.csv",
+        },
+        outputs={"flows": "outputs/corridor_flows.csv"},
+        outputs_dir="outputs/",
+    )
+
+    print(result.exit_code)       # 0
+    print(result.stdout_path)     # Path to sidecar stdout.log
+    print(result.inputs)          # Logged input artifacts by key
+    print(result.outputs)         # Verified output artifacts by key
+    ```
 
 ## External Tools and Containers
 

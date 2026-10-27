@@ -14,7 +14,7 @@ The canonical skill lives in the repository at
 Use the skill when asking an agent to:
 
 - add Consist to a new project or pipeline;
-- choose between `run(...)`, `trace(...)`, and `scenario(...)`;
+- choose between `run(...)`, `trace(...)`, `exec(...)` / `consist exec`, and `scenario(...)`;
 - wrap external tools, containers, or legacy code that writes files;
 - declare outputs, output sets, schema profiles, and cache identity;
 - inspect or analyze recorded runs and artifacts;

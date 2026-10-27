@@ -61,6 +61,8 @@ requested rows.
 
 | Task | Start with | Notes |
 | --- | --- | --- |
+| Initialize workspace | `consist init` | Sets up `.consist/provenance.duckdb` and `runs/` in project root. |
+| Track external command | `consist exec ...` | Execute any CLI command and record input/output provenance. |
 | Find recent runs | `consist runs` | Add `--model`, `--status`, or `--tag` when the database is busy. |
 | Inspect one run's outputs | `consist artifacts <run_id>` | Use `--expand-sets` for logical output sets. |
 | Preview data | `consist preview <artifact_key>` | Works for tabular artifacts such as CSV and Parquet. |
@@ -71,12 +73,15 @@ requested rows.
 
 ## Database Discovery
 
-The CLI looks for the provenance database in this order:
+The CLI discovers the provenance database in this order:
 
 1. Explicit `--db-path` argument
 2. `CONSIST_DB` environment variable
-3. `provenance.duckdb` in the current directory
-4. Common subdirectories (`./data/`, `./db/`, `./.consist/`)
+3. **Upward directory search**: Consist walks upward from the current working
+   directory looking for `.consist/provenance.duckdb`, `provenance.duckdb`, or
+   a `.consist/` directory. This allows `consist exec`, `consist runs`, and
+   other inspection commands to work from any subdirectory.
+4. Common local subdirectories (`./data/`, `./db/`, `./.consist/`)
 
 ## Artifact Path Resolution
 
@@ -161,6 +166,64 @@ consist --show-completion      # Print completion script
 ---
 
 ## Commands
+
+### consist init
+
+Initialize a standard Consist workspace in the current directory (or a target path). Creates:
+- `.consist/` metadata marker directory
+- `.consist/provenance.duckdb` analytic database
+- `runs/` default execution and sidecar log root
+
+```bash
+consist init
+# Or initialize in an explicit project directory:
+consist init --path /path/to/project
+```
+
+### consist exec
+
+Execute any CLI command, script, or binary and record its input/output boundaries, stdout/stderr sidecars, exit status, and baseline diffs directly in DuckDB.
+
+Trailing arguments after `--` represent the exact command line to execute.
+
+```bash
+consist exec \
+  --name calibrate_model \
+  --input config=configs/settings.yaml \
+  --input trips=data/trips.parquet \
+  --output summary=outputs/summary.csv \
+  --outputs-dir outputs/ \
+  -- python run_sim.py --config configs/settings.yaml
+```
+
+#### Boundary Declarations
+- **Explicit Role Mapping**: `--input role=PATH` / `--output role=PATH`. Maps logical names to file paths.
+- **Auto-keyed Paths**: `--input PATH` / `--output PATH`. Automatically derives the artifact key from the filename stem.
+- **Directory Monitoring**: `--outputs-dir PATH`. Scans the directory before and after execution, registering newly created or modified files as output artifacts.
+- **Suggested Inputs**: Consist inspects `argv` tokens for existing file paths.
+  - `--dry-run`: Previews resolved paths, calculated digests, and suggested undeclared inputs without executing the command or modifying DuckDB.
+  - `--accept-suggested`: Automatically registers any existing files detected in `argv` as input artifacts.
+
+#### Baseline Comparison
+When running a command with `--name <NAME>`, Consist searches DuckDB for the most recent completed run with the same name and automatically displays a **Baseline Comparison** panel reporting:
+- **Command & Environment drift**: changes to argv, working directory, or environment digest.
+- **Input Artifacts**: added, removed, modified, and unchanged inputs.
+- **Output Artifacts**: modified vs unchanged outputs, plus duration deltas.
+
+#### Scripting, CI & Shell Modes
+- **Clean Pipes (`--quiet` / `-q`)**: Suppresses Consist's Rich formatting, streaming only the child process stdout/stderr so output can be piped cleanly to `jq` or files.
+- **Machine-Readable JSON (`--json`)**: Emits structured JSON summarizing the run metadata, artifact hashes, durations, and baseline comparison.
+- **Shell Compound Commands (`--shell`)**: Executes through `/bin/sh -c` for pipelines and redirects:
+  ```bash
+  consist exec --name pipeline --shell -- "python step1.py | grep match > out.txt"
+  ```
+- **Exit Code Semantics**:
+  - `0`: Process exited `0` AND all declared outputs exist on disk and were hashed.
+  - `1`: Process failed, OR child exited `0` but a declared `--output` file was missing.
+  - `126`: Command found but permission denied.
+  - `127`: Command or executable not found.
+  - `130`: Interrupted by `SIGINT` (Ctrl+C).
+  - `128 + N`: Terminated by signal `N`.
 
 ### consist db
 

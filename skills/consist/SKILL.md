@@ -1,6 +1,6 @@
 ---
 name: consist
-description: Help with brand-new repos/projects being instrumented with Consist from scratch and downstream projects that use Consist for cache-aware scientific workflows. Use when Codex needs to set up or extend Consist in a new application or library, integrate an existing downstream project, choose between consist.run, tracker.run, scenario, and trace, wrap legacy file-writing or container-backed steps, make external files participate in cache identity, inspect or compare runs and artifacts, or debug cache misses, hydration, scenario wiring, or path and mount resolution without digging deeply into the Consist codebase.
+description: Help with brand-new repos/projects being instrumented with Consist from scratch and downstream projects that use Consist for cache-aware scientific workflows. Use when Codex needs to set up or extend Consist in a new application or library, integrate an existing downstream project, choose between consist.run, tracker.run, scenario, trace, and command execution (consist exec / tracker.exec), wrap legacy file-writing or container-backed steps, make external files participate in cache identity, inspect or compare runs and artifacts, or debug cache misses, hydration, scenario wiring, or path and mount resolution without digging deeply into the Consist codebase.
 ---
 
 # Consist
@@ -33,6 +33,10 @@ implementation work inside Consist itself.
   bootstrap reference, then the instrumentation reference.
 - Existing workflow integration or feature work: start with the instrumentation
   reference.
+- External CLI command, polyglot script, or zero-code terminal execution: use
+  `consist exec` or `Tracker.exec(...)` to record declared boundaries, capture
+  sidecar stdout/stderr logs, detect missing outputs, and compare against
+  baseline runs without refactoring code into Python functions.
 - External orchestration that must replay an already-admitted artifact choice:
   read the advanced `ResolvedBindingBuilder` and step-identity guidance in the
   instrumentation reference; keep ordinary `inputs=`, `consist.ref(...)`,
@@ -53,6 +57,9 @@ implementation work inside Consist itself.
 
 - For new repos, identify where the tracker is created and wired before
   choosing the wrapper surface.
+- Prefer `consist exec` (or `Tracker.exec(...)`) for black-box shell commands,
+  polyglot scripts (R, Julia, C++), and CLI pipelines where refactoring into
+  Python callables is unnecessary or impractical.
 - Prefer `consist.run(...)`, `consist.trace(...)`, and `consist.scenario(...)`
   with `use_tracker(...)` in app, script, notebook, and test code.
 - Prefer explicit `Tracker` ownership inside reusable libraries, wrappers, and
