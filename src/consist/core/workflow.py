@@ -1042,9 +1042,10 @@ class ScenarioContext:
                 pass
 
         if remappable_schemes is not None:
-            if isinstance(remappable_schemes, Mapping):
+            if isinstance(remappable_schemes, MappingABC):
                 for scheme, prefix in remappable_schemes.items():
-                    effective_remappable_schemes[scheme] = Path(prefix)
+                    if isinstance(scheme, str) and isinstance(prefix, (str, Path)):
+                        effective_remappable_schemes[scheme] = Path(prefix)
             elif isinstance(remappable_schemes, Iterable):
                 for scheme in remappable_schemes:
                     if scheme in effective_remappable_schemes:

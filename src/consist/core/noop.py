@@ -56,6 +56,10 @@ class NoopArtifact:
     def get_path(self) -> Path:
         return self.path
 
+    @property
+    def abs_path(self) -> Optional[str]:
+        return str(self.path) if self.path is not None else None
+
 
 @dataclass
 class NoopRunResult:
