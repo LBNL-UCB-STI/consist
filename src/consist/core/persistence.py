@@ -409,34 +409,41 @@ class DatabaseManager:
         if self._skip_schema_init:
             return
 
+        db_preexisted = (
+            self.db_path != ":memory:"
+            and Path(self.db_path).exists()
+            and Path(self.db_path).stat().st_size > 0
+        )
+
         def _create():
             SQLModel.metadata.create_all(
                 self.engine,
                 tables=[
-                    getattr(Run, "__table__"),
-                    getattr(Artifact, "__table__"),
-                    getattr(RunArtifactLink, "__table__"),
-                    getattr(RunBindingInvocation, "__table__"),
-                    getattr(ConfigFacet, "__table__"),
-                    getattr(RunConfigKV, "__table__"),
-                    getattr(ArtifactFacet, "__table__"),
-                    getattr(ArtifactKV, "__table__"),
-                    getattr(ArtifactSchema, "__table__"),
-                    getattr(ArtifactSchemaField, "__table__"),
-                    getattr(ArtifactSchemaObservation, "__table__"),
-                    getattr(ArtifactSchemaRelation, "__table__"),
-                    getattr(ArtifactContent, "__table__"),
-                    getattr(RunCouplerSnapshot, "__table__"),
+                    SQLModel.metadata.tables[Run.__tablename__],
+                    SQLModel.metadata.tables[Artifact.__tablename__],
+                    SQLModel.metadata.tables[RunArtifactLink.__tablename__],
+                    SQLModel.metadata.tables[RunBindingInvocation.__tablename__],
+                    SQLModel.metadata.tables[ConfigFacet.__tablename__],
+                    SQLModel.metadata.tables[RunConfigKV.__tablename__],
+                    SQLModel.metadata.tables[ArtifactFacet.__tablename__],
+                    SQLModel.metadata.tables[ArtifactKV.__tablename__],
+                    SQLModel.metadata.tables[ArtifactSchema.__tablename__],
+                    SQLModel.metadata.tables[ArtifactSchemaField.__tablename__],
+                    SQLModel.metadata.tables[ArtifactSchemaObservation.__tablename__],
+                    SQLModel.metadata.tables[ArtifactSchemaRelation.__tablename__],
+                    SQLModel.metadata.tables[ArtifactContent.__tablename__],
+                    SQLModel.metadata.tables[RunCouplerSnapshot.__tablename__],
                 ],
             )
             # DuckDB self-referential FK on run.parent_run_id blocks status updates.
             self._relax_run_parent_fk()
-            # Lightweight compatibility hooks for older DBs. Keep these isolated so
-            # they can be removed without changing steady-state persistence behavior.
-            apply_content_identity_compatibility(self)
-            apply_artifact_parent_compatibility(self)
-            apply_run_stage_phase_compatibility(self)
-            self._ensure_artifact_schema_field_ordinal_position()
+            if db_preexisted:
+                # Lightweight compatibility hooks for older DBs. Keep these isolated so
+                # they can be removed without changing steady-state persistence behavior.
+                apply_content_identity_compatibility(self)
+                apply_artifact_parent_compatibility(self)
+                apply_run_stage_phase_compatibility(self)
+                self._ensure_artifact_schema_field_ordinal_position()
             self._ensure_schema_links_view()
 
         self.execute_with_retry(_create, operation_name="init_schema")

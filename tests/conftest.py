@@ -13,8 +13,13 @@ from consist.core import context
 from consist.core.identity import IdentityManager
 
 # Import specific models
-from consist.models.run import Run, RunArtifactLink, RunBindingInvocation
-from consist.models.artifact import Artifact
+from consist.models.run import (
+    Run,
+    RunArtifactLink,
+    RunBindingInvocation,
+    RunCouplerSnapshot,
+)
+from consist.models.artifact import Artifact, ArtifactContent
 from consist.models.artifact_facet import ArtifactFacet
 from consist.models.artifact_kv import ArtifactKV
 from consist.models.artifact_schema import (
@@ -140,27 +145,27 @@ def _build_tracker(
         builtin_schemas=list(builtin_schemas),
     )
 
-    # --- CRITICAL DATABASE SETUP ---
-    # We restrict operations to ONLY these tables to prevent 'create_all'
-    # from trying to build 'MockTable' (from dlt tests) which uses 'SERIAL' types.
-    core_tables = [
-        getattr(Run, "__table__"),
-        getattr(Artifact, "__table__"),
-        getattr(RunArtifactLink, "__table__"),
-        getattr(RunBindingInvocation, "__table__"),
-        getattr(ConfigFacet, "__table__"),
-        getattr(RunConfigKV, "__table__"),
-        getattr(ArtifactFacet, "__table__"),
-        getattr(ArtifactKV, "__table__"),
-        getattr(ArtifactSchema, "__table__"),
-        getattr(ArtifactSchemaField, "__table__"),
-        getattr(ArtifactSchemaObservation, "__table__"),
-        getattr(ArtifactSchemaRelation, "__table__"),
-    ]
-
     # Clean Slate Policy:
-    # We drop and recreate ONLY the core tables before every test.
-    if test_tracker.engine:
+    # When reusing a persistent DB across tests, drop and recreate the core tables
+    # before each test. For fresh tmp_path DBs, Tracker initialization already
+    # creates all core tables and views cleanly.
+    if persist_path and test_tracker.engine:
+        core_tables = [
+            SQLModel.metadata.tables[Run.__tablename__],
+            SQLModel.metadata.tables[Artifact.__tablename__],
+            SQLModel.metadata.tables[RunArtifactLink.__tablename__],
+            SQLModel.metadata.tables[RunBindingInvocation.__tablename__],
+            SQLModel.metadata.tables[ConfigFacet.__tablename__],
+            SQLModel.metadata.tables[RunConfigKV.__tablename__],
+            SQLModel.metadata.tables[ArtifactFacet.__tablename__],
+            SQLModel.metadata.tables[ArtifactKV.__tablename__],
+            SQLModel.metadata.tables[ArtifactSchema.__tablename__],
+            SQLModel.metadata.tables[ArtifactSchemaField.__tablename__],
+            SQLModel.metadata.tables[ArtifactSchemaObservation.__tablename__],
+            SQLModel.metadata.tables[ArtifactSchemaRelation.__tablename__],
+            SQLModel.metadata.tables[ArtifactContent.__tablename__],
+            SQLModel.metadata.tables[RunCouplerSnapshot.__tablename__],
+        ]
         with test_tracker.engine.connect() as connection:
             with connection.begin():
                 SQLModel.metadata.drop_all(connection, tables=core_tables)
