@@ -13,6 +13,7 @@ from typing import (
     get_origin,
 )
 
+from consist.digest import canonical_json_sha256
 from consist.models.artifact import Artifact
 from consist.models.run import Run
 from consist.core.identity import IdentityManager
@@ -38,7 +39,7 @@ def _schema_view_name(
         "table_path": table_path,
         "array_path": array_path,
     }
-    digest = identity.canonical_json_sha256(base)[:12]
+    digest = canonical_json_sha256(base)[:12]
     safe_run = "".join(ch for ch in run_id if ch.isalnum() or ch == "_")
     if not safe_run:
         safe_run = "run"
@@ -300,7 +301,7 @@ class ArtifactSchemaManager:
                 "fields": field_rows,
                 "relations": sorted_relations,
             }
-            schema_id = self.tracker.identity.canonical_json_sha256(hash_obj)
+            schema_id = canonical_json_sha256(hash_obj)
 
             # 3. Create ArtifactSchema and ArtifactSchemaField rows.
             # NOTE: We do NOT include "source" in summary_json. The schema_id dedupes

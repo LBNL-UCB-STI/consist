@@ -18,6 +18,7 @@ from sqlmodel import col, select
 from consist.core._performance_attribution import _track_maintenance_merge_phase
 from consist.core.facet_common import flatten_facet_values
 from consist.core.identity import IdentityManager
+from consist.digest import canonical_json_sha256
 from consist.models.artifact import Artifact
 from consist.models.artifact_kv import ArtifactKV
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaObservation
@@ -2746,7 +2747,7 @@ class DatabaseMaintenance:
 
         facet_id = self._coerce_non_empty_str(run_meta.get("config_facet_id"))
         if facet_id is None:
-            facet_id = identity.canonical_json_sha256(run_facet)
+            facet_id = canonical_json_sha256(run_facet)
 
         flattened = flatten_facet_values(
             facet_dict=run_facet,
@@ -2789,7 +2790,7 @@ class DatabaseMaintenance:
 
         facet_id = self._coerce_non_empty_str(artifact_meta.get("artifact_facet_id"))
         if facet_id is None:
-            facet_id = identity.canonical_json_sha256(facet_payload)
+            facet_id = canonical_json_sha256(facet_payload)
         namespace = (
             self._coerce_non_empty_str(artifact_meta.get("artifact_facet_namespace"))
             or default_namespace

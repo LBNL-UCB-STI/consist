@@ -481,3 +481,18 @@ def test_matrix_canonicalization_and_digest() -> None:
     assert len(matrices_hash) == 64
     norm_id = normalize_logical_matrices_identity(matrices_hash)
     assert norm_id.startswith("sha256:logical_matrices:")
+
+
+def test_identity_manager_canonical_json_methods_deprecated() -> None:
+    from consist.core.identity import IdentityManager
+
+    im = IdentityManager()
+    payload = {"b": 2, "a": 1}
+    with pytest.deprecated_call(
+        match="IdentityManager.canonical_json_str is deprecated"
+    ):
+        assert im.canonical_json_str(payload) == canonical_json_str(payload)
+    with pytest.deprecated_call(
+        match="IdentityManager.canonical_json_sha256 is deprecated"
+    ):
+        assert im.canonical_json_sha256(payload) == canonical_json_sha256(payload)

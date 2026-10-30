@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel
 
 from consist.core.identity import IdentityManager
+from consist.digest import canonical_json_str
 from consist.types import FacetLike
 
 
@@ -51,7 +52,8 @@ def canonical_facet_json_and_id(
     facet_dict: Dict[str, Any],
 ) -> tuple[str, str]:
     """Return canonical facet JSON and stable SHA256 facet id."""
-    canonical = identity.canonical_json_str(facet_dict)
+    del identity
+    canonical = canonical_json_str(facet_dict)
     facet_id = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return canonical, facet_id
 

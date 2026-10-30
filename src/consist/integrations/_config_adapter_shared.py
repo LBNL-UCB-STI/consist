@@ -22,7 +22,7 @@ from typing import (
     Sequence,
 )
 
-from consist.digest import file_sha256
+from consist.digest import canonical_json_sha256, file_sha256
 
 if TYPE_CHECKING:  # pragma: no cover
     from consist.core.tracker import Tracker
@@ -197,7 +197,7 @@ def run_with_config_overrides_orchestrated(
     )
     selector_identity = hooks.selector_identity(base_selector, strict)
 
-    override_key = tracker.identity.canonical_json_sha256(
+    override_key = canonical_json_sha256(
         {
             "base_selector": selector_identity,
             "overrides": overrides.to_canonical_dict(),

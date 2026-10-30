@@ -570,7 +570,7 @@ def canonicalize_gtfs_bundle(
         "feed_keys": [snapshot.feed_key for snapshot in snapshots],
         "source_feed_hashes": source_feed_hashes,
     }
-    source_bundle_hash = identity.canonical_json_sha256(bundle_payload)
+    source_bundle_hash = canonical_json_sha256(bundle_payload)
 
     combined_selected_frames: dict[str, pd.DataFrame] = {}
     selected_table_hashes: dict[str, str] = {}
@@ -595,7 +595,7 @@ def canonicalize_gtfs_bundle(
                 for table_name in sorted(combined_selected_frames)
             },
         }
-        service_slice_hash = identity.canonical_json_sha256(slice_payload)
+        service_slice_hash = canonical_json_sha256(slice_payload)
 
     manifest = {
         "service_date": normalized_service_date.isoformat()

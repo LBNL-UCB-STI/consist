@@ -764,7 +764,7 @@ class ActivitySimConfigAdapter:
                 allow_out_of_root_csv_refs=self.allow_out_of_root_csv_refs,
             )
 
-        content_hash = identity.canonical_json_sha256(
+        content_hash = canonical_json_sha256(
             {
                 "base_bundle_hash": base_bundle_hash,
                 "overrides": overrides.to_canonical_dict(),
@@ -877,7 +877,7 @@ class ActivitySimConfigAdapter:
                 allow_out_of_root_csv_refs=self.allow_out_of_root_csv_refs,
             )
 
-        content_hash = identity.canonical_json_sha256(
+        content_hash = canonical_json_sha256(
             {
                 "base_config_hash": compute_config_pack_hash(
                     root_dirs=resolved_base_dirs,

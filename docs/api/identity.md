@@ -1,5 +1,19 @@
 # Identity Manager
 
+Consist approaches identity in two complementary architectural layers:
+
+- **Layer 1: Stateless Content & Tabular Digests ([`consist.digest`](digest.md))**
+  Zero-weight, deterministic hashing for in-memory bytes, regular files, canonical JSON,
+  order-invariant tables (`ctd1`), state dictionaries, and logical arrays / matrices.
+  Layer 1 imports only the Python standard library at module scope and operates completely
+  independently of DuckDB, SQLModel, or tracker lifecycle state.
+- **Layer 2: Run & Boundary Provenance (`IdentityManager` & [`consist.admission`](admission.md))**
+  Stateful, Merkle-DAG based run execution identity (`IdentityManager`) combining code
+  identity (Git repository state or callable module hashes), configuration plans, and input
+  artifact digests into deterministic run signatures. At workflow boundaries,
+  `consist.admission` enforces policy-neutral contracts (`PriorRunExpectation`,
+  `DeclaredDigestExpectation`) before code executes.
+
 ## Code identity
 
 Run code identity is resolved in this order:
@@ -58,8 +72,6 @@ for the complete API and developer helper reference.
       show_root_heading: false
       show_root_toc_entry: false
       members:
-        - canonical_json_str
-        - canonical_json_sha256
         - normalize_json
         - calculate_run_signature
         - get_code_version

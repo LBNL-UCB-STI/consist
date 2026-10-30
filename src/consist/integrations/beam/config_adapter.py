@@ -436,7 +436,7 @@ class BeamConfigAdapter:
             resolve=self.resolve_substitutions,
             env_overrides=self.env_overrides,
         )
-        content_hash = identity.canonical_json_sha256(
+        content_hash = canonical_json_sha256(
             {
                 "primary_config": str(config_path.name),
                 "config": identity.normalize_json(config_tree),
@@ -808,7 +808,7 @@ class BeamConfigAdapter:
         primary_relative = primary_source.relative_to(
             resolved_roots[primary_root_index]
         )
-        bundle_identity = tracker.identity.canonical_json_sha256(
+        bundle_identity = canonical_json_sha256(
             {
                 "bundle_version": 1,
                 "adapter": self.model_name,

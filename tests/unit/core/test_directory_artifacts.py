@@ -552,7 +552,7 @@ def test_directory_manifest_rejects_file_descendant_conflict(tmp_path: Path) -> 
     manifest["entries"].append(
         {"kind": "file", "path": "a/child", "sha256": "0" * 64, "size": 0}
     )
-    manifest["tree_hash"] = directory_artifacts._manifest_hash(
+    manifest["tree_hash"] = directory_artifacts.canonical_json_sha256(
         {"version": manifest["version"], "entries": manifest["entries"]}
     )
 

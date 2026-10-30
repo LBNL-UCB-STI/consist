@@ -9,6 +9,7 @@ import hashlib
 import json
 import inspect
 import fnmatch
+import warnings
 from dataclasses import dataclass
 from collections.abc import Mapping
 from importlib import import_module
@@ -20,7 +21,6 @@ from typing import (
     Any,
     Optional,
     Callable,
-    Set,
     Union,
     Literal,
     cast,
@@ -50,13 +50,6 @@ def _get_git() -> Optional[ModuleType]:
             git = None
     return git
 
-
-# Try importing numpy for type checking
-np: Optional[ModuleType]
-try:
-    np = import_module("numpy")
-except ImportError:
-    np = None
 
 if TYPE_CHECKING:
     from consist.core.run_resolution import InputBindingRole
@@ -198,13 +191,28 @@ class IdentityManager:
         """
         Return a stable JSON string for hashing/IDs.
 
-        Uses `consist.digest.canonical_json_str` for normalized types, deterministic
-        key ordering, and compact separators.
+        Deprecated: use ``consist.digest.canonical_json_str`` directly.
         """
+        warnings.warn(
+            "IdentityManager.canonical_json_str is deprecated; "
+            "use consist.digest.canonical_json_str instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         return canonical_json_str(obj)
 
     def canonical_json_sha256(self, obj: Any) -> str:
-        """SHA256 hex digest of `canonical_json_str(obj)`."""
+        """
+        SHA256 hex digest of ``canonical_json_str(obj)``.
+
+        Deprecated: use ``consist.digest.canonical_json_sha256`` directly.
+        """
+        warnings.warn(
+            "IdentityManager.canonical_json_sha256 is deprecated; "
+            "use consist.digest.canonical_json_sha256 instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         return canonical_json_sha256(obj)
 
     def normalize_json(self, obj: Any) -> Any:
@@ -214,7 +222,7 @@ class IdentityManager:
         This mirrors the canonical hashing cleanup but preserves the full structure
         without excluding any keys.
         """
-        return self._clean_structure(obj, set())
+        return _clean_for_canonical_json(obj, set())
 
     # --- Run Signature Calculation ---
 
@@ -380,7 +388,7 @@ class IdentityManager:
             elif strategy == "module":
                 module_path = inspect.getfile(identity_callable)
                 # We reuse the file checksum logic
-                file_hash = self._compute_file_checksum(module_path)
+                file_hash = self.compute_file_checksum(module_path)
                 hashes.append(f"mod:{file_hash}")
 
             else:
@@ -399,7 +407,7 @@ class IdentityManager:
                 # Resolve relative to project root
                 full_path = self.project_root / dep
                 if full_path.exists():
-                    d_hash = self._compute_file_checksum(str(full_path))
+                    d_hash = self.compute_file_checksum(str(full_path))
                     hashes.append(f"dep:{dep}:{d_hash}")
                 else:
                     # If dependency is missing, we must affect the hash to warn or fail?
@@ -513,7 +521,7 @@ class IdentityManager:
             exclude_keys = []
 
         # 1. Clean and Canonicalize
-        cleaned_config = self._clean_structure(config, set(exclude_keys))
+        cleaned_config = _clean_for_canonical_json(config, set(exclude_keys))
 
         # 2. Serialize with deterministic sorting
         # ensure_ascii=True ensures locale independence
@@ -623,7 +631,7 @@ class IdentityManager:
             raise ValueError(
                 f"Cannot hash raw artifact '{artifact.container_uri}' without a path_resolver."
             )
-        file_hash = self._compute_file_checksum(path_resolver(artifact.container_uri))
+        file_hash = self.compute_file_checksum(path_resolver(artifact.container_uri))
         sig_parts = [
             f"driver:{artifact.driver}",
             f"container_uri:{artifact.container_uri}",
@@ -738,7 +746,7 @@ class IdentityManager:
                 "identity": strict_binding_identity,
             }
         return ActionInputIdentity(
-            value=f"sha256:action-v2:{self.canonical_json_sha256(payload)}",
+            value=f"sha256:action-v2:{canonical_json_sha256(payload)}",
             code=descriptor,
             bindings=tuple(resolved_bindings),
             strict_binding_identity=strict_binding_identity,
@@ -888,12 +896,6 @@ class IdentityManager:
 
     # --- Internal Utilities ---
 
-    def _clean_structure(self, obj: Any, exclude_keys: Set[str]) -> Any:
-        """
-        Recursively cleans a Python structure (dictionary, list, tuple, Pydantic model) for canonical hashing.
-        """
-        return _clean_for_canonical_json(obj, exclude_keys)
-
     def compute_file_checksum(self, file_path: Union[str, Path]) -> str:
         """
         Computes a cryptographic identifier for a given file or directory based on the configured hashing strategy.
@@ -968,10 +970,6 @@ class IdentityManager:
 
         else:
             return file_sha256(path)
-
-    # Backwards-compatible alias (internal callers / integrations).
-    def _compute_file_checksum(self, file_path: Union[str, Path]) -> str:
-        return self.compute_file_checksum(file_path)
 
     def compute_fast_directory_observation(
         self, directory_path: Union[str, Path]

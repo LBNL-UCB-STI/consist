@@ -13,6 +13,7 @@ from sqlalchemy.engine import Engine
 
 from consist.core.identity import IdentityManager
 from consist.core.drivers import TableInfo, TABLE_DRIVERS
+from consist.digest import canonical_json_sha256
 
 PROFILE_VERSION = 1
 
@@ -245,7 +246,7 @@ def profile_duckdb_table(
         "sample_rows": sample_rows,
         "fields": field_rows,
     }
-    schema_id = identity.canonical_json_sha256(hash_obj)
+    schema_id = canonical_json_sha256(hash_obj)
 
     summary = {
         "profile_version": PROFILE_VERSION,
@@ -390,7 +391,7 @@ def profile_file_schema(
     }
     if driver == "h5_table":
         hash_obj["table_path"] = table_path
-    schema_id = identity.canonical_json_sha256(hash_obj)
+    schema_id = canonical_json_sha256(hash_obj)
 
     summary = {
         "profile_version": PROFILE_VERSION,

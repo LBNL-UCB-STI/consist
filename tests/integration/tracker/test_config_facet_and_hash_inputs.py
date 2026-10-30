@@ -382,9 +382,9 @@ def test_config_facet_id_is_canonical_json_hash(tracker):
     with open(tracker.run_dir / "consist.json") as f:
         payload = json.load(f)
 
-    expected_id = hashlib.sha256(
-        tracker.identity.canonical_json_str(facet).encode("utf-8")
-    ).hexdigest()
+    from consist.digest import canonical_json_str
+
+    expected_id = hashlib.sha256(canonical_json_str(facet).encode("utf-8")).hexdigest()
     assert payload["run"]["meta"]["config_facet_id"] == expected_id
 
     assert tracker.get_config_facet(expected_id) is not None

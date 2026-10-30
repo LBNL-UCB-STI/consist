@@ -62,7 +62,7 @@ def build_directory_manifest(root: Path) -> dict[str, Any]:
     visit(root_path)
     entries.sort(key=lambda entry: (entry["path"], entry["kind"]))
     identity = {"version": _MANIFEST_VERSION, "entries": entries}
-    return {**identity, "tree_hash": _manifest_hash(identity)}
+    return {**identity, "tree_hash": canonical_json_sha256(identity)}
 
 
 def build_shapefile_bundle_manifest(shapefile: Path) -> dict[str, Any]:
@@ -78,7 +78,7 @@ def build_shapefile_bundle_manifest(shapefile: Path) -> dict[str, Any]:
     _reject_symlink_components(root, label="shapefile bundle root")
     entries = _shapefile_bundle_entries(root, shapefile_path.name)
     identity = {"version": _MANIFEST_VERSION, "entries": entries}
-    return {**identity, "tree_hash": _manifest_hash(identity)}
+    return {**identity, "tree_hash": canonical_json_sha256(identity)}
 
 
 def validate_shapefile_bundle_root(
@@ -247,7 +247,7 @@ def validate_directory_tree(root: Path, manifest: Mapping[str, Any]) -> None:
                 raise ValueError(f"directory artifact file size mismatch: {path}")
 
     expected_identity = {"version": _MANIFEST_VERSION, "entries": expected_entries}
-    if manifest["tree_hash"] != _manifest_hash(expected_identity):
+    if manifest["tree_hash"] != canonical_json_sha256(expected_identity):
         raise ValueError("directory artifact manifest tree hash is invalid")
 
 
@@ -255,7 +255,7 @@ def validate_directory_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
     """Validate and normalize a persisted directory-artifact manifest."""
     entries = _validate_manifest(manifest)
     identity = {"version": _MANIFEST_VERSION, "entries": entries}
-    if manifest.get("tree_hash") != _manifest_hash(identity):
+    if manifest.get("tree_hash") != canonical_json_sha256(identity):
         raise ValueError("directory artifact manifest tree hash is invalid")
     return {**identity, "tree_hash": manifest["tree_hash"]}
 
@@ -551,7 +551,3 @@ def _reject_symlink_components(path: Path, *, label: str) -> None:
             raise ValueError(
                 f"directory artifact {label} contains a symlink component: {component}"
             )
-
-
-def _manifest_hash(manifest: Mapping[str, Any]) -> str:
-    return canonical_json_sha256(manifest)

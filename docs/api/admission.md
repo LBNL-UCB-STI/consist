@@ -12,10 +12,16 @@ Consist reports evidence without deciding workflow policy. Callers such as
 PILATES can classify an `AdmissionReport` as fatal, warning-only, or acceptable
 for their execution mode.
 
+> [!NOTE] Canonical Namespace
+> The canonical import namespace for all admission types, expectation contracts,
+> and verification functions is `consist.admission` (`from consist.admission import ...`).
+> To compute canonical stateless content digests (such as raw file, order-invariant
+> `ctd1` table, or format-neutral logical matrix digests), use [`consist.digest`](digest.md).
+
 ## Basic usage
 
 ```python
-from consist import check_artifact_identity
+from consist.admission import check_artifact_identity
 
 report = check_artifact_identity(
     tracker,
@@ -42,7 +48,7 @@ read-only without schema initialization) or construct a typed
 `PriorRunExpectation`:
 
 ```python
-from consist import PriorRunExpectation, check_prior_run_expectation
+from consist.admission import PriorRunExpectation, check_prior_run_expectation
 
 expectation = PriorRunExpectation(
     expected_run_id="upstream-beam-run",
@@ -69,7 +75,7 @@ configuration resolution. The report's `physical_target_path` always comes
 from resolving `execution_path`; callers cannot replace that audit value.
 
 ```python
-from consist import AdmissionReference, check_admission_reference
+from consist.admission import AdmissionReference, check_admission_reference
 
 report = check_admission_reference(
     tracker,
@@ -91,8 +97,31 @@ candidate bytes. A successful report only proves equality with the declaration;
 it does not authenticate the source label or URI, create a trusted `Artifact`,
 or change cache hashing defaults.
 
+### Producer / Contract pattern with `consist.digest`
+
+Canonical declared digests are typically calculated by the upstream data producer
+or contract specification script using [`consist.digest`](digest.md) primitives:
+
 ```python
-from consist import (
+# Producer / Contract authoring step
+from consist.digest import digest_file, digest_table, compute_omx_logical_matrices_sha256
+
+# Single file identity (e.g., "sha256:file:<64 hex>")
+governed_file_identity = digest_file("release/urbansim_initial_datastore.h5")
+
+# Canonical order-invariant table digest ("sha256:ctd1:<64 hex>")
+governed_table_identity = digest_table("release/zones.parquet")
+
+# Format-neutral logical matrix digest ("sha256:logical_matrices:<64 hex>")
+governed_matrix_identity = compute_omx_logical_matrices_sha256("release/skims.omx")
+```
+
+The consumer or downstream step then enforces this contract at the workflow
+boundary using `DeclaredDigestExpectation`:
+
+```python
+# Consumer / Admission verification step
+from consist.admission import (
     AdmissionIdentity,
     DeclaredDigestExpectation,
     check_expected_identity,
@@ -102,7 +131,7 @@ report = check_expected_identity(
     execution_path="inputs/initial_datastore.h5",
     input_role="urbansim_initial_datastore",
     expectation=DeclaredDigestExpectation(
-        identity=AdmissionIdentity.parse("sha256:file:<64 lowercase hex>"),
+        identity=AdmissionIdentity.parse(governed_file_identity),
         source_label="UrbanSim initial datastore",
         source_uri="s3://governed-inputs/seattle/initial_datastore.h5",
     ),
@@ -152,12 +181,12 @@ profiles via `logical_profile`:
   digests.
 
 ```python
-from consist import (
+from consist.admission import (
     PriorRunExpectation,
     check_prior_run_expectation,
-    compute_omx_logical_matrices_sha256,
     write_artifact_provenance_sidecar,
 )
+from consist.digest import compute_omx_logical_matrices_sha256
 
 # Compute a logical digest and write a .provenance.json sidecar
 digest = compute_omx_logical_matrices_sha256(
