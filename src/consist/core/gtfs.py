@@ -212,12 +212,8 @@ def load_gtfs_member_relation(
     return conn.from_df(duckdb_df)
 
 
-def _hash_bytes(data: bytes) -> str:
-    return digest_bytes(data)
-
-
 def hash_gtfs_member(source_path: Path, member_name: str) -> str:
-    return _hash_bytes(_read_member_bytes(source_path, member_name))
+    return digest_bytes(_read_member_bytes(source_path, member_name))
 
 
 def hash_gtfs_feed(source_path: Path, member_names: Sequence[str]) -> str:

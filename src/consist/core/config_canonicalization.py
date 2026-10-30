@@ -57,10 +57,6 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
-def _canonical_json_sha256(payload: Any) -> str:
-    return canonical_json_sha256(payload)
-
-
 class CanonicalConfig(NamedTuple):
     """
     Canonical representation of a discovered configuration.
@@ -1083,4 +1079,4 @@ def compute_config_pack_hash(
             root_dir,
             hashing_strategy_override="full",
         )
-    return identity.canonical_json_sha256({"config_dirs": digest_map})
+    return canonical_json_sha256({"config_dirs": digest_map})

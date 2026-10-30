@@ -82,22 +82,6 @@ def _shapefile_bundle_metadata(artifact: Artifact) -> tuple[str, dict[str, Any]]
     return entry, normalized
 
 
-def _compute_file_sha256(path: Path) -> str:
-    """Compute a full-content SHA-256 digest.
-
-    Parameters
-    ----------
-    path : Path
-        Regular file whose bytes are hashed.
-
-    Returns
-    -------
-    str
-        Lowercase hexadecimal SHA-256 digest.
-    """
-    return file_sha256(path)
-
-
 @dataclass(frozen=True, slots=True)
 class _ArchiveFileCandidate:
     """One requested file output and its canonical archive destination.
@@ -592,7 +576,7 @@ class TrackerArchiveService(_TrackerServiceBase):
                 f"OutputSet manifest {manifest.key!r} bytes do not match its "
                 "persisted identity."
             )
-        manifest_content_hash = _compute_file_sha256(manifest_source)
+        manifest_content_hash = file_sha256(manifest_source)
         if artifact.hash != _manifest_identity_hash(manifest_contents):
             raise ValueError(
                 f"OutputSet parent {artifact.key!r} manifest does not match its identity."
@@ -726,7 +710,7 @@ class TrackerArchiveService(_TrackerServiceBase):
                     f"OutputSet member {child.key!r} is outside the set root."
                 )
             if member_source.stat().st_size != size_bytes or (
-                _compute_file_sha256(member_source) != content_hash
+                file_sha256(member_source) != content_hash
             ):
                 raise ValueError(
                     f"OutputSet member {child.key!r} bytes do not match the manifest."
@@ -854,7 +838,7 @@ class TrackerArchiveService(_TrackerServiceBase):
             if (
                 source != member.source_path
                 or not source.is_file()
-                or _compute_file_sha256(source) != member.content_hash
+                or file_sha256(source) != member.content_hash
             ):
                 raise ValueError(
                     f"Nested output {key!r} does not match immutable manifest "
@@ -988,7 +972,7 @@ class TrackerArchiveService(_TrackerServiceBase):
             )
         for relative_path, member in expected_files.items():
             path = destination / relative_path
-            if _compute_file_sha256(path) != member.content_hash:
+            if file_sha256(path) != member.content_hash:
                 raise ValueError(
                     f"OutputSet archive destination member hash mismatch: {path}"
                 )
@@ -1004,7 +988,7 @@ class TrackerArchiveService(_TrackerServiceBase):
             )
         if destination.exists() and (
             not destination.is_file()
-            or _compute_file_sha256(destination) != plan.manifest_content_hash
+            or file_sha256(destination) != plan.manifest_content_hash
         ):
             raise FileExistsError(
                 f"OutputSet manifest archive destination already exists: {destination}"
@@ -1039,12 +1023,12 @@ class TrackerArchiveService(_TrackerServiceBase):
                 target = staging / member.relative_path
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(member.source_path, target)
-                if _compute_file_sha256(target) != member.content_hash:
+                if file_sha256(target) != member.content_hash:
                     raise ValueError(
                         f"OutputSet member {member.artifact.key!r} changed while archiving."
                     )
             for member in plan.members:
-                if _compute_file_sha256(member.source_path) != member.content_hash:
+                if file_sha256(member.source_path) != member.content_hash:
                     raise ValueError(
                         f"OutputSet member {member.artifact.key!r} changed while archiving."
                     )
@@ -1067,7 +1051,7 @@ class TrackerArchiveService(_TrackerServiceBase):
             )
         if destination.exists():
             if not destination.is_file() or (
-                _compute_file_sha256(destination) != plan.manifest_content_hash
+                file_sha256(destination) != plan.manifest_content_hash
             ):
                 raise FileExistsError(
                     f"OutputSet manifest archive destination already exists: {destination}"
@@ -1087,11 +1071,11 @@ class TrackerArchiveService(_TrackerServiceBase):
             with os.fdopen(descriptor, "wb") as temporary_file:
                 with plan.manifest_source.open("rb") as source_file:
                     shutil.copyfileobj(source_file, temporary_file)
-            if _compute_file_sha256(temporary_path) != plan.manifest_content_hash:
+            if file_sha256(temporary_path) != plan.manifest_content_hash:
                 raise ValueError(
                     f"OutputSet manifest {plan.manifest.key!r} changed while archiving."
                 )
-            if _compute_file_sha256(plan.manifest_source) != plan.manifest_content_hash:
+            if file_sha256(plan.manifest_source) != plan.manifest_content_hash:
                 raise ValueError(
                     f"OutputSet manifest {plan.manifest.key!r} changed while archiving."
                 )
@@ -1481,7 +1465,7 @@ class TrackerArchiveService(_TrackerServiceBase):
             )
         if verify:
             try:
-                actual_hash = _compute_file_sha256(expected_path_resolved)
+                actual_hash = file_sha256(expected_path_resolved)
             except Exception as exc:
                 return result(
                     "failed",
@@ -1816,9 +1800,7 @@ class TrackerArchiveService(_TrackerServiceBase):
                 candidate, "preserved_existing", "not_requested"
             )
         try:
-            matches = (
-                _compute_file_sha256(candidate.target_path) == candidate.artifact.hash
-            )
+            matches = file_sha256(candidate.target_path) == candidate.artifact.hash
         except OSError as exc:
             return self._archive_result(
                 candidate,
@@ -1960,11 +1942,7 @@ class TrackerArchiveService(_TrackerServiceBase):
                     "failed",
                     message="Archive destination already exists.",
                 )
-            if (
-                verify
-                and _compute_file_sha256(candidate.target_path)
-                != candidate.artifact.hash
-            ):
+            if verify and file_sha256(candidate.target_path) != candidate.artifact.hash:
                 return self._archive_result(
                     candidate,
                     "hash_mismatch",

@@ -39,10 +39,10 @@ from consist.core.config_canonicalization import (
     ConfigReference,
     DirectoryIdentity,
     IngestSpec,
-    _canonical_json_sha256,
     compute_config_pack_hash,
 )
 from consist.core.identity import IdentityManager
+from consist.digest import canonical_json_sha256, file_sha256
 from consist.integrations._config_adapter_shared import (
     OverrideRunHooks as _shared_OverrideRunHooks,
 )
@@ -57,9 +57,6 @@ from consist.integrations._config_adapter_shared import (
 )
 from consist.integrations._config_adapter_shared import (
     digest_path as _shared_digest_path,
-)
-from consist.integrations._config_adapter_shared import (
-    file_sha256 as _shared_file_sha256,
 )
 from consist.integrations._config_adapter_shared import (
     get_nested_value as _shared_get_nested_value,
@@ -2679,7 +2676,7 @@ def _build_activitysim_config_identity(
 
     def add_file(path: Path, *, role: str) -> None:
         key = _logical_config_key(path, config.root_dirs)
-        digest = _file_sha256(path)
+        digest = file_sha256(path)
         root_index = _config_root_index(path, config.root_dirs)
         entry = {"key": key, "role": role, "hash": digest}
         if root_index is not None:
@@ -2715,22 +2712,22 @@ def _build_activitysim_config_identity(
     yaml_entries = [item for item in file_entries if item["role"] == "yaml"]
     csv_entries = [item for item in file_entries if item["role"] == "csv"]
     component_hashes = {
-        "active_yaml_hash": _canonical_json_sha256({"files": yaml_entries}),
-        "referenced_csv_hash": _canonical_json_sha256({"files": csv_entries}),
+        "active_yaml_hash": canonical_json_sha256({"files": yaml_entries}),
+        "referenced_csv_hash": canonical_json_sha256({"files": csv_entries}),
     }
-    files_hash = _canonical_json_sha256({"files": file_entries})
-    options_hash = _canonical_json_sha256({"options": options_payload})
+    files_hash = canonical_json_sha256({"files": file_entries})
+    options_hash = canonical_json_sha256({"options": options_payload})
     directory_entries = _build_directory_identity_entries(
         file_entries=file_entries,
         root_dirs=config.root_dirs,
     )
-    directory_hash = _canonical_json_sha256({"directories": directory_entries})
+    directory_hash = canonical_json_sha256({"directories": directory_entries})
     primary_config = (
         _logical_config_key(config.primary_config, config.root_dirs)
         if config.primary_config is not None
         else None
     )
-    identity_hash = _canonical_json_sha256(
+    identity_hash = canonical_json_sha256(
         {
             "identity_schema_version": 1,
             "adapter_name": adapter_name,
@@ -2941,7 +2938,7 @@ def _build_directory_identity_entries(
             for item in file_entries
             if item.get("root_index") == index
         ]
-        root_hash = _canonical_json_sha256({"root_index": index, "files": root_files})
+        root_hash = canonical_json_sha256({"root_index": index, "files": root_files})
         entries.append(
             {
                 "canonical_value": f"root:{index}",
@@ -2967,14 +2964,10 @@ def _build_directory_identity_entries(
                 "role": "external_config_files",
                 "identity_policy": "fingerprint_manifest",
                 "hash_strategy": "active-files",
-                "hash": _canonical_json_sha256({"files": external_files}),
+                "hash": canonical_json_sha256({"files": external_files}),
             }
         )
     return entries
-
-
-def _file_sha256(path: Path) -> str:
-    return _shared_file_sha256(path)
 
 
 def _with_content_hash(

@@ -1,4 +1,3 @@
-import hashlib
 import json
 import re
 from collections.abc import Mapping as MappingABC
@@ -162,7 +161,6 @@ if TYPE_CHECKING:
 
 AccessMode = Literal["standard", "analysis", "read_only"]
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_FILE_HASH_CHUNK_SIZE = 8 * 1024 * 1024
 _RAW_STRICT_BINDING_CONTROL_KEYS = frozenset(
     {
         "_consist_strict_binding_json",
@@ -187,18 +185,6 @@ def _reject_raw_strict_binding_controls(kwargs: Mapping[str, Any]) -> None:
             "raw strict binding controls are not supported on public Tracker APIs: "
             + ", ".join(sorted(controls))
         )
-
-
-def _compute_file_sha256(path: Path) -> str:
-    """Compute a full content SHA-256 for one regular file."""
-    sha256 = hashlib.sha256()
-    with path.open("rb") as file:
-        while True:
-            chunk = file.read(_FILE_HASH_CHUNK_SIZE)
-            if not chunk:
-                break
-            sha256.update(chunk)
-    return sha256.hexdigest()
 
 
 def _is_safe_identifier(identifier: str) -> bool:

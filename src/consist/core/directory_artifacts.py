@@ -49,7 +49,7 @@ def build_directory_manifest(root: Path) -> dict[str, Any]:
                     {
                         "kind": "file",
                         "path": relative_path,
-                        "sha256": _compute_file_sha256(child_path),
+                        "sha256": file_sha256(child_path),
                         "size": child.stat(follow_symlinks=False).st_size,
                     }
                 )
@@ -387,7 +387,7 @@ def _shapefile_bundle_entries(root: Path, shapefile_name: str) -> list[dict[str,
             {
                 "kind": "file",
                 "path": candidate.name,
-                "sha256": _compute_file_sha256(candidate_path),
+                "sha256": file_sha256(candidate_path),
                 "size": candidate.stat(follow_symlinks=False).st_size,
             }
         )
@@ -551,10 +551,6 @@ def _reject_symlink_components(path: Path, *, label: str) -> None:
             raise ValueError(
                 f"directory artifact {label} contains a symlink component: {component}"
             )
-
-
-def _compute_file_sha256(path: Path) -> str:
-    return file_sha256(path)
 
 
 def _manifest_hash(manifest: Mapping[str, Any]) -> str:
