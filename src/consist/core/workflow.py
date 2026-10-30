@@ -2191,6 +2191,13 @@ class ScenarioContext:
         if header_record is None:
             return
 
+        if child_run.meta is None:
+            child_run.meta = {}
+        if child_run.meta.get("scenario_id") != self.run_id:
+            child_run.meta["scenario_id"] = self.run_id
+            if self.tracker.persistence is not None:
+                self.tracker.persistence.sync_run(child_run)
+
         parent_run = header_record.run
         parent_inputs_list = header_record.inputs
         parent_outputs_list = header_record.outputs

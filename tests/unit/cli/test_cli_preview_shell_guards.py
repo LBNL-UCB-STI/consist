@@ -878,3 +878,28 @@ def test_shell_schema_profile_h5_container_hint_for_unsupported_type(
     assert "Schema not implemented for loaded type: HDFStore" in out
     assert "Container-level HDF5 schema is not supported." in out
     assert "inspect sibling `h5_table` artifacts" in out
+
+
+def test_preview_preserves_integer_formatting_in_mixed_int_float_dataframe(
+    cli_runner, tracker, tmp_path: Path, capsys
+) -> None:
+    """`preview` and `ConsistShell.do_preview` should not coerce int columns to float strings."""
+    pq_path = tmp_path / "mixed_types.parquet"
+    df = pd.DataFrame({"zone_id": [1, 2], "utility": [0.25, 0.75]})
+    df.to_parquet(pq_path, index=False)
+
+    with tracker.start_run("mixed_preview_run", "model"):
+        tracker.log_output(pq_path, key="mixed_table", driver="parquet")
+
+    cli_res = cli_runner.invoke(app, ["preview", "mixed_table"])
+    assert cli_res.exit_code == 0
+    assert "1.0" not in cli_res.stdout
+    assert "2.0" not in cli_res.stdout
+    assert "0.25" in cli_res.stdout
+
+    shell = ConsistShell(tracker)
+    shell.do_preview("mixed_table")
+    shell_out = capsys.readouterr().out
+    assert "1.0" not in shell_out
+    assert "2.0" not in shell_out
+    assert "0.25" in shell_out

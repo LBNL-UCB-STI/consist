@@ -1760,20 +1760,173 @@ def views_create(
     console.print(f"[green]Created grouped view '{view_name}'.[/green]")
 
 
+def _collect_scenario_run_ids(session: Session, scenario_id: str) -> List[str]:
+    """Collect all transitive member run IDs belonging to a scenario."""
+    from consist.models.run import Run, RunCouplerSnapshot
+
+    discovered_ids: set[str] = set()
+
+    header_run = session.get(Run, scenario_id)
+    if header_run is not None and isinstance(header_run.meta, dict):
+        steps = header_run.meta.get("steps")
+        if isinstance(steps, list):
+            for step in steps:
+                step_id = (
+                    step
+                    if isinstance(step, str)
+                    else (step.get("id") if isinstance(step, dict) else None)
+                )
+                if isinstance(step_id, str) and step_id and step_id != scenario_id:
+                    discovered_ids.add(step_id)
+
+    try:
+        snapshots = session.exec(
+            select(RunCouplerSnapshot).where(
+                col(RunCouplerSnapshot.scenario_run_id) == scenario_id
+            )
+        ).all()
+        for snap in snapshots:
+            if snap.run_id and snap.run_id != scenario_id:
+                discovered_ids.add(snap.run_id)
+            if snap.producer_run_id and snap.producer_run_id != scenario_id:
+                discovered_ids.add(snap.producer_run_id)
+    except Exception:
+        pass
+
+    try:
+        meta_candidates = session.exec(
+            select(Run).where(
+                col(Run.id) != scenario_id,
+                col(Run.meta).is_not(None),
+            )
+        ).all()
+        for candidate in meta_candidates:
+            if (
+                isinstance(candidate.meta, dict)
+                and candidate.meta.get("scenario_id") == scenario_id
+            ):
+                discovered_ids.add(candidate.id)
+    except Exception:
+        pass
+
+    direct_children = session.exec(
+        select(Run.id).where(col(Run.parent_run_id) == scenario_id)
+    ).all()
+    for child_id in direct_children:
+        if child_id and child_id != scenario_id:
+            discovered_ids.add(str(child_id))
+
+    visited: set[str] = {scenario_id, *discovered_ids}
+    frontier: set[str] = set(discovered_ids)
+    while frontier:
+        next_children = session.exec(
+            select(Run.id).where(col(Run.parent_run_id).in_(sorted(frontier)))
+        ).all()
+        next_frontier: set[str] = set()
+        for child_id in next_children:
+            if not child_id:
+                continue
+            child_str = str(child_id)
+            if child_str not in visited:
+                visited.add(child_str)
+                discovered_ids.add(child_str)
+                next_frontier.add(child_str)
+        frontier = next_frontier
+
+    return sorted(discovered_ids)
+
+
+def _get_scenario_member_runs(session: Session, scenario_id: str) -> List["Run"]:
+    """Fetch all transitive member Run rows for a scenario in chronological order."""
+    from consist.models.run import Run
+
+    run_ids = _collect_scenario_run_ids(session, scenario_id)
+    if not run_ids:
+        return []
+    stmt = (
+        select(Run)
+        .where(col(Run.id).in_(run_ids))
+        .order_by(
+            col(Run.created_at).asc(),
+            col(Run.started_at).asc(),
+            col(Run.id).asc(),
+        )
+    )
+    return list(session.exec(stmt).all())
+
+
+def _query_runs_with_scenario(
+    session: Session,
+    *,
+    limit: int = 10,
+    model_name: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    status: Optional[str] = None,
+    scenario_id: Optional[str] = None,
+) -> List["Run"]:
+    """Query runs with optional scenario membership filtering."""
+    if scenario_id is not None:
+        scenario_run_ids = _collect_scenario_run_ids(session, scenario_id)
+        return queries.get_runs(
+            session,
+            limit=limit,
+            model_name=model_name,
+            tags=tags,
+            status=status,
+            run_ids=scenario_run_ids,
+        )
+    return queries.get_runs(
+        session,
+        limit=limit,
+        model_name=model_name,
+        tags=tags,
+        status=status,
+    )
+
+
+def _serialize_runs_json(runs_list: Iterable["Run"]) -> List[Dict[str, Any]]:
+    """Serialize Run objects into the CLI JSON payload format."""
+    payload: List[Dict[str, Any]] = []
+    for run in runs_list:
+        created_at = run.created_at
+        payload.append(
+            {
+                "id": run.id,
+                "model": run.model_name,
+                "status": run.status,
+                "scenario_id": run.parent_run_id,
+                "year": run.year,
+                "created_at": created_at.isoformat() if created_at else None,
+                "duration_seconds": run.duration_seconds,
+                "tags": run.tags,
+                "meta": run.meta,
+            }
+        )
+    return payload
+
+
 def _render_runs_table(
     tracker: Tracker,
     limit: int = 10,
     model_name: Optional[str] = None,
     tags: Optional[List[str]] = None,
     status: Optional[str] = None,
+    scenario_id: Optional[str] = None,
 ) -> None:
     """Shared logic for displaying runs."""
     with _tracker_session(tracker) as session:
-        results = queries.get_runs(
-            session, limit=limit, model_name=model_name, tags=tags, status=status
+        results = _query_runs_with_scenario(
+            session,
+            limit=limit,
+            model_name=model_name,
+            tags=tags,
+            status=status,
+            scenario_id=scenario_id,
         )
 
         title_parts = ["Recent Runs"]
+        if scenario_id:
+            title_parts.append(f"in scenario [cyan]{scenario_id}[/cyan]")
         if model_name:
             title_parts.append(f"for model [green]{model_name}[/green]")
         if tags:
@@ -2090,8 +2243,21 @@ def _render_summary(summary_data: Dict[str, Any]) -> None:
     console.print(model_table)
 
 
-def _iter_artifact_rows(session: Session, *, batch_size: int) -> Iterable["Artifact"]:
+def _iter_artifact_rows(
+    session: Session,
+    *,
+    batch_size: int = 1000,
+    run_ids: Optional[Sequence[str]] = None,
+    outputs_only: bool = False,
+) -> Iterable["Artifact"]:
     from consist.models.artifact import Artifact
+    from consist.models.run import RunArtifactLink
+
+    scoped_run_ids: Optional[List[str]] = None
+    if run_ids is not None:
+        scoped_run_ids = list(run_ids)
+        if not scoped_run_ids:
+            return
 
     last_created = None
     last_id = None
@@ -2101,6 +2267,29 @@ def _iter_artifact_rows(session: Session, *, batch_size: int) -> Iterable["Artif
             .order_by(col(Artifact.created_at), col(Artifact.id))
             .limit(batch_size)
         )
+        if scoped_run_ids is not None or outputs_only:
+            link_subq = select(RunArtifactLink.artifact_id)
+            if scoped_run_ids is not None:
+                link_subq = link_subq.where(
+                    col(RunArtifactLink.run_id).in_(scoped_run_ids)
+                )
+            if outputs_only:
+                link_subq = link_subq.where(col(RunArtifactLink.direction) == "output")
+            if scoped_run_ids is not None:
+                stmt = stmt.where(
+                    or_(
+                        col(Artifact.id).in_(link_subq),
+                        col(Artifact.run_id).in_(scoped_run_ids),
+                    )
+                )
+            else:
+                stmt = stmt.where(
+                    or_(
+                        col(Artifact.id).in_(link_subq),
+                        col(Artifact.run_id).is_not(None),
+                    )
+                )
+
         if last_created is not None and last_id is not None:
             stmt = stmt.where(
                 or_(
@@ -2127,23 +2316,69 @@ def _render_scenarios(tracker: Tracker, limit: int = 20) -> None:
         from consist.models.run import Run
         from sqlmodel import func
 
-        # Find parent runs by looking for distinct parent_run_ids
-        query = (
+        non_root_ids: set[str] = set()
+        candidate_ids: set[str] = set()
+        fallback_stats: Dict[str, Tuple[int, Any, Any]] = {}
+
+        child_ids = session.exec(
+            select(Run.id).where(col(Run.parent_run_id).is_not(None))
+        ).all()
+        for cid in child_ids:
+            if cid:
+                non_root_ids.add(str(cid))
+
+        parent_rows = session.exec(
             select(
-                col(Run.parent_run_id).label("scenario_id"),  # ← Fixed: was Run.id
+                col(Run.parent_run_id).label("scenario_id"),
                 func.count(col(Run.id)).label("run_count"),
                 func.min(col(Run.created_at)).label("first_run"),
                 func.max(col(Run.created_at)).label("last_run"),
             )
             .where(col(Run.parent_run_id).is_not(None))
             .group_by(col(Run.parent_run_id))
-            .order_by(func.max(col(Run.created_at)).desc())
-            .limit(limit)
-        )
+        ).all()
+        for row in parent_rows:
+            sc_id = str(row[0])
+            candidate_ids.add(sc_id)
+            fallback_stats[sc_id] = (int(row[1]), row[2], row[3])
 
-        results = session.exec(query).all()
+        header_runs = session.exec(
+            select(Run).where(
+                col(Run.model_name) == "scenario",
+                col(Run.parent_run_id).is_(None),
+            )
+        ).all()
+        for header in header_runs:
+            candidate_ids.add(header.id)
+            if header.id not in fallback_stats:
+                fallback_stats[header.id] = (0, header.created_at, header.created_at)
 
-        if not results:
+        meta_runs = session.exec(select(Run).where(col(Run.meta).is_not(None))).all()
+        for run_row in meta_runs:
+            if isinstance(run_row.meta, dict):
+                meta_sc_id = run_row.meta.get("scenario_id")
+                if isinstance(meta_sc_id, str) and meta_sc_id:
+                    if run_row.model_name != "scenario":
+                        non_root_ids.add(run_row.id)
+                    candidate_ids.add(meta_sc_id)
+
+        root_scenario_ids = sorted(candidate_ids - non_root_ids)
+        scenario_rows: List[Tuple[str, int, Any, Any]] = []
+        for scenario_id in root_scenario_ids:
+            member_runs = _get_scenario_member_runs(session, scenario_id)
+            if member_runs:
+                run_count = len(member_runs)
+                first_run = min(r.created_at for r in member_runs)
+                last_run = max(r.created_at for r in member_runs)
+                scenario_rows.append((scenario_id, run_count, first_run, last_run))
+            elif scenario_id in fallback_stats:
+                run_count, first_run, last_run = fallback_stats[scenario_id]
+                scenario_rows.append((scenario_id, run_count, first_run, last_run))
+
+        scenario_rows.sort(key=lambda item: (item[3], item[0]), reverse=True)
+        scenario_rows = scenario_rows[:limit]
+
+        if not scenario_rows:
             console.print("[yellow]No scenarios found.[/yellow]")
             return
 
@@ -2153,12 +2388,12 @@ def _render_scenarios(tracker: Tracker, limit: int = 20) -> None:
     table.add_column("First Run", style="dim")
     table.add_column("Last Run", style="green")
 
-    for row in results:
+    for scenario_id, run_count, first_run, last_run in scenario_rows:
         table.add_row(
-            row[0],  # scenario_id (parent_run_id)
-            str(row[1]),  # run_count
-            row[2].strftime("%Y-%m-%d %H:%M"),  # first_run
-            row[3].strftime("%Y-%m-%d %H:%M"),  # last_run
+            scenario_id,
+            str(run_count),
+            first_run.strftime("%Y-%m-%d %H:%M"),
+            last_run.strftime("%Y-%m-%d %H:%M"),
         )
 
     console.print(table)
@@ -2249,11 +2484,39 @@ def validate(
         "--mount",
         help=MOUNT_OVERRIDE_HELP,
     ),
+    scenario_id: Optional[str] = typer.Option(
+        None,
+        "--scenario",
+        help="Validate only artifacts associated with the specified scenario.",
+    ),
+    run_id: Optional[str] = typer.Option(
+        None,
+        "--run",
+        "--run-id",
+        help="Validate only artifacts associated with the specified run.",
+    ),
+    latest: bool = typer.Option(
+        False,
+        "--latest",
+        help="Validate only artifacts associated with the most recent run or scenario.",
+    ),
+    outputs_only: bool = typer.Option(
+        False,
+        "--outputs-only",
+        help="Validate only output artifacts (skip inputs).",
+    ),
     fix: bool = typer.Option(
         False, help="Attempt to fix issues (mark artifacts as missing)."
     ),
 ) -> None:
     """Check that artifacts referenced in DB actually exist on disk."""
+    scope_count = int(bool(scenario_id)) + int(bool(run_id)) + int(bool(latest))
+    if scope_count > 1:
+        console.print(
+            "[red]Options --scenario, --run, and --latest are mutually exclusive.[/red]"
+        )
+        raise typer.Exit(CLI_EXIT_USAGE_ERROR)
+
     resolved_db_path = find_db_path(db_path)
     mount_overrides = _resolve_mount_overrides_or_exit(mount)
     tracker = get_tracker(
@@ -2262,8 +2525,70 @@ def validate(
         mounts=mount_overrides or None,
     )
     from consist.models.artifact import Artifact
+    from consist.models.run import Run
 
     with _tracker_session(tracker) as session:
+        target_run_ids: Optional[List[str]] = None
+        if scenario_id is not None:
+            member_ids = _collect_scenario_run_ids(session, scenario_id)
+            header_run = session.get(Run, scenario_id)
+            if not member_ids and header_run is None:
+                console.print(f"[red]No runs found for scenario '{scenario_id}'[/red]")
+                raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
+            target_run_ids = (
+                [scenario_id, *member_ids] if header_run is not None else member_ids
+            )
+        elif run_id is not None:
+            run_row = session.get(Run, run_id)
+            if run_row is None:
+                console.print(f"[red]Run with ID '{run_id}' not found.[/red]")
+                raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
+            target_run_ids = [run_id]
+        elif latest:
+            latest_run = session.exec(
+                select(Run).order_by(*recent_run_order_by()).limit(1)
+            ).first()
+            if latest_run is None:
+                console.print("[yellow]No runs found in the database.[/yellow]")
+                return
+            root_scenario_id: Optional[str] = None
+            if isinstance(latest_run.meta, dict):
+                meta_scenario = latest_run.meta.get("scenario_id")
+                if isinstance(meta_scenario, str) and meta_scenario:
+                    root_scenario_id = meta_scenario
+            if root_scenario_id is None and latest_run.parent_run_id:
+                visited: set[str] = {latest_run.id}
+                current_parent_id: Optional[str] = latest_run.parent_run_id
+                while current_parent_id and current_parent_id not in visited:
+                    visited.add(current_parent_id)
+                    root_scenario_id = current_parent_id
+                    parent_row = session.get(Run, current_parent_id)
+                    if parent_row is None:
+                        break
+                    if isinstance(parent_row.meta, dict):
+                        parent_meta_scenario = parent_row.meta.get("scenario_id")
+                        if (
+                            isinstance(parent_meta_scenario, str)
+                            and parent_meta_scenario
+                        ):
+                            root_scenario_id = parent_meta_scenario
+                            break
+                    current_parent_id = parent_row.parent_run_id
+            if (
+                root_scenario_id is None
+                and latest_run.model_name == "scenario"
+                and latest_run.parent_run_id is None
+            ):
+                root_scenario_id = latest_run.id
+
+            if root_scenario_id is not None:
+                member_ids = _collect_scenario_run_ids(session, root_scenario_id)
+                target_run_ids = (
+                    [root_scenario_id, *member_ids] if member_ids else [latest_run.id]
+                )
+            else:
+                target_run_ids = [latest_run.id]
+
         missing = []
         missing_ids: List[uuid.UUID] = []
         batch_size = 1000
@@ -2273,7 +2598,17 @@ def validate(
             except ValueError:
                 batch_size = 1000
 
-        for artifact in _iter_artifact_rows(session, batch_size=batch_size):
+        if target_run_ids is None and not outputs_only:
+            artifact_iter = _iter_artifact_rows(session, batch_size=batch_size)
+        else:
+            artifact_iter = _iter_artifact_rows(
+                session,
+                batch_size=batch_size,
+                run_ids=target_run_ids,
+                outputs_only=outputs_only,
+            )
+
+        for artifact in artifact_iter:
             original_mounts = dict(tracker.mounts)
             try:
                 _ensure_tracker_mounts_for_artifact(
@@ -2378,20 +2713,14 @@ def scenario(
     tracker = get_tracker(db_path)
 
     with _tracker_session(tracker) as session:
-        from consist.models.run import Run
-
-        query = (
-            select(Run)
-            .where(col(Run.parent_run_id) == scenario_id)
-            .order_by(col(Run.created_at))
-        )
-        results = session.exec(query).all()
+        results = _get_scenario_member_runs(session, scenario_id)
 
         if not results:
             console.print(f"[red]No runs found for scenario '{scenario_id}'[/red]")
             raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
 
         table = Table(title=f"Runs in Scenario: [cyan]{scenario_id}[/cyan]")
+        table.add_column("Run ID", style="cyan")
         table.add_column("Model", style="green")
         table.add_column("Year", style="yellow")
         table.add_column("Status")
@@ -2400,6 +2729,7 @@ def scenario(
         for run in results:
             status_style = "green" if run.status == "completed" else "red"
             table.add_row(
+                run.id,
                 run.model_name,
                 str(run.year) if run.year else "-",
                 f"[{status_style}]{run.status}[/]",
@@ -2429,6 +2759,9 @@ def runs(
     status: Optional[str] = typer.Option(
         None, "--status", help="Filter by run status (e.g., 'completed', 'failed')."
     ),
+    scenario: Optional[str] = typer.Option(
+        None, "--scenario", help="Filter by scenario ID."
+    ),
 ) -> None:
     """
     Lists the most recent Consist runs recorded in the provenance database.
@@ -2436,29 +2769,23 @@ def runs(
     tracker = get_tracker(db_path)
     if json_output:
         with _tracker_session(tracker) as session:
-            results = queries.get_runs(
-                session, limit=limit, model_name=model_name, tags=tag, status=status
+            results = _query_runs_with_scenario(
+                session,
+                limit=limit,
+                model_name=model_name,
+                tags=tag,
+                status=status,
+                scenario_id=scenario,
             )
-            output = []
-            for r in results:
-                created_at = getattr(r, "created_at", None)
-                output.append(
-                    {
-                        "id": getattr(r, "id", None),
-                        "model": getattr(r, "model_name", None),
-                        "status": getattr(r, "status", None),
-                        "scenario_id": getattr(r, "parent_run_id", None),
-                        "year": getattr(r, "year", None),
-                        "created_at": created_at.isoformat() if created_at else None,
-                        "duration_seconds": getattr(r, "duration_seconds", None),
-                        "tags": getattr(r, "tags", None),
-                        "meta": getattr(r, "meta", None),
-                    }
-                )
-            output_json(output)
+            output_json(_serialize_runs_json(results))
             return
 
-    _render_runs_table(tracker, limit, model_name, tag, status)
+    if scenario is not None:
+        _render_runs_table(
+            tracker, limit, model_name, tag, status, scenario_id=scenario
+        )
+    else:
+        _render_runs_table(tracker, limit, model_name, tag, status)
 
 
 @app.command()
@@ -2573,12 +2900,22 @@ def artifacts(
 
 
 def _build_lineage_tree(
-    tree_node: Tree, lineage_info: Dict[str, Any], visited_runs: set
+    tree_node: Tree,
+    lineage_info: Dict[str, Any],
+    visited_runs: set,
+    *,
+    expand_configs: bool = False,
+    expand_sets: bool = False,
+    is_root: bool = True,
 ) -> None:
     """Helper function to recursively build a rich.tree.Tree for artifact lineage."""
     run_info = lineage_info.get("producing_run")
+    artifact_obj = lineage_info.get("artifact")
     if not run_info:
-        tree_node.add("[dim]No producing run found[/dim]")
+        if lineage_info.get("truncated_by_depth"):
+            tree_node.add("[dim]... (max depth reached)[/dim]")
+        elif is_root or (artifact_obj is not None and artifact_obj.run_id is not None):
+            tree_node.add("[dim]No producing run found[/dim]")
         return
 
     run = run_info["run"]
@@ -2591,14 +2928,104 @@ def _build_lineage_tree(
         f"🏃‍♂️ [bold green]Run:[/] [cyan]{run.id}[/] [dim]({run.model_name})[/dim]"
     )
 
-    for i, input_lineage in enumerate(run_info.get("inputs", [])):
-        artifact = input_lineage["artifact"]
-        is_last = i == len(run_info["inputs"]) - 1
-        prefix = "└──" if is_last else "├──"
-        child_branch = run_branch.add(
-            f"{prefix} 📄 [bold]Input:[/] [yellow]{artifact.key}[/yellow] [dim]({artifact.driver})[/dim]"
+    raw_inputs: List[Dict[str, Any]] = list(run_info.get("inputs", []))
+
+    def _is_leaf_input(inp: Dict[str, Any]) -> bool:
+        return not inp.get("producing_run") and not inp.get("truncated_by_depth")
+
+    leaf_config_inputs = [
+        inp
+        for inp in raw_inputs
+        if inp["artifact"].key.startswith("config:") and _is_leaf_input(inp)
+    ]
+    collapse_configs = not expand_configs and len(leaf_config_inputs) >= 2
+
+    parent_ids_in_inputs = {
+        inp["artifact"].id
+        for inp in raw_inputs
+        if _artifact_is_output_set_parent(inp["artifact"])
+    }
+    set_member_groups: Dict[Any, List[Dict[str, Any]]] = {}
+    if not expand_sets:
+        for inp in raw_inputs:
+            art = inp["artifact"]
+            if _artifact_is_output_set_manifest(art):
+                continue
+            if (
+                collapse_configs
+                and art.key.startswith("config:")
+                and _is_leaf_input(inp)
+            ):
+                continue
+            parent_id = art.parent_artifact_id
+            if (
+                parent_id is not None
+                and parent_id not in parent_ids_in_inputs
+                and _is_leaf_input(inp)
+            ):
+                set_member_groups.setdefault(parent_id, []).append(inp)
+
+    emitted_config_summary = False
+    emitted_set_groups: set[Any] = set()
+    display_items: List[Tuple[str, Optional[Dict[str, Any]]]] = []
+
+    for inp in raw_inputs:
+        art = inp["artifact"]
+        if not expand_sets:
+            if _artifact_is_output_set_manifest(art):
+                continue
+            if (
+                art.parent_artifact_id is not None
+                and art.parent_artifact_id in parent_ids_in_inputs
+            ):
+                continue
+        if collapse_configs and art.key.startswith("config:") and _is_leaf_input(inp):
+            if not emitted_config_summary:
+                emitted_config_summary = True
+                display_items.append(
+                    (
+                        f"📁 [bold]Inputs:[/] [yellow]config:*[/yellow] [dim]({len(leaf_config_inputs)} files)[/dim]",
+                        None,
+                    )
+                )
+            continue
+        parent_id = art.parent_artifact_id
+        if (
+            not expand_sets
+            and parent_id is not None
+            and _is_leaf_input(inp)
+            and len(set_member_groups.get(parent_id, [])) >= 2
+        ):
+            if parent_id not in emitted_set_groups:
+                emitted_set_groups.add(parent_id)
+                group_count = len(set_member_groups[parent_id])
+                display_items.append(
+                    (
+                        f"📁 [bold]Input Set Members:[/] [yellow]{str(parent_id)[:8]}[/yellow] [dim]({group_count} files)[/dim]",
+                        None,
+                    )
+                )
+            continue
+        display_items.append(
+            (
+                f"📄 [bold]Input:[/] [yellow]{art.key}[/yellow] [dim]({art.driver})[/dim]",
+                inp,
+            )
         )
-        _build_lineage_tree(child_branch, input_lineage, visited_runs.copy())
+
+    for i, (label, child_lineage) in enumerate(display_items):
+        is_last = i == len(display_items) - 1
+        prefix = "└──" if is_last else "├──"
+        child_branch = run_branch.add(f"{prefix} {label}")
+        if child_lineage is not None:
+            _build_lineage_tree(
+                child_branch,
+                child_lineage,
+                visited_runs.copy(),
+                expand_configs=expand_configs,
+                expand_sets=expand_sets,
+                is_root=False,
+            )
 
 
 def _resolve_cli_path(path: Path | str) -> Path:
@@ -3206,13 +3633,33 @@ def lineage(
     artifact_key: str = typer.Argument(
         ..., help="The key or ID of the artifact to trace."
     ),
+    max_depth: Optional[int] = typer.Option(
+        None,
+        "--max-depth",
+        "-d",
+        min=0,
+        help="Maximum run depth to traverse.",
+    ),
+    expand_configs: bool = typer.Option(
+        False,
+        "--expand-configs",
+        help="Show individual config:* input artifacts instead of collapsing.",
+    ),
+    expand_sets: bool = typer.Option(
+        False,
+        "--expand-sets",
+        help="Show individual output-set/artifact-set member artifacts instead of collapsing.",
+    ),
     db_path: Optional[str] = typer.Option(
         None, help="Path to the Consist DuckDB database."
     ),
 ) -> None:
     """Traces and displays the full lineage of an artifact."""
     tracker = get_tracker(db_path)
-    lineage_data = tracker.get_artifact_lineage(artifact_key)
+    if max_depth is not None:
+        lineage_data = tracker.get_artifact_lineage(artifact_key, max_depth=max_depth)
+    else:
+        lineage_data = tracker.get_artifact_lineage(artifact_key)
 
     if not lineage_data:
         console.print(
@@ -3226,9 +3673,19 @@ def lineage(
     )
 
     if not lineage_data.get("producing_run"):
-        tree.add("[dim]No producing run found. This may be a primary input.[/dim]")
+        if lineage_data.get("truncated_by_depth"):
+            tree.add("[dim]... (max depth reached)[/dim]")
+        else:
+            tree.add("[dim]No producing run found. This may be a primary input.[/dim]")
     else:
-        _build_lineage_tree(tree, lineage_data, set())
+        _build_lineage_tree(
+            tree,
+            lineage_data,
+            set(),
+            expand_configs=expand_configs,
+            expand_sets=expand_sets,
+            is_root=True,
+        )
 
     console.print(tree)
 
@@ -3357,7 +3814,7 @@ def preview(
                 style = "green"
             table.add_column(str(col_name), style=style)
 
-        for _, row in df.iterrows():
+        for row in df.itertuples(index=False, name=None):
             table.add_row(*[str(item) for item in row])
 
         console.print(table)
@@ -3367,7 +3824,7 @@ def preview(
     if xr is not None and isinstance(data, (xr.Dataset, xr.DataArray)):
         ds: xr.Dataset
         if isinstance(data, xr.DataArray):
-            ds = data.to_dataset(name=getattr(data, "name", None) or "data")
+            ds = data.to_dataset(name=str(data.name) if data.name else "data")
         else:
             ds = data
 
@@ -3439,6 +3896,7 @@ class ConsistShell(cmd.Cmd):
         "--model",
         "--status",
         "--tag",
+        "--scenario",
         "--json",
     )
     _ARTIFACT_COMPLETION_FLAGS: Tuple[str, ...] = (
@@ -4089,7 +4547,7 @@ class ConsistShell(cmd.Cmd):
     def do_validate(self, arg: str) -> None:
         """Validate artifact files.
 
-        Usage: validate [--fix] [--run-dir PATH] [--trust-db] [--mount NAME=PATH]
+        Usage: validate [--scenario ID | --run ID | --latest] [--outputs-only] [--fix] [--run-dir PATH] [--trust-db] [--mount NAME=PATH]
         """
         self._invoke_cli_command("validate", arg)
 
@@ -4098,7 +4556,7 @@ class ConsistShell(cmd.Cmd):
         self._invoke_cli_command("scenario", arg)
 
     def do_lineage(self, arg: str) -> None:
-        """Show artifact lineage. Usage: lineage <artifact_key>"""
+        """Show artifact lineage. Usage: lineage <artifact_key> [--max-depth N] [--expand-configs] [--expand-sets]"""
         self._invoke_cli_command("lineage", arg)
 
     def do_db(self, arg: str) -> None:
@@ -4121,13 +4579,14 @@ class ConsistShell(cmd.Cmd):
         self._invoke_cli_command("views", arg)
 
     def do_runs(self, arg: str) -> None:
-        """List recent runs. Usage: runs [--limit N] [--model NAME] [--status STATUS] [--tag TAG] [--json]"""
+        """List recent runs. Usage: runs [--limit N] [--model NAME] [--status STATUS] [--tag TAG] [--scenario ID] [--json]"""
         try:
             args = self._safe_split(arg)
             limit = 10
             model_name = None
             status = None
             tags: List[str] = []
+            scenario: Optional[str] = None
             json_output = False
 
             i = 0
@@ -4158,6 +4617,16 @@ class ConsistShell(cmd.Cmd):
                         raise ValueError("--tag requires a value")
                     tags.append(args[i + 1])
                     i += 2
+                elif token == "--scenario":
+                    if i + 1 >= len(args):
+                        raise ValueError("--scenario requires a value")
+                    scenario = args[i + 1]
+                    i += 2
+                elif token.startswith("--scenario="):
+                    scenario = token.split("=", 1)[1]
+                    if not scenario:
+                        raise ValueError("--scenario requires a value")
+                    i += 1
                 elif token == "--json":
                     json_output = True
                     i += 1
@@ -4168,51 +4637,42 @@ class ConsistShell(cmd.Cmd):
 
             if json_output:
                 with _tracker_session(self.tracker) as session:
-                    results = queries.get_runs(
+                    results = _query_runs_with_scenario(
                         session,
                         limit=limit,
                         model_name=model_name,
                         tags=tags if tags else None,
                         status=status,
+                        scenario_id=scenario,
                     )
-                    payload = []
-                    for run in results:
-                        created_at = getattr(run, "created_at", None)
-                        payload.append(
-                            {
-                                "id": getattr(run, "id", None),
-                                "model": getattr(run, "model_name", None),
-                                "status": getattr(run, "status", None),
-                                "scenario_id": getattr(run, "parent_run_id", None),
-                                "year": getattr(run, "year", None),
-                                "created_at": (
-                                    created_at.isoformat() if created_at else None
-                                ),
-                                "duration_seconds": getattr(
-                                    run, "duration_seconds", None
-                                ),
-                                "tags": getattr(run, "tags", None),
-                                "meta": getattr(run, "meta", None),
-                            }
-                        )
+                    payload = _serialize_runs_json(results)
                 output_json(payload)
                 return
 
-            _render_runs_table(
-                self.tracker, limit, model_name, tags if tags else None, status
-            )
+            if scenario is not None:
+                _render_runs_table(
+                    self.tracker,
+                    limit,
+                    model_name,
+                    tags if tags else None,
+                    status,
+                    scenario_id=scenario,
+                )
+            else:
+                _render_runs_table(
+                    self.tracker, limit, model_name, tags if tags else None, status
+                )
             with _tracker_session(self.tracker) as session:
-                cached_runs = queries.get_runs(
+                cached_runs = _query_runs_with_scenario(
                     session,
                     limit=limit,
                     model_name=model_name,
                     tags=tags if tags else None,
                     status=status,
+                    scenario_id=scenario,
                 )
             self._last_run_ids = [
-                str(getattr(run, "id"))
-                for run in cached_runs
-                if getattr(run, "id", None) is not None
+                str(run.id) for run in cached_runs if run.id is not None
             ]
             if self._last_run_ids:
                 console.print("[dim]Run refs:[/dim]")
@@ -4515,7 +4975,7 @@ class ConsistShell(cmd.Cmd):
                     elif pd.api.types.is_datetime64_any_dtype(df[col_name]):
                         style = "green"
                     table.add_column(str(col_name), style=style)
-                for _, row in df.iterrows():
+                for row in df.itertuples(index=False, name=None):
                     table.add_row(*[str(item) for item in row])
                 console.print(table)
                 return
@@ -4524,7 +4984,7 @@ class ConsistShell(cmd.Cmd):
             if xr is not None and isinstance(data, (xr.Dataset, xr.DataArray)):
                 ds: xr.Dataset
                 if isinstance(data, xr.DataArray):
-                    ds = data.to_dataset(name=getattr(data, "name", None) or "data")
+                    ds = data.to_dataset(name=str(data.name) if data.name else "data")
                 else:
                     ds = data
 

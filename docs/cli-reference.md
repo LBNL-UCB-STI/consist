@@ -63,7 +63,7 @@ requested rows.
 | --- | --- | --- |
 | Initialize workspace | `consist init` | Sets up `.consist/provenance.duckdb` and `runs/` in project root. |
 | Track external command | `consist exec ...` | Execute any CLI command and record input/output provenance. |
-| Find recent runs | `consist runs` | Add `--model`, `--status`, or `--tag` when the database is busy. |
+| Find recent runs | `consist runs` | Add `--model`, `--status`, `--tag`, or `--scenario` when the database is busy. |
 | Inspect one run's outputs | `consist artifacts <run_id>` | Use `--expand-sets` for logical output sets. |
 | Preview data | `consist preview <artifact_key>` | Works for tabular artifacts such as CSV and Parquet. |
 | Diagnose one input file | `consist admission doctor` | Compare it to one explicit input from a completed baseline run. |
@@ -321,6 +321,7 @@ consist runs --limit 20               # Last 20 runs
 consist runs --model travel_demand    # Filter by model name
 consist runs --status completed       # Filter by status
 consist runs --tag simulation         # Filter by tag
+consist runs --scenario baseline_2030 # Filter to transitive runs in a scenario
 consist runs --json                   # JSON output for scripting
 ```
 
@@ -494,13 +495,27 @@ Trace the full provenance chain for an artifact.
 
 ```bash
 consist lineage <artifact_key_or_id>
+consist lineage <artifact_key_or_id> --max-depth 4
+consist lineage <artifact_key_or_id> --expand-configs
+consist lineage <artifact_key_or_id> --expand-sets
 ```
 
-Displays a tree showing which runs and inputs produced the artifact.
+Displays a tree showing which runs and inputs produced the artifact. By default,
+`lineage` collapses multiple leaf `config:*` inputs and output-set manifest/member
+artifacts to keep deep provenance trees readable, and stops recursion at
+`--max-depth` (`-d`, default `6`) with an explicit `... (max depth reached)`
+marker when further upstream provenance exists.
+
+Options:
+
+- `--max-depth` / `-d`: maximum recursion depth (default `6`)
+- `--expand-configs`: list every leaf `config:*` input instead of collapsing them
+- `--expand-sets`: list individual output-set manifest and member artifacts
+- `--run-id`: scope artifact key lookup to a specific run
 
 ### consist scenarios
 
-List all scenarios and their run counts.
+List all root scenarios and their transitive member run counts and timestamps.
 
 ```bash
 consist scenarios
@@ -509,7 +524,8 @@ consist scenarios --limit 50
 
 ### consist scenario
 
-Show all runs within a specific scenario.
+Show all transitive member runs within a specific scenario in chronological order,
+including each step's `Run ID`, model name, status, year, iteration, and duration.
 
 ```bash
 consist scenario <scenario_id>
@@ -557,12 +573,26 @@ Check that artifacts in the database exist on disk.
 
 ```bash
 consist validate
+consist validate --latest
+consist validate --scenario baseline_2030
+consist validate --run beam_2025_iter2
+consist validate --latest --outputs-only
 consist validate --fix  # Mark missing artifacts
 consist validate --db-path examples/runs/beam_core_demo/beam_core_demo_demo.duckdb
 consist validate --db-path archives/beam_core_demo.duckdb --run-dir /data/archive/beam_core_demo
 consist validate --db-path archives/beam_core_demo.duckdb --mount workspace=/data/archive/beam_core_demo
 consist validate --db-path archives/beam_core_demo.duckdb --trust-db
 ```
+
+Scope and filter options:
+
+- `--scenario <scenario_id>`: validate only artifacts linked to the specified scenario and its transitive member runs (shared artifacts across steps are validated once)
+- `--run <run_id>` / `--run-id <run_id>`: validate only artifacts linked to the specified run
+- `--latest`: validate only artifacts linked to the most recent run or its enclosing scenario
+- `--outputs-only`: validate only output artifacts and skip inputs
+- `--fix`: mark missing artifacts with `meta["missing_on_disk"] = True`
+
+`--scenario`, `--run`, and `--latest` are mutually exclusive.
 
 ### consist shell
 

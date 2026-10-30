@@ -200,3 +200,55 @@ def test_build_lineage_cycle_does_not_recurse_forever() -> None:
     input_node = producer["inputs"][0]
     assert input_node["artifact"] == art_cycle
     assert input_node["producing_run"] is None
+
+
+def test_build_lineage_tree_sets_truncated_by_depth_when_max_depth_reached() -> None:
+    """When max_depth stops traversal on an artifact with run_id, truncated_by_depth is set."""
+    mock_tracker = MagicMock()
+    run_a = Run(id="run_a", model_name="model_a", config_hash=None, git_hash=None)
+    run_b = Run(id="run_b", model_name="model_b", config_hash=None, git_hash=None)
+
+    art_1 = Artifact(
+        id=uuid.uuid4(),
+        key="data_v1",
+        container_uri="outputs://data_v1.csv",
+        driver="csv",
+        run_id="run_a",
+    )
+    art_2 = Artifact(
+        id=uuid.uuid4(),
+        key="data_v2",
+        container_uri="outputs://data_v2.csv",
+        driver="csv",
+        run_id="run_b",
+    )
+    art_leaf = Artifact(
+        id=uuid.uuid4(),
+        key="raw_leaf",
+        container_uri="inputs://raw_leaf.csv",
+        driver="csv",
+        run_id=None,
+    )
+
+    mock_tracker.get_artifact.return_value = art_2
+    mock_tracker.get_run.side_effect = lambda r_id: (
+        run_b if r_id == "run_b" else (run_a if r_id == "run_a" else None)
+    )
+    mock_tracker.get_artifacts_for_run.side_effect = lambda r_id: (
+        RunArtifacts(
+            inputs={"data_v1": art_1, "raw_leaf": art_leaf},
+            outputs={"data_v2": art_2},
+        )
+        if r_id == "run_b"
+        else RunArtifacts()
+    )
+
+    tree = build_lineage_tree(mock_tracker, "a2", max_depth=1)
+    assert tree is not None
+    inputs_by_key = {
+        node["artifact"].key: node for node in tree["producing_run"]["inputs"]
+    }
+    assert inputs_by_key["data_v1"]["producing_run"] is None
+    assert inputs_by_key["data_v1"].get("truncated_by_depth") is True
+    assert inputs_by_key["raw_leaf"]["producing_run"] is None
+    assert "truncated_by_depth" not in inputs_by_key["raw_leaf"]
