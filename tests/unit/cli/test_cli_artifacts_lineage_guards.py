@@ -284,3 +284,111 @@ def test_artifacts_accepts_run_dir_for_moved_run_roots(
     assert result.exit_code == 0
     assert "results" in result.stdout
     assert "primary" in result.stdout
+
+
+def test_lineage_max_depth_flag(cli_runner, tracker, run_dir: Path) -> None:
+    """`lineage --max-depth 1` should truncate deeper runs with a depth marker."""
+    f1 = run_dir / "step1.csv"
+    f1.write_text("a\n1\n", encoding="utf-8")
+    f2 = run_dir / "step2.csv"
+    f2.write_text("a\n2\n", encoding="utf-8")
+
+    with tracker.start_run("depth_run_1", "model_1"):
+        a1 = tracker.log_output(f1, key="depth_art_1")
+    with tracker.start_run("depth_run_2", "model_2"):
+        tracker.log_input(a1, key="depth_art_1")
+        tracker.log_output(f2, key="depth_art_2")
+
+    result = cli_runner.invoke(app, ["lineage", "depth_art_2", "--max-depth", "1"])
+    assert result.exit_code == 0
+    assert "depth_run_2" in result.stdout
+    assert "depth_art_1" in result.stdout
+    assert "depth_run_1" not in result.stdout
+    assert "... (max depth reached)" in result.stdout
+    assert "No producing run found" not in result.stdout
+
+
+def test_lineage_collapses_config_inputs_by_default_and_expands_with_flag(
+    cli_runner, tracker, run_dir: Path
+) -> None:
+    """`lineage` should collapse >=2 leaf config:* inputs by default and expand with --expand-configs."""
+    data_in = run_dir / "data_in.csv"
+    data_in.write_text("a\n1\n", encoding="utf-8")
+    out_file = run_dir / "out.csv"
+    out_file.write_text("a\n2\n", encoding="utf-8")
+
+    with tracker.start_run("cfg_run", "model"):
+        tracker.log_input(data_in, key="primary_input")
+        for idx in range(5):
+            cfg_path = run_dir / f"cfg_{idx}.yaml"
+            cfg_path.write_text(f"k: {idx}\n", encoding="utf-8")
+            tracker.log_input(cfg_path, key=f"config:cfg_{idx}.yaml")
+        tracker.log_output(out_file, key="cfg_run_output")
+
+    default_res = cli_runner.invoke(app, ["lineage", "cfg_run_output"])
+    assert default_res.exit_code == 0
+    assert "config:* (5 files)" in default_res.stdout
+    assert "config:cfg_0.yaml" not in default_res.stdout
+    assert "primary_input" in default_res.stdout
+    assert "No producing run found" not in default_res.stdout
+
+    expanded_res = cli_runner.invoke(
+        app, ["lineage", "cfg_run_output", "--expand-configs"]
+    )
+    assert expanded_res.exit_code == 0
+    for idx in range(5):
+        assert f"config:cfg_{idx}.yaml" in expanded_res.stdout
+
+
+def test_lineage_collapses_output_set_members_by_default_and_expands_with_flag(
+    cli_runner, tracker, run_dir: Path
+) -> None:
+    """`lineage` should hide output-set manifest and member leaves by default and expand with --expand-sets."""
+    parent_path = run_dir / "set_parent.csv"
+    parent_path.write_text("v\n1\n", encoding="utf-8")
+    manifest_path = run_dir / "set_manifest.json"
+    manifest_path.write_text("{}\n", encoding="utf-8")
+    final_path = run_dir / "final_set_consumer.csv"
+    final_path.write_text("v\n9\n", encoding="utf-8")
+
+    with tracker.start_run("set_consumer_run", "model"):
+        manifest = tracker.log_artifact(
+            manifest_path,
+            key="set_manifest_key",
+            driver="json",
+            direction="input",
+            output_set_manifest=True,
+        )
+        parent = tracker.log_artifact(
+            parent_path,
+            key="set_parent_key",
+            driver="artifact_set",
+            direction="input",
+            artifact_set=True,
+            manifest_artifact_id=str(manifest.id),
+        )
+        for idx in range(3):
+            m_path = run_dir / f"member_{idx}.csv"
+            m_path.write_text(f"v\n{idx}\n", encoding="utf-8")
+            tracker.log_artifact(
+                m_path,
+                key=f"set_member_{idx}",
+                driver="csv",
+                direction="input",
+                parent_artifact_id=parent.id,
+            )
+        tracker.log_output(final_path, key="set_consumer_out")
+
+    default_res = cli_runner.invoke(app, ["lineage", "set_consumer_out"])
+    assert default_res.exit_code == 0
+    assert "set_parent_key" in default_res.stdout
+    assert "set_manifest_key" not in default_res.stdout
+    assert "set_member_0" not in default_res.stdout
+
+    expanded_res = cli_runner.invoke(
+        app, ["lineage", "set_consumer_out", "--expand-sets"]
+    )
+    assert expanded_res.exit_code == 0
+    assert "set_parent_key" in expanded_res.stdout
+    assert "set_manifest_key" in expanded_res.stdout
+    assert "set_member_0" in expanded_res.stdout

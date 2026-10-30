@@ -2557,3 +2557,173 @@ def test_shell_help_lists_preview_and_schema(capsys):
     out = capsys.readouterr().out
     assert "preview" in out
     assert "schema" in out
+
+
+def test_scenario_command_lists_recursively_chained_runs(cli_runner, tracker):
+    with Session(tracker.engine) as session:
+        session.add_all(
+            [
+                Run(
+                    id="step_1",
+                    model_name="net_build",
+                    config_hash=None,
+                    git_hash=None,
+                    status="completed",
+                    parent_run_id="sc_chain",
+                    created_at=datetime(2025, 1, 1, 12, 0),
+                    started_at=datetime(2025, 1, 1, 12, 0),
+                ),
+                Run(
+                    id="step_2",
+                    model_name="assign",
+                    config_hash=None,
+                    git_hash=None,
+                    status="completed",
+                    parent_run_id="step_1",
+                    created_at=datetime(2025, 1, 1, 12, 5),
+                    started_at=datetime(2025, 1, 1, 12, 5),
+                ),
+                Run(
+                    id="step_3",
+                    model_name="postproc",
+                    config_hash=None,
+                    git_hash=None,
+                    status="completed",
+                    parent_run_id="step_2",
+                    created_at=datetime(2025, 1, 1, 12, 10),
+                    started_at=datetime(2025, 1, 1, 12, 10),
+                ),
+            ]
+        )
+        session.commit()
+
+    result = cli_runner.invoke(app, ["scenario", "sc_chain"])
+    assert result.exit_code == 0
+    assert "Runs in Scenario: sc_chain" in result.stdout
+    assert "step_1" in result.stdout
+    assert "step_2" in result.stdout
+    assert "step_3" in result.stdout
+    assert result.stdout.index("step_1") < result.stdout.index("step_2")
+    assert result.stdout.index("step_2") < result.stdout.index("step_3")
+
+    scenarios_result = cli_runner.invoke(app, ["scenarios"])
+    assert scenarios_result.exit_code == 0
+    assert "sc_chain" in scenarios_result.stdout
+    assert "3" in scenarios_result.stdout
+    assert "step_1" not in scenarios_result.stdout
+    assert "step_2" not in scenarios_result.stdout
+
+
+def test_scenario_context_records_scenario_id_and_discovers_overridden_parent(
+    cli_runner, tracker, sample_csv
+):
+    with tracker.scenario("sc_meta") as sc:
+        with sc.trace(
+            "overridden_step",
+            run_id="overridden_step",
+            model="custom_model",
+            parent_run_id="external_run",
+        ) as t:
+            t.log_output(sample_csv("step.csv"), key="step_out")
+
+    overridden_run = tracker.get_run("overridden_step")
+    assert overridden_run is not None
+    assert overridden_run.meta.get("scenario_id") == "sc_meta"
+
+    result = cli_runner.invoke(app, ["scenario", "sc_meta"])
+    assert result.exit_code == 0
+    assert "overridden_step" in result.stdout
+
+
+def test_collect_scenario_run_ids_handles_cycle_safely(tracker):
+    from consist.cli import _collect_scenario_run_ids
+
+    with Session(tracker.engine) as session:
+        session.add_all(
+            [
+                Run(
+                    id="cycle_a",
+                    model_name="m1",
+                    config_hash=None,
+                    git_hash=None,
+                    status="completed",
+                    parent_run_id="cycle_b",
+                    meta={"scenario_id": "sc_cycle"},
+                    created_at=datetime(2025, 1, 1, 12, 0),
+                    started_at=datetime(2025, 1, 1, 12, 0),
+                ),
+                Run(
+                    id="cycle_b",
+                    model_name="m2",
+                    config_hash=None,
+                    git_hash=None,
+                    status="completed",
+                    parent_run_id="cycle_a",
+                    created_at=datetime(2025, 1, 1, 12, 5),
+                    started_at=datetime(2025, 1, 1, 12, 5),
+                ),
+            ]
+        )
+        session.commit()
+
+        ids = _collect_scenario_run_ids(session, "sc_cycle")
+        assert set(ids) == {"cycle_a", "cycle_b"}
+
+
+def test_runs_filter_by_scenario_includes_recursive_members(cli_runner, tracker):
+    with Session(tracker.engine) as session:
+        session.add_all(
+            [
+                Run(
+                    id="sc_step_1",
+                    model_name="m1",
+                    config_hash=None,
+                    git_hash=None,
+                    status="completed",
+                    parent_run_id="sc_filter",
+                    created_at=datetime(2025, 1, 1, 12, 0),
+                    started_at=datetime(2025, 1, 1, 12, 0),
+                ),
+                Run(
+                    id="sc_step_2",
+                    model_name="m2",
+                    config_hash=None,
+                    git_hash=None,
+                    status="completed",
+                    parent_run_id="sc_step_1",
+                    created_at=datetime(2025, 1, 1, 12, 5),
+                    started_at=datetime(2025, 1, 1, 12, 5),
+                ),
+                Run(
+                    id="other_run",
+                    model_name="m3",
+                    config_hash=None,
+                    git_hash=None,
+                    status="completed",
+                    parent_run_id="other_sc",
+                    created_at=datetime(2025, 1, 1, 12, 10),
+                    started_at=datetime(2025, 1, 1, 12, 10),
+                ),
+            ]
+        )
+        session.commit()
+
+    result = cli_runner.invoke(app, ["runs", "--scenario", "sc_filter", "--json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    ids = {item["id"] for item in payload}
+    assert ids == {"sc_step_1", "sc_step_2"}
+
+
+def test_shell_runs_filter_by_scenario():
+    tracker = MagicMock()
+    shell = ConsistShell(tracker)
+    with (
+        patch("consist.cli._render_runs_table") as render,
+        patch("consist.cli._tracker_session") as tracker_session,
+        patch("consist.cli._collect_scenario_run_ids", return_value={"r1"}),
+        patch("consist.cli.queries.get_runs", return_value=[]),
+    ):
+        tracker_session.return_value.__enter__.return_value = MagicMock()
+        shell.do_runs("--scenario sc_1 --limit 5")
+    render.assert_called_once_with(tracker, 5, None, None, None, scenario_id="sc_1")

@@ -20,10 +20,16 @@ def get_runs(
     model_name: Optional[str] = None,
     tags: Optional[List[str]] = None,
     status: Optional[str] = None,
+    run_ids: Optional[Iterable[str]] = None,
 ) -> List[Run]:
     """Fetches a list of runs with optional filters."""
     statement = select(Run).order_by(*recent_run_order_by())
 
+    if run_ids is not None:
+        id_list = list(run_ids)
+        if not id_list:
+            return []
+        statement = statement.where(col(Run.id).in_(id_list))
     if model_name:
         statement = statement.where(Run.model_name == model_name)
     if status:

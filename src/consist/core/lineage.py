@@ -72,6 +72,8 @@ def build_lineage_tree(
         lineage_node: Dict[str, Any] = {"artifact": artifact, "producing_run": None}
 
         if max_depth is not None and depth >= max_depth:
+            if artifact.run_id:
+                lineage_node["truncated_by_depth"] = True
             return lineage_node
 
         cache_key = (
