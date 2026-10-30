@@ -8,7 +8,6 @@ callbacks and use the shared orchestration to preserve consistent run semantics.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-import hashlib
 import inspect
 from pathlib import Path
 import shutil
@@ -22,6 +21,8 @@ from typing import (
     Protocol,
     Sequence,
 )
+
+from consist.digest import file_sha256
 
 if TYPE_CHECKING:  # pragma: no cover
     from consist.core.tracker import Tracker
@@ -364,12 +365,3 @@ def digest_path(path: Path, tracker: Optional["Tracker"]) -> str:
     if tracker is not None:
         return tracker.identity.digest_path(path)
     return file_sha256(path)
-
-
-def file_sha256(path: Path) -> str:
-    """Compute SHA-256 digest for a file path."""
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()

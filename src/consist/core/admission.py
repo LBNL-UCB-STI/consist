@@ -10,7 +10,6 @@ declaration, but neither source changes cache identity or artifacts on its own.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -30,6 +29,7 @@ from consist.core.logical_array_identity import (
     normalize_logical_matrices_identity,
 )
 from consist.core.persistence import DatabaseManager
+from consist.digest import digest_file
 from consist.models.artifact import Artifact
 from consist.models.run import Run, RunArtifactLink
 
@@ -754,15 +754,7 @@ def admission_file_identity(path: str | Path) -> str:
     This function always hashes full file contents and does not consult or
     modify a tracker's cache hashing strategy.
     """
-    file_path = Path(path)
-    if not file_path.is_file():
-        raise ValueError(f"Admission only supports regular files: {file_path}")
-
-    digest = hashlib.sha256()
-    with file_path.open("rb") as source:
-        while chunk := source.read(1024 * 1024):
-            digest.update(chunk)
-    return f"sha256:file:{digest.hexdigest()}"
+    return digest_file(path)
 
 
 def _is_git_lfs_pointer(path: Path) -> bool:

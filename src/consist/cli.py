@@ -58,7 +58,8 @@ from rich.text import Text
 from sqlalchemy import and_, or_
 from sqlmodel import Session, col, select
 
-from consist import AdmissionReport, Tracker, check_artifact_identity
+from consist import Tracker
+from consist.admission import AdmissionReport, check_artifact_identity
 from consist.core.gtfs import GTFS_CORE_TABLE_NAMES, discover_gtfs_members
 from consist.core.db_snapshot import snapshot_sidecar_path
 from consist.core.maintenance import DatabaseMaintenance

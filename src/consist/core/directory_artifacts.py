@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 import shutil
 import tempfile
@@ -11,8 +9,9 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from consist.digest import canonical_json_sha256, file_sha256
 
-_HASH_CHUNK_SIZE = 8 * 1024 * 1024
+
 _MANIFEST_VERSION = 1
 _SHAPEFILE_REQUIRED_SUFFIXES = frozenset({".shp", ".shx", ".dbf"})
 
@@ -555,13 +554,8 @@ def _reject_symlink_components(path: Path, *, label: str) -> None:
 
 
 def _compute_file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(_HASH_CHUNK_SIZE), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return file_sha256(path)
 
 
 def _manifest_hash(manifest: Mapping[str, Any]) -> str:
-    payload = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return canonical_json_sha256(manifest)

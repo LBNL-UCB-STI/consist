@@ -83,20 +83,28 @@ def _assert_observation(report: AdmissionReport, text: str) -> None:
 
 
 def test_public_package_exports_admission_api() -> None:
+    import warnings
     import consist
+    import consist.admission as cadmission
 
-    assert consist.AdmissionReference is AdmissionReference
-    assert consist.AdmissionReport is AdmissionReport
-    assert consist.FileIdentity is FileIdentity
-    assert consist.DeclaredDigestExpectation is DeclaredDigestExpectation
-    assert consist.check_admission_reference is check_admission_reference
+    assert cadmission.AdmissionReference is AdmissionReference
+    assert cadmission.AdmissionReport is AdmissionReport
+    assert cadmission.FileIdentity is FileIdentity
+    assert cadmission.DeclaredDigestExpectation is DeclaredDigestExpectation
+    assert cadmission.check_admission_reference is check_admission_reference
     assert (
-        consist.check_admission_reference_expected_identity
+        cadmission.check_admission_reference_expected_identity
         is check_admission_reference_expected_identity
     )
-    assert consist.check_artifact_identity is check_artifact_identity
-    assert consist.check_expected_identity is check_expected_identity
-    assert consist.compare_path_to_identity is compare_path_to_identity
+    assert cadmission.check_artifact_identity is check_artifact_identity
+    assert cadmission.check_expected_identity is check_expected_identity
+    assert cadmission.compare_path_to_identity is compare_path_to_identity
+
+    with warnings.catch_warnings(record=True) as recorded:
+        warnings.simplefilter("always")
+        assert consist.AdmissionReference is AdmissionReference
+        assert len(recorded) >= 1
+        assert issubclass(recorded[0].category, DeprecationWarning)
 
 
 def test_declared_digest_matching_file_is_verified_without_a_tracker(

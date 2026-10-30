@@ -7,7 +7,7 @@ import duckdb
 import pandas as pd
 import pytest
 
-from consist import canonicalize_gtfs_bundle, discover_gtfs_members
+from consist.gtfs import canonicalize_gtfs_bundle, discover_gtfs_members
 from consist.core.drivers import TABLE_DRIVERS, TableInfo
 from consist.core.identity import IdentityManager
 from consist.core.gtfs import hash_gtfs_feed

@@ -54,6 +54,7 @@ from consist.core.directory_artifacts import (
     validate_shapefile_bundle_root,
 )
 from consist.core.stores import get_hot_data_engine
+from consist.digest import file_sha256
 from consist.models.artifact import Artifact, _private_state
 
 if TYPE_CHECKING:
@@ -126,8 +127,6 @@ ArchiveRunOutputVerificationStatus = Literal[
     "hash_mismatch",
     "failed",
 ]
-
-_FILE_HASH_CHUNK_SIZE = 8 * 1024 * 1024
 
 
 @dataclass(slots=True)
@@ -980,11 +979,7 @@ def _ensure_destination_not_symlink(path: Path) -> None:
 
 
 def _compute_file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(_FILE_HASH_CHUNK_SIZE), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return file_sha256(path)
 
 
 def _compute_path_checksum(path: Path) -> str:

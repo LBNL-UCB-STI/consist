@@ -13,6 +13,7 @@ import pandas as pd
 
 from consist.core.config_canonicalization import IngestSpec
 from consist.core.identity import IdentityManager
+from consist.digest import canonical_json_sha256, digest_bytes
 from consist.models.gtfs import GTFS_SCHEMA_BY_TABLE_NAME
 
 GTFS_TABLE_EXTENSIONS = (".txt", ".csv")
@@ -212,7 +213,7 @@ def load_gtfs_member_relation(
 
 
 def _hash_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+    return digest_bytes(data)
 
 
 def hash_gtfs_member(source_path: Path, member_name: str) -> str:
@@ -229,8 +230,7 @@ def hash_gtfs_feed(source_path: Path, member_names: Sequence[str]) -> str:
             for name in sorted(_normalize_member_name(name) for name in member_names)
         ],
     }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    return canonical_json_sha256(payload)
 
 
 def _unwrap_optional(annotation: Any) -> Any:

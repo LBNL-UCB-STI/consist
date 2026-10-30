@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
@@ -36,9 +35,8 @@ from consist.core.output_sets import (
     _manifest_identity_hash,
     _normalize_output_set_relative_path,
 )
+from consist.digest import file_sha256
 from consist.models.artifact import Artifact, ArchivedOutputs
-
-_FILE_HASH_CHUNK_SIZE = 8 * 1024 * 1024
 
 
 def _is_directory_artifact(artifact: Artifact) -> bool:
@@ -97,14 +95,7 @@ def _compute_file_sha256(path: Path) -> str:
     str
         Lowercase hexadecimal SHA-256 digest.
     """
-    sha256 = hashlib.sha256()
-    with path.open("rb") as file:
-        while True:
-            chunk = file.read(_FILE_HASH_CHUNK_SIZE)
-            if not chunk:
-                break
-            sha256.update(chunk)
-    return sha256.hexdigest()
+    return file_sha256(path)
 
 
 @dataclass(frozen=True, slots=True)
