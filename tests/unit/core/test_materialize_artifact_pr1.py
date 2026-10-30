@@ -229,7 +229,7 @@ def test_directory_artifact_materialization_never_skips_manifest_hashing(
 
     tracker = _create_stub_tracker(tmp_path / "workspace")
 
-    # Spy on build_directory_manifest and _compute_file_sha256 to ensure they are NOT called
+    # Spy on build_directory_manifest and file_sha256 to ensure they are NOT called
     called = []
 
     def fail_on_build(*args, **kwargs):
@@ -237,13 +237,13 @@ def test_directory_artifact_materialization_never_skips_manifest_hashing(
         raise AssertionError("build_directory_manifest should not be called!")
 
     def fail_on_sha(*args, **kwargs):
-        called.append("_compute_file_sha256")
-        raise AssertionError("_compute_file_sha256 should not be called!")
+        called.append("file_sha256")
+        raise AssertionError("file_sha256 should not be called!")
 
     monkeypatch.setattr(
         "consist.core.materialize.build_directory_manifest", fail_on_build
     )
-    monkeypatch.setattr("consist.core.materialize._compute_file_sha256", fail_on_sha)
+    monkeypatch.setattr("consist.core.materialize.file_sha256", fail_on_sha)
 
     result = materialize_artifact(
         tracker,

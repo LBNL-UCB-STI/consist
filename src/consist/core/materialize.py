@@ -54,6 +54,7 @@ from consist.core.directory_artifacts import (
     validate_shapefile_bundle_root,
 )
 from consist.core.stores import get_hot_data_engine
+from consist.digest import file_sha256
 from consist.models.artifact import Artifact, _private_state
 
 if TYPE_CHECKING:
@@ -126,8 +127,6 @@ ArchiveRunOutputVerificationStatus = Literal[
     "hash_mismatch",
     "failed",
 ]
-
-_FILE_HASH_CHUNK_SIZE = 8 * 1024 * 1024
 
 
 @dataclass(slots=True)
@@ -979,14 +978,6 @@ def _ensure_destination_not_symlink(path: Path) -> None:
         raise ValueError(f"Symlink detected in destination path: {path}")
 
 
-def _compute_file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(_FILE_HASH_CHUNK_SIZE), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _compute_path_checksum(path: Path) -> str:
     if path.is_dir():
         digest = hashlib.sha256()
@@ -1003,9 +994,9 @@ def _compute_path_checksum(path: Path) -> str:
                 file_path = Path(root, filename).resolve()
                 rel_file = file_path.relative_to(base).as_posix()
                 digest.update(f"file:{rel_file}".encode("utf-8"))
-                digest.update(_compute_file_sha256(file_path).encode("utf-8"))
+                digest.update(file_sha256(file_path).encode("utf-8"))
         return digest.hexdigest()
-    return _compute_file_sha256(path)
+    return file_sha256(path)
 
 
 def _copy_file_atomic(source: Path, destination: Path) -> bool:
@@ -2004,7 +1995,7 @@ def materialize_artifact(
                     message=f"Destination {destination} exists but is a directory.",
                     resolvable=False,
                 )
-            if should_validate and _compute_file_sha256(destination) != expected_hash:
+            if should_validate and file_sha256(destination) != expected_hash:
                 return _make_materialized_artifact(
                     artifact,
                     status="hash_mismatch",
@@ -2359,7 +2350,7 @@ def materialize_artifact(
             resolvable=False,
         )
 
-    if should_validate and _compute_file_sha256(source_path) != expected_hash:
+    if should_validate and file_sha256(source_path) != expected_hash:
         return _make_materialized_artifact(
             artifact,
             status="hash_mismatch",

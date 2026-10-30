@@ -39,6 +39,11 @@ For tiered guidance:
 
 ## Top-level API policy
 
+Consist manages its top-level package namespace (`import consist`) using PEP 562
+lazy loading. Core workflow and tracker entry points are available immediately,
+while heavier subpackages (such as DuckDB integration and SQLModel models) are loaded
+only when accessed.
+
 Consist keeps top-level `consist.*` helpers when they add one of two things:
 
 - **Ambient run-scoped behavior**: helpers that attach metadata, artifacts, or
@@ -51,6 +56,20 @@ Consist keeps top-level `consist.*` helpers when they add one of two things:
 - **Pure/context utilities**: helpers that do not create tracker-owned
   execution state, such as `consist.ref(...)`, `consist.refs(...)`,
   `consist.output_path(...)`, and `consist.output_dir(...)`.
+
+Consist organizes domain-specific, zero-weight, and boundary surfaces into dedicated
+submodules:
+
+- **`consist.digest`**: Stateless content, table (`ctd1`), state, and array digests
+  with zero mandatory third-party imports at module scope.
+- **`consist.admission`**: Boundary admission checks, expectation contracts, and
+  evidence reporting.
+- **`consist.gtfs`**: Transit feed schemas, snapshots, and pure member discovery.
+
+Top-level exports for symbols in these domain submodules are retained as deprecated
+aliases for backward compatibility, emitting `FutureWarning` on access, and will be
+phased out in a future release. Prefer direct submodule imports (e.g.,
+`from consist.digest import digest_file` or `from consist.admission import PriorRunExpectation`).
 
 Consist deprecates top-level helpers when they are only duplicate
 tracker-owning execution entry points:
@@ -122,48 +141,108 @@ with tracker.scenario("baseline") as sc:
 - [`consist.StagedInputsResult`](materialize.md#consist.core.materialize.StagedInputsResult)
 - [`consist.RunSet`](runset.md#consist.runset.RunSet)
 - [`consist.AlignedPair`](runset.md#consist.runset.AlignedPair)
-- [`consist.AdmissionReport`](admission.md#consist.core.admission.AdmissionReport)
-  (policy-neutral evidence returned by prior-run or declared-digest admission)
-- [`consist.AdmissionReference`](admission.md#consist.core.admission.AdmissionReference)
-  (caller-proven runtime host/consumer path evidence for admission)
-- [`consist.PriorRunExpectation`](admission.md#consist.core.admission.PriorRunExpectation)
-  (typed prior-run artifact expectation with optional direction constraint, `identity_scheme`, `logical_profile`, and external `source_tracker_db`)
-- [`consist.AdmissionIdentity`](admission.md#consist.core.admission.AdmissionIdentity)
-  (validated `sha256:file:...`, `sha256:manifest-v1:...`, or `sha256:logical_matrices:...` identity)
-- [`consist.FileIdentity`](admission.md#consist.core.admission.FileIdentity)
-  (validated `sha256:file:<64 lowercase hex>` raw-file identity)
-- [`consist.DeclaredDigestExpectation`](admission.md#consist.core.admission.DeclaredDigestExpectation)
-  (typed locally declared identity with optional `identity_scheme`, `logical_profile`, and opaque source metadata)
-- [`consist.ArrayCanonicalizationPolicy`](admission.md#consist.core.logical_array_identity.ArrayCanonicalizationPolicy)
-  (configurable numeric and structural canonicalization policy for logical array hashing)
-- [`consist.MatrixContainerSummary`](admission.md#consist.core.logical_array_identity.MatrixContainerSummary)
-  (structural inspection summary for `.omx`/`.h5` and `.zarr` containers)
-- [`consist.ArtifactProvenanceSidecar`](admission.md#consist.core.logical_array_identity.ArtifactProvenanceSidecar)
-  (standardized `.provenance.json` sidecar schema)
-- [`consist.compute_logical_matrices_sha256`](admission.md#consist.core.logical_array_identity.compute_logical_matrices_sha256)
+
+### Canonical Content, Table, State, and Array Digests (consist.digest)
+
+Stateless cryptographic hashing with zero mandatory third-party imports at module scope.
+See [Content & Tabular Digests](digest.md) for detailed reference and examples.
+
+- [`consist.digest.digest_bytes`](digest.md#consist.digest.digest_bytes)
+  (raw 64-character lowercase hexadecimal SHA-256 of in-memory bytes)
+- [`consist.digest.file_sha256`](digest.md#consist.digest.file_sha256)
+  (raw 64-character lowercase hexadecimal SHA-256 of a regular file via streaming stdlib)
+- [`consist.digest.digest_file`](digest.md#consist.digest.digest_file)
+  (self-describing `sha256:file:<64 hex>` identity string for admission)
+- [`consist.digest.normalize_json`](digest.md#consist.digest.normalize_json)
+  (normalize Python/NumPy/Pydantic/Path/set structures into deterministic JSON primitives)
+- [`consist.digest.canonical_json_str`](digest.md#consist.digest.canonical_json_str) / [`consist.digest.canonical_json_sha256`](digest.md#consist.digest.canonical_json_sha256)
+  (RFC 8785 deterministic JSON formatting and 64-hex SHA-256 digest)
+- [`consist.digest.digest_table`](digest.md#consist.digest.digest_table)
+  (order-invariant `sha256:ctd1:<64 hex>` canonical table digest across Parquet, Arrow, and SQLite)
+- [`consist.digest.normalize_table_scalar`](digest.md#consist.digest.normalize_table_scalar)
+  (deterministic scalar value byte normalization for `ctd1` table hashing)
+- [`consist.digest.digest_state`](digest.md#consist.digest.digest_state)
+  (Merkle state dictionary digest for multi-facet checkpoints and configs)
+- [`consist.digest.compute_logical_matrices_sha256`](digest.md#consist.digest.compute_logical_matrices_sha256)
   (compute a canonical `sha256:logical_matrices:<64 hex>` digest from named NumPy arrays)
-- [`consist.compute_omx_logical_matrices_sha256`](admission.md#consist.core.logical_array_identity.compute_omx_logical_matrices_sha256)
+- [`consist.digest.compute_omx_logical_matrices_sha256`](digest.md#consist.digest.compute_omx_logical_matrices_sha256)
   (compute a canonical `sha256:logical_matrices:<64 hex>` digest from an OMX/HDF5 container)
-- [`consist.compute_zarr_logical_matrices_sha256`](admission.md#consist.core.logical_array_identity.compute_zarr_logical_matrices_sha256)
+- [`consist.digest.compute_zarr_logical_matrices_sha256`](digest.md#consist.digest.compute_zarr_logical_matrices_sha256)
   (compute a canonical `sha256:logical_matrices:<64 hex>` digest from a Zarr store)
-- [`consist.admission_directory_identity`](admission.md#consist.core.logical_array_identity.admission_directory_identity)
+- [`consist.digest.canonicalize_float32_array`](digest.md) / [`consist.digest.canonicalize_float64_array`](digest.md) / [`consist.digest.canonicalize_float_array`](digest.md)
+  (IEEE 754 canonicalization of floating-point arrays normalizing NaNs and `-0.0`)
+- [`consist.digest.compute_array_entry_sha256`](digest.md)
+  (compute deterministic digest for a single named array)
+- [`consist.digest.normalize_logical_matrices_identity`](digest.md)
+  (validate and normalize `sha256:logical_matrices:<64 hex>` string)
+- [`consist.digest.resolve_canonicalization_policy`](digest.md)
+  (resolve named profile string to `ArrayCanonicalizationPolicy`)
+- [`consist.digest.ArrayCanonicalizationPolicy`](digest.md#consist.digest.ArrayCanonicalizationPolicy)
+  (dataclass specifying numeric and structural canonicalization policy)
+
+### Artifact Admission and Boundary Verification (consist.admission)
+
+Policy-neutral evidence returned before executing model steps. Canonical imports are
+from `consist.admission` (top-level `consist` aliases remain available for backward
+compatibility with deprecation warnings). See [Artifact Admission](admission.md).
+
+- [`consist.admission.AdmissionReport`](admission.md#consist.core.admission.AdmissionReport)
+  (policy-neutral evidence returned by prior-run or declared-digest admission)
+- [`consist.admission.AdmissionReference`](admission.md#consist.core.admission.AdmissionReference)
+  (caller-proven runtime host/consumer path evidence for admission)
+- [`consist.admission.PriorRunExpectation`](admission.md#consist.core.admission.PriorRunExpectation)
+  (typed prior-run artifact expectation with optional direction constraint, `identity_scheme`, `logical_profile`, and external `source_tracker_db`)
+- [`consist.admission.AdmissionIdentity`](admission.md#consist.core.admission.AdmissionIdentity)
+  (validated `sha256:file:...`, `sha256:manifest-v1:...`, or `sha256:logical_matrices:...` identity)
+- [`consist.admission.FileIdentity`](admission.md#consist.core.admission.FileIdentity)
+  (validated `sha256:file:<64 lowercase hex>` raw-file identity)
+- [`consist.admission.DeclaredDigestExpectation`](admission.md#consist.core.admission.DeclaredDigestExpectation)
+  (typed locally declared identity with optional `identity_scheme`, `logical_profile`, and opaque source metadata)
+- [`consist.admission.MatrixContainerSummary`](admission.md#consist.core.logical_array_identity.MatrixContainerSummary)
+  (structural inspection summary for `.omx`/`.h5` and `.zarr` containers)
+- [`consist.admission.ArtifactProvenanceSidecar`](admission.md#consist.core.logical_array_identity.ArtifactProvenanceSidecar)
+  (standardized `.provenance.json` sidecar schema)
+- [`consist.admission.admission_directory_identity`](admission.md#consist.core.logical_array_identity.admission_directory_identity)
   (compute a deterministic `sha256:manifest-v1:<64 hex>` digest for a directory artifact)
-- [`consist.inspect_matrix_container`](admission.md#consist.core.logical_array_identity.inspect_matrix_container)
+- [`consist.admission.inspect_matrix_container`](admission.md#consist.core.logical_array_identity.inspect_matrix_container)
   (inspect structural metadata of an `.omx`/`.h5` or `.zarr` matrix container without loading payloads)
-- [`consist.write_artifact_provenance_sidecar`](admission.md#consist.core.logical_array_identity.write_artifact_provenance_sidecar) / [`consist.read_artifact_provenance_sidecar`](admission.md#consist.core.logical_array_identity.read_artifact_provenance_sidecar)
+- [`consist.admission.write_artifact_provenance_sidecar`](admission.md#consist.core.logical_array_identity.write_artifact_provenance_sidecar) / [`consist.admission.read_artifact_provenance_sidecar`](admission.md#consist.core.logical_array_identity.read_artifact_provenance_sidecar)
   (write and read standardized `.provenance.json` sidecars)
-- [`consist.check_artifact_identity`](admission.md#consist.core.admission.check_artifact_identity)
+- [`consist.admission.check_artifact_identity`](admission.md#consist.core.admission.check_artifact_identity)
   (compare one resolved file or container with an exact artifact from a completed run)
-- [`consist.check_prior_run_expectation`](admission.md#consist.core.admission.check_prior_run_expectation)
+- [`consist.admission.check_prior_run_expectation`](admission.md#consist.core.admission.check_prior_run_expectation)
   (compare one resolved file or container against a `PriorRunExpectation`)
-- [`consist.check_admission_reference`](admission.md#consist.core.admission.check_admission_reference)
+- [`consist.admission.check_admission_reference`](admission.md#consist.core.admission.check_admission_reference)
   (compare a runtime-resolved file or container without recreating consumer path logic)
-- [`consist.check_admission_reference_prior_run_expectation`](admission.md#consist.core.admission.check_admission_reference_prior_run_expectation)
+- [`consist.admission.check_admission_reference_prior_run_expectation`](admission.md#consist.core.admission.check_admission_reference_prior_run_expectation)
   (compare a runtime-resolved file or container against a `PriorRunExpectation` while retaining path evidence)
-- [`consist.check_expected_identity`](admission.md#consist.core.admission.check_expected_identity)
+- [`consist.admission.check_expected_identity`](admission.md#consist.core.admission.check_expected_identity)
   (compare one resolved file or container with a declared digest and no Tracker lookup)
-- [`consist.check_admission_reference_expected_identity`](admission.md#consist.core.admission.check_admission_reference_expected_identity)
+- [`consist.admission.check_admission_reference_expected_identity`](admission.md#consist.core.admission.check_admission_reference_expected_identity)
   (compare runtime-resolved declared-digest input while retaining path evidence)
+
+### GTFS Transit Integration (consist.gtfs)
+
+GTFS feed schemas, snapshots, and pure member discovery. Canonical imports are from
+`consist.gtfs` (top-level aliases on `consist` remain available for backward compatibility
+with deprecation warnings). Note that workflow methods `Tracker.ingest_gtfs(...)`,
+`Tracker.canonicalize_gtfs(...)`, and `consist.canonicalize_gtfs(...)` remain on the
+tracker and workflow surfaces. See [GTFS Support](../integrations/gtfs.md).
+
+- `consist.gtfs.GtfsCanonicalizationResult` and `consist.gtfs.GtfsFeedSnapshot`
+  (GTFS selected-service identity results)
+- `consist.gtfs.canonicalize_gtfs_bundle` and `consist.gtfs.discover_gtfs_members`
+  (pure GTFS helpers for dependency-light inspection and identity calculation)
+- GTFS schema models: `consist.gtfs.GtfsAgency`, `consist.gtfs.GtfsStops`,
+  `consist.gtfs.GtfsRoutes`, `consist.gtfs.GtfsTrips`, `consist.gtfs.GtfsStopTimes`,
+  `consist.gtfs.GtfsCalendar`, `consist.gtfs.GtfsCalendarDates`,
+  `consist.gtfs.GtfsFareAttributes`, `consist.gtfs.GtfsFareRules`,
+  `consist.gtfs.GtfsShapes`, `consist.gtfs.GtfsFrequencies`,
+  `consist.gtfs.GtfsTransfers`, `consist.gtfs.GtfsPathways`,
+  `consist.gtfs.GtfsLevels`, `consist.gtfs.GtfsFeedInfo`
+
+### Execution contracts and options
+
 - `consist.ArtifactSpec` / `consist.OutputArtifactSpec` (rich declared-output
   metadata for `Tracker.run(output_paths=...)`)
 - `consist.FilenamePattern`, `consist.IntCapture`, and `consist.EnumCapture`
@@ -180,12 +259,6 @@ with tracker.scenario("baseline") as sc:
   locator from a Consist artifact; ordinary workflows should continue to use
   Coupler refs or `BindingResult`)
 - `consist.H5ChildSpec` (typed child-artifact customization for HDF5 containers)
-- `consist.GtfsCanonicalizationResult` and `consist.GtfsFeedSnapshot`
-  (GTFS selected-service identity results)
-- `consist.canonicalize_gtfs_bundle` and `consist.discover_gtfs_members`
-  (pure GTFS helpers for dependency-light inspection and identity calculation)
-- GTFS schema models such as `consist.GtfsRoutes`, `consist.GtfsTrips`, and
-  `consist.GtfsStopTimes`
 
 ### Scenario / workflow helpers
 

@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 import logging
-from typing import Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel
 
@@ -9,12 +11,14 @@ from consist.core.facet_common import (
     infer_schema_name_from_facet,
     normalize_facet_like,
 )
-from consist.core.identity import IdentityManager
 from consist.core.persistence import DatabaseManager
 from consist.models.config_facet import ConfigFacet
 from consist.models.run import Run
 from consist.models.run_config_kv import RunConfigKV
 from consist.types import FacetLike, HasConsistFacet
+
+if TYPE_CHECKING:
+    from consist.core.identity import IdentityManager
 
 
 class ConfigFacetManager:
@@ -26,7 +30,10 @@ class ConfigFacetManager:
     """
 
     def __init__(
-        self, *, db: Optional[DatabaseManager], identity: IdentityManager
+        self,
+        *,
+        db: Optional[DatabaseManager],
+        identity: Optional[IdentityManager] = None,
     ) -> None:
         self._db = db
         self._identity = identity
@@ -84,7 +91,7 @@ class ConfigFacetManager:
             JSON-serializable dictionary representing the facet, or ``None`` if unavailable.
         """
         if facet is not None:
-            return normalize_facet_like(identity=self._identity, facet=facet)
+            return normalize_facet_like(facet=facet)
 
         if raw_config_model is not None and isinstance(
             raw_config_model, HasConsistFacet
@@ -100,7 +107,7 @@ class ConfigFacetManager:
                 )
                 extracted = None
             if extracted is not None:
-                return normalize_facet_like(identity=self._identity, facet=extracted)
+                return normalize_facet_like(facet=extracted)
 
         return None
 
@@ -142,7 +149,6 @@ class ConfigFacetManager:
             return
 
         canonical, facet_id = canonical_facet_json_and_id(
-            identity=self._identity,
             facet_dict=facet_dict,
         )
         canonical_bytes = len(canonical.encode("utf-8"))

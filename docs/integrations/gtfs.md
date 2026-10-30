@@ -79,9 +79,31 @@ summary, and load table artifacts such as `weekday.table_artifacts["trips"]`
 for row data.
 
 Use `tracker.canonicalize_gtfs(...)` or `consist.canonicalize_gtfs(...)` for
-normal workflows. The lower-level `canonicalize_gtfs_bundle(...)` helper is
-available when you need the pure identity calculation without tracker-managed
-artifacts, run metadata, or ingestion.
+normal workflows.
+
+> [!NOTE] Canonical Namespace (`consist.gtfs`)
+> Pure GTFS feed inspection, canonicalization results, and schema models live
+> under the canonical `consist.gtfs` submodule:
+>
+> ```python
+> from consist.gtfs import (
+>     canonicalize_gtfs_bundle,
+>     discover_gtfs_members,
+>     GtfsCanonicalizationResult,
+>     GtfsFeedSnapshot,
+>     GtfsTrips,
+>     GtfsRoutes,
+> )
+> ```
+>
+> The lower-level `canonicalize_gtfs_bundle(...)` helper is available from
+> `consist.gtfs` when you need pure identity calculation without tracker-managed
+> artifacts, run metadata, or database ingestion.
+>
+> Workflow methods (`Tracker.ingest_gtfs(...)`, `Tracker.canonicalize_gtfs(...)`,
+> and `consist.canonicalize_gtfs(...)`) remain on the `Tracker` and top-level workflow
+> surfaces. Top-level aliases for GTFS schemas/models on `consist` are deprecated
+> in favor of `consist.gtfs`.
 
 ### With BEAM
 

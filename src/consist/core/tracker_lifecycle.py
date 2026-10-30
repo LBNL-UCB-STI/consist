@@ -45,6 +45,7 @@ from consist.core.validation import (
     validate_run_meta,
     validate_run_strings,
 )
+from consist.digest import normalize_json
 from consist.models.artifact import Artifact
 from consist.models.run import ConsistRecord, Run, RunBindingInvocation
 from consist.types import (
@@ -362,9 +363,9 @@ class RunLifecycleCoordinator:
                     facet_dict = tracker._coerce_facet_mapping(facet, "facet")
                     merged = dict(derived)
                     merged.update(facet_dict)
-                    facet = tracker.identity.normalize_json(merged)
+                    facet = normalize_json(merged)
                 else:
-                    facet = tracker.identity.normalize_json(derived)
+                    facet = normalize_json(derived)
 
             year = kwargs.pop("year", None)
             iteration = kwargs.pop("iteration", None)
@@ -441,7 +442,7 @@ class RunLifecycleCoordinator:
                 config_dict["__consist_hash_inputs__"] = digest_map
                 kwargs["consist_hash_inputs"] = digest_map
 
-            config_dict = tracker.identity.normalize_json(config_dict)
+            config_dict = normalize_json(config_dict)
             if not isinstance(config_dict, MappingABC):
                 raise TypeError("config must be a mapping after normalization.")
             validate_config_structure(config_dict)

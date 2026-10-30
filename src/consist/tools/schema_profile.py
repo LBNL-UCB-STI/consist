@@ -5,14 +5,17 @@ import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Literal
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Literal
 
 import duckdb
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-from consist.core.identity import IdentityManager
 from consist.core.drivers import TableInfo, TABLE_DRIVERS
+from consist.digest import canonical_json_sha256
+
+if TYPE_CHECKING:
+    from consist.core.identity import IdentityManager
 
 PROFILE_VERSION = 1
 
@@ -190,9 +193,9 @@ def _json_size_bytes(obj: Any) -> int:
 def profile_duckdb_table(
     *,
     engine: Engine,
-    identity: IdentityManager,
     table_schema: str,
     table_name: str,
+    identity: Optional[IdentityManager] = None,
     source: str = "duckdb",
     sample_rows: Optional[int] = None,
 ) -> SchemaProfileResult:
@@ -202,6 +205,7 @@ def profile_duckdb_table(
     This is intended to capture the post-ingest "ground truth" schema (e.g. dlt-normalized),
     not just file-side dtypes.
     """
+    del identity
     sql = text(
         """
         SELECT
@@ -245,7 +249,7 @@ def profile_duckdb_table(
         "sample_rows": sample_rows,
         "fields": field_rows,
     }
-    schema_id = identity.canonical_json_sha256(hash_obj)
+    schema_id = canonical_json_sha256(hash_obj)
 
     summary = {
         "profile_version": PROFILE_VERSION,
@@ -284,10 +288,10 @@ def profile_duckdb_table(
 
 def profile_file_schema(
     *,
-    identity: IdentityManager,
     path: str,
     driver: Literal["parquet", "csv", "gtfs", "h5_table"],
     sample_rows: Optional[int],
+    identity: Optional[IdentityManager] = None,
     table_path: Optional[str] = None,
     source: str = "file",
     view_name: Optional[str] = None,
@@ -297,14 +301,14 @@ def profile_file_schema(
 
     Parameters
     ----------
-    identity : IdentityManager
-        Identity manager used to hash the canonical schema payload.
     path : str
         Filesystem path to the file to profile.
     driver : {"parquet", "csv", "gtfs", "h5_table"}
         File format driver for the profiler.
     sample_rows : Optional[int]
         Maximum number of rows to sample for dtype inference. None means no limit.
+    identity : Optional[IdentityManager], optional
+        Deprecated compatibility parameter; ignored when provided.
     table_path : Optional[str]
         HDF5 table path when profiling ``h5_table`` artifacts.
     source : str, default "file"
@@ -318,6 +322,7 @@ def profile_file_schema(
     SchemaProfileResult
         Schema profile payload including per-field rows and summary metadata.
     """
+    del identity
     conn = duckdb.connect()
     relation = None
     if driver == "h5_table":
@@ -390,7 +395,7 @@ def profile_file_schema(
     }
     if driver == "h5_table":
         hash_obj["table_path"] = table_path
-    schema_id = identity.canonical_json_sha256(hash_obj)
+    schema_id = canonical_json_sha256(hash_obj)
 
     summary = {
         "profile_version": PROFILE_VERSION,

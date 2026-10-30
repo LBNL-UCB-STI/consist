@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,6 +23,7 @@ from typing import (
 from sqlmodel import SQLModel
 
 from consist.core.identity import IdentityManager
+from consist.digest import canonical_json_sha256
 from consist.models.run import Run
 from consist.types import IdentityInputs
 
@@ -56,17 +55,6 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_json_safe(item) for item in value]
     return value
-
-
-def _canonical_json_sha256(payload: Any) -> str:
-    encoded = json.dumps(
-        payload,
-        sort_keys=True,
-        ensure_ascii=True,
-        separators=(",", ":"),
-        default=str,
-    )
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 class CanonicalConfig(NamedTuple):
@@ -1091,4 +1079,4 @@ def compute_config_pack_hash(
             root_dir,
             hashing_strategy_override="full",
         )
-    return identity.canonical_json_sha256({"config_dirs": digest_map})
+    return canonical_json_sha256({"config_dirs": digest_map})

@@ -13,6 +13,7 @@ from typing import Any, Callable, Iterator, Literal, Mapping, Protocol, Sequence
 from sqlmodel import SQLModel
 
 from consist.core.artifacts import _infer_driver_from_path
+from consist.digest import file_sha256
 from consist.models.artifact import Artifact
 from consist.types import (
     EnumCapture,
@@ -25,7 +26,6 @@ from consist.types import (
 
 
 _OUTPUT_SET_MANIFEST_VERSION = 1
-_FILE_HASH_CHUNK_SIZE = 8 * 1024 * 1024
 _SAFE_KEY_RE = re.compile(r"[^A-Za-z0-9_]+")
 
 
@@ -254,7 +254,7 @@ def discover_output_set_members(output_set: OutputSet) -> list[OutputSetMember]:
                 path=path,
                 relative_path=relative_path,
                 size_bytes=path.stat().st_size,
-                content_hash=_compute_file_sha256(path),
+                content_hash=file_sha256(path),
             )
         )
     return sorted(members, key=lambda member: member.relative_path)
@@ -689,17 +689,6 @@ def _normalize_output_set_relative_path(path: str | Path) -> str:
     if any(part in {"", ".", ".."} for part in Path(normalized).parts):
         raise ValueError(f"unsafe output-set member path: {path}")
     return normalized
-
-
-def _compute_file_sha256(path: Path) -> str:
-    sha256 = hashlib.sha256()
-    with path.open("rb") as file:
-        while True:
-            chunk = file.read(_FILE_HASH_CHUNK_SIZE)
-            if not chunk:
-                break
-            sha256.update(chunk)
-    return sha256.hexdigest()
 
 
 def _resolve_expected_count(

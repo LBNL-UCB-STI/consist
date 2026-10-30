@@ -44,45 +44,6 @@ from consist.core.context import (
     set_default_tracker,
     use_tracker as _use_tracker,
 )
-from consist.core.admission import (  # noqa: F401
-    AdmissionIdentity,
-    AdmissionReference,
-    AdmissionReport,
-    DeclaredDigestExpectation,
-    FileIdentity,
-    PriorRunExpectation,
-    admission_file_identity,
-    check_admission_reference,
-    check_admission_reference_expected_identity,
-    check_admission_reference_prior_run_expectation,
-    check_artifact_identity,
-    check_expected_identity,
-    check_prior_run_expectation,
-    compare_path_to_identity,
-)
-from consist.core.logical_array_identity import (  # noqa: F401
-    ARTIFACT_PROVENANCE_SCHEMA_VERSION,
-    FLOAT32_MATRICES_V1_POLICY,
-    PRESERVE_CANONICAL_POLICY,
-    ArrayCanonicalizationPolicy,
-    ArtifactProvenanceSidecar,
-    LogicalProfileName,
-    MatrixContainerSummary,
-    admission_directory_identity,
-    artifact_provenance_sidecar_path,
-    canonicalize_float32_array,
-    canonicalize_float64_array,
-    canonicalize_float_array,
-    compute_array_entry_sha256,
-    compute_logical_matrices_sha256,
-    compute_omx_logical_matrices_sha256,
-    compute_zarr_logical_matrices_sha256,
-    inspect_matrix_container,
-    normalize_logical_matrices_identity,
-    read_artifact_provenance_sidecar,
-    resolve_canonicalization_policy,
-    write_artifact_provenance_sidecar,
-)
 from consist.core.decorators import (
     define_step as define_step_decorator,
     require_runtime_kwargs as require_runtime_kwargs_decorator,
@@ -3862,3 +3823,19 @@ def log_meta(**kwargs: Any) -> None:
         If called when no `Tracker` is active in the current context.
     """
     get_active_tracker().log_meta(**kwargs)
+
+
+def __getattr__(name: str) -> Any:
+    from consist import _DEPRECATED_TOP_LEVEL_EXPORTS
+
+    if name in _DEPRECATED_TOP_LEVEL_EXPORTS:
+        target_mod, target_attr = _DEPRECATED_TOP_LEVEL_EXPORTS[name]
+        warnings.warn(
+            f"Importing {name!r} from 'consist.api' is deprecated; use '{target_mod}.{target_attr}' instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        module = importlib.import_module(target_mod)
+        return module.__dict__[target_attr]
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

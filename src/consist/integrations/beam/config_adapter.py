@@ -36,7 +36,6 @@ from consist.core.config_canonicalization import (
     ConfigReferenceIdentityPolicy,
     DirectoryIdentity,
     IngestSpec,
-    _canonical_json_sha256,
 )
 from consist.core.config_canonicalization import ConfigPlan
 from consist.core.directory_artifacts import (
@@ -52,13 +51,13 @@ from consist.core.gtfs import (
     canonicalize_gtfs_bundle,
     has_gtfs_core_members,
 )
+from consist.digest import canonical_json_sha256, file_sha256, normalize_json
 from consist.integrations._config_adapter_shared import (
     OverrideRunHooks as _shared_OverrideRunHooks,
     artifact_key_for_path as _shared_artifact_key_for_path,
     build_override_runtime_kwargs as _shared_build_override_runtime_kwargs,
     callable_accepts_kwarg as _shared_callable_accepts_kwarg,
     digest_path as _shared_digest_path,
-    file_sha256 as _shared_file_sha256,
     get_nested_value as _shared_get_nested_value,
     resolve_base_config_dirs as _shared_resolve_base_config_dirs,
     resolve_override_base_selector as _shared_resolve_override_base_selector,
@@ -182,7 +181,7 @@ def _normalize_launch_bundle_members(
             raise ValueError(
                 f"Staged source must be a regular non-symlink file: {source_path}"
             )
-        sha256 = _shared_file_sha256(source_path)
+        sha256 = file_sha256(source_path)
         normalized.append(
             _NormalizedBeamLaunchBundleMember(
                 destination=destination,
@@ -308,7 +307,7 @@ def _stage_launch_bundle_artifact_member(
             f"{artifact.key!r}"
         )
     shutil.copy2(source, destination)
-    if _shared_file_sha256(destination) != artifact.hash:
+    if file_sha256(destination) != artifact.hash:
         raise ValueError(
             "Artifact-backed staged member source hash does not match its "
             f"declared identity: {artifact.key!r}"
@@ -437,10 +436,10 @@ class BeamConfigAdapter:
             resolve=self.resolve_substitutions,
             env_overrides=self.env_overrides,
         )
-        content_hash = identity.canonical_json_sha256(
+        content_hash = canonical_json_sha256(
             {
                 "primary_config": str(config_path.name),
-                "config": identity.normalize_json(config_tree),
+                "config": normalize_json(config_tree),
             }
         )
         external = [p for p in config_files if not _is_in_roots(p, root_dirs)]
@@ -809,7 +808,7 @@ class BeamConfigAdapter:
         primary_relative = primary_source.relative_to(
             resolved_roots[primary_root_index]
         )
-        bundle_identity = tracker.identity.canonical_json_sha256(
+        bundle_identity = canonical_json_sha256(
             {
                 "bundle_version": 1,
                 "adapter": self.model_name,
@@ -895,8 +894,7 @@ class BeamConfigAdapter:
                         )
                     shutil.copy2(member.source_path, target)
                 if not target.is_file() or (
-                    member.sha256 is not None
-                    and _shared_file_sha256(target) != member.sha256
+                    member.sha256 is not None and file_sha256(target) != member.sha256
                 ):
                     raise ValueError(
                         f"Staged member does not match its declared identity: "
@@ -1871,9 +1869,9 @@ def _build_beam_config_identity(
     scalar_payload: dict[str, Any] = {"config": canonical_tree}
     if extra_scalar_payload is not None:
         scalar_payload["gtfs"] = extra_scalar_payload
-    scalar_hash = _canonical_json_sha256(scalar_payload)
-    reference_hash = _canonical_json_sha256({"references": reference_payload})
-    directory_hash = _canonical_json_sha256(
+    scalar_hash = canonical_json_sha256(scalar_payload)
+    reference_hash = canonical_json_sha256({"references": reference_payload})
+    directory_hash = canonical_json_sha256(
         {"directories": [item.to_meta_dict() for item in directories]}
     )
     options_payload = {
@@ -1891,7 +1889,7 @@ def _build_beam_config_identity(
         if primary_config is not None
         else None
     )
-    identity_hash = _canonical_json_sha256(
+    identity_hash = canonical_json_sha256(
         {
             "identity_schema_version": 1,
             "adapter_name": adapter_name,
@@ -2292,7 +2290,6 @@ def _canonicalize_gtfs_inputs(
     service_date = _resolve_beam_service_date(config_tree)
     return canonicalize_gtfs_bundle(
         feed_paths,
-        identity=tracker.identity if tracker is not None else IdentityManager(),
         service_date=service_date,
     )
 
@@ -2421,7 +2418,3 @@ def _iter_tabular_rows(path: Path, content_hash: str) -> Iterable[dict[str, Any]
 
 def _digest_path(path: Path, tracker: Optional["Tracker"]) -> str:
     return _shared_digest_path(path, tracker)
-
-
-def _file_sha256(path: Path) -> str:
-    return _shared_file_sha256(path)

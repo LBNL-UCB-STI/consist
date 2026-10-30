@@ -7,13 +7,16 @@ import zipfile
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Optional, Sequence, get_args, get_origin
+from typing import TYPE_CHECKING, Any, Optional, Sequence, get_args, get_origin
 
 import pandas as pd
 
 from consist.core.config_canonicalization import IngestSpec
-from consist.core.identity import IdentityManager
+from consist.digest import canonical_json_sha256, digest_bytes
 from consist.models.gtfs import GTFS_SCHEMA_BY_TABLE_NAME
+
+if TYPE_CHECKING:
+    from consist.core.identity import IdentityManager
 
 GTFS_TABLE_EXTENSIONS = (".txt", ".csv")
 GTFS_BUNDLE_SOURCE_KEY = "consist_gtfs_bundle"
@@ -211,12 +214,8 @@ def load_gtfs_member_relation(
     return conn.from_df(duckdb_df)
 
 
-def _hash_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
 def hash_gtfs_member(source_path: Path, member_name: str) -> str:
-    return _hash_bytes(_read_member_bytes(source_path, member_name))
+    return digest_bytes(_read_member_bytes(source_path, member_name))
 
 
 def hash_gtfs_feed(source_path: Path, member_names: Sequence[str]) -> str:
@@ -229,8 +228,7 @@ def hash_gtfs_feed(source_path: Path, member_names: Sequence[str]) -> str:
             for name in sorted(_normalize_member_name(name) for name in member_names)
         ],
     }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    return canonical_json_sha256(payload)
 
 
 def _unwrap_optional(annotation: Any) -> Any:
@@ -488,7 +486,7 @@ def _select_related_rows(
 def canonicalize_gtfs_bundle(
     feed_paths: Sequence[Path],
     *,
-    identity: IdentityManager,
+    identity: Optional[IdentityManager] = None,
     service_date: Optional[date | datetime | str] = None,
     feed_keys: Optional[Sequence[str]] = None,
     source_key: str = GTFS_BUNDLE_SOURCE_KEY,
@@ -500,6 +498,7 @@ def canonicalize_gtfs_bundle(
     namespace boundaries, and an optional service-date slice hash that is computed
     from the selected active service rows.
     """
+    del identity
     if feed_keys is not None and len(feed_keys) != len(feed_paths):
         raise ValueError("feed_keys must match feed_paths length.")
 
@@ -574,7 +573,7 @@ def canonicalize_gtfs_bundle(
         "feed_keys": [snapshot.feed_key for snapshot in snapshots],
         "source_feed_hashes": source_feed_hashes,
     }
-    source_bundle_hash = identity.canonical_json_sha256(bundle_payload)
+    source_bundle_hash = canonical_json_sha256(bundle_payload)
 
     combined_selected_frames: dict[str, pd.DataFrame] = {}
     selected_table_hashes: dict[str, str] = {}
@@ -599,7 +598,7 @@ def canonicalize_gtfs_bundle(
                 for table_name in sorted(combined_selected_frames)
             },
         }
-        service_slice_hash = identity.canonical_json_sha256(slice_payload)
+        service_slice_hash = canonical_json_sha256(slice_payload)
 
     manifest = {
         "service_date": normalized_service_date.isoformat()

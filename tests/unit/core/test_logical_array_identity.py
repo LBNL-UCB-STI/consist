@@ -517,19 +517,45 @@ def test_declared_digest_supports_manifest_v1_and_logical_matrices(
 
 
 def test_public_exports_include_logical_array_identity() -> None:
-    """Verify top-level consist exports include the new logical array identity symbols."""
-    assert consist.AdmissionIdentity is AdmissionIdentity
-    assert consist.ArrayCanonicalizationPolicy is ArrayCanonicalizationPolicy
-    assert consist.PRESERVE_CANONICAL_POLICY is PRESERVE_CANONICAL_POLICY
-    assert consist.FLOAT32_MATRICES_V1_POLICY is FLOAT32_MATRICES_V1_POLICY
-    assert consist.compute_logical_matrices_sha256 is compute_logical_matrices_sha256
+    """Verify consist submodules and deprecated top-level exports include logical array identity symbols."""
+    import warnings
+    import consist.admission as cadmission
+    import consist.digest as cdigest
+
+    assert cadmission.AdmissionIdentity is AdmissionIdentity
+    assert cadmission.inspect_matrix_container is inspect_matrix_container
+    assert cadmission.check_prior_run_expectation is check_prior_run_expectation
+    assert cdigest.ArrayCanonicalizationPolicy is ArrayCanonicalizationPolicy
+    assert cdigest.PRESERVE_CANONICAL_POLICY is PRESERVE_CANONICAL_POLICY
+    assert cdigest.FLOAT32_MATRICES_V1_POLICY is FLOAT32_MATRICES_V1_POLICY
+    assert cdigest.compute_logical_matrices_sha256 is compute_logical_matrices_sha256
     assert (
-        consist.compute_omx_logical_matrices_sha256
+        cdigest.compute_omx_logical_matrices_sha256
         is compute_omx_logical_matrices_sha256
     )
     assert (
-        consist.compute_zarr_logical_matrices_sha256
+        cdigest.compute_zarr_logical_matrices_sha256
         is compute_zarr_logical_matrices_sha256
     )
-    assert consist.inspect_matrix_container is inspect_matrix_container
-    assert consist.check_prior_run_expectation is check_prior_run_expectation
+
+    with warnings.catch_warnings(record=True) as recorded:
+        warnings.simplefilter("always")
+        assert consist.AdmissionIdentity is AdmissionIdentity
+        assert consist.ArrayCanonicalizationPolicy is ArrayCanonicalizationPolicy
+        assert consist.PRESERVE_CANONICAL_POLICY is PRESERVE_CANONICAL_POLICY
+        assert consist.FLOAT32_MATRICES_V1_POLICY is FLOAT32_MATRICES_V1_POLICY
+        assert (
+            consist.compute_logical_matrices_sha256 is compute_logical_matrices_sha256
+        )
+        assert (
+            consist.compute_omx_logical_matrices_sha256
+            is compute_omx_logical_matrices_sha256
+        )
+        assert (
+            consist.compute_zarr_logical_matrices_sha256
+            is compute_zarr_logical_matrices_sha256
+        )
+        assert consist.inspect_matrix_container is inspect_matrix_container
+        assert consist.check_prior_run_expectation is check_prior_run_expectation
+        assert len(recorded) >= 1
+        assert issubclass(recorded[0].category, DeprecationWarning)

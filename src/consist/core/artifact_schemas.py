@@ -13,9 +13,9 @@ from typing import (
     get_origin,
 )
 
+from consist.digest import canonical_json_sha256
 from consist.models.artifact import Artifact
 from consist.models.run import Run
-from consist.core.identity import IdentityManager
 from consist.types import DriverType
 
 if TYPE_CHECKING:
@@ -28,7 +28,6 @@ if TYPE_CHECKING:
 def _schema_view_name(
     *,
     run_id: str,
-    identity: IdentityManager,
     container_uri: str,
     table_path: Optional[str],
     array_path: Optional[str],
@@ -38,7 +37,7 @@ def _schema_view_name(
         "table_path": table_path,
         "array_path": array_path,
     }
-    digest = identity.canonical_json_sha256(base)[:12]
+    digest = canonical_json_sha256(base)[:12]
     safe_run = "".join(ch for ch in run_id if ch.isalnum() or ch == "_")
     if not safe_run:
         safe_run = "run"
@@ -300,7 +299,7 @@ class ArtifactSchemaManager:
                 "fields": field_rows,
                 "relations": sorted_relations,
             }
-            schema_id = self.tracker.identity.canonical_json_sha256(hash_obj)
+            schema_id = canonical_json_sha256(hash_obj)
 
             # 3. Create ArtifactSchema and ArtifactSchemaField rows.
             # NOTE: We do NOT include "source" in summary_json. The schema_id dedupes
@@ -428,7 +427,6 @@ class ArtifactSchemaManager:
 
             result = profile_duckdb_table(
                 engine=hot_engine,
-                identity=self.tracker.identity,
                 table_schema=table_schema,
                 table_name=table_name,
                 source=source,
@@ -617,7 +615,6 @@ class ArtifactSchemaManager:
                         return
 
             result = profile_file_schema(
-                identity=self.tracker.identity,
                 path=resolved_path,
                 driver=driver,
                 sample_rows=sample_rows,
@@ -625,7 +622,6 @@ class ArtifactSchemaManager:
                 source=source,
                 view_name=_schema_view_name(
                     run_id=str(run.id),
-                    identity=self.tracker.identity,
                     container_uri=artifact.container_uri,
                     table_path=table_path,
                     array_path=artifact.array_path,

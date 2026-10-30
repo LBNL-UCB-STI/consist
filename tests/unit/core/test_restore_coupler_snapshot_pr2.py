@@ -381,7 +381,7 @@ def test_startup_performance_guard_no_full_sha256(tmp_path: Path) -> None:
 
     with tracker_local.scenario("perf_resumed") as sc_resume:
         with (
-            patch("consist.core.materialize._compute_file_sha256") as mock_file_sha,
+            patch("consist.core.materialize.file_sha256") as mock_file_sha,
             patch(
                 "consist.core.materialize.build_directory_manifest"
             ) as mock_dir_manifest,
@@ -407,7 +407,7 @@ def test_startup_performance_guard_no_full_sha256(tmp_path: Path) -> None:
     with tracker_local2.scenario("perf_resumed_always") as sc_resume2:
         with (
             patch(
-                "consist.core.materialize._compute_file_sha256",
+                "consist.core.materialize.file_sha256",
                 return_value="recorded_file_sha256",
             ) as mock_file_sha,
             patch(

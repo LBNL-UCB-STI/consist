@@ -12,6 +12,7 @@ import pytest
 from pydantic import ValidationError
 
 import consist
+import consist.admission
 import consist.api
 from consist.core.admission import (
     AdmissionReference,
@@ -85,19 +86,22 @@ def _record_artifact(
 
 def test_public_api_exports() -> None:
     """Verify that PriorRunExpectation and new check functions are exported."""
+    assert consist.admission.PriorRunExpectation is PriorRunExpectation
+    assert consist.admission.check_prior_run_expectation is check_prior_run_expectation
+    assert (
+        consist.admission.check_admission_reference_prior_run_expectation
+        is check_admission_reference_prior_run_expectation
+    )
     for module in (consist, consist.api):
-        assert hasattr(module, "PriorRunExpectation")
-        assert getattr(module, "PriorRunExpectation") is PriorRunExpectation
-        assert hasattr(module, "check_prior_run_expectation")
-        assert (
-            getattr(module, "check_prior_run_expectation")
-            is check_prior_run_expectation
-        )
-        assert hasattr(module, "check_admission_reference_prior_run_expectation")
-        assert (
-            getattr(module, "check_admission_reference_prior_run_expectation")
-            is check_admission_reference_prior_run_expectation
-        )
+        with pytest.deprecated_call():
+            assert module.PriorRunExpectation is PriorRunExpectation
+        with pytest.deprecated_call():
+            assert module.check_prior_run_expectation is check_prior_run_expectation
+        with pytest.deprecated_call():
+            assert (
+                module.check_admission_reference_prior_run_expectation
+                is check_admission_reference_prior_run_expectation
+            )
 
 
 # =============================================================================

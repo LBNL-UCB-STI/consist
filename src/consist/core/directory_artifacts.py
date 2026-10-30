@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 import shutil
 import tempfile
@@ -11,8 +9,9 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from consist.digest import canonical_json_sha256, file_sha256
 
-_HASH_CHUNK_SIZE = 8 * 1024 * 1024
+
 _MANIFEST_VERSION = 1
 _SHAPEFILE_REQUIRED_SUFFIXES = frozenset({".shp", ".shx", ".dbf"})
 
@@ -50,7 +49,7 @@ def build_directory_manifest(root: Path) -> dict[str, Any]:
                     {
                         "kind": "file",
                         "path": relative_path,
-                        "sha256": _compute_file_sha256(child_path),
+                        "sha256": file_sha256(child_path),
                         "size": child.stat(follow_symlinks=False).st_size,
                     }
                 )
@@ -63,7 +62,7 @@ def build_directory_manifest(root: Path) -> dict[str, Any]:
     visit(root_path)
     entries.sort(key=lambda entry: (entry["path"], entry["kind"]))
     identity = {"version": _MANIFEST_VERSION, "entries": entries}
-    return {**identity, "tree_hash": _manifest_hash(identity)}
+    return {**identity, "tree_hash": canonical_json_sha256(identity)}
 
 
 def build_shapefile_bundle_manifest(shapefile: Path) -> dict[str, Any]:
@@ -79,7 +78,7 @@ def build_shapefile_bundle_manifest(shapefile: Path) -> dict[str, Any]:
     _reject_symlink_components(root, label="shapefile bundle root")
     entries = _shapefile_bundle_entries(root, shapefile_path.name)
     identity = {"version": _MANIFEST_VERSION, "entries": entries}
-    return {**identity, "tree_hash": _manifest_hash(identity)}
+    return {**identity, "tree_hash": canonical_json_sha256(identity)}
 
 
 def validate_shapefile_bundle_root(
@@ -248,7 +247,7 @@ def validate_directory_tree(root: Path, manifest: Mapping[str, Any]) -> None:
                 raise ValueError(f"directory artifact file size mismatch: {path}")
 
     expected_identity = {"version": _MANIFEST_VERSION, "entries": expected_entries}
-    if manifest["tree_hash"] != _manifest_hash(expected_identity):
+    if manifest["tree_hash"] != canonical_json_sha256(expected_identity):
         raise ValueError("directory artifact manifest tree hash is invalid")
 
 
@@ -256,7 +255,7 @@ def validate_directory_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
     """Validate and normalize a persisted directory-artifact manifest."""
     entries = _validate_manifest(manifest)
     identity = {"version": _MANIFEST_VERSION, "entries": entries}
-    if manifest.get("tree_hash") != _manifest_hash(identity):
+    if manifest.get("tree_hash") != canonical_json_sha256(identity):
         raise ValueError("directory artifact manifest tree hash is invalid")
     return {**identity, "tree_hash": manifest["tree_hash"]}
 
@@ -388,7 +387,7 @@ def _shapefile_bundle_entries(root: Path, shapefile_name: str) -> list[dict[str,
             {
                 "kind": "file",
                 "path": candidate.name,
-                "sha256": _compute_file_sha256(candidate_path),
+                "sha256": file_sha256(candidate_path),
                 "size": candidate.stat(follow_symlinks=False).st_size,
             }
         )
@@ -552,16 +551,3 @@ def _reject_symlink_components(path: Path, *, label: str) -> None:
             raise ValueError(
                 f"directory artifact {label} contains a symlink component: {component}"
             )
-
-
-def _compute_file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(_HASH_CHUNK_SIZE), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _manifest_hash(manifest: Mapping[str, Any]) -> str:
-    payload = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()

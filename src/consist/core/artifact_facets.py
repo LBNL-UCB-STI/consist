@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from consist.core.facet_common import (
     canonical_facet_json_and_id,
@@ -10,12 +10,14 @@ from consist.core.facet_common import (
     infer_schema_name_from_facet,
     normalize_facet_like,
 )
-from consist.core.identity import IdentityManager
 from consist.core.persistence import DatabaseManager
 from consist.models.artifact import Artifact
 from consist.models.artifact_facet import ArtifactFacet
 from consist.models.artifact_kv import ArtifactKV
 from consist.types import FacetLike
+
+if TYPE_CHECKING:
+    from consist.core.identity import IdentityManager
 
 
 @dataclass(frozen=True)
@@ -37,7 +39,7 @@ class ArtifactFacetManager:
         self,
         *,
         db: Optional[DatabaseManager],
-        identity: IdentityManager,
+        identity: Optional[IdentityManager] = None,
     ) -> None:
         self._db = db
         self._identity = identity
@@ -50,7 +52,7 @@ class ArtifactFacetManager:
     ) -> Optional[Dict[str, Any]]:
         if facet is None:
             return None
-        return normalize_facet_like(identity=self._identity, facet=facet)
+        return normalize_facet_like(facet=facet)
 
     def prepare_facet_bundle(
         self,
@@ -65,7 +67,6 @@ class ArtifactFacetManager:
         max_kv_rows: int = 500,
     ) -> Optional[PreparedArtifactFacetBundle]:
         canonical, facet_id = canonical_facet_json_and_id(
-            identity=self._identity,
             facet_dict=facet_dict,
         )
         facet_bytes = len(canonical.encode("utf-8"))

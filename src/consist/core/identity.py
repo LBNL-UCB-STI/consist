@@ -9,6 +9,7 @@ import hashlib
 import json
 import inspect
 import fnmatch
+import warnings
 from dataclasses import dataclass
 from collections.abc import Mapping
 from importlib import import_module
@@ -20,7 +21,6 @@ from typing import (
     Any,
     Optional,
     Callable,
-    Set,
     Union,
     Literal,
     cast,
@@ -29,6 +29,12 @@ from pathlib import Path
 
 from consist.types import CodeIdentityMode
 from consist.core.resolved_binding import ArtifactIdentity
+from consist.digest import (
+    canonical_json_sha256,
+    canonical_json_str,
+    file_sha256,
+    normalize_json,
+)
 
 # Try importing git lazily on first use, handle error if missing (optional dependency)
 _UNSET = object()
@@ -44,13 +50,6 @@ def _get_git() -> Optional[ModuleType]:
             git = None
     return git
 
-
-# Try importing numpy for type checking
-np: Optional[ModuleType]
-try:
-    np = import_module("numpy")
-except ImportError:
-    np = None
 
 if TYPE_CHECKING:
     from consist.core.run_resolution import InputBindingRole
@@ -192,29 +191,43 @@ class IdentityManager:
         """
         Return a stable JSON string for hashing/IDs.
 
-        Uses `_clean_structure` to normalize types and then dumps with deterministic
-        key ordering and compact separators.
+        Deprecated: use ``consist.digest.canonical_json_str`` directly.
         """
-        cleaned = self._clean_structure(obj, set())
-        return self._canonical_json_token(cleaned)
+        warnings.warn(
+            "IdentityManager.canonical_json_str is deprecated; "
+            "use consist.digest.canonical_json_str instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return canonical_json_str(obj)
 
     def canonical_json_sha256(self, obj: Any) -> str:
-        """SHA256 hex digest of `canonical_json_str(obj)`."""
-        return hashlib.sha256(self.canonical_json_str(obj).encode("utf-8")).hexdigest()
+        """
+        SHA256 hex digest of ``canonical_json_str(obj)``.
+
+        Deprecated: use ``consist.digest.canonical_json_sha256`` directly.
+        """
+        warnings.warn(
+            "IdentityManager.canonical_json_sha256 is deprecated; "
+            "use consist.digest.canonical_json_sha256 instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return canonical_json_sha256(obj)
 
     def normalize_json(self, obj: Any) -> Any:
         """
         Normalize Python structures into JSON-friendly types.
 
-        This mirrors the canonical hashing cleanup but preserves the full structure
-        without excluding any keys.
+        Deprecated: use ``consist.digest.normalize_json`` directly.
         """
-        return self._clean_structure(obj, set())
-
-    @staticmethod
-    def _canonical_json_token(obj: Any) -> str:
-        """Serialize a cleaned value using the canonical JSON token settings."""
-        return json.dumps(obj, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+        warnings.warn(
+            "IdentityManager.normalize_json is deprecated; "
+            "use consist.digest.normalize_json instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return normalize_json(obj)
 
     # --- Run Signature Calculation ---
 
@@ -380,7 +393,7 @@ class IdentityManager:
             elif strategy == "module":
                 module_path = inspect.getfile(identity_callable)
                 # We reuse the file checksum logic
-                file_hash = self._compute_file_checksum(module_path)
+                file_hash = self.compute_file_checksum(module_path)
                 hashes.append(f"mod:{file_hash}")
 
             else:
@@ -399,7 +412,7 @@ class IdentityManager:
                 # Resolve relative to project root
                 full_path = self.project_root / dep
                 if full_path.exists():
-                    d_hash = self._compute_file_checksum(str(full_path))
+                    d_hash = self.compute_file_checksum(str(full_path))
                     hashes.append(f"dep:{dep}:{d_hash}")
                 else:
                     # If dependency is missing, we must affect the hash to warn or fail?
@@ -513,7 +526,7 @@ class IdentityManager:
             exclude_keys = []
 
         # 1. Clean and Canonicalize
-        cleaned_config = self._clean_structure(config, set(exclude_keys))
+        cleaned_config = normalize_json(config, exclude_keys=set(exclude_keys))
 
         # 2. Serialize with deterministic sorting
         # ensure_ascii=True ensures locale independence
@@ -623,7 +636,7 @@ class IdentityManager:
             raise ValueError(
                 f"Cannot hash raw artifact '{artifact.container_uri}' without a path_resolver."
             )
-        file_hash = self._compute_file_checksum(path_resolver(artifact.container_uri))
+        file_hash = self.compute_file_checksum(path_resolver(artifact.container_uri))
         sig_parts = [
             f"driver:{artifact.driver}",
             f"container_uri:{artifact.container_uri}",
@@ -738,7 +751,7 @@ class IdentityManager:
                 "identity": strict_binding_identity,
             }
         return ActionInputIdentity(
-            value=f"sha256:action-v2:{self.canonical_json_sha256(payload)}",
+            value=f"sha256:action-v2:{canonical_json_sha256(payload)}",
             code=descriptor,
             bindings=tuple(resolved_bindings),
             strict_binding_identity=strict_binding_identity,
@@ -888,78 +901,6 @@ class IdentityManager:
 
     # --- Internal Utilities ---
 
-    def _clean_structure(self, obj: Any, exclude_keys: Set[str]) -> Any:
-        """
-        Recursively cleans a Python structure (dictionary, list, tuple, Pydantic model) for canonical hashing.
-
-        This method is vital for:
-        -   **Canonical Config Hashing**: By recursively removing specified `exclude_keys`
-            from dictionaries and consistently converting data types, it ensures that
-            the same logical configuration always produces the same hash, regardless
-            of minor structural or type variations.
-        -   **Addressing "The NumPy Problem"**: It handles NumPy-specific data types
-            (e.g., `np.int64`, `np.ndarray`) by converting them into standard Python types
-            (e.g., `int`, `float`, `list`). This prevents serialization errors with
-            `json.dumps` and ensures that hashes are consistent even if input types
-            vary between NumPy and standard Python, which is common in scientific computing.
-
-        Updates:
-        - Handles Pydantic models (v1 and v2)
-        - Handles Sets (converts to sorted list for determinism)
-        - Handles NumPy types
-        """
-
-        if isinstance(obj, Path):
-            return str(obj)
-
-        # 1. Handle Pydantic Models (Native Support)
-        # Check for v2 'model_dump' first, then v1 'dict'
-        if hasattr(obj, "model_dump"):
-            return self._clean_structure(obj.model_dump(mode="json"), exclude_keys)
-        elif hasattr(obj, "dict") and hasattr(obj, "json"):  # Pydantic v1 heuristic
-            return self._clean_structure(obj.dict(), exclude_keys)
-
-        # 2. Handle Dictionaries
-        if isinstance(obj, dict):
-            return {
-                k: self._clean_structure(v, exclude_keys)
-                for k, v in obj.items()
-                if k not in exclude_keys
-            }
-
-        # 3. Handle Lists and Tuples
-        elif isinstance(obj, (list, tuple)):
-            return [self._clean_structure(x, exclude_keys) for x in obj]
-
-        # 4. Handle Sets (CRITICAL for hashing)
-        elif isinstance(obj, set):
-            cleaned_members = [self._clean_structure(x, exclude_keys) for x in obj]
-            # Preserve legacy natural ordering for comparable cleaned values so
-            # existing sortable-set hashes remain stable. Heterogeneous sets use
-            # canonical tokens to remove process-local iteration dependence.
-            try:
-                return sorted(cleaned_members)
-            except TypeError:
-                tokenized_members = [
-                    (
-                        self._canonical_json_token(member),
-                        member,
-                    )
-                    for member in cleaned_members
-                ]
-                tokenized_members.sort(key=lambda item: item[0])
-                return [member for _, member in tokenized_members]
-
-        # 5. Handle Numpy conversions (Existing logic)
-        if np:
-            if isinstance(obj, np.ndarray):
-                # Recursive call ensures arrays of Pydantic objects or sets are handled
-                return self._clean_structure(obj.tolist(), exclude_keys)
-            if isinstance(obj, np.generic):
-                return self._clean_structure(obj.item(), exclude_keys)
-
-        return obj
-
     def compute_file_checksum(self, file_path: Union[str, Path]) -> str:
         """
         Computes a cryptographic identifier for a given file or directory based on the configured hashing strategy.
@@ -1023,12 +964,7 @@ class IdentityManager:
                 sha256 = hashlib.sha256()
                 for p in sorted(path.rglob("*")):
                     if p.is_file():
-                        with open(p, "rb") as f:
-                            while True:
-                                chunk = f.read(65536)
-                                if not chunk:
-                                    break
-                                sha256.update(chunk)
+                        self._update_hash_from_file(sha256, p)
                 return sha256.hexdigest()
 
         # Single File Handling
@@ -1038,18 +974,7 @@ class IdentityManager:
             return hashlib.sha256(meta_str.encode("utf-8")).hexdigest()
 
         else:
-            sha256 = hashlib.sha256()
-            with open(path, "rb") as f:
-                while True:
-                    chunk = f.read(65536)
-                    if not chunk:
-                        break
-                    sha256.update(chunk)
-            return sha256.hexdigest()
-
-    # Backwards-compatible alias (internal callers / integrations).
-    def _compute_file_checksum(self, file_path: Union[str, Path]) -> str:
-        return self.compute_file_checksum(file_path)
+            return file_sha256(path)
 
     def compute_fast_directory_observation(
         self, directory_path: Union[str, Path]
@@ -1170,12 +1095,7 @@ class IdentityManager:
                     sha.update(leaf.encode("utf-8"))
                 else:
                     sha.update(f"{rel}:".encode("utf-8"))
-                    with open(file_path, "rb") as f:
-                        while True:
-                            chunk = f.read(65536)
-                            if not chunk:
-                                break
-                            sha.update(chunk)
+                    self._update_hash_from_file(sha, file_path)
             return sha.hexdigest()
         finally:
             self.hashing_strategy = original_strategy
@@ -1200,12 +1120,7 @@ class IdentityManager:
                 continue
             rel = file_path.relative_to(path).as_posix()
             sha.update(f"{rel}:".encode("utf-8"))
-            with open(file_path, "rb") as f:
-                while True:
-                    chunk = f.read(65536)
-                    if not chunk:
-                        break
-                    sha.update(chunk)
+            self._update_hash_from_file(sha, file_path)
         return sha.hexdigest()
 
     def _hash_zarr_store_fast(self, path: Path) -> str:
@@ -1242,11 +1157,7 @@ class IdentityManager:
 
     def _update_hash_from_file(self, sha: "hashlib._Hash", path: Path) -> None:
         with open(path, "rb") as f:
-            while True:
-                chunk = f.read(65536)
-                if not chunk:
-                    break
-                sha.update(chunk)
+            hashlib.file_digest(f, lambda: sha)
 
     def compute_hash_inputs_digests(
         self,

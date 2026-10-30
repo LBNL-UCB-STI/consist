@@ -34,6 +34,9 @@ Guidance: [Manual Lifecycle and Decorators](../advanced/manual-lifecycle-and-dec
   [`consist.run_query`](api_helpers.md#consist.api.run_query),
   [`consist.db_session`](api_helpers.md#consist.api.db_session),
   [`Tracker.resolve_uri`](tracker.md#consist.core.tracker.Tracker.resolve_uri)
+- Cryptographic digests & boundary contracts:
+  [`consist.digest`](digest.md) (stateless content, table, and array hashing),
+  [`consist.admission`](admission.md) (artifact admission and expectation contracts)
 
 ## Choosing execution style
 

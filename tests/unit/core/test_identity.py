@@ -34,6 +34,7 @@ from pathlib import Path
 # Import the class
 from consist.core.identity import IdentityManager
 from consist.core.run_resolution import InputBindingRole
+from consist.digest import normalize_json
 from consist.models.artifact import Artifact
 
 # Conditional numpy import for testing
@@ -53,8 +54,8 @@ class TestConfigHashing:
         config_a = {"tags": {"beta", 1, "alpha", (2, "nested")}}
         config_b = {"tags": {(2, "nested"), "alpha", "beta", 1}}
 
-        normalized_a = im.normalize_json(config_a)
-        normalized_b = im.normalize_json(config_b)
+        normalized_a = normalize_json(config_a)
+        normalized_b = normalize_json(config_b)
 
         assert normalized_a == {"tags": ["alpha", "beta", 1, [2, "nested"]]}
         assert normalized_a == normalized_b
@@ -64,17 +65,14 @@ class TestConfigHashing:
         ) == im.compute_run_config_hash(config=config_b, model="demo")
 
     def test_sortable_sets_preserve_legacy_natural_order(self):
-        im = IdentityManager()
         config = {"values": {2, 10}}
 
-        assert im.normalize_json(config) == {"values": [2, 10]}
+        assert normalize_json(config) == {"values": [2, 10]}
 
     def test_path_config_values_match_string_values(self):
         im = IdentityManager()
 
-        assert im.normalize_json({"path": Path("config.yaml")}) == {
-            "path": "config.yaml"
-        }
+        assert normalize_json({"path": Path("config.yaml")}) == {"path": "config.yaml"}
         assert im.compute_config_hash(
             {"path": Path("config.yaml")}
         ) == im.compute_config_hash({"path": "config.yaml"})
@@ -84,10 +82,11 @@ class TestConfigHashing:
 import json
 from consist.core.identity import IdentityManager
 from consist.core.validation import validate_config_structure
+from consist.digest import normalize_json
 
 identity = IdentityManager()
 config = {"tags": {"alpha", "beta", 1}}
-normalized = identity.normalize_json(config)
+normalized = normalize_json(config)
 validate_config_structure(normalized)
 config_hash = identity.compute_run_config_hash(config=normalized, model="demo")
 print(json.dumps({"config_hash": config_hash, "normalized": normalized}, sort_keys=True))
