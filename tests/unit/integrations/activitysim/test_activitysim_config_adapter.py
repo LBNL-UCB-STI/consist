@@ -16,10 +16,14 @@ from consist.integrations.activitysim import (  # noqa: E402
     ActivitySimConfigAdapter,
     ConfigOverrides,
 )
-from consist.core.config_canonicalization import ConfigAdapterOptions  # noqa: E402
+from consist.core.config_canonicalization import (  # noqa: E402
+    CanonicalConfig,
+    ConfigAdapterOptions,
+)
 from consist.integrations.activitysim.config_adapter import (  # noqa: E402
     _bundle_configs,
     _digest_path_with_name,
+    _unpack_bundle,
 )
 from tests.helpers.activitysim_fixtures import (  # noqa: E402
     build_activitysim_test_configs,
@@ -852,3 +856,107 @@ def test_select_root_dir_supports_required_file_guard(tracker, tmp_path: Path):
 
     with pytest.raises(FileNotFoundError, match="Required config file"):
         adapter.select_root_dir(canonical, required_file="missing.yaml")
+
+
+def test_materialize_from_config_dirs_preserves_non_alphabetical_overlay_precedence(
+    tracker, tmp_path: Path
+):
+    alpha_base, zzz_overlay = build_activitysim_test_configs(tmp_path / "raw")
+    alpha_dir = tmp_path / "alpha_base"
+    zzz_dir = tmp_path / "zzz_overlay"
+    shutil.copytree(alpha_base, alpha_dir)
+    shutil.copytree(zzz_overlay, zzz_dir)
+
+    adapter = ActivitySimConfigAdapter()
+    staged = adapter.materialize_from_config_dirs(
+        base_config_dirs=[zzz_dir, alpha_dir],
+        base_primary_config=None,
+        overrides=ConfigOverrides(
+            constants={("settings_local.yaml", "sample_rate"): 0.42}
+        ),
+        output_dir=tmp_path / "staged",
+        identity=tracker.identity,
+    )
+
+    assert [root.name for root in staged.root_dirs] == ["zzz_overlay", "alpha_base"]
+    assert staged.primary_config == staged.root_dirs[0] / "settings.yaml"
+    assert adapter.select_root_dir(staged) == staged.root_dirs[0]
+
+
+def test_materialize_from_run_preserves_non_alphabetical_overlay_precedence(
+    tracker, tmp_path: Path
+):
+    alpha_base, zzz_overlay = build_activitysim_test_configs(tmp_path / "raw")
+    alpha_dir = tmp_path / "alpha_base"
+    zzz_dir = tmp_path / "zzz_overlay"
+    shutil.copytree(alpha_base, alpha_dir)
+    shutil.copytree(zzz_overlay, zzz_dir)
+
+    adapter = ActivitySimConfigAdapter()
+    run = tracker.begin_run("activitysim_precedence_run", "activitysim")
+    tracker.canonicalize_config(adapter, [zzz_dir, alpha_dir], strict=True)
+    tracker.end_run()
+
+    staged = adapter.materialize_from_run(
+        tracker=tracker,
+        run_id=run.id,
+        overrides=ConfigOverrides(
+            constants={("settings_local.yaml", "sample_rate"): 0.55}
+        ),
+        output_dir=tmp_path / "staged_from_run",
+    )
+
+    assert [root.name for root in staged.root_dirs] == ["zzz_overlay", "alpha_base"]
+    assert staged.primary_config == staged.root_dirs[0] / "settings.yaml"
+    assert adapter.select_root_dir(staged) == staged.root_dirs[0]
+
+
+def test_select_root_dir_required_file_preserves_precedence_order(tmp_path: Path):
+    zzz_dir = tmp_path / "zzz_overlay"
+    alpha_dir = tmp_path / "alpha_base"
+    zzz_dir.mkdir()
+    alpha_dir.mkdir()
+    (zzz_dir / "shared.yaml").write_text("value: 1\n", encoding="utf-8")
+    (alpha_dir / "shared.yaml").write_text("value: 2\n", encoding="utf-8")
+    (alpha_dir / "settings.yaml").write_text("models: []\n", encoding="utf-8")
+
+    canonical = CanonicalConfig(
+        root_dirs=[zzz_dir, alpha_dir],
+        primary_config=alpha_dir / "settings.yaml",
+        config_files=[
+            zzz_dir / "shared.yaml",
+            alpha_dir / "shared.yaml",
+            alpha_dir / "settings.yaml",
+        ],
+        external_files=[],
+        content_hash="deadbeef",
+    )
+    adapter = ActivitySimConfigAdapter()
+    assert adapter.select_root_dir(canonical, required_file="shared.yaml") == zzz_dir
+    assert adapter.select_root_dir(canonical) == alpha_dir
+
+
+def test_bundle_configs_disambiguates_duplicate_directory_basenames(
+    tracker, tmp_path: Path
+):
+    base_src, overlay_src = build_activitysim_test_configs(tmp_path / "src")
+    overlay_configs = tmp_path / "overlay" / "configs"
+    base_configs = tmp_path / "base" / "configs"
+    shutil.copytree(overlay_src, overlay_configs)
+    shutil.copytree(base_src, base_configs)
+
+    run = SimpleNamespace(model_name="activitysim")
+    bundle_path = _bundle_configs(
+        config_dirs=[overlay_configs, base_configs],
+        run=run,
+        tracker=tracker,
+        content_hash="test_bundle_hash",
+        cache_dir=tmp_path / "bundle_cache",
+    )
+
+    extracted = _unpack_bundle(
+        bundle_path=bundle_path, output_dir=tmp_path / "extracted"
+    )
+    assert [d.name for d in extracted] == ["configs", "1_configs"]
+    assert (extracted[0] / "settings.yaml").exists()
+    assert (extracted[1] / "settings_local.yaml").exists()

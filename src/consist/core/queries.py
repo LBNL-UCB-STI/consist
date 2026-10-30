@@ -286,11 +286,24 @@ class RunQueryService:
         prefix: Optional[str] = None,
         keys: Optional[Iterable[str]] = None,
         limit: int = 10_000,
+        resolve_canonical: bool = True,
     ) -> Dict[str, Any]:
         resolved_namespace = self._resolve_config_namespace(run_id, namespace)
         rows = self.get_run_config_kv(
             run_id, namespace=resolved_namespace, prefix=prefix, limit=limit
         )
+        if not rows and resolve_canonical:
+            canonical_id = self._tracker.resolve_canonical_run_id(run_id)
+            if canonical_id != run_id:
+                resolved_namespace = self._resolve_config_namespace(
+                    canonical_id, namespace
+                )
+                rows = self.get_run_config_kv(
+                    canonical_id,
+                    namespace=resolved_namespace,
+                    prefix=prefix,
+                    limit=limit,
+                )
         if not rows:
             return {}
 
@@ -364,11 +377,24 @@ class RunQueryService:
         *,
         namespace: Optional[str] = None,
         default: Any = None,
+        resolve_canonical: bool = True,
     ) -> Any:
         resolved_namespace = self._resolve_config_namespace(run_id, namespace)
         rows = self.get_run_config_kv(
             run_id, namespace=resolved_namespace, prefix=key, limit=10_000
         )
+        if not rows and resolve_canonical:
+            canonical_id = self._tracker.resolve_canonical_run_id(run_id)
+            if canonical_id != run_id:
+                resolved_namespace = self._resolve_config_namespace(
+                    canonical_id, namespace
+                )
+                rows = self.get_run_config_kv(
+                    canonical_id,
+                    namespace=resolved_namespace,
+                    prefix=key,
+                    limit=10_000,
+                )
         for row in rows:
             if row.key == key:
                 return self._coerce_config_kv_value(row)

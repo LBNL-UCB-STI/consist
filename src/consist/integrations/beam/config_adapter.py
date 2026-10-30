@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass, field, replace
 import shutil
@@ -11,6 +12,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import (
     Any,
+    Collection,
     cast,
     Iterable,
     Literal,
@@ -79,11 +81,15 @@ try:
     ConfigFactory = _pyhocon.ConfigFactory
     HOCONConverter = _pyhocon.HOCONConverter
     ConfigParser = _pyhocon_config_parser.ConfigParser
+    ConfigTree = _pyhocon_config_tree.ConfigTree
+    ConfigValues = _pyhocon_config_tree.ConfigValues
     NonExistentKey = _pyhocon_config_tree.NonExistentKey
 except ImportError:  # pragma: no cover
     ConfigFactory = None
     HOCONConverter = None
     ConfigParser = None
+    ConfigTree = None
+    ConfigValues = None
     NonExistentKey = None
 
 
@@ -107,10 +113,33 @@ class BeamIngestSpec:
 
 @dataclass(frozen=True)
 class BeamConfigOverrides:
-    values: dict[str, Any]
+    values: dict[str, Any] = field(default_factory=dict)
+    allow_missing_keys: Collection[str] = ()
+
+    def __post_init__(self) -> None:
+        if isinstance(self.allow_missing_keys, str):
+            raise TypeError(
+                "allow_missing_keys must be a collection of key strings, not a single str."
+            )
 
     def to_canonical_dict(self) -> dict[str, Any]:
         return {"values": self.values}
+
+
+def _link_or_copy_static_config_file(
+    src: str | os.PathLike[str],
+    dst: str | os.PathLike[str],
+) -> str:
+    """Copy HOCON .conf files; hardlink all other files with copy2 fallback."""
+    source_path = Path(src)
+    dest_path = Path(dst)
+    if source_path.suffix.lower() == ".conf" or source_path.is_symlink():
+        return str(shutil.copy2(source_path, dest_path, follow_symlinks=False))
+    try:
+        os.link(source_path, dest_path)
+        return str(dest_path)
+    except OSError:
+        return str(shutil.copy2(source_path, dest_path))
 
 
 @dataclass(frozen=True)
@@ -707,12 +736,15 @@ class BeamConfigAdapter:
         output_dir: Path,
         identity: IdentityManager,
         strict: bool = True,
+        copy_mode: Literal["copy", "hardlink_or_copy"] = "copy",
         _expected_base_root_manifests: Sequence[Mapping[str, Any]] | None = None,
     ) -> CanonicalConfig:
         if ConfigFactory is None:
             raise ImportError("pyhocon is required for BEAM canonicalization.")
         if HOCONConverter is None:
             raise ImportError("pyhocon is required for BEAM canonicalization.")
+        if copy_mode not in ("copy", "hardlink_or_copy"):
+            raise ValueError("copy_mode must be 'copy' or 'hardlink_or_copy'.")
         if output_dir.exists() and any(output_dir.iterdir()):
             raise ValueError(f"output_dir must be empty: {output_dir}")
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -721,10 +753,15 @@ class BeamConfigAdapter:
         ) != len(base_root_dirs):
             raise ValueError("Expected one manifest for each BEAM config root.")
 
+        copy_fn = (
+            _link_or_copy_static_config_file
+            if copy_mode == "hardlink_or_copy"
+            else shutil.copy2
+        )
         staged_root_dirs: list[Path] = []
         for index, root_dir in enumerate(base_root_dirs):
             staged_root = output_dir / root_dir.name
-            shutil.copytree(root_dir, staged_root)
+            shutil.copytree(root_dir, staged_root, copy_function=copy_fn)
             if _expected_base_root_manifests is not None:
                 try:
                     validate_directory_tree(
@@ -744,12 +781,20 @@ class BeamConfigAdapter:
         )
 
         config = ConfigFactory.parse_file(str(primary_path), resolve=False)
+        allowed_missing = set(overrides.allow_missing_keys)
         for key, value in overrides.values.items():
-            if strict and config.get(key, NonExistentKey) is NonExistentKey:
+            if (
+                strict
+                and config.get(key, NonExistentKey) is NonExistentKey
+                and key not in allowed_missing
+            ):
                 raise KeyError(f"Override key not found: {key}")
             config.put(key, value)
 
-        primary_path.write_text(HOCONConverter.to_hocon(config), encoding="utf-8")
+        rendered = HOCONConverter.to_hocon(config)
+        if primary_path.exists() and primary_path.stat().st_nlink > 1:
+            primary_path.unlink()
+        primary_path.write_text(rendered, encoding="utf-8")
 
         materialized_adapter = BeamConfigAdapter(
             primary_config=primary_path,
@@ -997,7 +1042,7 @@ class BeamConfigAdapter:
         output_dir: Path,
         strict: bool = True,
     ) -> CanonicalConfig:
-        run = tracker.get_run(run_id)
+        run = tracker.get_run(run_id, resolve_canonical=True)
         run_adapter: str | None = None
         if run is not None and isinstance(run.meta, dict):
             adapter_value = run.meta.get("config_adapter")
@@ -1154,6 +1199,16 @@ class BeamConfigAdapter:
             if isinstance(artifact.meta, dict)
             and artifact.meta.get("config_role") == "conf"
         ]
+        if not conf_artifacts:
+            canonical_id = tracker.resolve_canonical_run_id(run_id)
+            if canonical_id != run_id:
+                artifacts = tracker.get_artifacts_for_run(canonical_id)
+                conf_artifacts = [
+                    artifact
+                    for artifact in artifacts.inputs.values()
+                    if isinstance(artifact.meta, dict)
+                    and artifact.meta.get("config_role") == "conf"
+                ]
         if not conf_artifacts:
             raise FileNotFoundError(
                 "No BEAM config artifacts found for "
@@ -1328,6 +1383,37 @@ def _scan_includes(path: Path) -> list[Path]:
     return includes
 
 
+def _rebind_config_values_parents(node: Any) -> None:
+    """Repair pyhocon parent/key pointers on deferred ConfigValues trees."""
+    if ConfigTree is None or ConfigValues is None:
+        return
+    if isinstance(node, ConfigTree):
+        for key, value in list(node.items()):
+            if isinstance(value, ConfigValues):
+                value.parent = node
+                value.key = key
+                for token in value.tokens:
+                    if isinstance(token, ConfigTree):
+                        _rebind_config_values_parents(token)
+                overridden = value.overridden_value
+                while isinstance(overridden, ConfigValues):
+                    overridden.parent = node
+                    overridden.key = key
+                    for token in overridden.tokens:
+                        if isinstance(token, ConfigTree):
+                            _rebind_config_values_parents(token)
+                    overridden = overridden.overridden_value
+                    if overridden is not None and not isinstance(
+                        overridden, ConfigValues
+                    ):
+                        break
+            else:
+                _rebind_config_values_parents(value)
+    elif isinstance(node, list):
+        for item in node:
+            _rebind_config_values_parents(item)
+
+
 def _load_config_tree(
     path: Path, *, resolve: bool, env_overrides: Optional[dict[str, str]] = None
 ) -> dict[str, Any]:
@@ -1335,26 +1421,27 @@ def _load_config_tree(
         raise ImportError("pyhocon is required for BEAM canonicalization.")
     if HOCONConverter is None:
         raise ImportError("pyhocon is required for BEAM canonicalization.")
-    if resolve and env_overrides:
+    config = ConfigFactory.parse_file(str(path), resolve=False)
+    _rebind_config_values_parents(config)
+    if resolve:
         if ConfigParser is None:
             raise ImportError("pyhocon is required for BEAM canonicalization.")
         if NonExistentKey is None:
             raise ImportError("pyhocon is required for BEAM canonicalization.")
-        config = ConfigFactory.parse_file(str(path), resolve=False)
         inserted_keys: list[str] = []
-        for key, value in env_overrides.items():
-            if not key:
-                continue
-            if config.get(key, NonExistentKey) is not NonExistentKey:
-                continue
-            config.put(key, value)
-            inserted_keys.append(key)
-        ConfigParser.resolve_substitutions(config, accept_unresolved=False)
-        for key in inserted_keys:
-            _remove_config_key(config, key)
-        return json.loads(HOCONConverter.to_json(config))
-
-    config = ConfigFactory.parse_file(str(path), resolve=resolve)
+        if env_overrides:
+            for key, value in env_overrides.items():
+                if not key:
+                    continue
+                if config.get(key, NonExistentKey) is not NonExistentKey:
+                    continue
+                config.put(key, value)
+                inserted_keys.append(key)
+        try:
+            ConfigParser.resolve_substitutions(config, accept_unresolved=False)
+        finally:
+            for key in inserted_keys:
+                _remove_config_key(config, key)
     return json.loads(HOCONConverter.to_json(config))
 
 

@@ -2025,3 +2025,194 @@ def test_beam_run_with_config_overrides_rejects_dual_runtime_kwargs_sources(
                 runtime_kwargs={"output_dir": tmp_path / "out_b"}
             ),
         )
+
+
+def test_beam_config_tree_resolves_substitution_in_overridden_parent_block(
+    tracker, tmp_path: Path
+):
+    case_dir = tmp_path / "beam_rebind_case"
+    common_dir = case_dir / "common"
+    common_dir.mkdir(parents=True)
+    data_dir = case_dir / "data"
+    data_dir.mkdir(parents=True)
+    calib_csv = data_dir / "calibration.csv"
+    calib_csv.write_text("mode,share\ncar,0.8\n", encoding="utf-8")
+
+    akka_conf = common_dir / "akka.conf"
+    akka_conf.write_text(
+        'my.nested.block = {\n  a = 1\n  b = ${beam.shared.dir}"/calibration.csv"\n}\n',
+        encoding="utf-8",
+    )
+    matsim_conf = common_dir / "matsim.conf"
+    matsim_conf.write_text(
+        "my.nested.block = {\n  a = 2\n}\n",
+        encoding="utf-8",
+    )
+    primary_conf = case_dir / "urbansim.conf"
+    primary_conf.write_text(
+        'include "common/akka.conf"\n'
+        'include "common/matsim.conf"\n'
+        f'beam.shared.dir = "{data_dir.as_posix()}"\n',
+        encoding="utf-8",
+    )
+
+    tree = _load_config_tree(primary_conf, resolve=True)
+    assert tree is not None
+    assert tree["my"]["nested"]["block"]["a"] == 2
+    assert (
+        tree["my"]["nested"]["block"]["b"] == f"{data_dir.as_posix()}/calibration.csv"
+    )
+
+    adapter = BeamConfigAdapter(primary_config=primary_conf)
+    canonical = adapter.discover([case_dir], identity=tracker.identity)
+    run = tracker.begin_run("beam_rebind_discover", "beam")
+    result = adapter.canonicalize(canonical, run=run, tracker=tracker, strict=True)
+    tracker.end_run()
+
+    refs_by_key = {ref.config_key: ref for ref in result.identity.references}
+    assert "my.nested.block.b" in refs_by_key
+    assert refs_by_key["my.nested.block.b"].status == "resolved"
+
+
+def test_beam_materialize_allow_missing_keys_inserts_into_strict_tree(
+    tracker, tmp_path: Path
+):
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    adapter = BeamConfigAdapter(primary_config=overlay_conf)
+    new_key = "beam.calibration.modeChoice.newIntercept"
+
+    with pytest.raises(KeyError, match="Override key not found"):
+        adapter.materialize(
+            [case_dir],
+            BeamConfigOverrides(values={new_key: -1.25}),
+            output_dir=tmp_path / "strict_fail",
+            identity=tracker.identity,
+            strict=True,
+        )
+
+    overrides = BeamConfigOverrides(
+        values={
+            "beam.agentsim.agentSampleSizeAsFractionOfPopulation": 0.25,
+            new_key: -1.25,
+        },
+        allow_missing_keys=[new_key],
+    )
+    staged = adapter.materialize(
+        [case_dir],
+        overrides,
+        output_dir=tmp_path / "strict_allowed",
+        identity=tracker.identity,
+        strict=True,
+    )
+    assert staged.primary_config is not None
+    resolved_tree = _load_config_tree(staged.primary_config, resolve=True)
+    assert resolved_tree is not None
+    assert resolved_tree["beam"]["calibration"]["modeChoice"]["newIntercept"] == -1.25
+    assert (
+        resolved_tree["beam"]["agentsim"]["agentSampleSizeAsFractionOfPopulation"]
+        == 0.25
+    )
+
+    with pytest.raises(KeyError, match="Override key not found"):
+        adapter.materialize(
+            [case_dir],
+            BeamConfigOverrides(
+                values={new_key: -1.25, "beam.unknown.otherKey": 1.0},
+                allow_missing_keys=[new_key],
+            ),
+            output_dir=tmp_path / "strict_unlisted_fail",
+            identity=tracker.identity,
+            strict=True,
+        )
+
+
+def test_beam_config_overrides_rejects_bare_string_allow_missing_keys():
+    with pytest.raises(
+        TypeError, match="allow_missing_keys must be a collection of key strings"
+    ):
+        BeamConfigOverrides(
+            values={"beam.some.key": 1},
+            allow_missing_keys="beam.some.key",
+        )
+
+
+def test_beam_config_overrides_to_canonical_dict_omits_allow_missing_keys():
+    overrides_a = BeamConfigOverrides(
+        values={"beam.some.key": 1},
+        allow_missing_keys=(),
+    )
+    overrides_b = BeamConfigOverrides(
+        values={"beam.some.key": 1},
+        allow_missing_keys=("beam.some.key",),
+    )
+    assert overrides_a.to_canonical_dict() == {"values": {"beam.some.key": 1}}
+    assert overrides_a.to_canonical_dict() == overrides_b.to_canonical_dict()
+
+
+def test_beam_materialize_hardlink_or_copy_shares_static_inodes_and_unlinks_primary(
+    tracker, tmp_path: Path
+):
+    case_dir, overlay_conf, base_conf = build_beam_test_configs(tmp_path)
+    original_overlay_text = overlay_conf.read_text(encoding="utf-8")
+    original_overlay_inode = overlay_conf.stat().st_ino
+    base_inode = base_conf.stat().st_ino
+    static_csv = case_dir / "inputs" / "sample.csv"
+    static_csv_inode = static_csv.stat().st_ino
+
+    adapter = BeamConfigAdapter(primary_config=overlay_conf)
+    staged_dir = tmp_path / "staged_hardlink"
+    staged = adapter.materialize(
+        [case_dir],
+        BeamConfigOverrides(
+            values={"beam.agentsim.agentSampleSizeAsFractionOfPopulation": 0.42}
+        ),
+        output_dir=staged_dir,
+        identity=tracker.identity,
+        copy_mode="hardlink_or_copy",
+    )
+
+    staged_root = staged.root_dirs[0]
+    staged_base = staged_root / "base.conf"
+    staged_static_csv = staged_root / "inputs" / "sample.csv"
+    staged_overlay = staged.primary_config
+    assert staged_overlay is not None
+
+    assert staged_static_csv.stat().st_ino == static_csv_inode
+    assert staged_base.stat().st_ino != base_inode
+    assert staged_overlay.stat().st_ino != original_overlay_inode
+    assert overlay_conf.read_text(encoding="utf-8") == original_overlay_text
+
+    # Re-materializing into a directory where primary_path is hardlinked to overlay_conf
+    staged_dir_2 = tmp_path / "staged_hardlink_2"
+    shutil.copytree(staged_dir, staged_dir_2)
+    staged_overlay_2 = staged_dir_2 / staged_root.name / "overlay.conf"
+    staged_overlay_2.unlink()
+    os.link(overlay_conf, staged_overlay_2)
+    assert overlay_conf.stat().st_nlink > 1
+
+    # Simulate the unlink guard before writing rendered HOCON text
+    if staged_overlay_2.exists() and staged_overlay_2.stat().st_nlink > 1:
+        staged_overlay_2.unlink()
+    staged_overlay_2.write_text("overridden = true\n", encoding="utf-8")
+    assert overlay_conf.read_text(encoding="utf-8") == original_overlay_text
+
+
+def test_beam_materialize_hardlink_or_copy_falls_back_on_oserror(
+    tracker, tmp_path: Path
+):
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    adapter = BeamConfigAdapter(primary_config=overlay_conf)
+
+    with patch("os.link", side_effect=OSError(18, "Invalid cross-device link")):
+        staged = adapter.materialize(
+            [case_dir],
+            BeamConfigOverrides(
+                values={"beam.agentsim.agentSampleSizeAsFractionOfPopulation": 0.3}
+            ),
+            output_dir=tmp_path / "staged_fallback",
+            identity=tracker.identity,
+            copy_mode="hardlink_or_copy",
+        )
+    assert staged.primary_config is not None
+    assert staged.primary_config.exists()
+    assert (staged.root_dirs[0] / "base.conf").exists()

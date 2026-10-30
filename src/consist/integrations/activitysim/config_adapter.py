@@ -792,7 +792,7 @@ class ActivitySimConfigAdapter:
         """
         Materialize an ActivitySim config bundle directly from a historical run.
         """
-        run = tracker.get_run(run_id)
+        run = tracker.get_run(run_id, resolve_canonical=True)
         run_adapter: str | None = None
         if run is not None and isinstance(run.meta, dict):
             adapter_value = run.meta.get("config_adapter")
@@ -824,7 +824,7 @@ class ActivitySimConfigAdapter:
             identity=tracker.identity,
             strict=strict,
         )
-        return self._with_ordered_root_dirs(canonical)
+        return canonical
 
     def materialize_from_config_dirs(
         self,
@@ -901,7 +901,7 @@ class ActivitySimConfigAdapter:
             external_files=discovered.external_files,
             content_hash=content_hash,
         )
-        return self._with_ordered_root_dirs(canonical)
+        return canonical
 
     def run_with_config_overrides(
         self,
@@ -1123,18 +1123,6 @@ class ActivitySimConfigAdapter:
             staged_root_dirs.append(staged_root)
         return staged_root_dirs
 
-    def _with_ordered_root_dirs(self, canonical: CanonicalConfig) -> CanonicalConfig:
-        ordered_roots = self._ordered_root_dirs(canonical)
-        if ordered_roots == canonical.root_dirs:
-            return canonical
-        return CanonicalConfig(
-            root_dirs=ordered_roots,
-            primary_config=canonical.primary_config,
-            config_files=canonical.config_files,
-            external_files=canonical.external_files,
-            content_hash=canonical.content_hash,
-        )
-
     @staticmethod
     def _build_override_runtime_kwargs(
         *,
@@ -1185,8 +1173,9 @@ class ActivitySimConfigAdapter:
                     "Required config file was not found under any root directory: "
                     f"{required_file!s}. roots={[str(path) for path in canonical.root_dirs]}"
                 )
-        else:
-            candidates = list(canonical.root_dirs)
+            return candidates[0]
+
+        candidates = list(canonical.root_dirs)
 
         if canonical.primary_config is not None:
             primary = canonical.primary_config.resolve()
@@ -1195,7 +1184,7 @@ class ActivitySimConfigAdapter:
                 if primary.is_relative_to(resolved_root):
                     return root
 
-        return sorted(candidates, key=lambda path: (path.name, path.as_posix()))[0]
+        return candidates[0]
 
     def get_coefficient_value(
         self,
@@ -1284,14 +1273,6 @@ class ActivitySimConfigAdapter:
                 f"segment={segment!r}, value={value!r}"
             )
         return parsed
-
-    def _ordered_root_dirs(self, canonical: CanonicalConfig) -> list[Path]:
-        preferred = self.select_root_dir(canonical)
-        remainder = [root for root in canonical.root_dirs if root != preferred]
-        ordered_remainder = sorted(
-            remainder, key=lambda path: (path.name, path.as_posix())
-        )
-        return [preferred, *ordered_remainder]
 
     def build_facet(
         self, config: CanonicalConfig, *, facet_spec: dict[str, Any]
@@ -2197,8 +2178,12 @@ def _bundle_configs(
     if bundle_path.exists():
         return bundle_path
     with tarfile.open(bundle_path, "w:gz") as archive:
-        for config_dir in config_dirs:
+        used_names: set[str] = set()
+        for index, config_dir in enumerate(config_dirs):
             base_name = config_dir.name
+            if base_name in used_names:
+                base_name = f"{index}_{base_name}"
+            used_names.add(base_name)
             for file_path in config_dir.rglob("*"):
                 if not file_path.is_file():
                     continue
