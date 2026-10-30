@@ -89,13 +89,34 @@ def parse_duckdb_type(logical_type: str) -> _TypeSpec:
             sqlalchemy_imports={"Numeric"},
         )
 
-    if t in {"integer", "int4", "int", "smallint", "int2", "utinyint", "usmallint"}:
+    if t in {
+        "integer",
+        "int4",
+        "int",
+        "smallint",
+        "int2",
+        "tinyint",
+        "int1",
+        "utinyint",
+        "usmallint",
+    }:
         return _TypeSpec(
             python_type="int",
             sqlalchemy_type_expr="Integer",
             sqlalchemy_imports={"Integer"},
         )
-    if t in {"bigint", "int8", "ubigint", "hugeint"}:
+    if t in {
+        "bigint",
+        "int8",
+        "uinteger",
+        "uint4",
+        "uint",
+        "ubigint",
+        "hugeint",
+        "uhugeint",
+        "int128",
+        "uint128",
+    }:
         return _TypeSpec(
             python_type="int",
             sqlalchemy_type_expr="BigInteger",
@@ -128,7 +149,15 @@ def parse_duckdb_type(logical_type: str) -> _TypeSpec:
             stdlib_imports={"import datetime"},
             sqlalchemy_imports={"Date"},
         )
-    if t in {"timestamp", "datetime", "timestamp without time zone"}:
+    if t in {
+        "timestamp",
+        "datetime",
+        "timestamp without time zone",
+        "timestamp_s",
+        "timestamp_ms",
+        "timestamp_us",
+        "timestamp_ns",
+    }:
         return _TypeSpec(
             python_type="datetime.datetime",
             sqlalchemy_type_expr="DateTime",
@@ -154,6 +183,14 @@ def parse_duckdb_type(logical_type: str) -> _TypeSpec:
     if t == "json":
         return _TypeSpec(
             python_type="dict[str, Any]",
+            sqlalchemy_type_expr="JSON",
+            typing_imports={"Any"},
+            sqlalchemy_imports={"JSON"},
+        )
+
+    if t == "variant":
+        return _TypeSpec(
+            python_type="Any",
             sqlalchemy_type_expr="JSON",
             typing_imports={"Any"},
             sqlalchemy_imports={"JSON"},
@@ -295,7 +332,7 @@ def render_sqlmodel_stub(
 ) -> str:
     resolved_table_name = table_name
     if resolved_table_name is None:
-        summary = getattr(schema, "summary_json", None) or {}
+        summary = schema.summary_json or {}
         tname = summary.get("table_name")
         resolved_table_name = tname if isinstance(tname, str) and tname else "table"
 
@@ -335,7 +372,7 @@ def render_sqlmodel_stub(
         imports.sqlalchemy |= type_spec.sqlalchemy_imports
 
         py_type = type_spec.python_type
-        if row.nullable:
+        if row.nullable and py_type != "Any":
             imports.typing.add("Optional")
             annotation = f"Optional[{py_type}]"
         else:
