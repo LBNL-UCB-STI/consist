@@ -2670,6 +2670,97 @@ def test_collect_scenario_run_ids_handles_cycle_safely(tracker):
         assert set(ids) == {"cycle_a", "cycle_b"}
 
 
+def test_collect_scenario_run_ids_discovers_dict_steps_in_header_meta(tracker):
+    from consist.cli import _collect_scenario_run_ids
+
+    with Session(tracker.engine) as session:
+        session.add_all(
+            [
+                Run(
+                    id="sc_dict_header",
+                    model_name="scenario",
+                    config_hash=None,
+                    git_hash=None,
+                    status="completed",
+                    parent_run_id=None,
+                    meta={"steps": [{"id": "step_dict_only", "name": "step_dict"}]},
+                    created_at=datetime(2025, 1, 1, 12, 0),
+                    started_at=datetime(2025, 1, 1, 12, 0),
+                ),
+                Run(
+                    id="step_dict_only",
+                    model_name="model_step",
+                    config_hash=None,
+                    git_hash=None,
+                    status="completed",
+                    parent_run_id="unrelated_parent",
+                    created_at=datetime(2025, 1, 1, 12, 5),
+                    started_at=datetime(2025, 1, 1, 12, 5),
+                ),
+            ]
+        )
+        session.commit()
+
+        ids = _collect_scenario_run_ids(session, "sc_dict_header")
+        assert ids == ["step_dict_only"]
+
+
+def test_render_scenarios_sorts_by_transitive_last_run_after_member_discovery(
+    cli_runner, tracker
+):
+    with Session(tracker.engine) as session:
+        session.add_all(
+            [
+                Run(
+                    id="sc_early_root",
+                    model_name="scenario",
+                    config_hash=None,
+                    git_hash=None,
+                    status="completed",
+                    parent_run_id=None,
+                    created_at=datetime(2025, 1, 1, 10, 0),
+                    started_at=datetime(2025, 1, 1, 10, 0),
+                ),
+                Run(
+                    id="early_step_1",
+                    model_name="m1",
+                    config_hash=None,
+                    git_hash=None,
+                    status="completed",
+                    parent_run_id="sc_early_root",
+                    created_at=datetime(2025, 1, 1, 10, 5),
+                    started_at=datetime(2025, 1, 1, 10, 5),
+                ),
+                Run(
+                    id="early_step_2",
+                    model_name="m2",
+                    config_hash=None,
+                    git_hash=None,
+                    status="completed",
+                    parent_run_id="early_step_1",
+                    created_at=datetime(2025, 1, 1, 13, 0),
+                    started_at=datetime(2025, 1, 1, 13, 0),
+                ),
+                Run(
+                    id="mid_step_1",
+                    model_name="m1",
+                    config_hash=None,
+                    git_hash=None,
+                    status="completed",
+                    parent_run_id="sc_mid_root",
+                    created_at=datetime(2025, 1, 1, 11, 0),
+                    started_at=datetime(2025, 1, 1, 11, 0),
+                ),
+            ]
+        )
+        session.commit()
+
+    result = cli_runner.invoke(app, ["scenarios", "--limit", "1"])
+    assert result.exit_code == 0
+    assert "sc_early_root" in result.stdout
+    assert "sc_mid_root" not in result.stdout
+
+
 def test_runs_filter_by_scenario_includes_recursive_members(cli_runner, tracker):
     with Session(tracker.engine) as session:
         session.add_all(

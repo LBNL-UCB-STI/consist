@@ -220,21 +220,39 @@ def test_validate_scoped_by_scenario_deduplicates_shared_artifacts(
 
 
 def test_validate_latest(cli_runner, tracker, run_dir: Path) -> None:
-    """`validate --latest` should validate the most recent scenario/root run."""
+    """`validate --latest` should validate the full scenario when the latest run is a scenario step."""
     stale_file = run_dir / "stale_latest.csv"
     stale_file.write_text("a\n1\n", encoding="utf-8")
     with tracker.start_run("old_step", "model_old", parent_run_id="sc_older"):
         tracker.log_output(stale_file, key="stale_latest_out")
     stale_file.unlink()
 
-    fresh_file = run_dir / "fresh_latest.csv"
-    fresh_file.write_text("a\n2\n", encoding="utf-8")
-    with tracker.start_run("new_step", "model_new", parent_run_id="sc_newer"):
-        tracker.log_output(fresh_file, key="fresh_latest_out")
+    step1_file = run_dir / "step1_latest.csv"
+    step1_file.write_text("a\n1\n", encoding="utf-8")
+    step2_file = run_dir / "step2_latest.csv"
+    step2_file.write_text("a\n2\n", encoding="utf-8")
+
+    with tracker.scenario("sc_newer") as sc:
+        with sc.trace("new_step_1", run_id="new_step_1", model="model_1") as t1:
+            t1.log_output(step1_file, key="step1_latest_out")
+        with sc.trace(
+            "new_step_2",
+            run_id="new_step_2",
+            model="model_2",
+            parent_run_id="new_step_1",
+        ) as t2:
+            t2.log_output(step2_file, key="step2_latest_out")
 
     result = cli_runner.invoke(app, ["validate", "--latest"])
     assert result.exit_code == 0
     assert "All artifacts validated successfully" in result.stdout
+
+    # Removing step_1's artifact should be caught even though new_step_2 is the latest run
+    step1_file.unlink()
+    missing_step1_result = cli_runner.invoke(app, ["validate", "--latest"])
+    assert missing_step1_result.exit_code == 0
+    assert "Found 1 missing artifacts:" in missing_step1_result.stdout
+    assert "step1_latest_out" in missing_step1_result.stdout
 
 
 def test_validate_outputs_only(cli_runner, tracker, run_dir: Path) -> None:

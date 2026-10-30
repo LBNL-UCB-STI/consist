@@ -1770,7 +1770,12 @@ def _collect_scenario_run_ids(session: Session, scenario_id: str) -> List[str]:
     if header_run is not None and isinstance(header_run.meta, dict):
         steps = header_run.meta.get("steps")
         if isinstance(steps, list):
-            for step_id in steps:
+            for step in steps:
+                step_id = (
+                    step
+                    if isinstance(step, str)
+                    else (step.get("id") if isinstance(step, dict) else None)
+                )
                 if isinstance(step_id, str) and step_id and step_id != scenario_id:
                     discovered_ids.add(step_id)
 
@@ -1850,6 +1855,56 @@ def _get_scenario_member_runs(session: Session, scenario_id: str) -> List["Run"]
     return list(session.exec(stmt).all())
 
 
+def _query_runs_with_scenario(
+    session: Session,
+    *,
+    limit: int = 10,
+    model_name: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    status: Optional[str] = None,
+    scenario_id: Optional[str] = None,
+) -> List["Run"]:
+    """Query runs with optional scenario membership filtering."""
+    if scenario_id is not None:
+        scenario_run_ids = _collect_scenario_run_ids(session, scenario_id)
+        return queries.get_runs(
+            session,
+            limit=limit,
+            model_name=model_name,
+            tags=tags,
+            status=status,
+            run_ids=scenario_run_ids,
+        )
+    return queries.get_runs(
+        session,
+        limit=limit,
+        model_name=model_name,
+        tags=tags,
+        status=status,
+    )
+
+
+def _serialize_runs_json(runs_list: Iterable["Run"]) -> List[Dict[str, Any]]:
+    """Serialize Run objects into the CLI JSON payload format."""
+    payload: List[Dict[str, Any]] = []
+    for run in runs_list:
+        created_at = run.created_at
+        payload.append(
+            {
+                "id": run.id,
+                "model": run.model_name,
+                "status": run.status,
+                "scenario_id": run.parent_run_id,
+                "year": run.year,
+                "created_at": created_at.isoformat() if created_at else None,
+                "duration_seconds": run.duration_seconds,
+                "tags": run.tags,
+                "meta": run.meta,
+            }
+        )
+    return payload
+
+
 def _render_runs_table(
     tracker: Tracker,
     limit: int = 10,
@@ -1860,20 +1915,14 @@ def _render_runs_table(
 ) -> None:
     """Shared logic for displaying runs."""
     with _tracker_session(tracker) as session:
-        if scenario_id is not None:
-            scenario_run_ids = _collect_scenario_run_ids(session, scenario_id)
-            results = queries.get_runs(
-                session,
-                limit=limit,
-                model_name=model_name,
-                tags=tags,
-                status=status,
-                run_ids=scenario_run_ids,
-            )
-        else:
-            results = queries.get_runs(
-                session, limit=limit, model_name=model_name, tags=tags, status=status
-            )
+        results = _query_runs_with_scenario(
+            session,
+            limit=limit,
+            model_name=model_name,
+            tags=tags,
+            status=status,
+            scenario_id=scenario_id,
+        )
 
         title_parts = ["Recent Runs"]
         if scenario_id:
@@ -2198,22 +2247,17 @@ def _iter_artifact_rows(
     session: Session,
     *,
     batch_size: int = 1000,
-    run_ids: Optional[Iterable[str]] = None,
-    target_run_ids: Optional[Iterable[str]] = None,
-    direction: Optional[str] = None,
+    run_ids: Optional[Sequence[str]] = None,
     outputs_only: bool = False,
 ) -> Iterable["Artifact"]:
     from consist.models.artifact import Artifact
     from consist.models.run import RunArtifactLink
 
     scoped_run_ids: Optional[List[str]] = None
-    effective_run_ids = run_ids if run_ids is not None else target_run_ids
-    if effective_run_ids is not None:
-        scoped_run_ids = list(effective_run_ids)
+    if run_ids is not None:
+        scoped_run_ids = list(run_ids)
         if not scoped_run_ids:
             return
-
-    effective_direction = "output" if outputs_only else direction
 
     last_created = None
     last_id = None
@@ -2223,43 +2267,28 @@ def _iter_artifact_rows(
             .order_by(col(Artifact.created_at), col(Artifact.id))
             .limit(batch_size)
         )
-        if scoped_run_ids is not None or effective_direction is not None:
+        if scoped_run_ids is not None or outputs_only:
             link_subq = select(RunArtifactLink.artifact_id)
             if scoped_run_ids is not None:
                 link_subq = link_subq.where(
                     col(RunArtifactLink.run_id).in_(scoped_run_ids)
                 )
-            if effective_direction is not None:
-                link_subq = link_subq.where(
-                    col(RunArtifactLink.direction) == effective_direction
+            if outputs_only:
+                link_subq = link_subq.where(col(RunArtifactLink.direction) == "output")
+            if scoped_run_ids is not None:
+                stmt = stmt.where(
+                    or_(
+                        col(Artifact.id).in_(link_subq),
+                        col(Artifact.run_id).in_(scoped_run_ids),
+                    )
                 )
-            if effective_direction == "output":
-                if scoped_run_ids is not None:
-                    stmt = stmt.where(
-                        or_(
-                            col(Artifact.id).in_(link_subq),
-                            col(Artifact.run_id).in_(scoped_run_ids),
-                        )
-                    )
-                else:
-                    stmt = stmt.where(
-                        or_(
-                            col(Artifact.id).in_(link_subq),
-                            col(Artifact.run_id).is_not(None),
-                        )
-                    )
-            elif effective_direction is None:
-                if scoped_run_ids is not None:
-                    stmt = stmt.where(
-                        or_(
-                            col(Artifact.id).in_(link_subq),
-                            col(Artifact.run_id).in_(scoped_run_ids),
-                        )
-                    )
-                else:
-                    stmt = stmt.where(col(Artifact.id).in_(link_subq))
             else:
-                stmt = stmt.where(col(Artifact.id).in_(link_subq))
+                stmt = stmt.where(
+                    or_(
+                        col(Artifact.id).in_(link_subq),
+                        col(Artifact.run_id).is_not(None),
+                    )
+                )
 
         if last_created is not None and last_id is not None:
             stmt = stmt.where(
@@ -2287,44 +2316,71 @@ def _render_scenarios(tracker: Tracker, limit: int = 20) -> None:
         from consist.models.run import Run
         from sqlmodel import func
 
-        non_root_subq = select(Run.id).where(col(Run.parent_run_id).is_not(None))
+        non_root_ids: set[str] = set()
+        candidate_ids: set[str] = set()
+        fallback_stats: Dict[str, Tuple[int, Any, Any]] = {}
 
-        # Find root scenario runs by looking for distinct parent_run_ids that are not child runs themselves
-        query = (
+        child_ids = session.exec(
+            select(Run.id).where(col(Run.parent_run_id).is_not(None))
+        ).all()
+        for cid in child_ids:
+            if cid:
+                non_root_ids.add(str(cid))
+
+        parent_rows = session.exec(
             select(
                 col(Run.parent_run_id).label("scenario_id"),
                 func.count(col(Run.id)).label("run_count"),
                 func.min(col(Run.created_at)).label("first_run"),
                 func.max(col(Run.created_at)).label("last_run"),
             )
-            .where(
-                col(Run.parent_run_id).is_not(None),
-                ~col(Run.parent_run_id).in_(non_root_subq),
-            )
+            .where(col(Run.parent_run_id).is_not(None))
             .group_by(col(Run.parent_run_id))
-            .order_by(func.max(col(Run.created_at)).desc())
-            .limit(limit)
-        )
+        ).all()
+        for row in parent_rows:
+            sc_id = str(row[0])
+            candidate_ids.add(sc_id)
+            fallback_stats[sc_id] = (int(row[1]), row[2], row[3])
 
-        results = session.exec(query).all()
+        header_runs = session.exec(
+            select(Run).where(
+                col(Run.model_name) == "scenario",
+                col(Run.parent_run_id).is_(None),
+            )
+        ).all()
+        for header in header_runs:
+            candidate_ids.add(header.id)
+            if header.id not in fallback_stats:
+                fallback_stats[header.id] = (0, header.created_at, header.created_at)
 
-        if not results:
-            console.print("[yellow]No scenarios found.[/yellow]")
-            return
+        meta_runs = session.exec(select(Run).where(col(Run.meta).is_not(None))).all()
+        for run_row in meta_runs:
+            if isinstance(run_row.meta, dict):
+                meta_sc_id = run_row.meta.get("scenario_id")
+                if isinstance(meta_sc_id, str) and meta_sc_id:
+                    if run_row.model_name != "scenario":
+                        non_root_ids.add(run_row.id)
+                    candidate_ids.add(meta_sc_id)
 
+        root_scenario_ids = sorted(candidate_ids - non_root_ids)
         scenario_rows: List[Tuple[str, int, Any, Any]] = []
-        for row in results:
-            scenario_id = str(row[0])
+        for scenario_id in root_scenario_ids:
             member_runs = _get_scenario_member_runs(session, scenario_id)
             if member_runs:
                 run_count = len(member_runs)
                 first_run = min(r.created_at for r in member_runs)
                 last_run = max(r.created_at for r in member_runs)
-            else:
-                run_count = int(row[1])
-                first_run = row[2]
-                last_run = row[3]
-            scenario_rows.append((scenario_id, run_count, first_run, last_run))
+                scenario_rows.append((scenario_id, run_count, first_run, last_run))
+            elif scenario_id in fallback_stats:
+                run_count, first_run, last_run = fallback_stats[scenario_id]
+                scenario_rows.append((scenario_id, run_count, first_run, last_run))
+
+        scenario_rows.sort(key=lambda item: (item[3], item[0]), reverse=True)
+        scenario_rows = scenario_rows[:limit]
+
+        if not scenario_rows:
+            console.print("[yellow]No scenarios found.[/yellow]")
+            return
 
     table = Table(title="Scenarios")
     table.add_column("Scenario ID", style="cyan")
@@ -2495,9 +2551,41 @@ def validate(
             if latest_run is None:
                 console.print("[yellow]No runs found in the database.[/yellow]")
                 return
-            if latest_run.model_name == "scenario" and latest_run.parent_run_id is None:
-                member_ids = _collect_scenario_run_ids(session, latest_run.id)
-                target_run_ids = [latest_run.id, *member_ids]
+            root_scenario_id: Optional[str] = None
+            if isinstance(latest_run.meta, dict):
+                meta_scenario = latest_run.meta.get("scenario_id")
+                if isinstance(meta_scenario, str) and meta_scenario:
+                    root_scenario_id = meta_scenario
+            if root_scenario_id is None and latest_run.parent_run_id:
+                visited: set[str] = {latest_run.id}
+                current_parent_id: Optional[str] = latest_run.parent_run_id
+                while current_parent_id and current_parent_id not in visited:
+                    visited.add(current_parent_id)
+                    root_scenario_id = current_parent_id
+                    parent_row = session.get(Run, current_parent_id)
+                    if parent_row is None:
+                        break
+                    if isinstance(parent_row.meta, dict):
+                        parent_meta_scenario = parent_row.meta.get("scenario_id")
+                        if (
+                            isinstance(parent_meta_scenario, str)
+                            and parent_meta_scenario
+                        ):
+                            root_scenario_id = parent_meta_scenario
+                            break
+                    current_parent_id = parent_row.parent_run_id
+            if (
+                root_scenario_id is None
+                and latest_run.model_name == "scenario"
+                and latest_run.parent_run_id is None
+            ):
+                root_scenario_id = latest_run.id
+
+            if root_scenario_id is not None:
+                member_ids = _collect_scenario_run_ids(session, root_scenario_id)
+                target_run_ids = (
+                    [root_scenario_id, *member_ids] if member_ids else [latest_run.id]
+                )
             else:
                 target_run_ids = [latest_run.id]
 
@@ -2681,37 +2769,15 @@ def runs(
     tracker = get_tracker(db_path)
     if json_output:
         with _tracker_session(tracker) as session:
-            if scenario is not None:
-                scenario_run_ids = _collect_scenario_run_ids(session, scenario)
-                results = queries.get_runs(
-                    session,
-                    limit=limit,
-                    model_name=model_name,
-                    tags=tag,
-                    status=status,
-                    run_ids=scenario_run_ids,
-                )
-            else:
-                results = queries.get_runs(
-                    session, limit=limit, model_name=model_name, tags=tag, status=status
-                )
-            output = []
-            for r in results:
-                created_at = r.created_at
-                output.append(
-                    {
-                        "id": r.id,
-                        "model": r.model_name,
-                        "status": r.status,
-                        "scenario_id": r.parent_run_id,
-                        "year": r.year,
-                        "created_at": created_at.isoformat() if created_at else None,
-                        "duration_seconds": r.duration_seconds,
-                        "tags": r.tags,
-                        "meta": r.meta,
-                    }
-                )
-            output_json(output)
+            results = _query_runs_with_scenario(
+                session,
+                limit=limit,
+                model_name=model_name,
+                tags=tag,
+                status=status,
+                scenario_id=scenario,
+            )
+            output_json(_serialize_runs_json(results))
             return
 
     if scenario is not None:
@@ -4571,42 +4637,15 @@ class ConsistShell(cmd.Cmd):
 
             if json_output:
                 with _tracker_session(self.tracker) as session:
-                    if scenario is not None:
-                        scenario_run_ids = _collect_scenario_run_ids(session, scenario)
-                        results = queries.get_runs(
-                            session,
-                            limit=limit,
-                            model_name=model_name,
-                            tags=tags if tags else None,
-                            status=status,
-                            run_ids=scenario_run_ids,
-                        )
-                    else:
-                        results = queries.get_runs(
-                            session,
-                            limit=limit,
-                            model_name=model_name,
-                            tags=tags if tags else None,
-                            status=status,
-                        )
-                    payload = []
-                    for run in results:
-                        created_at = run.created_at
-                        payload.append(
-                            {
-                                "id": run.id,
-                                "model": run.model_name,
-                                "status": run.status,
-                                "scenario_id": run.parent_run_id,
-                                "year": run.year,
-                                "created_at": (
-                                    created_at.isoformat() if created_at else None
-                                ),
-                                "duration_seconds": run.duration_seconds,
-                                "tags": run.tags,
-                                "meta": run.meta,
-                            }
-                        )
+                    results = _query_runs_with_scenario(
+                        session,
+                        limit=limit,
+                        model_name=model_name,
+                        tags=tags if tags else None,
+                        status=status,
+                        scenario_id=scenario,
+                    )
+                    payload = _serialize_runs_json(results)
                 output_json(payload)
                 return
 
@@ -4624,24 +4663,14 @@ class ConsistShell(cmd.Cmd):
                     self.tracker, limit, model_name, tags if tags else None, status
                 )
             with _tracker_session(self.tracker) as session:
-                if scenario is not None:
-                    scenario_run_ids = _collect_scenario_run_ids(session, scenario)
-                    cached_runs = queries.get_runs(
-                        session,
-                        limit=limit,
-                        model_name=model_name,
-                        tags=tags if tags else None,
-                        status=status,
-                        run_ids=scenario_run_ids,
-                    )
-                else:
-                    cached_runs = queries.get_runs(
-                        session,
-                        limit=limit,
-                        model_name=model_name,
-                        tags=tags if tags else None,
-                        status=status,
-                    )
+                cached_runs = _query_runs_with_scenario(
+                    session,
+                    limit=limit,
+                    model_name=model_name,
+                    tags=tags if tags else None,
+                    status=status,
+                    scenario_id=scenario,
+                )
             self._last_run_ids = [
                 str(run.id) for run in cached_runs if run.id is not None
             ]
