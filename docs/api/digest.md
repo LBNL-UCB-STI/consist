@@ -5,52 +5,19 @@ provides deterministic, format-neutral hashing for bytes, files, canonical JSON,
 order-invariant tables (`ctd1`), multi-facet state dictionaries, and
 floating-point array/matrix containers.
 
-## The Two-Layer Identity Architecture
+## Two-Layer Identity Architecture
 
-Consist separates identity into two distinct, complementary layers:
+Consist separates identity into two layers:
 
-```
-+-----------------------------------------------------------------------------+
-| LAYER 2: Run & Boundary Provenance                                          |
-|                                                                             |
-| - IdentityManager: Merkle-DAG run signatures (Inputs + Config + Code)       |
-| - consist.admission: Boundary contracts (PriorRunExpectation,               |
-|   DeclaredDigestExpectation, AdmissionReport)                               |
-| - Requires: DuckDB, SQLModel, Tracker or admission boundary context         |
-+-----------------------------------------------------------------------------+
-                                      |
-                                      v consumes
-+-----------------------------------------------------------------------------+
-| LAYER 1: Stateless Content Digests (consist.digest)                         |
-|                                                                             |
-| - digest_file, file_sha256, digest_bytes                                    |
-| - normalize_json, canonical_json_str, canonical_json_sha256                 |
-| - digest_table (ctd1 order-invariant row hashing across Parquet/Arrow/SQL) |
-| - digest_state (Merkle state dictionaries)                                  |
-| - compute_logical_matrices_sha256 (IEEE-754 array canonicalization)          |
-| - Zero-weight: imports only Python stdlib at module scope                   |
-| - Zero database/tracker runtime dependencies                                |
-+-----------------------------------------------------------------------------+
-```
+| Layer | Module / Surface | Scope | Runtime Dependencies |
+|---|---|---|---|
+| **Layer 1: Content Digests** | `consist.digest` | Deterministic hashing of bytes, files, canonical JSON, `ctd1` order-invariant tables, state dictionaries, and logical array/matrix containers. | Python standard library only at module scope (`hashlib`, `json`, `sqlite3`, `struct`). Heavy array/table libraries (`pyarrow`, `numpy`, `h5py`, `zarr`) load lazily when invoked. |
+| **Layer 2: Run & Boundary Provenance** | `IdentityManager`, `consist.admission` | Merkle-DAG run signatures (Code + Config + Inputs), cache keys, and boundary admission contracts (`PriorRunExpectation`, `DeclaredDigestExpectation`). | DuckDB, SQLModel, SQLAlchemy, and active Tracker or boundary evaluation context. |
 
-### Why two layers?
+### Design Separation
 
-1. **Layer 1: Stateless Content Digests (`consist.digest`)**
-   Pure hashing operations should not require database connections, schema migrations,
-   or tracking runtimes. `consist.digest` has zero mandatory third-party dependencies at
-   module import time—it imports only Python standard library modules (`hashlib`, `json`,
-   `sqlite3`, `struct`, etc.). Heavy scientific libraries (such as `pyarrow`, `numpy`,
-   `h5py`, or `zarr`) are imported lazily inside only the specific functions that operate
-   on those data structures. You can safely call `consist.digest` in lightweight worker
-   scripts, ingestion preflight hooks, CI checks, or external containers without
-   initializing a `Tracker`.
-
-2. **Layer 2: Run & Boundary Provenance (`IdentityManager` & `consist.admission`)**
-   Layer 2 sits above content hashing. It models the causal Merkle-DAG of workflow
-   executions: what code ran (Git commit or callable module hash), what configuration
-   was used, and which inputs were consumed. At workflow boundaries, `consist.admission`
-   evaluates policy-neutral admission reports to verify whether an input matches a prior
-   run's output or a declared canonical digest before executing a model step.
+- **Layer 1 (`consist.digest`)** computes data fingerprints without database state, migrations, or tracker instances. Module import loads only Python standard library modules. This keeps digests usable in worker scripts, data validation hooks, CI quality gates, and container wrappers without tracker overhead.
+- **Layer 2 (`IdentityManager` and `consist.admission`)** tracks execution lineage across runs. `IdentityManager` hashes the combination of code state, run configs, and input artifacts to generate cache keys. At pipeline boundaries, `consist.admission` checks physical inputs against expected prior-run outputs or declared fingerprints before step execution.
 
 ---
 

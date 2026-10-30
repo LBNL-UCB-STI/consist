@@ -1,18 +1,15 @@
 # Identity Manager
 
-Consist approaches identity in two complementary architectural layers:
+Consist manages identity across two layers:
 
-- **Layer 1: Stateless Content & Tabular Digests ([`consist.digest`](digest.md))**
-  Zero-weight, deterministic hashing for in-memory bytes, regular files, canonical JSON,
-  order-invariant tables (`ctd1`), state dictionaries, and logical arrays / matrices.
-  Layer 1 imports only the Python standard library at module scope and operates completely
-  independently of DuckDB, SQLModel, or tracker lifecycle state.
-- **Layer 2: Run & Boundary Provenance (`IdentityManager` & [`consist.admission`](admission.md))**
-  Stateful, Merkle-DAG based run execution identity (`IdentityManager`) combining code
-  identity (Git repository state or callable module hashes), configuration plans, and input
-  artifact digests into deterministic run signatures. At workflow boundaries,
-  `consist.admission` enforces policy-neutral contracts (`PriorRunExpectation`,
-  `DeclaredDigestExpectation`) before code executes.
+- **Layer 1: Stateless Content & Tabular Digests ([`consist.digest`](digest.md))**:
+  Deterministic hashing for bytes, files, canonical JSON, `ctd1` order-invariant
+  tables, state dictionaries, and logical array/matrix containers. Imports only the
+  Python standard library at module scope with no DuckDB or tracker dependencies.
+- **Layer 2: Run & Boundary Provenance (`IdentityManager` & [`consist.admission`](admission.md))**:
+  Merkle-DAG run execution identity combining code (Git state or callable module),
+  configuration plans, and input artifact digests into deterministic cache keys.
+  At pipeline boundaries, `consist.admission` verifies input expectations before code runs.
 
 ## Code identity
 

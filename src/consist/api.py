@@ -3823,3 +3823,19 @@ def log_meta(**kwargs: Any) -> None:
         If called when no `Tracker` is active in the current context.
     """
     get_active_tracker().log_meta(**kwargs)
+
+
+def __getattr__(name: str) -> Any:
+    from consist import _DEPRECATED_TOP_LEVEL_EXPORTS
+
+    if name in _DEPRECATED_TOP_LEVEL_EXPORTS:
+        target_mod, target_attr = _DEPRECATED_TOP_LEVEL_EXPORTS[name]
+        warnings.warn(
+            f"Importing {name!r} from 'consist.api' is deprecated; use '{target_mod}.{target_attr}' instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        module = importlib.import_module(target_mod)
+        return module.__dict__[target_attr]
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
