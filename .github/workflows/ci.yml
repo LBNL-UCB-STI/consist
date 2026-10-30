@@ -160,7 +160,7 @@ jobs:
           if-no-files-found: error
 
   smoke:
-    name: smoke (${{ matrix.os }}, py${{ matrix.python-version }})
+    name: smoke (${{ matrix.os }}, py${{ matrix.python-version }}, ${{ matrix.duckdb-label }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     strategy:
@@ -169,10 +169,20 @@ jobs:
         include:
           - os: ubuntu-latest
             python-version: "3.12"
+            duckdb-label: locked
+            duckdb-spec: ""
           - os: ubuntu-latest
             python-version: "3.13"
+            duckdb-label: locked
+            duckdb-spec: ""
+          - os: ubuntu-latest
+            python-version: "3.13"
+            duckdb-label: duckdb2
+            duckdb-spec: "duckdb>=2.0.0,<3"
           - os: macos-latest
             python-version: "3.13"
+            duckdb-label: locked
+            duckdb-spec: ""
 
     env:
       UV_PYTHON: ${{ matrix.python-version }}
@@ -190,9 +200,16 @@ jobs:
           uv sync --frozen
           --group dev
 
+      - name: Install DuckDB override
+        if: matrix.duckdb-spec != ''
+        run: |
+          uv pip install "${{ matrix.duckdb-spec }}"
+          uv run --no-sync python -c "import duckdb; assert int(duckdb.__version__.split('.')[0]) >= 2, duckdb.__version__"
+
       - name: Smoke pytest (core tracker, exec, CLI)
         run: >
-          uv run -m pytest -q
+          uv run --no-sync -m pytest -q
+          tests/unit/core/test_schema_export.py
           tests/unit/core/test_persistence.py
           tests/unit/core/test_tracker_run.py
           tests/unit/core/test_tracker_exec.py

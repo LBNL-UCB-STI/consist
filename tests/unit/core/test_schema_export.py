@@ -152,3 +152,63 @@ def test_parse_duckdb_type_pandas_fallbacks():
     assert parse_duckdb_type("datetime64[ns]").sqlalchemy_type_expr == "DateTime"
     assert parse_duckdb_type("date32").sqlalchemy_type_expr == "Date"
     assert parse_duckdb_type("category").sqlalchemy_type_expr == "String"
+
+
+def test_parse_duckdb_type_variant_and_duckdb_aliases():
+    for variant_type in ("VARIANT", "variant"):
+        spec = parse_duckdb_type(variant_type)
+        assert spec.python_type == "Any"
+        assert spec.sqlalchemy_type_expr == "JSON"
+        assert spec.typing_imports == {"Any"}
+        assert spec.sqlalchemy_imports == {"JSON"}
+
+    for int_type in ("TINYINT", "int1"):
+        spec = parse_duckdb_type(int_type)
+        assert spec.python_type == "int"
+        assert spec.sqlalchemy_type_expr == "Integer"
+
+    for bigint_type in ("UINTEGER", "uint4", "uint", "UHUGEINT", "int128", "uint128"):
+        spec = parse_duckdb_type(bigint_type)
+        assert spec.python_type == "int"
+        assert spec.sqlalchemy_type_expr == "BigInteger"
+
+    for ts_type in ("TIMESTAMP_S", "TIMESTAMP_MS", "TIMESTAMP_US", "TIMESTAMP_NS"):
+        spec = parse_duckdb_type(ts_type)
+        assert spec.python_type == "datetime.datetime"
+        assert spec.sqlalchemy_type_expr == "DateTime"
+
+
+def test_render_sqlmodel_stub_with_variant_field_compiles():
+    schema = ArtifactSchema(
+        id="schema_variant",
+        summary_json={"table_name": "events"},
+        profile_json=None,
+    )
+    fields = [
+        ArtifactSchemaField(
+            schema_id=schema.id,
+            ordinal_position=1,
+            name="raw_event",
+            logical_type="VARIANT",
+            nullable=True,
+        ),
+        ArtifactSchemaField(
+            schema_id=schema.id,
+            ordinal_position=2,
+            name="strict_event",
+            logical_type="variant",
+            nullable=False,
+        ),
+    ]
+    code = render_sqlmodel_stub(schema=schema, fields=fields)
+    compile(code, "<schema_export>", "exec")
+    assert (
+        "raw_event: Any = Field(default=None, sa_column=Column('raw_event', JSON, nullable=True))"
+        in code
+    )
+    assert (
+        "strict_event: Any = Field(sa_column=Column('strict_event', JSON, nullable=False))"
+        in code
+    )
+    assert "Optional[Any]" not in code
+    assert "Optional" not in code
