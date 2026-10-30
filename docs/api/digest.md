@@ -24,7 +24,7 @@ Consist separates identity into two distinct, complementary layers:
 | LAYER 1: Stateless Content Digests (consist.digest)                         |
 |                                                                             |
 | - digest_file, file_sha256, digest_bytes                                    |
-| - canonical_json_str, canonical_json_sha256                                 |
+| - normalize_json, canonical_json_str, canonical_json_sha256                 |
 | - digest_table (ctd1 order-invariant row hashing across Parquet/Arrow/SQL) |
 | - digest_state (Merkle state dictionaries)                                  |
 | - compute_logical_matrices_sha256 (IEEE-754 array canonicalization)          |
@@ -202,6 +202,10 @@ if omx_digest == zarr_digest:
       show_root_heading: true
 
 ### Canonical JSON
+
+::: consist.digest.normalize_json
+    options:
+      show_root_heading: true
 
 ::: consist.digest.canonical_json_str
     options:

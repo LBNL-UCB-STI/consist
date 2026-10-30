@@ -72,7 +72,6 @@ for the complete API and developer helper reference.
       show_root_heading: false
       show_root_toc_entry: false
       members:
-        - normalize_json
         - calculate_run_signature
         - get_code_version
         - resolve_code_version

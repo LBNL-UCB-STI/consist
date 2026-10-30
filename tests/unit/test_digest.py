@@ -28,6 +28,7 @@ from consist.digest import (
     digest_state,
     digest_table,
     file_sha256,
+    normalize_json,
     normalize_logical_matrices_identity,
     normalize_table_scalar,
     resolve_canonicalization_policy,
@@ -488,6 +489,8 @@ def test_identity_manager_canonical_json_methods_deprecated() -> None:
 
     im = IdentityManager()
     payload = {"b": 2, "a": 1}
+    with pytest.deprecated_call(match="IdentityManager.normalize_json is deprecated"):
+        assert im.normalize_json(payload) == normalize_json(payload)
     with pytest.deprecated_call(
         match="IdentityManager.canonical_json_str is deprecated"
     ):

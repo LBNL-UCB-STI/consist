@@ -208,6 +208,17 @@ def _clean_for_canonical_json(
     return obj
 
 
+def normalize_json(payload: Any, *, exclude_keys: set[str] | None = None) -> Any:
+    """Normalize a Python structure into deterministic JSON-compatible primitives.
+
+    Normalizes dictionaries/mappings by sorting keys and optionally excluding keys,
+    converts sets into deterministically sorted lists, Paths into strings,
+    Pydantic models into dumped mappings, and NumPy arrays/scalars into native
+    Python lists and primitives.
+    """
+    return _clean_for_canonical_json(payload, exclude_keys)
+
+
 def canonical_json_str(payload: Any, *, exclude_keys: set[str] | None = None) -> str:
     """Serialize a Python structure into a deterministic, canonical JSON string.
 
@@ -215,7 +226,7 @@ def canonical_json_str(payload: Any, *, exclude_keys: set[str] | None = None) ->
     Paths into strings, and NumPy arrays/scalars into standard Python primitives.
     Uses compact separators `(',', ':')` and `ensure_ascii=True`.
     """
-    cleaned = _clean_for_canonical_json(payload, exclude_keys)
+    cleaned = normalize_json(payload, exclude_keys=exclude_keys)
     return json.dumps(
         cleaned,
         sort_keys=True,
@@ -1740,6 +1751,7 @@ __all__ = [
     "file_sha256",
     "digest_file",
     # Canonical JSON
+    "normalize_json",
     "canonical_json_str",
     "canonical_json_sha256",
     # Canonical Tabular & State Digests

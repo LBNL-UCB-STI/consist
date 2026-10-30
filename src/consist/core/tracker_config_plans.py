@@ -30,6 +30,7 @@ from consist.core.config_canonicalization import (
     validate_config_plan,
 )
 from consist.core.stores import get_hot_data_store
+from consist.digest import normalize_json
 from consist.models.run import Run
 
 if TYPE_CHECKING:
@@ -334,7 +335,7 @@ class TrackerConfigPlanService(_TrackerServiceBase):
             if hasattr(adapter, "build_facet"):
                 facet_data = adapter.build_facet(canonical, facet_spec=facet_spec)
                 if facet_data is not None:
-                    facet_data = self.identity.normalize_json(facet_data)
+                    facet_data = normalize_json(facet_data)
             else:
                 raise ValueError(
                     "facet_spec provided but adapter does not support build_facet()."

@@ -54,6 +54,7 @@ from consist.core.resolved_binding import (
     step_contract_identity,
 )
 from consist.core.run_invocation import resolve_run_invocation
+from consist.digest import normalize_json
 from consist.types import (
     ArtifactRef,
     BindingResult,
@@ -1247,7 +1248,7 @@ class ScenarioContext:
             merged.update(self._coerce_mapping(self._step_facet, "step_facet"))
         if facet is not None:
             merged.update(self._coerce_mapping(facet, "facet"))
-        return self.tracker.identity.normalize_json(merged)
+        return normalize_json(merged)
 
     def _resolve_input_value(self, value: RunInputRef) -> ArtifactRef:
         def _resolve_coupler_ref(ref: str) -> Optional[ArtifactRef]:

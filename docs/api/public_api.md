@@ -153,6 +153,8 @@ See [Content & Tabular Digests](digest.md) for detailed reference and examples.
   (raw 64-character lowercase hexadecimal SHA-256 of a regular file via streaming stdlib)
 - [`consist.digest.digest_file`](digest.md#consist.digest.digest_file)
   (self-describing `sha256:file:<64 hex>` identity string for admission)
+- [`consist.digest.normalize_json`](digest.md#consist.digest.normalize_json)
+  (normalize Python/NumPy/Pydantic/Path/set structures into deterministic JSON primitives)
 - [`consist.digest.canonical_json_str`](digest.md#consist.digest.canonical_json_str) / [`consist.digest.canonical_json_sha256`](digest.md#consist.digest.canonical_json_sha256)
   (RFC 8785 deterministic JSON formatting and 64-hex SHA-256 digest)
 - [`consist.digest.digest_table`](digest.md#consist.digest.digest_table)

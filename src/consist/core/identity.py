@@ -30,10 +30,10 @@ from pathlib import Path
 from consist.types import CodeIdentityMode
 from consist.core.resolved_binding import ArtifactIdentity
 from consist.digest import (
-    _clean_for_canonical_json,
     canonical_json_sha256,
     canonical_json_str,
     file_sha256,
+    normalize_json,
 )
 
 # Try importing git lazily on first use, handle error if missing (optional dependency)
@@ -219,10 +219,15 @@ class IdentityManager:
         """
         Normalize Python structures into JSON-friendly types.
 
-        This mirrors the canonical hashing cleanup but preserves the full structure
-        without excluding any keys.
+        Deprecated: use ``consist.digest.normalize_json`` directly.
         """
-        return _clean_for_canonical_json(obj, set())
+        warnings.warn(
+            "IdentityManager.normalize_json is deprecated; "
+            "use consist.digest.normalize_json instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return normalize_json(obj)
 
     # --- Run Signature Calculation ---
 
@@ -521,7 +526,7 @@ class IdentityManager:
             exclude_keys = []
 
         # 1. Clean and Canonicalize
-        cleaned_config = _clean_for_canonical_json(config, set(exclude_keys))
+        cleaned_config = normalize_json(config, exclude_keys=set(exclude_keys))
 
         # 2. Serialize with deterministic sorting
         # ensure_ascii=True ensures locale independence

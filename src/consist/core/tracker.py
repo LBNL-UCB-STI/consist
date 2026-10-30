@@ -90,6 +90,7 @@ from consist.core.gtfs import (
     GtfsCanonicalizationResult,
     canonicalize_gtfs_bundle,
 )
+from consist.digest import normalize_json
 from consist.core.indexing import IndexBySpec
 from consist.core.persistence import (
     ArtifactSchemaSelection,
@@ -464,10 +465,8 @@ class Tracker:
 
         metadata_db = self.metadata_store.db if self.metadata_store else None
         self.artifacts = ArtifactManager(self)
-        self.config_facets = ConfigFacetManager(db=metadata_db, identity=self.identity)
-        self.artifact_facets = ArtifactFacetManager(
-            db=metadata_db, identity=self.identity
-        )
+        self.config_facets = ConfigFacetManager(db=metadata_db)
+        self.artifact_facets = ArtifactFacetManager(db=metadata_db)
         self.artifact_schemas = ArtifactSchemaManager(self)
         self.queries = RunQueryService(self)
         self.lineage = LineageService(self)
@@ -3785,7 +3784,6 @@ class Tracker:
         resolved_feed_paths = [Path(path).resolve() for path in feed_paths]
         result = canonicalize_gtfs_bundle(
             resolved_feed_paths,
-            identity=self.identity,
             service_date=service_date,
             feed_keys=feed_keys,
             source_key=key,
@@ -3814,7 +3812,7 @@ class Tracker:
         manifest_dir.mkdir(parents=True, exist_ok=True)
         safe_key = self._safe_run_id(key)
         manifest_path = manifest_dir / f"{safe_key}_manifest.json"
-        manifest_payload = self.identity.normalize_json(result.manifest)
+        manifest_payload = normalize_json(result.manifest)
         manifest_path.write_text(
             json.dumps(manifest_payload, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
@@ -5772,7 +5770,7 @@ class Tracker:
         if self.current_consist.run.meta is None:
             self.current_consist.run.meta = {}
 
-        normalized = self.identity.normalize_json(kwargs)
+        normalized = normalize_json(kwargs)
         for field in ("stage", "phase"):
             value = normalized.get(field)
             if isinstance(value, str) or value is None:

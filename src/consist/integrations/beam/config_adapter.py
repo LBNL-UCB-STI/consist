@@ -51,7 +51,7 @@ from consist.core.gtfs import (
     canonicalize_gtfs_bundle,
     has_gtfs_core_members,
 )
-from consist.digest import canonical_json_sha256, file_sha256
+from consist.digest import canonical_json_sha256, file_sha256, normalize_json
 from consist.integrations._config_adapter_shared import (
     OverrideRunHooks as _shared_OverrideRunHooks,
     artifact_key_for_path as _shared_artifact_key_for_path,
@@ -439,7 +439,7 @@ class BeamConfigAdapter:
         content_hash = canonical_json_sha256(
             {
                 "primary_config": str(config_path.name),
-                "config": identity.normalize_json(config_tree),
+                "config": normalize_json(config_tree),
             }
         )
         external = [p for p in config_files if not _is_in_roots(p, root_dirs)]
@@ -2290,7 +2290,6 @@ def _canonicalize_gtfs_inputs(
     service_date = _resolve_beam_service_date(config_tree)
     return canonicalize_gtfs_bundle(
         feed_paths,
-        identity=tracker.identity if tracker is not None else IdentityManager(),
         service_date=service_date,
     )
 

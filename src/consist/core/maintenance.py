@@ -17,7 +17,6 @@ from sqlmodel import col, select
 
 from consist.core._performance_attribution import _track_maintenance_merge_phase
 from consist.core.facet_common import flatten_facet_values
-from consist.core.identity import IdentityManager
 from consist.digest import canonical_json_sha256
 from consist.models.artifact import Artifact
 from consist.models.artifact_kv import ArtifactKV
@@ -2436,7 +2435,6 @@ class DatabaseMaintenance:
         rebuild_mode = str(mode).strip().lower()
         if rebuild_mode not in {"minimal", "full"}:
             raise ValueError("mode must be one of: minimal, full")
-        identity = IdentityManager(project_root=str(self.run_dir))
         supports_full_restore = (
             self._build_rebuild_full_table_support()
             if rebuild_mode == "full" and not dry_run
@@ -2634,7 +2632,6 @@ class DatabaseMaintenance:
                             run_facet=record.facet,
                             snapshot_artifact_meta=snapshot_artifact_meta,
                             supports_full_restore=supports_full_restore,
-                            identity=identity,
                         ),
                         operation_name="maintenance_rebuild_from_json_full_restore",
                     )
@@ -2689,7 +2686,6 @@ class DatabaseMaintenance:
         run_facet: Any,
         snapshot_artifact_meta: dict[str, tuple[uuid.UUID, dict[str, Any]]],
         supports_full_restore: dict[str, bool],
-        identity: IdentityManager,
     ) -> None:
         with self.db.session_scope() as session:
             run_meta = dict(run.meta) if isinstance(run.meta, dict) else {}
@@ -2705,7 +2701,6 @@ class DatabaseMaintenance:
                     run_facet=run_facet,
                     run_meta=run_meta,
                     namespace=run_namespace,
-                    identity=identity,
                 )
 
             restore_schema = bool(
@@ -2719,7 +2714,6 @@ class DatabaseMaintenance:
                         artifact_id=artifact_id,
                         artifact_meta=artifact_meta,
                         default_namespace=run.model_name,
-                        identity=identity,
                     )
 
                 if restore_schema:
@@ -2740,7 +2734,6 @@ class DatabaseMaintenance:
         run_facet: Any,
         run_meta: dict[str, Any],
         namespace: str,
-        identity: IdentityManager,
     ) -> None:
         if not isinstance(run_facet, dict) or not run_facet:
             return
@@ -2778,7 +2771,6 @@ class DatabaseMaintenance:
         artifact_id: uuid.UUID,
         artifact_meta: dict[str, Any],
         default_namespace: str,
-        identity: IdentityManager,
     ) -> None:
         facet_payload = artifact_meta.get("artifact_facet")
         if not isinstance(facet_payload, dict) or not facet_payload:
