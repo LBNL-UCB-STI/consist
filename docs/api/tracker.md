@@ -252,7 +252,7 @@ with tracker.trace(
 
 `Tracker.run_with_config_overrides(...)` now supports one-of base selectors:
 
-- `base_run_id="existing_run_id"` for historical bundle/config artifacts
+- `base_run_id="existing_run_id"` for historical bundle/config artifacts (automatically resolves cache-hit runs to their canonical producer run)
 - `base_config_dirs=[Path("configs"), ...]` for first-run override execution
 
 Use exactly one selector. Passing both raises a `ValueError`.
@@ -347,7 +347,9 @@ result = tracker.exec(
         - get_child_artifacts
         - get_parent_artifact
         - get_artifacts_for_run
+        - resolve_canonical_run_id
         - get_run
+        - get_run_result
         - get_run_config
         - get_run_inputs
         - get_run_outputs

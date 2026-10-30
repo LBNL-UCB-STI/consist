@@ -32,7 +32,9 @@ a tracker object to every call.
 - Querying: `consist.find_run`, `consist.find_runs`,
   `consist.find_latest_run`, `consist.find_matching_run`,
   `consist.find_matching_runs`, `consist.run_query`, `consist.run_set`,
-  `consist.get_run_result`, `consist.config_run_query`,
+  `consist.resolve_canonical_run_id`, `consist.get_run_result`,
+  `consist.get_config_bundle`, `consist.get_config_values`,
+  `consist.get_config_value`, `consist.config_run_query`,
   `consist.config_run_rows`, `consist.ibis_connection`, `consist.ibis_view`,
   `consist.ibis_grouped_view`
 
@@ -108,7 +110,11 @@ For class-level equivalents, see [Tracker](tracker.md) and
         - output_path
         - cached_artifacts
         - cached_output
+        - resolve_canonical_run_id
         - get_run_result
+        - get_config_bundle
+        - get_config_values
+        - get_config_value
         - get_artifact
         - register_artifact_facet_parser
         - log_artifact
