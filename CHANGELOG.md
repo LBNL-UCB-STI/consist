@@ -5,6 +5,99 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog], and this project adheres to
 [Semantic Versioning].
 
+## [0.4.0] - 2026-10-30
+
+### Added
+
+- Add command execution provenance tracking via the `consist exec` CLI subcommand
+  and `tracker.exec(...)` / `consist.exec(...)` APIs, capturing shell
+  invocations, exit codes, process streams, and declared file inputs and
+  outputs by @zneedell ([#265](https://github.com/LBNL-UCB-STI/consist/pull/265)).
+- Add per-run coupler snapshots for scenario resumption, workspace
+  materialization and ephemeral directory pruning in `restore_coupler_snapshot`,
+  output-direction and cross-tracker prior-run admission, directory/bundle and
+  sub-mount materialization, and logical array identity admission for matrix
+  and array artifacts by @zneedell
+  ([#272](https://github.com/LBNL-UCB-STI/consist/pull/272)).
+- Add the `consist.digest` module providing Tracker-free cryptographic hashing
+  and canonical serialization utilities (`digest_file`, `digest_table`,
+  `digest_directory`, `digest_object`, `digest_array`, `normalize_json`) by
+  @zneedell ([#289](https://github.com/LBNL-UCB-STI/consist/pull/289)).
+- Add `resolve_run_output_paths(...)` for resolving output artifact paths across
+  multiple runs in bulk, add a `columns` projection parameter to `load(...)`,
+  `load_df(...)`, and `load_relation(...)`, and add read-only database
+  snapshots for safe concurrent inspection on shared filesystems by @zneedell
+  ([#286](https://github.com/LBNL-UCB-STI/consist/pull/286)).
+- Add canonical cache-hit run resolution (`resolve_canonical_run_id(...)`,
+  `resolve_canonical=True` on `find_run(...)` / `get_run_outputs(...)` /
+  `resolve_run_output_paths(...)`, and `Run.is_cache_hit` /
+  `Run.cache_source_run_id`), plus `copy_mode="hardlink_or_copy"` and
+  `allow_missing_keys` in `BeamConfigAdapter.materialize_bundle(...)` by
+  @zneedell ([#290](https://github.com/LBNL-UCB-STI/consist/pull/290)).
+- Add transitive scenario membership traversal (`consist scenarios`,
+  `consist scenario <id>`, and `consist runs --scenario <id>`), scoped artifact
+  validation (`consist validate --scenario/--run/--latest/--outputs-only`), and
+  lineage pruning flags (`consist lineage --max-depth/--expand-configs/--expand-sets`)
+  by @zneedell ([#291](https://github.com/LBNL-UCB-STI/consist/pull/291)).
+- Support DuckDB 2.0 `VARIANT` and integer/timestamp alias type mappings in
+  `schema_export` and add a DuckDB 2.0 CI smoke matrix leg by @zneedell
+  ([#292](https://github.com/LBNL-UCB-STI/consist/pull/292)).
+
+### Changed
+
+- Defer heavy optional dependencies (`tables`, `geopandas`, `xarray`) until
+  first use, curate `consist.admission` and `consist.gtfs` submodules with PEP
+  562 lazy top-level imports in `consist/__init__.py`, and deprecate
+  `IdentityManager` `canonical_json` helpers by @zneedell
+  ([#286](https://github.com/LBNL-UCB-STI/consist/pull/286),
+  [#289](https://github.com/LBNL-UCB-STI/consist/pull/289)).
+- Replace `Table(..., autoload_with=...)` reflection in `materialize` with
+  catalog-scoped `information_schema.columns` queries, drop the
+  `sqlalchemy < 2.0.45` upper bound, and update `ty` and `sqlalchemy` by
+  @zneedell ([#287](https://github.com/LBNL-UCB-STI/consist/pull/287)).
+- Preserve caller-declared overlay root priority in `ActivitySimConfigAdapter`
+  and disambiguate duplicate config basenames across overlay directories by
+  @zneedell ([#290](https://github.com/LBNL-UCB-STI/consist/pull/290)).
+- Speed up schema initialization in CI, enforce `ty` type checking, add a smoke
+  matrix across Python versions, and satisfy `pandas-stubs` typing annotations
+  by @zneedell ([#285](https://github.com/LBNL-UCB-STI/consist/pull/285)).
+- Update JOSS paper manuscript, affiliations, bibliography DOIs, and add the
+  JOSS badge to `README.md` by @zneedell
+  ([#251](https://github.com/LBNL-UCB-STI/consist/pull/251),
+  [#252](https://github.com/LBNL-UCB-STI/consist/pull/252),
+  [#263](https://github.com/LBNL-UCB-STI/consist/pull/263),
+  [#269](https://github.com/LBNL-UCB-STI/consist/pull/269)).
+- Update `soupsieve` to 2.9, `gitpython` to 3.1.62, `anyio` to 4.14.2,
+  `astral-sh/setup-uv` to 7, roll up locked dependencies, and group Dependabot
+  security updates by @zneedell and dependabot[bot]
+  ([#250](https://github.com/LBNL-UCB-STI/consist/pull/250),
+  [#253](https://github.com/LBNL-UCB-STI/consist/pull/253),
+  [#254](https://github.com/LBNL-UCB-STI/consist/pull/254),
+  [#255](https://github.com/LBNL-UCB-STI/consist/pull/255),
+  [#256](https://github.com/LBNL-UCB-STI/consist/pull/256),
+  [#284](https://github.com/LBNL-UCB-STI/consist/pull/284),
+  [#288](https://github.com/LBNL-UCB-STI/consist/pull/288)).
+
+### Fixed
+
+- Preserve role information in input identity hashing, resolve HDF5 identity
+  mismatches with hash overrides, separate lineage from typed content-identity
+  admission, preserve container mount modes, and ensure portable config pack
+  hashes by @zneedell ([#225](https://github.com/LBNL-UCB-STI/consist/pull/225)).
+- Prevent `ObjectDereferencedError` when copying ORM-backed artifacts by
+  overriding `model_copy` on `Artifact` and `ArtifactContent` to avoid
+  deep-copying `_sa_instance_state` by @zneedell
+  ([#272](https://github.com/LBNL-UCB-STI/consist/pull/272)).
+- Handle `ENODATA` mmap errors on Lustre/NFS filesystems during Parquet loading
+  with a transparent non-mmap PyArrow fallback by @zneedell
+  ([#286](https://github.com/LBNL-UCB-STI/consist/pull/286)).
+- Rebind `pyhocon` `_ConfigValues` parent references when rewriting paths in
+  `BeamConfigAdapter.materialize_bundle(...)` so `${...}` substitutions remain
+  valid by @zneedell ([#290](https://github.com/LBNL-UCB-STI/consist/pull/290)).
+- Preserve native integer column dtypes on mixed int/float DataFrames in
+  `consist preview` by iterating with `df.itertuples` instead of `df.iterrows`
+  by @zneedell ([#291](https://github.com/LBNL-UCB-STI/consist/pull/291)).
+
 ## [0.3.5] - 2026-09-09
 
 ### Changed
@@ -724,7 +817,9 @@ The format is based on [Keep a Changelog], and this project adheres to
 
 [Semantic Versioning]: https://semver.org/spec/v2.0.0.html
 
-[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.4.0...HEAD
+
+[0.4.0]: https://github.com/LBNL-UCB-STI/consist/compare/v0.3.5...v0.4.0
 
 [0.3.5]: https://github.com/LBNL-UCB-STI/consist/compare/v0.3.4...v0.3.5
 
