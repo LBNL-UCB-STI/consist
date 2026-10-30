@@ -4778,6 +4778,7 @@ class Tracker:
         prefix: Optional[str] = None,
         keys: Optional[Iterable[str]] = None,
         limit: int = 10_000,
+        resolve_canonical: bool = True,
     ) -> Dict[str, Any]:
         """
         Return a flattened config facet as a dict of key/value pairs.
@@ -4794,6 +4795,9 @@ class Tracker:
             Only include specific keys when provided.
         limit : int, default 10_000
             Maximum number of entries to return.
+        resolve_canonical : bool, default True
+            When True and ``run_id`` has no config KV rows, follow ``cache_source``
+            links to query the canonical producer run.
 
         Returns
         -------
@@ -4811,6 +4815,7 @@ class Tracker:
             prefix=prefix,
             keys=keys,
             limit=limit,
+            resolve_canonical=resolve_canonical,
         )
 
     def diff_runs(
@@ -4866,6 +4871,7 @@ class Tracker:
         *,
         namespace: Optional[str] = None,
         default: Any = None,
+        resolve_canonical: bool = True,
     ) -> Any:
         """
         Retrieve a single config value from a flattened config facet.
@@ -4880,6 +4886,9 @@ class Tracker:
             Namespace for the facet. Defaults to the run's model name when available.
         default : Any, optional
             Value to return when the key is missing.
+        resolve_canonical : bool, default True
+            When True and ``run_id`` has no config KV rows, follow ``cache_source``
+            links to query the canonical producer run.
 
         Returns
         -------
@@ -4887,7 +4896,11 @@ class Tracker:
             The typed value for the key, or ``default`` if missing.
         """
         return self.queries.get_config_value(
-            run_id, key, namespace=namespace, default=default
+            run_id,
+            key,
+            namespace=namespace,
+            default=default,
+            resolve_canonical=resolve_canonical,
         )
 
     def find_runs_by_facet_kv(
@@ -4939,8 +4952,20 @@ class Tracker:
     def resolve_historical_path(self, artifact: Artifact, run: Run) -> Path:
         return self._history_service.resolve_historical_path(artifact, run)
 
-    def get_run(self, run_id: str) -> Optional[Run]:
-        return self._history_service.get_run(run_id)
+    def resolve_canonical_run_id(
+        self,
+        run_or_id: Run | str,
+        *,
+        max_depth: int = 100,
+    ) -> str:
+        return self._history_service.resolve_canonical_run_id(
+            run_or_id, max_depth=max_depth
+        )
+
+    def get_run(self, run_id: str, *, resolve_canonical: bool = False) -> Optional[Run]:
+        return self._history_service.get_run(
+            run_id, resolve_canonical=resolve_canonical
+        )
 
     def snapshot_db(
         self, dest_path: str | os.PathLike[str], checkpoint: bool = True
@@ -5152,12 +5177,14 @@ class Tracker:
         adapter: str | None = None,
         role: str = "bundle",
         allow_missing: bool = False,
+        resolve_canonical: bool = True,
     ) -> Path | None:
         return self._history_service.get_config_bundle(
             run_id,
             adapter=adapter,
             role=role,
             allow_missing=allow_missing,
+            resolve_canonical=resolve_canonical,
         )
 
     def get_artifacts_for_run(self, run_id: str) -> RunArtifacts:
@@ -5172,11 +5199,13 @@ class Tracker:
         *,
         keys: Optional[Iterable[str]] = None,
         validate: Literal["lazy", "strict", "none"] = "lazy",
+        resolve_canonical: bool = False,
     ) -> RunResult:
         return self._history_service.get_run_result(
             run_id,
             keys=keys,
             validate=validate,
+            resolve_canonical=resolve_canonical,
         )
 
     def resolve_run_output_paths(

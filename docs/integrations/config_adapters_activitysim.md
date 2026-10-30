@@ -223,6 +223,12 @@ Each override run automatically records which resolved config root was used
 (`run.meta["resolved_config_identity"]`), so you can trace any result back to
 the exact parameter values that produced it.
 
+When materializing from a multi-directory overlay hierarchy (`[overlay_dir, ..., base_dir]`),
+`ActivitySimConfigAdapter` preserves the original root directory precedence,
+disambiguates config roots that share a directory basename inside bundles, and
+transparently resolves `base_run_id` across cache-hit chains to the canonical
+producer run that recorded the config bundle.
+
 ---
 
 ### Read a single coefficient from a historical run

@@ -216,8 +216,9 @@ with Session(tracker.engine) as session:
 ## Behavior Notes
 
 - `resolve_substitutions=True` resolves HOCON substitutions; set to False to keep raw expressions.
-- `env_overrides` supplies environment variables for optional substitutions (e.g., `${?BEAM_OUTPUT}`).
+- `env_overrides` supplies environment variables for optional substitutions (e.g., `${?BEAM_OUTPUT}`). When an optional substitution overrides a key originally defined in an `include`d file and the environment variable is unset, the parser falls back to the included base value rather than raising a missing-reference error.
 - `strict=True` raises on missing referenced files; otherwise missing paths are logged as warnings.
+- `base_run_id` and `adapter.materialize_from_run(...)` transparently resolve cache-hit runs to their canonical producer run so base config files and bundles can be located even when the immediate parent run was a cache hit.
 - Canonicalization returns a structured `CanonicalConfigIdentity` manifest.
   Reference discovery is value-first: scalar strings become keyed
   `ConfigReference` entries when the value itself looks like a path, resolves
@@ -310,7 +311,9 @@ overrides = BeamConfigOverrides(
     values={
         "beam.agentsim.agentSampleSizeAsFractionOfPopulation": 0.75,
         "beam.agentsim.lastIteration": 5,
-    }
+        "beam.calibration.customObjectiveWeight": 1.25,
+    },
+    allow_missing_keys=("beam.calibration.customObjectiveWeight",),
 )
 
 materialized = adapter.materialize(
@@ -318,8 +321,12 @@ materialized = adapter.materialize(
     overrides,
     output_dir=Path("tmp/beam_materialized"),
     identity=tracker.identity,
+    copy_mode="hardlink_or_copy",
 )
 ```
+
+- `allow_missing_keys` declares override keys that may be injected into `base_file` (or the adapter's primary config) when they do not already appear in the base `.conf` files, while keeping `strict=True` validation for all other keys.
+- `copy_mode="hardlink_or_copy"` (also supported on `materialize_from_run(...)`) hardlinks static non-`.conf` files in the config directory instead of deep-copying them, falling back to `shutil.copy2` across filesystems; `.conf` files are always written fresh and unlinked before writing if their link count exceeds 1.
 
 If you already built a config plan (e.g., for caching), you can reuse its
 `config_dirs` metadata:

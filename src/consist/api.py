@@ -1227,11 +1227,40 @@ def cached_output(key: Optional[str] = None) -> Optional[Artifact]:
     return tracker.cached_output(key=key)
 
 
+def resolve_canonical_run_id(
+    run_or_id: Run | str,
+    *,
+    max_depth: int = 100,
+    tracker: Optional["Tracker"] = None,
+) -> str:
+    """
+    Follow ``run.meta['cache_source']`` links to the root producer run ID.
+
+    Parameters
+    ----------
+    run_or_id : Run | str
+        Run instance or run identifier to resolve.
+    max_depth : int, default 100
+        Maximum number of ``cache_source`` hops to traverse.
+    tracker : Optional[Tracker], optional
+        Tracker instance to query. If omitted, resolves the active/default tracker.
+
+    Returns
+    -------
+    str
+        Canonical producer run identifier.
+    """
+    return _resolve_tracker(tracker).resolve_canonical_run_id(
+        run_or_id, max_depth=max_depth
+    )
+
+
 def get_run_result(
     run_id: str,
     *,
     keys: Optional[Iterable[str]] = None,
     validate: Literal["lazy", "strict", "none"] = "lazy",
+    resolve_canonical: bool = False,
     tracker: Optional["Tracker"] = None,
 ) -> RunResult:
     """
@@ -1245,6 +1274,9 @@ def get_run_result(
         Optional output keys to include. If omitted, includes all outputs.
     validate : {"lazy", "strict", "none"}, default "lazy"
         Output validation policy forwarded to ``Tracker.get_run_result``.
+    resolve_canonical : bool, default False
+        When True, resolve ``run_id`` to the canonical producer run across
+        cache-hit chains.
     tracker : Optional[Tracker], optional
         Tracker instance to query. If omitted, resolves the active/default tracker.
 
@@ -1254,7 +1286,10 @@ def get_run_result(
         Historical run metadata plus selected outputs.
     """
     return _resolve_tracker(tracker).get_run_result(
-        run_id, keys=keys, validate=validate
+        run_id,
+        keys=keys,
+        validate=validate,
+        resolve_canonical=resolve_canonical,
     )
 
 

@@ -44,7 +44,51 @@ class TrackerHistoryService(_TrackerServiceBase):
         path_str = self.fs.resolve_historical_path(artifact.container_uri, old_dir)
         return Path(path_str)
 
-    def get_run(self, run_id: str) -> Optional[Run]:
+    def resolve_canonical_run_id(
+        self,
+        run_or_id: Run | str,
+        *,
+        max_depth: int = 100,
+    ) -> str:
+        """
+        Follow ``run.meta['cache_source']`` links to the root producer run ID.
+
+        Guards against cycles and missing intermediate run records by returning
+        the deepest resolvable run ID in the chain.
+        """
+        if isinstance(run_or_id, Run):
+            current_run: Optional[Run] = run_or_id
+            current_id = run_or_id.id
+        else:
+            current_id = str(run_or_id)
+            current_run = self.get_run(current_id)
+            if current_run is None:
+                return current_id
+
+        if self.db is None:
+            return current_run.cache_source_run_id or current_id
+
+        visited: set[str] = set()
+        steps = 0
+        while current_id not in visited and steps < max_depth:
+            visited.add(current_id)
+            if current_run is None:
+                current_run = self.get_run(current_id)
+                if current_run is None:
+                    break
+            source_id = current_run.cache_source_run_id
+            if not source_id or source_id in visited:
+                break
+            next_run = self.get_run(source_id)
+            if next_run is None:
+                break
+            current_id = source_id
+            current_run = next_run
+            steps += 1
+
+        return current_id
+
+    def get_run(self, run_id: str, *, resolve_canonical: bool = False) -> Optional[Run]:
         """
         Retrieve a run by id.
 
@@ -52,15 +96,23 @@ class TrackerHistoryService(_TrackerServiceBase):
         ----------
         run_id : str
             Run identifier.
+        resolve_canonical : bool, default False
+            When True, follow ``cache_source`` links to return the root producer run.
 
         Returns
         -------
         Optional[Run]
             Matching run, or ``None`` if it does not exist.
         """
-        if self.db:
-            return self.db.get_run(run_id)
-        return None
+        if not self.db:
+            return None
+        run = self.db.get_run(run_id)
+        if not resolve_canonical or run is None:
+            return run
+        canonical_id = self.resolve_canonical_run_id(run)
+        if canonical_id == run.id:
+            return run
+        return self.db.get_run(canonical_id) or run
 
     def snapshot_db(
         self, dest_path: str | os.PathLike[str], checkpoint: bool = True
@@ -165,33 +217,13 @@ class TrackerHistoryService(_TrackerServiceBase):
             return None
         return record.config
 
-    def get_config_bundle(
+    def _find_matching_config_bundle_artifacts(
         self,
         run_id: str,
         *,
-        adapter: str | None = None,
-        role: str = "bundle",
-        allow_missing: bool = False,
-    ) -> Path | None:
-        """
-        Resolve a config artifact path for a run by role and optional adapter.
-
-        Parameters
-        ----------
-        run_id : str
-            Run identifier.
-        adapter : Optional[str], optional
-            Optional adapter name filter.
-        role : str, default "bundle"
-            Config artifact role to select.
-        allow_missing : bool, default False
-            Return ``None`` when the matching file is absent.
-
-        Returns
-        -------
-        Path | None
-            Resolved config artifact path.
-        """
+        adapter: str | None,
+        role: str,
+    ) -> tuple[list[Artifact], str | None]:
         artifacts = self.get_artifacts_for_run(run_id)
         input_artifacts = list(artifacts.inputs.values())
 
@@ -226,6 +258,54 @@ class TrackerHistoryService(_TrackerServiceBase):
                     elif run_adapter == adapter:
                         filtered.append(artifact)
                 matching = filtered
+
+        return matching, run_adapter
+
+    def get_config_bundle(
+        self,
+        run_id: str,
+        *,
+        adapter: str | None = None,
+        role: str = "bundle",
+        allow_missing: bool = False,
+        resolve_canonical: bool = True,
+    ) -> Path | None:
+        """
+        Resolve a config artifact path for a run by role and optional adapter.
+
+        Parameters
+        ----------
+        run_id : str
+            Run identifier.
+        adapter : Optional[str], optional
+            Optional adapter name filter.
+        role : str, default "bundle"
+            Config artifact role to select.
+        allow_missing : bool, default False
+            Return ``None`` when the matching file is absent.
+        resolve_canonical : bool, default True
+            When True and no matching config artifact is found on ``run_id``,
+            follow ``cache_source`` links to look up the canonical producer run.
+
+        Returns
+        -------
+        Path | None
+            Resolved config artifact path.
+        """
+        matching, run_adapter = self._find_matching_config_bundle_artifacts(
+            run_id, adapter=adapter, role=role
+        )
+        if not matching and resolve_canonical:
+            if not (
+                adapter is not None
+                and run_adapter is not None
+                and run_adapter != adapter
+            ):
+                canonical_id = self.resolve_canonical_run_id(run_id)
+                if canonical_id != run_id:
+                    matching, _ = self._find_matching_config_bundle_artifacts(
+                        canonical_id, adapter=adapter, role=role
+                    )
 
         if matching:
             selected = sorted(
@@ -367,6 +447,7 @@ class TrackerHistoryService(_TrackerServiceBase):
         *,
         keys: Optional[Iterable[str]] = None,
         validate: Literal["lazy", "strict", "none"] = "lazy",
+        resolve_canonical: bool = False,
     ) -> RunResult:
         """
         Build a ``RunResult`` view for a historical run.
@@ -379,17 +460,20 @@ class TrackerHistoryService(_TrackerServiceBase):
             Optional subset of output keys to include.
         validate : {"lazy", "strict", "none"}, default "lazy"
             Output validation policy.
+        resolve_canonical : bool, default False
+            When True, resolve ``run_id`` to the canonical producer run across
+            cache-hit chains.
 
         Returns
         -------
         RunResult
             Historical run metadata plus selected outputs.
         """
-        run = self.get_run(run_id)
+        run = self.get_run(run_id, resolve_canonical=resolve_canonical)
         if run is None:
             raise KeyError(f"Run {run_id!r} was not found.")
 
-        outputs = self.get_run_outputs(run_id)
+        outputs = self.get_run_outputs(run.id)
 
         selected_outputs: Dict[str, Artifact]
         if keys is None:

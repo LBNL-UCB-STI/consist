@@ -91,8 +91,10 @@ For role-aware `action-v2` runs, `identity_summary["input_identity"]["bindings"]
 also includes non-hashed `evidence`: `content-v1` means the binding used a
 verified immutable identity, while `legacy-provenance-v1` includes a stable
 `fallback_reason` explaining why Consist kept the conservative provenance
-identity. On a cache hit, `identity_summary["cache"]["source_run_id"]` is the
-prior execution that supplied the outputs; it is `None` for a miss.
+identity. On a cache hit, `identity_summary["cache"]["source_run_id"]` (also
+exposed directly via `run.is_cache_hit` and `run.cache_source_run_id`, as well
+as on `RunResult`) is the prior execution that supplied the outputs; it is
+`None` for a miss.
 
 If you are diagnosing a cache miss, also inspect
 `run.meta["cache_miss_explanation"]` on the completed run. It records the
@@ -124,3 +126,5 @@ indexed config facets first and then the persisted JSON config snapshot.
       members:
         - duration_seconds
         - identity_summary
+        - is_cache_hit
+        - cache_source_run_id

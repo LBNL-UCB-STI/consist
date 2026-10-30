@@ -354,7 +354,9 @@ These models are returned by, or support, `ScenarioContext.map_runs(...)`:
 - [`Tracker.diff_runs(...)`](tracker.md#consist.core.tracker.Tracker.diff_runs)
 - [`Tracker.get_child_artifacts(...)`](tracker.md#consist.core.tracker.Tracker.get_child_artifacts) / [`Tracker.get_parent_artifact(...)`](tracker.md#consist.core.tracker.Tracker.get_parent_artifact)
 - [`Tracker.get_run_inputs(...)`](tracker.md#consist.core.tracker.Tracker.get_run_inputs) / [`Tracker.get_run_outputs(...)`](tracker.md#consist.core.tracker.Tracker.get_run_outputs)
-- [`Tracker.get_run_config(...)`](tracker.md#consist.core.tracker.Tracker.get_run_config)
+- [`Tracker.get_run_config(...)`](tracker.md#consist.core.tracker.Tracker.get_run_config) / [`Tracker.get_config_bundle(...)`](tracker.md#consist.core.tracker.Tracker.get_config_bundle)
+- [`consist.resolve_canonical_run_id`](api_helpers.md#consist.api.resolve_canonical_run_id) / [`Tracker.resolve_canonical_run_id(...)`](tracker.md#consist.core.tracker.Tracker.resolve_canonical_run_id)
+- [`consist.get_run_result`](api_helpers.md#consist.api.get_run_result) / [`Tracker.get_run_result(...)`](tracker.md#consist.core.tracker.Tracker.get_run_result)
 - [`Tracker.print_lineage(...)`](tracker.md#consist.core.tracker.Tracker.print_lineage)
 - [`consist.run_query`](api_helpers.md#consist.api.run_query)
 - [`consist.db_session`](api_helpers.md#consist.api.db_session)
@@ -394,7 +396,7 @@ to Consist, start with the **Core** and **Logging/Loading** groups and reach for
   `find_matching_runs`, `get_latest_run_id`
 - `find_artifacts`, `get_artifact`, `get_child_artifacts`, `get_parent_artifact`, `get_artifacts_for_run`
 - `find_artifacts_by_params`, `get_artifact_kv`, `register_artifact_facet_parser`
-- `get_run`, `get_run_config`, `get_run_inputs`, `get_run_outputs`
+- `resolve_canonical_run_id`, `get_run`, `get_run_result`, `get_run_config`, `get_config_bundle`, `get_run_inputs`, `get_run_outputs`
 - `hydrate_run_outputs`, `hydrate_run_outputs_to_destinations`,
   `materialize_run_outputs`, `materialize_artifact`
 - `stage_artifact`, `stage_inputs`

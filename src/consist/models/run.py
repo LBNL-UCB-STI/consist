@@ -259,6 +259,19 @@ class Run(SQLModel, table=True):
     )
 
     @property
+    def is_cache_hit(self) -> bool:
+        """Whether this run was satisfied from a prior cached run."""
+        return bool(isinstance(self.meta, dict) and self.meta.get("cache_hit"))
+
+    @property
+    def cache_source_run_id(self) -> Optional[str]:
+        """The run ID of the upstream cache source, if recorded."""
+        if not isinstance(self.meta, dict):
+            return None
+        val = self.meta.get("cache_source")
+        return val if isinstance(val, str) and val else None
+
+    @property
     def duration_seconds(self) -> Optional[float]:
         """
         Calculate the duration of the run in seconds.
@@ -541,6 +554,16 @@ class RunResult(BaseModel):
     cache_hit: bool = False
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    @property
+    def is_cache_hit(self) -> bool:
+        """Whether this run result was satisfied from a prior cached run."""
+        return bool(self.cache_hit or self.run.is_cache_hit)
+
+    @property
+    def cache_source_run_id(self) -> Optional[str]:
+        """The run ID of the upstream cache source, if recorded."""
+        return self.run.cache_source_run_id
 
     @property
     def output(self) -> Optional[Artifact]:
