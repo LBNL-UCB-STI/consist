@@ -261,6 +261,39 @@ def test_digest_table_sqlite_reserved_identifiers_and_duplicate_cols(
         digest_table(expected_table, columns=["group", "group"], key=["group"])
 
 
+def test_digest_table_sqlite_security_and_validation(tmp_path: Path) -> None:
+    sqlite_db = tmp_path / "weird?name#1 .sqlite"
+    con = sqlite3.connect(sqlite_db)
+    con.execute('CREATE TABLE "items" ("id" INTEGER, "val" TEXT)')
+    con.execute("INSERT INTO \"items\" VALUES (1, 'a'), (2, 'b')")
+    con.execute('CREATE VIEW "items_view" AS SELECT * FROM "items"')
+    con.commit()
+    con.close()
+
+    # Path with URI special characters (?, #, space) works in read-only URI mode
+    expected = pa.Table.from_pydict({"id": [1, 2], "val": ["a", "b"]})
+    assert digest_table(sqlite_db, sqlite_table="items") == digest_table(expected)
+
+    # Nonexistent table raises ValueError instead of returning empty table digest
+    with pytest.raises(ValueError, match="SQLite table not found"):
+        digest_table(sqlite_db, sqlite_table="no_such_table")
+
+    # Views are rejected (restricted to base tables)
+    with pytest.raises(ValueError, match="SQLite table not found"):
+        digest_table(sqlite_db, sqlite_table="items_view")
+
+    # Nonexistent columns raise ValueError (preventing SQLite DQS string-literal fallback)
+    with pytest.raises(ValueError, match="Columns not found in SQLite table"):
+        digest_table(sqlite_db, sqlite_table="items", columns=["id", "nonexistent"])
+
+    # Empty or NUL-containing identifiers are rejected
+    with pytest.raises(ValueError, match="non-empty string without NUL bytes"):
+        digest_table(sqlite_db, sqlite_table="")
+
+    with pytest.raises(ValueError, match="non-empty string without NUL bytes"):
+        digest_table(sqlite_db, sqlite_table="items\x00drop")
+
+
 def test_digest_table_record_batch_csv_and_duckdb(tmp_path: Path) -> None:
     import duckdb
 

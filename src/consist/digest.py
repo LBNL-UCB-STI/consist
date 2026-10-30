@@ -263,6 +263,10 @@ def normalize_table_scalar(val: Any) -> bytes:
 
 
 def _quote_sql_ident(name: str) -> str:
+    if not isinstance(name, str) or not name or "\x00" in name:
+        raise ValueError(
+            "SQLite identifier must be a non-empty string without NUL bytes"
+        )
     return '"' + name.replace('"', '""') + '"'
 
 
@@ -319,22 +323,37 @@ def digest_table(
 
         if sqlite_table is not None:
             quoted_table = _quote_sql_ident(sqlite_table)
-            with closing(sqlite3.connect(str(source_path))) as con:
+            sqlite_uri = f"{source_path.resolve().as_uri()}?mode=ro"
+            with closing(sqlite3.connect(sqlite_uri, uri=True)) as con:
                 cur = con.cursor()
-                cols_to_query = (
-                    list(columns)
-                    if columns is not None
-                    else [
-                        row[1]
-                        for row in cur.execute(
-                            f"PRAGMA table_info({quoted_table})"
-                        ).fetchall()
-                    ]
-                )
-                if len(set(cols_to_query)) != len(cols_to_query):
+                cur.execute("PRAGMA trusted_schema = OFF")
+                cur.execute("PRAGMA query_only = ON")
+                exists = cur.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                    (sqlite_table,),
+                ).fetchone()
+                if exists is None:
+                    raise ValueError(f"SQLite table not found: {sqlite_table!r}")
+                actual_cols = [
+                    row[1]
+                    for row in cur.execute(
+                        f"PRAGMA table_info({quoted_table})"
+                    ).fetchall()
+                ]
+                if len(set(actual_cols)) != len(actual_cols):
                     raise ValueError(
                         "Duplicate column names are not supported in digest_table"
                     )
+                if columns is not None:
+                    cols_to_query = list(columns)
+                    actual_col_set = set(actual_cols)
+                    missing_cols = [c for c in cols_to_query if c not in actual_col_set]
+                    if missing_cols:
+                        raise ValueError(
+                            f"Columns not found in SQLite table {sqlite_table!r}: {missing_cols}"
+                        )
+                else:
+                    cols_to_query = actual_cols
                 if cols_to_query:
                     cols_sql = ", ".join(_quote_sql_ident(c) for c in cols_to_query)
                     rows = cur.execute(
