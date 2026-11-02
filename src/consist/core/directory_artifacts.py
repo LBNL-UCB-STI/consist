@@ -274,6 +274,8 @@ def get_validated_directory_manifest(artifact: Artifact) -> dict[str, Any] | Non
     meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
     raw_manifest = meta.get("directory_manifest")
     if raw_manifest is None:
+        if meta.get("directory_artifact") is True:
+            raise ValueError("directory artifact is missing a valid directory_manifest")
         return None
     if not isinstance(raw_manifest, Mapping):
         raise ValueError("directory artifact is missing a valid directory_manifest")

@@ -481,6 +481,79 @@ def test_materialize_artifact_supports_directory_sources(tmp_path: Path) -> None
     ) == "x"
 
 
+def test_materialize_artifact_directory_manifest_skips_corrupted_historical_root_for_valid_recovery_root(
+    tmp_path: Path,
+) -> None:
+    from consist.core.directory_artifacts import build_directory_manifest
+
+    historical_root = tmp_path / "historical"
+    historical_dir = historical_root / "outputs" / "skims.zarr"
+    (historical_dir / "nested").mkdir(parents=True)
+    (historical_dir / "nested" / "0.0").write_bytes(b"valid-chunk")
+
+    recovery_root = tmp_path / "archive"
+    recovery_dir = recovery_root / "outputs" / "skims.zarr"
+    (recovery_dir / "nested").mkdir(parents=True)
+    (recovery_dir / "nested" / "0.0").write_bytes(b"valid-chunk")
+
+    manifest = build_directory_manifest(recovery_dir)
+    # Corrupt the historical root copy so single-artifact materialization must
+    # skip it and recover from recovery_root.
+    (historical_dir / "nested" / "0.0").write_bytes(b"corrupted-chunk")
+
+    producer_run = _run("producer", run_dir=historical_root)
+    artifact = _artifact(
+        "skims",
+        "./outputs/skims.zarr",
+        run_id="producer",
+        driver="zarr",
+        hash_value=manifest["tree_hash"],
+        meta={
+            "directory_artifact": True,
+            "directory_manifest": manifest,
+            "recovery_roots": [str(recovery_root)],
+        },
+    )
+    tracker = _stub_tracker(
+        run_dir=tmp_path / "workspace",
+        outputs_by_run={"producer": [artifact]},
+        runs={"producer": producer_run},
+    )
+
+    result = materialize_artifact(
+        tracker,
+        artifact,
+        target_root=tmp_path / "restore",
+        source_root=None,
+        allowed_base=None,
+        preserve_existing=True,
+        on_missing="warn",
+        validate_content_hash="if-present",
+    )
+
+    assert result.status == "materialized_from_recovery_root"
+    assert result.resolvable
+    assert (
+        tmp_path / "restore" / "outputs" / "skims.zarr" / "nested" / "0.0"
+    ).read_bytes() == b"valid-chunk"
+
+    # When all candidate roots are corrupted, materialize_artifact should report
+    # hash_mismatch rather than missing_source.
+    (recovery_dir / "nested" / "0.0").write_bytes(b"also-corrupted")
+    corrupt_result = materialize_artifact(
+        tracker,
+        artifact,
+        target_root=tmp_path / "restore_corrupt",
+        source_root=None,
+        allowed_base=None,
+        preserve_existing=True,
+        on_missing="warn",
+        validate_content_hash="if-present",
+    )
+    assert corrupt_result.status == "hash_mismatch"
+    assert not corrupt_result.resolvable
+
+
 def test_materialize_artifact_direct_fallback_uses_tracker_uri_before_cwd(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

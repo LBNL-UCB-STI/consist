@@ -514,11 +514,14 @@ def _strict_requested_output_hydration(
                 output_artifact = outputs_by_key[key]
                 if destination.exists():
                     try:
-                        if is_valid_directory_artifact_tree(
+                        manifest_valid = is_valid_directory_artifact_tree(
                             destination, output_artifact
-                        ) is not False and _artifact_identity(
-                            destination
-                        ) == _artifact_identity(staged_path):
+                        )
+                        if manifest_valid is True or (
+                            manifest_valid is None
+                            and _artifact_identity(destination)
+                            == _artifact_identity(staged_path)
+                        ):
                             continue
                     except OSError as exc:
                         logging.warning(
@@ -552,14 +555,15 @@ def _strict_requested_output_hydration(
                 return None
             for key, destination in requested_paths.items():
                 output_artifact = outputs_by_key[key]
+                manifest_valid = is_valid_directory_artifact_tree(
+                    Path(destination), output_artifact
+                )
                 if (
                     not destination.exists()
-                    or is_valid_directory_artifact_tree(
-                        Path(destination), output_artifact
-                    )
-                    is False
+                    or manifest_valid is False
                     or (
-                        _artifact_identity(destination)
+                        manifest_valid is None
+                        and _artifact_identity(destination)
                         != _artifact_identity(staged_paths[key])
                     )
                 ):
