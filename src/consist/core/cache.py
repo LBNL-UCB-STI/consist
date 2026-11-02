@@ -20,10 +20,7 @@ from typing import (
     runtime_checkable,
 )
 
-from consist.core.directory_artifacts import (
-    validate_directory_manifest,
-    validate_directory_tree,
-)
+from consist.core.directory_artifacts import is_valid_directory_artifact_tree
 from consist.core.error_messages import format_problem_cause_fix
 from consist.core.output_sets import build_output_set_child_destinations
 from consist.core.resolved_binding import (
@@ -514,11 +511,14 @@ def _strict_requested_output_hydration(
             for key in requested_keys:
                 staged_path = staged_paths[key]
                 destination = Path(requested_paths[key])
+                output_artifact = outputs_by_key[key]
                 if destination.exists():
                     try:
-                        if _artifact_identity(destination) == _artifact_identity(
-                            staged_path
-                        ):
+                        if is_valid_directory_artifact_tree(
+                            destination, output_artifact
+                        ) is not False and _artifact_identity(
+                            destination
+                        ) == _artifact_identity(staged_path):
                             continue
                     except OSError as exc:
                         logging.warning(
@@ -536,7 +536,7 @@ def _strict_requested_output_hydration(
                     )
                     return None
                 candidate_created.append(destination)
-                items.append((outputs_by_key[key], staged_path, destination))
+                items.append((output_artifact, staged_path, destination))
 
             promoted = materialize_artifacts_from_sources(
                 items=items,
@@ -551,9 +551,17 @@ def _strict_requested_output_hydration(
                 )
                 return None
             for key, destination in requested_paths.items():
-                if not destination.exists() or (
-                    _artifact_identity(destination)
-                    != _artifact_identity(staged_paths[key])
+                output_artifact = outputs_by_key[key]
+                if (
+                    not destination.exists()
+                    or is_valid_directory_artifact_tree(
+                        Path(destination), output_artifact
+                    )
+                    is False
+                    or (
+                        _artifact_identity(destination)
+                        != _artifact_identity(staged_paths[key])
+                    )
                 ):
                     logging.debug(
                         "[Consist][cache] candidate %s rejected after materialization: "
@@ -1023,9 +1031,19 @@ def validate_cached_run_outputs(
     run_artifacts = tracker.get_artifacts_for_run(run.id)
     db = tracker.db
 
+    def _is_valid_cached_output_path(art: Artifact, candidate: Path) -> bool:
+        if not candidate.exists():
+            return False
+        manifest_valid = is_valid_directory_artifact_tree(candidate, art)
+        if manifest_valid is not None:
+            return manifest_valid
+        return True
+
     for art in run_artifacts.outputs.values():
         resolved_path = tracker.resolve_uri(art.container_uri)
-        if not Path(resolved_path).exists() and not art.meta.get("is_ingested", False):
+        if not _is_valid_cached_output_path(
+            art, Path(resolved_path)
+        ) and not art.meta.get("is_ingested", False):
             from consist.core.materialize import find_existing_recovery_source_path
             from consist.tools.mount_diagnostics import (
                 build_mount_resolution_hint,
@@ -1043,6 +1061,16 @@ def validate_cached_run_outputs(
                 artifact=art,
                 run=owning_run,
                 source_root=None,
+                source_validator=lambda candidate, art=art: (
+                    _is_valid_cached_output_path(art, candidate)
+                ),
+                preserve_raw_paths=bool(
+                    isinstance(art.meta, Mapping)
+                    and (
+                        art.meta.get("directory_artifact") is True
+                        or "directory_manifest" in art.meta
+                    )
+                ),
             )
             if recovery_source is not None:
                 continue
@@ -1095,6 +1123,9 @@ def materialize_missing_inputs(
         return
 
     def _should_preserve_existing_input(artifact: Artifact, path: Path) -> bool:
+        manifest_valid = is_valid_directory_artifact_tree(path, artifact)
+        if manifest_valid is not None:
+            return manifest_valid
         if not artifact.hash:
             return True
         if tracker.identity.hashing_strategy != "full":
@@ -1113,7 +1144,12 @@ def materialize_missing_inputs(
             return True
 
     def _recovery_source_matches_artifact(artifact: Artifact, path: Path) -> bool:
+        manifest_valid = is_valid_directory_artifact_tree(path, artifact)
+        if manifest_valid is False:
+            return False
         if not active_options.validate_materialized_inputs:
+            return True
+        if manifest_valid is True:
             return True
         if not artifact.hash:
             return True
@@ -1157,6 +1193,13 @@ def materialize_missing_inputs(
                 source_root=None,
                 source_validator=lambda path, artifact=artifact: (
                     _recovery_source_matches_artifact(artifact, path)
+                ),
+                preserve_raw_paths=bool(
+                    isinstance(artifact.meta, Mapping)
+                    and (
+                        artifact.meta.get("directory_artifact") is True
+                        or "directory_manifest" in artifact.meta
+                    )
                 ),
             )
         if source is not None:
@@ -1279,19 +1322,9 @@ def materialize_requested_inputs(
     def _artifact_hash_matches_path(artifact: Artifact, path: Path) -> bool:
         if not artifact.hash:
             return False
-        meta = artifact.meta if isinstance(artifact.meta, dict) else {}
-        if meta.get("directory_artifact") is True:
-            manifest = meta.get("directory_manifest")
-            if not isinstance(manifest, Mapping):
-                return False
-            try:
-                normalized_manifest = validate_directory_manifest(manifest)
-                if artifact.hash != normalized_manifest["tree_hash"]:
-                    return False
-                validate_directory_tree(path, normalized_manifest)
-            except (OSError, ValueError):
-                return False
-            return True
+        manifest_valid = is_valid_directory_artifact_tree(path, artifact)
+        if manifest_valid is not None:
+            return manifest_valid
         return tracker.identity.compute_file_checksum(path) == artifact.hash
 
     def _paths_match(source: Path, destination: Path) -> bool:

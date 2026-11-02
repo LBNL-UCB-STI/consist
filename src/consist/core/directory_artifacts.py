@@ -7,9 +7,12 @@ import shutil
 import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from consist.digest import canonical_json_sha256, file_sha256
+
+if TYPE_CHECKING:
+    from consist.models.artifact import Artifact
 
 
 _MANIFEST_VERSION = 1
@@ -258,6 +261,58 @@ def validate_directory_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
     if manifest.get("tree_hash") != canonical_json_sha256(identity):
         raise ValueError("directory artifact manifest tree hash is invalid")
     return {**identity, "tree_hash": manifest["tree_hash"]}
+
+
+def get_validated_directory_manifest(artifact: Artifact) -> dict[str, Any] | None:
+    """Return normalized directory manifest if ``artifact`` carries one.
+
+    Returns ``None`` if ``artifact`` does not represent a manifest-backed directory
+    (e.g. regular file, Zarr without ``directory_manifest``, or legacy directory).
+    Raises ``ValueError`` if ``directory_manifest`` is present but malformed or if
+    ``artifact.hash`` is present and disagrees with ``manifest["tree_hash"]``.
+    """
+    meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
+    raw_manifest = meta.get("directory_manifest")
+    if raw_manifest is None:
+        return None
+    if not isinstance(raw_manifest, Mapping):
+        raise ValueError("directory artifact is missing a valid directory_manifest")
+    normalized = validate_directory_manifest(raw_manifest)
+    if (
+        isinstance(artifact.hash, str)
+        and artifact.hash
+        and artifact.hash != normalized["tree_hash"]
+    ):
+        raise ValueError(
+            "directory artifact hash does not match directory_manifest.tree_hash"
+        )
+    return normalized
+
+
+def is_valid_directory_artifact_tree(path: Path, artifact: Artifact) -> bool | None:
+    """Validate ``path`` against ``artifact``'s directory manifest, if present.
+
+    Returns:
+      - ``None`` if ``artifact`` does not use ``directory_manifest`` validation.
+      - ``True`` if ``path`` exists and strictly satisfies ``validate_directory_tree``.
+      - ``False`` if ``artifact`` is a manifest-backed directory artifact and ``path``
+        is missing, corrupted, contains extra/missing entries or symlinks, or has an
+        invalid manifest.
+    """
+    meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
+    if meta.get("directory_artifact") is True and "directory_manifest" not in meta:
+        return False
+    try:
+        manifest = get_validated_directory_manifest(artifact)
+    except ValueError:
+        return False
+    if manifest is None:
+        return None
+    try:
+        validate_directory_tree(Path(path), manifest)
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 def materialize_directory_tree(

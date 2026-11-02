@@ -45,6 +45,7 @@ from consist.core.container_policy import validate_recovery_registration_policy
 from consist.core.directory_artifacts import (
     build_directory_manifest,
     build_shapefile_bundle_manifest,
+    is_valid_directory_artifact_tree,
     materialize_directory_tree,
     materialize_shapefile_bundle,
     validate_directory_destination,
@@ -2993,6 +2994,17 @@ def plan_run_output_hydration(
                     artifact=artifact,
                     run=owning_run,
                     source_root=source_root,
+                    source_validator=(
+                        (
+                            lambda candidate, artifact=artifact: (
+                                is_valid_directory_artifact_tree(candidate, artifact)
+                                is not False
+                            )
+                        )
+                        if _is_directory_artifact(artifact)
+                        else None
+                    ),
+                    preserve_raw_paths=_is_directory_artifact(artifact),
                 )
             )
             if _is_file_bundle_artifact(artifact) and source_path is not None:

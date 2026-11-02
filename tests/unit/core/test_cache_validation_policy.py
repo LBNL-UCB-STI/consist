@@ -156,3 +156,92 @@ def test_cache_validation_warning_includes_mount_hint(tmp_path, caplog) -> None:
     assert any("Mount root mismatch" in record.message for record in caplog.records)
     if tracker.engine:
         tracker.engine.dispose()
+
+
+@pytest.mark.parametrize("corruption", ["delete", "modify", "extra"])
+def test_cache_validation_eager_rejects_corrupted_directory_output_when_dir_exists(
+    tracker,
+    corruption: str,
+) -> None:
+    """
+    Eager validation must validate directory_manifest entries even when the
+    top-level directory still exists on disk.
+    """
+    dir_path = tracker.run_dir / "outputs" / f"skims_{corruption}.zarr"
+    (dir_path / "nested").mkdir(parents=True, exist_ok=True)
+    member = dir_path / "nested" / "0.0"
+    member.write_bytes(b"original-chunk")
+
+    with tracker.start_run(
+        f"seed_dir_{corruption}",
+        model=f"model_dir_{corruption}",
+        cache_mode="overwrite",
+    ):
+        tracker.log_output(dir_path, key="skims", artifact_kind="directory")
+
+    assert dir_path.is_dir()
+    if corruption == "delete":
+        member.unlink()
+    elif corruption == "modify":
+        member.write_bytes(b"mutated-chunk")
+    elif corruption == "extra":
+        (dir_path / "nested" / "extra.bin").write_bytes(b"unexpected")
+
+    with tracker.start_run(
+        f"check_dir_{corruption}",
+        model=f"model_dir_{corruption}",
+        cache_mode="reuse",
+        validate_cached_outputs="eager",
+    ) as t:
+        assert not t.is_cached
+
+
+def test_cache_validation_eager_recovers_corrupted_primary_directory_from_recovery_root(
+    tracker,
+    tmp_path: Path,
+) -> None:
+    """
+    Eager validation succeeds when the primary directory output in run_dir is
+    corrupted if a valid archived directory tree exists in recovery_roots, and
+    fails when both primary and recovery_roots copies are corrupted.
+    """
+    dir_path = tracker.run_dir / "outputs" / "skims_recovery.zarr"
+    (dir_path / "nested").mkdir(parents=True, exist_ok=True)
+    member = dir_path / "nested" / "0.0"
+    member.write_bytes(b"original-chunk")
+
+    with tracker.start_run(
+        "seed_dir_recovery",
+        model="model_dir_recovery",
+        cache_mode="overwrite",
+    ):
+        tracker.log_output(dir_path, key="skims", artifact_kind="directory")
+
+    archive_root = tmp_path / "archive"
+    tracker.archive_run_outputs("seed_dir_recovery", archive_root)
+
+    # Corrupt primary directory in run_dir while archive_root remains valid.
+    member.unlink()
+    assert dir_path.is_dir()
+
+    with tracker.start_run(
+        "check_dir_recovery_valid_archive",
+        model="model_dir_recovery",
+        cache_mode="reuse",
+        validate_cached_outputs="eager",
+    ) as t:
+        assert t.is_cached
+
+    # Now corrupt the archived copy in recovery_roots as well.
+    archived_member = (
+        archive_root / "outputs" / "skims_recovery.zarr" / "nested" / "0.0"
+    )
+    archived_member.write_bytes(b"corrupted-archive")
+
+    with tracker.start_run(
+        "check_dir_recovery_corrupted_archive",
+        model="model_dir_recovery",
+        cache_mode="reuse",
+        validate_cached_outputs="eager",
+    ) as t:
+        assert not t.is_cached

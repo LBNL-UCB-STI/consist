@@ -12,6 +12,8 @@ import consist.core.directory_artifacts as directory_artifacts
 from consist.core.directory_artifacts import (
     build_directory_manifest,
     build_shapefile_bundle_manifest,
+    get_validated_directory_manifest,
+    is_valid_directory_artifact_tree,
     materialize_directory_tree,
     materialize_shapefile_bundle,
     validate_directory_manifest,
@@ -19,6 +21,7 @@ from consist.core.directory_artifacts import (
     validate_shapefile_bundle_root,
 )
 from consist.core.tracker import Tracker
+from consist.models.artifact import Artifact
 
 
 def test_directory_manifest_is_stable_and_includes_empty_directories(
@@ -1165,3 +1168,99 @@ def test_directory_archive_rechecks_source_before_publication(
         tracker.archive_run_outputs("beam_race", archive_root)
 
     assert not (archive_root / "outputs" / "raw_od_skims.zarr").exists()
+
+
+def test_get_validated_directory_manifest_and_is_valid_directory_artifact_tree(
+    tmp_path: Path,
+) -> None:
+    regular_file = tmp_path / "regular.csv"
+    regular_file.write_text("a,b\n1,2\n")
+    file_artifact = Artifact(
+        key="regular",
+        container_uri="./regular.csv",
+        driver="csv",
+        hash="abc123",
+        meta={},
+    )
+    assert get_validated_directory_manifest(file_artifact) is None
+    assert is_valid_directory_artifact_tree(regular_file, file_artifact) is None
+
+    legacy_dir = tmp_path / "legacy_dir"
+    legacy_dir.mkdir()
+    legacy_artifact = Artifact(
+        key="legacy",
+        container_uri="./legacy_dir",
+        driver="zarr",
+        hash="abc123",
+        meta={},
+    )
+    assert get_validated_directory_manifest(legacy_artifact) is None
+    assert is_valid_directory_artifact_tree(legacy_dir, legacy_artifact) is None
+
+    missing_manifest_artifact = Artifact(
+        key="missing_manifest",
+        container_uri="./legacy_dir",
+        driver="zarr",
+        hash="abc123",
+        meta={"directory_artifact": True},
+    )
+    assert (
+        is_valid_directory_artifact_tree(legacy_dir, missing_manifest_artifact) is False
+    )
+
+    valid_dir = tmp_path / "skims.zarr"
+    (valid_dir / "nested").mkdir(parents=True)
+    nested_file = valid_dir / "nested" / "0.0"
+    nested_file.write_bytes(b"original-bytes")
+    manifest = build_directory_manifest(valid_dir)
+    dir_artifact = Artifact(
+        key="skims",
+        container_uri="./skims.zarr",
+        driver="zarr",
+        hash=manifest["tree_hash"],
+        meta={"directory_artifact": True, "directory_manifest": manifest},
+    )
+
+    assert get_validated_directory_manifest(dir_artifact) == manifest
+    assert is_valid_directory_artifact_tree(valid_dir, dir_artifact) is True
+
+    # Mutated nested file -> False
+    nested_file.write_bytes(b"corrupted-bytes")
+    assert is_valid_directory_artifact_tree(valid_dir, dir_artifact) is False
+
+    # Missing nested file -> False
+    nested_file.unlink()
+    assert is_valid_directory_artifact_tree(valid_dir, dir_artifact) is False
+
+    # Restore valid nested file, then add extra nested file -> False
+    nested_file.write_bytes(b"original-bytes")
+    assert is_valid_directory_artifact_tree(valid_dir, dir_artifact) is True
+    extra_file = valid_dir / "nested" / "extra.bin"
+    extra_file.write_bytes(b"extra")
+    assert is_valid_directory_artifact_tree(valid_dir, dir_artifact) is False
+    extra_file.unlink()
+    assert is_valid_directory_artifact_tree(valid_dir, dir_artifact) is True
+
+    # Symlink inside directory -> False
+    external = tmp_path / "external.txt"
+    external.write_text("outside")
+    symlink_path = valid_dir / "nested" / "link"
+    try:
+        symlink_path.symlink_to(external)
+    except OSError:
+        pass
+    else:
+        assert is_valid_directory_artifact_tree(valid_dir, dir_artifact) is False
+        symlink_path.unlink()
+
+    # Artifact hash mismatch with manifest["tree_hash"] -> ValueError / False
+    mismatched_artifact = Artifact(
+        key="skims",
+        container_uri="./skims.zarr",
+        driver="zarr",
+        hash="0" * 64,
+        meta={"directory_artifact": True, "directory_manifest": manifest},
+    )
+    with pytest.raises(ValueError, match="tree_hash"):
+        get_validated_directory_manifest(mismatched_artifact)
+    assert is_valid_directory_artifact_tree(valid_dir, mismatched_artifact) is False
