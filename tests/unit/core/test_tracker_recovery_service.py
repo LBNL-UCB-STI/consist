@@ -748,3 +748,116 @@ def test_archive_run_outputs_filters_virtual_ingested_and_syncs_last_consist_and
     assert archived_b.outputs["metrics_b"].meta["recovery_roots"] == [
         str(archive_root_no_prepend.resolve())
     ]
+
+
+def test_archive_directory_and_shapefile_under_separate_workspace_mount(
+    tmp_path: Path,
+) -> None:
+    """Archiving directory and shapefile artifacts under workspace:// when mounts['workspace'] != run_dir."""
+    run_dir = tmp_path / "consist_runs"
+    workspace_root = tmp_path / "workspace_root"
+    run_dir.mkdir(parents=True)
+    workspace_root.mkdir(parents=True)
+    db_path = str(tmp_path / "provenance.duckdb")
+
+    tracker = Tracker(
+        run_dir=run_dir,
+        db_path=db_path,
+        mounts={"workspace": str(workspace_root)},
+    )
+
+    zarr_dir = workspace_root / "beam_outputs" / "skims.zarr"
+    zarr_dir.mkdir(parents=True)
+    (zarr_dir / ".zgroup").write_text('{"zarr_format": 2}\n', encoding="utf-8")
+    (zarr_dir / "0.0").write_bytes(b"\x01\x02\x03\x04")
+
+    shp_dir = workspace_root / "beam_outputs" / "zones_bundle"
+    shp_dir.mkdir(parents=True)
+    for ext in (".shp", ".shx", ".dbf"):
+        (shp_dir / f"zones{ext}").write_bytes(f"payload-{ext}".encode("utf-8"))
+
+    with tracker.start_run("separate_ws_mount_run", model="beam"):
+        dir_art = tracker.log_output(zarr_dir, key="skims_zarr")
+        shp_art = tracker.log_output(shp_dir / "zones.shp", key="zones_shp")
+
+    assert dir_art.container_uri == "workspace://beam_outputs/skims.zarr"
+    assert shp_art.container_uri == "workspace://beam_outputs/zones_bundle/zones.shp"
+    assert "recovery_roots" not in (dir_art.meta or {})
+    assert "recovery_roots" not in (shp_art.meta or {})
+
+    # Verify get_historical_root and resolve_historical_path respect mounts["workspace"]
+    run_record = tracker.get_run("separate_ws_mount_run")
+    assert run_record is not None
+    assert (
+        tracker.fs.get_historical_root(
+            dir_art.container_uri,
+            original_run_dir=run_record.meta.get("_physical_run_dir"),
+            mounts_snapshot=run_record.meta.get("mounts"),
+            artifact_mount_root=dir_art.meta.get("mount_root"),
+        )
+        == workspace_root.resolve()
+    )
+    assert tracker.fs.resolve_historical_path(
+        dir_art.container_uri, str(run_dir)
+    ) == str(zarr_dir.resolve())
+
+    archive_root = tmp_path / "archive_store"
+    archived = tracker.archive_run_outputs(
+        "separate_ws_mount_run",
+        archive_root,
+        mode="copy",
+    )
+    expected_roots = [
+        str(workspace_root.resolve()),
+        str(archive_root.resolve()),
+    ]
+    assert set(archived.keys()) == {"skims_zarr", "zones_shp"}
+    assert archived.outputs["skims_zarr"].meta["recovery_roots"] == expected_roots
+    assert archived.outputs["zones_shp"].meta["recovery_roots"] == expected_roots
+    assert (archive_root / "beam_outputs" / "skims.zarr" / "0.0").exists()
+    assert (
+        archive_root / "beam_outputs" / "zones_bundle" / "zones.shp" / "zones.shp"
+    ).exists()
+
+    # Also verify fallback to _find_current_managed_uri_source when run record lacks mounts snapshot
+    zarr_dir_2 = workspace_root / "beam_outputs" / "iter_dir.zarr"
+    zarr_dir_2.mkdir(parents=True)
+    (zarr_dir_2 / ".zgroup").write_text('{"zarr_format": 2}\n', encoding="utf-8")
+    (zarr_dir_2 / "events.bin").write_bytes(b"\x05\x06\x07\x08")
+
+    shp_dir_2 = workspace_root / "beam_outputs" / "links_bundle"
+    shp_dir_2.mkdir(parents=True)
+    for ext in (".shp", ".shx", ".dbf"):
+        (shp_dir_2 / f"links{ext}").write_bytes(f"links-{ext}".encode("utf-8"))
+
+    with tracker.start_run("legacy_ws_mount_run", model="beam_legacy"):
+        dir_art_2 = tracker.log_output(zarr_dir_2, key="iter_dir")
+        shp_art_2 = tracker.log_output(shp_dir_2 / "links.shp", key="links_shp")
+
+    # Simulate a legacy run record without mounts snapshot or artifact mount_root,
+    # where original_run_dir points to run_dir (which doesn't contain beam_outputs)
+    dir_art_2.meta.pop("mount_root", None)
+    shp_art_2.meta.pop("mount_root", None)
+    tracker.db.update_artifact_meta(dir_art_2, dir_art_2.meta)
+    tracker.db.update_artifact_meta(shp_art_2, shp_art_2.meta)
+    legacy_run = tracker.get_run("legacy_ws_mount_run")
+    assert legacy_run is not None
+    legacy_run.meta.pop("mounts", None)
+    with tracker.db.session_scope() as session:
+        db_run = session.get(type(legacy_run), "legacy_ws_mount_run")
+        if db_run is not None:
+            db_run.meta = dict(legacy_run.meta)
+            session.add(db_run)
+            session.commit()
+
+    archive_root_2 = tmp_path / "archive_store_2"
+    archived_2 = tracker.archive_run_outputs(
+        "legacy_ws_mount_run",
+        archive_root_2,
+        mode="copy",
+    )
+    assert set(archived_2.keys()) == {"iter_dir", "links_shp"}
+    assert (archive_root_2 / "beam_outputs" / "iter_dir.zarr" / "events.bin").exists()
+    assert (
+        archive_root_2 / "beam_outputs" / "links_bundle" / "links.shp" / "links.shp"
+    ).exists()

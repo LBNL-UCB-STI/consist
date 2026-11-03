@@ -630,7 +630,7 @@ class TrackerArchiveService(_TrackerServiceBase):
         candidate = Path(self.fs.resolve_uri(artifact.container_uri))
         if not candidate.exists():
             return None
-        if not candidate.is_file():
+        if not candidate.is_file() or _is_file_bundle_artifact(artifact):
             return candidate
         if not artifact.hash:
             raise ValueError(
@@ -1415,21 +1415,51 @@ class TrackerArchiveService(_TrackerServiceBase):
         artifact: Artifact,
         producing_run: Any,
     ) -> Path | None:
-        if producing_run is None:
-            return None
-        from consist.core.materialize import find_existing_recovery_source_path
+        source_path: Path | None = None
+        if producing_run is not None:
+            from consist.core.materialize import find_existing_recovery_source_path
 
-        _, source_path, _ = find_existing_recovery_source_path(
-            self.tracker,
-            artifact=artifact,
-            run=producing_run,
-            source_root=None,
-            preserve_raw_paths=True,
-            source_validator=lambda candidate: (
-                is_valid_directory_artifact_tree(candidate, artifact) is not False
-            ),
-        )
+            _, source_path, _ = find_existing_recovery_source_path(
+                self.tracker,
+                artifact=artifact,
+                run=producing_run,
+                source_root=None,
+                preserve_raw_paths=True,
+                source_validator=lambda candidate: (
+                    is_valid_directory_artifact_tree(candidate, artifact) is not False
+                ),
+            )
+            if source_path is None:
+                _, source_path, _ = find_existing_recovery_source_path(
+                    self.tracker,
+                    artifact=artifact,
+                    run=producing_run,
+                    source_root=None,
+                    preserve_raw_paths=True,
+                )
+        if source_path is None and artifact.run_id is None and artifact.abs_path:
+            candidate = Path(artifact.abs_path)
+            if candidate.exists():
+                source_path = candidate
+        if source_path is None and artifact.run_id is None:
+            candidate = Path(self.resolve_uri(artifact.container_uri))
+            if candidate.exists():
+                source_path = candidate
         if source_path is None:
+            source_path = self._find_current_managed_uri_source(artifact)
+        return source_path
+
+    def _find_shapefile_bundle_archive_source(
+        self,
+        artifact: Artifact,
+    ) -> Path | None:
+        producing_run = (
+            self.get_run(str(artifact.run_id)) if artifact.run_id is not None else None
+        )
+        source_path: Path | None = None
+        if producing_run is not None:
+            from consist.core.materialize import find_existing_recovery_source_path
+
             _, source_path, _ = find_existing_recovery_source_path(
                 self.tracker,
                 artifact=artifact,
@@ -1437,6 +1467,16 @@ class TrackerArchiveService(_TrackerServiceBase):
                 source_root=None,
                 preserve_raw_paths=True,
             )
+        if source_path is None and artifact.run_id is None and artifact.abs_path:
+            candidate = Path(artifact.abs_path)
+            if candidate.exists():
+                source_path = candidate
+        if source_path is None and artifact.run_id is None:
+            candidate = Path(self.resolve_uri(artifact.container_uri))
+            if candidate.exists():
+                source_path = candidate
+        if source_path is None:
+            source_path = self._find_current_managed_uri_source(artifact)
         return source_path
 
     def _validate_excluded_output_set_directory(
@@ -1490,20 +1530,7 @@ class TrackerArchiveService(_TrackerServiceBase):
                 require_clean_root=True,
             )
             return
-        producing_run = (
-            self.get_run(str(artifact.run_id)) if artifact.run_id is not None else None
-        )
-        source_path: Path | None = None
-        if producing_run is not None:
-            from consist.core.materialize import find_existing_recovery_source_path
-
-            _, source_path, _ = find_existing_recovery_source_path(
-                self.tracker,
-                artifact=artifact,
-                run=producing_run,
-                source_root=None,
-                preserve_raw_paths=True,
-            )
+        source_path = self._find_shapefile_bundle_archive_source(artifact)
         if source_path is None or not source_path.exists():
             raise FileNotFoundError(
                 f"Cannot archive artifact {artifact.key!r}: source bytes are unavailable."
@@ -2146,18 +2173,7 @@ class TrackerArchiveService(_TrackerServiceBase):
             raise ValueError(
                 f"Artifact {artifact.key!r} does not have a rematerializable URI layout."
             )
-        producing_run = self.get_run(str(artifact.run_id)) if artifact.run_id else None
-        source_path: Path | None = None
-        if producing_run is not None:
-            from consist.core.materialize import find_existing_recovery_source_path
-
-            _, source_path, _ = find_existing_recovery_source_path(
-                self.tracker,
-                artifact=artifact,
-                run=producing_run,
-                source_root=None,
-                preserve_raw_paths=True,
-            )
+        source_path = self._find_shapefile_bundle_archive_source(artifact)
         if source_path is None or not source_path.exists():
             raise FileNotFoundError(
                 f"Cannot archive artifact {artifact.key!r}: source bytes are unavailable."
