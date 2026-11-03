@@ -1413,6 +1413,316 @@ def test_archive_run_outputs_moves_nested_manifest_scalar_after_registration(
     assert archived.outputs["annual"].recovery_roots == [str(archive_root.resolve())]
 
 
+@pytest.mark.parametrize("log_directory_first", [False, True])
+def test_archive_run_outputs_archives_excluded_nested_directory_with_output_set(
+    tracker: Tracker,
+    tmp_path: Path,
+    log_directory_first: bool,
+) -> None:
+    """An excluded directory artifact inside an OutputSet root archives alongside the set."""
+    calls = {"count": 0}
+
+    def produce_outputs(ctx) -> None:
+        calls["count"] += 1
+        it0_root = ctx.run_dir / "beam_outputs" / "it0"
+        iters_dir = it0_root / "ITERS" / "it.0"
+        zarr_root = iters_dir / "0.skims.zarr"
+        (zarr_root / "chunk").mkdir(parents=True)
+        (it0_root / "summary.csv").write_text(
+            "metric,value\ntrips,42\n", encoding="utf-8"
+        )
+        (iters_dir / "0.events.csv").write_text(
+            "time,type\n1,departure\n", encoding="utf-8"
+        )
+        (zarr_root / ".zgroup").write_text('{"zarr_format":2}\n', encoding="utf-8")
+        (zarr_root / "chunk" / "0.0").write_bytes(b"skim-bytes")
+
+    if not log_directory_first:
+        from consist.core.output_sets import register_output_sets
+
+        with tracker.start_run("beam_excluded_nested_order", model="beam") as t:
+            run_dir = t.run_artifact_dir()
+            it0_root = run_dir / "beam_outputs" / "it0"
+            iters_dir = it0_root / "ITERS" / "it.0"
+            zarr_root = iters_dir / "0.skims.zarr"
+            (zarr_root / "chunk").mkdir(parents=True)
+            (it0_root / "summary.csv").write_text(
+                "metric,value\ntrips,42\n", encoding="utf-8"
+            )
+            (iters_dir / "0.events.csv").write_text(
+                "time,type\n1,departure\n", encoding="utf-8"
+            )
+            (zarr_root / ".zgroup").write_text('{"zarr_format":2}\n', encoding="utf-8")
+            (zarr_root / "chunk" / "0.0").write_bytes(b"skim-bytes")
+            register_output_sets(
+                tracker=t,
+                output_sets={
+                    "beam_output_set": consist.OutputSet(
+                        root=it0_root,
+                        include="**/*",
+                        exclude=("*.skims.zarr", "*.skims.zarr/**"),
+                    )
+                },
+                config=None,
+                output_base_dir=run_dir,
+            )
+            t.log_artifact(
+                zarr_root,
+                key="skims_zarr",
+                direction="output",
+                directory_artifact=True,
+            )
+            run_id = t.current_consist.run.id
+    else:
+        first = tracker.run(
+            name="beam_excluded_nested_archive",
+            fn=produce_outputs,
+            output_paths={
+                "skims_zarr": consist.OutputArtifactSpec(
+                    path="beam_outputs/it0/ITERS/it.0/0.skims.zarr",
+                    meta={"directory_artifact": True},
+                )
+            },
+            output_sets={
+                "beam_output_set": consist.OutputSet(
+                    root="beam_outputs/it0",
+                    include="**/*",
+                    exclude=("*.skims.zarr", "*.skims.zarr/**"),
+                )
+            },
+            execution_options=consist.ExecutionOptions(inject_context="ctx"),
+        )
+        run_id = first.run.id
+
+    archive_root = tmp_path / f"archive_excluded_nested_{log_directory_first}"
+    archived = tracker.archive_run_outputs(run_id, archive_root)
+
+    assert set(archived.paths) == {"beam_output_set", "skims_zarr"}
+    assert (
+        archived["skims_zarr"]
+        == archived["beam_output_set"] / "ITERS" / "it.0" / "0.skims.zarr"
+    )
+    assert (archived["beam_output_set"] / "summary.csv").read_text(
+        encoding="utf-8"
+    ) == "metric,value\ntrips,42\n"
+    assert (archived["beam_output_set"] / "ITERS" / "it.0" / "0.events.csv").read_text(
+        encoding="utf-8"
+    ) == "time,type\n1,departure\n"
+    assert (archived["skims_zarr"] / "chunk" / "0.0").read_bytes() == b"skim-bytes"
+
+    parent = archived.outputs["beam_output_set"]
+    directory = archived.outputs["skims_zarr"]
+    manifest = tracker.get_artifact(parent.meta["manifest_artifact_id"])
+    assert manifest is not None
+    for artifact in [parent, directory, *tracker.get_child_artifacts(parent), manifest]:
+        assert artifact.recovery_roots == [str(archive_root.resolve())]
+
+    retried = tracker.archive_run_outputs(run_id, archive_root)
+    assert retried.paths == archived.paths
+
+    if log_directory_first:
+        shutil.rmtree(tracker.run_artifact_dir(first.run))
+        second = tracker.run(
+            name="beam_excluded_nested_archive",
+            fn=produce_outputs,
+            output_paths={
+                "skims_zarr": consist.OutputArtifactSpec(
+                    path="beam_outputs/it0/ITERS/it.0/0.skims.zarr",
+                    meta={"directory_artifact": True},
+                )
+            },
+            output_sets={
+                "beam_output_set": consist.OutputSet(
+                    root="beam_outputs/it0",
+                    include="**/*",
+                    exclude=("*.skims.zarr", "*.skims.zarr/**"),
+                )
+            },
+            cache_options=consist.CacheOptions(cache_hydration="outputs-requested"),
+            execution_options=consist.ExecutionOptions(inject_context="ctx"),
+        )
+        assert second.cache_hit is True
+        assert calls["count"] == 1
+        hydrated_root = tracker.run_artifact_dir(second.run) / "beam_outputs" / "it0"
+        assert (hydrated_root / "summary.csv").read_text(
+            encoding="utf-8"
+        ) == "metric,value\ntrips,42\n"
+        assert (
+            hydrated_root / "ITERS" / "it.0" / "0.skims.zarr" / "chunk" / "0.0"
+        ).read_bytes() == b"skim-bytes"
+
+
+@pytest.mark.parametrize(
+    "key_order",
+    [
+        ("skims_zarr", "beam_output_set"),
+        ("beam_output_set", "skims_zarr"),
+    ],
+)
+def test_archive_run_outputs_supports_split_archival_of_excluded_nested_directory(
+    tracker: Tracker,
+    tmp_path: Path,
+    key_order: tuple[str, str],
+) -> None:
+    """Archiving an excluded nested directory and its enclosing OutputSet in separate calls succeeds."""
+
+    def produce_outputs(ctx) -> None:
+        it0_root = ctx.run_dir / "beam_outputs" / "it0"
+        iters_dir = it0_root / "ITERS" / "it.0"
+        zarr_root = iters_dir / "0.skims.zarr"
+        zarr_root.mkdir(parents=True)
+        (it0_root / "summary.csv").write_text(
+            "metric,value\ntrips,42\n", encoding="utf-8"
+        )
+        (iters_dir / "0.events.csv").write_text(
+            "time,type\n1,departure\n", encoding="utf-8"
+        )
+        (zarr_root / ".zgroup").write_text('{"zarr_format":2}\n', encoding="utf-8")
+
+    result = tracker.run(
+        name=f"split_archive_{key_order[0]}",
+        fn=produce_outputs,
+        output_paths={
+            "skims_zarr": consist.OutputArtifactSpec(
+                path="beam_outputs/it0/ITERS/it.0/0.skims.zarr",
+                meta={"directory_artifact": True},
+            )
+        },
+        output_sets={
+            "beam_output_set": consist.OutputSet(
+                root="beam_outputs/it0",
+                include="**/*",
+                exclude=("*.skims.zarr", "*.skims.zarr/**"),
+            )
+        },
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+    archive_root = tmp_path / f"split_archive_{key_order[0]}"
+
+    first_archived = tracker.archive_run_outputs(
+        result.run.id, archive_root, keys=[key_order[0]]
+    )
+    second_archived = tracker.archive_run_outputs(
+        result.run.id, archive_root, keys=[key_order[1]]
+    )
+
+    assert set(first_archived.paths) == {key_order[0]}
+    assert set(second_archived.paths) == {key_order[1]}
+
+    full_archived = tracker.archive_run_outputs(result.run.id, archive_root)
+    assert (full_archived["skims_zarr"] / ".zgroup").read_text(
+        encoding="utf-8"
+    ) == '{"zarr_format":2}\n'
+    assert (
+        full_archived["beam_output_set"] / "ITERS" / "it.0" / "0.events.csv"
+    ).read_text(encoding="utf-8") == "time,type\n1,departure\n"
+
+
+def test_archive_run_outputs_moves_excluded_nested_directory_and_scalar_with_output_set(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    """Move mode archives excluded nested directory and scalar outputs and cleans up sources."""
+
+    def produce_outputs(ctx) -> None:
+        it0_root = ctx.run_dir / "beam_outputs" / "it0"
+        zarr_root = it0_root / "ITERS" / "it.0" / "0.skims.zarr"
+        zarr_root.mkdir(parents=True)
+        (it0_root / "summary.csv").write_text(
+            "metric,value\ntrips,42\n", encoding="utf-8"
+        )
+        (it0_root / "ITERS" / "it.0" / "debug.log").write_text(
+            "debug line\n", encoding="utf-8"
+        )
+        (zarr_root / ".zgroup").write_text('{"zarr_format":2}\n', encoding="utf-8")
+
+    result = tracker.run(
+        name="move_excluded_nested_outputs",
+        fn=produce_outputs,
+        output_paths={
+            "skims_zarr": consist.OutputArtifactSpec(
+                path="beam_outputs/it0/ITERS/it.0/0.skims.zarr",
+                meta={"directory_artifact": True},
+            ),
+            "debug_log": "beam_outputs/it0/ITERS/it.0/debug.log",
+        },
+        output_sets={
+            "beam_output_set": consist.OutputSet(
+                root="beam_outputs/it0",
+                include="**/*",
+                exclude=("*.skims.zarr", "*.skims.zarr/**", "*.log"),
+            )
+        },
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+    source_root = tracker.run_artifact_dir(result.run) / "beam_outputs" / "it0"
+    archive_root = tmp_path / "move_excluded_nested_outputs"
+
+    archived = tracker.archive_run_outputs(result.run.id, archive_root, mode="move")
+
+    assert not source_root.exists()
+    assert (archived["skims_zarr"] / ".zgroup").read_text(
+        encoding="utf-8"
+    ) == '{"zarr_format":2}\n'
+    assert archived["debug_log"].read_text(encoding="utf-8") == "debug line\n"
+    assert (archived["beam_output_set"] / "summary.csv").read_text(
+        encoding="utf-8"
+    ) == "metric,value\ntrips,42\n"
+
+
+def test_run_completion_archive_policy_archives_output_set_and_excluded_nested_directory(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    """Automatic run-completion archival supports excluded nested directory artifacts."""
+    archive_root = tmp_path / "auto_archive"
+
+    def produce_outputs(ctx) -> None:
+        it0_root = ctx.run_dir / "beam_outputs" / "it0"
+        zarr_root = it0_root / "ITERS" / "it.0" / "0.skims.zarr"
+        zarr_root.mkdir(parents=True)
+        (it0_root / "summary.csv").write_text(
+            "metric,value\ntrips,42\n", encoding="utf-8"
+        )
+        (zarr_root / ".zgroup").write_text('{"zarr_format":2}\n', encoding="utf-8")
+
+    result = tracker.run(
+        name="auto_archive_beam_outputs",
+        fn=produce_outputs,
+        output_paths={
+            "skims_zarr": consist.OutputArtifactSpec(
+                path="beam_outputs/it0/ITERS/it.0/0.skims.zarr",
+                meta={"directory_artifact": True},
+            )
+        },
+        output_sets={
+            "beam_output_set": consist.OutputSet(
+                root="beam_outputs/it0",
+                include="**/*",
+                exclude=("*.skims.zarr", "*.skims.zarr/**"),
+            )
+        },
+        output_policy=consist.OutputPolicyOptions(
+            run_completion_archive=consist.RunCompletionArchivePolicy(
+                archive_root=archive_root,
+                mode="copy",
+            )
+        ),
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+
+    expected_root = str(archive_root.resolve())
+    assert result.outputs["beam_output_set"].recovery_roots == [expected_root]
+    assert result.outputs["skims_zarr"].recovery_roots == [expected_root]
+    archived_it0 = Path(
+        tracker.fs.resolve_historical_path(
+            result.outputs["beam_output_set"].container_uri, archive_root
+        )
+    )
+    assert (archived_it0 / "summary.csv").is_file()
+    assert (archived_it0 / "ITERS" / "it.0" / "0.skims.zarr" / ".zgroup").is_file()
+
+
 def test_archive_run_outputs_rejects_unsafe_output_set_member_before_registration(
     tracker: Tracker,
     tmp_path: Path,
