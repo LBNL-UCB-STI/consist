@@ -19,6 +19,7 @@ from consist.core.directory_artifacts import (
     materialize_shapefile_bundle,
     validate_directory_manifest,
     validate_directory_tree,
+    validate_shapefile_bundle_root,
 )
 from consist.core.materialize import (
     ArchivedRunOutputFile,
@@ -125,18 +126,19 @@ class _ExcludedOutputSetScalar:
     artifact: Artifact
     relative_path: str
     destination: Path
-    content_hash: str
+    content_hash: str | None
 
 
 @dataclass(frozen=True, slots=True)
 class _ExcludedOutputSetDirectory:
-    """One directory artifact excluded from an OutputSet whose path sits under its root."""
+    """One directory or bundle output excluded from an OutputSet under its root."""
 
     key: str
     artifact: Artifact
     relative_subtree: str
     destination: Path
     manifest: dict[str, Any]
+    bundle_entry: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -586,6 +588,40 @@ class TrackerArchiveService(_TrackerServiceBase):
             for entry in file_entries
         )
 
+    @classmethod
+    def _is_shapefile_bundle_excluded(
+        cls,
+        relative_to_set: str,
+        manifest: Mapping[str, Any],
+        exclude_patterns: Sequence[str],
+    ) -> bool:
+        """Return whether a nested shapefile bundle is excluded from an OutputSet."""
+        if cls._is_relative_path_excluded(
+            relative_to_set, exclude_patterns, is_directory=False
+        ) or cls._is_relative_path_excluded(
+            relative_to_set, exclude_patterns, is_directory=True
+        ):
+            return True
+        entries = manifest.get("entries")
+        if not isinstance(entries, Sequence):
+            return False
+        parent_rel = Path(relative_to_set).parent
+        file_entries = [
+            entry
+            for entry in entries
+            if isinstance(entry, Mapping)
+            and entry.get("kind") == "file"
+            and isinstance(entry.get("path"), str)
+        ]
+        return bool(file_entries) and all(
+            cls._is_relative_path_excluded(
+                _normalize_output_set_relative_path(parent_rel / entry["path"]),
+                exclude_patterns,
+                is_directory=False,
+            )
+            for entry in file_entries
+        )
+
     @staticmethod
     def _overlaps_output_set_members(
         destination: Path,
@@ -598,6 +634,35 @@ class TrackerArchiveService(_TrackerServiceBase):
             or destination.is_relative_to(member.destination)
             for member in members
         )
+
+    @classmethod
+    def _overlaps_shapefile_bundle_members(
+        cls,
+        plan_destination: Path,
+        relative_to_set: str,
+        manifest: Mapping[str, Any],
+        members: Sequence[_OutputSetArchiveMember],
+    ) -> bool:
+        """Return whether a shapefile bundle or any of its sidecars overlaps set members."""
+        if cls._overlaps_output_set_members(
+            plan_destination / relative_to_set, members
+        ):
+            return True
+        parent_rel = Path(relative_to_set).parent
+        for entry in manifest.get("entries", ()):
+            if not isinstance(entry, Mapping) or not isinstance(entry.get("path"), str):
+                continue
+            try:
+                sidecar_rel = _normalize_output_set_relative_path(
+                    parent_rel / entry["path"]
+                )
+            except ValueError:
+                return True
+            if cls._overlaps_output_set_members(
+                plan_destination / sidecar_rel, members
+            ):
+                return True
+        return False
 
     def _collect_excluded_nested_outputs_for_plan(
         self,
@@ -659,13 +724,30 @@ class TrackerArchiveService(_TrackerServiceBase):
                     )
                 continue
             if _is_file_bundle_artifact(candidate):
+                try:
+                    bundle_entry, bundle_manifest = _shapefile_bundle_metadata(
+                        candidate
+                    )
+                except ValueError:
+                    continue
+                if not self._overlaps_shapefile_bundle_members(
+                    destination, relative_to_set, bundle_manifest, members
+                ) and self._is_shapefile_bundle_excluded(
+                    relative_to_set, bundle_manifest, exclude_patterns
+                ):
+                    excluded_directories.append(
+                        _ExcludedOutputSetDirectory(
+                            key=output_key,
+                            artifact=candidate,
+                            relative_subtree=relative_to_set,
+                            destination=candidate_destination,
+                            manifest=bundle_manifest,
+                            bundle_entry=bundle_entry,
+                        )
+                    )
                 continue
-            if (
-                isinstance(candidate.hash, str)
-                and candidate.hash
-                and self._is_relative_path_excluded(
-                    relative_to_set, exclude_patterns, is_directory=False
-                )
+            if self._is_relative_path_excluded(
+                relative_to_set, exclude_patterns, is_directory=False
             ):
                 excluded_scalars.append(
                     _ExcludedOutputSetScalar(
@@ -673,7 +755,11 @@ class TrackerArchiveService(_TrackerServiceBase):
                         artifact=candidate,
                         relative_path=relative_to_set,
                         destination=candidate_destination,
-                        content_hash=candidate.hash,
+                        content_hash=(
+                            candidate.hash
+                            if isinstance(candidate.hash, str) and candidate.hash
+                            else None
+                        ),
                     )
                 )
         return (
@@ -1070,16 +1156,34 @@ class TrackerArchiveService(_TrackerServiceBase):
                     output_set_key=output_set_key,
                 )
                 continue
+            if _is_file_bundle_artifact(artifact):
+                bundle_entry, bundle_manifest = _shapefile_bundle_metadata(artifact)
+                if (
+                    not overlaps_members
+                    and not self._overlaps_shapefile_bundle_members(
+                        plan.destination,
+                        relative_to_set,
+                        bundle_manifest,
+                        plan.members,
+                    )
+                    and self._is_shapefile_bundle_excluded(
+                        relative_to_set, bundle_manifest, plan.exclude_patterns
+                    )
+                ):
+                    self._validate_excluded_output_set_shapefile_bundle(
+                        artifact, destination, bundle_entry, bundle_manifest
+                    )
+                    continue
+                raise ValueError(
+                    f"Nested output {key!r} is not a manifest member of "
+                    f"OutputSet {output_set_key!r}."
+                )
             matching_members = [
                 member for member in plan.members if member.destination == destination
             ]
             if not matching_members:
-                if (
-                    not overlaps_members
-                    and not _is_file_bundle_artifact(artifact)
-                    and self._is_relative_path_excluded(
-                        relative_to_set, plan.exclude_patterns, is_directory=False
-                    )
+                if not overlaps_members and self._is_relative_path_excluded(
+                    relative_to_set, plan.exclude_patterns, is_directory=False
                 ):
                     self._validate_excluded_output_set_scalar(artifact, destination)
                     continue
@@ -1163,6 +1267,46 @@ class TrackerArchiveService(_TrackerServiceBase):
             )
         validate_directory_tree(source_path, manifest)
 
+    def _validate_excluded_output_set_shapefile_bundle(
+        self,
+        artifact: Artifact,
+        destination: Path,
+        entry: str,
+        manifest: Mapping[str, Any],
+    ) -> None:
+        """Validate an excluded nested shapefile bundle artifact before archival."""
+        if destination.exists():
+            if not destination.is_dir():
+                raise ValueError(
+                    f"shapefile bundle destination type mismatch: {destination}"
+                )
+            validate_shapefile_bundle_root(
+                destination,
+                entry,
+                manifest,
+                require_clean_root=True,
+            )
+            return
+        producing_run = (
+            self.get_run(str(artifact.run_id)) if artifact.run_id is not None else None
+        )
+        source_path: Path | None = None
+        if producing_run is not None:
+            from consist.core.materialize import find_existing_recovery_source_path
+
+            _, source_path, _ = find_existing_recovery_source_path(
+                self.tracker,
+                artifact=artifact,
+                run=producing_run,
+                source_root=None,
+                preserve_raw_paths=True,
+            )
+        if source_path is None or not source_path.exists():
+            raise FileNotFoundError(
+                f"Cannot archive artifact {artifact.key!r}: source bytes are unavailable."
+            )
+        validate_shapefile_bundle_root(source_path.parent, entry, manifest)
+
     def _find_scalar_archive_source(self, artifact: Artifact) -> Path:
         """Resolve and validate the source file for archiving a scalar artifact."""
         source_path: Path | None = None
@@ -1210,6 +1354,7 @@ class TrackerArchiveService(_TrackerServiceBase):
                 )
             if (
                 artifact.hash
+                and self.identity.hashing_strategy == "full"
                 and self.identity.compute_file_checksum(str(destination))
                 != artifact.hash
             ):
@@ -1344,9 +1489,17 @@ class TrackerArchiveService(_TrackerServiceBase):
         for excluded_dir in excluded_directories:
             if excluded_dir.relative_subtree not in actual_directories:
                 continue
-            validate_directory_tree(
-                destination / excluded_dir.relative_subtree, excluded_dir.manifest
-            )
+            if excluded_dir.bundle_entry is not None:
+                validate_shapefile_bundle_root(
+                    destination / excluded_dir.relative_subtree,
+                    excluded_dir.bundle_entry,
+                    excluded_dir.manifest,
+                    require_clean_root=True,
+                )
+            else:
+                validate_directory_tree(
+                    destination / excluded_dir.relative_subtree, excluded_dir.manifest
+                )
             present_excluded_directories.add(excluded_dir.relative_subtree)
             parent = Path(excluded_dir.relative_subtree).parent
             while parent != Path("."):
@@ -1364,7 +1517,9 @@ class TrackerArchiveService(_TrackerServiceBase):
                 continue
             scalar_path = destination / excluded_scalar.relative_path
             if (
-                self.identity.compute_file_checksum(scalar_path)
+                excluded_scalar.content_hash is not None
+                and self.identity.hashing_strategy == "full"
+                and self.identity.compute_file_checksum(scalar_path)
                 != excluded_scalar.content_hash
             ):
                 raise ValueError(

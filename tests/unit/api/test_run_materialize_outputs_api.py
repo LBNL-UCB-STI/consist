@@ -1793,6 +1793,153 @@ def test_run_completion_archive_policy_archives_output_set_and_excluded_nested_d
     assert (archived_it0 / "ITERS" / "it.0" / "0.skims.zarr" / ".zgroup").is_file()
 
 
+@pytest.mark.parametrize(
+    "key_order",
+    [
+        ("beam_output_set", "roads_shp"),
+        ("roads_shp", "beam_output_set"),
+    ],
+)
+def test_archive_run_outputs_supports_excluded_nested_shapefile_bundle(
+    tracker: Tracker,
+    tmp_path: Path,
+    key_order: tuple[str, str],
+) -> None:
+    """Excluded shapefile bundles under an OutputSet root archive cleanly in any order and in move mode."""
+
+    def produce_outputs(ctx) -> None:
+        it0_root = ctx.run_dir / "beam_outputs" / "it0"
+        gis_dir = it0_root / "gis"
+        gis_dir.mkdir(parents=True)
+        (it0_root / "summary.csv").write_text(
+            "metric,value\ntrips,42\n", encoding="utf-8"
+        )
+        (gis_dir / "roads.shp").write_bytes(b"shp-bytes")
+        (gis_dir / "roads.shx").write_bytes(b"shx-bytes")
+        (gis_dir / "roads.dbf").write_bytes(b"dbf-bytes")
+
+    result = tracker.run(
+        name=f"archive_excluded_shapefile_{key_order[0]}",
+        fn=produce_outputs,
+        output_paths={"roads_shp": "beam_outputs/it0/gis/roads.shp"},
+        output_sets={
+            "beam_output_set": consist.OutputSet(
+                root="beam_outputs/it0",
+                include="**/*",
+                exclude=("gis/**",),
+            )
+        },
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+    archive_root = tmp_path / f"archive_shapefile_{key_order[0]}"
+
+    first_archived = tracker.archive_run_outputs(
+        result.run.id, archive_root, keys=[key_order[0]]
+    )
+    second_archived = tracker.archive_run_outputs(
+        result.run.id, archive_root, keys=[key_order[1]]
+    )
+    moved_archive_root = tmp_path / f"move_shapefile_{key_order[0]}"
+    moved = tracker.archive_run_outputs(result.run.id, moved_archive_root, mode="move")
+
+    assert set(first_archived.paths) == {key_order[0]}
+    assert set(second_archived.paths) == {key_order[1]}
+    assert (moved["roads_shp"] / "roads.shp").read_bytes() == b"shp-bytes"
+    assert (moved["roads_shp"] / "roads.shx").read_bytes() == b"shx-bytes"
+    assert (moved["roads_shp"] / "roads.dbf").read_bytes() == b"dbf-bytes"
+    assert (moved["beam_output_set"] / "summary.csv").read_text(
+        encoding="utf-8"
+    ) == "metric,value\ntrips,42\n"
+    source_root = tracker.run_artifact_dir(result.run) / "beam_outputs" / "it0"
+    assert not source_root.exists()
+
+
+def test_archive_run_outputs_rejects_partially_excluded_shapefile_bundle(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    """A shapefile bundle whose sidecars are OutputSet members cannot be treated as disjointly excluded."""
+
+    def produce_outputs(ctx) -> None:
+        it0_root = ctx.run_dir / "beam_outputs" / "it0"
+        it0_root.mkdir(parents=True)
+        (it0_root / "summary.csv").write_text(
+            "metric,value\ntrips,42\n", encoding="utf-8"
+        )
+        (it0_root / "roads.shp").write_bytes(b"shp-bytes")
+        (it0_root / "roads.shx").write_bytes(b"shx-bytes")
+        (it0_root / "roads.dbf").write_bytes(b"dbf-bytes")
+
+    result = tracker.run(
+        name="partial_shapefile_overlap",
+        fn=produce_outputs,
+        output_paths={"roads_shp": "beam_outputs/it0/roads.shp"},
+        output_sets={
+            "beam_output_set": consist.OutputSet(
+                root="beam_outputs/it0",
+                include="*",
+                exclude=("roads.shp",),
+            )
+        },
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Nested output 'roads_shp' is not a manifest member of OutputSet 'beam_output_set'",
+    ):
+        tracker.archive_run_outputs(
+            result.run.id, tmp_path / "partial_shapefile_archive"
+        )
+
+
+def test_archive_run_outputs_supports_excluded_nested_scalar_without_hash(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    """Excluded nested scalars without a persisted hash can still be pre-archived and archived alongside an OutputSet."""
+
+    def produce_outputs(ctx) -> None:
+        it0_root = ctx.run_dir / "beam_outputs" / "it0"
+        it0_root.mkdir(parents=True)
+        (it0_root / "summary.csv").write_text(
+            "metric,value\ntrips,42\n", encoding="utf-8"
+        )
+        (it0_root / "debug.log").write_text("debug line\n", encoding="utf-8")
+
+    result = tracker.run(
+        name="excluded_no_hash_scalar",
+        fn=produce_outputs,
+        output_paths={"debug_log": "beam_outputs/it0/debug.log"},
+        output_sets={
+            "beam_output_set": consist.OutputSet(
+                root="beam_outputs/it0",
+                include="*.csv",
+                exclude=("*.log",),
+            )
+        },
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+    assert tracker.db is not None
+    with tracker.db.session_scope() as session:
+        db_artifact = session.get(Artifact, result.outputs["debug_log"].id)
+        assert db_artifact is not None
+        db_artifact.hash = None
+        session.add(db_artifact)
+        session.commit()
+    tracker._run_artifacts_cache.clear()
+
+    archive_root = tmp_path / "excluded_no_hash_archive"
+    first = tracker.archive_run_outputs(result.run.id, archive_root, keys=["debug_log"])
+    second = tracker.archive_run_outputs(result.run.id, archive_root)
+
+    assert first["debug_log"].read_text(encoding="utf-8") == "debug line\n"
+    assert (second["beam_output_set"] / "summary.csv").read_text(
+        encoding="utf-8"
+    ) == "metric,value\ntrips,42\n"
+    assert second["debug_log"].read_text(encoding="utf-8") == "debug line\n"
+
+
 def test_archive_run_outputs_rejects_unsafe_output_set_member_before_registration(
     tracker: Tracker,
     tmp_path: Path,
