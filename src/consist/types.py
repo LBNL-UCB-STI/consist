@@ -398,30 +398,16 @@ def _validate_string_capture_pattern(pattern: str) -> None:
         compiled = re.compile(f"^(?:{pattern})$")
     except re.error as exc:
         raise ValueError(f"invalid string capture regex {pattern!r}: {exc}") from exc
+    if compiled.groups != 0:
+        raise ValueError(
+            "string capture pattern must not contain capturing groups; use non-capturing '(?:...)' instead"
+        )
     if compiled.fullmatch("") is not None:
         raise ValueError("string capture pattern must not match empty strings")
     if re.search(pattern, "/") or re.search(pattern, "\\"):
         raise ValueError(
             "string capture pattern must not match path separators ('/' or '\\\\')"
         )
-    for probe in (
-        "/",
-        "\\",
-        "/" * 8,
-        "\\" * 8,
-        "a/b",
-        "a\\b",
-        "aa/bb",
-        "aa\\bb",
-        "/a",
-        "a/",
-        "\\a",
-        "a\\",
-    ):
-        if compiled.fullmatch(probe) is not None:
-            raise ValueError(
-                "string capture pattern must not match path separators ('/' or '\\\\')"
-            )
 
 
 @dataclass(frozen=True, slots=True)

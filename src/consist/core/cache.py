@@ -56,7 +56,12 @@ class CacheDb(Protocol):
 @runtime_checkable
 class CacheFs(Protocol):
     def resolve_historical_path(
-        self, uri: str, original_run_dir: Optional[str]
+        self,
+        uri: str,
+        original_run_dir: Optional[str],
+        *,
+        mounts_snapshot: Optional[Mapping[str, str]] = None,
+        artifact_mount_root: Optional[str] = None,
     ) -> str: ...
 
     def normalize_recovery_roots(
@@ -1362,7 +1367,7 @@ def materialize_requested_inputs(
 
     allowed_base = _allowed_materialization_roots(tracker, target_run=run)
     staged: dict[str, str] = {}
-    run_dir_cache: dict[str, Optional[str]] = {}
+    run_cache: dict[str, Any] = {}
 
     def _file_hash(path: Path) -> str:
         digest = hashlib.sha256()
@@ -1430,19 +1435,39 @@ def materialize_requested_inputs(
 
         if tracker.db is not None and artifact.run_id:
             run_id = str(artifact.run_id)
-            if run_id not in run_dir_cache:
-                prior_run = tracker.db.get_run(run_id)
-                run_dir_cache[run_id] = (
-                    prior_run.meta.get("_physical_run_dir")
-                    if prior_run and prior_run.meta
-                    else None
-                )
-            original_run_dir = run_dir_cache.get(run_id)
-            if original_run_dir:
+            if run_id not in run_cache:
+                run_cache[run_id] = tracker.db.get_run(run_id)
+            prior_run = run_cache.get(run_id)
+            prior_meta = (
+                prior_run.meta
+                if prior_run is not None and isinstance(prior_run.meta, Mapping)
+                else {}
+            )
+            original_run_dir = prior_meta.get("_physical_run_dir")
+            mounts_snapshot_raw = prior_meta.get("mounts")
+            mounts_snapshot = (
+                {
+                    str(k): str(v)
+                    for k, v in mounts_snapshot_raw.items()
+                    if isinstance(k, str) and isinstance(v, str)
+                }
+                if isinstance(mounts_snapshot_raw, Mapping)
+                else None
+            )
+            artifact_meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
+            mount_root_raw = artifact_meta.get("mount_root")
+            artifact_mount_root = (
+                mount_root_raw
+                if isinstance(mount_root_raw, str) and mount_root_raw
+                else None
+            )
+            if original_run_dir or mounts_snapshot or artifact_mount_root:
                 historical = Path(
                     tracker.fs.resolve_historical_path(
                         artifact.container_uri,
-                        original_run_dir,
+                        original_run_dir if isinstance(original_run_dir, str) else None,
+                        mounts_snapshot=mounts_snapshot,
+                        artifact_mount_root=artifact_mount_root,
                     )
                 )
                 if historical.exists():
@@ -1451,6 +1476,13 @@ def materialize_requested_inputs(
         return None
 
     staged_by_destination: dict[Path, uuid.UUID] = {}
+
+    def _mark_staged(key: str, path: Path, artifact: Artifact) -> None:
+        resolved_str = str(path)
+        artifact.abs_path = resolved_str
+        staged[key] = resolved_str
+        if artifact.id is not None:
+            staged_by_destination[path] = artifact.id
 
     for key, destination in requested_paths.items():
         is_strict_snapshot = active_options.requested_input_strict_snapshot
@@ -1514,8 +1546,7 @@ def materialize_requested_inputs(
             artifact.id is not None
             and staged_by_destination.get(destination_path) == artifact.id
         ):
-            artifact.abs_path = str(destination_path)
-            staged[key] = str(destination_path)
+            _mark_staged(key, destination_path, artifact)
             continue
 
         source_path = _resolve_source(artifact)
@@ -1527,10 +1558,7 @@ def materialize_requested_inputs(
                 and artifact.hash
                 and _artifact_hash_matches_path(artifact, destination_path)
             ):
-                artifact.abs_path = str(destination_path)
-                staged[key] = str(destination_path)
-                if artifact.id is not None:
-                    staged_by_destination[destination_path] = artifact.id
+                _mark_staged(key, destination_path, artifact)
                 continue
             if source_path is not None and _paths_match(source_path, destination_path):
                 if (
@@ -1550,10 +1578,7 @@ def materialize_requested_inputs(
                             ),
                         )
                     )
-                artifact.abs_path = str(destination_path)
-                staged[key] = str(destination_path)
-                if artifact.id is not None:
-                    staged_by_destination[destination_path] = artifact.id
+                _mark_staged(key, destination_path, artifact)
                 continue
             if requested_mode != "copy":
                 raise ValueError(
@@ -1603,20 +1628,14 @@ def materialize_requested_inputs(
                             ),
                         )
                     )
-                artifact.abs_path = str(staged_path)
-                staged[key] = str(staged_path)
-                if artifact.id is not None:
-                    staged_by_destination[staged_path] = artifact.id
+                _mark_staged(key, staged_path, artifact)
                 continue
             raise FileNotFoundError(
                 f"[Consist] Cannot stage input {artifact.key!r}: source path missing."
             )
 
         if source_path.resolve() == destination_path:
-            artifact.abs_path = str(destination_path)
-            staged[key] = str(destination_path)
-            if artifact.id is not None:
-                staged_by_destination[destination_path] = artifact.id
+            _mark_staged(key, destination_path, artifact)
             continue
 
         if is_strict_snapshot:
@@ -1632,10 +1651,7 @@ def materialize_requested_inputs(
                     else None
                 ),
             )
-            artifact.abs_path = str(destination_path)
-            staged[key] = str(destination_path)
-            if artifact.id is not None:
-                staged_by_destination[destination_path] = artifact.id
+            _mark_staged(key, destination_path, artifact)
             continue
 
         materialize_artifacts_from_sources(
@@ -1660,9 +1676,6 @@ def materialize_requested_inputs(
                 )
             )
 
-        artifact.abs_path = str(destination_path)
-        staged[key] = str(destination_path)
-        if artifact.id is not None:
-            staged_by_destination[destination_path] = artifact.id
+        _mark_staged(key, destination_path, artifact)
 
     return staged

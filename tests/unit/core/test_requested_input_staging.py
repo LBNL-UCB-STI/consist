@@ -50,7 +50,7 @@ class _FakeTracker:
         self.current_consist = current_consist
         self.db = None
         self.fs = SimpleNamespace(
-            resolve_historical_path=lambda uri, original_run_dir: uri,
+            resolve_historical_path=lambda uri, original_run_dir, **kwargs: uri,
             normalize_recovery_roots=lambda roots: [],
             get_remappable_relative_path=lambda uri: None,
             get_historical_root=lambda **kwargs: None,

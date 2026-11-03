@@ -178,7 +178,14 @@ class FileSystemManager:
                 files[f] = f.stat().st_mtime_ns
         return files
 
-    def resolve_historical_path(self, uri: str, original_run_dir: Optional[str]) -> str:
+    def resolve_historical_path(
+        self,
+        uri: str,
+        original_run_dir: Optional[str | Path],
+        *,
+        mounts_snapshot: Optional[Mapping[str, str]] = None,
+        artifact_mount_root: Optional[str] = None,
+    ) -> str:
         """
         Resolve an artifact URI relative to a historical run directory.
 
@@ -186,14 +193,27 @@ class FileSystemManager:
         ----------
         uri : str
             Portable URI recorded by a previous run.
-        original_run_dir : Optional[str]
+        original_run_dir : Optional[str | Path]
             Absolute workspace path of the original run.
+        mounts_snapshot : Optional[Mapping[str, str]], optional
+            Historical mount table recorded in ``run.meta["mounts"]``.
+        artifact_mount_root : Optional[str], optional
+            Historical mount root recorded in ``artifact.meta["mount_root"]``.
 
         Returns
         -------
         str
             Absolute path where the artifact lived during the historical run.
         """
+        if "://" in uri:
+            scheme, rel_raw = uri.split("://", 1)
+            if scheme != "file":
+                rel_path = rel_raw.lstrip("/")
+                if mounts_snapshot and isinstance(mounts_snapshot.get(scheme), str):
+                    return str(Path(mounts_snapshot[scheme]) / rel_path)
+                if artifact_mount_root:
+                    return str(Path(artifact_mount_root) / rel_path)
+
         # Case 1: Workspace scheme (Ephemeral)
         # If the URI is virtualized to the workspace, its physical location
         # depends entirely on where that run happened unless "workspace" is

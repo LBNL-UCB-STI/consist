@@ -755,6 +755,13 @@ def test_string_capture_validation_errors() -> None:
     with pytest.raises(ValueError, match="path separators"):
         StringCapture(name="event_type", wildcard=1, pattern=r"[A-Za-z\\]+")
 
+    with pytest.raises(ValueError, match="capturing groups"):
+        StringCapture(name="event_type", wildcard=1, pattern=r"(foo|bar)")
+
+    # Non-capturing groups remain allowed
+    sc = StringCapture(name="event_type", wildcard=1, pattern=r"(?:foo|bar)")
+    assert sc.pattern == r"(?:foo|bar)"
+
     with pytest.raises(ValueError, match="incompatible repeated capture"):
         FilenamePattern.glob("output_*_*.parquet").with_captures(
             StringCapture(name="token", wildcard=1, pattern=r"[a-z]+"),

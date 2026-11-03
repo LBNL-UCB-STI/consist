@@ -202,14 +202,23 @@ class Coupler(CouplerMapMixin[Artifact, DeclaredOutput]):
     """
 
     def __init__(self, tracker: Optional["Tracker"] = None) -> None:
-        self.tracker = tracker
+        self._tracker: Optional["Tracker"] = None
         self._artifacts: MutableMapping[str, Artifact] = {}
         self._declared_outputs: MutableMapping[str, DeclaredOutput] = {}
         self._warn_undefined = False
         self._undefined_keys: set[str] = set()
         self._output_descriptions: MutableMapping[str, str] = {}
-        if tracker is not None:
-            couplers = tracker.__dict__.get("_couplers")
+        self.tracker = tracker
+
+    @property
+    def tracker(self) -> Optional["Tracker"]:
+        return self._tracker
+
+    @tracker.setter
+    def tracker(self, value: Optional["Tracker"]) -> None:
+        self._tracker = value
+        if value is not None:
+            couplers = value.__dict__.get("_couplers")
             if couplers is not None:
                 couplers.add(self)
 

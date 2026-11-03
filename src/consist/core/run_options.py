@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Final, Literal, Mapping, Optional, Union
+from typing import Any, Final, Literal, Mapping, Optional, Union, cast
 
 from consist.core.error_messages import format_problem_cause_fix
 from consist.types import (
@@ -195,6 +195,48 @@ def resolve_runtime_kwargs_alias(
         container=execution_options.container,
         runtime_kwargs=runtime_kwargs,
         inject_context=execution_options.inject_context,
+    )
+
+
+def resolve_trace_output_policy(
+    *,
+    output_policy: Optional[OutputPolicyOptions] = None,
+    output_mismatch: str = "warn",
+    output_missing: str = "warn",
+    run_completion_archive: Optional[
+        Union[RunCompletionArchivePolicy, Literal[False]]
+    ] = None,
+) -> OutputPolicyOptions:
+    """
+    Merge top-level ``trace(...)`` output policy arguments with ``output_policy``.
+    """
+    mismatch_policy = cast(Literal["warn", "error", "ignore"], output_mismatch)
+    missing_policy = cast(Literal["warn", "error", "ignore"], output_missing)
+    if output_policy is None and run_completion_archive is None:
+        return OutputPolicyOptions(
+            output_mismatch=mismatch_policy,
+            output_missing=missing_policy,
+        )
+    return OutputPolicyOptions(
+        output_mismatch=(
+            output_policy.output_mismatch
+            if output_policy is not None and output_policy.output_mismatch is not None
+            else mismatch_policy
+        ),
+        output_missing=(
+            output_policy.output_missing
+            if output_policy is not None and output_policy.output_missing is not None
+            else missing_policy
+        ),
+        run_completion_archive=(
+            run_completion_archive
+            if run_completion_archive is not None
+            else (
+                output_policy.run_completion_archive
+                if output_policy is not None
+                else None
+            )
+        ),
     )
 
 

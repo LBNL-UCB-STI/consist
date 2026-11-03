@@ -1476,3 +1476,24 @@ def test_output_policy_error_honors_runtime_output_paths_narrowing_decorator_out
             cache_options=CacheOptions(cache_mode="overwrite"),
             output_policy=OutputPolicyOptions(output_missing="error"),
         )
+
+
+def test_scenario_log_meta_promotes_stage_and_phase_columns(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs"
+    db_path = str(tmp_path / "provenance.duckdb")
+    tracker = Tracker(run_dir=run_dir, db_path=db_path)
+
+    with tracker.scenario("scen_stage_phase") as sc:
+        sc.log_meta(stage="supply_demand", phase="iteration", custom_key="val")
+        assert sc.meta["stage"] == "supply_demand"
+        assert sc.meta["phase"] == "iteration"
+        assert sc.meta["custom_key"] == "val"
+        assert sc._header_record is not None
+        assert sc._header_record.run.stage == "supply_demand"
+        assert sc._header_record.run.phase == "iteration"
+
+    persisted = tracker.get_run("scen_stage_phase")
+    assert persisted is not None
+    assert persisted.stage == "supply_demand"
+    assert persisted.phase == "iteration"
+    assert persisted.meta["custom_key"] == "val"

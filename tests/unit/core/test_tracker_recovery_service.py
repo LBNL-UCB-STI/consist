@@ -800,6 +800,9 @@ def test_archive_directory_and_shapefile_under_separate_workspace_mount(
     assert tracker.fs.resolve_historical_path(
         dir_art.container_uri, str(run_dir)
     ) == str(zarr_dir.resolve())
+    assert tracker.resolve_historical_path(dir_art, run_record) == Path(
+        zarr_dir.resolve()
+    )
 
     archive_root = tmp_path / "archive_store"
     archived = tracker.archive_run_outputs(

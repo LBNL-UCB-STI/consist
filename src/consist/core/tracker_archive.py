@@ -194,8 +194,6 @@ class TrackerArchiveService(_TrackerServiceBase):
     they do not change an artifact's canonical URI or identity.
     """
 
-    _deferred_directory_source_removals: list[tuple[Path, Path]] | None = None
-
     def _directory_archive_sort_key(
         self, index_and_item: tuple[int, tuple[str, Artifact]]
     ) -> tuple[int, int]:
@@ -215,7 +213,7 @@ class TrackerArchiveService(_TrackerServiceBase):
             resolved = Path(self.resolve_uri(artifact.container_uri))
             if resolved.exists():
                 return False
-        except Exception:
+        except (ValueError, RuntimeError, OSError, TypeError):
             pass
         from consist.core.materialize import find_existing_recovery_source_path
 
@@ -458,6 +456,7 @@ class TrackerArchiveService(_TrackerServiceBase):
         mode: Literal["copy", "move"] = "copy",
         append: bool = True,
         prepend_source_mount_root: bool = True,
+        _deferred_directory_source_removals: list[tuple[Path, Path]] | None = None,
     ) -> Path:
         """Archive a rematerializable artifact into a stable recovery root.
 
@@ -518,6 +517,9 @@ class TrackerArchiveService(_TrackerServiceBase):
                 mode=mode,
                 append=append,
                 prepend_source_mount_root=prepend_source_mount_root,
+                _deferred_directory_source_removals=(
+                    _deferred_directory_source_removals
+                ),
             )
         if _is_file_bundle_artifact(artifact):
             return self._archive_shapefile_bundle_artifact(
@@ -2104,6 +2106,7 @@ class TrackerArchiveService(_TrackerServiceBase):
         mode: Literal["copy", "move"],
         append: bool,
         prepend_source_mount_root: bool = True,
+        _deferred_directory_source_removals: list[tuple[Path, Path]] | None = None,
     ) -> Path:
         """Archive a manifest-verified immutable directory artifact."""
         manifest = _directory_artifact_manifest(artifact)
@@ -2147,9 +2150,10 @@ class TrackerArchiveService(_TrackerServiceBase):
             raise
         if mode == "move":
             if source_path.resolve() != destination.resolve():
-                deferred = self._deferred_directory_source_removals
-                if deferred is not None:
-                    deferred.append((source_path, destination))
+                if _deferred_directory_source_removals is not None:
+                    _deferred_directory_source_removals.append(
+                        (source_path, destination)
+                    )
                 elif source_path.exists():
                     shutil.rmtree(source_path)
             resolved_dest = str(destination.resolve())
@@ -3187,7 +3191,7 @@ class TrackerArchiveService(_TrackerServiceBase):
                     continue
                 try:
                     resolved_candidate = Path(self.resolve_uri(artifact.container_uri))
-                except Exception:
+                except (ValueError, RuntimeError, OSError, TypeError):
                     continue
                 if resolved_candidate.exists():
                     artifact.abs_path = str(resolved_candidate.resolve())
@@ -3238,23 +3242,20 @@ class TrackerArchiveService(_TrackerServiceBase):
             )
         ] + remaining_other_items
 
-        deferred_removals: list[tuple[Path, Path]] = []
-        previous_deferred = self._deferred_directory_source_removals
-        if mode == "move":
-            self._deferred_directory_source_removals = deferred_removals
-        try:
-            for key, artifact in ordered_remaining_items:
-                archived_by_key[key] = self.tracker.archive_artifact(
-                    artifact,
-                    archive_root,
-                    mode=mode,
-                    append=append,
-                    prepend_source_mount_root=prepend_source_mount_root,
-                )
-        finally:
-            self._deferred_directory_source_removals = previous_deferred
+        deferred_removals: list[tuple[Path, Path]] | None = (
+            [] if mode == "move" else None
+        )
+        for key, artifact in ordered_remaining_items:
+            archived_by_key[key] = self.archive_artifact(
+                artifact,
+                archive_root,
+                mode=mode,
+                append=append,
+                prepend_source_mount_root=prepend_source_mount_root,
+                _deferred_directory_source_removals=deferred_removals,
+            )
 
-        if mode == "move":
+        if mode == "move" and deferred_removals is not None:
             for source_path, destination in reversed(deferred_removals):
                 if (
                     source_path.exists()

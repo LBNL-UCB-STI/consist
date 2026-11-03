@@ -56,6 +56,7 @@ from consist.core.resolved_binding import (
     step_contract_identity,
 )
 from consist.core.run_invocation import resolve_run_invocation
+from consist.core.run_options import resolve_trace_output_policy
 from consist.digest import normalize_json
 from consist.types import (
     ArtifactRef,
@@ -611,9 +612,6 @@ class ScenarioContext:
         self.coupler = coupler or Coupler(tracker=tracker)
         if self.coupler.tracker is None:
             self.coupler.tracker = tracker
-        couplers = tracker.__dict__.get("_couplers")
-        if couplers is not None:
-            couplers.add(self.coupler)
         if require_outputs:
             self.coupler.require_outputs(*require_outputs)
 
@@ -772,22 +770,11 @@ class ScenarioContext:
         if not metadata:
             return
 
-        normalized = normalize_json(dict(metadata))
-        if not isinstance(normalized, dict):
-            raise TypeError("Scenario metadata must normalize to a JSON object.")
-
-        if self._header_record.run.meta is None:
-            self._header_record.run.meta = {}
-
-        self._header_record.run.meta.update(normalized)
-        self._header_record.run.updated_at = datetime.now(timezone.utc)
-
         prev = self.tracker.current_consist
         self.tracker.current_consist = self._header_record
         try:
-            self.tracker._flush_json()
-            if self.tracker.db:
-                self.tracker.db.sync_run(self._header_record.run)
+            self._header_record.run.updated_at = datetime.now(timezone.utc)
+            self.tracker.log_meta(**metadata)
         finally:
             self.tracker.current_consist = prev
 
@@ -2163,39 +2150,11 @@ class ScenarioContext:
         if not self._header_record:
             raise RuntimeError("Scenario not active. Use within 'with' block.")
 
-        output_mismatch_policy = cast(
-            Literal["warn", "error", "ignore"], output_mismatch
-        )
-        output_missing_policy = cast(Literal["warn", "error", "ignore"], output_missing)
-        resolved_output_policy = (
-            OutputPolicyOptions(
-                output_mismatch=(
-                    output_policy.output_mismatch
-                    if output_policy is not None
-                    and output_policy.output_mismatch is not None
-                    else output_mismatch_policy
-                ),
-                output_missing=(
-                    output_policy.output_missing
-                    if output_policy is not None
-                    and output_policy.output_missing is not None
-                    else output_missing_policy
-                ),
-                run_completion_archive=(
-                    run_completion_archive
-                    if run_completion_archive is not None
-                    else (
-                        output_policy.run_completion_archive
-                        if output_policy is not None
-                        else None
-                    )
-                ),
-            )
-            if output_policy is not None or run_completion_archive is not None
-            else OutputPolicyOptions(
-                output_mismatch=output_mismatch_policy,
-                output_missing=output_missing_policy,
-            )
+        resolved_output_policy = resolve_trace_output_policy(
+            output_policy=output_policy,
+            output_mismatch=output_mismatch,
+            output_missing=output_missing,
+            run_completion_archive=run_completion_archive,
         )
 
         resolved_invocation = resolve_run_invocation(
@@ -2333,7 +2292,6 @@ class ScenarioContext:
                     output_missing=resolved_invocation.output_missing,
                     run_completion_archive=effective_run_completion_archive,
                 ),
-                run_completion_archive=effective_run_completion_archive,
             ) as t:
                 if t.is_cached:
                     current_consist = t.current_consist

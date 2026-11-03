@@ -38,7 +38,10 @@ from consist.core.error_messages import format_problem_cause_fix
 from consist.core.output_sets import register_output_sets, validate_cached_output_sets
 from consist.core.output_sets import build_output_set_captures_identity
 from consist.core.run_invocation import resolve_run_invocation
-from consist.core.run_options import resolve_runtime_kwargs_alias
+from consist.core.run_options import (
+    resolve_runtime_kwargs_alias,
+    resolve_trace_output_policy,
+)
 from consist.core.run_resolution import InputBindingRole, build_input_binding_roles
 from consist.core.workflow import RunContext
 from consist.models.artifact import Artifact, get_tracker_ref, set_tracker_ref
@@ -2064,39 +2067,11 @@ class RunTraceCoordinator:
 
         """
         tracker = self._tracker
-        output_mismatch_policy = cast(
-            Literal["warn", "error", "ignore"], output_mismatch
-        )
-        output_missing_policy = cast(Literal["warn", "error", "ignore"], output_missing)
-        resolved_output_policy = (
-            OutputPolicyOptions(
-                output_mismatch=(
-                    output_policy.output_mismatch
-                    if output_policy is not None
-                    and output_policy.output_mismatch is not None
-                    else output_mismatch_policy
-                ),
-                output_missing=(
-                    output_policy.output_missing
-                    if output_policy is not None
-                    and output_policy.output_missing is not None
-                    else output_missing_policy
-                ),
-                run_completion_archive=(
-                    run_completion_archive
-                    if run_completion_archive is not None
-                    else (
-                        output_policy.run_completion_archive
-                        if output_policy is not None
-                        else None
-                    )
-                ),
-            )
-            if output_policy is not None or run_completion_archive is not None
-            else OutputPolicyOptions(
-                output_mismatch=output_mismatch_policy,
-                output_missing=output_missing_policy,
-            )
+        resolved_output_policy = resolve_trace_output_policy(
+            output_policy=output_policy,
+            output_mismatch=output_mismatch,
+            output_missing=output_missing,
+            run_completion_archive=run_completion_archive,
         )
 
         resolved_invocation = resolve_run_invocation(
