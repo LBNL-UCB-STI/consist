@@ -205,6 +205,7 @@ if TYPE_CHECKING:
         OutputPathRef,
         OutputPolicyOptions,
         OutputSet,
+        RunCompletionArchivePolicy,
     )
 
 _CORE_EXPORTS: dict[str, tuple[str, str]] = {
@@ -284,6 +285,10 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
         "RestoredCouplerSnapshotResult",
     ),
     "Run": ("consist.models.run", "Run"),
+    "RunCompletionArchivePolicy": (
+        "consist.types",
+        "RunCompletionArchivePolicy",
+    ),
     "RunContext": ("consist.api", "RunContext"),
     "RunCouplerSnapshot": ("consist.models.run", "RunCouplerSnapshot"),
     "RunFieldIndex": ("consist.core.indexing", "RunFieldIndex"),
@@ -552,6 +557,7 @@ __all__ = [
     "ResolvedBindingBuilder",
     "RestoredCouplerSnapshotResult",
     "Run",
+    "RunCompletionArchivePolicy",
     "RunContext",
     "RunCouplerSnapshot",
     "RunFieldIndex",

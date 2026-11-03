@@ -68,6 +68,7 @@ from consist.types import (
     OutputPolicyOptions,
     OutputPathRef,
     OutputSet,
+    RunCompletionArchivePolicy,
     RunInputRef,
 )
 from pathlib import Path
@@ -494,6 +495,7 @@ class ScenarioContext:
         tags: Optional[List[str]] = None,
         model: str = "scenario",
         step_cache_hydration: Optional[str] = None,
+        step_run_completion_archive: Optional[RunCompletionArchivePolicy] = None,
         name_template: Optional[str] = None,
         cache_epoch: Optional[int] = None,
         coupler: Optional[Coupler] = None,
@@ -503,6 +505,12 @@ class ScenarioContext:
         resume_phase: CouplerSnapshotPhase = "post",
         **kwargs: Any,
     ):
+        if step_run_completion_archive is not None and not isinstance(
+            step_run_completion_archive, RunCompletionArchivePolicy
+        ):
+            raise TypeError(
+                "step_run_completion_archive must be a RunCompletionArchivePolicy or None."
+            )
         self.tracker = tracker
         self.name = name
         self.model = model
@@ -512,6 +520,7 @@ class ScenarioContext:
         self._step_facet = kwargs.pop("step_facet", None)
         self.kwargs = kwargs
         self.step_cache_hydration = step_cache_hydration
+        self.step_run_completion_archive = step_run_completion_archive
         self.name_template = name_template
         self.cache_epoch = cache_epoch
         self.output_sets = output_sets
@@ -1839,6 +1848,11 @@ class ScenarioContext:
             if resolved_cache_hydration is not None
             else self.step_cache_hydration
         )
+        effective_run_completion_archive = (
+            resolved_invocation.run_completion_archive
+            if resolved_invocation.run_completion_archive is not None
+            else self.step_run_completion_archive
+        )
 
         promoted_inputs = self._promote_inputs_for_binding(
             resolved_inputs, resolved_input_binding
@@ -1905,6 +1919,7 @@ class ScenarioContext:
             output_policy=OutputPolicyOptions(
                 output_mismatch=resolved_output_mismatch,
                 output_missing=resolved_output_missing,
+                run_completion_archive=effective_run_completion_archive,
             ),
             execution_options=ExecutionOptions(
                 input_binding=resolved_input_binding,

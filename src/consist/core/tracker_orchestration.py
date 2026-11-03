@@ -56,6 +56,7 @@ from consist.types import (
     OutputPolicyOptions,
     OutputPathRef,
     OutputSet,
+    RunCompletionArchivePolicy,
     RunInputRef,
 )
 
@@ -143,6 +144,7 @@ class RunInvocationContext:
     inputs: Optional[Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]]
     output_mismatch: Literal["warn", "error", "ignore"]
     output_missing: Literal["warn", "error", "ignore"]
+    run_completion_archive: Optional[RunCompletionArchivePolicy]
     executor: Literal["python", "container"]
     container: Any
     runtime_kwargs: Optional[Mapping[str, Any]]
@@ -745,6 +747,7 @@ class RunTraceCoordinator:
             inputs=inputs_for_resolution,
             output_mismatch=invocation.output_mismatch,
             output_missing=invocation.output_missing,
+            run_completion_archive=invocation.run_completion_archive,
             executor=invocation.executor,
             container=invocation.container,
             runtime_kwargs=invocation.runtime_kwargs,
@@ -791,6 +794,116 @@ class RunTraceCoordinator:
         if policy == "warn":
             logging.warning("[Consist] %s", msg)
         return False
+
+    @staticmethod
+    def _is_virtual_unbacked_artifact(tracker: "Tracker", artifact: Artifact) -> bool:
+        meta = artifact.meta if isinstance(artifact.meta, MappingABC) else {}
+        if meta.get("is_ingested") is not True:
+            return False
+        if artifact.abs_path and Path(artifact.abs_path).exists():
+            return False
+        try:
+            resolved = Path(tracker.resolve_uri(artifact.container_uri))
+            if resolved.exists():
+                return False
+        except Exception:
+            pass
+        from consist.core.materialize import find_existing_recovery_source_path
+
+        producing_run = (
+            tracker.get_run(str(artifact.run_id))
+            if artifact.run_id is not None
+            else None
+        )
+        if producing_run is not None:
+            _, source_path, _ = find_existing_recovery_source_path(
+                tracker,
+                artifact=artifact,
+                run=producing_run,
+                source_root=None,
+            )
+            if source_path is not None and source_path.exists():
+                return False
+        return True
+
+    def _apply_run_completion_archive_policy(
+        self,
+        *,
+        tracker: "Tracker",
+        current_consist: Any,
+        outputs_map: Dict[str, Artifact],
+        policy: Optional[RunCompletionArchivePolicy],
+    ) -> Dict[str, Artifact]:
+        if policy is None:
+            return outputs_map
+
+        archive_root_str = tracker.fs.normalize_recovery_roots(policy.archive_root)[0]
+
+        all_outputs: Dict[str, Artifact] = {
+            art.key: art for art in current_consist.outputs
+        }
+        all_outputs.update(outputs_map)
+        if not all_outputs:
+            return outputs_map
+
+        from consist.core.materialize import _output_set_hydration_kind
+
+        virtual_keys = {
+            key
+            for key, art in all_outputs.items()
+            if self._is_virtual_unbacked_artifact(tracker, art)
+        }
+        archivable_keys = [
+            key
+            for key, art in all_outputs.items()
+            if _output_set_hydration_kind(tracker, art) not in {"member", "manifest"}
+            and key not in virtual_keys
+        ]
+        if not archivable_keys:
+            return outputs_map
+
+        archived = tracker.archive_current_run_outputs(
+            policy.archive_root,
+            keys=archivable_keys,
+            mode=policy.mode,
+            append=True,
+        )
+
+        synced_by_key: Dict[str, Artifact] = {
+            art.key: art for art in current_consist.outputs
+        }
+        synced_by_key.update(archived.outputs)
+
+        for art in current_consist.outputs:
+            if art.key in synced_by_key:
+                art.meta = dict(synced_by_key[art.key].meta or {})
+                set_tracker_ref(art, tracker)
+
+        missing_recovery_keys: list[str] = []
+        for key, art in all_outputs.items():
+            if key in virtual_keys:
+                continue
+            updated_art = synced_by_key.get(key, art)
+            meta = updated_art.meta if isinstance(updated_art.meta, MappingABC) else {}
+            roots = tracker.fs.normalize_recovery_roots(meta.get("recovery_roots"))
+            if archive_root_str not in roots:
+                missing_recovery_keys.append(key)
+
+        if missing_recovery_keys:
+            raise RuntimeError(
+                f"RunCompletionArchivePolicy failed to record recovery_roots "
+                f"under {archive_root_str!r} for outputs: "
+                f"{sorted(missing_recovery_keys)}"
+            )
+
+        refreshed_outputs: Dict[str, Artifact] = {}
+        for key, art in outputs_map.items():
+            if key in synced_by_key:
+                art.meta = dict(synced_by_key[key].meta or {})
+            set_tracker_ref(art, tracker)
+            refreshed_outputs[key] = art
+
+        return refreshed_outputs
 
     @staticmethod
     def _log_output_value(
@@ -1664,71 +1777,83 @@ class RunTraceCoordinator:
                     }
                 else:
                     outputs_map = cached_outputs
-                return RunResult(
+                run_result = RunResult(
                     run=current_consist.run,
                     outputs=outputs_map,
                     cache_hit=True,
                 )
+            else:
+                canonicalization = None
+                if config_plan is not None:
+                    contribution = tracker.apply_config_plan(
+                        config_plan,
+                        run=current_consist.run,
+                        ingest=config_plan_ingest,
+                        profile_schema=config_plan_profile_schema,
+                    )
+                    canonicalization = contribution.canonicalization
 
-            canonicalization = None
-            if config_plan is not None:
-                contribution = tracker.apply_config_plan(
-                    config_plan,
-                    run=current_consist.run,
-                    ingest=config_plan_ingest,
-                    profile_schema=config_plan_profile_schema,
-                )
-                canonicalization = contribution.canonicalization
+                if executor == "container":
+                    run_result = self._execute_container_run(
+                        tracker=tracker,
+                        run_id=run_id,
+                        run=current_consist.run,
+                        resolved_name=resolved_name,
+                        output_paths=output_paths,
+                        container=container,
+                        input_binding=input_binding,
+                        resolved_inputs=resolved_inputs,
+                        on_missing_outputs=_handle_missing_outputs,
+                    )
+                else:
+                    result, captured_outputs = self._execute_python_run(
+                        tracker=tracker,
+                        active_tracker=active_tracker,
+                        fn=fn,
+                        resolved_name=resolved_name,
+                        config=context.config,
+                        inputs=inputs,
+                        runtime_kwargs_dict=runtime_kwargs_dict,
+                        inject_context=inject_context,
+                        canonicalization=canonicalization,
+                        input_binding=input_binding,
+                        input_artifacts_by_key=input_artifacts_by_key,
+                        requested_input_paths=requested_input_paths,
+                        capture_dir=capture_dir,
+                        capture_pattern=capture_pattern,
+                    )
 
-            if executor == "container":
-                return self._execute_container_run(
-                    tracker=tracker,
-                    run_id=run_id,
-                    run=current_consist.run,
-                    resolved_name=resolved_name,
-                    output_paths=output_paths,
-                    container=container,
-                    input_binding=input_binding,
-                    resolved_inputs=resolved_inputs,
-                    on_missing_outputs=_handle_missing_outputs,
-                )
+                    outputs_map = self._normalize_run_outputs(
+                        tracker=tracker,
+                        current_consist=current_consist,
+                        fn=fn,
+                        resolved_name=resolved_name,
+                        outputs=outputs,
+                        output_paths=output_paths,
+                        output_sets=output_sets,
+                        profile_file_schema=context.profile_file_schema,
+                        result=result,
+                        captured_outputs=captured_outputs,
+                        on_missing_outputs=_handle_missing_outputs,
+                        on_output_mismatch=_handle_output_mismatch,
+                    )
 
-            result, captured_outputs = self._execute_python_run(
-                tracker=tracker,
-                active_tracker=active_tracker,
-                fn=fn,
-                resolved_name=resolved_name,
-                config=context.config,
-                inputs=inputs,
-                runtime_kwargs_dict=runtime_kwargs_dict,
-                inject_context=inject_context,
-                canonicalization=canonicalization,
-                input_binding=input_binding,
-                input_artifacts_by_key=input_artifacts_by_key,
-                requested_input_paths=requested_input_paths,
-                capture_dir=capture_dir,
-                capture_pattern=capture_pattern,
-            )
+                    run_result = RunResult(
+                        run=current_consist.run,
+                        outputs=outputs_map,
+                        cache_hit=False,
+                    )
 
-            outputs_map = self._normalize_run_outputs(
+            archived_outputs = self._apply_run_completion_archive_policy(
                 tracker=tracker,
                 current_consist=current_consist,
-                fn=fn,
-                resolved_name=resolved_name,
-                outputs=outputs,
-                output_paths=output_paths,
-                output_sets=output_sets,
-                profile_file_schema=context.profile_file_schema,
-                result=result,
-                captured_outputs=captured_outputs,
-                on_missing_outputs=_handle_missing_outputs,
-                on_output_mismatch=_handle_output_mismatch,
+                outputs_map=run_result.outputs,
+                policy=context.run_completion_archive,
             )
-
             return RunResult(
-                run=current_consist.run,
-                outputs=outputs_map,
-                cache_hit=False,
+                run=run_result.run,
+                outputs=archived_outputs,
+                cache_hit=run_result.cache_hit,
             )
 
     @contextmanager

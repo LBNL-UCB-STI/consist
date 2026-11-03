@@ -157,6 +157,30 @@ class TrackerArchiveService(_TrackerServiceBase):
     they do not change an artifact's canonical URI or identity.
     """
 
+    def _sync_active_run_artifacts_meta(
+        self, updated_by_id: Mapping[str, dict[str, Any]]
+    ) -> None:
+        current_consist = self.current_consist
+        if current_consist is None or not updated_by_id:
+            return
+        for active_artifact in current_consist.outputs:
+            if (
+                active_artifact.id is not None
+                and str(active_artifact.id) in updated_by_id
+            ):
+                active_artifact.meta = dict(updated_by_id[str(active_artifact.id)])
+
+    def _sync_active_run_artifact_abs_path(
+        self, artifact: Artifact, abs_path: str
+    ) -> None:
+        current_consist = self.current_consist
+        if current_consist is None or artifact.id is None:
+            return
+        target_id = str(artifact.id)
+        for active_artifact in current_consist.outputs:
+            if active_artifact.id is not None and str(active_artifact.id) == target_id:
+                active_artifact.abs_path = abs_path
+
     def set_artifact_recovery_roots(
         self,
         artifact: Artifact,
@@ -215,6 +239,8 @@ class TrackerArchiveService(_TrackerServiceBase):
                 artifact, {"recovery_roots": None}, raise_on_error=True
             )
             artifact.meta = current_meta
+            if artifact.id is not None:
+                self._sync_active_run_artifacts_meta({str(artifact.id): current_meta})
             self._run_artifacts_cache.clear()
             return artifact
 
@@ -223,6 +249,8 @@ class TrackerArchiveService(_TrackerServiceBase):
         )
         artifact.meta = dict(artifact.meta or {})
         artifact.meta["recovery_roots"] = normalized
+        if artifact.id is not None:
+            self._sync_active_run_artifacts_meta({str(artifact.id): artifact.meta})
         self._run_artifacts_cache.clear()
         return artifact
 
@@ -396,7 +424,9 @@ class TrackerArchiveService(_TrackerServiceBase):
             raise
 
         if mode == "move":
-            artifact.abs_path = str(destination.resolve())
+            resolved_dest = str(destination.resolve())
+            artifact.abs_path = resolved_dest
+            self._sync_active_run_artifact_abs_path(artifact, resolved_dest)
         return destination
 
     def _find_current_managed_uri_source(self, artifact: Artifact) -> Path | None:
@@ -1224,7 +1254,9 @@ class TrackerArchiveService(_TrackerServiceBase):
             raise
         if mode == "move" and source_path.resolve() != destination.resolve():
             shutil.rmtree(source_path)
-            artifact.abs_path = str(destination.resolve())
+            resolved_dest = str(destination.resolve())
+            artifact.abs_path = resolved_dest
+            self._sync_active_run_artifact_abs_path(artifact, resolved_dest)
         return destination
 
     def _archive_shapefile_bundle_artifact(
@@ -1279,7 +1311,9 @@ class TrackerArchiveService(_TrackerServiceBase):
         if mode == "move" and source_path.parent.resolve() != destination.resolve():
             for member in manifest["entries"]:
                 (source_path.parent / member["path"]).unlink()
-            artifact.abs_path = str((destination / entry).resolve())
+            resolved_dest = str((destination / entry).resolve())
+            artifact.abs_path = resolved_dest
+            self._sync_active_run_artifact_abs_path(artifact, resolved_dest)
         return destination
 
     def register_artifact_recovery_copy(
@@ -1591,6 +1625,9 @@ class TrackerArchiveService(_TrackerServiceBase):
 
         for artifact, next_meta in updates.values():
             artifact.meta = dict(next_meta)
+        self._sync_active_run_artifacts_meta(
+            {artifact_id: next_meta for artifact_id, (_, next_meta) in updates.items()}
+        )
         self._run_artifacts_cache.clear()
 
     def register_run_output_recovery_copies(
@@ -2216,6 +2253,10 @@ class TrackerArchiveService(_TrackerServiceBase):
         :meth:`archive_run_output_files` for report-oriented, no-overwrite
         regular-file archival.
         """
+        if self.db is None:
+            raise RuntimeError(
+                "Cannot archive run outputs: tracker has no database configured."
+            )
         normalized_keys = normalize_materialize_output_keys(
             keys, caller="archive_run_outputs"
         )
@@ -2270,6 +2311,9 @@ class TrackerArchiveService(_TrackerServiceBase):
         refreshed_selected = self._select_required_output_keys(
             refreshed_outputs, tuple(selected), run_id=run_id
         )
+        for key, source_artifact in selected.items():
+            if source_artifact.abs_path is not None and key in refreshed_selected:
+                refreshed_selected[key].abs_path = source_artifact.abs_path
         return ArchivedOutputs(paths=archived_paths, outputs=refreshed_selected)
 
     @staticmethod

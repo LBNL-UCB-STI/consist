@@ -1,13 +1,22 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+from consist.core.run_invocation import resolve_run_invocation
 from consist.core.run_options import (
     merge_run_options,
     raise_legacy_policy_kwargs_error,
     resolve_runtime_kwargs_alias,
 )
-from consist.types import CacheOptions, ExecutionOptions, OutputPolicyOptions
+from consist.core.settings import ConsistSettings
+from consist.types import (
+    CacheOptions,
+    ExecutionOptions,
+    OutputPolicyOptions,
+    RunCompletionArchivePolicy,
+)
 
 
 def test_merge_run_options_merges_options_objects() -> None:
@@ -61,6 +70,7 @@ def test_merge_run_options_defaults_to_empty_options() -> None:
     assert merged.code_identity_extra_deps is None
     assert merged.output_mismatch is None
     assert merged.output_missing is None
+    assert merged.run_completion_archive is None
     assert merged.input_binding is None
     assert merged.load_inputs is None
     assert merged.input_paths is None
@@ -118,4 +128,103 @@ def test_resolve_runtime_kwargs_alias_rejects_conflicting_values() -> None:
             api_name="Tracker.run",
             execution_options=ExecutionOptions(runtime_kwargs={"a": 1}),
             runtime_kwargs={"a": 2},
+        )
+
+
+def test_run_completion_archive_policy_validation_and_round_trip() -> None:
+    with pytest.raises(ValueError, match="archive_root must be a non-empty"):
+        RunCompletionArchivePolicy(archive_root="   ")
+
+    with pytest.raises(ValueError, match="mode must be 'copy'"):
+        RunCompletionArchivePolicy(archive_root="/tmp/archive", mode="move")  # type: ignore[arg-type]
+
+    policy = RunCompletionArchivePolicy(archive_root="/tmp/archive")
+    merged = merge_run_options(
+        output_policy=OutputPolicyOptions(
+            output_missing="error",
+            run_completion_archive=policy,
+        )
+    )
+    assert merged.run_completion_archive == policy
+
+    invocation = resolve_run_invocation(
+        fn=lambda: None,
+        name="step",
+        model=None,
+        description=None,
+        config=None,
+        adapter=None,
+        inputs=None,
+        input_keys=None,
+        optional_input_keys=None,
+        tags=None,
+        facet=None,
+        facet_from=None,
+        facet_schema_version=None,
+        facet_index=None,
+        identity_inputs=None,
+        year=None,
+        iteration=None,
+        phase=None,
+        stage=None,
+        outputs=None,
+        output_paths=None,
+        output_sets=None,
+        cache_options=None,
+        output_policy=OutputPolicyOptions(
+            output_missing="error",
+            run_completion_archive=policy,
+        ),
+        execution_options=None,
+        default_name_template=None,
+        allow_template=False,
+        apply_step_defaults=False,
+        consist_settings=ConsistSettings(),
+        consist_workspace=Path("/tmp"),
+        consist_state=None,
+        missing_name_error="missing name",
+        python_missing_fn_error="missing fn",
+    )
+    assert invocation.run_completion_archive == policy
+
+    with pytest.raises(
+        TypeError,
+        match="run_completion_archive must be a RunCompletionArchivePolicy",
+    ):
+        resolve_run_invocation(
+            fn=lambda: None,
+            name="step",
+            model=None,
+            description=None,
+            config=None,
+            adapter=None,
+            inputs=None,
+            input_keys=None,
+            optional_input_keys=None,
+            tags=None,
+            facet=None,
+            facet_from=None,
+            facet_schema_version=None,
+            facet_index=None,
+            identity_inputs=None,
+            year=None,
+            iteration=None,
+            phase=None,
+            stage=None,
+            outputs=None,
+            output_paths=None,
+            output_sets=None,
+            cache_options=None,
+            output_policy=OutputPolicyOptions(
+                run_completion_archive="/tmp/not_a_policy",  # type: ignore[arg-type]
+            ),
+            execution_options=None,
+            default_name_template=None,
+            allow_template=False,
+            apply_step_defaults=False,
+            consist_settings=ConsistSettings(),
+            consist_workspace=Path("/tmp"),
+            consist_state=None,
+            missing_name_error="missing name",
+            python_missing_fn_error="missing fn",
         )
