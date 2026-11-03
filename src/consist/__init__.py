@@ -198,6 +198,7 @@ if TYPE_CHECKING:
         DriverType,
         EnumCapture,
         ExecutionOptions,
+        FilenameCapture,
         FilenamePattern,
         H5ChildSpec,
         IntCapture,
@@ -206,6 +207,7 @@ if TYPE_CHECKING:
         OutputPolicyOptions,
         OutputSet,
         RunCompletionArchivePolicy,
+        StringCapture,
     )
 
 _CORE_EXPORTS: dict[str, tuple[str, str]] = {
@@ -254,6 +256,7 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "ExecutionSpec": ("consist.core.orchestration", "ExecutionSpec"),
     "ExecutionTarget": ("consist.core.orchestration", "ExecutionTarget"),
     "FacetIndex": ("consist.core.indexing", "FacetIndex"),
+    "FilenameCapture": ("consist.types", "FilenameCapture"),
     "FilenamePattern": ("consist.types", "FilenamePattern"),
     "H5ChildSpec": ("consist.types", "H5ChildSpec"),
     "HydratedRunOutput": ("consist.core.materialize", "HydratedRunOutput"),
@@ -306,6 +309,7 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "StagedInputsResult": ("consist.core.materialize", "StagedInputsResult"),
     "StepContract": ("consist.core.step_contracts", "StepContract"),
     "StepIdentity": ("consist.core.workflow", "StepIdentity"),
+    "StringCapture": ("consist.types", "StringCapture"),
     "TrackedArtifactLocator": (
         "consist.core.resolved_binding",
         "TrackedArtifactLocator",
@@ -535,6 +539,7 @@ __all__ = [
     "ExecutionSpec",
     "ExecutionTarget",
     "FacetIndex",
+    "FilenameCapture",
     "FilenamePattern",
     "H5ChildSpec",
     "HydratedRunOutput",
@@ -572,6 +577,7 @@ __all__ = [
     "StagedInputsResult",
     "StepContract",
     "StepIdentity",
+    "StringCapture",
     "TrackedArtifactLocator",
     "Tracker",
     "TrackerLike",

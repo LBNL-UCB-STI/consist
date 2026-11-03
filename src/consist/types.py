@@ -263,6 +263,8 @@ def _capture_signature(capture: "FilenameCapture") -> tuple[str, tuple[str, ...]
         return ("int", ())
     if isinstance(capture, EnumCapture):
         return ("enum", tuple(sorted(capture.allowed)))
+    if isinstance(capture, StringCapture):
+        return ("str", (capture.pattern,))
     raise TypeError(f"unsupported capture type: {type(capture)!r}")
 
 
@@ -293,7 +295,43 @@ class EnumCapture:
         object.__setattr__(self, "allowed", allowed_values)
 
 
-FilenameCapture: TypeAlias = Union[IntCapture, EnumCapture]
+_DEFAULT_STRING_CAPTURE_PATTERN = r"[A-Za-z0-9_.-]+"
+
+
+def _validate_string_capture_pattern(pattern: str) -> None:
+    if not isinstance(pattern, str) or not pattern:
+        raise ValueError("string capture pattern must be a non-empty string")
+    try:
+        compiled = re.compile(f"^(?:{pattern})$")
+    except re.error as exc:
+        raise ValueError(f"invalid string capture regex {pattern!r}: {exc}") from exc
+    if compiled.fullmatch("") is not None:
+        raise ValueError("string capture pattern must not match empty strings")
+    for probe in ("/", "\\", "a/b", "a\\b", "/a", "a/", "\\a", "a\\"):
+        if (
+            compiled.fullmatch(probe) is not None
+            or re.search(pattern, "/")
+            or re.search(pattern, "\\")
+        ):
+            raise ValueError(
+                "string capture pattern must not match path separators ('/' or '\\\\')"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class StringCapture:
+    name: str
+    wildcard: int
+    pattern: str = _DEFAULT_STRING_CAPTURE_PATTERN
+
+    def __post_init__(self) -> None:
+        _validate_capture_name(self.name)
+        if self.wildcard < 1:
+            raise ValueError(f"wildcard must be 1-indexed (got {self.wildcard})")
+        _validate_string_capture_pattern(self.pattern)
+
+
+FilenameCapture: TypeAlias = Union[IntCapture, EnumCapture, StringCapture]
 
 
 @dataclass(frozen=True, slots=True)

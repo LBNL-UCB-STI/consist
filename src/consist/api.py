@@ -83,12 +83,17 @@ from consist.types import (
     ArtifactRef,
     CacheOptions,
     DriverType,
+    EnumCapture as EnumCapture,
     ExecutionOptions,
+    FilenameCapture as FilenameCapture,
+    FilenamePattern as FilenamePattern,
     InputBindingMode,
     IdentityInputs,
+    IntCapture as IntCapture,
     OutputPolicyOptions,
     OutputSet,
     RunCompletionArchivePolicy,
+    StringCapture as StringCapture,
 )
 
 if TYPE_CHECKING:

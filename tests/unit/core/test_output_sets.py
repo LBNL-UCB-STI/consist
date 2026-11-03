@@ -3,7 +3,15 @@ import uuid
 
 import pytest
 
-from consist import EnumCapture, FilenamePattern, IntCapture, OutputSet
+from consist import (
+    EnumCapture,
+    FilenameCapture,
+    FilenamePattern,
+    IntCapture,
+    OutputSet,
+    StringCapture,
+)
+from consist.api import StringCapture as ApiStringCapture
 from consist.core.output_sets import (
     build_output_set_manifest,
     discover_output_set_members,
@@ -502,6 +510,161 @@ def test_filename_pattern_extracts_enum_facets(tmp_path: Path) -> None:
         "home",
         "homeoffice",
     ]
+
+
+def test_string_capture_public_imports() -> None:
+    assert StringCapture is ApiStringCapture
+    capture = StringCapture(name="event_type", wildcard=1)
+    assert isinstance(capture, FilenameCapture.__args__)
+
+
+def test_filename_pattern_extracts_string_facets(tmp_path: Path) -> None:
+    root = tmp_path / "events"
+    root.mkdir()
+    (root / "0.events.PathTraversal.parquet").write_text("event\n1\n")
+    (root / "0.events.ModeChoice.parquet").write_text("event\n2\n")
+    (root / "0.events.actend.parquet").write_text("event\n3\n")
+
+    output_set = OutputSet(
+        root=root,
+        include=FilenamePattern.glob("0.events.*.parquet").with_captures(
+            StringCapture(name="event_type", wildcard=1)
+        ),
+    )
+
+    members = discover_output_set_members(output_set)
+    manifest = build_output_set_manifest(
+        key="events_by_type",
+        output_set=output_set,
+        members=members,
+        config={},
+        logged_members=[],
+    )
+
+    assert [member.relative_path for member in members] == [
+        "0.events.ModeChoice.parquet",
+        "0.events.PathTraversal.parquet",
+        "0.events.actend.parquet",
+    ]
+    assert [member["facets"]["event_type"] for member in manifest["members"]] == [
+        "ModeChoice",
+        "PathTraversal",
+        "actend",
+    ]
+    assert manifest["include"] == {
+        "pattern": "0.events.*.parquet",
+        "captures": [
+            {
+                "kind": "string",
+                "name": "event_type",
+                "wildcard": 1,
+                "pattern": r"[A-Za-z0-9_.-]+",
+            }
+        ],
+    }
+
+
+def test_filename_pattern_combines_int_and_string_captures(tmp_path: Path) -> None:
+    root = tmp_path / "output"
+    (root / "ITERS" / "it.0").mkdir(parents=True)
+    (root / "ITERS" / "it.2").mkdir(parents=True)
+    (root / "ITERS" / "it.0" / "0.events.PathTraversal.parquet").write_text("e\n")
+    (root / "ITERS" / "it.2" / "0.events.ModeChoice.parquet").write_text("e\n")
+
+    output_set = OutputSet(
+        root=root,
+        recursive=True,
+        include=FilenamePattern.glob("ITERS/it.*/0.events.*.parquet").with_captures(
+            IntCapture(name="iteration", wildcard=1),
+            StringCapture(name="event_type", wildcard=2),
+        ),
+    )
+
+    members = discover_output_set_members(output_set)
+    manifest = build_output_set_manifest(
+        key="events",
+        output_set=output_set,
+        members=members,
+        config={},
+        logged_members=[],
+    )
+
+    assert [member.relative_path for member in members] == [
+        "ITERS/it.0/0.events.PathTraversal.parquet",
+        "ITERS/it.2/0.events.ModeChoice.parquet",
+    ]
+    assert [member["facets"] for member in manifest["members"]] == [
+        {
+            "output_set_key": "events",
+            "iteration": 0,
+            "event_type": "PathTraversal",
+        },
+        {
+            "output_set_key": "events",
+            "iteration": 2,
+            "event_type": "ModeChoice",
+        },
+    ]
+
+
+def test_string_capture_custom_pattern_validates_tokens(tmp_path: Path) -> None:
+    root = tmp_path / "events"
+    root.mkdir()
+    (root / "0.events.PathTraversal.parquet").write_text("event\n")
+    (root / "0.events.bad_123.parquet").write_text("event\n")
+
+    pattern = FilenamePattern.glob("0.events.*.parquet").with_captures(
+        StringCapture(name="event_type", wildcard=1, pattern=r"[A-Za-z]+")
+    )
+
+    with pytest.raises(ValueError, match="failed typed capture"):
+        discover_output_set_members(OutputSet(root=root, include=pattern))
+
+    members = discover_output_set_members(
+        OutputSet(
+            root=root,
+            include=pattern,
+            exclude=["0.events.bad_123.parquet"],
+        )
+    )
+    assert [member.relative_path for member in members] == [
+        "0.events.PathTraversal.parquet"
+    ]
+
+
+def test_string_capture_validation_errors() -> None:
+    with pytest.raises(ValueError, match="1-indexed"):
+        StringCapture(name="event_type", wildcard=0)
+
+    with pytest.raises(ValueError, match="safe identifier"):
+        StringCapture(name="", wildcard=1)
+
+    with pytest.raises(ValueError, match="reserved"):
+        StringCapture(name="output_set_key", wildcard=1)
+
+    with pytest.raises(ValueError, match="non-empty string"):
+        StringCapture(name="event_type", wildcard=1, pattern="")
+
+    with pytest.raises(ValueError, match="invalid string capture regex"):
+        StringCapture(name="event_type", wildcard=1, pattern="[unclosed")
+
+    with pytest.raises(ValueError, match="empty strings"):
+        StringCapture(name="event_type", wildcard=1, pattern=r"[A-Za-z]*")
+
+    with pytest.raises(ValueError, match="path separators"):
+        StringCapture(name="event_type", wildcard=1, pattern=r".+")
+
+    with pytest.raises(ValueError, match="path separators"):
+        StringCapture(name="event_type", wildcard=1, pattern=r"[A-Za-z/]+")
+
+    with pytest.raises(ValueError, match="path separators"):
+        StringCapture(name="event_type", wildcard=1, pattern=r"[A-Za-z\\]+")
+
+    with pytest.raises(ValueError, match="incompatible repeated capture"):
+        FilenamePattern.glob("output_*_*.parquet").with_captures(
+            StringCapture(name="token", wildcard=1, pattern=r"[a-z]+"),
+            StringCapture(name="token", wildcard=2, pattern=r"[A-Z]+"),
+        )
 
 
 def test_output_set_rejects_unimplemented_validation_modes(tmp_path: Path) -> None:
