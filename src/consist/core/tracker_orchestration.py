@@ -808,6 +808,22 @@ class RunTraceCoordinator:
                 return False
         except Exception:
             pass
+        from consist.core.materialize import find_existing_recovery_source_path
+
+        producing_run = (
+            tracker.get_run(str(artifact.run_id))
+            if artifact.run_id is not None
+            else None
+        )
+        if producing_run is not None:
+            _, source_path, _ = find_existing_recovery_source_path(
+                tracker,
+                artifact=artifact,
+                run=producing_run,
+                source_root=None,
+            )
+            if source_path is not None and source_path.exists():
+                return False
         return True
 
     def _apply_run_completion_archive_policy(
@@ -821,12 +837,7 @@ class RunTraceCoordinator:
         if policy is None:
             return outputs_map
 
-        normalized_roots = tracker.fs.normalize_recovery_roots(policy.archive_root)
-        if not normalized_roots:
-            raise ValueError(
-                "RunCompletionArchivePolicy.archive_root must normalize to a valid path."
-            )
-        archive_root_str = normalized_roots[0]
+        archive_root_str = tracker.fs.normalize_recovery_roots(policy.archive_root)[0]
 
         all_outputs: Dict[str, Artifact] = {
             art.key: art for art in current_consist.outputs
@@ -837,34 +848,42 @@ class RunTraceCoordinator:
 
         from consist.core.materialize import _output_set_hydration_kind
 
+        virtual_keys = {
+            key
+            for key, art in all_outputs.items()
+            if self._is_virtual_unbacked_artifact(tracker, art)
+        }
         archivable_keys = [
             key
             for key, art in all_outputs.items()
             if _output_set_hydration_kind(tracker, art) not in {"member", "manifest"}
-            and not self._is_virtual_unbacked_artifact(tracker, art)
+            and key not in virtual_keys
         ]
         if not archivable_keys:
             return outputs_map
 
-        tracker.archive_current_run_outputs(
+        archived = tracker.archive_current_run_outputs(
             policy.archive_root,
             keys=archivable_keys,
             mode=policy.mode,
             append=True,
         )
 
-        fresh_db_outputs = tracker.get_run_outputs(current_consist.run.id)
+        synced_by_key: Dict[str, Artifact] = {
+            art.key: art for art in current_consist.outputs
+        }
+        synced_by_key.update(archived.outputs)
 
         for art in current_consist.outputs:
-            if art.key in fresh_db_outputs:
-                art.meta = dict(fresh_db_outputs[art.key].meta or {})
+            if art.key in synced_by_key:
+                art.meta = dict(synced_by_key[art.key].meta or {})
                 set_tracker_ref(art, tracker)
 
         missing_recovery_keys: list[str] = []
         for key, art in all_outputs.items():
-            if self._is_virtual_unbacked_artifact(tracker, art):
+            if key in virtual_keys:
                 continue
-            updated_art = fresh_db_outputs.get(key, art)
+            updated_art = synced_by_key.get(key, art)
             meta = updated_art.meta if isinstance(updated_art.meta, MappingABC) else {}
             roots = tracker.fs.normalize_recovery_roots(meta.get("recovery_roots"))
             if archive_root_str not in roots:
@@ -879,8 +898,8 @@ class RunTraceCoordinator:
 
         refreshed_outputs: Dict[str, Artifact] = {}
         for key, art in outputs_map.items():
-            if key in fresh_db_outputs:
-                art.meta = dict(fresh_db_outputs[key].meta or {})
+            if key in synced_by_key:
+                art.meta = dict(synced_by_key[key].meta or {})
             set_tracker_ref(art, tracker)
             refreshed_outputs[key] = art
 

@@ -247,6 +247,12 @@ class NoopScenarioContext:
         resume_phase: CouplerSnapshotPhase = "post",
         **kwargs: Any,
     ) -> None:
+        if step_run_completion_archive is not None and not isinstance(
+            step_run_completion_archive, RunCompletionArchivePolicy
+        ):
+            raise TypeError(
+                "step_run_completion_archive must be a RunCompletionArchivePolicy or None."
+            )
         self.name = name
         self.step_run_completion_archive = step_run_completion_archive
         self.resume_from_run_id = resume_from_run_id

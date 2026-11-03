@@ -730,6 +730,17 @@ def test_scenario_step_run_completion_archive_default_and_override(
         ):
             pass
 
+    with pytest.raises(
+        TypeError,
+        match="step_run_completion_archive must be a RunCompletionArchivePolicy",
+    ):
+        with consist.scenario(
+            "bad_noop_archive_scen",
+            enabled=False,
+            step_run_completion_archive="/tmp/not_policy",  # type: ignore[arg-type]
+        ):
+            pass
+
     def step_one(ctx) -> dict[str, Path]:
         p = ctx.run_dir / "step_one.csv"
         p.write_text("a\n1\n", encoding="utf-8")

@@ -2253,6 +2253,10 @@ class TrackerArchiveService(_TrackerServiceBase):
         :meth:`archive_run_output_files` for report-oriented, no-overwrite
         regular-file archival.
         """
+        if self.db is None:
+            raise RuntimeError(
+                "Cannot archive run outputs: tracker has no database configured."
+            )
         normalized_keys = normalize_materialize_output_keys(
             keys, caller="archive_run_outputs"
         )

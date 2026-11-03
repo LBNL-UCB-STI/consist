@@ -4,10 +4,13 @@ import json
 from pathlib import Path
 import uuid
 
+import pytest
+
 from consist.core.materialize import (
     HydratedRunOutput,
     HydratedRunOutputsResult,
 )
+from consist.core.tracker import Tracker
 from consist.models.artifact import Artifact
 from consist.types import (
     ExecutionOptions,
@@ -205,18 +208,19 @@ def test_run_completion_archive_policy_archives_outputs_on_cache_miss(
     for key in ("summary", "bundle", "annual"):
         assert last_outputs_by_key[key].meta.get("recovery_roots") == [expected_root]
 
-    # Verify DB persistence
+    # Verify DB persistence (including OutputSet member and manifest artifacts)
     db_outputs = tracker.get_artifacts_for_run("archive_miss_run").outputs
-    for key in ("summary", "bundle", "annual"):
-        assert db_outputs[key].meta.get("recovery_roots") == [expected_root]
+    assert len(db_outputs) > 3
+    for key, art in db_outputs.items():
+        assert art.meta.get("recovery_roots") == [expected_root], key
 
-    # Verify consist.json snapshot has recovery_roots
+    # Verify consist.json snapshot has recovery_roots across all outputs
     snapshot = json.loads(
         (tracker.run_dir / "consist.json").read_text(encoding="utf-8")
     )
     snapshot_outputs = {art["key"]: art for art in snapshot["outputs"]}
-    for key in ("summary", "bundle", "annual"):
-        assert snapshot_outputs[key]["meta"].get("recovery_roots") == [expected_root]
+    for key, art in snapshot_outputs.items():
+        assert art["meta"].get("recovery_roots") == [expected_root], key
 
 
 def test_run_completion_archive_policy_on_cache_hit_backfills_new_archive_root(
@@ -347,3 +351,79 @@ def test_run_completion_archive_policy_does_not_perturb_cache_identity(
         str(archive_a.resolve()),
         str(archive_b.resolve()),
     ]
+
+
+def test_run_completion_archive_policy_cross_workspace_cache_hit_archives_file_backed_ingested_output(
+    tracker,
+    tmp_path: Path,
+) -> None:
+    archive_root = tmp_path / "cross_workspace_archive"
+    second_run_dir = tmp_path / "second_workspace"
+
+    def step(ctx) -> dict[str, Path]:
+        backed_ingested = tracker.run_dir / "ingested_backed.csv"
+        backed_ingested.write_text("col\n99\n", encoding="utf-8")
+        tracker.log_artifact(
+            backed_ingested,
+            key="ingested_backed",
+            direction="output",
+            is_ingested=True,
+        )
+        return {}
+
+    first = tracker.run(
+        fn=step,
+        name="cross_ws_ingested_step",
+        run_id="cross_ws_run_1",
+        outputs=["ingested_backed"],
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    assert first.cache_hit is False
+
+    second_tracker = Tracker(run_dir=second_run_dir, db_path=tracker.db_path)
+    second = second_tracker.run(
+        fn=step,
+        name="cross_ws_ingested_step",
+        run_id="cross_ws_run_2",
+        outputs=["ingested_backed"],
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        output_policy=OutputPolicyOptions(
+            run_completion_archive=RunCompletionArchivePolicy(archive_root=archive_root)
+        ),
+    )
+
+    expected_root = str(archive_root.resolve())
+    assert second.cache_hit is True
+    assert second.outputs["ingested_backed"].meta.get("recovery_roots") == [
+        expected_root
+    ]
+    assert (archive_root / "ingested_backed.csv").read_text(
+        encoding="utf-8"
+    ) == "col\n99\n"
+
+
+def test_run_completion_archive_policy_requires_database(tmp_path: Path) -> None:
+    db_less_tracker = Tracker(run_dir=tmp_path / "no_db_runs", db_path=None)
+    archive_root = tmp_path / "no_db_archive"
+
+    def step(ctx) -> dict[str, Path]:
+        out = db_less_tracker.run_dir / "out.csv"
+        out.write_text("a\n1\n", encoding="utf-8")
+        return {"out": out}
+
+    with pytest.raises(
+        RuntimeError,
+        match="Cannot archive run outputs: tracker has no database configured",
+    ):
+        db_less_tracker.run(
+            fn=step,
+            name="no_db_step",
+            run_id="no_db_run",
+            outputs=["out"],
+            execution_options=ExecutionOptions(inject_context="ctx"),
+            output_policy=OutputPolicyOptions(
+                run_completion_archive=RunCompletionArchivePolicy(
+                    archive_root=archive_root
+                )
+            ),
+        )
