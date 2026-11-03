@@ -679,6 +679,54 @@ def test_string_capture_custom_pattern_validates_tokens(tmp_path: Path) -> None:
     ]
 
 
+def test_string_capture_adjacent_wildcards_disambiguated_with_delimiter_free_pattern(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "outputs"
+    root.mkdir()
+    (root / "north_bay_transit.csv").write_text("value\n1\n")
+
+    default_pattern = FilenamePattern.glob("*_*.csv").with_captures(
+        StringCapture(name="region", wildcard=1),
+        StringCapture(name="mode", wildcard=2),
+    )
+    default_manifest = build_output_set_manifest(
+        key="greedy_split",
+        output_set=OutputSet(root=root, include=default_pattern),
+        members=discover_output_set_members(
+            OutputSet(root=root, include=default_pattern)
+        ),
+        config={},
+        logged_members=[],
+    )
+    assert default_manifest["members"][0]["facets"] == {
+        "output_set_key": "greedy_split",
+        "region": "north_bay",
+        "mode": "transit",
+    }
+
+    delimited_pattern = FilenamePattern.glob("*_*_*.csv").with_captures(
+        StringCapture(name="subregion", wildcard=1, pattern=r"[A-Za-z0-9-]+"),
+        StringCapture(name="corridor", wildcard=2, pattern=r"[A-Za-z0-9-]+"),
+        StringCapture(name="mode", wildcard=3, pattern=r"[A-Za-z0-9-]+"),
+    )
+    delimited_manifest = build_output_set_manifest(
+        key="explicit_split",
+        output_set=OutputSet(root=root, include=delimited_pattern),
+        members=discover_output_set_members(
+            OutputSet(root=root, include=delimited_pattern)
+        ),
+        config={},
+        logged_members=[],
+    )
+    assert delimited_manifest["members"][0]["facets"] == {
+        "output_set_key": "explicit_split",
+        "subregion": "north",
+        "corridor": "bay",
+        "mode": "transit",
+    }
+
+
 def test_string_capture_validation_errors() -> None:
     with pytest.raises(ValueError, match="1-indexed"):
         StringCapture(name="event_type", wildcard=0)

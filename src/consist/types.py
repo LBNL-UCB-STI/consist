@@ -333,6 +333,19 @@ def _validate_string_capture_pattern(pattern: str) -> None:
 
 @dataclass(frozen=True, slots=True)
 class StringCapture:
+    """
+    Captures an open string token from a 1-indexed ``*`` wildcard in a
+    ``FilenamePattern``.
+
+    Note:
+        The default ``pattern`` (``r"[A-Za-z0-9_.-]+"``) matches ``_``, ``.``,
+        and ``-`` greedily. When two open captures appear in the same filename
+        segment separated by one of those characters (for example,
+        ``"output_*_*.parquet"``), pass a narrower ``pattern`` that excludes
+        the delimiter (such as ``pattern=r"[A-Za-z0-9-]+"``) to avoid greedy
+        splitting across the separator.
+    """
+
     name: str
     wildcard: int
     pattern: str = _DEFAULT_STRING_CAPTURE_PATTERN
