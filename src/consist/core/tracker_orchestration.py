@@ -797,34 +797,7 @@ class RunTraceCoordinator:
 
     @staticmethod
     def _is_virtual_unbacked_artifact(tracker: "Tracker", artifact: Artifact) -> bool:
-        meta = artifact.meta if isinstance(artifact.meta, MappingABC) else {}
-        if meta.get("is_ingested") is not True:
-            return False
-        if artifact.abs_path and Path(artifact.abs_path).exists():
-            return False
-        try:
-            resolved = Path(tracker.resolve_uri(artifact.container_uri))
-            if resolved.exists():
-                return False
-        except Exception:
-            pass
-        from consist.core.materialize import find_existing_recovery_source_path
-
-        producing_run = (
-            tracker.get_run(str(artifact.run_id))
-            if artifact.run_id is not None
-            else None
-        )
-        if producing_run is not None:
-            _, source_path, _ = find_existing_recovery_source_path(
-                tracker,
-                artifact=artifact,
-                run=producing_run,
-                source_root=None,
-            )
-            if source_path is not None and source_path.exists():
-                return False
-        return True
+        return tracker._archive_service.is_virtual_unbacked_artifact(artifact)
 
     def _apply_run_completion_archive_policy(
         self,
@@ -834,10 +807,20 @@ class RunTraceCoordinator:
         outputs_map: Dict[str, Artifact],
         policy: Optional[Union[RunCompletionArchivePolicy, Literal[False]]],
     ) -> Dict[str, Artifact]:
-        if policy is None or policy is False:
+        pending_override = (
+            current_consist._pending_archive_policy
+            if current_consist is not None
+            else None
+        )
+        effective_policy = pending_override if pending_override is not None else policy
+        if effective_policy is None or effective_policy is False:
             return outputs_map
 
-        archive_root_str = tracker.fs.normalize_recovery_roots(policy.archive_root)[0]
+        resolved_archive_root = effective_policy.resolve_archive_root()
+        if resolved_archive_root is None:
+            return outputs_map
+
+        archive_root_str = tracker.fs.normalize_recovery_roots(resolved_archive_root)[0]
 
         all_outputs: Dict[str, Artifact] = {
             art.key: art for art in current_consist.outputs
@@ -853,7 +836,7 @@ class RunTraceCoordinator:
         for key, art in outputs_map.items():
             if art.abs_path is not None:
                 prior_abs_paths[key] = art.abs_path
-            elif policy.mode == "copy" and key not in prior_abs_paths:
+            elif effective_policy.mode == "copy" and key not in prior_abs_paths:
                 try:
                     resolved_workspace_path = Path(
                         tracker.resolve_uri(art.container_uri)
@@ -883,13 +866,14 @@ class RunTraceCoordinator:
             return outputs_map
 
         archived = tracker.archive_current_run_outputs(
-            policy.archive_root,
+            resolved_archive_root,
             keys=archivable_keys,
-            mode=policy.mode,
+            mode=effective_policy.mode,
             append=True,
+            prepend_source_mount_root=effective_policy.prepend_source_mount_root,
         )
 
-        if policy.mode == "copy":
+        if effective_policy.mode == "copy":
             for key, archived_art in archived.outputs.items():
                 if archived_art.abs_path is None and key in prior_abs_paths:
                     archived_art.abs_path = prior_abs_paths[key]
@@ -901,7 +885,7 @@ class RunTraceCoordinator:
 
         for key, synced_art in synced_by_key.items():
             fallback_abs_path = (
-                prior_abs_paths.get(key) if policy.mode == "copy" else None
+                prior_abs_paths.get(key) if effective_policy.mode == "copy" else None
             )
             matched = current_consist.sync_output_artifact(
                 key=key,
@@ -934,7 +918,7 @@ class RunTraceCoordinator:
             if key in synced_by_key:
                 art.meta = dict(synced_by_key[key].meta or {})
             if (
-                policy.mode == "copy"
+                effective_policy.mode == "copy"
                 and art.abs_path is None
                 and key in prior_abs_paths
             ):

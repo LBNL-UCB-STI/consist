@@ -542,6 +542,10 @@ def open_h5py_read_only(path: str | Path, *, h5py_module: Any = None) -> Any:
             return h5py.File(path, "r", locking=False)
         except TypeError:
             return h5py.File(path, "r")
+        except OSError as exc:
+            if "file locking flag values don't match" in str(exc):
+                return h5py.File(path, "r")
+            raise
     return h5py.File(path, "r")
 
 

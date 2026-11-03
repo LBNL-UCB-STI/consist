@@ -524,6 +524,7 @@ class Tracker:
         # In-Memory State (The Source of Truth)
         self.current_consist: Optional[ConsistRecord] = None
         self._active_coupler: Optional["Coupler"] = None
+        self._couplers: weakref.WeakSet["Coupler"] = weakref.WeakSet()
 
         # Introspection State (Last completed run)
         self._last_consist: Optional[ConsistRecord] = None
@@ -1170,9 +1171,14 @@ class Tracker:
         *,
         mode: Literal["copy", "move"] = "copy",
         append: bool = True,
+        prepend_source_mount_root: bool = True,
     ) -> Path:
         return self._archive_service.archive_artifact(
-            artifact, archive_root, mode=mode, append=append
+            artifact,
+            archive_root,
+            mode=mode,
+            append=append,
+            prepend_source_mount_root=prepend_source_mount_root,
         )
 
     def register_artifact_recovery_copy(
@@ -1268,9 +1274,15 @@ class Tracker:
         keys: Sequence[str] | None = None,
         mode: Literal["copy", "move"] = "copy",
         append: bool = True,
+        prepend_source_mount_root: bool = True,
     ) -> ArchivedOutputs:
         return self._archive_service.archive_run_outputs(
-            run_id, archive_root, keys=keys, mode=mode, append=append
+            run_id,
+            archive_root,
+            keys=keys,
+            mode=mode,
+            append=append,
+            prepend_source_mount_root=prepend_source_mount_root,
         )
 
     def archive_current_run_outputs(
@@ -1280,9 +1292,14 @@ class Tracker:
         keys: Sequence[str] | None = None,
         mode: Literal["copy", "move"] = "copy",
         append: bool = True,
+        prepend_source_mount_root: bool = True,
     ) -> ArchivedOutputs:
         return self._archive_service.archive_current_run_outputs(
-            archive_root, keys=keys, mode=mode, append=append
+            archive_root,
+            keys=keys,
+            mode=mode,
+            append=append,
+            prepend_source_mount_root=prepend_source_mount_root,
         )
 
     def _parse_artifact_facet_from_registered_parsers(
@@ -5880,6 +5897,37 @@ class Tracker:
                 self._flush_json()
 
     set_pending_output_meta = set_output_meta
+
+    def set_archive_root(
+        self,
+        archive_root: Union[
+            str,
+            os.PathLike[str],
+            Callable[[], Optional[Union[str, os.PathLike[str]]]],
+            None,
+        ],
+        *,
+        mode: Literal["copy"] = "copy",
+        prepend_source_mount_root: bool = True,
+    ) -> None:
+        """
+        Dynamically set, override, or disable the run-completion archive policy
+        for the currently active run.
+
+        Passing ``archive_root=None`` disables run-completion archival for the
+        active run even if a scenario- or step-level ``RunCompletionArchivePolicy``
+        was configured.
+        """
+        if not self.current_consist:
+            raise RuntimeError("set_archive_root requires an active run.")
+        if archive_root is None:
+            self.current_consist._pending_archive_policy = False
+            return
+        self.current_consist._pending_archive_policy = RunCompletionArchivePolicy(
+            archive_root=archive_root,
+            mode=mode,
+            prepend_source_mount_root=prepend_source_mount_root,
+        )
 
     def define_step(self, **kwargs) -> Callable:
         """

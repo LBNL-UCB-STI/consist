@@ -682,6 +682,7 @@ class ConsistRecord(SQLModel):
     _pending_output_meta_applied_object_ids: Dict[str, set[int]] = PrivateAttr(
         default_factory=dict
     )
+    _pending_archive_policy: Any = PrivateAttr(default=None)
 
     def sync_output_artifact(
         self,

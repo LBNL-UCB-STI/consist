@@ -175,29 +175,57 @@ class RunCompletionArchivePolicy:
 
     Attributes
     ----------
-    archive_root : PathLike
-        Filesystem root directory under which URI-relative output layouts are
-        replicated and registered in ``artifact.meta['recovery_roots']``.
+    archive_root : PathLike or Callable[[], PathLike | None]
+        Filesystem root directory (or zero-argument callable resolving the root
+        at run completion) under which URI-relative output layouts are
+        replicated and registered in ``artifact.meta['recovery_roots']``. When a
+        callable returns ``None``, run-completion archival is skipped cleanly.
     mode : {"copy"}, default "copy"
         Filesystem operation mode. Only ``"copy"`` is permitted for automatic
         run-completion archival so workspace outputs remain available to
         downstream consumers.
+    prepend_source_mount_root : bool, default True
+        When ``True``, archiving an artifact with ``mode="copy"`` whose
+        ``container_uri`` uses an explicitly configured mount scheme in
+        ``tracker.fs.mounts`` prepends that mount root ahead of ``archive_root``
+        in ``artifact.meta['recovery_roots']``.
     """
 
-    archive_root: PathLike
+    archive_root: Union[PathLike, Callable[[], Optional[PathLike]]]
     mode: Literal["copy"] = "copy"
+    prepend_source_mount_root: bool = True
 
     def __post_init__(self) -> None:
         if self.mode != "copy":
             raise ValueError(
                 f"RunCompletionArchivePolicy.mode must be 'copy'; got {self.mode!r}."
             )
+        if not isinstance(self.prepend_source_mount_root, bool):
+            raise TypeError(
+                "RunCompletionArchivePolicy.prepend_source_mount_root must be a bool."
+            )
+        if callable(self.archive_root):
+            return
         normalized_root = os.fspath(self.archive_root).strip()
         if not normalized_root:
             raise ValueError(
                 "RunCompletionArchivePolicy.archive_root must be a non-empty path."
             )
         object.__setattr__(self, "archive_root", Path(normalized_root))
+
+    def resolve_archive_root(self) -> Optional[Path]:
+        """Resolve ``archive_root`` at run completion, returning ``None`` when skipped."""
+        raw_root = (
+            self.archive_root() if callable(self.archive_root) else self.archive_root
+        )
+        if raw_root is None:
+            return None
+        normalized_root = os.fspath(raw_root).strip()
+        if not normalized_root:
+            raise ValueError(
+                "RunCompletionArchivePolicy.archive_root must be a non-empty path."
+            )
+        return Path(normalized_root)
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,15 +241,35 @@ class OutputPolicyOptions:
     ] = None
 
 
+class _DirectoryFieldOrFactory:
+    """Descriptor exposing ``spec.directory`` as a bool and ``OutputArtifactSpec.directory(...)`` as a factory."""
+
+    def __init__(self, slot_descriptor: Any) -> None:
+        self._slot_descriptor = slot_descriptor
+
+    def __get__(self, instance: Any, owner: type | None = None) -> Any:
+        if instance is None:
+            if owner is None:
+                return self
+            return owner.for_directory
+        return self._slot_descriptor.__get__(instance, owner)
+
+    def __set__(self, instance: Any, value: Any) -> None:
+        self._slot_descriptor.__set__(instance, value)
+
+    def __delete__(self, instance: Any) -> None:
+        self._slot_descriptor.__delete__(instance)
+
+
 @dataclass(frozen=True, slots=True)
 class OutputArtifactSpec:
     """
-    Declares one file output with optional artifact logging metadata.
+    Declares one file or directory output with optional artifact logging metadata.
 
     ``output_paths={key: path}`` remains the shorthand for plain path outputs.
     Use this richer declaration when the output path should carry schema,
-    driver, facet, profiling, or future validation metadata at the declaration
-    site.
+    driver, facet, profiling, directory manifest options, or future validation
+    metadata at the declaration site.
     """
 
     path: ArtifactRef
@@ -233,6 +281,74 @@ class OutputArtifactSpec:
     profile_file_schema: bool | Literal["if_changed"] | None = None
     file_schema_sample_rows: int | None = None
     meta: Mapping[str, Any] | None = None
+    directory: bool = False
+    allow_extra_files: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.directory, bool):
+            raise TypeError("OutputArtifactSpec.directory must be a bool.")
+        if not isinstance(self.allow_extra_files, bool):
+            raise TypeError("OutputArtifactSpec.allow_extra_files must be a bool.")
+
+        merged_meta: dict[str, Any] = dict(self.meta) if self.meta is not None else {}
+        is_directory = self.directory or (merged_meta.get("directory_artifact") is True)
+        allows_extra = self.allow_extra_files or (
+            merged_meta.get("directory_allow_extra_files") is True
+        )
+        is_zarr_output = self.driver == "zarr" or (
+            isinstance(self.path, (str, os.PathLike))
+            and str(os.fspath(self.path)).rstrip("/\\").endswith(".zarr")
+        )
+        if allows_extra and not (is_directory or is_zarr_output):
+            raise ValueError(
+                "OutputArtifactSpec.allow_extra_files=True requires directory=True "
+                "or a Zarr directory output."
+            )
+        if is_directory:
+            object.__setattr__(self, "directory", True)
+            merged_meta["directory_artifact"] = True
+        if allows_extra:
+            object.__setattr__(self, "allow_extra_files", True)
+            merged_meta["directory_allow_extra_files"] = True
+        if merged_meta:
+            object.__setattr__(self, "meta", merged_meta)
+
+    @classmethod
+    def for_directory(
+        cls,
+        path: ArtifactRef,
+        *,
+        allow_extra_files: bool = False,
+        schema: type[SQLModel] | None = None,
+        driver: str | None = None,
+        facet: FacetLike | None = None,
+        facet_schema_version: str | int | None = None,
+        facet_index: bool = False,
+        profile_file_schema: bool | Literal["if_changed"] | None = None,
+        file_schema_sample_rows: int | None = None,
+        meta: Mapping[str, Any] | None = None,
+    ) -> "OutputArtifactSpec":
+        """Construct a directory-backed ``OutputArtifactSpec``."""
+        return cls(
+            path=path,
+            schema=schema,
+            driver=driver,
+            facet=facet,
+            facet_schema_version=facet_schema_version,
+            facet_index=facet_index,
+            profile_file_schema=profile_file_schema,
+            file_schema_sample_rows=file_schema_sample_rows,
+            meta=meta,
+            directory=True,
+            allow_extra_files=allow_extra_files,
+        )
+
+
+type.__setattr__(
+    OutputArtifactSpec,
+    "directory",
+    _DirectoryFieldOrFactory(OutputArtifactSpec.__dict__["directory"]),
+)
 
 
 ArtifactSpec = OutputArtifactSpec

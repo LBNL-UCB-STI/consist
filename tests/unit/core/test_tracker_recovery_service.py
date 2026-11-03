@@ -668,3 +668,83 @@ def test_archive_shapefile_bundle_move_to_same_destination_sets_abs_path(
     tracker.archive_artifact(shp_art, archive_root, mode="move")
     assert shp_art.abs_path == str((bundle_dest / "zones.shp").resolve())
     assert (bundle_dest / "zones.shp").exists()
+
+
+def test_archive_run_outputs_filters_virtual_ingested_and_syncs_last_consist_and_coupler(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True)
+    db_path = str(tmp_path / "provenance.duckdb")
+    tracker = Tracker(
+        run_dir=workspace,
+        db_path=db_path,
+        mounts={"workspace": str(workspace)},
+    )
+
+    out_path = workspace / "outputs" / "metrics.csv"
+    out_path.parent.mkdir(parents=True)
+
+    with tracker.scenario("sync_scenario") as sc:
+
+        def step_fn() -> None:
+            out_path.write_text("id,val\n1,10\n", encoding="utf-8")
+            # Also log a virtual unbacked ingested table row
+            virtual_art = tracker.log_artifact(
+                "db://ingested_summary",
+                key="ingested_summary",
+                direction="output",
+                driver="duckdb",
+                is_ingested=True,
+            )
+            virtual_art.abs_path = None
+
+        res = sc.run(
+            fn=step_fn,
+            name="produce_and_ingest",
+            run_id="run_produce_and_ingest",
+            outputs=["metrics"],
+            output_paths={"metrics": out_path},
+        )
+        archive_root = tmp_path / "archive_post_step"
+        archived = tracker.archive_run_outputs(
+            res.run.id,
+            archive_root,
+            mode="copy",
+        )
+        assert set(archived.keys()) == {"metrics"}
+        expected_roots = [
+            str(workspace.resolve()),
+            str(archive_root.resolve()),
+        ]
+        assert archived.outputs["metrics"].meta["recovery_roots"] == expected_roots
+        assert archived.outputs["metrics"].abs_path == str(out_path.resolve())
+
+        # Verify in-memory sync onto ScenarioContext.coupler and tracker._last_consist
+        coupler_art = sc.coupler.require("metrics")
+        assert coupler_art.meta["recovery_roots"] == expected_roots
+        assert coupler_art.abs_path == str(out_path.resolve())
+
+        assert tracker._last_consist is not None
+        last_metrics = next(
+            a for a in tracker._last_consist.outputs if a.key == "metrics"
+        )
+        assert last_metrics.meta["recovery_roots"] == expected_roots
+        assert last_metrics.abs_path == str(out_path.resolve())
+
+    # Also test prepend_source_mount_root=False
+    archive_root_no_prepend = tmp_path / "archive_no_prepend"
+    with tracker.start_run("run_no_prepend", model="test"):
+        out_b = workspace / "outputs" / "metrics_b.csv"
+        out_b.write_text("id,val\n2,20\n", encoding="utf-8")
+        tracker.log_output(out_b, key="metrics_b")
+
+    archived_b = tracker.archive_run_outputs(
+        "run_no_prepend",
+        archive_root_no_prepend,
+        mode="copy",
+        prepend_source_mount_root=False,
+    )
+    assert archived_b.outputs["metrics_b"].meta["recovery_roots"] == [
+        str(archive_root_no_prepend.resolve())
+    ]

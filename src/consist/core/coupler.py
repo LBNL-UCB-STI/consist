@@ -208,6 +208,10 @@ class Coupler(CouplerMapMixin[Artifact, DeclaredOutput]):
         self._warn_undefined = False
         self._undefined_keys: set[str] = set()
         self._output_descriptions: MutableMapping[str, str] = {}
+        if tracker is not None:
+            couplers = tracker.__dict__.get("_couplers")
+            if couplers is not None:
+                couplers.add(self)
 
     def _validate_artifact_key(self, key: str) -> None:
         validate_artifact_key(key)

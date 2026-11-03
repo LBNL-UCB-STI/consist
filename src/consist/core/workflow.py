@@ -69,6 +69,7 @@ from consist.types import (
     OutputPolicyOptions,
     OutputPathRef,
     OutputSet,
+    PathLike,
     RunCompletionArchivePolicy,
     RunInputRef,
 )
@@ -396,6 +397,24 @@ class RunContext:
 
     set_pending_output_meta = set_output_meta
 
+    def set_archive_root(
+        self,
+        archive_root: Union[PathLike, Callable[[], Optional[PathLike]], None],
+        *,
+        mode: Literal["copy"] = "copy",
+        prepend_source_mount_root: bool = True,
+    ) -> None:
+        """
+        Set, override, or disable the run-completion archive root for the active step.
+
+        This is a thin wrapper around ``Tracker.set_archive_root``.
+        """
+        self._tracker.set_archive_root(
+            archive_root,
+            mode=mode,
+            prepend_source_mount_root=prepend_source_mount_root,
+        )
+
     @property
     def inputs(self) -> Dict[str, Artifact]:
         """
@@ -585,6 +604,11 @@ class ScenarioContext:
         # - Consistency: Artifacts in coupler are independent copies (no cross-run mutations)
         #
         self.coupler = coupler or Coupler(tracker=tracker)
+        if self.coupler.tracker is None:
+            self.coupler.tracker = tracker
+        couplers = tracker.__dict__.get("_couplers")
+        if couplers is not None:
+            couplers.add(self.coupler)
         if require_outputs:
             self.coupler.require_outputs(*require_outputs)
 

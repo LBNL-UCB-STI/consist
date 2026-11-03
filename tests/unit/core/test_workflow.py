@@ -1229,3 +1229,250 @@ def test_set_output_meta_reserved_keys_trace_demotion_and_post_call_preservation
 
     demoted_out = tracker.get_run_outputs("trace_demote_2")["t_out"]
     assert demoted_out.meta.get("from_demoted_trace") == 42
+
+
+def test_lazy_callable_archive_root_and_in_run_set_archive_root(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True)
+    db_path = str(tmp_path / "provenance.duckdb")
+    tracker = Tracker(
+        run_dir=workspace,
+        db_path=db_path,
+        mounts={"workspace": str(workspace)},
+    )
+
+    state: dict[str, Path | None] = {"archive_dir": None}
+
+    def beam_like_step() -> None:
+        # Discover archive root during execution
+        state["archive_dir"] = tmp_path / "discovered_beam_archive"
+        out_file = workspace / "beam_out" / "events.csv"
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_text("time,type\n1,departure\n", encoding="utf-8")
+
+    res = tracker.run(
+        fn=beam_like_step,
+        name="beam_like_step",
+        run_id="run_lazy_callable_archive",
+        outputs=["events"],
+        output_paths={"events": workspace / "beam_out" / "events.csv"},
+        output_policy=OutputPolicyOptions(
+            run_completion_archive=RunCompletionArchivePolicy(
+                archive_root=lambda: state["archive_dir"],
+                mode="copy",
+            )
+        ),
+    )
+    discovered = state["archive_dir"]
+    assert discovered is not None
+    assert (discovered / "beam_out" / "events.csv").exists()
+    assert res.outputs["events"].meta["recovery_roots"] == [
+        str(workspace.resolve()),
+        str(discovered.resolve()),
+    ]
+    assert res.outputs["events"].abs_path == str(
+        (workspace / "beam_out" / "events.csv").resolve()
+    )
+
+    # Callable returning None skips archiving cleanly
+    def skipped_archive_step() -> None:
+        out_file = workspace / "beam_out" / "skipped.csv"
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_text("time\n1\n", encoding="utf-8")
+
+    res_skipped = tracker.run(
+        fn=skipped_archive_step,
+        name="skipped_archive_step",
+        run_id="run_skipped_callable_archive",
+        outputs=["skipped"],
+        output_paths={"skipped": workspace / "beam_out" / "skipped.csv"},
+        output_policy=OutputPolicyOptions(
+            run_completion_archive=RunCompletionArchivePolicy(
+                archive_root=lambda: None,
+                mode="copy",
+            )
+        ),
+    )
+    assert "recovery_roots" not in (res_skipped.outputs["skipped"].meta or {})
+
+    # In-run ctx.set_archive_root override and disable
+    in_run_archive = tmp_path / "in_run_override_archive"
+
+    def step_with_ctx_archive(ctx) -> None:
+        out_file = workspace / "beam_out" / "ctx_events.csv"
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_text("time\n2\n", encoding="utf-8")
+        ctx.set_archive_root(in_run_archive, prepend_source_mount_root=False)
+
+    res_ctx = tracker.run(
+        fn=step_with_ctx_archive,
+        name="step_with_ctx_archive",
+        run_id="run_ctx_set_archive_root",
+        outputs=["ctx_events"],
+        output_paths={"ctx_events": workspace / "beam_out" / "ctx_events.csv"},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    assert (in_run_archive / "beam_out" / "ctx_events.csv").exists()
+    assert res_ctx.outputs["ctx_events"].meta["recovery_roots"] == [
+        str(in_run_archive.resolve())
+    ]
+
+    def step_disable_archive(ctx) -> None:
+        out_file = workspace / "beam_out" / "disabled.csv"
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_text("time\n3\n", encoding="utf-8")
+        ctx.set_archive_root(None)
+
+    res_disabled = tracker.run(
+        fn=step_disable_archive,
+        name="step_disable_archive",
+        run_id="run_ctx_disable_archive_root",
+        outputs=["disabled"],
+        output_paths={"disabled": workspace / "beam_out" / "disabled.csv"},
+        output_policy=OutputPolicyOptions(
+            run_completion_archive=RunCompletionArchivePolicy(
+                archive_root=tmp_path / "unused_static_archive",
+                mode="copy",
+            )
+        ),
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    assert "recovery_roots" not in (res_disabled.outputs["disabled"].meta or {})
+
+
+def test_output_artifact_spec_typed_directory_options(
+    tmp_path: Path,
+) -> None:
+    from consist.types import OutputArtifactSpec
+
+    run_dir = tmp_path / "runs"
+    db_path = str(tmp_path / "provenance.duckdb")
+    tracker = Tracker(run_dir=run_dir, db_path=db_path)
+
+    spec_kw = OutputArtifactSpec(
+        path=run_dir / "dir_kw",
+        directory=True,
+        allow_extra_files=True,
+        meta={"custom_tag": "v1"},
+    )
+    assert spec_kw.directory is True
+    assert spec_kw.allow_extra_files is True
+    assert spec_kw.meta == {
+        "custom_tag": "v1",
+        "directory_artifact": True,
+        "directory_allow_extra_files": True,
+    }
+
+    spec_factory = OutputArtifactSpec.directory(
+        run_dir / "dir_factory.zarr",
+        allow_extra_files=True,
+        driver="zarr",
+    )
+    assert spec_factory.directory is True
+    assert spec_factory.allow_extra_files is True
+    assert spec_factory.driver == "zarr"
+    assert spec_factory.meta == {
+        "directory_artifact": True,
+        "directory_allow_extra_files": True,
+    }
+
+    with pytest.raises(
+        ValueError, match="allow_extra_files=True requires directory=True"
+    ):
+        OutputArtifactSpec(path=run_dir / "scalar.csv", allow_extra_files=True)
+
+    def write_dirs() -> None:
+        d1 = run_dir / "dir_kw"
+        d1.mkdir(parents=True, exist_ok=True)
+        (d1 / "part.txt").write_text("hello", encoding="utf-8")
+
+    res = tracker.run(
+        fn=write_dirs,
+        name="write_dirs",
+        run_id="run_typed_dir_spec",
+        outputs=["dir_kw"],
+        output_paths={"dir_kw": spec_kw},
+    )
+    logged = res.outputs["dir_kw"]
+    assert logged.meta["directory_artifact"] is True
+    assert logged.meta["directory_allow_extra_files"] is True
+    assert logged.meta["custom_tag"] == "v1"
+    assert "directory_manifest" in logged.meta
+
+
+def test_open_h5py_read_only_falls_back_when_locking_flags_conflict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import types
+    from consist.digest import open_h5py_read_only
+
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def fake_file(*args: object, **kwargs: object) -> str:
+        calls.append((args, kwargs))
+        if kwargs.get("locking") is False:
+            raise OSError(
+                "Unable to synchronously open file (file locking flag values don't match)"
+            )
+        return "opened-with-default-locking"
+
+    fake_h5py = types.SimpleNamespace(File=fake_file)
+    h5_path = tmp_path / "model_data.h5"
+    result = open_h5py_read_only(h5_path, h5py_module=fake_h5py)
+    assert result == "opened-with-default-locking"
+    assert calls == [
+        ((h5_path, "r"), {"locking": False}),
+        ((h5_path, "r"), {}),
+    ]
+
+
+def test_output_policy_error_honors_runtime_output_paths_narrowing_decorator_outputs(
+    tmp_path: Path,
+) -> None:
+    from consist.types import CacheOptions, OutputPolicyOptions
+
+    run_dir = tmp_path / "runs"
+    db_path = str(tmp_path / "provenance.duckdb")
+    tracker = Tracker(run_dir=run_dir, db_path=db_path)
+
+    @tracker.define_step(outputs=["out_a", "out_b"])
+    def conditional_step() -> None:
+        out_a = run_dir / "out_a.txt"
+        out_a.parent.mkdir(parents=True, exist_ok=True)
+        out_a.write_text("only a", encoding="utf-8")
+
+    # 1. Cache miss: runtime output_paths narrows expected outputs to out_a
+    with tracker.scenario("scen_narrow_miss") as sc:
+        res_miss = sc.run(
+            fn=conditional_step,
+            output_paths={"out_a": run_dir / "out_a.txt"},
+            output_policy=OutputPolicyOptions(output_missing="error"),
+        )
+        assert res_miss.cache_hit is False
+        assert set(res_miss.outputs.keys()) == {"out_a"}
+        assert "out_a" in sc.coupler
+
+    # 2. Cache hit: cached run also validates only out_a without failing on out_b
+    with tracker.scenario("scen_narrow_hit") as sc_hit:
+        res_hit = sc_hit.run(
+            fn=conditional_step,
+            output_paths={"out_a": run_dir / "out_a.txt"},
+            output_policy=OutputPolicyOptions(output_missing="error"),
+        )
+        assert res_hit.cache_hit is True
+        assert set(res_hit.outputs.keys()) == {"out_a"}
+
+    # 3. Missing declared runtime output_paths key still raises RuntimeError
+    @tracker.define_step(outputs=["out_a", "out_b"])
+    def missing_step() -> None:
+        pass
+
+    with pytest.raises(RuntimeError, match="out_a"):
+        tracker.run(
+            fn=missing_step,
+            output_paths={"out_a": run_dir / "never_written.txt"},
+            cache_options=CacheOptions(cache_mode="overwrite"),
+            output_policy=OutputPolicyOptions(output_missing="error"),
+        )
