@@ -307,12 +307,25 @@ def _validate_string_capture_pattern(pattern: str) -> None:
         raise ValueError(f"invalid string capture regex {pattern!r}: {exc}") from exc
     if compiled.fullmatch("") is not None:
         raise ValueError("string capture pattern must not match empty strings")
-    for probe in ("/", "\\", "a/b", "a\\b", "/a", "a/", "\\a", "a\\"):
-        if (
-            compiled.fullmatch(probe) is not None
-            or re.search(pattern, "/")
-            or re.search(pattern, "\\")
-        ):
+    if re.search(pattern, "/") or re.search(pattern, "\\"):
+        raise ValueError(
+            "string capture pattern must not match path separators ('/' or '\\\\')"
+        )
+    for probe in (
+        "/",
+        "\\",
+        "/" * 8,
+        "\\" * 8,
+        "a/b",
+        "a\\b",
+        "aa/bb",
+        "aa\\bb",
+        "/a",
+        "a/",
+        "\\a",
+        "a\\",
+    ):
+        if compiled.fullmatch(probe) is not None:
             raise ValueError(
                 "string capture pattern must not match path separators ('/' or '\\\\')"
             )

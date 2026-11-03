@@ -607,6 +607,53 @@ def test_filename_pattern_combines_int_and_string_captures(tmp_path: Path) -> No
     ]
 
 
+def test_filename_pattern_string_capture_on_directory_wildcard(tmp_path: Path) -> None:
+    root = tmp_path / "output"
+    (root / "scenarios" / "baseline").mkdir(parents=True)
+    (root / "scenarios" / "high_transit").mkdir(parents=True)
+    (root / "scenarios" / "baseline" / "0.events.PathTraversal.parquet").write_text(
+        "e\n"
+    )
+    (root / "scenarios" / "high_transit" / "0.events.ModeChoice.parquet").write_text(
+        "e\n"
+    )
+
+    output_set = OutputSet(
+        root=root,
+        recursive=True,
+        include=FilenamePattern.glob("scenarios/*/0.events.*.parquet").with_captures(
+            StringCapture(name="scenario", wildcard=1),
+            StringCapture(name="event_type", wildcard=2),
+        ),
+    )
+
+    members = discover_output_set_members(output_set)
+    manifest = build_output_set_manifest(
+        key="scenario_events",
+        output_set=output_set,
+        members=members,
+        config={},
+        logged_members=[],
+    )
+
+    assert [member.relative_path for member in members] == [
+        "scenarios/baseline/0.events.PathTraversal.parquet",
+        "scenarios/high_transit/0.events.ModeChoice.parquet",
+    ]
+    assert [member["facets"] for member in manifest["members"]] == [
+        {
+            "output_set_key": "scenario_events",
+            "scenario": "baseline",
+            "event_type": "PathTraversal",
+        },
+        {
+            "output_set_key": "scenario_events",
+            "scenario": "high_transit",
+            "event_type": "ModeChoice",
+        },
+    ]
+
+
 def test_string_capture_custom_pattern_validates_tokens(tmp_path: Path) -> None:
     root = tmp_path / "events"
     root.mkdir()

@@ -136,11 +136,7 @@ def _compile_filename_pattern(
                     rf")"
                 )
             elif isinstance(capture, StringCapture):
-                capture_regex = (
-                    rf"(?P<{group_name}>"
-                    rf"(?=.+)(?![^/\\]*[/\\])(?:{capture.pattern})"
-                    rf")"
-                )
+                capture_regex = rf"(?P<{group_name}>(?:{capture.pattern}))"
             else:  # pragma: no cover - defensive for future capture kinds
                 raise TypeError(f"unsupported capture type: {type(capture)!r}")
             regex_parts.append(capture_regex)
