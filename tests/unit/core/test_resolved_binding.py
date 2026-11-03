@@ -533,7 +533,9 @@ def test_resolved_binding_rejects_locator_for_a_different_artifact() -> None:
         )
 
 
-def test_resolved_binding_rejects_duplicate_execution_destinations() -> None:
+def test_resolved_binding_allows_benign_parameter_aliasing_to_same_destination() -> (
+    None
+):
     from consist.core.resolved_binding import (
         ArtifactIdentity,
         BoundArtifact,
@@ -551,14 +553,76 @@ def test_resolved_binding_rejects_duplicate_execution_destinations() -> None:
         step_name="beam",
         step_contract_identity="sha256:step-v1:" + "b" * 64,
     )
+    binding = (
+        builder.bind_artifact(
+            parameter="first",
+            artifact=artifact,
+            destination=Path("inputs/shared.csv"),
+            source="pinned",
+        )
+        .bind_artifact(
+            parameter="second",
+            artifact=artifact,
+            destination=Path("inputs/shared.csv"),
+            source="pinned",
+        )
+        .bind_artifact(
+            parameter="unplaced",
+            artifact=artifact,
+            destination=None,
+            source="pinned",
+        )
+        .freeze()
+    )
+
+    assert binding.input_for("first").parameter == "first"
+    assert binding.input_for("second").parameter == "second"
+    assert binding.path_for("first") == Path("inputs/shared.csv")
+    assert binding.path_for("second") == Path("inputs/shared.csv")
+    assert binding.artifact_for("first") == artifact
+    assert binding.artifact_for("second") == artifact
+    with pytest.raises(KeyError):
+        binding.input_for("unknown")
+    with pytest.raises(KeyError):
+        binding.path_for("unknown")
+    with pytest.raises(KeyError):
+        binding.artifact_for("unknown")
+    with pytest.raises(ValueError, match="no execution destination"):
+        binding.path_for("unplaced")
+
+
+def test_resolved_binding_rejects_duplicate_execution_destinations() -> None:
+    from consist.core.resolved_binding import (
+        ArtifactIdentity,
+        BoundArtifact,
+        ResolvedBindingBuilder,
+        TrackedArtifactLocator,
+    )
+
+    first_id = uuid.uuid4()
+    second_id = uuid.uuid4()
+    first_artifact = BoundArtifact(
+        artifact_id=first_id,
+        identity=ArtifactIdentity.parse(f"sha256:file:{'a' * 64}"),
+        locator=TrackedArtifactLocator(artifact_id=first_id),
+    )
+    second_artifact = BoundArtifact(
+        artifact_id=second_id,
+        identity=ArtifactIdentity.parse(f"sha256:file:{'c' * 64}"),
+        locator=TrackedArtifactLocator(artifact_id=second_id),
+    )
+    builder = ResolvedBindingBuilder(
+        step_name="beam",
+        step_contract_identity="sha256:step-v1:" + "b" * 64,
+    )
     builder.bind_artifact(
         parameter="first",
-        artifact=artifact,
+        artifact=first_artifact,
         destination=Path("inputs/shared.csv"),
         source="pinned",
     ).bind_artifact(
         parameter="second",
-        artifact=artifact,
+        artifact=second_artifact,
         destination=Path("inputs/shared.csv"),
         source="pinned",
     )
@@ -957,6 +1021,106 @@ def test_strict_binding_materializes_one_artifact_for_multiple_parameters(
     assert {item["artifact"]["artifact_id"] for item in invocation_inputs.values()} == {
         str(artifact.id)
     }
+
+
+def test_strict_binding_aliases_multiple_parameters_to_same_artifact_and_destination(
+    tracker, tmp_path: Path, monkeypatch
+) -> None:
+    import consist.core.cache as cache_module
+    from consist import ExecutionOptions
+    from consist.core.resolved_binding import (
+        ResolvedBindingBuilder,
+        step_contract_identity,
+    )
+
+    source = tmp_path / "model_data.h5"
+    source.write_text("h5-payload\n", encoding="utf-8")
+    with tracker.start_run("seed_aliased_h5", "test"):
+        artifact = tracker.log_artifact(source, key="model_data_h5", direction="input")
+
+    received: list[tuple[Path, Path]] = []
+
+    def consume(
+        usim_population_source_h5: Path,
+        usim_datastore_h5: Path,
+    ) -> None:
+        received.append((usim_population_source_h5, usim_datastore_h5))
+
+    shared_destination = Path("inputs/model_data.h5")
+    binding = (
+        ResolvedBindingBuilder(
+            step_name="consume",
+            step_contract_identity=step_contract_identity(consume, "consume"),
+        )
+        .bind_tracked_artifact(
+            parameter="usim_population_source_h5",
+            artifact=artifact,
+            destination=shared_destination,
+            source="pinned",
+        )
+        .bind_tracked_artifact(
+            parameter="usim_datastore_h5",
+            artifact=artifact,
+            destination=shared_destination,
+            source="pinned",
+        )
+        .freeze()
+    )
+
+    assert (
+        binding.path_for("usim_population_source_h5")
+        == binding.path_for("usim_datastore_h5")
+        == shared_destination
+    )
+    assert binding.artifact_for("usim_population_source_h5") == binding.artifact_for(
+        "usim_datastore_h5"
+    )
+
+    snapshot_calls: list[Path] = []
+    real_snapshot = cache_module.create_execution_snapshot
+
+    def counting_snapshot(*args, **kwargs):
+        snapshot_calls.append(Path(kwargs["destination"]))
+        return real_snapshot(*args, **kwargs)
+
+    monkeypatch.setattr(cache_module, "create_execution_snapshot", counting_snapshot)
+
+    with tracker.scenario("strict_binding_aliased_destination_1") as scenario:
+        first_result = scenario.run(
+            fn=consume,
+            name="consume",
+            binding=binding,
+            execution_options=ExecutionOptions(input_binding="paths"),
+        )
+
+    expected_staged_path = (
+        tracker.run_dir
+        / ".resolved-bindings"
+        / first_result.run.id
+        / shared_destination
+    ).resolve()
+    assert first_result.cache_hit is False
+    assert snapshot_calls == [expected_staged_path]
+    assert received == [(expected_staged_path, expected_staged_path)]
+    assert expected_staged_path.read_text(encoding="utf-8") == "h5-payload\n"
+    assert first_result.run.meta["staged_inputs"] == {
+        "usim_population_source_h5": str(expected_staged_path),
+        "usim_datastore_h5": str(expected_staged_path),
+    }
+    assert set(tracker.get_artifacts_for_run(first_result.run.id).inputs) == {
+        "model_data_h5"
+    }
+
+    with tracker.scenario("strict_binding_aliased_destination_2") as scenario:
+        second_result = scenario.run(
+            fn=consume,
+            name="consume",
+            binding=binding,
+            execution_options=ExecutionOptions(input_binding="paths"),
+        )
+
+    assert second_result.cache_hit is True
+    assert len(received) == 1
 
 
 def test_scenario_forwards_ordered_duplicate_strict_context_to_lifecycle(

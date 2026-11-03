@@ -1716,17 +1716,21 @@ class ScenarioContext:
                 )
             if strict_binding is not None:
                 bound_inputs: dict[str, Artifact] = {}
+                resolved_by_id: dict[uuid.UUID, Artifact] = {}
                 for parameter, resolved_input in strict_binding.inputs.items():
                     locator = resolved_input.artifact.locator
                     if not isinstance(locator, TrackedArtifactLocator):
                         raise ValueError(
                             f"Resolved binding locator is unsupported for {parameter!r}."
                         )
-                    artifact = self.tracker.get_artifact(locator.artifact_id)
+                    artifact = resolved_by_id.get(locator.artifact_id)
                     if artifact is None:
-                        raise ValueError(
-                            f"Resolved binding artifact is unavailable for {parameter!r}."
-                        )
+                        artifact = self.tracker.get_artifact(locator.artifact_id)
+                        if artifact is None:
+                            raise ValueError(
+                                f"Resolved binding artifact is unavailable for {parameter!r}."
+                            )
+                        resolved_by_id[locator.artifact_id] = artifact
                     if (
                         ArtifactIdentity.from_artifact(artifact)
                         != resolved_input.artifact.identity

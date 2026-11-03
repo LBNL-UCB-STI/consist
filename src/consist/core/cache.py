@@ -1374,6 +1374,8 @@ def materialize_requested_inputs(
 
         return None
 
+    staged_by_destination: dict[Path, uuid.UUID] = {}
+
     for key, destination in requested_paths.items():
         is_strict_snapshot = active_options.requested_input_strict_snapshot
         requested_artifact_id = requested_artifact_ids.get(key)
@@ -1432,6 +1434,11 @@ def materialize_requested_inputs(
         validate_allowed_materialization_destination(destination_path, allowed_base)
         destination_path.parent.mkdir(parents=True, exist_ok=True)
 
+        if staged_by_destination.get(destination_path) == artifact.id:
+            artifact.abs_path = str(destination_path)
+            staged[key] = str(destination_path)
+            continue
+
         source_path = _resolve_source(artifact)
         if destination_path.exists():
             if is_strict_snapshot:
@@ -1443,6 +1450,7 @@ def materialize_requested_inputs(
             ):
                 artifact.abs_path = str(destination_path)
                 staged[key] = str(destination_path)
+                staged_by_destination[destination_path] = artifact.id
                 continue
             if source_path is not None and _paths_match(source_path, destination_path):
                 if (
@@ -1464,6 +1472,7 @@ def materialize_requested_inputs(
                     )
                 artifact.abs_path = str(destination_path)
                 staged[key] = str(destination_path)
+                staged_by_destination[destination_path] = artifact.id
                 continue
             if requested_mode != "copy":
                 raise ValueError(
@@ -1515,6 +1524,7 @@ def materialize_requested_inputs(
                     )
                 artifact.abs_path = str(staged_path)
                 staged[key] = str(staged_path)
+                staged_by_destination[staged_path] = artifact.id
                 continue
             raise FileNotFoundError(
                 f"[Consist] Cannot stage input {artifact.key!r}: source path missing."
@@ -1523,6 +1533,7 @@ def materialize_requested_inputs(
         if source_path.resolve() == destination_path:
             artifact.abs_path = str(destination_path)
             staged[key] = str(destination_path)
+            staged_by_destination[destination_path] = artifact.id
             continue
 
         if is_strict_snapshot:
@@ -1540,6 +1551,7 @@ def materialize_requested_inputs(
             )
             artifact.abs_path = str(destination_path)
             staged[key] = str(destination_path)
+            staged_by_destination[destination_path] = artifact.id
             continue
 
         materialize_artifacts_from_sources(
@@ -1566,5 +1578,6 @@ def materialize_requested_inputs(
 
         artifact.abs_path = str(destination_path)
         staged[key] = str(destination_path)
+        staged_by_destination[destination_path] = artifact.id
 
     return staged

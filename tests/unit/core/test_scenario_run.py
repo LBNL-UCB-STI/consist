@@ -1231,3 +1231,76 @@ def test_scenario_preflight_identity_rejects_changed_runtime_kwargs(tracker) -> 
                     runtime_kwargs={"scenario": "second"}
                 ),
             )
+
+
+def test_binding_result_parameter_lookup_helpers_and_aliasing(
+    tracker, tmp_path: Path
+) -> None:
+    shared_path = tmp_path / "model_data.h5"
+    shared_path.write_text("h5-content\n", encoding="utf-8")
+    raw_path = tmp_path / "raw.csv"
+    raw_path.write_text("a,b\n1,2\n", encoding="utf-8")
+
+    with tracker.start_run("seed_binding_result_alias", "test"):
+        artifact = tracker.log_artifact(
+            shared_path, key="model_data_h5", direction="input"
+        )
+
+    binding = consist.BindingResult(
+        inputs={
+            "usim_population_source_h5": artifact,
+            "usim_datastore_h5": artifact,
+            "raw_csv": raw_path,
+        }
+    )
+
+    assert binding.input_for("usim_population_source_h5") == artifact
+    assert binding.input_for("usim_datastore_h5") == artifact
+    assert binding.artifact_for("usim_population_source_h5") == artifact
+    assert binding.artifact_for("usim_datastore_h5") == artifact
+    assert binding.path_for("usim_population_source_h5") == shared_path.resolve()
+    assert binding.path_for("usim_datastore_h5") == shared_path.resolve()
+    assert binding.path_for("raw_csv") == raw_path
+
+    with pytest.raises(KeyError):
+        binding.input_for("missing")
+    with pytest.raises(KeyError):
+        binding.artifact_for("missing")
+    with pytest.raises(KeyError):
+        binding.path_for("missing")
+    with pytest.raises(TypeError, match="not an Artifact"):
+        binding.artifact_for("raw_csv")
+
+    received: list[tuple[Path, Path]] = []
+
+    def consume(
+        usim_population_source_h5: Path,
+        usim_datastore_h5: Path,
+        raw_csv: Path,
+    ) -> None:
+        assert raw_csv == raw_path
+        received.append((usim_population_source_h5, usim_datastore_h5))
+
+    staged_target = tracker.run_dir / "staged" / "model_data.h5"
+    with tracker.scenario("scen_binding_result_aliased_inputs") as sc:
+        result = sc.run(
+            fn=consume,
+            name="consume",
+            binding=binding,
+            execution_options=ExecutionOptions(
+                input_binding="paths",
+                input_paths={
+                    "usim_population_source_h5": staged_target,
+                    "usim_datastore_h5": staged_target,
+                },
+                input_materialization="requested",
+            ),
+        )
+
+    assert result.cache_hit is False
+    assert received == [(staged_target.resolve(), staged_target.resolve())]
+    assert staged_target.read_text(encoding="utf-8") == "h5-content\n"
+    assert set(tracker.get_artifacts_for_run(result.run.id).inputs) == {
+        "model_data_h5",
+        "raw_csv",
+    }

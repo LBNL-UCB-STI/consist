@@ -1623,19 +1623,20 @@ class DatabaseManager:
         """
         if not artifact_ids:
             return
+        unique_artifact_ids = list(dict.fromkeys(artifact_ids))
 
         def _do_link():
             with self.session_scope() as session:
                 existing = session.exec(
                     select(RunArtifactLink)
                     .where(RunArtifactLink.run_id == run_id)
-                    .where(col(RunArtifactLink.artifact_id).in_(artifact_ids))
+                    .where(col(RunArtifactLink.artifact_id).in_(unique_artifact_ids))
                 ).all()
 
                 existing_by_id = {row.artifact_id: row for row in existing}
 
                 new_links: List[RunArtifactLink] = []
-                for artifact_id in artifact_ids:
+                for artifact_id in unique_artifact_ids:
                     row = existing_by_id.get(artifact_id)
                     if row is not None:
                         if row.direction != direction:
@@ -1701,6 +1702,7 @@ class DatabaseManager:
                 require_success=require_success,
             )
             return
+        unique_artifact_ids = list(dict.fromkeys(artifact_ids))
 
         def _do_sync():
             with _track_begin_run_phase("db.sync_run_with_links.session_scope"):
@@ -1716,7 +1718,11 @@ class DatabaseManager:
                         existing = session.exec(
                             select(RunArtifactLink)
                             .where(RunArtifactLink.run_id == run.id)
-                            .where(col(RunArtifactLink.artifact_id).in_(artifact_ids))
+                            .where(
+                                col(RunArtifactLink.artifact_id).in_(
+                                    unique_artifact_ids
+                                )
+                            )
                         ).all()
 
                     existing_by_id = {row.artifact_id: row for row in existing}
@@ -1724,7 +1730,7 @@ class DatabaseManager:
                     with _track_begin_run_phase(
                         "db.sync_run_with_links.prepare_new_links"
                     ):
-                        for artifact_id in artifact_ids:
+                        for artifact_id in unique_artifact_ids:
                             row = existing_by_id.get(artifact_id)
                             if row is not None:
                                 if row.direction != direction:

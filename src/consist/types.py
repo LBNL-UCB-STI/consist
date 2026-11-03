@@ -73,6 +73,36 @@ class BindingResult:
     optional_input_keys: Optional[Union[Iterable[str], str]] = None
     metadata: Optional[Mapping[str, Any]] = None
 
+    def input_for(self, name: str) -> RunInputRef:
+        """Return the bound input reference for ``name``."""
+        if self.inputs is None or name not in self.inputs:
+            raise KeyError(name)
+        return self.inputs[name]
+
+    def artifact_for(self, name: str) -> "Artifact":
+        """Return the bound ``Artifact`` for ``name``."""
+        value = self.input_for(name)
+        from consist.models.artifact import Artifact
+        from consist.models.run import RunResult, resolve_run_result_output
+
+        if isinstance(value, Artifact):
+            return value
+        if isinstance(value, RunResult):
+            return resolve_run_result_output(value)
+        raise TypeError(
+            f"BindingResult input {name!r} is not an Artifact "
+            f"(got {type(value).__name__})."
+        )
+
+    def path_for(self, name: str) -> Path:
+        """Return the resolved filesystem ``Path`` for ``name``."""
+        value = self.input_for(name)
+        if isinstance(value, Path):
+            return value
+        if isinstance(value, str):
+            return Path(value)
+        return self.artifact_for(name).path
+
 
 @dataclass(frozen=True, slots=True)
 class CacheOptions:

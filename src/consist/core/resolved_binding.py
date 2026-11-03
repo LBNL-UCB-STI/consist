@@ -273,7 +273,7 @@ def _validate_resolved_binding(
         raise ValueError("resolved binding step name must not be empty")
     if not _STEP_IDENTITY_PATTERN.fullmatch(step_contract):
         raise ValueError("invalid step contract identity")
-    destinations: set[Path] = set()
+    destinations: dict[Path, BoundArtifact] = {}
     for key, resolved_input in inputs.items():
         if not key or not resolved_input.parameter:
             raise ValueError("resolved binding input parameter must not be empty")
@@ -285,9 +285,22 @@ def _validate_resolved_binding(
             continue
         if destination.is_absolute() or ".." in destination.parts:
             raise ValueError("resolved binding destinations must be relative paths")
-        if destination in destinations:
-            raise ValueError("duplicate execution destination in resolved binding")
-        destinations.add(destination)
+        existing = destinations.get(destination)
+        if existing is not None:
+            if (
+                existing.identity,
+                existing.locator,
+                existing.artifact_kind,
+                existing.directory_manifest,
+            ) != (
+                resolved_input.artifact.identity,
+                resolved_input.artifact.locator,
+                resolved_input.artifact.artifact_kind,
+                resolved_input.artifact.directory_manifest,
+            ):
+                raise ValueError("duplicate execution destination in resolved binding")
+            continue
+        destinations[destination] = resolved_input.artifact
     for parameter, evidence in admission_evidence.items():
         try:
             bound = inputs[parameter]
@@ -354,6 +367,23 @@ class ResolvedBinding:
             MappingProxyType(dict(self.admission_evidence)),
         )
         object.__setattr__(self, "diagnostics", MappingProxyType(dict(diagnostics)))
+
+    def input_for(self, parameter: str) -> ResolvedInput:
+        """Return the resolved input contract for ``parameter``."""
+        return self.inputs[parameter]
+
+    def path_for(self, parameter: str) -> Path:
+        """Return the execution destination path for ``parameter``."""
+        destination = self.input_for(parameter).destination
+        if destination is None:
+            raise ValueError(
+                f"resolved binding input {parameter!r} has no execution destination"
+            )
+        return destination
+
+    def artifact_for(self, parameter: str) -> BoundArtifact:
+        """Return the bound artifact contract for ``parameter``."""
+        return self.input_for(parameter).artifact
 
     def identity_json(self) -> str:
         """Serialize the cache-partitioning execution contract deterministically."""
