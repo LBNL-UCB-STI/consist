@@ -45,6 +45,7 @@ from consist.core.container_policy import validate_recovery_registration_policy
 from consist.core.directory_artifacts import (
     build_directory_manifest,
     build_shapefile_bundle_manifest,
+    is_valid_directory_artifact_tree,
     materialize_directory_tree,
     materialize_shapefile_bundle,
     validate_directory_destination,
@@ -1634,6 +1635,21 @@ def _select_materialize_artifact_source(
         if "://" in artifact.container_uri
         else None
     )
+    is_dir_artifact = _is_directory_artifact(artifact)
+    fallback_existing: (
+        tuple[
+            Path,
+            Literal[
+                "source_root",
+                "historical_root",
+                "recovery_root",
+                "artifact_uri",
+            ],
+            bool,
+        ]
+        | None
+    ) = None
+
     seen_roots: set[str] = set()
     for source_kind, root in candidate_roots:
         resolved_root = Path(root).resolve()
@@ -1643,11 +1659,24 @@ def _select_materialize_artifact_source(
         seen_roots.add(root_key)
         candidate = resolved_root / relative_path
         if candidate.exists():
-            return candidate, source_kind, True
+            if (
+                not is_dir_artifact
+                or is_valid_directory_artifact_tree(candidate, artifact) is not False
+            ):
+                return candidate, source_kind, True
+            if fallback_existing is None:
+                fallback_existing = (candidate, source_kind, True)
         if unprefixed_rel is not None and unprefixed_rel != relative_path:
             fallback_candidate = resolved_root / unprefixed_rel
             if fallback_candidate.exists():
-                return fallback_candidate, source_kind, True
+                if (
+                    not is_dir_artifact
+                    or is_valid_directory_artifact_tree(fallback_candidate, artifact)
+                    is not False
+                ):
+                    return fallback_candidate, source_kind, True
+                if fallback_existing is None:
+                    fallback_existing = (fallback_candidate, source_kind, True)
 
     direct_source = _direct_artifact_source_path(
         tracker,
@@ -1656,7 +1685,20 @@ def _select_materialize_artifact_source(
         allow_tracker_uri=not bool(artifact.run_id),
     )
     if direct_source is not None:
-        return direct_source, "artifact_uri", bool(candidate_roots)
+        if (
+            not is_dir_artifact
+            or is_valid_directory_artifact_tree(direct_source, artifact) is not False
+        ):
+            return direct_source, "artifact_uri", bool(candidate_roots)
+        if fallback_existing is None:
+            fallback_existing = (
+                direct_source,
+                "artifact_uri",
+                bool(candidate_roots),
+            )
+
+    if fallback_existing is not None:
+        return fallback_existing
 
     return None, None, bool(candidate_roots)
 
@@ -2987,14 +3029,37 @@ def plan_run_output_hydration(
             owning_run = _get_artifact_owning_run(
                 tracker, selected_run=run, artifact=artifact
             )
+            is_dir_artifact = _is_directory_artifact(artifact)
             relative_path, source_path, has_candidate_roots = (
                 find_existing_recovery_source_path(
                     tracker,
                     artifact=artifact,
                     run=owning_run,
                     source_root=source_root,
+                    source_validator=(
+                        (
+                            lambda candidate, artifact=artifact: (
+                                is_valid_directory_artifact_tree(candidate, artifact)
+                                is not False
+                            )
+                        )
+                        if is_dir_artifact
+                        else None
+                    ),
+                    preserve_raw_paths=is_dir_artifact,
                 )
             )
+            if is_dir_artifact and source_path is None:
+                relative_path, source_path, has_candidate_roots = (
+                    find_existing_recovery_source_path(
+                        tracker,
+                        artifact=artifact,
+                        run=owning_run,
+                        source_root=source_root,
+                        source_validator=None,
+                        preserve_raw_paths=True,
+                    )
+                )
             if _is_file_bundle_artifact(artifact) and source_path is not None:
                 source_path = (
                     source_path if source_path.is_dir() else source_path.parent

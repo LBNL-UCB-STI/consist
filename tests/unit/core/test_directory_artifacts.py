@@ -12,6 +12,8 @@ import consist.core.directory_artifacts as directory_artifacts
 from consist.core.directory_artifacts import (
     build_directory_manifest,
     build_shapefile_bundle_manifest,
+    get_validated_directory_manifest,
+    is_valid_directory_artifact_tree,
     materialize_directory_tree,
     materialize_shapefile_bundle,
     validate_directory_manifest,
@@ -19,6 +21,7 @@ from consist.core.directory_artifacts import (
     validate_shapefile_bundle_root,
 )
 from consist.core.tracker import Tracker
+from consist.models.artifact import Artifact
 
 
 def test_directory_manifest_is_stable_and_includes_empty_directories(
@@ -1165,3 +1168,166 @@ def test_directory_archive_rechecks_source_before_publication(
         tracker.archive_run_outputs("beam_race", archive_root)
 
     assert not (archive_root / "outputs" / "raw_od_skims.zarr").exists()
+
+
+def test_get_validated_directory_manifest_and_is_valid_directory_artifact_tree(
+    tmp_path: Path,
+) -> None:
+    regular_file = tmp_path / "regular.csv"
+    regular_file.write_text("a,b\n1,2\n")
+    file_artifact = Artifact(
+        key="regular",
+        container_uri="./regular.csv",
+        driver="csv",
+        hash="abc123",
+        meta={},
+    )
+    assert get_validated_directory_manifest(file_artifact) is None
+    assert is_valid_directory_artifact_tree(regular_file, file_artifact) is None
+
+    legacy_dir = tmp_path / "legacy_dir"
+    legacy_dir.mkdir()
+    legacy_artifact = Artifact(
+        key="legacy",
+        container_uri="./legacy_dir",
+        driver="zarr",
+        hash="abc123",
+        meta={},
+    )
+    assert get_validated_directory_manifest(legacy_artifact) is None
+    assert is_valid_directory_artifact_tree(legacy_dir, legacy_artifact) is None
+
+    missing_manifest_artifact = Artifact(
+        key="missing_manifest",
+        container_uri="./legacy_dir",
+        driver="zarr",
+        hash="abc123",
+        meta={"directory_artifact": True},
+    )
+    with pytest.raises(ValueError, match="missing a valid directory_manifest"):
+        get_validated_directory_manifest(missing_manifest_artifact)
+    assert (
+        is_valid_directory_artifact_tree(legacy_dir, missing_manifest_artifact) is False
+    )
+
+    none_manifest_artifact = Artifact(
+        key="none_manifest",
+        container_uri="./legacy_dir",
+        driver="zarr",
+        hash="abc123",
+        meta={"directory_artifact": True, "directory_manifest": None},
+    )
+    with pytest.raises(ValueError, match="missing a valid directory_manifest"):
+        get_validated_directory_manifest(none_manifest_artifact)
+    assert is_valid_directory_artifact_tree(legacy_dir, none_manifest_artifact) is False
+
+    valid_dir = tmp_path / "skims.zarr"
+    (valid_dir / "nested").mkdir(parents=True)
+    nested_file = valid_dir / "nested" / "0.0"
+    nested_file.write_bytes(b"original-bytes")
+    manifest = build_directory_manifest(valid_dir)
+    dir_artifact = Artifact(
+        key="skims",
+        container_uri="./skims.zarr",
+        driver="zarr",
+        hash=manifest["tree_hash"],
+        meta={"directory_artifact": True, "directory_manifest": manifest},
+    )
+
+    assert get_validated_directory_manifest(dir_artifact) == manifest
+    assert is_valid_directory_artifact_tree(valid_dir, dir_artifact) is True
+
+    # Mutated nested file -> False
+    nested_file.write_bytes(b"corrupted-bytes")
+    assert is_valid_directory_artifact_tree(valid_dir, dir_artifact) is False
+
+    # Missing nested file -> False
+    nested_file.unlink()
+    assert is_valid_directory_artifact_tree(valid_dir, dir_artifact) is False
+
+    # Restore valid nested file, then add extra nested file -> False
+    nested_file.write_bytes(b"original-bytes")
+    assert is_valid_directory_artifact_tree(valid_dir, dir_artifact) is True
+    extra_file = valid_dir / "nested" / "extra.bin"
+    extra_file.write_bytes(b"extra")
+    assert is_valid_directory_artifact_tree(valid_dir, dir_artifact) is False
+    extra_file.unlink()
+    assert is_valid_directory_artifact_tree(valid_dir, dir_artifact) is True
+
+    # Symlink inside directory -> False
+    external = tmp_path / "external.txt"
+    external.write_text("outside")
+    symlink_path = valid_dir / "nested" / "link"
+    try:
+        symlink_path.symlink_to(external)
+    except OSError:
+        pass
+    else:
+        assert is_valid_directory_artifact_tree(valid_dir, dir_artifact) is False
+        symlink_path.unlink()
+
+    # Artifact hash mismatch with manifest["tree_hash"] -> ValueError / False
+    mismatched_artifact = Artifact(
+        key="skims",
+        container_uri="./skims.zarr",
+        driver="zarr",
+        hash="0" * 64,
+        meta={"directory_artifact": True, "directory_manifest": manifest},
+    )
+    with pytest.raises(ValueError, match="tree_hash"):
+        get_validated_directory_manifest(mismatched_artifact)
+    assert is_valid_directory_artifact_tree(valid_dir, mismatched_artifact) is False
+
+
+def test_directory_artifact_hydration_prefers_valid_recovery_root_and_reports_failed_when_all_corrupted(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    source = tracker.run_dir / "outputs" / "skims.zarr"
+    (source / "nested").mkdir(parents=True)
+    (source / ".zgroup").write_bytes(b'{"zarr_format": 2}\n')
+    (source / "nested" / "0.0").write_bytes(b"chunk-bytes")
+    with tracker.start_run("zarr_recovery_fallback", model="zarr"):
+        tracker.log_output(source, key="skims", driver="zarr")
+
+    archive_root = tmp_path / "archive"
+    tracker.archive_run_outputs("zarr_recovery_fallback", archive_root)
+
+    # Corrupt the primary source in place so hydration must skip it and use archive_root.
+    (source / "nested" / "0.0").write_bytes(b"corrupted-primary")
+
+    restored_from_archive = tracker.run_dir / "restored_from_archive" / "skims.zarr"
+    hydrated = tracker.hydrate_run_outputs_to_destinations(
+        "zarr_recovery_fallback",
+        destinations_by_key={"skims": restored_from_archive},
+        on_missing="raise",
+        db_fallback="if_ingested",
+    )
+    assert hydrated["skims"].status == "materialized_directory_from_filesystem"
+    assert (restored_from_archive / "nested" / "0.0").read_bytes() == b"chunk-bytes"
+
+    # Now corrupt the archived copy too; hydration should report status="failed"
+    # (RuntimeError when on_missing="raise") rather than status="missing_source"
+    # (FileNotFoundError).
+    (archive_root / "outputs" / "skims.zarr" / "nested" / "0.0").write_bytes(
+        b"corrupted-archive"
+    )
+    restored_all_corrupt = tracker.run_dir / "restored_all_corrupt" / "skims.zarr"
+    hydrated_warn = tracker.hydrate_run_outputs_to_destinations(
+        "zarr_recovery_fallback",
+        destinations_by_key={"skims": restored_all_corrupt},
+        on_missing="warn",
+        db_fallback="if_ingested",
+    )
+    assert hydrated_warn["skims"].status == "failed"
+    assert "hash mismatch" in (hydrated_warn["skims"].message or "")
+
+    with pytest.raises(RuntimeError, match="hash mismatch"):
+        tracker.hydrate_run_outputs_to_destinations(
+            "zarr_recovery_fallback",
+            destinations_by_key={
+                "skims": tracker.run_dir / "restored_all_corrupt_raise" / "skims.zarr"
+            },
+            on_missing="raise",
+            db_fallback="if_ingested",
+        )

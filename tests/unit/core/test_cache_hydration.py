@@ -2731,3 +2731,225 @@ def test_cache_hit_and_hydrated_outputs_support_set_artifact_recovery_roots(
         tracker_a.engine.dispose()
     if tracker_b.engine:
         tracker_b.engine.dispose()
+
+
+def test_inputs_missing_validation_preserves_valid_and_rehydrates_corrupted_directory_input(
+    tmp_path: Path,
+) -> None:
+    """
+    With cache_hydration='inputs-missing' and validate_materialized_inputs=True:
+    1) A valid existing directory destination is preserved without re-copying
+       (even when historical and archive sources are unavailable).
+    2) A corrupted existing directory destination is replaced from a valid
+       recovery_root while skipping a corrupted historical source directory.
+    """
+    db_path = str(tmp_path / "provenance.db")
+    archive_root = tmp_path / "archive"
+    tracker_a = Tracker(run_dir=tmp_path / "runs_a", db_path=db_path)
+    _init_core_tables(tracker_a)
+
+    source_dir = tracker_a.run_dir / "outputs" / "skims.zarr"
+    (source_dir / "nested").mkdir(parents=True, exist_ok=True)
+    (source_dir / "nested" / "0.0").write_bytes(b"expected-skim")
+
+    with tracker_a.start_run("producer_dir_input", model="producer"):
+        artifact = tracker_a.log_output(
+            source_dir, key="skims", artifact_kind="directory"
+        )
+
+    tracker_a.archive_run_outputs("producer_dir_input", archive_root)
+    artifact = tracker_a.get_run_outputs("producer_dir_input")["skims"]
+
+    # Corrupt the historical source in runs_a while archive_root stays valid.
+    (source_dir / "nested" / "0.0").write_bytes(b"corrupted-historical")
+
+    tracker_b = Tracker(run_dir=tmp_path / "runs_b", db_path=db_path)
+    _init_core_tables(tracker_b)
+    destination = tracker_b.run_dir / "outputs" / "skims.zarr"
+    (destination / "nested").mkdir(parents=True, exist_ok=True)
+    (destination / "nested" / "0.0").write_bytes(b"expected-skim")
+
+    # 1) Valid existing destination is preserved without touching recovery sources.
+    with tracker_b.start_run(
+        "consumer_preserve_valid_dir",
+        model="consumer",
+        inputs=[artifact],
+        cache_mode="overwrite",
+        cache_hydration="inputs-missing",
+        validate_materialized_inputs=True,
+    ):
+        assert (destination / "nested" / "0.0").read_bytes() == b"expected-skim"
+
+    preserved_run = tracker_b.get_run("consumer_preserve_valid_dir")
+    assert preserved_run is not None
+    assert "materialized_inputs" not in (preserved_run.meta or {})
+
+    # 2) Corrupt the existing destination; it should be overwritten from archive_root
+    #    (skipping the corrupted historical source in runs_a).
+    (destination / "nested" / "0.0").write_bytes(b"stale-destination")
+
+    with tracker_b.start_run(
+        "consumer_rehydrate_corrupted_dir",
+        model="consumer",
+        inputs=[artifact],
+        cache_mode="overwrite",
+        cache_hydration="inputs-missing",
+        validate_materialized_inputs=True,
+    ):
+        assert (destination / "nested" / "0.0").read_bytes() == b"expected-skim"
+
+    rehydrated_run = tracker_b.get_run("consumer_rehydrate_corrupted_dir")
+    assert rehydrated_run is not None
+    assert (rehydrated_run.meta or {}).get("materialized_inputs") == {
+        "skims": str(destination.resolve())
+    }
+
+    if tracker_a.engine:
+        tracker_a.engine.dispose()
+    if tracker_b.engine:
+        tracker_b.engine.dispose()
+
+
+def test_outputs_requested_rejects_corrupted_directory_candidate_and_recovers_from_archive(
+    tmp_path: Path,
+) -> None:
+    """
+    Under cache_hydration='outputs-requested':
+    1) A cached candidate whose directory output is corrupted on disk (with no
+       valid recovery root) is rejected and falls back to re-execution.
+    2) When a valid recovery_root exists, outputs-requested skips the corrupted
+       historical directory tree and hydrates from the valid recovery_root.
+    """
+    db_path = str(tmp_path / "provenance.db")
+    calls = 0
+
+    def write_zarr(ctx) -> None:
+        nonlocal calls
+        calls += 1
+        zarr_path = ctx.run_dir / "skims.zarr"
+        (zarr_path / "nested").mkdir(parents=True, exist_ok=True)
+        (zarr_path / "nested" / "0.0").write_bytes(f"skim-{calls}".encode("utf-8"))
+
+    output_paths = {"skims": ArtifactSpec(path="skims.zarr", driver="zarr")}
+
+    tracker_a = Tracker(run_dir=tmp_path / "runs_a", db_path=db_path)
+    _init_core_tables(tracker_a)
+    first = tracker_a.run(
+        fn=write_zarr,
+        name="dir_candidate_hydration",
+        output_paths=output_paths,
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    assert calls == 1
+    # Corrupt nested file in first candidate's directory output (no recovery root).
+    (first.outputs["skims"].path / "nested" / "0.0").write_bytes(b"corrupted")
+
+    tracker_b = Tracker(run_dir=tmp_path / "runs_b", db_path=db_path)
+    _init_core_tables(tracker_b)
+    second = tracker_b.run(
+        fn=write_zarr,
+        name="dir_candidate_hydration",
+        output_paths=output_paths,
+        cache_options=CacheOptions(
+            cache_hydration="outputs-requested",
+            cache_hydration_failure="miss",
+        ),
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    # Corrupted first candidate was rejected; second run executed fresh.
+    assert calls == 2
+    assert second.cache_hit is False
+    assert (second.outputs["skims"].path / "nested" / "0.0").read_bytes() == b"skim-2"
+
+    # Archive second run's outputs to archive_root, then corrupt its historical run_dir copy.
+    archive_root = tmp_path / "archive"
+    tracker_b.archive_run_outputs(second.run.id, archive_root)
+    (second.outputs["skims"].path / "nested" / "0.0").unlink()
+
+    tracker_c = Tracker(run_dir=tmp_path / "runs_c", db_path=db_path)
+    _init_core_tables(tracker_c)
+    third = tracker_c.run(
+        fn=write_zarr,
+        name="dir_candidate_hydration",
+        output_paths=output_paths,
+        cache_options=CacheOptions(
+            cache_hydration="outputs-requested",
+            cache_hydration_failure="miss",
+        ),
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    assert calls == 2
+    assert third.cache_hit is True
+    assert third.run.meta["cache_source"] == second.run.id
+    hydrated_path = Path(third.run.meta["materialized_outputs"]["skims"])
+    assert (hydrated_path / "nested" / "0.0").read_bytes() == b"skim-2"
+
+    if tracker_a.engine:
+        tracker_a.engine.dispose()
+    if tracker_b.engine:
+        tracker_b.engine.dispose()
+    if tracker_c.engine:
+        tracker_c.engine.dispose()
+
+
+def test_outputs_requested_preserves_caller_owned_corrupted_directory_destination(
+    tmp_path: Path,
+) -> None:
+    """
+    When a requested directory output destination already exists on disk before
+    candidate hydration and its contents do not match the cached manifest,
+    _strict_requested_output_hydration must reject the candidate without
+    overwriting the caller-owned destination during candidate evaluation.
+    """
+    db_path = str(tmp_path / "provenance.db")
+    tracker_a = Tracker(run_dir=tmp_path / "runs_a", db_path=db_path)
+    _init_core_tables(tracker_a)
+    observed_caller_bytes: list[bytes] = []
+
+    def write_zarr(ctx) -> None:
+        zarr_path = ctx.run_dir / "skims.zarr"
+        caller_file = zarr_path / "nested" / "0.0"
+        if caller_file.exists():
+            observed_caller_bytes.append(caller_file.read_bytes())
+        (zarr_path / "nested").mkdir(parents=True, exist_ok=True)
+        caller_file.write_bytes(b"fresh-skim")
+
+    output_paths = {"skims": ArtifactSpec(path="skims.zarr", driver="zarr")}
+    tracker_a.run(
+        fn=write_zarr,
+        name="dir_caller_destination_safety",
+        output_paths=output_paths,
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    tracker_b = Tracker(run_dir=tmp_path / "runs_b", db_path=db_path)
+    _init_core_tables(tracker_b)
+    custom_dest = tracker_b.run_dir / "custom_dest" / "skims.zarr"
+    (custom_dest / "nested").mkdir(parents=True, exist_ok=True)
+    (custom_dest / "nested" / "0.0").write_bytes(b"caller-uncommitted-bytes")
+
+    observed_during_miss: list[bytes] = []
+
+    def write_zarr_custom(ctx) -> None:
+        observed_during_miss.append((custom_dest / "nested" / "0.0").read_bytes())
+        (custom_dest / "nested" / "0.0").write_bytes(b"fresh-skim")
+
+    result = tracker_b.run(
+        fn=write_zarr_custom,
+        name="dir_caller_destination_safety",
+        output_paths={"skims": ArtifactSpec(path=custom_dest, driver="zarr")},
+        cache_options=CacheOptions(
+            cache_hydration="outputs-requested",
+            cache_hydration_failure="miss",
+        ),
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    assert result.cache_hit is False
+    # Caller-owned destination was untouched when the miss handler began executing.
+    assert observed_during_miss == [b"caller-uncommitted-bytes"]
+
+    if tracker_a.engine:
+        tracker_a.engine.dispose()
+    if tracker_b.engine:
+        tracker_b.engine.dispose()
