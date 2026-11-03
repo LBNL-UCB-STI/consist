@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 import inspect
 import uuid
 import functools
@@ -650,6 +651,70 @@ class ScenarioContext:
 
         self._inputs[key] = artifact
         return artifact
+
+    @property
+    def meta(self) -> Mapping[str, Any]:
+        """
+        Read-only view of scenario header run metadata.
+
+        Returns
+        -------
+        Mapping[str, Any]
+            Immutable view of the scenario header run's ``meta`` dictionary.
+
+        Raises
+        ------
+        RuntimeError
+            If the scenario context is inactive.
+        """
+        if not self._header_record:
+            raise RuntimeError("Scenario not active. Use within 'with' block.")
+        if self._header_record.run.meta is None:
+            self._header_record.run.meta = {}
+        return MappingProxyType(self._header_record.run.meta)
+
+    def log_meta(self, **metadata: Any) -> None:
+        """
+        Record key-value metadata on the scenario header run and persist immediately.
+
+        Unlike ``Tracker.log_meta``, which requires an active step run,
+        ``ScenarioContext.log_meta`` targets the suspended scenario header run
+        within an active ``with tracker.scenario(...) as sc:`` block.
+
+        Parameters
+        ----------
+        **metadata : Any
+            JSON-serializable metadata keys and values to merge into the scenario
+            header run's ``meta`` dictionary.
+
+        Raises
+        ------
+        RuntimeError
+            If the scenario context is inactive.
+        """
+        if not self._header_record:
+            raise RuntimeError("Scenario not active. Use within 'with' block.")
+        if not metadata:
+            return
+
+        normalized = normalize_json(dict(metadata))
+        if not isinstance(normalized, dict):
+            raise TypeError("Scenario metadata must normalize to a JSON object.")
+
+        if self._header_record.run.meta is None:
+            self._header_record.run.meta = {}
+
+        self._header_record.run.meta.update(normalized)
+        self._header_record.run.updated_at = datetime.now(timezone.utc)
+
+        prev = self.tracker.current_consist
+        self.tracker.current_consist = self._header_record
+        try:
+            self.tracker._flush_json()
+            if self.tracker.db:
+                self.tracker.db.sync_run(self._header_record.run)
+        finally:
+            self.tracker.current_consist = prev
 
     def declare_outputs(
         self,

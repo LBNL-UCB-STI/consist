@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from types import MappingProxyType
 import inspect
 import logging
 from typing import (
@@ -274,6 +275,14 @@ class NoopScenarioContext:
         artifact = _build_noop_artifact(path, key=key, meta=kwargs)
         self._inputs[key] = artifact
         return artifact
+
+    @property
+    def meta(self) -> Mapping[str, Any]:
+        return MappingProxyType({})
+
+    def log_meta(self, **metadata: Any) -> None:
+        _ = metadata
+        return None
 
     def declare_outputs(
         self,

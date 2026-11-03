@@ -844,3 +844,122 @@ def test_run_completion_archive_policy_failure_aborts_run_and_prevents_coupler_u
     assert failed_run.status == "failed"
     post_snapshot = tracker.get_coupler_snapshot("scen_archive_fail", phase="post")
     assert "failing_out" not in post_snapshot
+
+
+def test_scenario_log_meta_persists_to_header_run_while_suspended(
+    tracker: Tracker, tmp_path: Path
+) -> None:
+    import json
+    from types import MappingProxyType
+
+    def write_step(ctx) -> dict[str, Path]:
+        out_path = ctx.run_dir / "step_out.csv"
+        out_path.write_text("col\n1\n", encoding="utf-8")
+        return {"step_out": out_path}
+
+    with tracker.scenario("sc_meta_test") as sc:
+        assert isinstance(sc.meta, MappingProxyType)
+        with pytest.raises(TypeError):
+            sc.meta["illegal"] = "value"  # type: ignore[index]
+
+        sc.log_meta(
+            admission_policy="v1",
+            preflight={"ok": True, "artifact_path": tmp_path / "input.csv"},
+        )
+        # Empty call is a safe no-op
+        sc.log_meta()
+
+        assert isinstance(sc.meta, MappingProxyType)
+        assert sc.meta["admission_policy"] == "v1"
+        assert sc.meta["preflight"] == {
+            "ok": True,
+            "artifact_path": str(tmp_path / "input.csv"),
+        }
+
+        # Scenario is suspended while inside the with-block; verify persistence
+        # before any child step runs or scenario completion occurs.
+        assert tracker.current_consist is None
+
+        persisted_while_running = tracker.get_run("sc_meta_test")
+        assert persisted_while_running is not None
+        assert persisted_while_running.status == "running"
+        assert persisted_while_running.meta["admission_policy"] == "v1"
+        assert persisted_while_running.meta["preflight"] == {
+            "ok": True,
+            "artifact_path": str(tmp_path / "input.csv"),
+        }
+
+        consist_json = json.loads(
+            (tracker.run_dir / "consist.json").read_text(encoding="utf-8")
+        )
+        assert consist_json["run"]["id"] == "sc_meta_test"
+        assert consist_json["run"]["status"] == "running"
+        assert consist_json["run"]["meta"]["admission_policy"] == "v1"
+        assert consist_json["run"]["meta"]["preflight"] == {
+            "ok": True,
+            "artifact_path": str(tmp_path / "input.csv"),
+        }
+
+        snapshot_json = json.loads(
+            (tracker.run_dir / "consist_runs" / "sc_meta_test.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert snapshot_json["run"]["meta"]["admission_policy"] == "v1"
+
+        step_result = sc.run(
+            fn=write_step,
+            name="child_step",
+            run_id="sc_meta_test_child_step",
+            outputs=["step_out"],
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+        assert "admission_policy" not in step_result.run.meta
+        assert "preflight" not in step_result.run.meta
+
+    completed_header = tracker.get_run("sc_meta_test")
+    assert completed_header is not None
+    assert completed_header.status == "completed"
+    assert completed_header.meta["admission_policy"] == "v1"
+    assert completed_header.meta["preflight"] == {
+        "ok": True,
+        "artifact_path": str(tmp_path / "input.csv"),
+    }
+    assert len(completed_header.meta["steps"]) == 1
+    assert completed_header.meta["steps"][0]["id"] == "sc_meta_test_child_step"
+    post_snapshot = tracker.get_coupler_snapshot(
+        "sc_meta_test_child_step", phase="post"
+    )
+    assert "step_out" in post_snapshot
+
+
+def test_scenario_log_meta_outside_active_scenario_raises_runtime_error(
+    tracker: Tracker,
+) -> None:
+    from types import MappingProxyType
+
+    sc = tracker.scenario("sc_inactive")
+
+    with pytest.raises(RuntimeError, match="Scenario not active"):
+        _ = sc.meta
+
+    with pytest.raises(RuntimeError, match="Scenario not active"):
+        sc.log_meta(stage="before_enter")
+
+    with sc:
+        sc.log_meta(stage="inside")
+        assert sc.meta["stage"] == "inside"
+
+    with pytest.raises(RuntimeError, match="Scenario not active"):
+        _ = sc.meta
+
+    with pytest.raises(RuntimeError, match="Scenario not active"):
+        sc.log_meta(stage="after_exit")
+
+    with consist.scenario("sc_noop", enabled=False) as noop_sc:
+        assert isinstance(noop_sc.meta, MappingProxyType)
+        assert dict(noop_sc.meta) == {}
+        with pytest.raises(TypeError):
+            noop_sc.meta["x"] = 1  # type: ignore[index]
+        assert noop_sc.log_meta(stage="noop") is None
+        assert dict(noop_sc.meta) == {}
