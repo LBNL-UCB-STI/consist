@@ -679,3 +679,6 @@ class ConsistRecord(SQLModel):
 
     _pending_output_meta: Dict[str, Dict[str, Any]] = PrivateAttr(default_factory=dict)
     _pending_output_meta_replace_keys: set[str] = PrivateAttr(default_factory=set)
+    _pending_output_meta_applied_object_ids: Dict[str, set[int]] = PrivateAttr(
+        default_factory=dict
+    )

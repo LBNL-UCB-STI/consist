@@ -51,7 +51,6 @@ from consist.core.directory_artifacts import (
     materialize_shapefile_bundle,
     validate_directory_destination,
     validate_directory_manifest,
-    validate_directory_tree,
     validate_shapefile_bundle_destination,
     validate_shapefile_bundle_root,
 )
@@ -1967,17 +1966,19 @@ def materialize_artifact(
                     message=f"Destination {destination} exists but is not a directory.",
                     resolvable=False,
                 )
+            manifest = (
+                artifact.meta.get("directory_manifest")
+                if isinstance(artifact.meta, dict)
+                else None
+            )
+            needs_partial_completion = False
             if should_validate:
-                manifest = (
-                    artifact.meta.get("directory_manifest")
-                    if isinstance(artifact.meta, dict)
-                    else None
-                )
                 if manifest is not None:
                     try:
-                        validate_directory_tree(
+                        already_complete = validate_directory_destination(
                             destination,
                             manifest,
+                            preserve_existing=True,
                             allow_extra_files=directory_allows_extra_files(artifact),
                         )
                     except (ValueError, OSError) as exc:
@@ -1993,6 +1994,21 @@ def materialize_artifact(
                             ),
                             resolvable=False,
                         )
+                    if not already_complete:
+                        if source_path is None:
+                            return _make_materialized_artifact(
+                                artifact,
+                                status="hash_mismatch",
+                                path=None,
+                                source_path=source_path,
+                                target_path=destination,
+                                message=(
+                                    f"Existing destination for artifact {artifact.key!r} "
+                                    "is incomplete and no recovery source is available."
+                                ),
+                                resolvable=False,
+                            )
+                        needs_partial_completion = True
                 elif expected_hash:
                     try:
                         dest_manifest = build_directory_manifest(destination)
@@ -2022,14 +2038,26 @@ def materialize_artifact(
                             ),
                             resolvable=False,
                         )
-            return _make_materialized_artifact(
-                artifact,
-                status="already_present",
-                path=destination,
-                source_path=source_path,
-                target_path=destination,
-                resolvable=True,
-            )
+            elif (
+                isinstance(manifest, Mapping)
+                and isinstance(manifest.get("entries"), list)
+                and source_path is not None
+            ):
+                needs_partial_completion = any(
+                    isinstance(entry, Mapping)
+                    and isinstance(entry.get("path"), str)
+                    and not (destination / entry["path"]).exists()
+                    for entry in manifest["entries"]
+                )
+            if not needs_partial_completion:
+                return _make_materialized_artifact(
+                    artifact,
+                    status="already_present",
+                    path=destination,
+                    source_path=source_path,
+                    target_path=destination,
+                    resolvable=True,
+                )
 
         else:
             if destination.is_dir():
@@ -2345,11 +2373,34 @@ def materialize_artifact(
                     )
 
         try:
-            materialized, skipped_existing = _materialize_path(
-                source=source_path,
-                destination=destination,
-                preserve_existing=preserve_existing,
-            )
+            if (
+                preserve_existing
+                and destination.exists()
+                and isinstance(manifest, Mapping)
+                and isinstance(manifest.get("entries"), list)
+            ):
+                materialized_any = False
+                for entry in manifest["entries"]:
+                    if not isinstance(entry, Mapping) or not isinstance(
+                        entry.get("path"), str
+                    ):
+                        continue
+                    rel_member = entry["path"]
+                    member_mat, _ = _materialize_path(
+                        source=source_path / rel_member,
+                        destination=destination / rel_member,
+                        preserve_existing=True,
+                    )
+                    if member_mat:
+                        materialized_any = True
+                materialized = materialized_any
+                skipped_existing = not materialized_any
+            else:
+                materialized, skipped_existing = _materialize_path(
+                    source=source_path,
+                    destination=destination,
+                    preserve_existing=preserve_existing,
+                )
         except (OSError, shutil.Error, RuntimeError, ValueError) as exc:
             if on_missing == "raise":
                 raise RuntimeError(

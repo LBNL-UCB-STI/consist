@@ -933,3 +933,43 @@ class ArchivedOutputs(MappingABC[str, Path]):
 
     def __repr__(self) -> str:
         return f"ArchivedOutputs(paths={self._paths!r}, outputs={self.outputs!r})"
+
+
+_SYSTEM_ARTIFACT_META_PREFIXES: tuple[str, ...] = (
+    "_dlt_",
+    "directory_",
+    "output_set_",
+    "file_bundle_",
+)
+
+_SYSTEM_ARTIFACT_META_KEYS: frozenset[str] = frozenset(
+    {
+        "is_ingested",
+        "dlt_table_name",
+        "recovery_roots",
+        "content_id",
+        "schema_id",
+        "schema_summary",
+        "file_schema",
+        "facet",
+        "facet_schema_version",
+        "facet_index",
+        "year",
+        "iteration",
+        "tags",
+    }
+)
+
+
+def preserve_system_artifact_meta(
+    existing_meta: MappingABC[str, Any] | None,
+) -> Dict[str, Any]:
+    """Return a copy of internal/system metadata keys from ``existing_meta``."""
+    if not isinstance(existing_meta, MappingABC):
+        return {}
+    return {
+        key: value
+        for key, value in existing_meta.items()
+        if key.startswith(_SYSTEM_ARTIFACT_META_PREFIXES)
+        or key in _SYSTEM_ARTIFACT_META_KEYS
+    }

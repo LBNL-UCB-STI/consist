@@ -1445,3 +1445,74 @@ def test_directory_allow_extra_files_validation_and_materialization(
     (destination / "tracked.csv").unlink()
     with pytest.raises(ValueError, match="missing"):
         validate_directory_tree(destination, manifest, allow_extra_files=True)
+
+
+def test_partial_directory_rollback_and_stage_hydration_completion(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    source = tracker.run_dir / "outputs" / "partial_dir"
+    (source / "sub" / "deep").mkdir(parents=True)
+    (source / "a.txt").write_text("a-bytes", encoding="utf-8")
+    (source / "sub" / "b.txt").write_text("b-bytes", encoding="utf-8")
+    (source / "sub" / "deep" / "c.txt").write_text("c-bytes", encoding="utf-8")
+
+    with tracker.start_run("partial_dir_producer", model="test"):
+        art = tracker.log_output(source, key="dir_out", artifact_kind="directory")
+
+    manifest = art.meta["directory_manifest"]
+    dest = tmp_path / "partial_dest"
+    (dest / "sub").mkdir(parents=True)
+    (dest / "sub" / "b.txt").write_text("b-bytes", encoding="utf-8")
+
+    # 1. Rollback of partial completion preserves pre-existing files/dirs
+    published = directory_artifacts.materialize_directory_tree_with_rollback_info(
+        source,
+        dest,
+        manifest,
+        preserve_existing=True,
+    )
+    assert published.published is True
+    assert published.created_root is False
+    assert (dest / "a.txt").exists()
+    assert (dest / "sub" / "deep" / "c.txt").exists()
+
+    directory_artifacts.rollback_published_directory_tree(dest, published)
+    assert dest.exists()
+    assert (dest / "sub" / "b.txt").read_text(encoding="utf-8") == "b-bytes"
+    assert not (dest / "a.txt").exists()
+    assert not (dest / "sub" / "deep").exists()
+
+    # 2. materialize_artifact / hydrate_run_outputs with preserve_existing=True completes partial destination
+    stage_root = tracker.run_dir / "staged_partial"
+    stage_target = stage_root / "outputs" / "partial_dir"
+    (stage_target / "sub").mkdir(parents=True)
+    (stage_target / "sub" / "b.txt").write_text("b-bytes", encoding="utf-8")
+    materialized = tracker.materialize_artifact(
+        art,
+        target_root=stage_root,
+        preserve_existing=True,
+    )
+    assert materialized.status in {
+        "materialized_from_historical_root",
+        "materialized_directory_from_filesystem",
+    }
+    assert (stage_target / "a.txt").read_text(encoding="utf-8") == "a-bytes"
+    assert (stage_target / "sub" / "deep" / "c.txt").read_text(
+        encoding="utf-8"
+    ) == "c-bytes"
+
+    hydrate_root = tracker.run_dir / "hydrated_partial"
+    partial_hydrated_dir = hydrate_root / "outputs" / "partial_dir"
+    (partial_hydrated_dir / "sub").mkdir(parents=True)
+    (partial_hydrated_dir / "sub" / "b.txt").write_text("b-bytes", encoding="utf-8")
+    hydrated = tracker.hydrate_run_outputs(
+        "partial_dir_producer",
+        target_root=hydrate_root,
+        preserve_existing=True,
+    )
+    assert hydrated["dir_out"].status == "materialized_directory_from_filesystem"
+    assert (partial_hydrated_dir / "a.txt").read_text(encoding="utf-8") == "a-bytes"
+    assert (partial_hydrated_dir / "sub" / "deep" / "c.txt").read_text(
+        encoding="utf-8"
+    ) == "c-bytes"

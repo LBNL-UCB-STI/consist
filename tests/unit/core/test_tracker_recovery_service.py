@@ -592,3 +592,79 @@ def test_archive_run_outputs_handles_nested_scalar_and_child_directory_inside_di
     assert (
         move_archive / "beam_outputs" / "ITERS" / "it.0" / "0.linkstats.csv.gz"
     ).read_bytes() == b"linkstats-payload"
+
+
+def test_archive_directory_artifact_rollback_preserves_preexisting_files_and_recovery_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "runs"
+    db_path = str(tmp_path / "provenance.duckdb")
+    tracker = Tracker(run_dir=run_dir, db_path=db_path)
+
+    dir_path = run_dir / "shared_dir"
+    (dir_path / "nested").mkdir(parents=True)
+    nested_scalar = dir_path / "nested" / "scalar.csv"
+    nested_scalar.write_text("id\n1\n", encoding="utf-8")
+    (dir_path / "other.txt").write_text("other-content", encoding="utf-8")
+
+    with tracker.start_run("rollback_and_fallback_run", model="test"):
+        scalar_art = tracker.log_output(nested_scalar, key="scalar")
+        dir_art = tracker.log_output(dir_path, key="dir_out", artifact_kind="directory")
+
+    # 1. Pre-populate archive destination with the nested scalar, then fail set_artifact_recovery_roots
+    archive_a = tmp_path / "archive_a"
+    tracker.archive_artifact(scalar_art, archive_a, mode="copy")
+    archived_scalar = archive_a / "shared_dir" / "nested" / "scalar.csv"
+    assert archived_scalar.exists()
+
+    orig_set_roots = tracker.set_artifact_recovery_roots
+
+    def fail_set_roots(*args, **kwargs):
+        raise RuntimeError("simulated DB failure during recovery root registration")
+
+    monkeypatch.setattr(tracker, "set_artifact_recovery_roots", fail_set_roots)
+    with pytest.raises(RuntimeError, match="simulated DB failure"):
+        tracker.archive_artifact(dir_art, archive_a, mode="copy")
+    monkeypatch.setattr(tracker, "set_artifact_recovery_roots", orig_set_roots)
+
+    # Pre-existing scalar must remain intact, while newly copied other.txt was rolled back
+    assert archived_scalar.read_text(encoding="utf-8") == "id\n1\n"
+    assert not (archive_a / "shared_dir" / "other.txt").exists()
+
+    # 2. Succeed archiving to archive_a, corrupt primary source, and archive to archive_b via fallback
+    tracker.archive_artifact(dir_art, archive_a, mode="copy")
+    (dir_path / "other.txt").write_text("corrupted-in-workspace", encoding="utf-8")
+
+    archive_b = tmp_path / "archive_b"
+    refreshed_dir = tracker.get_run_outputs("rollback_and_fallback_run")["dir_out"]
+    dest_b = tracker.archive_artifact(refreshed_dir, archive_b, mode="copy")
+    assert (dest_b / "other.txt").read_text(encoding="utf-8") == "other-content"
+
+
+def test_archive_shapefile_bundle_move_to_same_destination_sets_abs_path(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs"
+    db_path = str(tmp_path / "provenance.duckdb")
+    tracker = Tracker(run_dir=run_dir, db_path=db_path)
+
+    shp_dir = run_dir / "shapes"
+    shp_dir.mkdir(parents=True)
+    for ext in (".shp", ".shx", ".dbf"):
+        (shp_dir / f"zones{ext}").write_bytes(f"payload-{ext}".encode("utf-8"))
+
+    with tracker.start_run("shp_same_dest_run", model="test"):
+        shp_art = tracker.log_output(shp_dir / "zones.shp", key="zones")
+
+    archive_root = tmp_path / "archive"
+    bundle_dest = tracker.archive_artifact(shp_art, archive_root, mode="copy")
+    # Remove original workspace files so recovery resolves from archive_root
+    for ext in (".shp", ".shx", ".dbf"):
+        (shp_dir / f"zones{ext}").unlink()
+
+    shp_art.abs_path = None
+    # Archiving with mode="move" when source already resolves to the archive bundle root
+    tracker.archive_artifact(shp_art, archive_root, mode="move")
+    assert shp_art.abs_path == str((bundle_dest / "zones.shp").resolve())
+    assert (bundle_dest / "zones.shp").exists()

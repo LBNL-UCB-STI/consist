@@ -2968,3 +2968,120 @@ def test_outputs_requested_preserves_caller_owned_corrupted_directory_destinatio
         tracker_a.engine.dispose()
     if tracker_b.engine:
         tracker_b.engine.dispose()
+
+
+def test_cache_hit_abs_path_populated_for_skipped_existing_and_shapefile_bundles(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "provenance.db")
+    tracker = Tracker(run_dir=tmp_path / "runs", db_path=db_path)
+    _init_core_tables(tracker)
+
+    def produce(ctx) -> None:
+        csv_path = ctx.run_dir / "table.csv"
+        csv_path.write_text("x\n1\n", encoding="utf-8")
+        tracker.log_output(csv_path, key="table")
+
+        shp_dir = ctx.run_dir / "shapes"
+        shp_dir.mkdir(parents=True, exist_ok=True)
+        for ext in (".shp", ".shx", ".dbf"):
+            (shp_dir / f"zones{ext}").write_bytes(f"shp-{ext}".encode("utf-8"))
+        tracker.log_output(shp_dir / "zones.shp", key="zones")
+
+        bundle_root = ctx.run_dir / "bundle"
+        bundle_root.mkdir(parents=True, exist_ok=True)
+        (bundle_root / "part_a.csv").write_text("a\n1\n", encoding="utf-8")
+
+    output_sets = {
+        "bundle_set": OutputSet(
+            root="bundle",
+            include=FilenamePattern(
+                pattern="part_*.csv",
+                captures=(EnumCapture(name="part", allowed=("a",), wildcard=1),),
+            ),
+        )
+    }
+
+    tracker.run(
+        fn=produce,
+        name="produce_for_abs_path",
+        run_id="produce_abs_1",
+        outputs=["table", "zones"],
+        output_sets=output_sets,
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    out_all_dir = tracker.run_dir / "outputs" / "hydrated_all"
+    rel_prefix = Path("outputs") / "produce_for_abs_path" / "produce_abs_1"
+    tracker.set_run_subdir_fn(lambda _run: "hydrated_all")
+    hit_1 = tracker.run(
+        fn=produce,
+        name="produce_for_abs_path",
+        run_id="produce_abs_hit_1",
+        outputs=["table", "zones"],
+        output_sets=output_sets,
+        cache_options=CacheOptions(
+            cache_hydration="outputs-all",
+        ),
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    assert hit_1.cache_hit is True
+    assert hit_1.outputs["table"].abs_path == str(
+        (out_all_dir / rel_prefix / "table.csv").resolve()
+    )
+    assert hit_1.outputs["zones"].abs_path == str(
+        (out_all_dir / rel_prefix / "shapes" / "zones.shp" / "zones.shp").resolve()
+    )
+
+    # Second cache hit into the same out_all_dir hits skipped_existing (preserve_existing=True)
+    # and must still populate abs_path for both scalar and shapefile bundle outputs.
+    hit_2 = tracker.run(
+        fn=produce,
+        name="produce_for_abs_path",
+        run_id="produce_abs_hit_2",
+        outputs=["table", "zones"],
+        output_sets=output_sets,
+        cache_options=CacheOptions(
+            cache_hydration="outputs-all",
+        ),
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    assert hit_2.cache_hit is True
+    assert hit_2.outputs["table"].abs_path == str(
+        (out_all_dir / rel_prefix / "table.csv").resolve()
+    )
+    assert hit_2.outputs["zones"].abs_path == str(
+        (out_all_dir / rel_prefix / "shapes" / "zones.shp" / "zones.shp").resolve()
+    )
+    tracker.set_run_subdir_fn(None)
+
+    # Verify outputs-requested with materialize_cached_output_set_roots sets parent OutputSet abs_path
+    tracker_b = Tracker(run_dir=tmp_path / "runs_b", db_path=db_path)
+    _init_core_tables(tracker_b)
+    hit_3 = tracker_b.run(
+        fn=produce,
+        name="produce_for_abs_path",
+        run_id="produce_abs_hit_3",
+        outputs=["table", "zones"],
+        output_sets=output_sets,
+        cache_options=CacheOptions(
+            cache_hydration="outputs-requested",
+            cache_hydration_failure="warn",
+        ),
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    assert hit_3.cache_hit is True
+    expected_set_root = (
+        tracker_b.run_dir
+        / "outputs"
+        / "produce_for_abs_path"
+        / "produce_abs_hit_3"
+        / "bundle"
+    )
+    assert (expected_set_root / "part_a.csv").exists()
+    assert hit_3.outputs["bundle_set"].abs_path == str(expected_set_root.resolve())
+
+    if tracker.engine:
+        tracker.engine.dispose()
+    if tracker_b.engine:
+        tracker_b.engine.dispose()

@@ -1152,3 +1152,80 @@ def test_scenario_trace_archive_opt_out_and_step_factory(
             t.log_output(tp2, key="traced_no_archive")
 
         assert "recovery_roots" not in sc.coupler.require("traced_no_archive").meta
+
+
+def test_set_output_meta_reserved_keys_trace_demotion_and_post_call_preservation(
+    tracker: Tracker,
+) -> None:
+    # 1. Reserved log_artifact parameter names in set_output_meta with output_paths + return dict
+    def step_reserved(ctx) -> dict[str, Path]:
+        out = ctx.run_dir / "reserved.csv"
+        out.write_text("id\n1\n", encoding="utf-8")
+        ctx.set_output_meta(
+            "reserved",
+            {
+                "key": "user_meta_key",
+                "direction": "north",
+                "path": "/logical/route",
+                "driver": "custom_meta_driver",
+                "schema": "v2",
+                "content_hash": "not_an_override",
+            },
+        )
+        return {"reserved": out}
+
+    res = tracker.run(
+        fn=step_reserved,
+        name="step_reserved_meta",
+        run_id="run_reserved_meta",
+        outputs=["reserved"],
+        output_paths={"reserved": "reserved.csv"},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    art = res.outputs["reserved"]
+    assert art.key == "reserved"
+    assert art.driver == "csv"
+    assert art.meta["key"] == "user_meta_key"
+    assert art.meta["direction"] == "north"
+    assert art.meta["path"] == "/logical/route"
+    assert art.meta["driver"] == "custom_meta_driver"
+    assert art.meta["schema"] == "v2"
+    assert art.meta["content_hash"] == "not_an_override"
+
+    # 2. merge=False on an already-logged output does not wipe subsequent metadata additions
+    def step_post_meta(ctx) -> None:
+        p = ctx.run_dir / "post.csv"
+        p.write_text("id\n2\n", encoding="utf-8")
+        logged = tracker.log_output(p, key="post", initial="drop_me")
+        ctx.set_output_meta("post", {"replaced": True}, merge=False)
+        logged.meta["after_replace"] = "keep_me"
+
+    res_post = tracker.run(
+        fn=step_post_meta,
+        name="step_post_meta",
+        run_id="run_post_meta",
+        outputs=["post"],
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    post_meta = res_post.outputs["post"].meta
+    assert "initial" not in post_meta
+    assert post_meta.get("replaced") is True
+    assert post_meta.get("after_replace") == "keep_me"
+
+    # 3. tracker.trace() cache-hit demotion to miss when set_output_meta is called before log_output
+    with tracker.trace("trace_demote", run_id="trace_demote_1", outputs=["t_out"]) as t:
+        tp = t.run_dir / "t_out.csv"
+        tp.write_text("v\n1\n", encoding="utf-8")
+        t.log_output(tp, key="t_out")
+
+    with tracker.trace("trace_demote", run_id="trace_demote_2", outputs=["t_out"]) as t:
+        # Initially a cache hit before log_output is called
+        assert t.is_cached is True
+        t.set_output_meta("t_out", {"from_demoted_trace": 42})
+        tp2 = t.run_dir / "t_out_demoted.csv"
+        tp2.write_text("v\n2\n", encoding="utf-8")
+        t.log_output(tp2, key="t_out")
+        assert t.is_cached is False
+
+    demoted_out = tracker.get_run_outputs("trace_demote_2")["t_out"]
+    assert demoted_out.meta.get("from_demoted_trace") == 42

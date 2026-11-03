@@ -5853,9 +5853,6 @@ class Tracker:
         normalized = normalize_json(dict(meta))
         if not isinstance(normalized, dict):
             raise TypeError("meta must normalize to a JSON object mapping.")
-        if self.is_cached:
-            return
-
         if merge:
             existing = dict(self.current_consist._pending_output_meta.get(key, {}))
             existing.update(normalized)
@@ -5863,7 +5860,12 @@ class Tracker:
         else:
             self.current_consist._pending_output_meta[key] = dict(normalized)
             self.current_consist._pending_output_meta_replace_keys.add(key)
+        self.current_consist._pending_output_meta_applied_object_ids[key] = set()
 
+        if self.is_cached:
+            return
+
+        applied_ids = self.current_consist._pending_output_meta_applied_object_ids[key]
         for art in self.current_consist.outputs:
             if art.key == key:
                 existing_art_meta = dict(art.meta) if isinstance(art.meta, dict) else {}
@@ -5871,28 +5873,14 @@ class Tracker:
                     existing_art_meta.update(normalized)
                     art.meta = existing_art_meta
                 else:
-                    preserved_system_meta = {
-                        sys_key: sys_val
-                        for sys_key, sys_val in existing_art_meta.items()
-                        if sys_key.startswith("_dlt_")
-                        or sys_key.startswith("directory_")
-                        or sys_key.startswith("output_set_")
-                        or sys_key
-                        in {
-                            "is_ingested",
-                            "dlt_table_name",
-                            "recovery_roots",
-                            "content_id",
-                            "schema_id",
-                            "schema_summary",
-                            "file_schema",
-                            "facet",
-                            "facet_schema_version",
-                            "facet_index",
-                        }
-                    }
+                    from consist.models.artifact import preserve_system_artifact_meta
+
+                    preserved_system_meta = preserve_system_artifact_meta(
+                        existing_art_meta
+                    )
                     preserved_system_meta.update(normalized)
                     art.meta = preserved_system_meta
+                applied_ids.add(id(art))
                 if self.db is not None:
                     self.db.update_artifact_meta(art, dict(art.meta))
                 self._flush_json()

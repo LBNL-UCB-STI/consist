@@ -16,8 +16,10 @@ from consist.core._tracker_service_base import _TrackerServiceBase
 from consist.core.container_policy import validate_recovery_registration_policy
 from consist.core.directory_artifacts import (
     directory_allows_extra_files,
-    materialize_directory_tree,
+    is_valid_directory_artifact_tree,
+    materialize_directory_tree_with_rollback_info,
     materialize_shapefile_bundle,
+    rollback_published_directory_tree,
     validate_directory_manifest,
     validate_directory_tree,
     validate_shapefile_bundle_root,
@@ -1258,6 +1260,35 @@ class TrackerArchiveService(_TrackerServiceBase):
 
         return output_set_plans, nested_scalars, nested_directories
 
+    def _find_directory_artifact_recovery_source_path(
+        self,
+        artifact: Artifact,
+        producing_run: Any,
+    ) -> Path | None:
+        if producing_run is None:
+            return None
+        from consist.core.materialize import find_existing_recovery_source_path
+
+        _, source_path, _ = find_existing_recovery_source_path(
+            self.tracker,
+            artifact=artifact,
+            run=producing_run,
+            source_root=None,
+            preserve_raw_paths=True,
+            source_validator=lambda candidate: (
+                is_valid_directory_artifact_tree(candidate, artifact) is not False
+            ),
+        )
+        if source_path is None:
+            _, source_path, _ = find_existing_recovery_source_path(
+                self.tracker,
+                artifact=artifact,
+                run=producing_run,
+                source_root=None,
+                preserve_raw_paths=True,
+            )
+        return source_path
+
     def _validate_excluded_output_set_directory(
         self,
         artifact: Artifact,
@@ -1276,17 +1307,9 @@ class TrackerArchiveService(_TrackerServiceBase):
         producing_run = (
             self.get_run(str(artifact.run_id)) if artifact.run_id is not None else None
         )
-        source_path: Path | None = None
-        if producing_run is not None:
-            from consist.core.materialize import find_existing_recovery_source_path
-
-            _, source_path, _ = find_existing_recovery_source_path(
-                self.tracker,
-                artifact=artifact,
-                run=producing_run,
-                source_root=None,
-                preserve_raw_paths=True,
-            )
+        source_path = self._find_directory_artifact_recovery_source_path(
+            artifact, producing_run
+        )
         if source_path is None or not source_path.exists():
             raise FileNotFoundError(
                 f"Cannot archive artifact {artifact.key!r}: source bytes are unavailable."
@@ -1902,17 +1925,9 @@ class TrackerArchiveService(_TrackerServiceBase):
                 f"Artifact {artifact.key!r} does not have a rematerializable URI layout."
             )
         producing_run = self.get_run(str(artifact.run_id)) if artifact.run_id else None
-        source_path: Path | None = None
-        if producing_run is not None:
-            from consist.core.materialize import find_existing_recovery_source_path
-
-            _, source_path, _ = find_existing_recovery_source_path(
-                self.tracker,
-                artifact=artifact,
-                run=producing_run,
-                source_root=None,
-                preserve_raw_paths=True,
-            )
+        source_path = self._find_directory_artifact_recovery_source_path(
+            artifact, producing_run
+        )
         if source_path is None or not source_path.exists():
             raise FileNotFoundError(
                 f"Cannot archive artifact {artifact.key!r}: source bytes are unavailable."
@@ -1920,7 +1935,7 @@ class TrackerArchiveService(_TrackerServiceBase):
 
         archive_root_path = Path(archive_root).expanduser().absolute()
         destination = archive_root_path / relative_path
-        published = materialize_directory_tree(
+        published = materialize_directory_tree_with_rollback_info(
             source_path,
             destination,
             manifest,
@@ -1932,8 +1947,7 @@ class TrackerArchiveService(_TrackerServiceBase):
                 artifact, [archive_root_path], append=append
             )
         except Exception:
-            if published and destination.exists():
-                shutil.rmtree(destination)
+            rollback_published_directory_tree(destination, published)
             raise
         if mode == "move":
             if source_path.resolve() != destination.resolve():
@@ -1981,8 +1995,9 @@ class TrackerArchiveService(_TrackerServiceBase):
 
         archive_root_path = Path(archive_root).expanduser().absolute()
         destination = archive_root_path / relative_path
+        source_bundle_root = source_path if source_path.is_dir() else source_path.parent
         published = materialize_shapefile_bundle(
-            source_path.parent,
+            source_bundle_root,
             destination,
             entry,
             manifest,
@@ -1996,9 +2011,10 @@ class TrackerArchiveService(_TrackerServiceBase):
             if published and destination.exists():
                 shutil.rmtree(destination)
             raise
-        if mode == "move" and source_path.parent.resolve() != destination.resolve():
-            for member in manifest["entries"]:
-                (source_path.parent / member["path"]).unlink()
+        if mode == "move":
+            if source_bundle_root.resolve() != destination.resolve():
+                for member in manifest["entries"]:
+                    (source_bundle_root / member["path"]).unlink(missing_ok=True)
             resolved_dest = str((destination / entry).resolve())
             artifact.abs_path = resolved_dest
             self._sync_active_run_artifact_abs_path(artifact, resolved_dest)

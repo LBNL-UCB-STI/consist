@@ -371,6 +371,22 @@ def _requested_output_destinations(
     return destinations
 
 
+def _resolve_hydrated_artifact_abs_path(
+    artifact: Artifact,
+    hydrated_path: str | Path,
+) -> str:
+    resolved = Path(hydrated_path).resolve()
+    meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+    if (
+        meta.get("file_bundle_artifact") is True
+        or meta.get("file_bundle") == "shapefile"
+    ) and resolved.is_dir():
+        entry = meta.get("file_bundle_entry")
+        if isinstance(entry, str) and Path(entry).name == entry:
+            return str((resolved / entry).resolve())
+    return str(resolved)
+
+
 def _remove_candidate_destination(destination: Path) -> None:
     if not destination.exists() or destination.is_symlink():
         return
@@ -981,16 +997,72 @@ def hydrate_cache_hit_outputs(
 
             if materialized:
                 target_run.meta["materialized_outputs"] = materialized
-            materialized_outputs = target_run.meta.get("materialized_outputs")
-            if isinstance(materialized_outputs, dict):
-                for output_artifact in record.outputs:
-                    hydrated_path = materialized_outputs.get(output_artifact.key)
-                    if isinstance(hydrated_path, str) and hydrated_path:
-                        output_artifact.abs_path = str(Path(hydrated_path).resolve())
-                for key, output_artifact in cached_items.outputs.items():
-                    hydrated_path = materialized_outputs.get(key)
-                    if isinstance(hydrated_path, str) and hydrated_path:
-                        output_artifact.abs_path = str(Path(hydrated_path).resolve())
+
+        materialized_outputs = target_run.meta.get("materialized_outputs")
+        if isinstance(materialized_outputs, dict):
+            for output_artifact in record.outputs:
+                hydrated_path = materialized_outputs.get(output_artifact.key)
+                if isinstance(hydrated_path, str) and hydrated_path:
+                    output_artifact.abs_path = _resolve_hydrated_artifact_abs_path(
+                        output_artifact, hydrated_path
+                    )
+            for key, output_artifact in cached_items.outputs.items():
+                hydrated_path = materialized_outputs.get(key)
+                if isinstance(hydrated_path, str) and hydrated_path:
+                    output_artifact.abs_path = _resolve_hydrated_artifact_abs_path(
+                        output_artifact, hydrated_path
+                    )
+
+        all_hydrated_artifacts: list[Artifact] = [
+            *record.outputs,
+            *cached_items.outputs.values(),
+        ]
+        if (
+            active_options.cache_hydration == "outputs-all"
+            and active_options.materialize_cached_outputs_dir is not None
+        ):
+            from consist.core.materialize import _derive_remappable_relative_path
+
+            out_dir = Path(active_options.materialize_cached_outputs_dir).resolve()
+            for output_artifact in all_hydrated_artifacts:
+                if output_artifact.abs_path is not None:
+                    continue
+                try:
+                    rel_path = _derive_remappable_relative_path(
+                        cast("Tracker", tracker),
+                        artifact=output_artifact,
+                    )
+                except Exception:
+                    rel_path = None
+                if rel_path is not None and (out_dir / rel_path).exists():
+                    output_artifact.abs_path = _resolve_hydrated_artifact_abs_path(
+                        output_artifact, out_dir / rel_path
+                    )
+        elif active_options.cache_hydration == "outputs-requested":
+            requested_dests = _requested_output_destinations(
+                active_options=active_options,
+                outputs_by_key=dict(cached_items.outputs),
+            )
+            for output_artifact in all_hydrated_artifacts:
+                if output_artifact.abs_path is not None:
+                    continue
+                req_dest = requested_dests.get(output_artifact.key)
+                if req_dest is not None and Path(req_dest).exists():
+                    output_artifact.abs_path = _resolve_hydrated_artifact_abs_path(
+                        output_artifact, req_dest
+                    )
+            for set_key, set_root in (
+                active_options.materialize_cached_output_set_roots or {}
+            ).items():
+                if not Path(set_root).exists():
+                    continue
+                resolved_set_root = str(Path(set_root).resolve())
+                for output_artifact in all_hydrated_artifacts:
+                    if (
+                        output_artifact.key == set_key
+                        and output_artifact.abs_path is None
+                    ):
+                        output_artifact.abs_path = resolved_set_root
     except Exception as e:
         if active_options.materialize_cached_outputs_source_root is not None:
             raise

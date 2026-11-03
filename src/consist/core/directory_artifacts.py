@@ -6,6 +6,7 @@ import os
 import shutil
 import tempfile
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -383,19 +384,56 @@ def _mkdir_with_tracking(target_dir: Path, created_dirs: list[Path]) -> None:
         created_dirs.append(directory)
 
 
-def materialize_directory_tree(
+@dataclass(frozen=True)
+class PublishedDirectoryTree:
+    """Published directory tree state used for rollback on post-copy failures."""
+
+    published: bool
+    created_root: bool = False
+    created_files: tuple[Path, ...] = ()
+    created_directories: tuple[Path, ...] = ()
+
+
+def rollback_published_directory_tree(
+    destination: Path,
+    published: PublishedDirectoryTree,
+) -> None:
+    """Rollback directory tree files and directories published before failure."""
+    if not published.published:
+        return
+    if published.created_root:
+        if destination.exists() and not destination.is_symlink():
+            shutil.rmtree(destination)
+        return
+    for file_path in reversed(published.created_files):
+        try:
+            file_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    for dir_path in sorted(
+        published.created_directories,
+        key=lambda path: len(path.parts),
+        reverse=True,
+    ):
+        try:
+            dir_path.rmdir()
+        except OSError:
+            pass
+
+
+def materialize_directory_tree_with_rollback_info(
     source: Path,
     destination: Path,
     manifest: Mapping[str, Any],
     *,
     preserve_existing: bool,
     allow_extra_files: bool = False,
-) -> bool:
+) -> PublishedDirectoryTree:
     """Copy a verified directory tree into an exact destination atomically.
 
-    Returns ``True`` when a new destination is published (or a partially
-    populated destination is completed) and ``False`` when an existing,
-    already-verified destination is preserved.
+    Returns a ``PublishedDirectoryTree`` describing whether bytes were published
+    and which files/directories were newly created so callers can safely roll
+    back without destroying pre-existing files.
     """
     normalized_manifest = validate_directory_manifest(manifest)
     source_path = Path(source)
@@ -422,7 +460,7 @@ def materialize_directory_tree(
             allow_extra_files=allow_extra_files,
         )
         if not missing_entries:
-            return False
+            return PublishedDirectoryTree(published=False)
 
         validate_directory_tree(
             source_path,
@@ -450,18 +488,22 @@ def materialize_directory_tree(
                 normalized_manifest,
                 allow_extra_files=allow_extra_files,
             )
-            return True
+            return PublishedDirectoryTree(
+                published=True,
+                created_root=False,
+                created_files=tuple(created_files),
+                created_directories=tuple(created_dirs),
+            )
         except Exception:
-            for file_path in reversed(created_files):
-                try:
-                    file_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-            for dir_path in reversed(created_dirs):
-                try:
-                    dir_path.rmdir()
-                except OSError:
-                    pass
+            rollback_published_directory_tree(
+                destination_path,
+                PublishedDirectoryTree(
+                    published=True,
+                    created_root=False,
+                    created_files=tuple(created_files),
+                    created_directories=tuple(created_dirs),
+                ),
+            )
             raise
 
     validate_directory_tree(
@@ -502,9 +544,35 @@ def materialize_directory_tree(
                 f"directory artifact destination already exists: {destination_path}"
             )
         os.rename(staging, destination_path)
-        return True
+        return PublishedDirectoryTree(
+            published=True,
+            created_root=True,
+        )
     finally:
         shutil.rmtree(staging_root, ignore_errors=True)
+
+
+def materialize_directory_tree(
+    source: Path,
+    destination: Path,
+    manifest: Mapping[str, Any],
+    *,
+    preserve_existing: bool,
+    allow_extra_files: bool = False,
+) -> bool:
+    """Copy a verified directory tree into an exact destination atomically.
+
+    Returns ``True`` when a new destination is published (or a partially
+    populated destination is completed) and ``False`` when an existing,
+    already-verified destination is preserved.
+    """
+    return materialize_directory_tree_with_rollback_info(
+        source,
+        destination,
+        manifest,
+        preserve_existing=preserve_existing,
+        allow_extra_files=allow_extra_files,
+    ).published
 
 
 def validate_directory_destination(
@@ -516,9 +584,11 @@ def validate_directory_destination(
 ) -> bool:
     """Validate an exact directory destination before source bytes are needed.
 
-    Returns ``True`` when an existing destination matches the manifest
-    and may be retained. Returns ``False`` when the destination does not yet
-    exist. Unsafe or conflicting destinations raise ``ValueError``.
+    Returns ``True`` when an existing destination already contains all manifest
+    entries with matching digests and may be retained without copying. Returns
+    ``False`` when the destination does not yet exist or is only partially
+    populated with valid manifest entries. Unsafe or conflicting destinations
+    raise ``ValueError``.
     """
     normalized_manifest = validate_directory_manifest(manifest)
     destination_path = Path(destination)
@@ -538,12 +608,12 @@ def validate_directory_destination(
             "directory artifact hydration requires a clean destination when "
             "preserve_existing=False"
         )
-    validate_directory_tree(
+    missing_entries = _inspect_existing_directory_destination(
         destination_path,
         normalized_manifest,
         allow_extra_files=allow_extra_files,
     )
-    return True
+    return not missing_entries
 
 
 def _shapefile_bundle_entries(root: Path, shapefile_name: str) -> list[dict[str, Any]]:

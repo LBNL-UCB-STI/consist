@@ -1024,55 +1024,52 @@ class RunTraceCoordinator:
         if not pending_meta_by_key:
             return
         replace_keys: set[str] = current_consist._pending_output_meta_replace_keys
-
-        all_outputs: Dict[str, Artifact] = {
-            art.key: art for art in current_consist.outputs if art.key
-        }
-        all_outputs.update(outputs_map)
+        applied_object_ids: Dict[str, set[int]] = (
+            current_consist._pending_output_meta_applied_object_ids
+        )
 
         updated_any = False
         for key, pending_meta in list(pending_meta_by_key.items()):
-            art = all_outputs.get(key)
-            if art is None:
+            candidates: list[Artifact] = [
+                recorded for recorded in current_consist.outputs if recorded.key == key
+            ]
+            mapped_art = outputs_map.get(key)
+            if mapped_art is not None and all(
+                id(mapped_art) != id(c) for c in candidates
+            ):
+                candidates.append(mapped_art)
+            if not candidates:
                 continue
-            existing_meta = dict(art.meta) if isinstance(art.meta, dict) else {}
+
+            already_applied = applied_object_ids.get(key, set())
+            unapplied = [c for c in candidates if id(c) not in already_applied]
+            if not unapplied:
+                pending_meta_by_key.pop(key, None)
+                replace_keys.discard(key)
+                applied_object_ids.pop(key, None)
+                continue
+
+            primary_art = unapplied[-1]
+            existing_meta = (
+                dict(primary_art.meta) if isinstance(primary_art.meta, dict) else {}
+            )
             if key in replace_keys:
-                preserved_system_meta = {
-                    sys_key: sys_val
-                    for sys_key, sys_val in existing_meta.items()
-                    if sys_key.startswith("_dlt_")
-                    or sys_key.startswith("directory_")
-                    or sys_key.startswith("output_set_")
-                    or sys_key
-                    in {
-                        "is_ingested",
-                        "dlt_table_name",
-                        "recovery_roots",
-                        "content_id",
-                        "schema_id",
-                        "schema_summary",
-                        "file_schema",
-                        "facet",
-                        "facet_schema_version",
-                        "facet_index",
-                    }
-                }
+                from consist.models.artifact import preserve_system_artifact_meta
+
+                preserved_system_meta = preserve_system_artifact_meta(existing_meta)
                 preserved_system_meta.update(pending_meta)
                 merged_meta = preserved_system_meta
             else:
                 merged_meta = dict(existing_meta)
                 merged_meta.update(pending_meta)
 
-            art.meta = merged_meta
-            for recorded in current_consist.outputs:
-                if recorded.key == key:
-                    recorded.meta = dict(merged_meta)
-            if key in outputs_map:
-                outputs_map[key].meta = dict(merged_meta)
+            for candidate in candidates:
+                candidate.meta = dict(merged_meta)
             if tracker.db is not None:
-                tracker.db.update_artifact_meta(art, dict(merged_meta))
+                tracker.db.update_artifact_meta(primary_art, dict(merged_meta))
             pending_meta_by_key.pop(key, None)
             replace_keys.discard(key)
+            applied_object_ids.pop(key, None)
             updated_any = True
 
         if updated_any:
@@ -1119,15 +1116,12 @@ class RunTraceCoordinator:
                     and not tracker.is_cached
                     and output_key in tracker.current_consist._pending_output_meta
                 ):
-                    pending_meta = dict(
-                        tracker.current_consist._pending_output_meta.pop(output_key)
-                    )
+                    pending_meta = tracker.current_consist._pending_output_meta[
+                        output_key
+                    ]
                     replace_meta = (
                         output_key
                         in tracker.current_consist._pending_output_meta_replace_keys
-                    )
-                    tracker.current_consist._pending_output_meta_replace_keys.discard(
-                        output_key
                     )
                     if (
                         replace_meta
@@ -1137,7 +1131,14 @@ class RunTraceCoordinator:
                         for meta_key in ref.meta.keys():
                             if meta_key != "directory_artifact":
                                 log_kwargs.pop(meta_key, None)
-                    log_kwargs.update(pending_meta)
+                    for dir_flag in (
+                        "directory_artifact",
+                        "directory_allow_extra_files",
+                    ):
+                        if dir_flag in pending_meta and isinstance(
+                            pending_meta[dir_flag], bool
+                        ):
+                            log_kwargs[dir_flag] = pending_meta[dir_flag]
                 if isinstance(output_ref, Artifact):
                     outputs_map[output_key] = tracker.log_artifact(
                         output_ref,
