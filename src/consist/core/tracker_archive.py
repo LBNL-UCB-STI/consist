@@ -8,7 +8,7 @@ import shutil
 import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Dict, Literal, Mapping, Sequence
+from typing import Any, Callable, Dict, Literal, Mapping, Sequence
 
 from sqlmodel import col, select
 
@@ -482,6 +482,7 @@ class TrackerArchiveService(_TrackerServiceBase):
         artifact: Artifact,
         *,
         producing_run: Any | None,
+        required_relative_files: Sequence[str] = (),
     ) -> Path:
         """Locate an OutputSet source without resolving through symlinks."""
 
@@ -490,28 +491,40 @@ class TrackerArchiveService(_TrackerServiceBase):
                 raise ValueError(f"OutputSet source contains a symlink: {path}")
             return True
 
-        source_path: Path | None = None
-        if producing_run is not None:
-            from consist.core.materialize import find_existing_recovery_source_path
-
-            _, source_path, _ = find_existing_recovery_source_path(
-                self.tracker,
-                artifact=artifact,
-                run=producing_run,
-                source_root=None,
-                source_validator=reject_symlink,
-                preserve_raw_paths=True,
+        def validate_candidate(path: Path) -> bool:
+            reject_symlink(path)
+            if not required_relative_files:
+                return True
+            return path.is_dir() and all(
+                (path / rel).is_file() for rel in required_relative_files
             )
-        if source_path is None and artifact.abs_path:
-            candidate = Path(artifact.abs_path)
-            if candidate.exists():
-                reject_symlink(candidate)
-                source_path = candidate
-        if source_path is None:
-            candidate = Path(self.resolve_uri(artifact.container_uri))
-            if candidate.exists():
-                reject_symlink(candidate)
-                source_path = candidate
+
+        def resolve_with_validator(validator: Callable[[Path], bool]) -> Path | None:
+            resolved: Path | None = None
+            if producing_run is not None:
+                from consist.core.materialize import find_existing_recovery_source_path
+
+                _, resolved, _ = find_existing_recovery_source_path(
+                    self.tracker,
+                    artifact=artifact,
+                    run=producing_run,
+                    source_root=None,
+                    source_validator=validator,
+                    preserve_raw_paths=True,
+                )
+            if resolved is None and artifact.abs_path:
+                candidate = Path(artifact.abs_path)
+                if candidate.exists() and validator(candidate):
+                    resolved = candidate
+            if resolved is None:
+                candidate = Path(self.resolve_uri(artifact.container_uri))
+                if candidate.exists() and validator(candidate):
+                    resolved = candidate
+            return resolved
+
+        source_path = resolve_with_validator(validate_candidate)
+        if source_path is None and required_relative_files:
+            source_path = resolve_with_validator(reject_symlink)
         if source_path is None:
             raise FileNotFoundError(
                 f"Cannot archive OutputSet artifact {artifact.key!r}: "
@@ -733,8 +746,23 @@ class TrackerArchiveService(_TrackerServiceBase):
         producing_run = (
             self.get_run(str(artifact.run_id)) if artifact.run_id is not None else None
         )
+        children = self.tracker.get_child_artifacts(artifact)
+        required_relative_files: list[str] = []
+        for child in children:
+            child_metadata = child.meta if isinstance(child.meta, dict) else {}
+            if child_metadata.get("output_set_member") is True:
+                try:
+                    required_relative_files.append(
+                        _normalize_output_set_relative_path(
+                            child_metadata.get("output_set_relative_path", "")
+                        )
+                    )
+                except ValueError:
+                    pass
         parent_source = self._find_output_set_archive_source(
-            artifact, producing_run=producing_run
+            artifact,
+            producing_run=producing_run,
+            required_relative_files=required_relative_files,
         )
         if not parent_source.is_dir():
             raise ValueError(
@@ -779,7 +807,6 @@ class TrackerArchiveService(_TrackerServiceBase):
                 f"OutputSet parent {artifact.key!r} has an incomplete manifest."
             )
 
-        children = self.tracker.get_child_artifacts(artifact)
         if any(
             (child.meta if isinstance(child.meta, dict) else {}).get(
                 "output_set_member"
@@ -1209,7 +1236,13 @@ class TrackerArchiveService(_TrackerServiceBase):
             self.get_run(str(artifact.run_id)) if artifact.run_id is not None else None
         )
         source = self._find_output_set_archive_source(
-            artifact, producing_run=producing_run
+            artifact,
+            producing_run=producing_run,
+            required_relative_files=[
+                entry["path"]
+                for entry in manifest["entries"]
+                if entry.get("kind") == "file"
+            ],
         )
         expected_source = plan.parent_source / relative_subtree
         if source != expected_source or not source.is_dir():
@@ -1576,6 +1609,8 @@ class TrackerArchiveService(_TrackerServiceBase):
     @staticmethod
     def _remove_output_set_sources(plan: _OutputSetArchivePlan) -> None:
         """Apply move semantics after a complete OutputSet archive is registered."""
+        if plan.parent_source == plan.destination:
+            return
         for member in plan.members:
             if member.source_path != member.destination:
                 member.source_path.unlink()

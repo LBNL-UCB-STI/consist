@@ -1670,6 +1670,76 @@ def test_archive_run_outputs_moves_excluded_nested_directory_and_scalar_with_out
     ) == "metric,value\ntrips,42\n"
 
 
+@pytest.mark.parametrize(
+    "key_order",
+    [
+        ("beam_output_set", "skims_zarr"),
+        ("skims_zarr", "beam_output_set"),
+    ],
+)
+def test_archive_run_outputs_supports_split_move_and_untracked_excluded_files(
+    tracker: Tracker,
+    tmp_path: Path,
+    key_order: tuple[str, str],
+) -> None:
+    """Split move archival and idempotent move retries succeed when excluded files keep historical_root alive."""
+
+    def produce_outputs(ctx) -> None:
+        it0_root = ctx.run_dir / "beam_outputs" / "it0"
+        iters_dir = it0_root / "ITERS" / "it.0"
+        zarr_root = iters_dir / "0.skims.zarr"
+        zarr_root.mkdir(parents=True)
+        (it0_root / "summary.csv").write_text(
+            "metric,value\ntrips,42\n", encoding="utf-8"
+        )
+        (iters_dir / "0.events.csv").write_text(
+            "time,type\n1,departure\n", encoding="utf-8"
+        )
+        (it0_root / "untracked.log").write_text("untracked\n", encoding="utf-8")
+        (zarr_root / ".zgroup").write_text('{"zarr_format":2}\n', encoding="utf-8")
+
+    result = tracker.run(
+        name=f"split_move_{key_order[0]}",
+        fn=produce_outputs,
+        output_paths={
+            "skims_zarr": consist.OutputArtifactSpec(
+                path="beam_outputs/it0/ITERS/it.0/0.skims.zarr",
+                meta={"directory_artifact": True},
+            )
+        },
+        output_sets={
+            "beam_output_set": consist.OutputSet(
+                root="beam_outputs/it0",
+                include="**/*",
+                exclude=("*.skims.zarr", "*.skims.zarr/**", "*.log"),
+            )
+        },
+        execution_options=consist.ExecutionOptions(inject_context="ctx"),
+    )
+    source_root = tracker.run_artifact_dir(result.run) / "beam_outputs" / "it0"
+    archive_root = tmp_path / f"split_move_{key_order[0]}"
+
+    first_archived = tracker.archive_run_outputs(
+        result.run.id, archive_root, keys=[key_order[0]], mode="move"
+    )
+    second_archived = tracker.archive_run_outputs(
+        result.run.id, archive_root, keys=[key_order[1]], mode="move"
+    )
+    retried = tracker.archive_run_outputs(result.run.id, archive_root, mode="move")
+
+    assert set(first_archived.paths) == {key_order[0]}
+    assert set(second_archived.paths) == {key_order[1]}
+    assert set(retried.paths) == {"beam_output_set", "skims_zarr"}
+    assert (source_root / "untracked.log").is_file()
+    assert not (source_root / "summary.csv").exists()
+    assert (retried["beam_output_set"] / "summary.csv").read_text(
+        encoding="utf-8"
+    ) == "metric,value\ntrips,42\n"
+    assert (retried["skims_zarr"] / ".zgroup").read_text(
+        encoding="utf-8"
+    ) == '{"zarr_format":2}\n'
+
+
 def test_run_completion_archive_policy_archives_output_set_and_excluded_nested_directory(
     tracker: Tracker,
     tmp_path: Path,
