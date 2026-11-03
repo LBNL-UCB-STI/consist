@@ -233,7 +233,20 @@ class RunCompletionArchivePolicy:
 @dataclass(frozen=True, slots=True)
 class OutputPolicyOptions:
     """
-    Grouped output policy options for ``run(...)`` APIs.
+    Grouped output policy options for ``run(...)`` and ``trace(...)`` APIs.
+
+    Attributes
+    ----------
+    output_mismatch : Optional[Literal["warn", "error", "ignore"]], default None
+        Behavior when the number of produced outputs does not match declared
+        expectations (``"warn"``, ``"error"``, or ``"ignore"``).
+    output_missing : Optional[Literal["warn", "error", "ignore"]], default None
+        Behavior when a declared output path or key is missing on disk after
+        execution (``"warn"``, ``"error"``, or ``"ignore"``).
+    run_completion_archive : Optional[Union[RunCompletionArchivePolicy, Literal[False]]], default None
+        Optional policy to automatically archive produced outputs when a cache-miss
+        step finishes. Pass ``False`` on a scenario step to explicitly disable a
+        scenario-level ``step_run_completion_archive`` default for that step.
     """
 
     output_mismatch: Optional[Literal["warn", "error", "ignore"]] = None
@@ -252,6 +265,35 @@ class OutputArtifactSpec:
     Use this richer declaration when the output path should carry schema,
     driver, facet, profiling, directory manifest options, or future validation
     metadata at the declaration site.
+
+    Attributes
+    ----------
+    path : ArtifactRef
+        Host filesystem path, virtual URI, or ``Artifact`` reference for the output.
+    schema : Optional[type[SQLModel]], default None
+        Optional SQLModel schema class associated with the output artifact.
+    driver : Optional[str], default None
+        Explicit content driver (for example ``"parquet"``, ``"zarr"``, ``"h5"``).
+        Inferred from the path extension when omitted.
+    facet : Optional[FacetLike], default None
+        Optional artifact-level facet mapping or model to attach to the output.
+    facet_schema_version : Optional[Union[str, int]], default None
+        Optional schema version identifier for ``facet``.
+    facet_index : bool, default False
+        Whether to index scalar facet fields for querying.
+    profile_file_schema : Optional[Union[bool, Literal["if_changed"]]], default None
+        Override for run-level file schema profiling on this output.
+    file_schema_sample_rows : Optional[int], default None
+        Number of rows to sample when profiling tabular file schemas.
+    meta : Optional[Mapping[str, Any]], default None
+        Additional metadata dictionary merged into the logged ``Artifact.meta``.
+    directory : bool, default False
+        When ``True``, log the output as an immutable directory artifact with a
+        persisted member manifest.
+    allow_extra_files : bool, default False
+        When ``True`` on a directory or Zarr output, allow non-manifest extra
+        files (such as post-run diagnostic or QA outputs) in the directory tree
+        during cache validation and historical recovery.
     """
 
     path: ArtifactRef
@@ -310,7 +352,40 @@ class OutputArtifactSpec:
         file_schema_sample_rows: int | None = None,
         meta: Mapping[str, Any] | None = None,
     ) -> "OutputArtifactSpec":
-        """Construct a directory-backed ``OutputArtifactSpec``."""
+        """
+        Construct a directory-backed ``OutputArtifactSpec`` (`directory=True`).
+
+        Parameters
+        ----------
+        path : ArtifactRef
+            Directory path, virtual URI, or ``Artifact`` reference for the output.
+        allow_extra_files : bool, default False
+            When ``True``, tolerate extra unrecorded files inside the directory
+            during cache validation and recovery while still verifying all
+            recorded manifest members.
+        schema : Optional[type[SQLModel]], default None
+            Optional SQLModel schema class associated with the output artifact.
+        driver : Optional[str], default None
+            Explicit content driver. Inferred when omitted (for example ``"zarr"``
+            for ``*.zarr`` directories).
+        facet : Optional[FacetLike], default None
+            Optional artifact-level facet mapping or model.
+        facet_schema_version : Optional[Union[str, int]], default None
+            Optional schema version identifier for ``facet``.
+        facet_index : bool, default False
+            Whether to index scalar facet fields for querying.
+        profile_file_schema : Optional[Union[bool, Literal["if_changed"]]], default None
+            Override for run-level file schema profiling on this output.
+        file_schema_sample_rows : Optional[int], default None
+            Number of rows to sample when profiling tabular file schemas.
+        meta : Optional[Mapping[str, Any]], default None
+            Additional metadata dictionary merged into the logged ``Artifact.meta``.
+
+        Returns
+        -------
+        OutputArtifactSpec
+            A configured directory output specification with ``directory=True``.
+        """
         return cls(
             path=path,
             schema=schema,
@@ -363,6 +438,17 @@ def _capture_signature(capture: "FilenameCapture") -> tuple[str, tuple[str, ...]
 
 @dataclass(frozen=True, slots=True)
 class IntCapture:
+    """
+    Captures an integer facet from a 1-indexed ``*`` wildcard in a ``FilenamePattern``.
+
+    Attributes
+    ----------
+    name : str
+        Facet field name to record on each matched member artifact.
+    wildcard : int
+        1-indexed position of the ``*`` wildcard in the ``FilenamePattern`` glob.
+    """
+
     name: str
     wildcard: int
 
@@ -374,6 +460,20 @@ class IntCapture:
 
 @dataclass(frozen=True, slots=True)
 class EnumCapture:
+    """
+    Captures a string facet constrained to an allowed set of values from a
+    1-indexed ``*`` wildcard in a ``FilenamePattern``.
+
+    Attributes
+    ----------
+    name : str
+        Facet field name to record on each matched member artifact.
+    allowed : frozenset[str] | Iterable[str]
+        Non-empty collection of permitted string values for the wildcard.
+    wildcard : int
+        1-indexed position of the ``*`` wildcard in the ``FilenamePattern`` glob.
+    """
+
     name: str
     allowed: frozenset[str] | Iterable[str]
     wildcard: int
@@ -416,13 +516,24 @@ class StringCapture:
     Captures an open string token from a 1-indexed ``*`` wildcard in a
     ``FilenamePattern``.
 
-    Note:
-        The default ``pattern`` (``r"[A-Za-z0-9_.-]+"``) matches ``_``, ``.``,
-        and ``-`` greedily. When two open captures appear in the same filename
-        segment separated by one of those characters (for example,
-        ``"output_*_*.parquet"``), pass a narrower ``pattern`` that excludes
-        the delimiter (such as ``pattern=r"[A-Za-z0-9-]+"``) to avoid greedy
-        splitting across the separator.
+    Attributes
+    ----------
+    name : str
+        Facet field name to record on each matched member artifact.
+    wildcard : int
+        1-indexed position of the ``*`` wildcard in the ``FilenamePattern`` glob.
+    pattern : str, default r"[A-Za-z0-9_.-]+"
+        Single-segment, non-empty regular expression (without capturing groups or
+        path separators) used to match the wildcard token.
+
+    Notes
+    -----
+    The default ``pattern`` (``r"[A-Za-z0-9_.-]+"``) matches ``_``, ``.``,
+    and ``-`` greedily. When two open captures appear in the same filename
+    segment separated by one of those characters (for example,
+    ``"output_*_*.parquet"``), pass a narrower ``pattern`` that excludes
+    the delimiter (such as ``pattern=r"[A-Za-z0-9-]+"``) to avoid greedy
+    splitting across the separator.
     """
 
     name: str
@@ -441,6 +552,18 @@ FilenameCapture: TypeAlias = Union[IntCapture, EnumCapture, StringCapture]
 
 @dataclass(frozen=True, slots=True)
 class FilenamePattern:
+    """
+    Glob pattern for an ``OutputSet`` with optional typed wildcard captures.
+
+    Attributes
+    ----------
+    pattern : str
+        Relative ``/``-separated glob pattern using ``*`` wildcards (without ``**``).
+    captures : tuple[FilenameCapture, ...], default ()
+        Typed capture declarations (``IntCapture``, ``EnumCapture``,
+        ``StringCapture``) bound to 1-indexed ``*`` wildcards in ``pattern``.
+    """
+
     pattern: str
     captures: tuple[FilenameCapture, ...] = ()
 
@@ -451,9 +574,11 @@ class FilenamePattern:
 
     @classmethod
     def glob(cls, pattern: str) -> "FilenamePattern":
+        """Construct a ``FilenamePattern`` for ``pattern`` before attaching captures."""
         return cls(pattern=pattern)
 
     def with_captures(self, *captures: FilenameCapture) -> "FilenamePattern":
+        """Return a copy of this pattern with ``captures`` bound to its ``*`` wildcards."""
         return replace(self, captures=tuple(captures))
 
 

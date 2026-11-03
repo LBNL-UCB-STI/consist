@@ -699,7 +699,7 @@ def run(
     cache_options : Optional[CacheOptions]
         Grouped cache controls for run execution.
     output_policy : Optional[OutputPolicyOptions]
-        Grouped output mismatch/missing policy controls.
+        Grouped output mismatch, missing, and run-completion archive policy controls.
     execution_options : Optional[ExecutionOptions]
         Grouped runtime execution controls. For path-bound workflows, this is
         also where you request local input staging via

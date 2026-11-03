@@ -390,9 +390,33 @@ class RunContext:
         merge: bool = True,
     ) -> None:
         """
-        Register pending metadata for a declared output key during step execution.
+        Attach or queue metadata for an output artifact key during step execution.
 
-        This is a thin wrapper around ``Tracker.set_output_meta``.
+        This is a thin wrapper around ``Tracker.set_output_meta``. If an output
+        with ``key`` has already been logged in the current run, its metadata is
+        updated immediately; otherwise the metadata is queued and applied when the
+        declared output is finalized at the end of the step.
+
+        Parameters
+        ----------
+        key : str
+            Declared or logged output artifact key to update.
+        meta : Mapping[str, Any]
+            JSON-serializable metadata mapping to merge into (or replace on) the
+            output artifact's ``meta`` dictionary.
+        merge : bool, default True
+            When ``True``, merge ``meta`` into existing user metadata on the
+            output artifact. When ``False``, replace existing user metadata while
+            preserving Consist system metadata keys.
+
+        Raises
+        ------
+        RuntimeError
+            If no run is currently active.
+        ValueError
+            If ``key`` is empty or whitespace-only.
+        TypeError
+            If ``meta`` is not a mapping or does not normalize to a JSON object.
         """
         self._tracker.set_output_meta(key, meta, merge=merge)
 
@@ -414,6 +438,27 @@ class RunContext:
         Set, override, or disable the run-completion archive root for the active step.
 
         This is a thin wrapper around ``Tracker.set_archive_root``.
+
+        Parameters
+        ----------
+        archive_root : Union[str, os.PathLike[str], Callable[[], Optional[Union[str, os.PathLike[str]]]], None]
+            Destination directory path, a zero-argument callable returning an
+            optional destination path, or ``None`` to disable run-completion
+            archival for the active step.
+        mode : Literal["copy"], default "copy"
+            Archive transfer mode (``"copy"``).
+        prepend_source_mount_root : bool, default True
+            When ``True``, nest archived files under the last path segment of the
+            source mount root to prevent layout collisions across mounts.
+
+        Raises
+        ------
+        RuntimeError
+            If no run is currently active.
+        ValueError
+            If ``archive_root`` is an empty string or ``mode`` is invalid.
+        TypeError
+            If ``archive_root`` or ``prepend_source_mount_root`` has an invalid type.
         """
         self._tracker.set_archive_root(
             archive_root,
@@ -758,7 +803,8 @@ class ScenarioContext:
         ----------
         **metadata : Any
             JSON-serializable metadata keys and values to merge into the scenario
-            header run's ``meta`` dictionary.
+            header run's ``meta`` dictionary. Keys ``stage`` and ``phase`` are
+            also promoted to top-level ``Run`` fields when provided as strings.
 
         Raises
         ------
