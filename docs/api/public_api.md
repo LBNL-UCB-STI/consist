@@ -244,12 +244,10 @@ tracker and workflow surfaces. See [GTFS Support](../integrations/gtfs.md).
 ### Execution contracts and options
 
 - `consist.ArtifactSpec` / `consist.OutputArtifactSpec` (rich declared-output
-  metadata for `Tracker.run(output_paths=...)`)
-- `consist.FilenamePattern`, `consist.IntCapture`, and `consist.EnumCapture`
-  (capture-aware output-set declarations for `OutputSet(include=...)`; the
-  capture set is intentionally narrow in v1, and future typed captures can be
-  added by design if there is demand)
-- `consist.CacheOptions`, `consist.OutputPolicyOptions`, `consist.ExecutionOptions`
+  metadata for `Tracker.run(output_paths=...)`, including `OutputArtifactSpec.for_directory(...)` and `allow_extra_files=True`)
+- `consist.FilenamePattern`, `consist.IntCapture`, `consist.EnumCapture`, and `consist.StringCapture`
+  (capture-aware output-set declarations for `OutputSet(include=...)`)
+- `consist.CacheOptions`, `consist.OutputPolicyOptions`, `consist.ExecutionOptions`, `consist.RunCompletionArchivePolicy`
 - `consist.BindingResult` (execution envelope for orchestrator-resolved scenario inputs)
 - `consist.StepIdentity` (Scenario-owned resolved name, model, and strict
   callable contract for preflighted advanced bindings)
@@ -274,12 +272,12 @@ tracker and workflow surfaces. See [GTFS Support](../integrations/gtfs.md).
 - [`consist.trace`](api_helpers.md#consist.api.trace) (deprecated compatibility wrapper)
 - [`consist.start_run`](api_helpers.md#consist.api.start_run) (deprecated compatibility wrapper)
 - [`ScenarioContext`](workflow.md#scenario-context) (returned by `consist.scenario(...)`)
-  - `run_id`, `config`, `inputs`, `add_input`, `declare_outputs`, `require_outputs`, `collect_by_keys`, `run`, `map_runs`, `trace`
+  - `run_id`, `config`, `inputs`, `meta`, `log_meta`, `add_input`, `declare_outputs`, `require_outputs`, `collect_by_keys`, `run`, `map_runs`, `trace`
   - `run(..., binding=BindingResult(...))` for resolved orchestrator plans
     or `binding=ResolvedBinding(...)` for verified execution-exact plans
   - `map_runs(...)` for independent process-backed sweep rows
 - [`RunContext`](workflow.md#run-context) (injected via `execution_options=ExecutionOptions(inject_context=True)`)
-  - `run_dir`, `output_dir`, `output_path`, `inputs`, `load`, `log_artifact`, `log_artifacts`, `log_input`, `log_output`, `log_meta`, `capture_outputs`
+  - `run_dir`, `output_dir`, `output_path`, `inputs`, `load`, `log_artifact`, `log_artifacts`, `log_input`, `log_output`, `log_meta`, `set_output_meta`, `set_archive_root`, `capture_outputs`
 - [`Coupler`](workflow.md#coupler) (available at `scenario.coupler`)
 
 Scenario defaults like `name_template` and `cache_epoch` are configured via `consist.scenario(...)` and flow into `ScenarioContext.run(...)`.

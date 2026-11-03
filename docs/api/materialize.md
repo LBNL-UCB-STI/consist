@@ -135,10 +135,12 @@ reuse. `archive_run_output_files(...)` remains a regular-file-only report API
 and reports OutputSets as unsupported.
 
 When a selected immutable directory artifact is nested inside an OutputSet
-root, it reuses the set publication only when its persisted directory manifest
-exactly matches that OutputSet manifest subtree. This preserves strict set
-validation; unrepresented files or directories fail archival instead of being
-silently accepted.
+root, it reuses the set publication when its persisted directory manifest
+matches that OutputSet manifest subtree. If a sibling directory artifact,
+shapefile bundle, or scalar output under an OutputSet root is explicitly
+excluded from the set via `OutputSet(exclude=...)` (or outside `OutputSet(include=...)`),
+Consist archives it independently alongside the OutputSet without failing set
+validation.
 
 When an application needs an auditable, no-replacement archive pass for files
 only, use `tracker.archive_run_output_files(...)` instead:
