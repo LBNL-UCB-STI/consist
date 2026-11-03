@@ -191,7 +191,11 @@ class RunCompletionArchivePolicy:
         in ``artifact.meta['recovery_roots']``.
     """
 
-    archive_root: Union[PathLike, Callable[[], Optional[PathLike]]]
+    archive_root: Union[
+        str,
+        os.PathLike[str],
+        Callable[[], Optional[Union[str, os.PathLike[str]]]],
+    ]
     mode: Literal["copy"] = "copy"
     prepend_source_mount_root: bool = True
 
@@ -204,14 +208,8 @@ class RunCompletionArchivePolicy:
             raise TypeError(
                 "RunCompletionArchivePolicy.prepend_source_mount_root must be a bool."
             )
-        if callable(self.archive_root):
-            return
-        normalized_root = os.fspath(self.archive_root).strip()
-        if not normalized_root:
-            raise ValueError(
-                "RunCompletionArchivePolicy.archive_root must be a non-empty path."
-            )
-        object.__setattr__(self, "archive_root", Path(normalized_root))
+        if not callable(self.archive_root):
+            object.__setattr__(self, "archive_root", self.resolve_archive_root())
 
     def resolve_archive_root(self) -> Optional[Path]:
         """Resolve ``archive_root`` at run completion, returning ``None`` when skipped."""
@@ -220,12 +218,16 @@ class RunCompletionArchivePolicy:
         )
         if raw_root is None:
             return None
+        if not isinstance(raw_root, (str, os.PathLike)):
+            raise TypeError(
+                "RunCompletionArchivePolicy.archive_root must resolve to a path-like value."
+            )
         normalized_root = os.fspath(raw_root).strip()
         if not normalized_root:
             raise ValueError(
                 "RunCompletionArchivePolicy.archive_root must be a non-empty path."
             )
-        return Path(normalized_root)
+        return Path(normalized_root).expanduser()
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,26 +241,6 @@ class OutputPolicyOptions:
     run_completion_archive: Optional[
         Union[RunCompletionArchivePolicy, Literal[False]]
     ] = None
-
-
-class _DirectoryFieldOrFactory:
-    """Descriptor exposing ``spec.directory`` as a bool and ``OutputArtifactSpec.directory(...)`` as a factory."""
-
-    def __init__(self, slot_descriptor: Any) -> None:
-        self._slot_descriptor = slot_descriptor
-
-    def __get__(self, instance: Any, owner: type | None = None) -> Any:
-        if instance is None:
-            if owner is None:
-                return self
-            return owner.for_directory
-        return self._slot_descriptor.__get__(instance, owner)
-
-    def __set__(self, instance: Any, value: Any) -> None:
-        self._slot_descriptor.__set__(instance, value)
-
-    def __delete__(self, instance: Any) -> None:
-        self._slot_descriptor.__delete__(instance)
 
 
 @dataclass(frozen=True, slots=True)
@@ -342,13 +324,6 @@ class OutputArtifactSpec:
             directory=True,
             allow_extra_files=allow_extra_files,
         )
-
-
-type.__setattr__(
-    OutputArtifactSpec,
-    "directory",
-    _DirectoryFieldOrFactory(OutputArtifactSpec.__dict__["directory"]),
-)
 
 
 ArtifactSpec = OutputArtifactSpec

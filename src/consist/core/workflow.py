@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import inspect
+import os
 import uuid
 import functools
 import concurrent.futures
@@ -69,7 +70,6 @@ from consist.types import (
     OutputPolicyOptions,
     OutputPathRef,
     OutputSet,
-    PathLike,
     RunCompletionArchivePolicy,
     RunInputRef,
 )
@@ -399,7 +399,12 @@ class RunContext:
 
     def set_archive_root(
         self,
-        archive_root: Union[PathLike, Callable[[], Optional[PathLike]], None],
+        archive_root: Union[
+            str,
+            os.PathLike[str],
+            Callable[[], Optional[Union[str, os.PathLike[str]]]],
+            None,
+        ],
         *,
         mode: Literal["copy"] = "copy",
         prepend_source_mount_root: bool = True,

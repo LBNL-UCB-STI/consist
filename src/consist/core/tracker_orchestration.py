@@ -795,10 +795,6 @@ class RunTraceCoordinator:
             logging.warning("[Consist] %s", msg)
         return False
 
-    @staticmethod
-    def _is_virtual_unbacked_artifact(tracker: "Tracker", artifact: Artifact) -> bool:
-        return tracker._archive_service.is_virtual_unbacked_artifact(artifact)
-
     def _apply_run_completion_archive_policy(
         self,
         *,
@@ -829,76 +825,29 @@ class RunTraceCoordinator:
         if not all_outputs:
             return outputs_map
 
-        prior_abs_paths: Dict[str, str] = {}
-        for art in current_consist.outputs:
-            if art.key and art.abs_path is not None:
-                prior_abs_paths[art.key] = art.abs_path
         for key, art in outputs_map.items():
             if art.abs_path is not None:
-                prior_abs_paths[key] = art.abs_path
-            elif effective_policy.mode == "copy" and key not in prior_abs_paths:
-                try:
-                    resolved_workspace_path = Path(
-                        tracker.resolve_uri(art.container_uri)
-                    ).resolve()
-                except Exception:
-                    resolved_workspace_path = None
-                if (
-                    resolved_workspace_path is not None
-                    and resolved_workspace_path.exists()
-                ):
-                    prior_abs_paths[key] = str(resolved_workspace_path)
-
-        from consist.core.materialize import _output_set_hydration_kind
-
-        virtual_keys = {
-            key
-            for key, art in all_outputs.items()
-            if self._is_virtual_unbacked_artifact(tracker, art)
-        }
-        archivable_keys = [
-            key
-            for key, art in all_outputs.items()
-            if _output_set_hydration_kind(tracker, art) not in {"member", "manifest"}
-            and key not in virtual_keys
-        ]
-        if not archivable_keys:
-            return outputs_map
+                current_consist.sync_output_artifact(
+                    key=key,
+                    abs_path=art.abs_path,
+                    preserve_existing_abs_path=True,
+                )
 
         archived = tracker.archive_current_run_outputs(
             resolved_archive_root,
-            keys=archivable_keys,
             mode=effective_policy.mode,
             append=True,
             prepend_source_mount_root=effective_policy.prepend_source_mount_root,
         )
-
-        if effective_policy.mode == "copy":
-            for key, archived_art in archived.outputs.items():
-                if archived_art.abs_path is None and key in prior_abs_paths:
-                    archived_art.abs_path = prior_abs_paths[key]
 
         synced_by_key: Dict[str, Artifact] = {
             art.key: art for art in current_consist.outputs
         }
         synced_by_key.update(archived.outputs)
 
-        for key, synced_art in synced_by_key.items():
-            fallback_abs_path = (
-                prior_abs_paths.get(key) if effective_policy.mode == "copy" else None
-            )
-            matched = current_consist.sync_output_artifact(
-                key=key,
-                meta=dict(synced_art.meta or {}),
-                abs_path=fallback_abs_path,
-                preserve_existing_abs_path=True,
-            )
-            for art in matched:
-                set_tracker_ref(art, tracker)
-
         missing_recovery_keys: list[str] = []
         for key, art in all_outputs.items():
-            if key in virtual_keys:
+            if tracker._archive_service.is_virtual_unbacked_artifact(art):
                 continue
             updated_art = synced_by_key.get(key, art)
             meta = updated_art.meta if isinstance(updated_art.meta, MappingABC) else {}
@@ -915,14 +864,11 @@ class RunTraceCoordinator:
 
         refreshed_outputs: Dict[str, Artifact] = {}
         for key, art in outputs_map.items():
-            if key in synced_by_key:
-                art.meta = dict(synced_by_key[key].meta or {})
-            if (
-                effective_policy.mode == "copy"
-                and art.abs_path is None
-                and key in prior_abs_paths
-            ):
-                art.abs_path = prior_abs_paths[key]
+            synced = synced_by_key.get(key)
+            if synced is not None:
+                art.meta = dict(synced.meta or {})
+                if art.abs_path is None and synced.abs_path is not None:
+                    art.abs_path = synced.abs_path
             set_tracker_ref(art, tracker)
             refreshed_outputs[key] = art
 
@@ -1113,7 +1059,10 @@ class RunTraceCoordinator:
                         and ref.meta
                     ):
                         for meta_key in ref.meta.keys():
-                            if meta_key != "directory_artifact":
+                            if meta_key not in (
+                                "directory_artifact",
+                                "directory_allow_extra_files",
+                            ):
                                 log_kwargs.pop(meta_key, None)
                     for dir_flag in (
                         "directory_artifact",

@@ -1365,7 +1365,7 @@ def test_output_artifact_spec_typed_directory_options(
         "directory_allow_extra_files": True,
     }
 
-    spec_factory = OutputArtifactSpec.directory(
+    spec_factory = OutputArtifactSpec.for_directory(
         run_dir / "dir_factory.zarr",
         allow_extra_files=True,
         driver="zarr",

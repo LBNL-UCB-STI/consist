@@ -234,18 +234,10 @@ class TrackerArchiveService(_TrackerServiceBase):
         return True
 
     def _iter_live_couplers(self) -> list[Any]:
-        couplers: list[Any] = []
-        seen_ids: set[int] = set()
-        active_coupler = self.tracker.__dict__.get("_active_coupler")
-        if active_coupler is not None:
-            couplers.append(active_coupler)
-            seen_ids.add(id(active_coupler))
-        tracked_couplers = self.tracker.__dict__.get("_couplers")
-        if tracked_couplers is not None:
-            for coupler in list(tracked_couplers):
-                if id(coupler) not in seen_ids:
-                    couplers.append(coupler)
-                    seen_ids.add(id(coupler))
+        active = self.tracker.__dict__.get("_active_coupler")
+        couplers = list(self.tracker.__dict__.get("_couplers") or ())
+        if active is not None and not any(c is active for c in couplers):
+            return [active, *couplers]
         return couplers
 
     def _source_mount_recovery_root(self, artifact: Artifact) -> Path | None:
@@ -358,25 +350,31 @@ class TrackerArchiveService(_TrackerServiceBase):
                     set_tracker_ref(art, self.tracker)
 
         for coupler in self._iter_live_couplers():
-            for key, refreshed in refreshed_outputs.items():
-                coupler_art = coupler.get(key)
-                if coupler_art is None:
+            for coupler_key, coupler_art in coupler.items():
+                matched_refreshed: Artifact | None = None
+                if coupler_art.id is not None:
+                    target_id = str(coupler_art.id)
+                    matched_refreshed = next(
+                        (
+                            r
+                            for r in refreshed_outputs.values()
+                            if r.id is not None and str(r.id) == target_id
+                        ),
+                        None,
+                    )
+                if (
+                    matched_refreshed is None
+                    and coupler_art.run_id is not None
+                    and str(coupler_art.run_id) == str(run_id)
+                ):
+                    matched_refreshed = refreshed_outputs.get(coupler_key)
+                if matched_refreshed is None:
                     continue
-                matches_id = (
-                    coupler_art.id is not None
-                    and refreshed.id is not None
-                    and str(coupler_art.id) == str(refreshed.id)
-                )
-                matches_run = coupler_art.run_id is not None and str(
-                    coupler_art.run_id
-                ) == str(run_id)
-                if not (matches_id or matches_run):
-                    continue
-                coupler_art.meta = dict(refreshed.meta or {})
-                if refreshed.abs_path is not None and (
+                coupler_art.meta = dict(matched_refreshed.meta or {})
+                if matched_refreshed.abs_path is not None and (
                     not preserve_existing_abs_path or coupler_art.abs_path is None
                 ):
-                    coupler_art.abs_path = refreshed.abs_path
+                    coupler_art.abs_path = matched_refreshed.abs_path
                 set_tracker_ref(coupler_art, self.tracker)
 
     def set_artifact_recovery_roots(
@@ -3251,16 +3249,18 @@ class TrackerArchiveService(_TrackerServiceBase):
                 self._remove_output_set_sources(plan)
         archived_paths = {key: archived_by_key[key] for key in selected}
         refreshed_outputs = self.get_run_outputs(run_id)
-        refreshed_selected = self._select_required_output_keys(
-            refreshed_outputs, tuple(selected), run_id=run_id
-        )
-        for key, source_artifact in selected.items():
-            if source_artifact.abs_path is not None and key in refreshed_selected:
-                refreshed_selected[key].abs_path = source_artifact.abs_path
+        for key, artifact in refreshed_outputs.items():
+            if key in selected and selected[key].abs_path is not None:
+                artifact.abs_path = selected[key].abs_path
+            elif artifact.abs_path is None and key in known_abs_paths:
+                artifact.abs_path = known_abs_paths[key]
         self._sync_archived_run_outputs_to_runtime_state(
             run_id=run_id,
-            refreshed_outputs=refreshed_selected,
+            refreshed_outputs=refreshed_outputs,
             preserve_existing_abs_path=(mode == "copy"),
+        )
+        refreshed_selected = self._select_required_output_keys(
+            refreshed_outputs, tuple(selected), run_id=run_id
         )
         return ArchivedOutputs(paths=archived_paths, outputs=refreshed_selected)
 
