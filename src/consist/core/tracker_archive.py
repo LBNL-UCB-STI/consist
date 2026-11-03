@@ -15,6 +15,7 @@ from sqlmodel import col, select
 from consist.core._tracker_service_base import _TrackerServiceBase
 from consist.core.container_policy import validate_recovery_registration_policy
 from consist.core.directory_artifacts import (
+    directory_allows_extra_files,
     materialize_directory_tree,
     materialize_shapefile_bundle,
     validate_directory_manifest,
@@ -195,6 +196,26 @@ class TrackerArchiveService(_TrackerServiceBase):
     :class:`Tracker` façade methods. Recovery roots are alternate byte sources;
     they do not change an artifact's canonical URI or identity.
     """
+
+    _deferred_directory_source_removals: list[tuple[Path, Path]] | None = None
+
+    def _directory_archive_sort_key(
+        self, index_and_item: tuple[int, tuple[str, Artifact]]
+    ) -> tuple[int, int]:
+        index, (_, artifact) = index_and_item
+        relative_path = self.fs.get_remappable_relative_path(artifact.container_uri)
+        depth = len(relative_path.parts) if relative_path is not None else 0
+        return (depth, index)
+
+    def _known_run_output_abs_paths(self, run_id: str) -> dict[str, str]:
+        known: dict[str, str] = {}
+        for record in (self.current_consist, self.tracker._last_consist):
+            if record is None or record.run.id != run_id:
+                continue
+            for art in record.outputs:
+                if art.key and art.abs_path is not None and art.key not in known:
+                    known[art.key] = art.abs_path
+        return known
 
     def _sync_active_run_artifacts_meta(
         self, updated_by_id: Mapping[str, dict[str, Any]]
@@ -1244,8 +1265,13 @@ class TrackerArchiveService(_TrackerServiceBase):
         manifest: Mapping[str, Any],
     ) -> None:
         """Validate an excluded nested directory artifact before archival."""
+        allow_extra_files = directory_allows_extra_files(artifact)
         if destination.exists():
-            validate_directory_tree(destination, manifest)
+            validate_directory_tree(
+                destination,
+                manifest,
+                allow_extra_files=allow_extra_files,
+            )
             return
         producing_run = (
             self.get_run(str(artifact.run_id)) if artifact.run_id is not None else None
@@ -1265,7 +1291,11 @@ class TrackerArchiveService(_TrackerServiceBase):
             raise FileNotFoundError(
                 f"Cannot archive artifact {artifact.key!r}: source bytes are unavailable."
             )
-        validate_directory_tree(source_path, manifest)
+        validate_directory_tree(
+            source_path,
+            manifest,
+            allow_extra_files=allow_extra_files,
+        )
 
     def _validate_excluded_output_set_shapefile_bundle(
         self,
@@ -1865,6 +1895,7 @@ class TrackerArchiveService(_TrackerServiceBase):
     ) -> Path:
         """Archive a manifest-verified immutable directory artifact."""
         manifest = _directory_artifact_manifest(artifact)
+        allow_extra_files = directory_allows_extra_files(artifact)
         relative_path = self.fs.get_remappable_relative_path(artifact.container_uri)
         if relative_path is None:
             raise ValueError(
@@ -1894,6 +1925,7 @@ class TrackerArchiveService(_TrackerServiceBase):
             destination,
             manifest,
             preserve_existing=True,
+            allow_extra_files=allow_extra_files,
         )
         try:
             self.tracker.set_artifact_recovery_roots(
@@ -1903,8 +1935,13 @@ class TrackerArchiveService(_TrackerServiceBase):
             if published and destination.exists():
                 shutil.rmtree(destination)
             raise
-        if mode == "move" and source_path.resolve() != destination.resolve():
-            shutil.rmtree(source_path)
+        if mode == "move":
+            if source_path.resolve() != destination.resolve():
+                deferred = self._deferred_directory_source_removals
+                if deferred is not None:
+                    deferred.append((source_path, destination))
+                elif source_path.exists():
+                    shutil.rmtree(source_path)
             resolved_dest = str(destination.resolve())
             artifact.abs_path = resolved_dest
             self._sync_active_run_artifact_abs_path(artifact, resolved_dest)
@@ -2911,7 +2948,11 @@ class TrackerArchiveService(_TrackerServiceBase):
         normalized_keys = normalize_materialize_output_keys(
             keys, caller="archive_run_outputs"
         )
+        known_abs_paths = self._known_run_output_abs_paths(run_id)
         outputs = self.get_run_outputs(run_id)
+        for key, artifact in outputs.items():
+            if artifact.abs_path is None and key in known_abs_paths:
+                artifact.abs_path = known_abs_paths[key]
         selected = self._select_required_output_keys(
             outputs, normalized_keys, run_id=run_id
         )
@@ -2922,6 +2963,16 @@ class TrackerArchiveService(_TrackerServiceBase):
                 if _output_set_hydration_kind(self.tracker, artifact)
                 not in {"member", "manifest"}
             }
+        if mode == "copy":
+            for key, artifact in selected.items():
+                if artifact.abs_path is not None:
+                    continue
+                try:
+                    resolved_candidate = Path(self.resolve_uri(artifact.container_uri))
+                except Exception:
+                    continue
+                if resolved_candidate.exists():
+                    artifact.abs_path = str(resolved_candidate.resolve())
         output_set_plans, nested_scalars, nested_directories = (
             self._build_selected_output_set_archive_plans(
                 selected, archive_root, run_outputs=outputs
@@ -2942,7 +2993,9 @@ class TrackerArchiveService(_TrackerServiceBase):
                 remove_sources=False,
                 dependent_artifacts=dependent_artifacts,
             )
-        for key, artifact in selected.items():
+        remaining_directory_items: list[tuple[int, tuple[str, Artifact]]] = []
+        remaining_other_items: list[tuple[str, Artifact]] = []
+        for idx, (key, artifact) in enumerate(selected.items()):
             if key in output_set_plans:
                 continue
             nested_scalar = nested_scalars.get(key)
@@ -2953,10 +3006,38 @@ class TrackerArchiveService(_TrackerServiceBase):
             if nested_directory is not None:
                 archived_by_key[key] = nested_directory.destination
                 continue
-            archived_by_key[key] = self.tracker.archive_artifact(
-                artifact, archive_root, mode=mode, append=append
+            if _is_directory_artifact(artifact):
+                remaining_directory_items.append((idx, (key, artifact)))
+            else:
+                remaining_other_items.append((key, artifact))
+
+        ordered_remaining_items = [
+            item
+            for _, item in sorted(
+                remaining_directory_items,
+                key=self._directory_archive_sort_key,
             )
+        ] + remaining_other_items
+
+        deferred_removals: list[tuple[Path, Path]] = []
+        previous_deferred = self._deferred_directory_source_removals
         if mode == "move":
+            self._deferred_directory_source_removals = deferred_removals
+        try:
+            for key, artifact in ordered_remaining_items:
+                archived_by_key[key] = self.tracker.archive_artifact(
+                    artifact, archive_root, mode=mode, append=append
+                )
+        finally:
+            self._deferred_directory_source_removals = previous_deferred
+
+        if mode == "move":
+            for source_path, destination in reversed(deferred_removals):
+                if (
+                    source_path.exists()
+                    and source_path.resolve() != destination.resolve()
+                ):
+                    shutil.rmtree(source_path)
             for plan in output_set_plans.values():
                 self._remove_output_set_sources(plan)
         archived_paths = {key: archived_by_key[key] for key in selected}

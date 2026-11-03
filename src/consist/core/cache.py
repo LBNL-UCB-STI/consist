@@ -981,6 +981,16 @@ def hydrate_cache_hit_outputs(
 
             if materialized:
                 target_run.meta["materialized_outputs"] = materialized
+            materialized_outputs = target_run.meta.get("materialized_outputs")
+            if isinstance(materialized_outputs, dict):
+                for output_artifact in record.outputs:
+                    hydrated_path = materialized_outputs.get(output_artifact.key)
+                    if isinstance(hydrated_path, str) and hydrated_path:
+                        output_artifact.abs_path = str(Path(hydrated_path).resolve())
+                for key, output_artifact in cached_items.outputs.items():
+                    hydrated_path = materialized_outputs.get(key)
+                    if isinstance(hydrated_path, str) and hydrated_path:
+                        output_artifact.abs_path = str(Path(hydrated_path).resolve())
     except Exception as e:
         if active_options.materialize_cached_outputs_source_root is not None:
             raise

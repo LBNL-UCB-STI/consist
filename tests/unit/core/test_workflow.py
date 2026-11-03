@@ -987,3 +987,168 @@ def test_scenario_positional_arguments_preserve_legacy_positions(
         assert sc.cache_epoch == 7
         assert sc.step_cache_hydration == "inputs-missing"
         assert sc.step_run_completion_archive is None
+
+
+def test_set_output_meta_attaches_metadata_to_declared_outputs_across_run_and_trace(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    import json
+
+    archive_root = tmp_path / "meta_archive"
+
+    def step_with_meta(ctx) -> dict[str, Path]:
+        out_a = ctx.run_dir / "out_a.csv"
+        out_b = ctx.run_dir / "out_b.csv"
+        out_a.write_text("x\n1\n", encoding="utf-8")
+        out_b.write_text("y\n2\n", encoding="utf-8")
+
+        ctx.set_output_meta("a", {"sidecar": {"v": 1}, "tag": "initial"})
+        consist.set_output_meta("a", {"extra": "merged"})
+        ctx.set_output_meta("b", {"will_be": "replaced"})
+        ctx.set_output_meta("b", {"final": True}, merge=False)
+        return {"a": out_a, "b": out_b}
+
+    with tracker.scenario(
+        "sc_output_meta",
+        step_run_completion_archive=RunCompletionArchivePolicy(
+            archive_root=archive_root
+        ),
+    ) as sc:
+        res = sc.run(
+            fn=step_with_meta,
+            name="step_with_meta",
+            run_id="run_with_meta_1",
+            outputs=["a", "b"],
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+        assert res.cache_hit is False
+        assert res.outputs["a"].meta["sidecar"] == {"v": 1}
+        assert res.outputs["a"].meta["tag"] == "initial"
+        assert res.outputs["a"].meta["extra"] == "merged"
+        assert res.outputs["a"].meta.get("recovery_roots") == [
+            str(archive_root.resolve())
+        ]
+        assert "will_be" not in res.outputs["b"].meta
+        assert res.outputs["b"].meta["final"] is True
+
+        # Coupler and DB also reflect the merged output metadata
+        assert sc.coupler.require("a").meta["sidecar"] == {"v": 1}
+        assert sc.coupler.require("b").meta["final"] is True
+
+        with sc.trace(
+            "trace_with_meta",
+            run_id="trace_with_meta_1",
+            outputs=["traced_out"],
+        ) as t:
+            traced_path = t.run_dir / "traced_out.csv"
+            traced_path.write_text("z\n3\n", encoding="utf-8")
+            t.log_output(traced_path, key="traced_out", initial=1)
+            t.set_output_meta("traced_out", {"added_in_trace": 2})
+
+        assert sc.coupler.require("traced_out").meta["initial"] == 1
+        assert sc.coupler.require("traced_out").meta["added_in_trace"] == 2
+        assert sc.coupler.require("traced_out").meta.get("recovery_roots") == [
+            str(archive_root.resolve())
+        ]
+
+    db_outputs = tracker.get_artifacts_for_run("run_with_meta_1").outputs
+    assert db_outputs["a"].meta["sidecar"] == {"v": 1}
+    assert db_outputs["a"].meta["extra"] == "merged"
+    assert db_outputs["b"].meta["final"] is True
+
+    trace_db_outputs = tracker.get_artifacts_for_run("trace_with_meta_1").outputs
+    assert trace_db_outputs["traced_out"].meta["added_in_trace"] == 2
+
+    snapshot = json.loads(
+        (tracker.run_dir / "consist_runs" / "run_with_meta_1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    snap_by_key = {art["key"]: art for art in snapshot["outputs"]}
+    assert snap_by_key["a"]["meta"]["sidecar"] == {"v": 1}
+    assert snap_by_key["b"]["meta"]["final"] is True
+
+
+def test_scenario_trace_archive_opt_out_and_step_factory(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    archive_root = tmp_path / "factory_archive"
+
+    def policy_factory(step_name: str) -> RunCompletionArchivePolicy | None:
+        if step_name == "skip_by_factory":
+            return None
+        return RunCompletionArchivePolicy(archive_root=archive_root / step_name)
+
+    def write_csv(ctx) -> dict[str, Path]:
+        assert tracker.current_consist is not None
+        run_id = tracker.current_consist.run.id
+        p = ctx.run_dir / f"{run_id}.csv"
+        p.write_text("v\n1\n", encoding="utf-8")
+        return {"out": p}
+
+    with tracker.scenario(
+        "sc_factory_and_opt_out",
+        step_run_completion_archive=policy_factory,
+    ) as sc:
+        # 1. Archived via factory in sc.run
+        r_archived = sc.run(
+            fn=write_csv,
+            name="archived_step",
+            run_id="run_archived_step",
+            outputs=["out"],
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+        assert r_archived.outputs["out"].meta.get("recovery_roots") == [
+            str((archive_root / "archived_step").resolve())
+        ]
+
+        # 2. Skipped via factory returning None
+        r_skipped_factory = sc.run(
+            fn=write_csv,
+            name="skip_by_factory",
+            run_id="run_skip_by_factory",
+            outputs=["out"],
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+        assert "recovery_roots" not in r_skipped_factory.outputs["out"].meta
+
+        # 3. Explicitly opted out via OutputPolicyOptions(run_completion_archive=False)
+        r_opted_out = sc.run(
+            fn=write_csv,
+            name="opted_out_step",
+            run_id="run_opted_out_step",
+            outputs=["out"],
+            execution_options=ExecutionOptions(inject_context="ctx"),
+            output_policy=OutputPolicyOptions(run_completion_archive=False),
+        )
+        assert "recovery_roots" not in r_opted_out.outputs["out"].meta
+
+        # 4. Archived via factory in sc.trace
+        with sc.trace(
+            "traced_archived",
+            run_id="run_traced_archived",
+            outputs=["traced_file"],
+        ) as t:
+            tp = t.run_dir / "traced_file.csv"
+            tp.write_text("t\n1\n", encoding="utf-8")
+            t.log_output(tp, key="traced_file")
+
+        assert sc.coupler.require("traced_file").meta.get("recovery_roots") == [
+            str((archive_root / "traced_archived").resolve())
+        ]
+        assert sc.coupler.require("traced_file").abs_path == str(tp.resolve())
+
+        # 5. Explicitly opted out in sc.trace via run_completion_archive=False
+        with sc.trace(
+            "traced_opt_out",
+            run_id="run_traced_opt_out",
+            outputs=["traced_no_archive"],
+            run_completion_archive=False,
+        ) as t:
+            tp2 = t.run_dir / "traced_no_archive.csv"
+            tp2.write_text("t\n2\n", encoding="utf-8")
+            t.log_output(tp2, key="traced_no_archive")
+
+        assert "recovery_roots" not in sc.coupler.require("traced_no_archive").meta

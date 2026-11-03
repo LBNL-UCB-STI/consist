@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Sequence
 
-from pydantic import BaseModel, ConfigDict, Field as PydanticField
+from pydantic import BaseModel, ConfigDict, Field as PydanticField, PrivateAttr
 
 from sqlalchemy import Column, DateTime, Index, JSON, String
 from sqlmodel import Field, SQLModel
@@ -676,3 +676,6 @@ class ConsistRecord(SQLModel):
     # Optional, minimal, queryable config facet (not persisted to Run table).
     # This is included in the per-run `consist.json` snapshot for inspection/debugging.
     facet: Dict[str, Any] = PydanticField(default_factory=dict)
+
+    _pending_output_meta: Dict[str, Dict[str, Any]] = PrivateAttr(default_factory=dict)
+    _pending_output_meta_replace_keys: set[str] = PrivateAttr(default_factory=set)

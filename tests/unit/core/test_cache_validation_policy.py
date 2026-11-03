@@ -245,3 +245,110 @@ def test_cache_validation_eager_recovers_corrupted_primary_directory_from_recove
         validate_cached_outputs="eager",
     ) as t:
         assert not t.is_cached
+
+
+def test_directory_allow_extra_files_preserves_cache_and_input_validation_until_tracked_member_changes(
+    tracker,
+) -> None:
+    from consist.types import CacheOptions, ExecutionOptions
+
+    shared_dir = tracker.run_dir / "shared_work"
+    (shared_dir / "sub").mkdir(parents=True, exist_ok=True)
+    tracked_file = shared_dir / "sub" / "tracked.csv"
+    tracked_file.write_text("v\n1\n", encoding="utf-8")
+
+    producer_calls = 0
+
+    def produce(ctx) -> None:
+        nonlocal producer_calls
+        producer_calls += 1
+        (shared_dir / "sub").mkdir(parents=True, exist_ok=True)
+        tracked_file.write_text("v\n1\n", encoding="utf-8")
+        tracker.log_output(
+            shared_dir,
+            key="shared_dir",
+            artifact_kind="directory",
+            directory_allow_extra_files=True,
+        )
+
+    res1 = tracker.run(
+        fn=produce,
+        name="produce_shared_dir",
+        run_id="produce_shared_1",
+        outputs=["shared_dir"],
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        cache_options=CacheOptions(validate_cached_outputs="eager"),
+    )
+    assert res1.cache_hit is False
+    assert producer_calls == 1
+
+    # Add extra files from a later step into the shared directory
+    extra_file = shared_dir / "later_step.csv"
+    extra_file.write_text("extra\n42\n", encoding="utf-8")
+
+    # Eager cached output validation should still succeed
+    res2 = tracker.run(
+        fn=produce,
+        name="produce_shared_dir",
+        run_id="produce_shared_2",
+        outputs=["shared_dir"],
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        cache_options=CacheOptions(validate_cached_outputs="eager"),
+    )
+    assert res2.cache_hit is True
+    assert producer_calls == 1
+
+    # Downstream step consuming shared_dir with validate_materialized_inputs=True
+    consumer_calls = 0
+
+    def consume(ctx) -> dict[str, Path]:
+        nonlocal consumer_calls
+        consumer_calls += 1
+        out = ctx.run_dir / "consumed.txt"
+        out.write_text(tracked_file.read_text(encoding="utf-8"), encoding="utf-8")
+        return {"consumed": out}
+
+    c1 = tracker.run(
+        fn=consume,
+        name="consume_shared_dir",
+        run_id="consume_shared_1",
+        inputs={"shared_dir": res1.outputs["shared_dir"]},
+        outputs=["consumed"],
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        cache_options=CacheOptions(
+            validate_materialized_inputs=True,
+            cache_hydration="inputs-missing",
+        ),
+    )
+    assert c1.cache_hit is False
+    assert consumer_calls == 1
+
+    # Adding another extra file inside shared_dir keeps materialized input valid on cache hit
+    (shared_dir / "sub" / "another_extra.txt").write_text("ok", encoding="utf-8")
+    c2 = tracker.run(
+        fn=consume,
+        name="consume_shared_dir",
+        run_id="consume_shared_2",
+        inputs={"shared_dir": res1.outputs["shared_dir"]},
+        outputs=["consumed"],
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        cache_options=CacheOptions(
+            validate_materialized_inputs=True,
+            cache_hydration="inputs-missing",
+        ),
+    )
+    assert c2.cache_hit is True
+    assert consumer_calls == 1
+
+    # Modifying or deleting the tracked manifest member invalidates eager output validation
+    tracked_file.write_text("v\ncorrupted\n", encoding="utf-8")
+    res3 = tracker.run(
+        fn=produce,
+        name="produce_shared_dir",
+        run_id="produce_shared_3",
+        outputs=["shared_dir"],
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        cache_options=CacheOptions(validate_cached_outputs="eager"),
+    )
+    assert res3.cache_hit is False
+    assert producer_calls == 2

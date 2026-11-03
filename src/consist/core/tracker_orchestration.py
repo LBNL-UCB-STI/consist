@@ -144,7 +144,7 @@ class RunInvocationContext:
     inputs: Optional[Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]]
     output_mismatch: Literal["warn", "error", "ignore"]
     output_missing: Literal["warn", "error", "ignore"]
-    run_completion_archive: Optional[RunCompletionArchivePolicy]
+    run_completion_archive: Optional[Union[RunCompletionArchivePolicy, Literal[False]]]
     executor: Literal["python", "container"]
     container: Any
     runtime_kwargs: Optional[Mapping[str, Any]]
@@ -832,9 +832,9 @@ class RunTraceCoordinator:
         tracker: "Tracker",
         current_consist: Any,
         outputs_map: Dict[str, Artifact],
-        policy: Optional[RunCompletionArchivePolicy],
+        policy: Optional[Union[RunCompletionArchivePolicy, Literal[False]]],
     ) -> Dict[str, Artifact]:
-        if policy is None:
+        if policy is None or policy is False:
             return outputs_map
 
         archive_root_str = tracker.fs.normalize_recovery_roots(policy.archive_root)[0]
@@ -845,6 +845,26 @@ class RunTraceCoordinator:
         all_outputs.update(outputs_map)
         if not all_outputs:
             return outputs_map
+
+        prior_abs_paths: Dict[str, str] = {}
+        for art in current_consist.outputs:
+            if art.key and art.abs_path is not None:
+                prior_abs_paths[art.key] = art.abs_path
+        for key, art in outputs_map.items():
+            if art.abs_path is not None:
+                prior_abs_paths[key] = art.abs_path
+            elif policy.mode == "copy" and key not in prior_abs_paths:
+                try:
+                    resolved_workspace_path = Path(
+                        tracker.resolve_uri(art.container_uri)
+                    ).resolve()
+                except Exception:
+                    resolved_workspace_path = None
+                if (
+                    resolved_workspace_path is not None
+                    and resolved_workspace_path.exists()
+                ):
+                    prior_abs_paths[key] = str(resolved_workspace_path)
 
         from consist.core.materialize import _output_set_hydration_kind
 
@@ -869,6 +889,11 @@ class RunTraceCoordinator:
             append=True,
         )
 
+        if policy.mode == "copy":
+            for key, archived_art in archived.outputs.items():
+                if archived_art.abs_path is None and key in prior_abs_paths:
+                    archived_art.abs_path = prior_abs_paths[key]
+
         synced_by_key: Dict[str, Artifact] = {
             art.key: art for art in current_consist.outputs
         }
@@ -877,6 +902,12 @@ class RunTraceCoordinator:
         for art in current_consist.outputs:
             if art.key in synced_by_key:
                 art.meta = dict(synced_by_key[art.key].meta or {})
+                if (
+                    policy.mode == "copy"
+                    and art.abs_path is None
+                    and art.key in prior_abs_paths
+                ):
+                    art.abs_path = prior_abs_paths[art.key]
                 set_tracker_ref(art, tracker)
 
         missing_recovery_keys: list[str] = []
@@ -900,9 +931,16 @@ class RunTraceCoordinator:
         for key, art in outputs_map.items():
             if key in synced_by_key:
                 art.meta = dict(synced_by_key[key].meta or {})
+            if (
+                policy.mode == "copy"
+                and art.abs_path is None
+                and key in prior_abs_paths
+            ):
+                art.abs_path = prior_abs_paths[key]
             set_tracker_ref(art, tracker)
             refreshed_outputs[key] = art
 
+        tracker._flush_json()
         return refreshed_outputs
 
     @staticmethod
@@ -971,6 +1009,75 @@ class RunTraceCoordinator:
 
         return None
 
+    def _apply_pending_output_meta(
+        self,
+        *,
+        tracker: "Tracker",
+        current_consist: Any,
+        outputs_map: Dict[str, Artifact],
+    ) -> None:
+        if current_consist is None or tracker.is_cached:
+            return
+        pending_meta_by_key: Dict[str, Dict[str, Any]] = (
+            current_consist._pending_output_meta
+        )
+        if not pending_meta_by_key:
+            return
+        replace_keys: set[str] = current_consist._pending_output_meta_replace_keys
+
+        all_outputs: Dict[str, Artifact] = {
+            art.key: art for art in current_consist.outputs if art.key
+        }
+        all_outputs.update(outputs_map)
+
+        updated_any = False
+        for key, pending_meta in list(pending_meta_by_key.items()):
+            art = all_outputs.get(key)
+            if art is None:
+                continue
+            existing_meta = dict(art.meta) if isinstance(art.meta, dict) else {}
+            if key in replace_keys:
+                preserved_system_meta = {
+                    sys_key: sys_val
+                    for sys_key, sys_val in existing_meta.items()
+                    if sys_key.startswith("_dlt_")
+                    or sys_key.startswith("directory_")
+                    or sys_key.startswith("output_set_")
+                    or sys_key
+                    in {
+                        "is_ingested",
+                        "dlt_table_name",
+                        "recovery_roots",
+                        "content_id",
+                        "schema_id",
+                        "schema_summary",
+                        "file_schema",
+                        "facet",
+                        "facet_schema_version",
+                        "facet_index",
+                    }
+                }
+                preserved_system_meta.update(pending_meta)
+                merged_meta = preserved_system_meta
+            else:
+                merged_meta = dict(existing_meta)
+                merged_meta.update(pending_meta)
+
+            art.meta = merged_meta
+            for recorded in current_consist.outputs:
+                if recorded.key == key:
+                    recorded.meta = dict(merged_meta)
+            if key in outputs_map:
+                outputs_map[key].meta = dict(merged_meta)
+            if tracker.db is not None:
+                tracker.db.update_artifact_meta(art, dict(merged_meta))
+            pending_meta_by_key.pop(key, None)
+            replace_keys.discard(key)
+            updated_any = True
+
+        if updated_any:
+            tracker._flush_json()
+
     def _log_declared_output_paths(
         self,
         *,
@@ -992,12 +1099,45 @@ class RunTraceCoordinator:
                     tracker, output_ref, output_base_dir
                 )
                 if not ref_path.exists():
+                    if (
+                        tracker.is_cached
+                        and tracker.current_consist is not None
+                        and any(
+                            art.key == output_key
+                            for art in tracker.current_consist.outputs
+                        )
+                    ):
+                        continue
                     on_missing_outputs(f"Run {resolved_name!r}", [str(output_key)])
                     continue
                 log_kwargs = _output_spec_log_kwargs(
                     ref,
                     default_profile_file_schema=profile_file_schema,
                 )
+                if (
+                    tracker.current_consist is not None
+                    and not tracker.is_cached
+                    and output_key in tracker.current_consist._pending_output_meta
+                ):
+                    pending_meta = dict(
+                        tracker.current_consist._pending_output_meta.pop(output_key)
+                    )
+                    replace_meta = (
+                        output_key
+                        in tracker.current_consist._pending_output_meta_replace_keys
+                    )
+                    tracker.current_consist._pending_output_meta_replace_keys.discard(
+                        output_key
+                    )
+                    if (
+                        replace_meta
+                        and isinstance(ref, OutputArtifactSpec)
+                        and ref.meta
+                    ):
+                        for meta_key in ref.meta.keys():
+                            if meta_key != "directory_artifact":
+                                log_kwargs.pop(meta_key, None)
+                    log_kwargs.update(pending_meta)
                 if isinstance(output_ref, Artifact):
                     outputs_map[output_key] = tracker.log_artifact(
                         output_ref,
@@ -1181,6 +1321,12 @@ class RunTraceCoordinator:
             except ValueError:
                 raise
             outputs_map.update(registered_sets)
+
+        self._apply_pending_output_meta(
+            tracker=tracker,
+            current_consist=current_consist,
+            outputs_map=outputs_map,
+        )
 
         return outputs_map
 
@@ -1897,6 +2043,10 @@ class RunTraceCoordinator:
         code_identity_extra_deps: Optional[List[str]] = None,
         output_mismatch: str = "warn",
         output_missing: str = "warn",
+        output_policy: Optional[OutputPolicyOptions] = None,
+        run_completion_archive: Optional[
+            Union[RunCompletionArchivePolicy, Literal[False]]
+        ] = None,
     ) -> Iterator["Tracker"]:
         """Execute context-managed trace flow with tracker-level orchestration.
 
@@ -1984,6 +2134,36 @@ class RunTraceCoordinator:
             Literal["warn", "error", "ignore"], output_mismatch
         )
         output_missing_policy = cast(Literal["warn", "error", "ignore"], output_missing)
+        resolved_output_policy = (
+            OutputPolicyOptions(
+                output_mismatch=(
+                    output_policy.output_mismatch
+                    if output_policy is not None
+                    and output_policy.output_mismatch is not None
+                    else output_mismatch_policy
+                ),
+                output_missing=(
+                    output_policy.output_missing
+                    if output_policy is not None
+                    and output_policy.output_missing is not None
+                    else output_missing_policy
+                ),
+                run_completion_archive=(
+                    run_completion_archive
+                    if run_completion_archive is not None
+                    else (
+                        output_policy.run_completion_archive
+                        if output_policy is not None
+                        else None
+                    )
+                ),
+            )
+            if output_policy is not None or run_completion_archive is not None
+            else OutputPolicyOptions(
+                output_mismatch=output_mismatch_policy,
+                output_missing=output_missing_policy,
+            )
+        )
 
         resolved_invocation = resolve_run_invocation(
             fn=None,
@@ -2018,10 +2198,7 @@ class RunTraceCoordinator:
                 code_identity=code_identity,
                 code_identity_extra_deps=code_identity_extra_deps,
             ),
-            output_policy=OutputPolicyOptions(
-                output_mismatch=output_mismatch_policy,
-                output_missing=output_missing_policy,
-            ),
+            output_policy=resolved_output_policy,
             execution_options=None,
             default_name_template=None,
             allow_template=None,
@@ -2174,3 +2351,21 @@ class RunTraceCoordinator:
                         if output_key not in logged_outputs
                     ]
                     _handle_missing_outputs(f"Run {resolved_name!r}", missing_keys)
+
+            trace_outputs_map = {
+                artifact.key: artifact
+                for artifact in current_consist.outputs
+                if artifact.key
+            }
+            if not active_tracker.is_cached:
+                self._apply_pending_output_meta(
+                    tracker=tracker,
+                    current_consist=current_consist,
+                    outputs_map=trace_outputs_map,
+                )
+            self._apply_run_completion_archive_policy(
+                tracker=tracker,
+                current_consist=current_consist,
+                outputs_map=trace_outputs_map,
+                policy=resolved_invocation.run_completion_archive,
+            )

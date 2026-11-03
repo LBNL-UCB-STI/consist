@@ -114,7 +114,9 @@ class ResolvedRunOptions:
     code_identity_extra_deps: Optional[list[str]]
     output_mismatch: Optional[str]
     output_missing: Optional[str]
-    run_completion_archive: Optional[RunCompletionArchivePolicy] = None
+    run_completion_archive: Optional[
+        Union[RunCompletionArchivePolicy, Literal[False]]
+    ] = None
     input_binding: Optional[InputBindingMode] = None
     load_inputs: Optional[bool] = None
     input_paths: Optional[Mapping[str, Any]] = None

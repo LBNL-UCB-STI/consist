@@ -1331,3 +1331,117 @@ def test_directory_artifact_hydration_prefers_valid_recovery_root_and_reports_fa
             on_missing="raise",
             db_fallback="if_ingested",
         )
+
+
+def test_materialize_directory_tree_completes_partially_populated_destination_and_rolls_back_on_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source_dir"
+    (source / "nested").mkdir(parents=True)
+    (source / "a.txt").write_text("file-a", encoding="utf-8")
+    (source / "nested" / "b.txt").write_text("file-b", encoding="utf-8")
+    (source / "nested" / "c.txt").write_text("file-c", encoding="utf-8")
+    manifest = build_directory_manifest(source)
+
+    destination = tmp_path / "dest_dir"
+    destination.mkdir(parents=True)
+    (destination / "a.txt").write_text("file-a", encoding="utf-8")
+
+    # Failure midway through completing missing entries rolls back only newly created paths
+    original_copy2 = directory_artifacts.shutil.copy2
+    copy_count = 0
+
+    def fail_on_second_copy(src, dst, *args, **kwargs):
+        nonlocal copy_count
+        copy_count += 1
+        if copy_count == 2:
+            raise OSError("copy failed midway")
+        return original_copy2(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(directory_artifacts.shutil, "copy2", fail_on_second_copy)
+    with pytest.raises(OSError, match="copy failed midway"):
+        materialize_directory_tree(
+            source, destination, manifest, preserve_existing=True
+        )
+    assert (destination / "a.txt").read_text(encoding="utf-8") == "file-a"
+    assert not (destination / "nested").exists()
+
+    # Restore copy2 and complete the partially populated destination
+    monkeypatch.setattr(directory_artifacts.shutil, "copy2", original_copy2)
+    copied = materialize_directory_tree(
+        source, destination, manifest, preserve_existing=True
+    )
+    assert copied is True
+    validate_directory_tree(destination, manifest)
+
+    # Subsequent preserve_existing=True call on complete tree returns False without needing source
+    shutil.rmtree(source)
+    assert (
+        materialize_directory_tree(
+            source, destination, manifest, preserve_existing=True
+        )
+        is False
+    )
+
+
+def test_directory_allow_extra_files_validation_and_materialization(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "shared_workspace"
+    (source / "sub").mkdir(parents=True)
+    (source / "tracked.csv").write_text("id\n1\n", encoding="utf-8")
+    (source / "sub" / "nested.csv").write_text("id\n2\n", encoding="utf-8")
+    manifest = build_directory_manifest(source)
+
+    artifact = Artifact(
+        key="shared_dir",
+        container_uri="./shared_workspace",
+        driver="directory",
+        hash=manifest["tree_hash"],
+        meta={
+            "directory_artifact": True,
+            "directory_allow_extra_files": True,
+            "directory_manifest": manifest,
+        },
+    )
+    assert directory_artifacts.directory_allows_extra_files(artifact) is True
+
+    # Add extra files and directories into source
+    (source / "extra_step_output.parquet").write_bytes(b"extra-data")
+    (source / "sub" / "extra_sub.txt").write_text("extra-sub", encoding="utf-8")
+    (source / "extra_dir").mkdir()
+
+    with pytest.raises(ValueError, match="unexpected"):
+        validate_directory_tree(source, manifest, allow_extra_files=False)
+    validate_directory_tree(source, manifest, allow_extra_files=True)
+    assert is_valid_directory_artifact_tree(source, artifact) is True
+
+    # Materialize into a destination that already has extra files
+    destination = tmp_path / "dest_shared"
+    destination.mkdir()
+    (destination / "preexisting_extra.txt").write_text("keep-me", encoding="utf-8")
+
+    copied = materialize_directory_tree(
+        source,
+        destination,
+        manifest,
+        preserve_existing=True,
+        allow_extra_files=True,
+    )
+    assert copied is True
+    assert (destination / "preexisting_extra.txt").read_text(
+        encoding="utf-8"
+    ) == "keep-me"
+    assert (destination / "tracked.csv").read_text(encoding="utf-8") == "id\n1\n"
+    assert (destination / "sub" / "nested.csv").read_text(encoding="utf-8") == "id\n2\n"
+    # Unlisted extra files in source are not part of the manifest copy
+    assert not (destination / "extra_step_output.parquet").exists()
+
+    # Modifying or deleting a tracked manifest file still fails validation
+    (destination / "tracked.csv").write_text("id\n999\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="hash mismatch"):
+        validate_directory_tree(destination, manifest, allow_extra_files=True)
+    (destination / "tracked.csv").unlink()
+    with pytest.raises(ValueError, match="missing"):
+        validate_directory_tree(destination, manifest, allow_extra_files=True)

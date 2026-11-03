@@ -380,6 +380,22 @@ class RunContext:
         """
         self._tracker.log_meta(**kwargs)
 
+    def set_output_meta(
+        self,
+        key: str,
+        meta: Mapping[str, Any],
+        *,
+        merge: bool = True,
+    ) -> None:
+        """
+        Register pending metadata for a declared output key during step execution.
+
+        This is a thin wrapper around ``Tracker.set_output_meta``.
+        """
+        self._tracker.set_output_meta(key, meta, merge=merge)
+
+    set_pending_output_meta = set_output_meta
+
     @property
     def inputs(self) -> Dict[str, Artifact]:
         """
@@ -503,14 +519,22 @@ class ScenarioContext:
         output_sets: Optional[Mapping[str, OutputSet]] = None,
         resume_from_run_id: Optional[str] = None,
         resume_phase: CouplerSnapshotPhase = "post",
-        step_run_completion_archive: Optional[RunCompletionArchivePolicy] = None,
+        step_run_completion_archive: Optional[
+            Union[
+                RunCompletionArchivePolicy,
+                Callable[[str], Optional[RunCompletionArchivePolicy]],
+            ]
+        ] = None,
         **kwargs: Any,
     ):
-        if step_run_completion_archive is not None and not isinstance(
-            step_run_completion_archive, RunCompletionArchivePolicy
+        if (
+            step_run_completion_archive is not None
+            and not isinstance(step_run_completion_archive, RunCompletionArchivePolicy)
+            and not callable(step_run_completion_archive)
         ):
             raise TypeError(
-                "step_run_completion_archive must be a RunCompletionArchivePolicy or None."
+                "step_run_completion_archive must be a RunCompletionArchivePolicy, "
+                "a callable returning RunCompletionArchivePolicy | None, or None."
             )
         self.tracker = tracker
         self.name = name
@@ -563,6 +587,30 @@ class ScenarioContext:
         self.coupler = coupler or Coupler(tracker=tracker)
         if require_outputs:
             self.coupler.require_outputs(*require_outputs)
+
+    def _resolve_step_run_completion_archive(
+        self,
+        step_name: str,
+        step_policy: Optional[Union[RunCompletionArchivePolicy, Literal[False]]],
+    ) -> Optional[RunCompletionArchivePolicy]:
+        if step_policy is False:
+            return None
+        if isinstance(step_policy, RunCompletionArchivePolicy):
+            return step_policy
+        scenario_policy = self.step_run_completion_archive
+        if scenario_policy is None:
+            return None
+        if isinstance(scenario_policy, RunCompletionArchivePolicy):
+            return scenario_policy
+        resolved = scenario_policy(step_name)
+        if resolved is None or resolved is False:
+            return None
+        if not isinstance(resolved, RunCompletionArchivePolicy):
+            raise TypeError(
+                "step_run_completion_archive callable must return a "
+                "RunCompletionArchivePolicy or None."
+            )
+        return resolved
 
     @property
     def run_id(self) -> str:
@@ -1915,10 +1963,9 @@ class ScenarioContext:
             if resolved_cache_hydration is not None
             else self.step_cache_hydration
         )
-        effective_run_completion_archive = (
-            resolved_invocation.run_completion_archive
-            if resolved_invocation.run_completion_archive is not None
-            else self.step_run_completion_archive
+        effective_run_completion_archive = self._resolve_step_run_completion_archive(
+            resolved_name,
+            resolved_invocation.run_completion_archive,
         )
 
         promoted_inputs = self._promote_inputs_for_binding(
@@ -2069,6 +2116,10 @@ class ScenarioContext:
         code_identity_extra_deps: Optional[List[str]] = None,
         output_mismatch: str = "warn",
         output_missing: str = "warn",
+        output_policy: Optional[OutputPolicyOptions] = None,
+        run_completion_archive: Optional[
+            Union[RunCompletionArchivePolicy, Literal[False]]
+        ] = None,
     ):
         """
         Manual tracing context manager for scenario steps.
@@ -2087,6 +2138,36 @@ class ScenarioContext:
             Literal["warn", "error", "ignore"], output_mismatch
         )
         output_missing_policy = cast(Literal["warn", "error", "ignore"], output_missing)
+        resolved_output_policy = (
+            OutputPolicyOptions(
+                output_mismatch=(
+                    output_policy.output_mismatch
+                    if output_policy is not None
+                    and output_policy.output_mismatch is not None
+                    else output_mismatch_policy
+                ),
+                output_missing=(
+                    output_policy.output_missing
+                    if output_policy is not None
+                    and output_policy.output_missing is not None
+                    else output_missing_policy
+                ),
+                run_completion_archive=(
+                    run_completion_archive
+                    if run_completion_archive is not None
+                    else (
+                        output_policy.run_completion_archive
+                        if output_policy is not None
+                        else None
+                    )
+                ),
+            )
+            if output_policy is not None or run_completion_archive is not None
+            else OutputPolicyOptions(
+                output_mismatch=output_mismatch_policy,
+                output_missing=output_missing_policy,
+            )
+        )
 
         resolved_invocation = resolve_run_invocation(
             fn=None,
@@ -2121,10 +2202,7 @@ class ScenarioContext:
                 code_identity=code_identity,
                 code_identity_extra_deps=code_identity_extra_deps,
             ),
-            output_policy=OutputPolicyOptions(
-                output_mismatch=output_mismatch_policy,
-                output_missing=output_missing_policy,
-            ),
+            output_policy=resolved_output_policy,
             execution_options=None,
             default_name_template=self.name_template,
             allow_template=True,
@@ -2176,6 +2254,10 @@ class ScenarioContext:
         effective_cache_hydration = (
             resolved_cache_hydration or self.step_cache_hydration
         )
+        effective_run_completion_archive = self._resolve_step_run_completion_archive(
+            resolved_name,
+            resolved_invocation.run_completion_archive,
+        )
 
         try:
             self.tracker._active_coupler = self.coupler
@@ -2217,6 +2299,12 @@ class ScenarioContext:
                 code_identity_extra_deps=resolved_invocation.code_identity_extra_deps,
                 output_mismatch=resolved_invocation.output_mismatch,
                 output_missing=resolved_invocation.output_missing,
+                output_policy=OutputPolicyOptions(
+                    output_mismatch=resolved_invocation.output_mismatch,
+                    output_missing=resolved_invocation.output_missing,
+                    run_completion_archive=effective_run_completion_archive,
+                ),
+                run_completion_archive=effective_run_completion_archive,
             ) as t:
                 if t.is_cached:
                     current_consist = t.current_consist

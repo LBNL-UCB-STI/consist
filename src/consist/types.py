@@ -208,7 +208,9 @@ class OutputPolicyOptions:
 
     output_mismatch: Optional[Literal["warn", "error", "ignore"]] = None
     output_missing: Optional[Literal["warn", "error", "ignore"]] = None
-    run_completion_archive: Optional[RunCompletionArchivePolicy] = None
+    run_completion_archive: Optional[
+        Union[RunCompletionArchivePolicy, Literal[False]]
+    ] = None
 
 
 @dataclass(frozen=True, slots=True)

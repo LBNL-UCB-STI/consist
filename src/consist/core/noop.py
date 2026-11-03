@@ -233,6 +233,18 @@ class NoopRunContext:
             )
         return artifacts
 
+    def set_output_meta(
+        self,
+        key: str,
+        meta: Mapping[str, Any],
+        *,
+        merge: bool = True,
+    ) -> None:
+        _ = (key, meta, merge)
+        return None
+
+    set_pending_output_meta = set_output_meta
+
 
 class NoopScenarioContext:
     """
@@ -243,16 +255,24 @@ class NoopScenarioContext:
         self,
         name: str,
         *,
-        step_run_completion_archive: Optional[RunCompletionArchivePolicy] = None,
+        step_run_completion_archive: Optional[
+            Union[
+                RunCompletionArchivePolicy,
+                Any,
+            ]
+        ] = None,
         resume_from_run_id: Optional[str] = None,
         resume_phase: CouplerSnapshotPhase = "post",
         **kwargs: Any,
     ) -> None:
-        if step_run_completion_archive is not None and not isinstance(
-            step_run_completion_archive, RunCompletionArchivePolicy
+        if (
+            step_run_completion_archive is not None
+            and not isinstance(step_run_completion_archive, RunCompletionArchivePolicy)
+            and not callable(step_run_completion_archive)
         ):
             raise TypeError(
-                "step_run_completion_archive must be a RunCompletionArchivePolicy or None."
+                "step_run_completion_archive must be a RunCompletionArchivePolicy, "
+                "a callable returning RunCompletionArchivePolicy | None, or None."
             )
         self.name = name
         self.step_run_completion_archive = step_run_completion_archive
@@ -476,6 +496,19 @@ class NoopTracker(TrackerLike):
     ) -> Dict[str, NoopArtifact]:
         self._warn_disabled()
         return NoopRunContext().log_artifacts(outputs, **metadata)
+
+    def set_output_meta(
+        self,
+        key: str,
+        meta: Mapping[str, Any],
+        *,
+        merge: bool = True,
+    ) -> None:
+        self._warn_disabled()
+        _ = (key, meta, merge)
+        return None
+
+    set_pending_output_meta = set_output_meta
 
     @contextmanager
     def scenario(self, name: str, **kwargs: Any) -> Iterator[NoopScenarioContext]:

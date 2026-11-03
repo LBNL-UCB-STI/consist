@@ -427,3 +427,168 @@ def test_run_completion_archive_policy_requires_database(tmp_path: Path) -> None
                 )
             ),
         )
+
+
+def test_run_completion_archive_policy_preserves_abs_path_on_miss_and_hydrated_hit(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    from consist.types import CacheOptions
+
+    archive_miss = tmp_path / "archive_miss"
+    archive_hit = tmp_path / "archive_hit"
+    out_file = tracker.run_dir / "workspace_out" / "skims.omx"
+
+    def step(ctx) -> dict[str, Path]:
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_bytes(b"omx-bytes")
+        return {"skims": out_file}
+
+    with tracker.scenario(
+        "sc_abs_path_miss",
+        step_run_completion_archive=RunCompletionArchivePolicy(
+            archive_root=archive_miss,
+            mode="copy",
+        ),
+    ) as sc_miss:
+        miss_res = sc_miss.run(
+            fn=step,
+            name="produce_skims",
+            run_id="abs_path_miss_run",
+            outputs=["skims"],
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+        expected_abs = str(out_file.resolve())
+        assert miss_res.cache_hit is False
+        assert miss_res.outputs["skims"].abs_path == expected_abs
+        assert sc_miss.coupler.require("skims").abs_path == expected_abs
+        assert sc_miss.coupler.require("skims").path == out_file.resolve()
+
+    # Remove workspace file so cache hit must hydrate it from archive_miss,
+    # then archive to archive_hit via RunCompletionArchivePolicy(mode="copy").
+    out_file.unlink()
+    assert not out_file.exists()
+
+    with tracker.scenario(
+        "sc_abs_path_hit",
+        step_run_completion_archive=RunCompletionArchivePolicy(
+            archive_root=archive_hit,
+            mode="copy",
+        ),
+    ) as sc_hit:
+        hit_res = sc_hit.run(
+            fn=step,
+            name="produce_skims",
+            run_id="abs_path_hit_run",
+            outputs=["skims"],
+            output_paths={"skims": out_file},
+            cache_options=CacheOptions(cache_hydration="outputs-requested"),
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+        expected_abs = str(out_file.resolve())
+        assert hit_res.cache_hit is True
+        assert out_file.exists()
+        assert hit_res.outputs["skims"].abs_path == expected_abs
+        assert sc_hit.coupler.require("skims").abs_path == expected_abs
+        assert sc_hit.coupler.require("skims").path == out_file.resolve()
+
+
+@pytest.mark.parametrize("scalar_declared_first", [True, False])
+def test_archive_run_outputs_handles_nested_scalar_and_child_directory_inside_directory_artifact(
+    tracker: Tracker,
+    tmp_path: Path,
+    scalar_declared_first: bool,
+) -> None:
+    archive_root = tmp_path / f"archive_nested_{scalar_declared_first}"
+    beam_root = tracker.run_dir / "beam_outputs"
+    iter_dir = beam_root / "ITERS" / "it.0"
+    zarr_dir = beam_root / "skims.zarr"
+
+    def step(ctx) -> None:
+        iter_dir.mkdir(parents=True, exist_ok=True)
+        zarr_dir.mkdir(parents=True, exist_ok=True)
+        events_file = iter_dir / "0.events.csv.gz"
+        events_file.write_bytes(b"events-payload")
+        linkstats_file = iter_dir / "0.linkstats.csv.gz"
+        linkstats_file.write_bytes(b"linkstats-payload")
+        (zarr_dir / ".zgroup").write_text('{"zarr_format":2}\n', encoding="utf-8")
+        (zarr_dir / "0.0").write_bytes(b"zarr-chunk")
+
+        if scalar_declared_first:
+            tracker.log_output(events_file, key="events")
+            tracker.log_output(
+                zarr_dir, key="skims_zarr", artifact_kind="directory", driver="zarr"
+            )
+            tracker.log_output(iter_dir, key="beam_iter_dir", artifact_kind="directory")
+            tracker.log_output(
+                beam_root, key="beam_output_root_dir", artifact_kind="directory"
+            )
+        else:
+            tracker.log_output(
+                beam_root, key="beam_output_root_dir", artifact_kind="directory"
+            )
+            tracker.log_output(iter_dir, key="beam_iter_dir", artifact_kind="directory")
+            tracker.log_output(
+                zarr_dir, key="skims_zarr", artifact_kind="directory", driver="zarr"
+            )
+            tracker.log_output(events_file, key="events")
+
+    output_keys = (
+        ["events", "skims_zarr", "beam_iter_dir", "beam_output_root_dir"]
+        if scalar_declared_first
+        else ["beam_output_root_dir", "beam_iter_dir", "skims_zarr", "events"]
+    )
+    res = tracker.run(
+        fn=step,
+        name=f"nested_dir_step_{scalar_declared_first}",
+        run_id=f"nested_dir_run_{scalar_declared_first}",
+        outputs=output_keys,
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        output_policy=OutputPolicyOptions(
+            run_completion_archive=RunCompletionArchivePolicy(
+                archive_root=archive_root,
+                mode="copy",
+            )
+        ),
+    )
+
+    expected_root = str(archive_root.resolve())
+    for key in output_keys:
+        assert res.outputs[key].meta.get("recovery_roots") == [expected_root]
+        assert res.outputs[key].abs_path is not None
+
+    assert (
+        archive_root / "beam_outputs" / "ITERS" / "it.0" / "0.events.csv.gz"
+    ).read_bytes() == b"events-payload"
+    assert (
+        archive_root / "beam_outputs" / "ITERS" / "it.0" / "0.linkstats.csv.gz"
+    ).read_bytes() == b"linkstats-payload"
+    assert (archive_root / "beam_outputs" / "skims.zarr" / "0.0").read_bytes() == (
+        b"zarr-chunk"
+    )
+
+    # Also test direct archive_artifact(dir_artifact) when a nested scalar was archived first
+    manual_archive = tmp_path / f"manual_archive_{scalar_declared_first}"
+    tracker.archive_artifact(res.outputs["events"], manual_archive, mode="copy")
+    tracker.archive_artifact(
+        res.outputs["beam_output_root_dir"], manual_archive, mode="copy"
+    )
+    assert (
+        manual_archive / "beam_outputs" / "ITERS" / "it.0" / "0.linkstats.csv.gz"
+    ).read_bytes() == b"linkstats-payload"
+
+    # Also verify mode="move" on archive_run_outputs with nested outputs
+    move_archive = tmp_path / f"move_archive_{scalar_declared_first}"
+    moved = tracker.archive_run_outputs(
+        f"nested_dir_run_{scalar_declared_first}",
+        move_archive,
+        mode="move",
+    )
+    assert set(moved.keys()) == set(output_keys)
+    assert not beam_root.exists()
+    assert (
+        move_archive / "beam_outputs" / "ITERS" / "it.0" / "0.events.csv.gz"
+    ).read_bytes() == b"events-payload"
+    assert (
+        move_archive / "beam_outputs" / "ITERS" / "it.0" / "0.linkstats.csv.gz"
+    ).read_bytes() == b"linkstats-payload"

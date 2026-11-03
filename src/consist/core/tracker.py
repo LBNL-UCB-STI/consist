@@ -2026,6 +2026,10 @@ class Tracker:
         code_identity_extra_deps: Optional[List[str]] = None,
         output_mismatch: str = "warn",
         output_missing: str = "warn",
+        output_policy: Optional[OutputPolicyOptions] = None,
+        run_completion_archive: Optional[
+            Union[RunCompletionArchivePolicy, Literal[False]]
+        ] = None,
     ) -> Iterator["Tracker"]:
         """
         Context manager for inline tracing of a run with inline execution.
@@ -2212,6 +2216,8 @@ class Tracker:
             code_identity_extra_deps=code_identity_extra_deps,
             output_mismatch=output_mismatch,
             output_missing=output_missing,
+            output_policy=output_policy,
+            run_completion_archive=run_completion_archive,
         ) as active_tracker:
             yield active_tracker
 
@@ -2230,7 +2236,12 @@ class Tracker:
         require_outputs: Optional[Iterable[str]] = None,
         resume_from_run_id: Optional[str] = None,
         resume_phase: CouplerSnapshotPhase = "post",
-        step_run_completion_archive: Optional[RunCompletionArchivePolicy] = None,
+        step_run_completion_archive: Optional[
+            Union[
+                RunCompletionArchivePolicy,
+                Callable[[str], Optional[RunCompletionArchivePolicy]],
+            ]
+        ] = None,
         **kwargs: Any,
     ) -> ScenarioContext:
         """
@@ -5816,6 +5827,77 @@ class Tracker:
         self._flush_json()
         # We also sync to DB immediately so external monitors can see progress/tags
         self._sync_run_to_db(self.current_consist.run)
+
+    def set_output_meta(
+        self,
+        key: str,
+        meta: Mapping[str, Any],
+        *,
+        merge: bool = True,
+    ) -> None:
+        """
+        Register pending metadata for a declared output key during step execution.
+
+        When the step finishes on a cache miss, Consist merges (or replaces, when
+        ``merge=False``) this metadata into the logged output artifact's ``meta``
+        before persisting to DuckDB, applying ``RunCompletionArchivePolicy``,
+        flushing ``consist.json``, and snapshotting the scenario coupler. On cache
+        hits, calling ``set_output_meta`` is a no-op.
+        """
+        if not self.current_consist:
+            raise RuntimeError("set_output_meta requires an active run.")
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError("key must be a non-empty string.")
+        if not isinstance(meta, MappingABC):
+            raise TypeError("meta must be a mapping.")
+        normalized = normalize_json(dict(meta))
+        if not isinstance(normalized, dict):
+            raise TypeError("meta must normalize to a JSON object mapping.")
+        if self.is_cached:
+            return
+
+        if merge:
+            existing = dict(self.current_consist._pending_output_meta.get(key, {}))
+            existing.update(normalized)
+            self.current_consist._pending_output_meta[key] = existing
+        else:
+            self.current_consist._pending_output_meta[key] = dict(normalized)
+            self.current_consist._pending_output_meta_replace_keys.add(key)
+
+        for art in self.current_consist.outputs:
+            if art.key == key:
+                existing_art_meta = dict(art.meta) if isinstance(art.meta, dict) else {}
+                if merge:
+                    existing_art_meta.update(normalized)
+                    art.meta = existing_art_meta
+                else:
+                    preserved_system_meta = {
+                        sys_key: sys_val
+                        for sys_key, sys_val in existing_art_meta.items()
+                        if sys_key.startswith("_dlt_")
+                        or sys_key.startswith("directory_")
+                        or sys_key.startswith("output_set_")
+                        or sys_key
+                        in {
+                            "is_ingested",
+                            "dlt_table_name",
+                            "recovery_roots",
+                            "content_id",
+                            "schema_id",
+                            "schema_summary",
+                            "file_schema",
+                            "facet",
+                            "facet_schema_version",
+                            "facet_index",
+                        }
+                    }
+                    preserved_system_meta.update(normalized)
+                    art.meta = preserved_system_meta
+                if self.db is not None:
+                    self.db.update_artifact_meta(art, dict(art.meta))
+                self._flush_json()
+
+    set_pending_output_meta = set_output_meta
 
     def define_step(self, **kwargs) -> Callable:
         """

@@ -45,6 +45,7 @@ from consist.core.container_policy import validate_recovery_registration_policy
 from consist.core.directory_artifacts import (
     build_directory_manifest,
     build_shapefile_bundle_manifest,
+    directory_allows_extra_files,
     is_valid_directory_artifact_tree,
     materialize_directory_tree,
     materialize_shapefile_bundle,
@@ -1974,7 +1975,11 @@ def materialize_artifact(
                 )
                 if manifest is not None:
                     try:
-                        validate_directory_tree(destination, manifest)
+                        validate_directory_tree(
+                            destination,
+                            manifest,
+                            allow_extra_files=directory_allows_extra_files(artifact),
+                        )
                     except (ValueError, OSError) as exc:
                         return _make_materialized_artifact(
                             artifact,
@@ -2283,6 +2288,7 @@ def materialize_artifact(
                         destination,
                         manifest,
                         preserve_existing=preserve_existing,
+                        allow_extra_files=directory_allows_extra_files(artifact),
                     )
                 except (ValueError, OSError) as exc:
                     return _make_materialized_artifact(
@@ -2957,6 +2963,7 @@ def plan_run_output_hydration(
                     destination,
                     _directory_artifact_manifest(artifact),
                     preserve_existing=preserve_existing,
+                    allow_extra_files=directory_allows_extra_files(artifact),
                 )
             except ValueError as exc:
                 outputs[artifact.key] = _make_hydrated_output(
@@ -3317,6 +3324,7 @@ def execute_planned_output_hydration(
                     item.destination,
                     manifest,
                     preserve_existing=preserve_existing,
+                    allow_extra_files=directory_allows_extra_files(item.artifact),
                 )
                 status: HydrationStatus = (
                     "materialized_directory_from_filesystem"
