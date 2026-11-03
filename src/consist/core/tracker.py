@@ -5866,20 +5866,14 @@ class Tracker:
             return
 
         applied_ids = self.current_consist._pending_output_meta_applied_object_ids[key]
+        from consist.models.artifact import merge_artifact_output_meta
+
         for art in self.current_consist.outputs:
             if art.key == key:
                 existing_art_meta = dict(art.meta) if isinstance(art.meta, dict) else {}
-                if merge:
-                    existing_art_meta.update(normalized)
-                    art.meta = existing_art_meta
-                else:
-                    from consist.models.artifact import preserve_system_artifact_meta
-
-                    preserved_system_meta = preserve_system_artifact_meta(
-                        existing_art_meta
-                    )
-                    preserved_system_meta.update(normalized)
-                    art.meta = preserved_system_meta
+                art.meta = merge_artifact_output_meta(
+                    existing_art_meta, normalized, merge=merge
+                )
                 applied_ids.add(id(art))
                 if self.db is not None:
                     self.db.update_artifact_meta(art, dict(art.meta))

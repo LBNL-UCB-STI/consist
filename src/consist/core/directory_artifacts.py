@@ -221,6 +221,58 @@ def validate_shapefile_bundle_destination(
     return True
 
 
+def is_directory_artifact(artifact: Artifact) -> bool:
+    """Return whether ``artifact`` carries immutable directory-artifact metadata."""
+    meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
+    return meta.get("directory_artifact") is True
+
+
+def is_file_bundle_artifact(artifact: Artifact) -> bool:
+    """Return whether ``artifact`` represents a multi-file sidecar bundle."""
+    meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
+    return (
+        meta.get("file_bundle_artifact") is True
+        or meta.get("file_bundle") == "shapefile"
+    )
+
+
+def file_bundle_entry_name(
+    artifact: Artifact,
+    *,
+    fallback: str | None = None,
+) -> str | None:
+    """Return a validated single-segment bundle entry filename if present."""
+    meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
+    entry = meta.get("file_bundle_entry")
+    if isinstance(entry, str) and entry and Path(entry).name == entry:
+        return entry
+    return fallback
+
+
+def resolve_file_bundle_root(path: str | Path) -> Path:
+    """Return the enclosing directory for a file-bundle source or target path."""
+    candidate = Path(path)
+    return candidate if candidate.is_dir() else candidate.parent
+
+
+def resolve_artifact_entry_path(
+    artifact: Artifact,
+    target_path: str | Path,
+) -> str:
+    """Return the resolved runtime ``abs_path`` for ``artifact`` at ``target_path``.
+
+    When a file-bundle artifact is materialized or archived into a bundle
+    directory ``target_path``, returns the resolved path of the primary entry
+    file inside that directory.
+    """
+    resolved = Path(target_path).resolve()
+    if is_file_bundle_artifact(artifact) and resolved.is_dir():
+        entry = file_bundle_entry_name(artifact)
+        if entry is not None:
+            return str((resolved / entry).resolve())
+    return str(resolved)
+
+
 def directory_allows_extra_files(artifact: Artifact) -> bool:
     """Return whether ``artifact`` allows extra unrecorded entries in its directory tree."""
     meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}

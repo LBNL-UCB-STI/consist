@@ -16,9 +16,14 @@ from consist.core._tracker_service_base import _TrackerServiceBase
 from consist.core.container_policy import validate_recovery_registration_policy
 from consist.core.directory_artifacts import (
     directory_allows_extra_files,
+    file_bundle_entry_name,
+    is_directory_artifact as _is_directory_artifact,
+    is_file_bundle_artifact as _is_file_bundle_artifact,
     is_valid_directory_artifact_tree,
     materialize_directory_tree_with_rollback_info,
     materialize_shapefile_bundle,
+    resolve_artifact_entry_path,
+    resolve_file_bundle_root,
     rollback_published_directory_tree,
     validate_directory_manifest,
     validate_directory_tree,
@@ -45,16 +50,6 @@ from consist.digest import file_sha256
 from consist.models.artifact import Artifact, ArchivedOutputs
 
 
-def _is_directory_artifact(artifact: Artifact) -> bool:
-    meta = artifact.meta if isinstance(artifact.meta, dict) else {}
-    return meta.get("directory_artifact") is True
-
-
-def _is_file_bundle_artifact(artifact: Artifact) -> bool:
-    meta = artifact.meta if isinstance(artifact.meta, dict) else {}
-    return meta.get("file_bundle_artifact") is True
-
-
 def _directory_artifact_manifest(artifact: Artifact) -> dict[str, Any]:
     meta = artifact.meta if isinstance(artifact.meta, dict) else {}
     manifest = meta.get("directory_manifest")
@@ -72,9 +67,9 @@ def _directory_artifact_manifest(artifact: Artifact) -> dict[str, Any]:
 
 def _shapefile_bundle_metadata(artifact: Artifact) -> tuple[str, dict[str, Any]]:
     meta = artifact.meta if isinstance(artifact.meta, dict) else {}
-    entry = meta.get("file_bundle_entry")
+    entry = file_bundle_entry_name(artifact)
     manifest = meta.get("file_bundle_manifest")
-    if not isinstance(entry, str) or Path(entry).name != entry:
+    if entry is None:
         raise ValueError(
             f"shapefile bundle artifact {artifact.key!r} has no valid entry"
         )
@@ -225,12 +220,8 @@ class TrackerArchiveService(_TrackerServiceBase):
         current_consist = self.current_consist
         if current_consist is None or not updated_by_id:
             return
-        for active_artifact in current_consist.outputs:
-            if (
-                active_artifact.id is not None
-                and str(active_artifact.id) in updated_by_id
-            ):
-                active_artifact.meta = dict(updated_by_id[str(active_artifact.id)])
+        for artifact_id, meta in updated_by_id.items():
+            current_consist.sync_output_artifact(artifact_id=artifact_id, meta=meta)
 
     def _sync_active_run_artifact_abs_path(
         self, artifact: Artifact, abs_path: str
@@ -238,10 +229,7 @@ class TrackerArchiveService(_TrackerServiceBase):
         current_consist = self.current_consist
         if current_consist is None or artifact.id is None:
             return
-        target_id = str(artifact.id)
-        for active_artifact in current_consist.outputs:
-            if active_artifact.id is not None and str(active_artifact.id) == target_id:
-                active_artifact.abs_path = abs_path
+        current_consist.sync_output_artifact(artifact_id=artifact.id, abs_path=abs_path)
 
     def set_artifact_recovery_roots(
         self,
@@ -1995,7 +1983,7 @@ class TrackerArchiveService(_TrackerServiceBase):
 
         archive_root_path = Path(archive_root).expanduser().absolute()
         destination = archive_root_path / relative_path
-        source_bundle_root = source_path if source_path.is_dir() else source_path.parent
+        source_bundle_root = resolve_file_bundle_root(source_path)
         published = materialize_shapefile_bundle(
             source_bundle_root,
             destination,
@@ -2015,7 +2003,7 @@ class TrackerArchiveService(_TrackerServiceBase):
             if source_bundle_root.resolve() != destination.resolve():
                 for member in manifest["entries"]:
                     (source_bundle_root / member["path"]).unlink(missing_ok=True)
-            resolved_dest = str((destination / entry).resolve())
+            resolved_dest = resolve_artifact_entry_path(artifact, destination)
             artifact.abs_path = resolved_dest
             self._sync_active_run_artifact_abs_path(artifact, resolved_dest)
         return destination

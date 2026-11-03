@@ -46,6 +46,9 @@ from consist.core.directory_artifacts import (
     build_directory_manifest,
     build_shapefile_bundle_manifest,
     directory_allows_extra_files,
+    file_bundle_entry_name,
+    is_directory_artifact as _is_directory_artifact,
+    is_file_bundle_artifact as _is_file_bundle_artifact,
     is_valid_directory_artifact_tree,
     materialize_directory_tree,
     materialize_shapefile_bundle,
@@ -783,34 +786,15 @@ def _make_hydrated_output(
     )
 
 
-def _is_directory_artifact(artifact: Artifact) -> bool:
-    """Return whether an artifact has the strict directory-artifact contract."""
-    meta = artifact.meta if isinstance(artifact.meta, dict) else {}
-    return meta.get("directory_artifact") is True
-
-
-def _is_file_bundle_artifact(artifact: Artifact) -> bool:
-    """Return whether an artifact has the strict Shapefile bundle contract."""
-    meta = artifact.meta if isinstance(artifact.meta, dict) else {}
-    return (
-        meta.get("file_bundle_artifact") is True
-        or meta.get("file_bundle") == "shapefile"
-    )
-
-
 def _shapefile_bundle_metadata(artifact: Artifact) -> tuple[str, dict[str, object]]:
     meta = artifact.meta if isinstance(artifact.meta, dict) else {}
-    entry = meta.get("file_bundle_entry")
-    if not (isinstance(entry, str) and Path(entry).name == entry):
-        uri = artifact.container_uri or ""
-        uri_path = uri.split("://", 1)[-1] if "://" in uri else uri
-        entry_name = Path(uri_path).name
-        if entry_name:
-            entry = entry_name
-        else:
-            raise ValueError(
-                f"shapefile bundle artifact {artifact.key!r} has no valid entry"
-            )
+    uri = artifact.container_uri or ""
+    uri_path = uri.split("://", 1)[-1] if "://" in uri else uri
+    entry = file_bundle_entry_name(artifact, fallback=Path(uri_path).name or None)
+    if entry is None:
+        raise ValueError(
+            f"shapefile bundle artifact {artifact.key!r} has no valid entry"
+        )
     manifest = meta.get("file_bundle_manifest") or meta.get("directory_manifest")
     if not isinstance(manifest, Mapping):
         raise ValueError(f"shapefile bundle artifact {artifact.key!r} has no manifest")
@@ -1890,9 +1874,8 @@ def materialize_artifact(
                 )
             if should_validate:
                 meta = artifact.meta if isinstance(artifact.meta, dict) else {}
-                entry = meta.get("file_bundle_entry")
-                if not (isinstance(entry, str) and Path(entry).name == entry):
-                    entry = destination.name
+                entry = file_bundle_entry_name(artifact, fallback=destination.name)
+                assert entry is not None
                 manifest = meta.get("file_bundle_manifest") or meta.get(
                     "directory_manifest"
                 )
@@ -2121,9 +2104,8 @@ def materialize_artifact(
 
     if _is_file_bundle_artifact(artifact):
         meta = artifact.meta if isinstance(artifact.meta, dict) else {}
-        entry = meta.get("file_bundle_entry")
-        if not (isinstance(entry, str) and Path(entry).name == entry):
-            entry = destination.name
+        entry = file_bundle_entry_name(artifact, fallback=destination.name)
+        assert entry is not None
 
         manifest = meta.get("file_bundle_manifest") or meta.get("directory_manifest")
 

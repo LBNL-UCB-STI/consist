@@ -1516,3 +1516,59 @@ def test_partial_directory_rollback_and_stage_hydration_completion(
     assert (partial_hydrated_dir / "sub" / "deep" / "c.txt").read_text(
         encoding="utf-8"
     ) == "c-bytes"
+
+
+def test_artifact_layout_and_record_sync_helpers(tmp_path: Path) -> None:
+    from consist.models.artifact import Artifact, merge_artifact_output_meta
+    from consist.models.run import ConsistRecord, Run
+
+    bundle_dir = tmp_path / "bundle_dir"
+    bundle_dir.mkdir(parents=True)
+    entry_file = bundle_dir / "parcels.shp"
+    entry_file.write_bytes(b"shp")
+
+    bundle_art = Artifact(
+        key="parcels",
+        container_uri="inputs://bundle_dir/parcels.shp",
+        driver="shapefile",
+        meta={
+            "file_bundle_artifact": True,
+            "file_bundle": "shapefile",
+            "file_bundle_entry": "parcels.shp",
+            "custom": "old",
+        },
+    )
+    assert directory_artifacts.is_file_bundle_artifact(bundle_art) is True
+    assert directory_artifacts.file_bundle_entry_name(bundle_art) == "parcels.shp"
+    assert directory_artifacts.resolve_file_bundle_root(bundle_dir) == bundle_dir
+    assert directory_artifacts.resolve_file_bundle_root(entry_file) == bundle_dir
+    assert directory_artifacts.resolve_artifact_entry_path(
+        bundle_art, bundle_dir
+    ) == str(entry_file.resolve())
+
+    replaced_meta = merge_artifact_output_meta(
+        bundle_art.meta,
+        {"custom": "new"},
+        merge=False,
+    )
+    assert replaced_meta["file_bundle_entry"] == "parcels.shp"
+    assert replaced_meta["custom"] == "new"
+
+    record = ConsistRecord(
+        run=Run(id="sync_test_run", model_name="test", config_hash=None, git_hash=None),
+        outputs=[bundle_art],
+    )
+    matched = record.sync_output_artifact(
+        key="parcels",
+        meta=replaced_meta,
+        abs_path=str(entry_file.resolve()),
+    )
+    assert len(matched) == 1
+    assert bundle_art.meta["custom"] == "new"
+    assert bundle_art.abs_path == str(entry_file.resolve())
+    record.sync_output_artifact(
+        artifact_id=bundle_art.id,
+        abs_path=str(bundle_dir.resolve()),
+        preserve_existing_abs_path=True,
+    )
+    assert bundle_art.abs_path == str(entry_file.resolve())

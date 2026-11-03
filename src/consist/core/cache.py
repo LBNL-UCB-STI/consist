@@ -20,7 +20,10 @@ from typing import (
     runtime_checkable,
 )
 
-from consist.core.directory_artifacts import is_valid_directory_artifact_tree
+from consist.core.directory_artifacts import (
+    is_valid_directory_artifact_tree,
+    resolve_artifact_entry_path,
+)
 from consist.core.error_messages import format_problem_cause_fix
 from consist.core.output_sets import build_output_set_child_destinations
 from consist.core.resolved_binding import (
@@ -375,16 +378,7 @@ def _resolve_hydrated_artifact_abs_path(
     artifact: Artifact,
     hydrated_path: str | Path,
 ) -> str:
-    resolved = Path(hydrated_path).resolve()
-    meta = artifact.meta if isinstance(artifact.meta, dict) else {}
-    if (
-        meta.get("file_bundle_artifact") is True
-        or meta.get("file_bundle") == "shapefile"
-    ) and resolved.is_dir():
-        entry = meta.get("file_bundle_entry")
-        if isinstance(entry, str) and Path(entry).name == entry:
-            return str((resolved / entry).resolve())
-    return str(resolved)
+    return resolve_artifact_entry_path(artifact, hydrated_path)
 
 
 def _remove_candidate_destination(destination: Path) -> None:

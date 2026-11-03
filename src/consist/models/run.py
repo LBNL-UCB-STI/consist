@@ -682,3 +682,33 @@ class ConsistRecord(SQLModel):
     _pending_output_meta_applied_object_ids: Dict[str, set[int]] = PrivateAttr(
         default_factory=dict
     )
+
+    def sync_output_artifact(
+        self,
+        *,
+        key: Optional[str] = None,
+        artifact_id: str | uuid.UUID | None = None,
+        meta: Optional[Dict[str, Any]] = None,
+        abs_path: Optional[str] = None,
+        preserve_existing_abs_path: bool = False,
+    ) -> List[Artifact]:
+        """Synchronize ``meta`` and/or ``abs_path`` across matching recorded outputs."""
+        matched: List[Artifact] = []
+        target_id = str(artifact_id) if artifact_id is not None else None
+        for recorded in self.outputs:
+            matches_key = key is not None and recorded.key == key
+            matches_id = (
+                target_id is not None
+                and recorded.id is not None
+                and str(recorded.id) == target_id
+            )
+            if not (matches_key or matches_id):
+                continue
+            if meta is not None:
+                recorded.meta = dict(meta)
+            if abs_path is not None and (
+                not preserve_existing_abs_path or recorded.abs_path is None
+            ):
+                recorded.abs_path = abs_path
+            matched.append(recorded)
+        return matched

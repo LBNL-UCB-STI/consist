@@ -899,15 +899,17 @@ class RunTraceCoordinator:
         }
         synced_by_key.update(archived.outputs)
 
-        for art in current_consist.outputs:
-            if art.key in synced_by_key:
-                art.meta = dict(synced_by_key[art.key].meta or {})
-                if (
-                    policy.mode == "copy"
-                    and art.abs_path is None
-                    and art.key in prior_abs_paths
-                ):
-                    art.abs_path = prior_abs_paths[art.key]
+        for key, synced_art in synced_by_key.items():
+            fallback_abs_path = (
+                prior_abs_paths.get(key) if policy.mode == "copy" else None
+            )
+            matched = current_consist.sync_output_artifact(
+                key=key,
+                meta=dict(synced_art.meta or {}),
+                abs_path=fallback_abs_path,
+                preserve_existing_abs_path=True,
+            )
+            for art in matched:
                 set_tracker_ref(art, tracker)
 
         missing_recovery_keys: list[str] = []
@@ -1053,15 +1055,13 @@ class RunTraceCoordinator:
             existing_meta = (
                 dict(primary_art.meta) if isinstance(primary_art.meta, dict) else {}
             )
-            if key in replace_keys:
-                from consist.models.artifact import preserve_system_artifact_meta
+            from consist.models.artifact import merge_artifact_output_meta
 
-                preserved_system_meta = preserve_system_artifact_meta(existing_meta)
-                preserved_system_meta.update(pending_meta)
-                merged_meta = preserved_system_meta
-            else:
-                merged_meta = dict(existing_meta)
-                merged_meta.update(pending_meta)
+            merged_meta = merge_artifact_output_meta(
+                existing_meta,
+                pending_meta,
+                merge=(key not in replace_keys),
+            )
 
             for candidate in candidates:
                 candidate.meta = dict(merged_meta)

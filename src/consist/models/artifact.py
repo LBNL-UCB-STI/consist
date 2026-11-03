@@ -973,3 +973,19 @@ def preserve_system_artifact_meta(
         if key.startswith(_SYSTEM_ARTIFACT_META_PREFIXES)
         or key in _SYSTEM_ARTIFACT_META_KEYS
     }
+
+
+def merge_artifact_output_meta(
+    existing_meta: MappingABC[str, Any] | None,
+    updates: MappingABC[str, Any],
+    *,
+    merge: bool = True,
+) -> Dict[str, Any]:
+    """Apply user output metadata updates while preserving system metadata on replace."""
+    base = (
+        dict(existing_meta)
+        if merge and isinstance(existing_meta, MappingABC)
+        else preserve_system_artifact_meta(existing_meta)
+    )
+    base.update(updates)
+    return base
