@@ -167,6 +167,7 @@ class RunCompletionArchivePolicy:
             raise ValueError(
                 "RunCompletionArchivePolicy.archive_root must be a non-empty path."
             )
+        object.__setattr__(self, "archive_root", Path(normalized_root))
 
 
 @dataclass(frozen=True, slots=True)

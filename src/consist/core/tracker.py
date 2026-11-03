@@ -2224,13 +2224,13 @@ class Tracker:
         step_tags: Optional[List[str]] = None,
         step_facet: Optional[Dict[str, Any]] = None,
         step_cache_hydration: Optional[str] = None,
-        step_run_completion_archive: Optional[RunCompletionArchivePolicy] = None,
         name_template: Optional[str] = None,
         cache_epoch: Optional[int] = None,
         coupler: Optional["Coupler"] = None,
         require_outputs: Optional[Iterable[str]] = None,
         resume_from_run_id: Optional[str] = None,
         resume_phase: CouplerSnapshotPhase = "post",
+        step_run_completion_archive: Optional[RunCompletionArchivePolicy] = None,
         **kwargs: Any,
     ) -> ScenarioContext:
         """
@@ -2267,9 +2267,6 @@ class Tracker:
         step_cache_hydration : Optional[str], optional
             Default cache hydration policy for all scenario steps unless overridden
             in a specific `scenario.trace(...)` or `scenario.run(...)`.
-        step_run_completion_archive : Optional[RunCompletionArchivePolicy], optional
-            Default run-completion archive policy for all `scenario.run(...)` steps
-            unless overridden via per-step `output_policy.run_completion_archive`.
         name_template : Optional[str], optional
             Optional step name template applied when scenario.run() is called without
             an explicit name and no step-level template is provided.
@@ -2284,6 +2281,9 @@ class Tracker:
             the scenario.
         resume_phase : CouplerSnapshotPhase, default "post"
             The snapshot phase ("init", "pre", or "post") to restore when resuming.
+        step_run_completion_archive : Optional[RunCompletionArchivePolicy], optional
+            Default run-completion archive policy for all `scenario.run(...)` steps
+            unless overridden via per-step `output_policy.run_completion_archive`.
         **kwargs : Any
             Additional metadata or arguments for the header run (including `facet_from`).
 
@@ -2310,13 +2310,13 @@ class Tracker:
             step_tags=step_tags,
             step_facet=step_facet,
             step_cache_hydration=step_cache_hydration,
-            step_run_completion_archive=step_run_completion_archive,
             name_template=name_template,
             cache_epoch=cache_epoch,
             coupler=coupler,
             require_outputs=require_outputs,
             resume_from_run_id=resume_from_run_id,
             resume_phase=resume_phase,
+            step_run_completion_archive=step_run_completion_archive,
             **kwargs,
         )
 

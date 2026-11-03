@@ -496,7 +496,6 @@ class ScenarioContext:
         tags: Optional[List[str]] = None,
         model: str = "scenario",
         step_cache_hydration: Optional[str] = None,
-        step_run_completion_archive: Optional[RunCompletionArchivePolicy] = None,
         name_template: Optional[str] = None,
         cache_epoch: Optional[int] = None,
         coupler: Optional[Coupler] = None,
@@ -504,6 +503,7 @@ class ScenarioContext:
         output_sets: Optional[Mapping[str, OutputSet]] = None,
         resume_from_run_id: Optional[str] = None,
         resume_phase: CouplerSnapshotPhase = "post",
+        step_run_completion_archive: Optional[RunCompletionArchivePolicy] = None,
         **kwargs: Any,
     ):
         if step_run_completion_archive is not None and not isinstance(
@@ -669,9 +669,7 @@ class ScenarioContext:
         """
         if not self._header_record:
             raise RuntimeError("Scenario not active. Use within 'with' block.")
-        if self._header_record.run.meta is None:
-            self._header_record.run.meta = {}
-        return MappingProxyType(self._header_record.run.meta)
+        return MappingProxyType(self._header_record.run.meta or {})
 
     def log_meta(self, **metadata: Any) -> None:
         """

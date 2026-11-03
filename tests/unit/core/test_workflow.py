@@ -858,7 +858,11 @@ def test_scenario_log_meta_persists_to_header_run_while_suspended(
         return {"step_out": out_path}
 
     with tracker.scenario("sc_meta_test") as sc:
+        assert sc._header_record is not None
+        sc._header_record.run.meta = None
         assert isinstance(sc.meta, MappingProxyType)
+        assert dict(sc.meta) == {}
+        assert sc._header_record.run.meta is None
         with pytest.raises(TypeError):
             sc.meta["illegal"] = "value"  # type: ignore[index]
 
@@ -963,3 +967,23 @@ def test_scenario_log_meta_outside_active_scenario_raises_runtime_error(
             noop_sc.meta["x"] = 1  # type: ignore[index]
         assert noop_sc.log_meta(stage="noop") is None
         assert dict(noop_sc.meta) == {}
+
+
+def test_scenario_positional_arguments_preserve_legacy_positions(
+    tracker: Tracker,
+) -> None:
+    with tracker.scenario(
+        "sc_pos_args",
+        {"k": 1},
+        ["tag_a"],
+        "custom_model",
+        ["step_tag"],
+        {"step_f": 2},
+        "inputs-missing",
+        "{step}_tmpl",
+        7,
+    ) as sc:
+        assert sc.name_template == "{step}_tmpl"
+        assert sc.cache_epoch == 7
+        assert sc.step_cache_hydration == "inputs-missing"
+        assert sc.step_run_completion_archive is None

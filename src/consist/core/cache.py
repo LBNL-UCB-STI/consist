@@ -1148,13 +1148,11 @@ def materialize_missing_inputs(
             return True
 
     def _recovery_source_matches_artifact(artifact: Artifact, path: Path) -> bool:
-        manifest_valid = is_valid_directory_artifact_tree(path, artifact)
-        if manifest_valid is False:
-            return False
         if not active_options.validate_materialized_inputs:
             return True
-        if manifest_valid is True:
-            return True
+        manifest_valid = is_valid_directory_artifact_tree(path, artifact)
+        if manifest_valid is not None:
+            return manifest_valid
         if not artifact.hash:
             return True
         if tracker.identity.hashing_strategy != "full":

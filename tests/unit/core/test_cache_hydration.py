@@ -2804,6 +2804,21 @@ def test_inputs_missing_validation_preserves_valid_and_rehydrates_corrupted_dire
         "skims": str(destination.resolve())
     }
 
+    # 3) When validate_materialized_inputs is disabled (default), missing directory
+    #    inputs should not perform manifest tree validation during recovery discovery.
+    import shutil
+
+    shutil.rmtree(destination)
+    with tracker_b.start_run(
+        "consumer_unvalidated_dir_recovery",
+        model="consumer",
+        inputs=[artifact],
+        cache_mode="overwrite",
+        cache_hydration="inputs-missing",
+        validate_materialized_inputs=False,
+    ):
+        assert (destination / "nested" / "0.0").read_bytes() == b"corrupted-historical"
+
     if tracker_a.engine:
         tracker_a.engine.dispose()
     if tracker_b.engine:
