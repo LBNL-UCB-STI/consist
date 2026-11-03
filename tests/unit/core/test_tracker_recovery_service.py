@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import uuid
 
@@ -8,6 +9,12 @@ from consist.core.materialize import (
     HydratedRunOutputsResult,
 )
 from consist.models.artifact import Artifact
+from consist.types import (
+    ExecutionOptions,
+    OutputPolicyOptions,
+    OutputSet,
+    RunCompletionArchivePolicy,
+)
 
 
 def test_recovery_service_stage_inputs_normalizes_destination_paths(
@@ -132,3 +139,211 @@ def test_recovery_service_hydrates_run_outputs_to_normalized_destinations(
     assert captured["destinations_by_key"] == {
         "result": (tracker.run_dir / "restored" / "result.csv").resolve()
     }
+
+
+def test_run_completion_archive_policy_archives_outputs_on_cache_miss(
+    tracker,
+    tmp_path: Path,
+) -> None:
+    archive_root = tmp_path / "archive_store"
+
+    def step(ctx) -> dict[str, Path]:
+        out_dir = tracker.run_dir / "outputs"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        scalar_file = out_dir / "summary.csv"
+        scalar_file.write_text("k,v\n1,2\n", encoding="utf-8")
+
+        zarr_dir = out_dir / "bundle.zarr"
+        zarr_dir.mkdir(parents=True, exist_ok=True)
+        (zarr_dir / ".zgroup").write_text('{"zarr_format":2}\n', encoding="utf-8")
+        tracker.log_output(
+            zarr_dir, key="bundle", artifact_kind="directory", driver="zarr"
+        )
+
+        annual_dir = ctx.run_dir / "annual"
+        annual_dir.mkdir(parents=True, exist_ok=True)
+        (annual_dir / "year_2030.csv").write_text("year\n2030\n", encoding="utf-8")
+        (annual_dir / "year_2040.csv").write_text("year\n2040\n", encoding="utf-8")
+
+        return {"summary": scalar_file}
+
+    result = tracker.run(
+        fn=step,
+        name="archive_miss_step",
+        run_id="archive_miss_run",
+        outputs=["summary", "bundle"],
+        output_sets={"annual": OutputSet(root="annual", include="year_*.csv")},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        output_policy=OutputPolicyOptions(
+            run_completion_archive=RunCompletionArchivePolicy(
+                archive_root=archive_root,
+            )
+        ),
+    )
+
+    expected_root = str(archive_root.resolve())
+    assert result.cache_hit is False
+    for key in ("summary", "bundle", "annual"):
+        assert result.outputs[key].meta.get("recovery_roots") == [expected_root]
+
+    # Verify archive files exist on disk
+    assert (archive_root / "outputs" / "summary.csv").read_text(
+        encoding="utf-8"
+    ) == "k,v\n1,2\n"
+    assert (archive_root / "outputs" / "bundle.zarr" / ".zgroup").exists()
+    archived_annual_dir = Path(
+        tracker.fs.resolve_historical_path(
+            result.outputs["annual"].container_uri, archive_root
+        )
+    )
+    assert (archived_annual_dir / "year_2030.csv").exists()
+    assert (archived_annual_dir / "year_2040.csv").exists()
+
+    # Verify tracker.last_run.outputs in-memory sync
+    assert tracker.last_run is not None
+    last_outputs_by_key = {art.key: art for art in tracker.last_run.outputs}
+    for key in ("summary", "bundle", "annual"):
+        assert last_outputs_by_key[key].meta.get("recovery_roots") == [expected_root]
+
+    # Verify DB persistence
+    db_outputs = tracker.get_artifacts_for_run("archive_miss_run").outputs
+    for key in ("summary", "bundle", "annual"):
+        assert db_outputs[key].meta.get("recovery_roots") == [expected_root]
+
+    # Verify consist.json snapshot has recovery_roots
+    snapshot = json.loads(
+        (tracker.run_dir / "consist.json").read_text(encoding="utf-8")
+    )
+    snapshot_outputs = {art["key"]: art for art in snapshot["outputs"]}
+    for key in ("summary", "bundle", "annual"):
+        assert snapshot_outputs[key]["meta"].get("recovery_roots") == [expected_root]
+
+
+def test_run_completion_archive_policy_on_cache_hit_backfills_new_archive_root(
+    tracker,
+    tmp_path: Path,
+) -> None:
+    archive_root = tmp_path / "backfill_archive"
+
+    def step(ctx) -> dict[str, Path]:
+        out_file = tracker.run_dir / "table.csv"
+        out_file.write_text("col\n42\n", encoding="utf-8")
+        annual_dir = ctx.run_dir / "annual_hit"
+        annual_dir.mkdir(parents=True, exist_ok=True)
+        (annual_dir / "part_1.csv").write_text("p\n1\n", encoding="utf-8")
+        return {"table": out_file}
+
+    first = tracker.run(
+        fn=step,
+        name="cache_hit_archive_step",
+        run_id="cache_hit_archive_run_1",
+        outputs=["table"],
+        output_sets={"annual": OutputSet(root="annual_hit", include="part_*.csv")},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    assert first.cache_hit is False
+    assert "recovery_roots" not in (first.outputs["table"].meta or {})
+
+    second = tracker.run(
+        fn=step,
+        name="cache_hit_archive_step",
+        run_id="cache_hit_archive_run_2",
+        outputs=["table"],
+        output_sets={"annual": OutputSet(root="annual_hit", include="part_*.csv")},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        output_policy=OutputPolicyOptions(
+            run_completion_archive=RunCompletionArchivePolicy(archive_root=archive_root)
+        ),
+    )
+    expected_root = str(archive_root.resolve())
+    assert second.cache_hit is True
+    assert second.outputs["table"].meta.get("recovery_roots") == [expected_root]
+    assert second.outputs["annual"].meta.get("recovery_roots") == [expected_root]
+    assert (archive_root / "table.csv").read_text(encoding="utf-8") == "col\n42\n"
+    archived_annual_hit = Path(
+        tracker.fs.resolve_historical_path(
+            second.outputs["annual"].container_uri, archive_root
+        )
+    )
+    assert (archived_annual_hit / "part_1.csv").read_text(encoding="utf-8") == "p\n1\n"
+
+
+def test_run_completion_archive_policy_skips_virtual_unbacked_artifacts(
+    tracker,
+    tmp_path: Path,
+) -> None:
+    archive_root = tmp_path / "virtual_skip_archive"
+
+    def step(ctx) -> dict[str, Path]:
+        backed = tracker.run_dir / "backed.csv"
+        backed.write_text("a\n1\n", encoding="utf-8")
+        virtual_missing_path = tracker.run_dir / "virtual_table.parquet"
+        tracker.log_artifact(
+            virtual_missing_path,
+            key="virtual_ingested",
+            direction="output",
+            driver="parquet",
+            content_hash="deadbeef",
+            is_ingested=True,
+        )
+        return {"backed": backed}
+
+    result = tracker.run(
+        fn=step,
+        name="virtual_skip_step",
+        run_id="virtual_skip_run",
+        outputs=["backed", "virtual_ingested"],
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        output_policy=OutputPolicyOptions(
+            run_completion_archive=RunCompletionArchivePolicy(archive_root=archive_root)
+        ),
+    )
+
+    expected_root = str(archive_root.resolve())
+    assert result.outputs["backed"].meta.get("recovery_roots") == [expected_root]
+    assert "recovery_roots" not in (result.outputs["virtual_ingested"].meta or {})
+    assert (archive_root / "backed.csv").exists()
+
+
+def test_run_completion_archive_policy_does_not_perturb_cache_identity(
+    tracker,
+    tmp_path: Path,
+) -> None:
+    archive_a = tmp_path / "archive_a"
+    archive_b = tmp_path / "archive_b"
+
+    def step(ctx) -> dict[str, Path]:
+        out = ctx.run_dir / "id_check.csv"
+        out.write_text("v\n1\n", encoding="utf-8")
+        return {"out": out}
+
+    run1 = tracker.run(
+        fn=step,
+        name="identity_step",
+        run_id="identity_run_1",
+        outputs=["out"],
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        output_policy=OutputPolicyOptions(
+            run_completion_archive=RunCompletionArchivePolicy(archive_root=archive_a)
+        ),
+    )
+    run2 = tracker.run(
+        fn=step,
+        name="identity_step",
+        run_id="identity_run_2",
+        outputs=["out"],
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        output_policy=OutputPolicyOptions(
+            run_completion_archive=RunCompletionArchivePolicy(archive_root=archive_b)
+        ),
+    )
+
+    assert run1.cache_hit is False
+    assert run2.cache_hit is True
+    assert run1.run.config_hash == run2.run.config_hash
+    assert run1.run.input_hash == run2.run.input_hash
+    assert run1.run.git_hash == run2.run.git_hash
+    assert run2.outputs["out"].meta.get("recovery_roots") == [
+        str(archive_a.resolve()),
+        str(archive_b.resolve()),
+    ]

@@ -13,7 +13,13 @@ from consist.core.config_canonicalization import (
 )
 from consist.core.tracker import Tracker
 from consist.core.workflow import RunContext
-from consist.types import CacheOptions, ExecutionOptions, OutputSet
+from consist.types import (
+    CacheOptions,
+    ExecutionOptions,
+    OutputPolicyOptions,
+    OutputSet,
+    RunCompletionArchivePolicy,
+)
 
 
 def _dummy_config_plan(
@@ -706,3 +712,124 @@ def test_scenario_run_accepts_output_sets(tracker: Tracker) -> None:
 
         assert result.outputs["annual_outputs"].driver == "artifact_set"
         assert sc.coupler["annual_outputs"].driver == "artifact_set"
+
+
+def test_scenario_step_run_completion_archive_default_and_override(
+    tracker: Tracker, tmp_path: Path
+) -> None:
+    default_archive = tmp_path / "scenario_default_archive"
+    override_archive = tmp_path / "step_override_archive"
+
+    with pytest.raises(
+        TypeError,
+        match="step_run_completion_archive must be a RunCompletionArchivePolicy",
+    ):
+        with tracker.scenario(
+            "bad_archive_scen",
+            step_run_completion_archive="/tmp/not_policy",  # type: ignore[arg-type]
+        ):
+            pass
+
+    def step_one(ctx) -> dict[str, Path]:
+        p = ctx.run_dir / "step_one.csv"
+        p.write_text("a\n1\n", encoding="utf-8")
+        return {"one": p}
+
+    def step_two(ctx) -> dict[str, Path]:
+        p = ctx.run_dir / "step_two.csv"
+        p.write_text("b\n2\n", encoding="utf-8")
+        return {"two": p}
+
+    with tracker.scenario(
+        "scen_archive_default",
+        step_run_completion_archive=RunCompletionArchivePolicy(
+            archive_root=default_archive
+        ),
+    ) as sc:
+        res1 = sc.run(
+            fn=step_one,
+            name="step_one",
+            outputs=["one"],
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+        res2 = sc.run(
+            fn=step_two,
+            name="step_two",
+            outputs=["two"],
+            execution_options=ExecutionOptions(inject_context="ctx"),
+            output_policy=OutputPolicyOptions(
+                run_completion_archive=RunCompletionArchivePolicy(
+                    archive_root=override_archive
+                )
+            ),
+        )
+
+        assert res1.outputs["one"].meta.get("recovery_roots") == [
+            str(default_archive.resolve())
+        ]
+        assert res2.outputs["two"].meta.get("recovery_roots") == [
+            str(override_archive.resolve())
+        ]
+        assert sc.coupler["one"].meta.get("recovery_roots") == [
+            str(default_archive.resolve())
+        ]
+        assert sc.coupler["two"].meta.get("recovery_roots") == [
+            str(override_archive.resolve())
+        ]
+
+    assert Path(
+        tracker.fs.resolve_historical_path(
+            res1.outputs["one"].container_uri, default_archive
+        )
+    ).exists()
+    assert Path(
+        tracker.fs.resolve_historical_path(
+            res2.outputs["two"].container_uri, override_archive
+        )
+    ).exists()
+    assert tracker.last_run is not None
+    header_outputs = {art.key: art for art in tracker.last_run.outputs}
+    assert header_outputs["one"].meta.get("recovery_roots") == [
+        str(default_archive.resolve())
+    ]
+    assert header_outputs["two"].meta.get("recovery_roots") == [
+        str(override_archive.resolve())
+    ]
+
+
+def test_run_completion_archive_policy_failure_aborts_run_and_prevents_coupler_update(
+    tracker: Tracker, tmp_path: Path, monkeypatch
+) -> None:
+    archive_root = tmp_path / "failing_archive"
+
+    def step(ctx) -> dict[str, Path]:
+        p = ctx.run_dir / "will_fail_archive.csv"
+        p.write_text("x\n1\n", encoding="utf-8")
+        return {"failing_out": p}
+
+    def boom_archive(*args, **kwargs):
+        raise RuntimeError("simulated archive storage failure")
+
+    monkeypatch.setattr(tracker, "archive_current_run_outputs", boom_archive)
+
+    with pytest.raises(RuntimeError, match="simulated archive storage failure"):
+        with tracker.scenario(
+            "scen_archive_fail",
+            step_run_completion_archive=RunCompletionArchivePolicy(
+                archive_root=archive_root
+            ),
+        ) as sc:
+            sc.run(
+                fn=step,
+                name="fail_step",
+                run_id="scen_archive_fail_step",
+                outputs=["failing_out"],
+                execution_options=ExecutionOptions(inject_context="ctx"),
+            )
+
+    assert "failing_out" not in sc.coupler
+    failed_run = tracker.get_run("scen_archive_fail_step")
+    assert failed_run is not None
+    assert failed_run.status == "failed"
+    post_snapshot = tracker.get_coupler_snapshot("scen_archive_fail", phase="post")
+    assert "failing_out" not in post_snapshot

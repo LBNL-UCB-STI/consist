@@ -27,6 +27,7 @@ from consist.types import (
     OutputPathRef,
     OutputSet,
     PathLike,
+    RunCompletionArchivePolicy,
     RunInputRef,
 )
 
@@ -148,6 +149,7 @@ class ResolvedRunInvocation:
     code_identity_extra_deps: Optional[List[str]]
     output_mismatch: Literal["warn", "error", "ignore"]
     output_missing: Literal["warn", "error", "ignore"]
+    run_completion_archive: Optional[RunCompletionArchivePolicy]
     input_binding: InputBindingMode
     load_inputs: Optional[bool]
     input_paths: Optional[Mapping[str, PathLike]]
@@ -378,6 +380,7 @@ def resolve_run_invocation(
     code_identity_extra_deps = merged_options.code_identity_extra_deps
     output_mismatch = merged_options.output_mismatch
     output_missing = merged_options.output_missing
+    run_completion_archive = merged_options.run_completion_archive
     input_binding = merged_options.input_binding
     load_inputs = merged_options.load_inputs
     requested_input_paths = merged_options.input_paths
@@ -688,6 +691,27 @@ def resolve_run_invocation(
                 ),
             )
         )
+    if run_completion_archive is not None and not isinstance(
+        run_completion_archive, RunCompletionArchivePolicy
+    ):
+        raise TypeError(
+            format_problem_cause_fix(
+                problem=(
+                    "output_policy.run_completion_archive must be a "
+                    "RunCompletionArchivePolicy instance or None. "
+                    f"Received {type(run_completion_archive).__name__}."
+                ),
+                cause=(
+                    "An invalid object was supplied for run-completion output "
+                    "archival policy."
+                ),
+                fix=(
+                    "Pass output_policy=OutputPolicyOptions("
+                    "run_completion_archive=RunCompletionArchivePolicy("
+                    "archive_root=...))."
+                ),
+            )
+        )
 
     resolved_input_binding = _resolve_input_binding(
         explicit_input_binding=resolved.input_binding,
@@ -758,6 +782,7 @@ def resolve_run_invocation(
         ),
         output_mismatch=output_mismatch,
         output_missing=output_missing,
+        run_completion_archive=run_completion_archive,
         input_binding=resolved_input_binding,
         load_inputs=resolved.load_inputs,
         input_paths=(

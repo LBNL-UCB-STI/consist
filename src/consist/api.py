@@ -88,6 +88,7 @@ from consist.types import (
     IdentityInputs,
     OutputPolicyOptions,
     OutputSet,
+    RunCompletionArchivePolicy,
 )
 
 if TYPE_CHECKING:
@@ -492,6 +493,7 @@ def scenario(
     enabled: bool = True,
     step_tags: Optional[list[str]] = None,
     step_facet: Optional[dict[str, Any]] = None,
+    step_run_completion_archive: Optional[RunCompletionArchivePolicy] = None,
     **kwargs: Any,
 ):
     """
@@ -521,6 +523,9 @@ def scenario(
         ``scenario.trace(...)`` calls. These defaults do not apply to the
         scenario header run itself, and per-step ``facet=...`` values take
         precedence on key collisions.
+    step_run_completion_archive : Optional[RunCompletionArchivePolicy], optional
+        Default run-completion archive policy applied to child ``scenario.run(...)``
+        calls unless overridden by a step's ``output_policy.run_completion_archive``.
     **kwargs : Any
         Additional metadata (e.g., tags, config) forwarded to the header run.
 
@@ -534,6 +539,7 @@ def scenario(
             name,
             step_tags=step_tags,
             step_facet=step_facet,
+            step_run_completion_archive=step_run_completion_archive,
             **kwargs,
         )
         return
@@ -542,6 +548,7 @@ def scenario(
         name,
         step_tags=step_tags,
         step_facet=step_facet,
+        step_run_completion_archive=step_run_completion_archive,
         **kwargs,
     ) as sc:
         yield sc

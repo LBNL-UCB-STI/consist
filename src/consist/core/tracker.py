@@ -142,6 +142,7 @@ from consist.types import (
     OutputPolicyOptions,
     OutputPathRef,
     OutputSet,
+    RunCompletionArchivePolicy,
     RunInputRef,
 )
 
@@ -2223,6 +2224,7 @@ class Tracker:
         step_tags: Optional[List[str]] = None,
         step_facet: Optional[Dict[str, Any]] = None,
         step_cache_hydration: Optional[str] = None,
+        step_run_completion_archive: Optional[RunCompletionArchivePolicy] = None,
         name_template: Optional[str] = None,
         cache_epoch: Optional[int] = None,
         coupler: Optional["Coupler"] = None,
@@ -2265,6 +2267,9 @@ class Tracker:
         step_cache_hydration : Optional[str], optional
             Default cache hydration policy for all scenario steps unless overridden
             in a specific `scenario.trace(...)` or `scenario.run(...)`.
+        step_run_completion_archive : Optional[RunCompletionArchivePolicy], optional
+            Default run-completion archive policy for all `scenario.run(...)` steps
+            unless overridden via per-step `output_policy.run_completion_archive`.
         name_template : Optional[str], optional
             Optional step name template applied when scenario.run() is called without
             an explicit name and no step-level template is provided.
@@ -2305,6 +2310,7 @@ class Tracker:
             step_tags=step_tags,
             step_facet=step_facet,
             step_cache_hydration=step_cache_hydration,
+            step_run_completion_archive=step_run_completion_archive,
             name_template=name_template,
             cache_epoch=cache_epoch,
             coupler=coupler,

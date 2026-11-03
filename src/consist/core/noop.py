@@ -28,7 +28,7 @@ from consist.core.output_sets import (
 )
 from consist.core.validation import validate_artifact_key
 from consist.protocols import TrackerLike
-from consist.types import ExecutionOptions, OutputSet
+from consist.types import ExecutionOptions, OutputSet, RunCompletionArchivePolicy
 
 from consist.models.run import Run, CouplerSnapshotPhase
 from consist.core.workflow import RestoredCouplerSnapshotResult
@@ -242,11 +242,13 @@ class NoopScenarioContext:
         self,
         name: str,
         *,
+        step_run_completion_archive: Optional[RunCompletionArchivePolicy] = None,
         resume_from_run_id: Optional[str] = None,
         resume_phase: CouplerSnapshotPhase = "post",
         **kwargs: Any,
     ) -> None:
         self.name = name
+        self.step_run_completion_archive = step_run_completion_archive
         self.resume_from_run_id = resume_from_run_id
         self.resume_phase = resume_phase
         self.kwargs = kwargs

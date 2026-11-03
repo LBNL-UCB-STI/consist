@@ -11,6 +11,7 @@ from consist.types import (
     InputBindingMode,
     OutputPolicyOptions,
     PathLike,
+    RunCompletionArchivePolicy,
 )
 
 
@@ -77,6 +78,8 @@ class ResolvedRunOptions:
         Policy applied when declared outputs differ from returned outputs.
     output_missing : str | None
         Policy applied when a declared output is absent after execution.
+    run_completion_archive : RunCompletionArchivePolicy | None
+        Optional synchronous run-completion output archival policy.
     input_binding : InputBindingMode | None
         Input-to-callable binding policy.
     load_inputs : bool | None
@@ -111,16 +114,17 @@ class ResolvedRunOptions:
     code_identity_extra_deps: Optional[list[str]]
     output_mismatch: Optional[str]
     output_missing: Optional[str]
-    input_binding: Optional[InputBindingMode]
-    load_inputs: Optional[bool]
-    input_paths: Optional[Mapping[str, Any]]
-    input_materialization: Optional[Literal["requested"]]
-    input_materialization_mode: Optional[Literal["copy"]]
-    requested_input_artifact_ids: Optional[Mapping[str, str]]
-    executor: Optional[str]
-    container: Optional[Mapping[str, Any]]
-    runtime_kwargs: Optional[Mapping[str, Any]]
-    inject_context: Optional[Union[bool, str]]
+    run_completion_archive: Optional[RunCompletionArchivePolicy] = None
+    input_binding: Optional[InputBindingMode] = None
+    load_inputs: Optional[bool] = None
+    input_paths: Optional[Mapping[str, Any]] = None
+    input_materialization: Optional[Literal["requested"]] = None
+    input_materialization_mode: Optional[Literal["copy"]] = None
+    requested_input_artifact_ids: Optional[Mapping[str, str]] = None
+    executor: Optional[str] = None
+    container: Optional[Mapping[str, Any]] = None
+    runtime_kwargs: Optional[Mapping[str, Any]] = None
+    inject_context: Optional[Union[bool, str]] = None
 
 
 def raise_legacy_policy_kwargs_error(
@@ -221,6 +225,7 @@ def merge_run_options(
         code_identity_extra_deps=cache_obj.code_identity_extra_deps,
         output_mismatch=output_obj.output_mismatch,
         output_missing=output_obj.output_missing,
+        run_completion_archive=output_obj.run_completion_archive,
         input_binding=exec_obj.input_binding,
         load_inputs=exec_obj.load_inputs,
         input_paths=exec_obj.input_paths,

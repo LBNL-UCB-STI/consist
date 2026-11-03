@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import Enum
+import os
 from pathlib import Path
 import re
 from typing import (
@@ -128,6 +129,47 @@ class CacheOptions:
 
 
 @dataclass(frozen=True, slots=True)
+class RunCompletionArchivePolicy:
+    """
+    Synchronous run-completion output archival policy.
+
+    When attached to ``OutputPolicyOptions.run_completion_archive``, Consist
+    archives all filesystem-backed outputs of the run (including ``OutputSet``
+    parents, members, and manifests, and ``directory_artifact`` trees) into
+    ``archive_root`` and verifies ``artifact.meta['recovery_roots']`` *before*
+    marking the run as completed or publishing outputs to a ``ScenarioContext``
+    coupler.
+
+    On cache hits, Consist ensures all returned outputs are present and
+    registered under ``archive_root`` before returning the ``RunResult``.
+
+    Attributes
+    ----------
+    archive_root : PathLike
+        Filesystem root directory under which URI-relative output layouts are
+        replicated and registered in ``artifact.meta['recovery_roots']``.
+    mode : {"copy"}, default "copy"
+        Filesystem operation mode. Only ``"copy"`` is permitted for automatic
+        run-completion archival so workspace outputs remain available to
+        downstream consumers.
+    """
+
+    archive_root: PathLike
+    mode: Literal["copy"] = "copy"
+
+    def __post_init__(self) -> None:
+        if self.mode != "copy":
+            raise ValueError(
+                f"RunCompletionArchivePolicy.mode must be 'copy'; got {self.mode!r}."
+            )
+        normalized_root = os.fspath(self.archive_root).strip()
+        if not normalized_root:
+            raise ValueError(
+                "RunCompletionArchivePolicy.archive_root must be a non-empty path."
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class OutputPolicyOptions:
     """
     Grouped output policy options for ``run(...)`` APIs.
@@ -135,6 +177,7 @@ class OutputPolicyOptions:
 
     output_mismatch: Optional[Literal["warn", "error", "ignore"]] = None
     output_missing: Optional[Literal["warn", "error", "ignore"]] = None
+    run_completion_archive: Optional[RunCompletionArchivePolicy] = None
 
 
 @dataclass(frozen=True, slots=True)
