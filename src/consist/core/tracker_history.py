@@ -40,26 +40,11 @@ class TrackerHistoryService(_TrackerServiceBase):
         if not run:
             return Path(self.resolve_uri(artifact.container_uri))
 
-        old_dir = run.meta.get("_physical_run_dir") if run.meta else None
-        raw_mounts = run.meta.get("mounts") if run.meta else None
-        mounts_snapshot = (
-            {str(k): str(v) for k, v in raw_mounts.items() if isinstance(v, str)}
-            if isinstance(raw_mounts, dict)
-            else None
+        resolved = self.fs.resolve_historical_artifact_path(
+            artifact, run, fallback_to_current_uri=True
         )
-        raw_mount_root = (
-            artifact.meta.get("mount_root") if isinstance(artifact.meta, dict) else None
-        )
-        artifact_mount_root = (
-            raw_mount_root if isinstance(raw_mount_root, str) else None
-        )
-        path_str = self.fs.resolve_historical_path(
-            artifact.container_uri,
-            old_dir,
-            mounts_snapshot=mounts_snapshot,
-            artifact_mount_root=artifact_mount_root,
-        )
-        return Path(path_str)
+        assert resolved is not None
+        return resolved
 
     def resolve_canonical_run_id(
         self,

@@ -1018,3 +1018,96 @@ def test_archive_scalar_skips_or_rejects_in_place_modified_workspace_source(
         tracker.archive_run_outputs(
             "usim_unarchived", tmp_path / "archive_3", mode="copy"
         )
+
+
+def test_run_completion_archive_policy_replaces_stale_step_archive_root_in_move_mode(
+    tmp_path: Path,
+) -> None:
+    """Re-running a multi-output step with mode='move' into a preexisting archive root preserves all outputs when a later output conflicts."""
+    run_dir = tmp_path / "runs"
+    workspace = tmp_path / "workspace"
+    run_dir.mkdir(parents=True)
+    workspace.mkdir(parents=True)
+    tracker = Tracker(
+        run_dir=run_dir,
+        db_path=str(tmp_path / "provenance.duckdb"),
+        mounts={"workspace": str(workspace)},
+    )
+    archive_root = tmp_path / "consist-recovery" / "step_move_replace"
+
+    out_first = workspace / "asim" / "first_new.csv"
+    out_second = workspace / "asim" / "second_conflict.csv"
+
+    with tracker.start_run("move_step_run_1", model="move_step"):
+        out_second.parent.mkdir(parents=True, exist_ok=True)
+        out_second.write_bytes(b"v1-bytes\n")
+        tracker.log_output(out_second, key="second")
+        tracker._archive_service.archive_current_run_outputs_for_completion_policy(
+            archive_root, mode="move"
+        )
+
+    assert (archive_root / "asim" / "second_conflict.csv").read_bytes() == b"v1-bytes\n"
+    assert not out_second.exists()
+
+    with tracker.start_run("move_step_run_2", model="move_step", config={"attempt": 2}):
+        out_first.parent.mkdir(parents=True, exist_ok=True)
+        out_first.write_bytes(b"first-v2-bytes\n")
+        out_second.write_bytes(b"v2-different-bytes\n")
+        tracker.log_output(out_first, key="first")
+        tracker.log_output(out_second, key="second")
+        tracker._archive_service.archive_current_run_outputs_for_completion_policy(
+            archive_root, mode="move"
+        )
+
+    expected_root = str(archive_root.resolve())
+    run_2_outputs = tracker.get_run_outputs("move_step_run_2")
+    assert run_2_outputs["first"].meta["recovery_roots"] == [expected_root]
+    assert run_2_outputs["second"].meta["recovery_roots"] == [expected_root]
+    assert (archive_root / "asim" / "first_new.csv").read_bytes() == b"first-v2-bytes\n"
+    assert (
+        archive_root / "asim" / "second_conflict.csv"
+    ).read_bytes() == b"v2-different-bytes\n"
+    assert not out_first.exists()
+    assert not out_second.exists()
+
+
+def test_archive_shapefile_bundle_skips_in_place_modified_workspace_sidecar(
+    tmp_path: Path,
+) -> None:
+    """Archiving a Shapefile bundle whose workspace sidecar was modified in place falls back to an intact recovery root."""
+    run_dir = tmp_path / "runs"
+    workspace = tmp_path / "workspace"
+    run_dir.mkdir(parents=True)
+    workspace.mkdir(parents=True)
+    tracker = Tracker(
+        run_dir=run_dir,
+        db_path=str(tmp_path / "provenance.duckdb"),
+        mounts={"workspace": str(workspace)},
+    )
+
+    bundle_dir = workspace / "gis" / "zones_bundle"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    shp_path = bundle_dir / "zones.shp"
+    shx_path = bundle_dir / "zones.shx"
+    dbf_path = bundle_dir / "zones.dbf"
+    shp_path.write_bytes(b"shp-v1")
+    shx_path.write_bytes(b"shx-v1")
+    dbf_path.write_bytes(b"dbf-v1")
+
+    with tracker.start_run("gis_export", model="gis"):
+        tracker.log_output(shp_path, key="zones", driver="shapefile")
+
+    archive_1 = tmp_path / "archive_1"
+    tracker.archive_run_outputs("gis_export", archive_1, mode="copy")
+    assert (
+        archive_1 / "gis" / "zones_bundle" / "zones.shp" / "zones.dbf"
+    ).read_bytes() == b"dbf-v1"
+
+    # Mutate the workspace .dbf sidecar in place
+    dbf_path.write_bytes(b"dbf-mutated-in-place")
+
+    archive_2 = tmp_path / "archive_2"
+    tracker.archive_run_outputs("gis_export", archive_2, mode="copy")
+    assert (
+        archive_2 / "gis" / "zones_bundle" / "zones.shp" / "zones.dbf"
+    ).read_bytes() == b"dbf-v1"

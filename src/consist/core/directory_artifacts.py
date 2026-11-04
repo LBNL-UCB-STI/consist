@@ -356,6 +356,54 @@ def get_validated_directory_manifest(artifact: Artifact) -> dict[str, Any] | Non
     return normalized
 
 
+def require_directory_artifact_manifest(artifact: Artifact) -> dict[str, Any]:
+    """Return validated directory manifest for ``artifact`` or raise ``ValueError``."""
+    meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
+    manifest = meta.get("directory_manifest")
+    if not isinstance(manifest, Mapping):
+        raise ValueError(
+            f"directory artifact {artifact.key!r} has no persisted manifest"
+        )
+    normalized = validate_directory_manifest(manifest)
+    if artifact.hash != normalized["tree_hash"]:
+        raise ValueError(
+            f"directory artifact {artifact.key!r} manifest does not match artifact identity"
+        )
+    return normalized
+
+
+def require_shapefile_bundle_metadata(
+    artifact: Artifact,
+    *,
+    fallback_uri_name: bool = False,
+) -> tuple[str, dict[str, Any]]:
+    """Return validated ``(entry_name, manifest)`` for a Shapefile bundle artifact."""
+    meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
+    fallback: str | None = None
+    if fallback_uri_name:
+        uri = artifact.container_uri or ""
+        uri_path = uri.split("://", 1)[-1] if "://" in uri else uri
+        fallback = Path(uri_path).name or None
+    entry = file_bundle_entry_name(artifact, fallback=fallback)
+    if entry is None:
+        raise ValueError(
+            f"shapefile bundle artifact {artifact.key!r} has no valid entry"
+        )
+    manifest = (
+        meta.get("file_bundle_manifest") or meta.get("directory_manifest")
+        if fallback_uri_name
+        else meta.get("file_bundle_manifest")
+    )
+    if not isinstance(manifest, Mapping):
+        raise ValueError(f"shapefile bundle artifact {artifact.key!r} has no manifest")
+    normalized = validate_directory_manifest(manifest)
+    if artifact.hash != normalized["tree_hash"]:
+        raise ValueError(
+            f"shapefile bundle artifact {artifact.key!r} manifest does not match artifact identity"
+        )
+    return entry, normalized
+
+
 def is_valid_directory_artifact_tree(path: Path, artifact: Artifact) -> bool | None:
     """Validate ``path`` against ``artifact``'s directory manifest, if present.
 
@@ -380,6 +428,35 @@ def is_valid_directory_artifact_tree(path: Path, artifact: Artifact) -> bool | N
             Path(path),
             manifest,
             allow_extra_files=directory_allows_extra_files(artifact),
+        )
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def is_valid_shapefile_bundle_source(path: Path, artifact: Artifact) -> bool | None:
+    """Validate ``path`` against ``artifact``'s Shapefile bundle manifest, if present.
+
+    Returns:
+      - ``None`` if ``artifact`` is not a file-bundle artifact.
+      - ``True`` if ``path`` resolves to a bundle root that satisfies
+        ``validate_shapefile_bundle_root``.
+      - ``False`` if ``artifact`` is a file-bundle artifact and ``path`` is
+        missing, corrupted, contains missing/duplicate sidecars or symlinks,
+        or has invalid bundle metadata.
+    """
+    if not is_file_bundle_artifact(artifact):
+        return None
+    try:
+        entry, manifest = require_shapefile_bundle_metadata(
+            artifact, fallback_uri_name=True
+        )
+        bundle_root = resolve_file_bundle_root(Path(path))
+        validate_shapefile_bundle_root(
+            bundle_root,
+            entry,
+            manifest,
+            require_clean_root=False,
         )
     except (OSError, ValueError):
         return False

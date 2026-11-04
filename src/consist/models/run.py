@@ -8,6 +8,7 @@ in-memory snapshot helpers used to serialize full run records.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Sequence
@@ -646,6 +647,15 @@ def resolve_run_result_output(
     )
 
 
+@dataclass(slots=True)
+class _PendingOutputMetaEntry:
+    """In-flight output metadata queued by ``set_output_meta(...)``."""
+
+    meta: Dict[str, Any]
+    merge: bool = True
+    applied_object_ids: set[int] = field(default_factory=set)
+
+
 class ConsistRecord(SQLModel):
     """
     A comprehensive record of a run, acting as the primary log entry.
@@ -677,9 +687,7 @@ class ConsistRecord(SQLModel):
     # This is included in the per-run `consist.json` snapshot for inspection/debugging.
     facet: Dict[str, Any] = PydanticField(default_factory=dict)
 
-    _pending_output_meta: Dict[str, Dict[str, Any]] = PrivateAttr(default_factory=dict)
-    _pending_output_meta_replace_keys: set[str] = PrivateAttr(default_factory=set)
-    _pending_output_meta_applied_object_ids: Dict[str, set[int]] = PrivateAttr(
+    _pending_output_meta: Dict[str, _PendingOutputMetaEntry] = PrivateAttr(
         default_factory=dict
     )
     _pending_archive_policy: Any = PrivateAttr(default=None)

@@ -1,7 +1,55 @@
 import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
-from typing import Optional, Union, Dict, cast
+from typing import Any, Dict, Optional, Union, cast
+
+
+def resolve_historical_artifact_path(
+    fs: Any,
+    artifact: Any,
+    run: Any,
+    *,
+    fallback_to_current_uri: bool = True,
+) -> Optional[Path]:
+    """Resolve an artifact's historical path using metadata from ``run`` and ``artifact``."""
+    run_meta = run.meta if run is not None and isinstance(run.meta, Mapping) else {}
+    original_run_dir_raw = run_meta.get("_physical_run_dir")
+    original_run_dir = (
+        original_run_dir_raw
+        if isinstance(original_run_dir_raw, str) and original_run_dir_raw
+        else None
+    )
+    raw_mounts = run_meta.get("mounts")
+    mounts_snapshot = (
+        {
+            str(k): str(v)
+            for k, v in raw_mounts.items()
+            if isinstance(k, str) and isinstance(v, str)
+        }
+        if isinstance(raw_mounts, Mapping)
+        else None
+    )
+    artifact_meta = (
+        artifact.meta
+        if artifact is not None and isinstance(artifact.meta, Mapping)
+        else {}
+    )
+    raw_mount_root = artifact_meta.get("mount_root")
+    artifact_mount_root = (
+        raw_mount_root if isinstance(raw_mount_root, str) and raw_mount_root else None
+    )
+    if not fallback_to_current_uri and not (
+        original_run_dir or mounts_snapshot or artifact_mount_root
+    ):
+        return None
+    return Path(
+        fs.resolve_historical_path(
+            artifact.container_uri,
+            original_run_dir,
+            mounts_snapshot=mounts_snapshot,
+            artifact_mount_root=artifact_mount_root,
+        )
+    )
 
 
 class FileSystemManager:
@@ -235,6 +283,21 @@ class FileSystemManager:
         # If it's "inputs://data.csv" and "inputs" points to a shared /data drive
         # that is mounted in the current config, standard resolution works fine.
         return self.resolve_uri(uri)
+
+    def resolve_historical_artifact_path(
+        self,
+        artifact: Any,
+        run: Any,
+        *,
+        fallback_to_current_uri: bool = True,
+    ) -> Optional[Path]:
+        """Resolve an artifact's historical path using metadata from ``run`` and ``artifact``."""
+        return resolve_historical_artifact_path(
+            self,
+            artifact,
+            run,
+            fallback_to_current_uri=fallback_to_current_uri,
+        )
 
     @staticmethod
     def normalize_recovery_roots(

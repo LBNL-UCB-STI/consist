@@ -954,18 +954,12 @@ class RunTraceCoordinator:
     ) -> None:
         if current_consist is None or tracker.is_cached:
             return
-        pending_meta_by_key: Dict[str, Dict[str, Any]] = (
-            current_consist._pending_output_meta
-        )
+        pending_meta_by_key = current_consist._pending_output_meta
         if not pending_meta_by_key:
             return
-        replace_keys: set[str] = current_consist._pending_output_meta_replace_keys
-        applied_object_ids: Dict[str, set[int]] = (
-            current_consist._pending_output_meta_applied_object_ids
-        )
 
         updated_any = False
-        for key, pending_meta in list(pending_meta_by_key.items()):
+        for key, entry in list(pending_meta_by_key.items()):
             candidates: list[Artifact] = [
                 recorded for recorded in current_consist.outputs if recorded.key == key
             ]
@@ -977,12 +971,9 @@ class RunTraceCoordinator:
             if not candidates:
                 continue
 
-            already_applied = applied_object_ids.get(key, set())
-            unapplied = [c for c in candidates if id(c) not in already_applied]
+            unapplied = [c for c in candidates if id(c) not in entry.applied_object_ids]
             if not unapplied:
                 pending_meta_by_key.pop(key, None)
-                replace_keys.discard(key)
-                applied_object_ids.pop(key, None)
                 continue
 
             primary_art = unapplied[-1]
@@ -993,8 +984,8 @@ class RunTraceCoordinator:
 
             merged_meta = merge_artifact_output_meta(
                 existing_meta,
-                pending_meta,
-                merge=(key not in replace_keys),
+                entry.meta,
+                merge=entry.merge,
             )
 
             for candidate in candidates:
@@ -1002,8 +993,6 @@ class RunTraceCoordinator:
             if tracker.db is not None:
                 tracker.db.update_artifact_meta(primary_art, dict(merged_meta))
             pending_meta_by_key.pop(key, None)
-            replace_keys.discard(key)
-            applied_object_ids.pop(key, None)
             updated_any = True
 
         if updated_any:
@@ -1050,15 +1039,11 @@ class RunTraceCoordinator:
                     and not tracker.is_cached
                     and output_key in tracker.current_consist._pending_output_meta
                 ):
-                    pending_meta = tracker.current_consist._pending_output_meta[
+                    pending_entry = tracker.current_consist._pending_output_meta[
                         output_key
                     ]
-                    replace_meta = (
-                        output_key
-                        in tracker.current_consist._pending_output_meta_replace_keys
-                    )
                     if (
-                        replace_meta
+                        not pending_entry.merge
                         and isinstance(ref, OutputArtifactSpec)
                         and ref.meta
                     ):
@@ -1072,10 +1057,10 @@ class RunTraceCoordinator:
                         "directory_artifact",
                         "directory_allow_extra_files",
                     ):
-                        if dir_flag in pending_meta and isinstance(
-                            pending_meta[dir_flag], bool
+                        if dir_flag in pending_entry.meta and isinstance(
+                            pending_entry.meta[dir_flag], bool
                         ):
-                            log_kwargs[dir_flag] = pending_meta[dir_flag]
+                            log_kwargs[dir_flag] = pending_entry.meta[dir_flag]
                 if isinstance(output_ref, Artifact):
                     outputs_map[output_key] = tracker.log_artifact(
                         output_ref,

@@ -379,13 +379,6 @@ def _requested_output_destinations(
     return destinations
 
 
-def _resolve_hydrated_artifact_abs_path(
-    artifact: Artifact,
-    hydrated_path: str | Path,
-) -> str:
-    return resolve_artifact_entry_path(artifact, hydrated_path)
-
-
 def _remove_candidate_destination(destination: Path) -> None:
     if not destination.exists() or destination.is_symlink():
         return
@@ -1002,13 +995,13 @@ def hydrate_cache_hit_outputs(
             for output_artifact in record.outputs:
                 hydrated_path = materialized_outputs.get(output_artifact.key)
                 if isinstance(hydrated_path, str) and hydrated_path:
-                    output_artifact.abs_path = _resolve_hydrated_artifact_abs_path(
+                    output_artifact.abs_path = resolve_artifact_entry_path(
                         output_artifact, hydrated_path
                     )
             for key, output_artifact in cached_items.outputs.items():
                 hydrated_path = materialized_outputs.get(key)
                 if isinstance(hydrated_path, str) and hydrated_path:
-                    output_artifact.abs_path = _resolve_hydrated_artifact_abs_path(
+                    output_artifact.abs_path = resolve_artifact_entry_path(
                         output_artifact, hydrated_path
                     )
 
@@ -1034,7 +1027,7 @@ def hydrate_cache_hit_outputs(
                 except Exception:
                     rel_path = None
                 if rel_path is not None and (out_dir / rel_path).exists():
-                    output_artifact.abs_path = _resolve_hydrated_artifact_abs_path(
+                    output_artifact.abs_path = resolve_artifact_entry_path(
                         output_artifact, out_dir / rel_path
                     )
         elif active_options.cache_hydration == "outputs-requested":
@@ -1047,7 +1040,7 @@ def hydrate_cache_hit_outputs(
                     continue
                 req_dest = requested_dests.get(output_artifact.key)
                 if req_dest is not None and Path(req_dest).exists():
-                    output_artifact.abs_path = _resolve_hydrated_artifact_abs_path(
+                    output_artifact.abs_path = resolve_artifact_entry_path(
                         output_artifact, req_dest
                     )
             for set_key, set_root in (
@@ -1434,44 +1427,17 @@ def materialize_requested_inputs(
                 return abs_path
 
         if tracker.db is not None and artifact.run_id:
+            from consist.core.fs import resolve_historical_artifact_path
+
             run_id = str(artifact.run_id)
             if run_id not in run_cache:
                 run_cache[run_id] = tracker.db.get_run(run_id)
             prior_run = run_cache.get(run_id)
-            prior_meta = (
-                prior_run.meta
-                if prior_run is not None and isinstance(prior_run.meta, Mapping)
-                else {}
+            historical = resolve_historical_artifact_path(
+                tracker.fs, artifact, prior_run, fallback_to_current_uri=False
             )
-            original_run_dir = prior_meta.get("_physical_run_dir")
-            mounts_snapshot_raw = prior_meta.get("mounts")
-            mounts_snapshot = (
-                {
-                    str(k): str(v)
-                    for k, v in mounts_snapshot_raw.items()
-                    if isinstance(k, str) and isinstance(v, str)
-                }
-                if isinstance(mounts_snapshot_raw, Mapping)
-                else None
-            )
-            artifact_meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
-            mount_root_raw = artifact_meta.get("mount_root")
-            artifact_mount_root = (
-                mount_root_raw
-                if isinstance(mount_root_raw, str) and mount_root_raw
-                else None
-            )
-            if original_run_dir or mounts_snapshot or artifact_mount_root:
-                historical = Path(
-                    tracker.fs.resolve_historical_path(
-                        artifact.container_uri,
-                        original_run_dir if isinstance(original_run_dir, str) else None,
-                        mounts_snapshot=mounts_snapshot,
-                        artifact_mount_root=artifact_mount_root,
-                    )
-                )
-                if historical.exists():
-                    return historical
+            if historical is not None and historical.exists():
+                return historical
 
         return None
 

@@ -5908,19 +5908,23 @@ class Tracker:
         normalized = normalize_json(dict(meta))
         if not isinstance(normalized, dict):
             raise TypeError("meta must normalize to a JSON object mapping.")
-        if merge:
-            existing = dict(self.current_consist._pending_output_meta.get(key, {}))
-            existing.update(normalized)
-            self.current_consist._pending_output_meta[key] = existing
+        from consist.models.run import _PendingOutputMetaEntry
+
+        existing_entry = self.current_consist._pending_output_meta.get(key)
+        if merge and existing_entry is not None:
+            merged_pending = dict(existing_entry.meta)
+            merged_pending.update(normalized)
+            entry = _PendingOutputMetaEntry(
+                meta=merged_pending,
+                merge=existing_entry.merge,
+            )
         else:
-            self.current_consist._pending_output_meta[key] = dict(normalized)
-            self.current_consist._pending_output_meta_replace_keys.add(key)
-        self.current_consist._pending_output_meta_applied_object_ids[key] = set()
+            entry = _PendingOutputMetaEntry(meta=dict(normalized), merge=merge)
+        self.current_consist._pending_output_meta[key] = entry
 
         if self.is_cached:
             return
 
-        applied_ids = self.current_consist._pending_output_meta_applied_object_ids[key]
         from consist.models.artifact import merge_artifact_output_meta
 
         for art in self.current_consist.outputs:
@@ -5929,7 +5933,7 @@ class Tracker:
                 art.meta = merge_artifact_output_meta(
                     existing_art_meta, normalized, merge=merge
                 )
-                applied_ids.add(id(art))
+                entry.applied_object_ids.add(id(art))
                 if self.db is not None:
                     self.db.update_artifact_meta(art, dict(art.meta))
                 self._flush_json()
