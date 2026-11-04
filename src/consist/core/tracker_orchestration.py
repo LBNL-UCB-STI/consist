@@ -871,7 +871,9 @@ class RunTraceCoordinator:
             synced = synced_by_key.get(key)
             if synced is not None:
                 art.meta = dict(synced.meta or {})
-                if art.abs_path is None and synced.abs_path is not None:
+                if (
+                    effective_policy.mode == "move" or art.abs_path is None
+                ) and synced.abs_path is not None:
                     art.abs_path = synced.abs_path
             set_tracker_ref(art, tracker)
             refreshed_outputs[key] = art
@@ -1838,14 +1840,21 @@ class RunTraceCoordinator:
                     expected_keys.update(output_sets.keys())
                 missing = [k for k in expected_keys if k not in cached_outputs]
                 _handle_missing_outputs(f"Cache hit for run {resolved_name!r}", missing)
-                if expected_keys:
-                    outputs_map = {
-                        k: cached_outputs[k]
-                        for k in expected_keys
-                        if k in cached_outputs
-                    }
-                else:
-                    outputs_map = cached_outputs
+                outputs_map = {
+                    k: art
+                    for k, art in cached_outputs.items()
+                    if k in expected_keys
+                    or (
+                        outputs is None
+                        and not (
+                            isinstance(art.meta, Mapping)
+                            and (
+                                art.meta.get("output_set_member") is True
+                                or art.meta.get("output_set_manifest") is True
+                            )
+                        )
+                    )
+                }
                 run_result = RunResult(
                     run=current_consist.run,
                     outputs=outputs_map,

@@ -123,6 +123,8 @@ class TrackerArchiveService(_TrackerServiceBase):
     they do not change an artifact's canonical URI or identity.
     """
 
+    _active_archive_replace_backup: tuple[Path, Path] | None = None
+
     def _directory_archive_sort_key(
         self, index_and_item: tuple[int, tuple[str, Artifact]]
     ) -> tuple[int, int]:
@@ -229,7 +231,7 @@ class TrackerArchiveService(_TrackerServiceBase):
     def _sync_active_run_artifact_abs_path(
         self,
         artifact: Artifact,
-        abs_path: str,
+        abs_path: str | None,
         *,
         preserve_existing: bool = False,
     ) -> None:
@@ -457,6 +459,9 @@ class TrackerArchiveService(_TrackerServiceBase):
                 mode=mode,
                 append=append,
                 prepend_source_mount_root=prepend_source_mount_root,
+                _deferred_directory_source_removals=(
+                    _deferred_directory_source_removals
+                ),
             )
         if artifact.driver == "shapefile":
             raise ValueError(
@@ -483,32 +488,30 @@ class TrackerArchiveService(_TrackerServiceBase):
         source_path = self._find_scalar_archive_source(artifact)
 
         destination_preexisted = destination.exists()
+        matched_existing_destination = False
         moved_from: Path | None = None
         if destination.exists():
             if destination.is_symlink():
                 raise ValueError(
                     f"Symlink detected in archive destination: {destination}"
                 )
-            if destination.resolve() != source_path.resolve() and not (
-                self._is_matching_archive_file(source_path, destination)
-            ):
-                raise FileExistsError(
-                    f"Archive destination already exists: {destination}"
-                )
+            if destination.resolve() != source_path.resolve():
+                if not self._is_matching_archive_file(source_path, destination):
+                    raise FileExistsError(
+                        f"Archive destination already exists: {destination}"
+                    )
+                matched_existing_destination = True
         else:
             destination.parent.mkdir(parents=True, exist_ok=True)
             if source_path.resolve() != destination.resolve():
-                if mode == "copy":
-                    if source_path.is_dir():
-                        shutil.copytree(source_path, destination)
-                    else:
-                        shutil.copy2(source_path, destination)
-                        if file_sha256(destination) != file_sha256(source_path):
-                            destination.unlink(missing_ok=True)
-                            raise ValueError(
-                                f"Archived copy for artifact {artifact.key!r} failed "
-                                f"post-copy verification: {destination}"
-                            )
+                if mode == "copy" or _deferred_directory_source_removals is not None:
+                    shutil.copy2(source_path, destination)
+                    if file_sha256(destination) != file_sha256(source_path):
+                        destination.unlink(missing_ok=True)
+                        raise ValueError(
+                            f"Archived copy for artifact {artifact.key!r} failed "
+                            f"post-copy verification: {destination}"
+                        )
                 else:
                     moved_from = source_path
                     shutil.move(str(source_path), str(destination))
@@ -536,6 +539,13 @@ class TrackerArchiveService(_TrackerServiceBase):
             raise
 
         if mode == "move":
+            if _deferred_directory_source_removals is not None:
+                if source_path.resolve() != destination.resolve():
+                    _deferred_directory_source_removals.append(
+                        (source_path, destination)
+                    )
+            elif matched_existing_destination:
+                source_path.unlink(missing_ok=True)
             resolved_dest = str(destination.resolve())
             artifact.abs_path = resolved_dest
             self._sync_active_run_artifact_abs_path(artifact, resolved_dest)
@@ -653,6 +663,37 @@ class TrackerArchiveService(_TrackerServiceBase):
                     break
         if source_path is None and include_current_managed_uri:
             source_path = self._find_current_managed_uri_source(artifact)
+        if (
+            source_path is None
+            and run is not None
+            and self._active_archive_replace_backup is not None
+        ):
+            archive_root, backup_root = self._active_archive_replace_backup
+            has_archive_root = any(
+                Path(root).resolve() == archive_root
+                for root in self.fs.normalize_recovery_roots(
+                    (artifact.meta or {}).get("recovery_roots")
+                )
+            ) or (
+                isinstance(artifact.abs_path, str)
+                and bool(artifact.abs_path)
+                and Path(artifact.abs_path)
+                .expanduser()
+                .resolve()
+                .is_relative_to(archive_root)
+            )
+            if has_archive_root:
+                from consist.core.materialize import find_existing_recovery_source_path
+
+                _, source_path, _ = find_existing_recovery_source_path(
+                    self.tracker,
+                    artifact=artifact,
+                    run=run,
+                    source_root=backup_root,
+                    source_validator=source_validator,
+                    fallback_validator=fallback_validator,
+                    preserve_raw_paths=preserve_raw_paths,
+                )
         return source_path
 
     def _find_output_set_archive_source(
@@ -1462,6 +1503,7 @@ class TrackerArchiveService(_TrackerServiceBase):
         mode: Literal["copy", "move"],
         append: bool,
         prepend_source_mount_root: bool = True,
+        _deferred_directory_source_removals: list[tuple[Path, Path]] | None = None,
     ) -> Path:
         """Archive a verified Shapefile sidecar bundle as one atomic directory."""
         entry, manifest = _shapefile_bundle_metadata(artifact)
@@ -1510,7 +1552,13 @@ class TrackerArchiveService(_TrackerServiceBase):
         if mode == "move":
             if source_bundle_root.resolve() != destination.resolve():
                 for member in manifest["entries"]:
-                    (source_bundle_root / member["path"]).unlink(missing_ok=True)
+                    member_source = source_bundle_root / member["path"]
+                    if _deferred_directory_source_removals is not None:
+                        _deferred_directory_source_removals.append(
+                            (member_source, destination)
+                        )
+                    else:
+                        member_source.unlink(missing_ok=True)
             resolved_dest = resolve_artifact_entry_path(artifact, destination)
             artifact.abs_path = resolved_dest
             self._sync_active_run_artifact_abs_path(artifact, resolved_dest)
@@ -2565,7 +2613,10 @@ class TrackerArchiveService(_TrackerServiceBase):
                     source_path.exists()
                     and source_path.resolve() != destination.resolve()
                 ):
-                    shutil.rmtree(source_path)
+                    if source_path.is_dir():
+                        shutil.rmtree(source_path)
+                    else:
+                        source_path.unlink(missing_ok=True)
             for plan in output_set_plans.values():
                 self._remove_output_set_sources(plan)
         archived_paths = {key: archived_by_key[key] for key in selected}
@@ -2716,6 +2767,73 @@ class TrackerArchiveService(_TrackerServiceBase):
         if updated_any:
             self._run_artifacts_cache.clear()
 
+    def _archive_root_has_expected_layout(
+        self,
+        archive_root_path: Path,
+        outputs: Mapping[str, Artifact],
+    ) -> bool:
+        """Return whether ``archive_root_path`` has the exact file and directory layout for ``outputs`` with no symlinks or stale entries."""
+        try:
+            actual_files: set[Path] = set()
+            actual_dirs: set[Path] = set()
+            for path in archive_root_path.rglob("*"):
+                if path.is_symlink():
+                    return False
+                rel_path = path.relative_to(archive_root_path)
+                if path.is_file():
+                    actual_files.add(rel_path)
+                elif path.is_dir():
+                    actual_dirs.add(rel_path)
+                else:
+                    return False
+
+            expected_files: set[Path] = set()
+            expected_dirs: set[Path] = set()
+
+            def _add_dir(rel_dir: Path) -> None:
+                cur = rel_dir
+                while cur != Path(".") and cur != Path(""):
+                    expected_dirs.add(cur)
+                    cur = cur.parent
+
+            def _add_file(rel_file: Path) -> None:
+                expected_files.add(rel_file)
+                _add_dir(rel_file.parent)
+
+            for artifact in outputs.values():
+                if self.is_virtual_unbacked_artifact(artifact):
+                    continue
+                relative_path = self.fs.get_remappable_relative_path(
+                    artifact.container_uri
+                )
+                if relative_path is None:
+                    return False
+                if self._is_output_set_parent(artifact):
+                    _add_dir(relative_path)
+                elif _is_directory_artifact(artifact) or _is_file_bundle_artifact(
+                    artifact
+                ):
+                    manifest = (
+                        _directory_artifact_manifest(artifact)
+                        if _is_directory_artifact(artifact)
+                        else _shapefile_bundle_metadata(artifact)[1]
+                    )
+                    _add_dir(relative_path)
+                    for entry in manifest["entries"]:
+                        entry_rel = relative_path / Path(entry["path"])
+                        if entry["kind"] == "directory":
+                            _add_dir(entry_rel)
+                        elif entry["kind"] == "file":
+                            _add_file(entry_rel)
+                        else:
+                            return False
+                else:
+                    _add_file(relative_path)
+
+            return actual_files == expected_files and actual_dirs == expected_dirs
+        except (ValueError, OSError):
+            return False
+
     def archive_current_run_outputs_for_completion_policy(
         self,
         archive_root: str | os.PathLike[str],
@@ -2744,60 +2862,61 @@ class TrackerArchiveService(_TrackerServiceBase):
                 prepend_source_mount_root=prepend_source_mount_root,
             )
 
+        known_abs_paths = self._known_run_output_abs_paths(active_run_id)
+        prior_outputs = self.get_run_outputs(active_run_id)
+        for key, artifact in prior_outputs.items():
+            if artifact.abs_path is None and key in known_abs_paths:
+                artifact.abs_path = known_abs_paths[key]
+        prior_state = [
+            (
+                artifact,
+                self.fs.normalize_recovery_roots(
+                    (artifact.meta or {}).get("recovery_roots")
+                ),
+                artifact.abs_path,
+            )
+            for artifact in prior_outputs.values()
+        ]
+
+        def _restore_prior_state() -> None:
+            for artifact, prior_roots, prior_abs_path in prior_state:
+                self.set_artifact_recovery_roots(artifact, prior_roots, append=False)
+                artifact.abs_path = prior_abs_path
+                self._sync_active_run_artifact_abs_path(artifact, prior_abs_path)
+
+        if self._archive_root_has_expected_layout(archive_root_path, prior_outputs):
+            try:
+                return self.tracker.archive_current_run_outputs(
+                    archive_root_path,
+                    mode=mode,
+                    append=True,
+                    prepend_source_mount_root=prepend_source_mount_root,
+                )
+            except (FileExistsError, ValueError):
+                _restore_prior_state()
+            except Exception:
+                _restore_prior_state()
+                raise
+
         backup_root = Path(
             tempfile.mkdtemp(
                 dir=str(archive_root_path.parent),
                 prefix=f".consist-archive-replace-{archive_root_path.name}-",
             )
         )
-        backup_target = backup_root / "previous"
-        shutil.copytree(archive_root_path, backup_target, symlinks=True)
+        backup_target = backup_root / archive_root_path.name
+        os.replace(archive_root_path, backup_target)
+        self._active_archive_replace_backup = (
+            archive_root_path.resolve(),
+            backup_target.resolve(),
+        )
         try:
             archived = self.tracker.archive_current_run_outputs(
                 archive_root_path,
-                mode="copy",
+                mode=mode,
                 append=True,
-                prepend_source_mount_root=(
-                    prepend_source_mount_root and mode == "copy"
-                ),
+                prepend_source_mount_root=prepend_source_mount_root,
             )
-            if mode == "move":
-                archived = self.tracker.archive_current_run_outputs(
-                    archive_root_path,
-                    mode="move",
-                    append=True,
-                    prepend_source_mount_root=prepend_source_mount_root,
-                )
-            shutil.rmtree(backup_root, ignore_errors=True)
-            return archived
-        except (FileExistsError, ValueError):
-            if archive_root_path.exists() and not archive_root_path.is_symlink():
-                shutil.rmtree(archive_root_path)
-            try:
-                archived = self.tracker.archive_current_run_outputs(
-                    archive_root_path,
-                    mode=mode,
-                    append=True,
-                    prepend_source_mount_root=prepend_source_mount_root,
-                )
-            except Exception:
-                if archive_root_path.exists() or archive_root_path.is_symlink():
-                    if (
-                        archive_root_path.is_dir()
-                        and not archive_root_path.is_symlink()
-                    ):
-                        shutil.rmtree(archive_root_path)
-                    else:
-                        archive_root_path.unlink(missing_ok=True)
-                if backup_target.exists():
-                    shutil.move(str(backup_target), str(archive_root_path))
-                shutil.rmtree(backup_root, ignore_errors=True)
-                raise
-            self._evict_superseded_recovery_root(
-                archive_root_path, active_run_id=active_run_id
-            )
-            shutil.rmtree(backup_root, ignore_errors=True)
-            return archived
         except Exception:
             if archive_root_path.exists() or archive_root_path.is_symlink():
                 if archive_root_path.is_dir() and not archive_root_path.is_symlink():
@@ -2805,6 +2924,15 @@ class TrackerArchiveService(_TrackerServiceBase):
                 else:
                     archive_root_path.unlink(missing_ok=True)
             if backup_target.exists():
-                shutil.move(str(backup_target), str(archive_root_path))
+                os.replace(backup_target, archive_root_path)
             shutil.rmtree(backup_root, ignore_errors=True)
+            _restore_prior_state()
             raise
+        finally:
+            self._active_archive_replace_backup = None
+
+        self._evict_superseded_recovery_root(
+            archive_root_path, active_run_id=active_run_id
+        )
+        shutil.rmtree(backup_root, ignore_errors=True)
+        return archived
