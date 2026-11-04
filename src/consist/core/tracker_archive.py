@@ -27,7 +27,6 @@ from consist.core.directory_artifacts import (
     rollback_published_directory_tree,
     validate_directory_manifest,
     validate_directory_tree,
-    validate_shapefile_bundle_root,
 )
 from consist.core.materialize import (
     ArchivedRunOutputFile,
@@ -41,9 +40,7 @@ from consist.core.materialize import (
 )
 from consist.core.materialize_options import normalize_materialize_output_keys
 from consist.core.output_sets import (
-    _is_wholly_excluded_subtree,
     _manifest_identity_hash,
-    _matches_any,
     _normalize_output_set_relative_path,
 )
 from consist.digest import file_sha256
@@ -117,39 +114,6 @@ class _OutputSetArchiveMember:
 
 
 @dataclass(frozen=True, slots=True)
-class _ExcludedOutputSetScalar:
-    """One scalar output excluded from an OutputSet whose path sits under its root."""
-
-    key: str
-    artifact: Artifact
-    relative_path: str
-    destination: Path
-    content_hash: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class _ExcludedOutputSetDirectory:
-    """One directory or bundle output excluded from an OutputSet under its root."""
-
-    key: str
-    artifact: Artifact
-    relative_subtree: str
-    destination: Path
-    manifest: dict[str, Any]
-    bundle_entry: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class _PublishedOutputSetDirectory:
-    """Filesystem changes performed while publishing an OutputSet member directory."""
-
-    published: bool
-    created_root: bool = False
-    created_files: tuple[Path, ...] = ()
-    created_directories: tuple[Path, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
 class _OutputSetArchivePlan:
     """All immutable inputs required to archive one logical OutputSet."""
 
@@ -161,9 +125,6 @@ class _OutputSetArchivePlan:
     manifest_source: Path
     manifest_destination: Path
     manifest_content_hash: str
-    exclude_patterns: tuple[str, ...] = ()
-    excluded_scalars: tuple[_ExcludedOutputSetScalar, ...] = ()
-    excluded_directories: tuple[_ExcludedOutputSetDirectory, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -560,20 +521,12 @@ class TrackerArchiveService(_TrackerServiceBase):
                 raise ValueError(
                     f"Symlink detected in archive destination: {destination}"
                 )
-            if destination.resolve() != source_path.resolve():
-                if source_path.is_file() and destination.is_file():
-                    same_size = source_path.stat().st_size == destination.stat().st_size
-                    same_hash = same_size and file_sha256(source_path) == file_sha256(
-                        destination
-                    )
-                    if not same_hash:
-                        raise FileExistsError(
-                            f"Archive destination already exists: {destination}"
-                        )
-                else:
-                    raise FileExistsError(
-                        f"Archive destination already exists: {destination}"
-                    )
+            if destination.resolve() != source_path.resolve() and not (
+                self._is_matching_archive_file(source_path, destination)
+            ):
+                raise FileExistsError(
+                    f"Archive destination already exists: {destination}"
+                )
         else:
             destination.parent.mkdir(parents=True, exist_ok=True)
             if source_path.resolve() != destination.resolve():
@@ -655,17 +608,89 @@ class TrackerArchiveService(_TrackerServiceBase):
         return candidate
 
     @staticmethod
+    def _is_matching_archive_file(source_path: Path, destination: Path) -> bool:
+        """Return whether two regular files have identical size and SHA-256 content."""
+        return (
+            source_path.is_file()
+            and destination.is_file()
+            and source_path.stat().st_size == destination.stat().st_size
+            and file_sha256(source_path) == file_sha256(destination)
+        )
+
+    @staticmethod
     def _is_output_set_parent(artifact: Artifact) -> bool:
         """Return whether an artifact is the logical parent of an OutputSet."""
         metadata = artifact.meta if isinstance(artifact.meta, dict) else {}
         return artifact.driver == "artifact_set" or metadata.get("artifact_set") is True
 
+    def _find_archive_source_candidate(
+        self,
+        artifact: Artifact,
+        *,
+        producing_run: Any | None = None,
+        source_validator: Callable[[Path], bool] | None = None,
+        fallback_validator: Callable[[Path], bool] | None = None,
+        preserve_raw_paths: bool = True,
+        allow_run_owned_uri_fallback: bool = False,
+        include_current_managed_uri: bool = True,
+    ) -> Path | None:
+        """Locate an archive source candidate across recovery, runtime, and mount roots."""
+        run = (
+            producing_run
+            if producing_run is not None
+            else (
+                self.get_run(str(artifact.run_id))
+                if artifact.run_id is not None
+                else None
+            )
+        )
+        source_path: Path | None = None
+        if run is not None:
+            from consist.core.materialize import find_existing_recovery_source_path
+
+            _, source_path, _ = find_existing_recovery_source_path(
+                self.tracker,
+                artifact=artifact,
+                run=run,
+                source_root=None,
+                source_validator=source_validator,
+                preserve_raw_paths=preserve_raw_paths,
+            )
+            if source_path is None and fallback_validator is not None:
+                _, source_path, _ = find_existing_recovery_source_path(
+                    self.tracker,
+                    artifact=artifact,
+                    run=run,
+                    source_root=None,
+                    source_validator=fallback_validator,
+                    preserve_raw_paths=preserve_raw_paths,
+                )
+        allow_direct = allow_run_owned_uri_fallback or artifact.run_id is None
+        if source_path is None and allow_direct and artifact.abs_path:
+            candidate = Path(artifact.abs_path)
+            if not preserve_raw_paths:
+                candidate = candidate.resolve()
+            if candidate.exists() and (
+                source_validator is None or source_validator(candidate)
+            ):
+                source_path = candidate
+        if source_path is None and allow_direct:
+            candidate = Path(self.resolve_uri(artifact.container_uri))
+            if not preserve_raw_paths:
+                candidate = candidate.resolve()
+            if candidate.exists() and (
+                source_validator is None or source_validator(candidate)
+            ):
+                source_path = candidate
+        if source_path is None and include_current_managed_uri:
+            source_path = self._find_current_managed_uri_source(artifact)
+        return source_path
+
     def _find_output_set_archive_source(
         self,
         artifact: Artifact,
         *,
-        producing_run: Any | None,
-        required_relative_files: Sequence[str] = (),
+        producing_run: Any | None = None,
     ) -> Path:
         """Locate an OutputSet source without resolving through symlinks."""
 
@@ -674,40 +699,14 @@ class TrackerArchiveService(_TrackerServiceBase):
                 raise ValueError(f"OutputSet source contains a symlink: {path}")
             return True
 
-        def validate_candidate(path: Path) -> bool:
-            reject_symlink(path)
-            if not required_relative_files:
-                return True
-            return path.is_dir() and all(
-                (path / rel).is_file() for rel in required_relative_files
-            )
-
-        def resolve_with_validator(validator: Callable[[Path], bool]) -> Path | None:
-            resolved: Path | None = None
-            if producing_run is not None:
-                from consist.core.materialize import find_existing_recovery_source_path
-
-                _, resolved, _ = find_existing_recovery_source_path(
-                    self.tracker,
-                    artifact=artifact,
-                    run=producing_run,
-                    source_root=None,
-                    source_validator=validator,
-                    preserve_raw_paths=True,
-                )
-            if resolved is None and artifact.abs_path:
-                candidate = Path(artifact.abs_path)
-                if candidate.exists() and validator(candidate):
-                    resolved = candidate
-            if resolved is None:
-                candidate = Path(self.resolve_uri(artifact.container_uri))
-                if candidate.exists() and validator(candidate):
-                    resolved = candidate
-            return resolved
-
-        source_path = resolve_with_validator(validate_candidate)
-        if source_path is None and required_relative_files:
-            source_path = resolve_with_validator(reject_symlink)
+        source_path = self._find_archive_source_candidate(
+            artifact,
+            producing_run=producing_run,
+            source_validator=reject_symlink,
+            preserve_raw_paths=True,
+            allow_run_owned_uri_fallback=True,
+            include_current_managed_uri=False,
+        )
         if source_path is None:
             raise FileNotFoundError(
                 f"Cannot archive OutputSet artifact {artifact.key!r}: "
@@ -715,245 +714,10 @@ class TrackerArchiveService(_TrackerServiceBase):
             )
         return source_path
 
-    @staticmethod
-    def _is_relative_path_excluded(
-        relative_path: str,
-        exclude_patterns: Sequence[str],
-        *,
-        is_directory: bool,
-    ) -> bool:
-        """Return whether a path relative to an OutputSet root is excluded by its patterns."""
-        if not exclude_patterns:
-            return False
-        target = Path(relative_path)
-        current = target
-        while current != Path("."):
-            current_posix = current.as_posix()
-            if (is_directory or current != target) and _is_wholly_excluded_subtree(
-                current_posix, exclude_patterns
-            ):
-                return True
-            if current == target and _matches_any(current_posix, exclude_patterns):
-                return True
-            current = current.parent
-        return False
-
-    @classmethod
-    def _is_directory_artifact_excluded(
-        cls,
-        relative_subtree: str,
-        manifest: Mapping[str, Any],
-        exclude_patterns: Sequence[str],
-    ) -> bool:
-        """Return whether a nested directory artifact is excluded from an OutputSet."""
-        if cls._is_relative_path_excluded(
-            relative_subtree, exclude_patterns, is_directory=True
-        ):
-            return True
-        entries = manifest.get("entries")
-        if not isinstance(entries, Sequence):
-            return False
-        file_entries = [
-            entry
-            for entry in entries
-            if isinstance(entry, Mapping)
-            and entry.get("kind") == "file"
-            and isinstance(entry.get("path"), str)
-        ]
-        return bool(file_entries) and all(
-            cls._is_relative_path_excluded(
-                f"{relative_subtree}/{entry['path']}",
-                exclude_patterns,
-                is_directory=False,
-            )
-            for entry in file_entries
-        )
-
-    @classmethod
-    def _is_shapefile_bundle_excluded(
-        cls,
-        relative_to_set: str,
-        manifest: Mapping[str, Any],
-        exclude_patterns: Sequence[str],
-    ) -> bool:
-        """Return whether a nested shapefile bundle is excluded from an OutputSet."""
-        if cls._is_relative_path_excluded(
-            relative_to_set, exclude_patterns, is_directory=False
-        ) or cls._is_relative_path_excluded(
-            relative_to_set, exclude_patterns, is_directory=True
-        ):
-            return True
-        entries = manifest.get("entries")
-        if not isinstance(entries, Sequence):
-            return False
-        parent_rel = Path(relative_to_set).parent
-        file_entries = [
-            entry
-            for entry in entries
-            if isinstance(entry, Mapping)
-            and entry.get("kind") == "file"
-            and isinstance(entry.get("path"), str)
-        ]
-        return bool(file_entries) and all(
-            cls._is_relative_path_excluded(
-                _normalize_output_set_relative_path(parent_rel / entry["path"]),
-                exclude_patterns,
-                is_directory=False,
-            )
-            for entry in file_entries
-        )
-
-    @staticmethod
-    def _overlaps_output_set_members(
-        destination: Path,
-        members: Sequence[_OutputSetArchiveMember],
-    ) -> bool:
-        """Return whether a destination path overlaps any OutputSet member path."""
-        return any(
-            member.destination == destination
-            or member.destination.is_relative_to(destination)
-            or destination.is_relative_to(member.destination)
-            for member in members
-        )
-
-    @classmethod
-    def _overlaps_shapefile_bundle_members(
-        cls,
-        plan_destination: Path,
-        relative_to_set: str,
-        manifest: Mapping[str, Any],
-        members: Sequence[_OutputSetArchiveMember],
-    ) -> bool:
-        """Return whether a shapefile bundle or any of its sidecars overlaps set members."""
-        if cls._overlaps_output_set_members(
-            plan_destination / relative_to_set, members
-        ):
-            return True
-        parent_rel = Path(relative_to_set).parent
-        for entry in manifest.get("entries", ()):
-            if not isinstance(entry, Mapping) or not isinstance(entry.get("path"), str):
-                continue
-            try:
-                sidecar_rel = _normalize_output_set_relative_path(
-                    parent_rel / entry["path"]
-                )
-            except ValueError:
-                return True
-            if cls._overlaps_output_set_members(
-                plan_destination / sidecar_rel, members
-            ):
-                return True
-        return False
-
-    def _collect_excluded_nested_outputs_for_plan(
-        self,
-        *,
-        parent: Artifact,
-        destination: Path,
-        members: Sequence[_OutputSetArchiveMember],
-        exclude_patterns: Sequence[str],
-        archive_root_path: Path,
-        run_outputs: Mapping[str, Artifact],
-    ) -> tuple[
-        tuple[_ExcludedOutputSetScalar, ...],
-        tuple[_ExcludedOutputSetDirectory, ...],
-    ]:
-        """Collect run outputs under an OutputSet root that are disjointly excluded."""
-        if not exclude_patterns or not run_outputs:
-            return (), ()
-        excluded_scalars: list[_ExcludedOutputSetScalar] = []
-        excluded_directories: list[_ExcludedOutputSetDirectory] = []
-        for output_key, candidate in run_outputs.items():
-            if output_key == parent.key or (
-                candidate.id is not None and candidate.id == parent.id
-            ):
-                continue
-            if _output_set_hydration_kind(self.tracker, candidate) is not None:
-                continue
-            candidate_relative = self.fs.get_remappable_relative_path(
-                candidate.container_uri
-            )
-            if candidate_relative is None:
-                continue
-            candidate_destination = archive_root_path / candidate_relative
-            if candidate_destination == destination:
-                continue
-            try:
-                relative_to_set = _normalize_output_set_relative_path(
-                    candidate_destination.relative_to(destination)
-                )
-            except ValueError:
-                continue
-            if self._overlaps_output_set_members(candidate_destination, members):
-                continue
-            if _is_directory_artifact(candidate):
-                try:
-                    candidate_manifest = _directory_artifact_manifest(candidate)
-                except ValueError:
-                    continue
-                if self._is_directory_artifact_excluded(
-                    relative_to_set, candidate_manifest, exclude_patterns
-                ):
-                    excluded_directories.append(
-                        _ExcludedOutputSetDirectory(
-                            key=output_key,
-                            artifact=candidate,
-                            relative_subtree=relative_to_set,
-                            destination=candidate_destination,
-                            manifest=candidate_manifest,
-                        )
-                    )
-                continue
-            if _is_file_bundle_artifact(candidate):
-                try:
-                    bundle_entry, bundle_manifest = _shapefile_bundle_metadata(
-                        candidate
-                    )
-                except ValueError:
-                    continue
-                if not self._overlaps_shapefile_bundle_members(
-                    destination, relative_to_set, bundle_manifest, members
-                ) and self._is_shapefile_bundle_excluded(
-                    relative_to_set, bundle_manifest, exclude_patterns
-                ):
-                    excluded_directories.append(
-                        _ExcludedOutputSetDirectory(
-                            key=output_key,
-                            artifact=candidate,
-                            relative_subtree=relative_to_set,
-                            destination=candidate_destination,
-                            manifest=bundle_manifest,
-                            bundle_entry=bundle_entry,
-                        )
-                    )
-                continue
-            if self._is_relative_path_excluded(
-                relative_to_set, exclude_patterns, is_directory=False
-            ):
-                excluded_scalars.append(
-                    _ExcludedOutputSetScalar(
-                        key=output_key,
-                        artifact=candidate,
-                        relative_path=relative_to_set,
-                        destination=candidate_destination,
-                        content_hash=(
-                            candidate.hash
-                            if isinstance(candidate.hash, str) and candidate.hash
-                            else None
-                        ),
-                    )
-                )
-        return (
-            tuple(sorted(excluded_scalars, key=lambda item: item.relative_path)),
-            tuple(sorted(excluded_directories, key=lambda item: item.relative_subtree)),
-        )
-
     def _build_output_set_archive_plan(
         self,
         artifact: Artifact,
         archive_root: str | os.PathLike[str],
-        *,
-        run_outputs: Mapping[str, Artifact] | None = None,
     ) -> _OutputSetArchivePlan:
         """Validate a persisted OutputSet graph before changing archive bytes."""
         metadata = artifact.meta if isinstance(artifact.meta, dict) else {}
@@ -1013,23 +777,8 @@ class TrackerArchiveService(_TrackerServiceBase):
         producing_run = (
             self.get_run(str(artifact.run_id)) if artifact.run_id is not None else None
         )
-        children = self.tracker.get_child_artifacts(artifact)
-        required_relative_files: list[str] = []
-        for child in children:
-            child_metadata = child.meta if isinstance(child.meta, dict) else {}
-            if child_metadata.get("output_set_member") is True:
-                try:
-                    required_relative_files.append(
-                        _normalize_output_set_relative_path(
-                            child_metadata.get("output_set_relative_path", "")
-                        )
-                    )
-                except ValueError:
-                    pass
         parent_source = self._find_output_set_archive_source(
-            artifact,
-            producing_run=producing_run,
-            required_relative_files=required_relative_files,
+            artifact, producing_run=producing_run
         )
         if not parent_source.is_dir():
             raise ValueError(
@@ -1074,6 +823,7 @@ class TrackerArchiveService(_TrackerServiceBase):
                 f"OutputSet parent {artifact.key!r} has an incomplete manifest."
             )
 
+        children = self.tracker.get_child_artifacts(artifact)
         if any(
             (child.meta if isinstance(child.meta, dict) else {}).get(
                 "output_set_member"
@@ -1224,51 +974,21 @@ class TrackerArchiveService(_TrackerServiceBase):
             raise ValueError(
                 f"OutputSet manifest {manifest.key!r} overlaps a member destination."
             )
-
-        raw_exclude = manifest_contents.get("exclude")
-        if raw_exclude is not None and (
-            not isinstance(raw_exclude, list)
-            or any(not isinstance(item, str) for item in raw_exclude)
-        ):
-            raise ValueError(
-                f"OutputSet parent {artifact.key!r} has a malformed manifest."
-            )
-        exclude_patterns = tuple(item for item in (raw_exclude or []) if item)
-        sorted_members = tuple(sorted(members, key=lambda member: member.relative_path))
-        effective_run_outputs = run_outputs
-        if effective_run_outputs is None and artifact.run_id is not None:
-            effective_run_outputs = self.get_run_outputs(str(artifact.run_id))
-        excluded_scalars, excluded_directories = (
-            self._collect_excluded_nested_outputs_for_plan(
-                parent=artifact,
-                destination=destination,
-                members=sorted_members,
-                exclude_patterns=exclude_patterns,
-                archive_root_path=archive_root_path,
-                run_outputs=effective_run_outputs or {},
-            )
-        )
-
         return _OutputSetArchivePlan(
             parent=artifact,
             parent_source=parent_source,
             destination=destination,
-            members=sorted_members,
+            members=tuple(sorted(members, key=lambda member: member.relative_path)),
             manifest=manifest,
             manifest_source=manifest_source,
             manifest_destination=manifest_destination,
             manifest_content_hash=manifest_content_hash,
-            exclude_patterns=exclude_patterns,
-            excluded_scalars=excluded_scalars,
-            excluded_directories=excluded_directories,
         )
 
     def _build_selected_output_set_archive_plans(
         self,
         selected: Mapping[str, Artifact],
         archive_root: str | os.PathLike[str],
-        *,
-        run_outputs: Mapping[str, Artifact] | None = None,
     ) -> tuple[
         dict[str, _OutputSetArchivePlan],
         dict[str, _NestedOutputSetScalar],
@@ -1276,9 +996,7 @@ class TrackerArchiveService(_TrackerServiceBase):
     ]:
         """Validate selected OutputSets and their nested-output overlap contract."""
         output_set_plans = {
-            key: self._build_output_set_archive_plan(
-                artifact, archive_root, run_outputs=run_outputs
-            )
+            key: self._build_output_set_archive_plan(artifact, archive_root)
             for key, artifact in selected.items()
             if self._is_output_set_parent(artifact)
         }
@@ -1313,21 +1031,7 @@ class TrackerArchiveService(_TrackerServiceBase):
                     f"Nested output {key!r} conflicts with OutputSet "
                     f"{output_set_key!r} root."
                 )
-            relative_to_set = _normalize_output_set_relative_path(
-                destination.relative_to(plan.destination)
-            )
-            overlaps_members = self._overlaps_output_set_members(
-                destination, plan.members
-            )
             if _is_directory_artifact(artifact):
-                manifest = _directory_artifact_manifest(artifact)
-                if not overlaps_members and self._is_directory_artifact_excluded(
-                    relative_to_set, manifest, plan.exclude_patterns
-                ):
-                    self._validate_excluded_output_set_directory(
-                        artifact, destination, manifest
-                    )
-                    continue
                 self._validate_nested_output_set_directory(
                     key, artifact, destination, output_set_key, plan
                 )
@@ -1337,37 +1041,10 @@ class TrackerArchiveService(_TrackerServiceBase):
                     output_set_key=output_set_key,
                 )
                 continue
-            if _is_file_bundle_artifact(artifact):
-                bundle_entry, bundle_manifest = _shapefile_bundle_metadata(artifact)
-                if (
-                    not overlaps_members
-                    and not self._overlaps_shapefile_bundle_members(
-                        plan.destination,
-                        relative_to_set,
-                        bundle_manifest,
-                        plan.members,
-                    )
-                    and self._is_shapefile_bundle_excluded(
-                        relative_to_set, bundle_manifest, plan.exclude_patterns
-                    )
-                ):
-                    self._validate_excluded_output_set_shapefile_bundle(
-                        artifact, destination, bundle_entry, bundle_manifest
-                    )
-                    continue
-                raise ValueError(
-                    f"Nested output {key!r} is not a manifest member of "
-                    f"OutputSet {output_set_key!r}."
-                )
             matching_members = [
                 member for member in plan.members if member.destination == destination
             ]
             if not matching_members:
-                if not overlaps_members and self._is_relative_path_excluded(
-                    relative_to_set, plan.exclude_patterns, is_directory=False
-                ):
-                    self._validate_excluded_output_set_scalar(artifact, destination)
-                    continue
                 raise ValueError(
                     f"Nested output {key!r} is not a manifest member of "
                     f"OutputSet {output_set_key!r}."
@@ -1382,14 +1059,7 @@ class TrackerArchiveService(_TrackerServiceBase):
                     f"member {member.artifact.key!r} of OutputSet "
                     f"{output_set_key!r}."
                 )
-            producing_run = (
-                self.get_run(str(artifact.run_id))
-                if artifact.run_id is not None
-                else None
-            )
-            source = self._find_output_set_archive_source(
-                artifact, producing_run=producing_run
-            )
+            source = self._find_output_set_archive_source(artifact)
             if (
                 source != member.source_path
                 or not source.is_file()
@@ -1408,146 +1078,14 @@ class TrackerArchiveService(_TrackerServiceBase):
 
         for plan in output_set_plans.values():
             self._validate_output_set_archive_destination(
-                plan.destination,
-                plan.members,
-                excluded_directories=plan.excluded_directories,
-                excluded_scalars=plan.excluded_scalars,
-                allow_unpopulated_members=True,
+                plan.destination, plan.members
             )
             self._validate_output_set_manifest_archive_destination(plan)
 
         return output_set_plans, nested_scalars, nested_directories
 
-    def _find_directory_artifact_recovery_source_path(
-        self,
-        artifact: Artifact,
-        producing_run: Any,
-    ) -> Path | None:
-        source_path: Path | None = None
-        if producing_run is not None:
-            from consist.core.materialize import find_existing_recovery_source_path
-
-            _, source_path, _ = find_existing_recovery_source_path(
-                self.tracker,
-                artifact=artifact,
-                run=producing_run,
-                source_root=None,
-                preserve_raw_paths=True,
-                source_validator=lambda candidate: (
-                    is_valid_directory_artifact_tree(candidate, artifact) is not False
-                ),
-            )
-            if source_path is None:
-                _, source_path, _ = find_existing_recovery_source_path(
-                    self.tracker,
-                    artifact=artifact,
-                    run=producing_run,
-                    source_root=None,
-                    preserve_raw_paths=True,
-                )
-        if source_path is None and artifact.run_id is None and artifact.abs_path:
-            candidate = Path(artifact.abs_path)
-            if candidate.exists():
-                source_path = candidate
-        if source_path is None and artifact.run_id is None:
-            candidate = Path(self.resolve_uri(artifact.container_uri))
-            if candidate.exists():
-                source_path = candidate
-        if source_path is None:
-            source_path = self._find_current_managed_uri_source(artifact)
-        return source_path
-
-    def _find_shapefile_bundle_archive_source(
-        self,
-        artifact: Artifact,
-    ) -> Path | None:
-        producing_run = (
-            self.get_run(str(artifact.run_id)) if artifact.run_id is not None else None
-        )
-        source_path: Path | None = None
-        if producing_run is not None:
-            from consist.core.materialize import find_existing_recovery_source_path
-
-            _, source_path, _ = find_existing_recovery_source_path(
-                self.tracker,
-                artifact=artifact,
-                run=producing_run,
-                source_root=None,
-                preserve_raw_paths=True,
-            )
-        if source_path is None and artifact.run_id is None and artifact.abs_path:
-            candidate = Path(artifact.abs_path)
-            if candidate.exists():
-                source_path = candidate
-        if source_path is None and artifact.run_id is None:
-            candidate = Path(self.resolve_uri(artifact.container_uri))
-            if candidate.exists():
-                source_path = candidate
-        if source_path is None:
-            source_path = self._find_current_managed_uri_source(artifact)
-        return source_path
-
-    def _validate_excluded_output_set_directory(
-        self,
-        artifact: Artifact,
-        destination: Path,
-        manifest: Mapping[str, Any],
-    ) -> None:
-        """Validate an excluded nested directory artifact before archival."""
-        allow_extra_files = directory_allows_extra_files(artifact)
-        if destination.exists():
-            validate_directory_tree(
-                destination,
-                manifest,
-                allow_extra_files=allow_extra_files,
-            )
-            return
-        producing_run = (
-            self.get_run(str(artifact.run_id)) if artifact.run_id is not None else None
-        )
-        source_path = self._find_directory_artifact_recovery_source_path(
-            artifact, producing_run
-        )
-        if source_path is None or not source_path.exists():
-            raise FileNotFoundError(
-                f"Cannot archive artifact {artifact.key!r}: source bytes are unavailable."
-            )
-        validate_directory_tree(
-            source_path,
-            manifest,
-            allow_extra_files=allow_extra_files,
-        )
-
-    def _validate_excluded_output_set_shapefile_bundle(
-        self,
-        artifact: Artifact,
-        destination: Path,
-        entry: str,
-        manifest: Mapping[str, Any],
-    ) -> None:
-        """Validate an excluded nested shapefile bundle artifact before archival."""
-        if destination.exists():
-            if not destination.is_dir():
-                raise ValueError(
-                    f"shapefile bundle destination type mismatch: {destination}"
-                )
-            validate_shapefile_bundle_root(
-                destination,
-                entry,
-                manifest,
-                require_clean_root=True,
-            )
-            return
-        source_path = self._find_shapefile_bundle_archive_source(artifact)
-        if source_path is None or not source_path.exists():
-            raise FileNotFoundError(
-                f"Cannot archive artifact {artifact.key!r}: source bytes are unavailable."
-            )
-        validate_shapefile_bundle_root(source_path.parent, entry, manifest)
-
     def _find_scalar_archive_source(self, artifact: Artifact) -> Path:
         """Resolve and validate the source file for archiving a scalar artifact."""
-        source_path: Path | None = None
         mismatched_candidate: Path | None = None
 
         def _matches_artifact_hash(candidate: Path) -> bool:
@@ -1559,28 +1097,11 @@ class TrackerArchiveService(_TrackerServiceBase):
             mismatched_candidate = candidate
             return False
 
-        if artifact.run_id:
-            from consist.core.materialize import find_existing_recovery_source_path
-
-            producing_run = self.get_run(str(artifact.run_id))
-            if producing_run is not None:
-                _, source_path, _ = find_existing_recovery_source_path(
-                    self.tracker,
-                    artifact=artifact,
-                    run=producing_run,
-                    source_root=None,
-                    source_validator=_matches_artifact_hash,
-                )
-        if source_path is None and artifact.run_id is None and artifact.abs_path:
-            candidate = Path(artifact.abs_path).resolve()
-            if candidate.exists() and _matches_artifact_hash(candidate):
-                source_path = candidate
-        if source_path is None and artifact.run_id is None:
-            candidate = Path(self.resolve_uri(artifact.container_uri)).resolve()
-            if candidate.exists() and _matches_artifact_hash(candidate):
-                source_path = candidate
-        if source_path is None:
-            source_path = self._find_current_managed_uri_source(artifact)
+        source_path = self._find_archive_source_candidate(
+            artifact,
+            source_validator=_matches_artifact_hash,
+            preserve_raw_paths=False,
+        )
         if source_path is None or not source_path.exists():
             if mismatched_candidate is not None:
                 raise ValueError(
@@ -1596,29 +1117,6 @@ class TrackerArchiveService(_TrackerServiceBase):
             )
         return source_path
 
-    def _validate_excluded_output_set_scalar(
-        self,
-        artifact: Artifact,
-        destination: Path,
-    ) -> None:
-        """Validate an excluded nested scalar output before archival."""
-        source_path = self._find_scalar_archive_source(artifact)
-        if destination.exists():
-            if not destination.is_file():
-                raise FileExistsError(
-                    f"Archive destination already exists: {destination}"
-                )
-            if destination.resolve() != source_path.resolve():
-                same_size = source_path.stat().st_size == destination.stat().st_size
-                same_hash = same_size and file_sha256(source_path) == file_sha256(
-                    destination
-                )
-                if not same_hash:
-                    raise FileExistsError(
-                        f"Archive destination already exists: {destination}"
-                    )
-            return
-
     def _validate_nested_output_set_directory(
         self,
         key: str,
@@ -1632,18 +1130,7 @@ class TrackerArchiveService(_TrackerServiceBase):
         relative_subtree = _normalize_output_set_relative_path(
             destination.relative_to(plan.destination)
         )
-        producing_run = (
-            self.get_run(str(artifact.run_id)) if artifact.run_id is not None else None
-        )
-        source = self._find_output_set_archive_source(
-            artifact,
-            producing_run=producing_run,
-            required_relative_files=[
-                entry["path"]
-                for entry in manifest["entries"]
-                if entry.get("kind") == "file"
-            ],
-        )
+        source = self._find_output_set_archive_source(artifact)
         expected_source = plan.parent_source / relative_subtree
         if source != expected_source or not source.is_dir():
             raise ValueError(
@@ -1692,23 +1179,14 @@ class TrackerArchiveService(_TrackerServiceBase):
         self,
         destination: Path,
         members: Sequence[_OutputSetArchiveMember],
-        *,
-        excluded_directories: Sequence[_ExcludedOutputSetDirectory] = (),
-        excluded_scalars: Sequence[_ExcludedOutputSetScalar] = (),
-        allow_unpopulated_members: bool = False,
-    ) -> bool:
-        """Require an existing OutputSet archive root to match members and excluded outputs.
-
-        Returns ``True`` when the OutputSet members are already populated at
-        ``destination``, or ``False`` when ``destination`` is absent or contains
-        only verified pre-archived excluded nested outputs.
-        """
+    ) -> None:
+        """Require an existing OutputSet archive root to match the manifest."""
         if self._has_symlink_component(destination) or destination.is_symlink():
             raise ValueError(
                 f"Symlink detected in OutputSet archive destination: {destination}"
             )
         if not destination.exists():
-            return False
+            return
         if not destination.is_dir():
             raise ValueError(
                 f"OutputSet archive destination is not a directory: {destination}"
@@ -1739,64 +1217,9 @@ class TrackerArchiveService(_TrackerServiceBase):
             else:
                 raise ValueError(f"Unsupported OutputSet archive entry: {path}")
 
-        present_excluded_files: set[str] = set()
-        present_excluded_directories: set[str] = set()
-        for excluded_dir in excluded_directories:
-            if excluded_dir.relative_subtree not in actual_directories:
-                continue
-            if excluded_dir.bundle_entry is not None:
-                validate_shapefile_bundle_root(
-                    destination / excluded_dir.relative_subtree,
-                    excluded_dir.bundle_entry,
-                    excluded_dir.manifest,
-                    require_clean_root=True,
-                )
-            else:
-                validate_directory_tree(
-                    destination / excluded_dir.relative_subtree, excluded_dir.manifest
-                )
-            present_excluded_directories.add(excluded_dir.relative_subtree)
-            parent = Path(excluded_dir.relative_subtree).parent
-            while parent != Path("."):
-                present_excluded_directories.add(parent.as_posix())
-                parent = parent.parent
-            for entry in excluded_dir.manifest["entries"]:
-                entry_rel = f"{excluded_dir.relative_subtree}/{entry['path']}"
-                if entry["kind"] == "file":
-                    present_excluded_files.add(entry_rel)
-                elif entry["kind"] == "directory":
-                    present_excluded_directories.add(entry_rel)
-
-        for excluded_scalar in excluded_scalars:
-            if excluded_scalar.relative_path not in actual_files:
-                continue
-            scalar_path = destination / excluded_scalar.relative_path
-            if (
-                excluded_scalar.content_hash is not None
-                and self.identity.hashing_strategy == "full"
-                and self.identity.compute_file_checksum(scalar_path)
-                != excluded_scalar.content_hash
-            ):
-                raise ValueError(
-                    f"OutputSet archive destination member hash mismatch: {scalar_path}"
-                )
-            present_excluded_files.add(excluded_scalar.relative_path)
-            parent = Path(excluded_scalar.relative_path).parent
-            while parent != Path("."):
-                present_excluded_directories.add(parent.as_posix())
-                parent = parent.parent
-
-        remaining_files = actual_files - present_excluded_files
         if (
-            allow_unpopulated_members
-            and expected_files
-            and not remaining_files
-            and actual_directories == present_excluded_directories
-        ):
-            return False
-
-        if remaining_files != set(expected_files) or actual_directories != (
-            expected_directories | present_excluded_directories
+            actual_files != set(expected_files)
+            or actual_directories != expected_directories
         ):
             raise ValueError(
                 f"OutputSet archive destination has unexpected or missing members: {destination}"
@@ -1807,7 +1230,6 @@ class TrackerArchiveService(_TrackerServiceBase):
                 raise ValueError(
                     f"OutputSet archive destination member hash mismatch: {path}"
                 )
-        return True
 
     def _validate_output_set_manifest_archive_destination(
         self, plan: _OutputSetArchivePlan
@@ -1826,18 +1248,11 @@ class TrackerArchiveService(_TrackerServiceBase):
                 f"OutputSet manifest archive destination already exists: {destination}"
             )
 
-    def _publish_output_set_directory(
-        self, plan: _OutputSetArchivePlan
-    ) -> _PublishedOutputSetDirectory:
+    def _publish_output_set_directory(self, plan: _OutputSetArchivePlan) -> bool:
         """Stage and publish one OutputSet member root without overwriting bytes."""
-        if self._validate_output_set_archive_destination(
-            plan.destination,
-            plan.members,
-            excluded_directories=plan.excluded_directories,
-            excluded_scalars=plan.excluded_scalars,
-            allow_unpopulated_members=True,
-        ):
-            return _PublishedOutputSetDirectory(published=False)
+        self._validate_output_set_archive_destination(plan.destination, plan.members)
+        if plan.destination.exists():
+            return False
         if self._has_symlink_component(plan.destination):
             raise ValueError(
                 f"Symlink detected in OutputSet archive destination: {plan.destination}"
@@ -1870,69 +1285,12 @@ class TrackerArchiveService(_TrackerServiceBase):
                         f"OutputSet member {member.artifact.key!r} changed while archiving."
                     )
             self._validate_output_set_archive_destination(staging, plan.members)
-            if plan.destination.is_symlink():
-                raise ValueError(
-                    f"Symlink detected in OutputSet archive destination: {plan.destination}"
+            if plan.destination.exists() or plan.destination.is_symlink():
+                raise FileExistsError(
+                    f"OutputSet archive destination already exists: {plan.destination}"
                 )
-            if not plan.destination.exists():
-                os.rename(staging, plan.destination)
-                return _PublishedOutputSetDirectory(
-                    published=True,
-                    created_root=True,
-                )
-
-            created_files: list[Path] = []
-            created_directories: list[Path] = []
-            try:
-                for member in plan.members:
-                    staged_member = staging / member.relative_path
-                    target = plan.destination / member.relative_path
-                    missing_parents: list[Path] = []
-                    parent = target.parent
-                    while parent != plan.destination and not parent.exists():
-                        if parent.is_symlink():
-                            raise ValueError(
-                                f"Symlink detected in OutputSet archive destination: {parent}"
-                            )
-                        missing_parents.append(parent)
-                        parent = parent.parent
-                    for directory in reversed(missing_parents):
-                        directory.mkdir()
-                        created_directories.append(directory)
-                    if self._has_symlink_component(target.parent):
-                        raise ValueError(
-                            f"Symlink detected in OutputSet archive destination: {target}"
-                        )
-                    if target.exists() or target.is_symlink():
-                        raise FileExistsError(
-                            f"OutputSet archive destination already exists: {target}"
-                        )
-                    os.rename(staged_member, target)
-                    created_files.append(target)
-                self._validate_output_set_archive_destination(
-                    plan.destination,
-                    plan.members,
-                    excluded_directories=plan.excluded_directories,
-                    excluded_scalars=plan.excluded_scalars,
-                    allow_unpopulated_members=False,
-                )
-            except Exception:
-                self._rollback_published_output_set_directory(
-                    plan.destination,
-                    _PublishedOutputSetDirectory(
-                        published=True,
-                        created_root=False,
-                        created_files=tuple(created_files),
-                        created_directories=tuple(created_directories),
-                    ),
-                )
-                raise
-            return _PublishedOutputSetDirectory(
-                published=True,
-                created_root=False,
-                created_files=tuple(created_files),
-                created_directories=tuple(created_directories),
-            )
+            os.rename(staging, plan.destination)
+            return True
         finally:
             shutil.rmtree(staging_root, ignore_errors=True)
 
@@ -1992,30 +1350,6 @@ class TrackerArchiveService(_TrackerServiceBase):
         elif destination.exists():
             destination.unlink()
 
-    @classmethod
-    def _rollback_published_output_set_directory(
-        cls,
-        destination: Path,
-        published: _PublishedOutputSetDirectory,
-    ) -> None:
-        """Rollback OutputSet member files and directories published before failure."""
-        if not published.published:
-            return
-        if published.created_root:
-            cls._remove_output_set_archive_destination(destination)
-            return
-        for created_file in published.created_files:
-            created_file.unlink(missing_ok=True)
-        for directory in sorted(
-            published.created_directories,
-            key=lambda path: len(path.parts),
-            reverse=True,
-        ):
-            try:
-                directory.rmdir()
-            except OSError:
-                pass
-
     @staticmethod
     def _remove_output_set_sources(plan: _OutputSetArchivePlan) -> None:
         """Apply move semantics after a complete OutputSet archive is registered."""
@@ -2030,20 +1364,6 @@ class TrackerArchiveService(_TrackerServiceBase):
         for member in plan.members:
             current = member.source_path.parent
             while current != plan.parent_source:
-                directories.add(current)
-                current = current.parent
-        for excluded_dir in plan.excluded_directories:
-            current = (plan.parent_source / excluded_dir.relative_subtree).parent
-            while current != plan.parent_source and current.is_relative_to(
-                plan.parent_source
-            ):
-                directories.add(current)
-                current = current.parent
-        for excluded_scalar in plan.excluded_scalars:
-            current = (plan.parent_source / excluded_scalar.relative_path).parent
-            while current != plan.parent_source and current.is_relative_to(
-                plan.parent_source
-            ):
                 directories.add(current)
                 current = current.parent
         for directory in sorted(
@@ -2066,7 +1386,7 @@ class TrackerArchiveService(_TrackerServiceBase):
         prepend_source_mount_root: bool = True,
     ) -> Path:
         """Archive a validated OutputSet plan before registering it recoverable."""
-        published_directory = _PublishedOutputSetDirectory(published=False)
+        published_directory = False
         published_manifest = False
         archive_root_path = Path(archive_root).expanduser().absolute()
         recovery_roots = self._archive_recovery_roots_for_artifact(
@@ -2092,10 +1412,8 @@ class TrackerArchiveService(_TrackerServiceBase):
         except Exception:
             if published_manifest:
                 self._remove_output_set_archive_destination(plan.manifest_destination)
-            if published_directory.published:
-                self._rollback_published_output_set_directory(
-                    plan.destination, published_directory
-                )
+            if published_directory:
+                self._remove_output_set_archive_destination(plan.destination)
             raise
         if mode == "move" and remove_sources:
             self._remove_output_set_sources(plan)
@@ -2139,9 +1457,12 @@ class TrackerArchiveService(_TrackerServiceBase):
             raise ValueError(
                 f"Artifact {artifact.key!r} does not have a rematerializable URI layout."
             )
-        producing_run = self.get_run(str(artifact.run_id)) if artifact.run_id else None
-        source_path = self._find_directory_artifact_recovery_source_path(
-            artifact, producing_run
+        source_path = self._find_archive_source_candidate(
+            artifact,
+            source_validator=lambda candidate: (
+                is_valid_directory_artifact_tree(candidate, artifact) is not False
+            ),
+            fallback_validator=lambda _: True,
         )
         if source_path is None or not source_path.exists():
             raise FileNotFoundError(
@@ -2200,7 +1521,7 @@ class TrackerArchiveService(_TrackerServiceBase):
             raise ValueError(
                 f"Artifact {artifact.key!r} does not have a rematerializable URI layout."
             )
-        source_path = self._find_shapefile_bundle_archive_source(artifact)
+        source_path = self._find_archive_source_candidate(artifact)
         if source_path is None or not source_path.exists():
             raise FileNotFoundError(
                 f"Cannot archive artifact {artifact.key!r}: source bytes are unavailable."
@@ -2822,25 +2143,14 @@ class TrackerArchiveService(_TrackerServiceBase):
 
         if producing_run is not None:
             try:
-                from consist.core.materialize import find_existing_recovery_source_path
-
-                _, source_path, _ = find_existing_recovery_source_path(
-                    self.tracker,
-                    artifact=candidate.artifact,
-                    run=producing_run,
-                    source_root=None,
+                source_path = self._find_archive_source_candidate(
+                    candidate.artifact,
+                    producing_run=producing_run,
                     source_validator=validate_source,
+                    fallback_validator=reject_symlink,
                     preserve_raw_paths=True,
+                    include_current_managed_uri=False,
                 )
-                if source_path is None:
-                    _, source_path, _ = find_existing_recovery_source_path(
-                        self.tracker,
-                        artifact=candidate.artifact,
-                        run=producing_run,
-                        source_root=None,
-                        source_validator=reject_symlink,
-                        preserve_raw_paths=True,
-                    )
             except ValueError as exc:
                 return None, self._archive_result(
                     candidate, "symlink_source", "failed", message=str(exc)
@@ -3237,9 +2547,7 @@ class TrackerArchiveService(_TrackerServiceBase):
                 if resolved_candidate.exists():
                     artifact.abs_path = str(resolved_candidate.resolve())
         output_set_plans, nested_scalars, nested_directories = (
-            self._build_selected_output_set_archive_plans(
-                selected, archive_root, run_outputs=outputs
-            )
+            self._build_selected_output_set_archive_plans(selected, archive_root)
         )
         archived_by_key: dict[str, Path] = {}
         for key, plan in output_set_plans.items():
