@@ -864,3 +864,157 @@ def test_archive_directory_and_shapefile_under_separate_workspace_mount(
     assert (
         archive_root_2 / "beam_outputs" / "links_bundle" / "links.shp" / "links.shp"
     ).exists()
+
+
+def test_run_completion_archive_rerun_with_fast_hashing_and_modified_outputs(
+    tmp_path: Path,
+) -> None:
+    """Re-running a step into the same step-scoped archive root succeeds under fast hashing, both for identical bytes with newer mtime and for modified outputs."""
+    run_dir = tmp_path / "runs"
+    workspace = tmp_path / "workspace"
+    run_dir.mkdir(parents=True)
+    workspace.mkdir(parents=True)
+    tracker = Tracker(
+        run_dir=run_dir,
+        db_path=str(tmp_path / "provenance.duckdb"),
+        mounts={"workspace": str(workspace)},
+        hashing_strategy="fast",
+    )
+    archive_root = tmp_path / "consist-recovery" / "asim__preprocess__y2015__i0__main"
+    policy = OutputPolicyOptions(
+        run_completion_archive=RunCompletionArchivePolicy(
+            archive_root=archive_root,
+            mode="copy",
+        )
+    )
+
+    out_csv = workspace / "asim" / "households.csv"
+    out_dir = workspace / "asim" / "configs"
+
+    def step_v1(ctx) -> None:
+        out_csv.parent.mkdir(parents=True, exist_ok=True)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_csv.write_bytes(b"hh_id\n1\n")
+        (out_dir / "settings.yaml").write_text("iter: 1\n", encoding="utf-8")
+        tracker.log_output(out_csv, key="households")
+        tracker.log_output(out_dir, key="configs_dir", artifact_kind="directory")
+
+    res_1 = tracker.run(
+        fn=step_v1,
+        name="asim_preprocess",
+        run_id="asim_preprocess_run_1",
+        config={"attempt": 1},
+        outputs=["households", "configs_dir"],
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        output_policy=policy,
+    )
+    expected_root = str(archive_root.resolve())
+    assert expected_root in res_1.outputs["households"].meta["recovery_roots"]
+
+    # Re-run 2: identical bytes but newer mtime under fast hashing
+    def step_v1_newer_mtime(ctx) -> None:
+        import os
+
+        out_csv.write_bytes(b"hh_id\n1\n")
+        future_ns = out_csv.stat().st_mtime_ns + 5_000_000_000
+        os.utime(out_csv, ns=(future_ns, future_ns))
+        tracker.log_output(out_csv, key="households")
+        tracker.log_output(out_dir, key="configs_dir", artifact_kind="directory")
+
+    res_2 = tracker.run(
+        fn=step_v1_newer_mtime,
+        name="asim_preprocess",
+        run_id="asim_preprocess_run_2",
+        config={"attempt": 2},
+        outputs=["households", "configs_dir"],
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        output_policy=policy,
+    )
+    assert expected_root in res_2.outputs["households"].meta["recovery_roots"]
+
+    # Re-run 3: code/config change produces different scalar & directory bytes into the same archive_root
+    def step_v2_modified(ctx) -> None:
+        out_csv.write_bytes(b"hh_id\n1\n2\n3\n")
+        (out_dir / "settings.yaml").write_text("iter: 2\n", encoding="utf-8")
+        tracker.log_output(out_csv, key="households")
+        tracker.log_output(out_dir, key="configs_dir", artifact_kind="directory")
+
+    res_3 = tracker.run(
+        fn=step_v2_modified,
+        name="asim_preprocess",
+        run_id="asim_preprocess_run_3",
+        config={"attempt": 3},
+        outputs=["households", "configs_dir"],
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        output_policy=policy,
+    )
+    assert expected_root in res_3.outputs["households"].meta["recovery_roots"]
+    assert expected_root in res_3.outputs["configs_dir"].meta["recovery_roots"]
+    assert (
+        archive_root / "asim" / "households.csv"
+    ).read_bytes() == b"hh_id\n1\n2\n3\n"
+    assert (archive_root / "asim" / "configs" / "settings.yaml").read_text(
+        encoding="utf-8"
+    ) == "iter: 2\n"
+
+    # Superseded runs must have the overwritten step-scoped archive_root evicted
+    superseded_outputs_1 = tracker.get_run_outputs("asim_preprocess_run_1")
+    superseded_outputs_2 = tracker.get_run_outputs("asim_preprocess_run_2")
+    for key in ("households", "configs_dir"):
+        assert expected_root not in superseded_outputs_1[key].meta.get(
+            "recovery_roots", []
+        )
+        assert expected_root not in superseded_outputs_2[key].meta.get(
+            "recovery_roots", []
+        )
+
+
+def test_archive_scalar_skips_or_rejects_in_place_modified_workspace_source(
+    tmp_path: Path,
+) -> None:
+    """Archiving a scalar artifact whose workspace file was modified in place falls back to a valid recovery root or raises ValueError."""
+    run_dir = tmp_path / "runs"
+    workspace = tmp_path / "workspace"
+    run_dir.mkdir(parents=True)
+    workspace.mkdir(parents=True)
+    tracker = Tracker(
+        run_dir=run_dir,
+        db_path=str(tmp_path / "provenance.duckdb"),
+        mounts={"workspace": str(workspace)},
+        hashing_strategy="fast",
+    )
+
+    h5_file = workspace / "urbansim" / "datastore.h5"
+    h5_file.parent.mkdir(parents=True, exist_ok=True)
+    h5_file.write_bytes(b"original-urbansim-h5")
+
+    with tracker.start_run("usim_postprocess", model="urbansim"):
+        tracker.log_output(h5_file, key="usim_datastore_h5")
+
+    archive_1 = tmp_path / "archive_1"
+    tracker.archive_run_outputs("usim_postprocess", archive_1, mode="copy")
+    assert (
+        archive_1 / "urbansim" / "datastore.h5"
+    ).read_bytes() == b"original-urbansim-h5"
+
+    # Simulate a downstream step mutating the workspace file in place
+    h5_file.write_bytes(b"mutated-in-place-by-downstream-step")
+
+    # Archiving to a second root skips the mutated workspace copy and uses archive_1
+    archive_2 = tmp_path / "archive_2"
+    tracker.archive_run_outputs("usim_postprocess", archive_2, mode="copy")
+    assert (
+        archive_2 / "urbansim" / "datastore.h5"
+    ).read_bytes() == b"original-urbansim-h5"
+
+    # If no valid recovery copy exists, archiving rejects the mutated workspace source
+    unarchived_file = workspace / "urbansim" / "unarchived.h5"
+    unarchived_file.write_bytes(b"clean-bytes")
+    with tracker.start_run("usim_unarchived", model="urbansim"):
+        tracker.log_output(unarchived_file, key="unarchived_h5")
+
+    unarchived_file.write_bytes(b"corrupted-in-place-bytes")
+    with pytest.raises(ValueError, match="does not match artifact hash"):
+        tracker.archive_run_outputs(
+            "usim_unarchived", tmp_path / "archive_3", mode="copy"
+        )

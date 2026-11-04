@@ -836,11 +836,12 @@ class RunTraceCoordinator:
                     preserve_existing_abs_path=True,
                 )
 
-        archived = tracker.archive_current_run_outputs(
-            resolved_archive_root,
-            mode=effective_policy.mode,
-            append=True,
-            prepend_source_mount_root=effective_policy.prepend_source_mount_root,
+        archived = (
+            tracker._archive_service.archive_current_run_outputs_for_completion_policy(
+                resolved_archive_root,
+                mode=effective_policy.mode,
+                prepend_source_mount_root=effective_policy.prepend_source_mount_root,
+            )
         )
 
         synced_by_key: Dict[str, Artifact] = {

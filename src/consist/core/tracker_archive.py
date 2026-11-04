@@ -563,9 +563,9 @@ class TrackerArchiveService(_TrackerServiceBase):
             if destination.resolve() != source_path.resolve():
                 if source_path.is_file() and destination.is_file():
                     same_size = source_path.stat().st_size == destination.stat().st_size
-                    same_hash = same_size and self.identity.compute_file_checksum(
-                        str(source_path)
-                    ) == self.identity.compute_file_checksum(str(destination))
+                    same_hash = same_size and file_sha256(source_path) == file_sha256(
+                        destination
+                    )
                     if not same_hash:
                         raise FileExistsError(
                             f"Archive destination already exists: {destination}"
@@ -582,6 +582,12 @@ class TrackerArchiveService(_TrackerServiceBase):
                         shutil.copytree(source_path, destination)
                     else:
                         shutil.copy2(source_path, destination)
+                        if file_sha256(destination) != file_sha256(source_path):
+                            destination.unlink(missing_ok=True)
+                            raise ValueError(
+                                f"Archived copy for artifact {artifact.key!r} failed "
+                                f"post-copy verification: {destination}"
+                            )
                 else:
                     moved_from = source_path
                     shutil.move(str(source_path), str(destination))
@@ -1542,6 +1548,17 @@ class TrackerArchiveService(_TrackerServiceBase):
     def _find_scalar_archive_source(self, artifact: Artifact) -> Path:
         """Resolve and validate the source file for archiving a scalar artifact."""
         source_path: Path | None = None
+        mismatched_candidate: Path | None = None
+
+        def _matches_artifact_hash(candidate: Path) -> bool:
+            nonlocal mismatched_candidate
+            if not candidate.is_file() or not artifact.hash:
+                return True
+            if self.identity.compute_file_checksum(str(candidate)) == artifact.hash:
+                return True
+            mismatched_candidate = candidate
+            return False
+
         if artifact.run_id:
             from consist.core.materialize import find_existing_recovery_source_path
 
@@ -1552,18 +1569,24 @@ class TrackerArchiveService(_TrackerServiceBase):
                     artifact=artifact,
                     run=producing_run,
                     source_root=None,
+                    source_validator=_matches_artifact_hash,
                 )
         if source_path is None and artifact.run_id is None and artifact.abs_path:
             candidate = Path(artifact.abs_path).resolve()
-            if candidate.exists():
+            if candidate.exists() and _matches_artifact_hash(candidate):
                 source_path = candidate
         if source_path is None and artifact.run_id is None:
             candidate = Path(self.resolve_uri(artifact.container_uri)).resolve()
-            if candidate.exists():
+            if candidate.exists() and _matches_artifact_hash(candidate):
                 source_path = candidate
         if source_path is None:
             source_path = self._find_current_managed_uri_source(artifact)
         if source_path is None or not source_path.exists():
+            if mismatched_candidate is not None:
+                raise ValueError(
+                    f"Source file for artifact {artifact.key!r} does not match "
+                    f"artifact hash: {mismatched_candidate}"
+                )
             raise FileNotFoundError(
                 f"Cannot archive artifact {artifact.key!r}: source bytes are unavailable."
             )
@@ -1579,22 +1602,22 @@ class TrackerArchiveService(_TrackerServiceBase):
         destination: Path,
     ) -> None:
         """Validate an excluded nested scalar output before archival."""
+        source_path = self._find_scalar_archive_source(artifact)
         if destination.exists():
             if not destination.is_file():
                 raise FileExistsError(
                     f"Archive destination already exists: {destination}"
                 )
-            if (
-                artifact.hash
-                and self.identity.hashing_strategy == "full"
-                and self.identity.compute_file_checksum(str(destination))
-                != artifact.hash
-            ):
-                raise FileExistsError(
-                    f"Archive destination already exists: {destination}"
+            if destination.resolve() != source_path.resolve():
+                same_size = source_path.stat().st_size == destination.stat().st_size
+                same_hash = same_size and file_sha256(source_path) == file_sha256(
+                    destination
                 )
+                if not same_hash:
+                    raise FileExistsError(
+                        f"Archive destination already exists: {destination}"
+                    )
             return
-        self._find_scalar_archive_source(artifact)
 
     def _validate_nested_output_set_directory(
         self,
@@ -2788,6 +2811,15 @@ class TrackerArchiveService(_TrackerServiceBase):
                 raise ValueError(f"Symlink source is not supported: {path}")
             return True
 
+        def validate_source(path: Path) -> bool:
+            reject_symlink(path)
+            if not path.is_file() or not candidate.artifact.hash:
+                return True
+            return (
+                self.identity.compute_file_checksum(str(path))
+                == candidate.artifact.hash
+            )
+
         if producing_run is not None:
             try:
                 from consist.core.materialize import find_existing_recovery_source_path
@@ -2797,9 +2829,18 @@ class TrackerArchiveService(_TrackerServiceBase):
                     artifact=candidate.artifact,
                     run=producing_run,
                     source_root=None,
-                    source_validator=reject_symlink,
+                    source_validator=validate_source,
                     preserve_raw_paths=True,
                 )
+                if source_path is None:
+                    _, source_path, _ = find_existing_recovery_source_path(
+                        self.tracker,
+                        artifact=candidate.artifact,
+                        run=producing_run,
+                        source_root=None,
+                        source_validator=reject_symlink,
+                        preserve_raw_paths=True,
+                    )
             except ValueError as exc:
                 return None, self._archive_result(
                     candidate, "symlink_source", "failed", message=str(exc)
@@ -3368,3 +3409,112 @@ class TrackerArchiveService(_TrackerServiceBase):
             append=append,
             prepend_source_mount_root=prepend_source_mount_root,
         )
+
+    def _evict_superseded_recovery_root(
+        self,
+        archive_root: str | os.PathLike[str],
+        *,
+        active_run_id: str,
+    ) -> None:
+        """Remove an overwritten archive root from superseded runs' artifact metadata."""
+        if self.db is None:
+            return
+        normalized_roots = self.fs.normalize_recovery_roots(archive_root)
+        if not normalized_roots:
+            return
+        target_root = normalized_roots[0]
+        retained_ids = {
+            art.id
+            for art in self.get_run_outputs(active_run_id).values()
+            if art.id is not None
+        }
+        updated_any = False
+        with self.db.session_scope() as session:
+            statement = select(Artifact)
+            if retained_ids:
+                statement = statement.where(col(Artifact.id).not_in(retained_ids))
+            candidates = session.exec(statement).all()
+            for db_artifact in candidates:
+                meta = db_artifact.meta if isinstance(db_artifact.meta, Mapping) else {}
+                existing = self.fs.normalize_recovery_roots(meta.get("recovery_roots"))
+                if target_root not in existing:
+                    continue
+                remaining = [root for root in existing if root != target_root]
+                next_meta = dict(meta)
+                if remaining:
+                    next_meta["recovery_roots"] = remaining
+                else:
+                    next_meta.pop("recovery_roots", None)
+                db_artifact.meta = next_meta
+                session.add(db_artifact)
+                updated_any = True
+            if updated_any:
+                session.commit()
+        if updated_any:
+            self._run_artifacts_cache.clear()
+
+    def archive_current_run_outputs_for_completion_policy(
+        self,
+        archive_root: str | os.PathLike[str],
+        *,
+        mode: Literal["copy", "move"] = "copy",
+        prepend_source_mount_root: bool = True,
+    ) -> ArchivedOutputs:
+        """Archive active-run outputs for ``RunCompletionArchivePolicy``, atomically replacing stale step-scoped archive roots."""
+        if not self.current_consist or self.current_consist.run is None:
+            raise RuntimeError(
+                "archive_current_run_outputs_for_completion_policy(...) requires an active run context."
+            )
+        active_run_id = str(self.current_consist.run.id)
+        archive_root_path = Path(archive_root).expanduser().absolute()
+        preexisted = archive_root_path.exists() or archive_root_path.is_symlink()
+        try:
+            return self.tracker.archive_current_run_outputs(
+                archive_root_path,
+                mode=mode,
+                append=True,
+                prepend_source_mount_root=prepend_source_mount_root,
+            )
+        except (FileExistsError, ValueError):
+            if (
+                mode != "copy"
+                or not preexisted
+                or not archive_root_path.exists()
+                or archive_root_path.is_symlink()
+                or self._has_symlink_component(archive_root_path)
+                or not archive_root_path.is_dir()
+            ):
+                raise
+            backup_root = Path(
+                tempfile.mkdtemp(
+                    dir=str(archive_root_path.parent),
+                    prefix=f".consist-archive-replace-{archive_root_path.name}-",
+                )
+            )
+            backup_target = backup_root / "previous"
+            shutil.move(str(archive_root_path), str(backup_target))
+            try:
+                archived = self.tracker.archive_current_run_outputs(
+                    archive_root_path,
+                    mode=mode,
+                    append=True,
+                    prepend_source_mount_root=prepend_source_mount_root,
+                )
+            except Exception:
+                if archive_root_path.exists() or archive_root_path.is_symlink():
+                    if (
+                        archive_root_path.is_dir()
+                        and not archive_root_path.is_symlink()
+                    ):
+                        shutil.rmtree(archive_root_path)
+                    else:
+                        archive_root_path.unlink(missing_ok=True)
+                if backup_target.exists():
+                    shutil.move(str(backup_target), str(archive_root_path))
+                shutil.rmtree(backup_root, ignore_errors=True)
+                raise
+            self._evict_superseded_recovery_root(
+                archive_root_path, active_run_id=active_run_id
+            )
+            shutil.rmtree(backup_root, ignore_errors=True)
+            return archived
