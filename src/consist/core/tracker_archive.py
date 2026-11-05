@@ -204,7 +204,8 @@ class TrackerArchiveService(_TrackerServiceBase):
         for coupler in self._iter_live_couplers():
             for key, art in coupler.items():
                 if (
-                    art.abs_path is not None
+                    isinstance(art, Artifact)
+                    and art.abs_path is not None
                     and key not in known
                     and art.run_id is not None
                     and str(art.run_id) == str(run_id)
@@ -224,7 +225,11 @@ class TrackerArchiveService(_TrackerServiceBase):
                 record.sync_output_artifact(artifact_id=artifact_id, meta=meta)
         for coupler in self._iter_live_couplers():
             for art in coupler.values():
-                if art.id is not None and str(art.id) in updated_by_id:
+                if (
+                    isinstance(art, Artifact)
+                    and art.id is not None
+                    and str(art.id) in updated_by_id
+                ):
                     art.meta = dict(updated_by_id[str(art.id)])
                     set_tracker_ref(art, self.tracker)
 
@@ -248,7 +253,11 @@ class TrackerArchiveService(_TrackerServiceBase):
             )
         for coupler in self._iter_live_couplers():
             for art in coupler.values():
-                if art.id is not None and str(art.id) == target_id:
+                if (
+                    isinstance(art, Artifact)
+                    and art.id is not None
+                    and str(art.id) == target_id
+                ):
                     if not preserve_existing or art.abs_path is None:
                         art.abs_path = abs_path
                     set_tracker_ref(art, self.tracker)
@@ -280,6 +289,8 @@ class TrackerArchiveService(_TrackerServiceBase):
 
         for coupler in self._iter_live_couplers():
             for coupler_key, coupler_art in coupler.items():
+                if not isinstance(coupler_art, Artifact):
+                    continue
                 matched_refreshed: Artifact | None = None
                 if coupler_art.id is not None:
                     target_id = str(coupler_art.id)
