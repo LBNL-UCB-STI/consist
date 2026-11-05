@@ -125,7 +125,7 @@ class CacheOptions:
         Cache reuse always rejects an ``outputs-requested`` candidate that
         cannot materialize every requested output; ``"miss"`` is required
         outside that lifecycle path and requires
-        ``cache_hydration="outputs-requested"``.
+        ``cache_hydration="outputs-requested"`` or ``"outputs-all"``.
     cache_version : int | None
         Optional cache-version discriminator used when selecting candidates.
     cache_epoch : int | None

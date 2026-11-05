@@ -694,7 +694,7 @@ def test_miss_policy_requires_requested_output_hydration(tmp_path: Path) -> None
 
     with pytest.raises(
         ValueError,
-        match="cache_hydration_failure='miss' requires cache_hydration='outputs-requested'",
+        match="cache_hydration_failure='miss' requires cache_hydration='outputs-requested' or 'outputs-all'",
     ):
         tracker.run(
             fn=lambda: None,
@@ -3085,3 +3085,116 @@ def test_cache_hit_abs_path_populated_for_skipped_existing_and_shapefile_bundles
         tracker.engine.dispose()
     if tracker_b.engine:
         tracker_b.engine.dispose()
+
+
+def test_dynamic_logged_outputs_hydrated_on_cold_scratch_with_eager_validation(
+    tmp_path: Path,
+) -> None:
+    import shutil
+
+    db_path = str(tmp_path / "provenance.db")
+    workspace_dir = tmp_path / "workspace"
+    archive_dir = tmp_path / "archive"
+    tracker = Tracker(run_dir=workspace_dir, db_path=db_path)
+    _init_core_tables(tracker)
+
+    calls = 0
+
+    def run_dynamic_step(ctx) -> None:
+        nonlocal calls
+        calls += 1
+        out_dir = workspace_dir / "beam" / "output" / "ITERS" / "it.0"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        events_file = out_dir / "0.events.parquet"
+        events_file.write_bytes(f"events-{calls}".encode("utf-8"))
+        ctx.log_output(events_file, key="events_parquet")
+
+        skims_dir = out_dir / "0.skims.zarr"
+        (skims_dir / "chunk").mkdir(parents=True, exist_ok=True)
+        (skims_dir / "chunk" / "0.0").write_bytes(f"skims-{calls}".encode("utf-8"))
+        ctx.log_output(skims_dir, key="skims_zarr", artifact_kind="directory")
+
+    with tracker.scenario("dynamic_step_run_1") as scenario:
+        res1 = scenario.run(
+            fn=run_dynamic_step,
+            name="beam_step",
+            config={"iteration": 0},
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+    assert res1.cache_hit is False
+    assert calls == 1
+
+    for art in res1.outputs.values():
+        tracker.archive_artifact(art, archive_dir, mode="copy")
+
+    # Simulate cold scratch wipe
+    shutil.rmtree(workspace_dir / "beam")
+
+    # 1) Cache hit with outputs-requested + validate_cached_outputs="eager" hydrates dynamic outputs
+    with tracker.scenario("dynamic_step_run_2") as scenario:
+        res2 = scenario.run(
+            fn=run_dynamic_step,
+            name="beam_step",
+            config={"iteration": 0},
+            cache_options=CacheOptions(
+                cache_hydration="outputs-requested",
+                cache_hydration_failure="miss",
+                validate_cached_outputs="eager",
+            ),
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+    assert res2.cache_hit is True
+    assert calls == 1
+    hydrated_events = (
+        workspace_dir / "beam" / "output" / "ITERS" / "it.0" / "0.events.parquet"
+    )
+    hydrated_skims = (
+        workspace_dir / "beam" / "output" / "ITERS" / "it.0" / "0.skims.zarr"
+    )
+    assert hydrated_events.read_bytes() == b"events-1"
+    assert (hydrated_skims / "chunk" / "0.0").read_bytes() == b"skims-1"
+    assert res2.outputs["events_parquet"].abs_path == str(hydrated_events.resolve())
+    assert res2.outputs["skims_zarr"].abs_path == str(hydrated_skims.resolve())
+
+    # 2) Cache hit with outputs-all + cache_hydration_failure="miss" also hydrates dynamic outputs
+    shutil.rmtree(workspace_dir / "beam")
+    with tracker.scenario("dynamic_step_run_3") as scenario:
+        res3 = scenario.run(
+            fn=run_dynamic_step,
+            name="beam_step",
+            config={"iteration": 0},
+            cache_options=CacheOptions(
+                cache_hydration="outputs-all",
+                cache_hydration_failure="miss",
+            ),
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+    assert res3.cache_hit is True
+    assert calls == 1
+    assert hydrated_events.read_bytes() == b"events-1"
+    assert (hydrated_skims / "chunk" / "0.0").read_bytes() == b"skims-1"
+
+    # 3) If archive copy is missing/unrecoverable, cache_hydration="outputs-all" +
+    #    cache_hydration_failure="miss" (even with lazy validation) rejects the hit and re-executes
+    shutil.rmtree(workspace_dir / "beam")
+    (archive_dir / "beam" / "output" / "ITERS" / "it.0" / "0.events.parquet").unlink()
+
+    with tracker.scenario("dynamic_step_run_4_miss") as scenario:
+        res4 = scenario.run(
+            fn=run_dynamic_step,
+            name="beam_step",
+            config={"iteration": 0},
+            cache_options=CacheOptions(
+                cache_hydration="outputs-all",
+                cache_hydration_failure="miss",
+                validate_cached_outputs="lazy",
+            ),
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+    assert res4.cache_hit is False
+    assert calls == 2
+    assert hydrated_events.read_bytes() == b"events-2"
+    assert (hydrated_skims / "chunk" / "0.0").read_bytes() == b"skims-2"
+
+    if tracker.engine:
+        tracker.engine.dispose()

@@ -1355,3 +1355,77 @@ def test_artifact_abs_path_setter_accepts_path_object():
 
     cloned = copy.deepcopy(art)
     assert cloned.abs_path == "/data/runs/output.parquet"
+
+
+def test_artifact_tracker_property_and_ensure_local_path(
+    tracker, tmp_path: Path
+) -> None:
+    import consist
+    from consist.core.context import use_tracker
+
+    archive_dir = tmp_path / "archive"
+    out_file = tracker.run_dir / "outputs" / "households.parquet"
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    out_file.write_bytes(b"households-v1")
+
+    with tracker.start_run("produce_households", "urbansim"):
+        artifact = tracker.log_artifact(out_file, key="households", direction="output")
+
+    # 1) Outside active context, artifact.tracker resolves via weakref
+    assert artifact.tracker is tracker
+
+    # Unbound artifact falls back to current_tracker() inside use_tracker
+    unbound = Artifact(
+        key="unbound",
+        container_uri="inputs://unbound.parquet",
+        driver="parquet",
+    )
+    assert unbound.tracker is None
+    with use_tracker(tracker):
+        assert unbound.tracker is tracker
+
+    # 2) When local path already exists on disk, ensure_local_path returns it directly
+    resolved_existing = artifact.ensure_local_path()
+    assert resolved_existing == out_file.resolve()
+    assert consist.ensure_local_path(artifact) == out_file.resolve()
+
+    # 3) Archive artifact, wipe scratch copy, and recover via ensure_local_path outside context
+    tracker.archive_artifact(artifact, archive_dir, mode="copy")
+    out_file.unlink()
+    assert not out_file.exists()
+
+    recovered_path = artifact.ensure_local_path()
+    assert recovered_path == out_file.resolve()
+    assert out_file.read_bytes() == b"households-v1"
+
+    # 4) Explicit target_root materializes into the requested root
+    custom_root = tmp_path / "custom_target"
+    out_file.unlink()
+    custom_path = consist.ensure_local_path(artifact, target_root=custom_root)
+    assert custom_path == (custom_root / "outputs" / "households.parquet").resolve()
+    assert custom_path.read_bytes() == b"households-v1"
+
+    # 5) Missing source behavior: on_missing="warn" returns None, on_missing="raise" raises
+    (archive_dir / "outputs" / "households.parquet").unlink()
+    custom_path.unlink()
+    artifact.abs_path = None
+
+    assert artifact.ensure_local_path(on_missing="warn") is None
+    with pytest.raises(FileNotFoundError):
+        artifact.ensure_local_path(on_missing="raise")
+
+    # 6) Detached artifact with target_root requires a tracker even if self.path exists elsewhere
+    elsewhere_file = tmp_path / "elsewhere.parquet"
+    elsewhere_file.write_bytes(b"elsewhere")
+    detached = Artifact(
+        key="detached",
+        container_uri=str(elsewhere_file),
+        driver="parquet",
+    )
+    assert detached.ensure_local_path() == elsewhere_file
+    assert (
+        detached.ensure_local_path(
+            target_root=tmp_path / "other_target", on_missing="warn"
+        )
+        is None
+    )

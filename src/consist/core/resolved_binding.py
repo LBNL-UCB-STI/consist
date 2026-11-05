@@ -570,6 +570,41 @@ def _validate_strict_binding_invocation_context(
     return context
 
 
+_COMPOUND_ARCHIVE_EXTENSIONS = frozenset(
+    {
+        ".gz",
+        ".bz2",
+        ".xz",
+        ".zst",
+        ".lz4",
+        ".zip",
+    }
+)
+
+
+def _extract_artifact_suffix(artifact: "Artifact") -> str:
+    """Return the file extension(s) from an artifact's URI or path."""
+    for candidate in (artifact.container_uri, artifact.abs_path):
+        if not candidate:
+            continue
+        raw_path = candidate.split("://", 1)[1] if "://" in candidate else candidate
+        name = Path(raw_path).name
+        if not name:
+            continue
+        suffixes = Path(name).suffixes
+        if not suffixes:
+            continue
+        if (
+            len(suffixes) >= 2
+            and suffixes[-1].lower() in _COMPOUND_ARCHIVE_EXTENSIONS
+            and any(ch.isalpha() for ch in suffixes[-2])
+        ):
+            return f"{suffixes[-2]}{suffixes[-1]}"
+        if any(ch.isalpha() for ch in suffixes[-1]):
+            return suffixes[-1]
+    return ""
+
+
 class ResolvedBindingBuilder:
     """Build one immutable resolved binding without retaining runtime objects."""
 
@@ -613,15 +648,26 @@ class ResolvedBindingBuilder:
         *,
         parameter: str,
         artifact: "Artifact",
-        destination: Path | None,
+        destination: Path | str | None = None,
         source: Literal[
             "explicit", "coupler", "fallback", "pinned", "external_admitted"
-        ],
+        ] = "explicit",
         selected_role: str | None = None,
+        preserve_suffix: bool = True,
     ) -> "ResolvedBindingBuilder":
         """Bind a locally tracked artifact after deriving its trusted identity."""
         identity = ArtifactIdentity.from_artifact(artifact)
         manifest = artifact.meta.get("directory_manifest")
+        dest_path = (
+            Path("inputs") / parameter if destination is None else Path(destination)
+        )
+        suffix = _extract_artifact_suffix(artifact) if preserve_suffix else ""
+        has_alpha_suffix = any(ch.isalpha() for ch in dest_path.suffix)
+        resolved_dest = (
+            dest_path.with_name(f"{dest_path.name}{suffix}")
+            if suffix and not has_alpha_suffix
+            else dest_path
+        )
         return self.bind_artifact(
             parameter=parameter,
             artifact=BoundArtifact(
@@ -637,7 +683,7 @@ class ResolvedBindingBuilder:
                     else None
                 ),
             ),
-            destination=destination,
+            destination=resolved_dest,
             source=source,
             selected_role=selected_role,
         )

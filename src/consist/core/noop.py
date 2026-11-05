@@ -61,6 +61,32 @@ class NoopArtifact:
     def abs_path(self) -> Optional[str]:
         return str(self.path) if self.path is not None else None
 
+    @property
+    def tracker(self) -> None:
+        return None
+
+    def ensure_local_path(
+        self,
+        *,
+        tracker: Any = None,
+        target_root: Optional[Path | str] = None,
+        source_root: Optional[Path | str] = None,
+        on_missing: Literal["warn", "raise"] = "warn",
+    ) -> Optional[Path]:
+        del tracker, target_root, source_root
+        if self.path is not None and self.path.exists():
+            return self.path
+        if on_missing == "raise":
+            raise FileNotFoundError(
+                f"Cannot ensure local path for noop artifact {self.key!r}: {self.path!r} does not exist."
+            )
+        logging.warning(
+            "[Consist] Cannot ensure local path for noop artifact %r: %r does not exist.",
+            self.key,
+            self.path,
+        )
+        return None
+
 
 @dataclass
 class NoopRunResult:

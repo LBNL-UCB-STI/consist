@@ -67,6 +67,8 @@ class CacheFs(Protocol):
     def normalize_recovery_roots(
         self,
         roots: str | os.PathLike[str] | Sequence[str | os.PathLike[str]] | None,
+        *,
+        resolve: bool = True,
     ) -> list[str]: ...
 
     def get_remappable_relative_path(
@@ -178,7 +180,7 @@ class ActiveRunCacheOptions:
         Lower-level requested-output hydration failure policy. Cache reuse
         performs strict requested-output candidate admission regardless of
         this value. ``"miss"`` is valid only with
-        ``cache_hydration="outputs-requested"``.
+        ``cache_hydration="outputs-requested"`` or ``"outputs-all"``.
     materialize_cached_output_paths : dict[str, pathlib.Path] | None
         Exact destination paths requested for individual cached output keys.
     materialize_cached_output_set_roots : dict[str, pathlib.Path] | None
@@ -288,13 +290,21 @@ def _materialize_cached_outputs_via_run_api(
     active_options: ActiveRunCacheOptions,
     outputs_by_key: dict[str, Artifact],
 ) -> Optional[dict[str, str]]:
-    requested_paths = dict(active_options.materialize_cached_output_paths or {})
-    requested_paths.update(
-        build_output_set_child_destinations(
-            outputs=list(outputs_by_key.values()),
-            output_set_roots=active_options.materialize_cached_output_set_roots or {},
+    if active_options.cache_hydration == "outputs-requested":
+        requested_paths = _requested_output_destinations(
+            active_options=active_options,
+            outputs_by_key=outputs_by_key,
+            tracker=tracker,
         )
-    )
+    else:
+        requested_paths = dict(active_options.materialize_cached_output_paths or {})
+        requested_paths.update(
+            build_output_set_child_destinations(
+                outputs=list(outputs_by_key.values()),
+                output_set_roots=active_options.materialize_cached_output_set_roots
+                or {},
+            )
+        )
     requested_keys = list(requested_paths)
     hydrated_keys = set(outputs_by_key)
     missing_keys = sorted(set(requested_keys) - hydrated_keys)
@@ -368,6 +378,7 @@ def _requested_output_destinations(
     *,
     active_options: ActiveRunCacheOptions,
     outputs_by_key: dict[str, Artifact],
+    tracker: Optional[CacheHydrationContext] = None,
 ) -> dict[str, Path]:
     destinations = dict(active_options.materialize_cached_output_paths or {})
     destinations.update(
@@ -376,6 +387,37 @@ def _requested_output_destinations(
             output_set_roots=active_options.materialize_cached_output_set_roots or {},
         )
     )
+    if (
+        active_options.validate_cached_outputs == "eager"
+        or active_options.cache_hydration == "outputs-all"
+    ):
+        set_roots = active_options.materialize_cached_output_set_roots or {}
+        for key, artifact in outputs_by_key.items():
+            if key in destinations or key in set_roots:
+                continue
+            if artifact.driver == "artifact_set":
+                continue
+            if isinstance(artifact.meta, Mapping) and (
+                artifact.meta.get("output_set_manifest") is True
+                or artifact.meta.get("output_set_member") is True
+                or (
+                    artifact.meta.get("is_ingested") is True
+                    and not artifact.container_uri
+                )
+            ):
+                continue
+            resolved_dest: Optional[Path] = None
+            if tracker is not None and artifact.container_uri:
+                try:
+                    uri_resolved = tracker.resolve_uri(artifact.container_uri)
+                    if uri_resolved:
+                        resolved_dest = Path(uri_resolved)
+                except Exception:
+                    resolved_dest = None
+            if resolved_dest is None and artifact.abs_path:
+                resolved_dest = Path(artifact.abs_path)
+            if resolved_dest is not None:
+                destinations[key] = resolved_dest
     return destinations
 
 
@@ -406,6 +448,7 @@ def _strict_requested_output_hydration(
     requested_paths = _requested_output_destinations(
         active_options=active_options,
         outputs_by_key=outputs_by_key,
+        tracker=tracker,
     )
     requested_keys = list(requested_paths)
     missing_keys = sorted(set(requested_keys) - set(outputs_by_key))
@@ -679,10 +722,13 @@ def parse_materialize_cached_outputs_kwargs(
 
     if cache_hydration_failure not in {"warn", "miss"}:
         raise ValueError("cache_hydration_failure must be one of: 'warn', 'miss'")
-    if cache_hydration_failure == "miss" and cache_hydration != "outputs-requested":
+    if cache_hydration_failure == "miss" and cache_hydration not in {
+        "outputs-requested",
+        "outputs-all",
+    }:
         raise ValueError(
             "cache_hydration_failure='miss' requires "
-            "cache_hydration='outputs-requested'"
+            "cache_hydration='outputs-requested' or 'outputs-all'"
         )
 
     if validate_cached_outputs not in {"eager", "lazy"}:
@@ -700,15 +746,21 @@ def parse_materialize_cached_outputs_kwargs(
             materialize_cached_output_paths_raw is None
             and materialize_cached_output_set_roots_raw is None
         ):
-            raise ValueError(
-                "cache_hydration='outputs-requested' requires materialize_cached_output_paths"
-            )
+            if validate_cached_outputs == "eager":
+                materialize_cached_output_paths_raw = {}
+            else:
+                raise ValueError(
+                    "cache_hydration='outputs-requested' requires materialize_cached_output_paths"
+                )
         if materialize_cached_outputs_dir_raw is not None:
             raise ValueError(
                 "cache_hydration='outputs-requested' does not use materialize_cached_outputs_dir"
             )
     elif cache_hydration == "outputs-all":
-        if materialize_cached_outputs_dir_raw is None:
+        if (
+            materialize_cached_outputs_dir_raw is None
+            and cache_hydration_failure != "miss"
+        ):
             raise ValueError(
                 "cache_hydration='outputs-all' requires materialize_cached_outputs_dir"
             )
@@ -794,7 +846,7 @@ def hydrate_cache_hit_outputs(
     active_options = options or ActiveRunCacheOptions()
     strict_materialized: Optional[dict[str, str]] = None
     if (
-        active_options.cache_hydration == "outputs-requested"
+        active_options.cache_hydration in {"outputs-requested", "outputs-all"}
         and active_options.cache_hydration_failure == "miss"
     ):
         strict_materialized = _strict_requested_output_hydration(
@@ -909,7 +961,13 @@ def hydrate_cache_hit_outputs(
                 run_cache: dict[str, Optional[Run]] = {}
 
                 if active_options.cache_hydration == "outputs-requested":
-                    destinations = active_options.materialize_cached_output_paths or {}
+                    destinations = _requested_output_destinations(
+                        active_options=active_options,
+                        outputs_by_key={
+                            artifact.key: artifact for artifact in record.outputs
+                        },
+                        tracker=tracker,
+                    )
                     requested_items = build_materialize_items_for_keys(
                         record.outputs,
                         destinations_by_key=destinations,
@@ -1012,6 +1070,7 @@ def hydrate_cache_hit_outputs(
         if (
             active_options.cache_hydration == "outputs-all"
             and active_options.materialize_cached_outputs_dir is not None
+            and strict_materialized is None
         ):
             from consist.core.materialize import _derive_remappable_relative_path
 
@@ -1030,10 +1089,11 @@ def hydrate_cache_hit_outputs(
                     output_artifact.abs_path = resolve_artifact_entry_path(
                         output_artifact, out_dir / rel_path
                     )
-        elif active_options.cache_hydration == "outputs-requested":
+        elif active_options.cache_hydration in {"outputs-requested", "outputs-all"}:
             requested_dests = _requested_output_destinations(
                 active_options=active_options,
                 outputs_by_key=dict(cached_items.outputs),
+                tracker=tracker,
             )
             for output_artifact in all_hydrated_artifacts:
                 if output_artifact.abs_path is not None:
@@ -1416,16 +1476,45 @@ def materialize_requested_inputs(
         else:
             path.unlink()
 
+    def _recovery_source_matches_artifact(artifact: Artifact, path: Path) -> bool:
+        if (
+            active_options.requested_input_validate_content_hash == "never"
+            and not active_options.requested_input_strict_snapshot
+        ):
+            return True
+        manifest_valid = is_valid_directory_artifact_tree(path, artifact)
+        if manifest_valid is not None:
+            return manifest_valid
+        if not artifact.hash or tracker.identity.hashing_strategy != "full":
+            return True
+        try:
+            return tracker.identity.compute_file_checksum(path) == artifact.hash
+        except (FileNotFoundError, OSError, ValueError):
+            return False
+
     def _resolve_source(artifact: Artifact) -> Optional[Path]:
-        resolved_path = Path(tracker.resolve_uri(artifact.container_uri))
-        if resolved_path.exists():
-            return resolved_path
+        fallback_source: Optional[Path] = None
+        resolved_uri = (
+            tracker.resolve_uri(artifact.container_uri)
+            if artifact.container_uri
+            else ""
+        )
+        if resolved_uri:
+            resolved_path = Path(resolved_uri)
+            if resolved_path.exists():
+                if _recovery_source_matches_artifact(artifact, resolved_path):
+                    return resolved_path
+                fallback_source = resolved_path
 
         if artifact.abs_path:
             abs_path = Path(artifact.abs_path)
             if abs_path.exists():
-                return abs_path
+                if _recovery_source_matches_artifact(artifact, abs_path):
+                    return abs_path
+                if fallback_source is None:
+                    fallback_source = abs_path
 
+        prior_run: Optional[Run] = None
         if tracker.db is not None and artifact.run_id:
             from consist.core.fs import resolve_historical_artifact_path
 
@@ -1437,9 +1526,40 @@ def materialize_requested_inputs(
                 tracker.fs, artifact, prior_run, fallback_to_current_uri=False
             )
             if historical is not None and historical.exists():
-                return historical
+                if _recovery_source_matches_artifact(artifact, historical):
+                    return historical
+                if fallback_source is None:
+                    fallback_source = historical
 
-        return None
+        from consist.core.materialize import find_existing_recovery_source_path
+
+        _, recovered, _ = find_existing_recovery_source_path(
+            cast("Tracker", tracker),
+            artifact=artifact,
+            run=prior_run,
+            source_root=None,
+            preserve_raw_paths=bool(
+                isinstance(artifact.meta, Mapping)
+                and (
+                    artifact.meta.get("directory_artifact") is True
+                    or "directory_manifest" in artifact.meta
+                )
+            ),
+            source_validator=lambda path, artifact=artifact: (
+                _recovery_source_matches_artifact(artifact, path)
+            ),
+        )
+        if recovered is not None:
+            return recovered
+
+        if (
+            isinstance(artifact.meta, Mapping)
+            and artifact.meta.get("is_ingested", False)
+            and not active_options.requested_input_strict_snapshot
+        ):
+            return None
+
+        return fallback_source
 
     staged_by_destination: dict[Path, uuid.UUID] = {}
 

@@ -818,6 +818,12 @@ class RunLifecycleCoordinator:
                 requested_output_hydration = (
                     tracker._active_run_cache_options.cache_hydration
                     == "outputs-requested"
+                    or (
+                        tracker._active_run_cache_options.cache_hydration
+                        == "outputs-all"
+                        and tracker._active_run_cache_options.cache_hydration_failure
+                        == "miss"
+                    )
                 )
                 cached_run = None
                 if cache_key and requested_output_hydration:

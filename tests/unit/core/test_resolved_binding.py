@@ -1735,3 +1735,114 @@ def test_strict_binding_refuses_execution_when_evidence_persistence_fails(
             )
 
     assert executed is False
+
+
+def test_bind_tracked_artifact_preserves_single_and_compound_suffixes(
+    tracker, tmp_path: Path
+) -> None:
+    from consist import ExecutionOptions
+    from consist.core.resolved_binding import (
+        ResolvedBindingBuilder,
+        step_contract_identity,
+    )
+
+    parquet_src = tmp_path / "0.events.parquet"
+    parquet_src.write_bytes(b"parquet-bytes")
+    h5_src = tmp_path / "datastore.h5"
+    h5_src.write_bytes(b"h5-bytes")
+    csvgz_src = tmp_path / "0.linkstats.csv.gz"
+    csvgz_src.write_bytes(b"csvgz-bytes")
+    zarr_src = tmp_path / "0.skims.zarr"
+    (zarr_src / "chunk").mkdir(parents=True, exist_ok=True)
+    (zarr_src / "chunk" / "0.0").write_bytes(b"zarr-bytes")
+
+    with tracker.start_run("seed_suffixes", "test"):
+        parquet_art = tracker.log_artifact(
+            parquet_src, key="events_out", direction="output"
+        )
+        h5_art = tracker.log_artifact(h5_src, key="datastore_out", direction="output")
+        csvgz_art = tracker.log_artifact(
+            csvgz_src, key="linkstats_out", direction="output"
+        )
+        zarr_art = tracker.log_output(
+            zarr_src, key="skims_out", artifact_kind="directory", driver="zarr"
+        )
+
+    received: dict[str, Path] = {}
+
+    def consume(
+        households_in: Path,
+        datastore_in: Path,
+        linkstats_in: Path,
+        skims_in: Path,
+        raw_no_suffix: Path,
+    ) -> None:
+        received["households_in"] = households_in
+        received["datastore_in"] = datastore_in
+        received["linkstats_in"] = linkstats_in
+        received["skims_in"] = skims_in
+        received["raw_no_suffix"] = raw_no_suffix
+
+    binding = (
+        ResolvedBindingBuilder(
+            step_name="consume",
+            step_contract_identity=step_contract_identity(consume, "consume"),
+        )
+        # Default destination=None appends single suffix (.parquet) ignoring numeric prefix "0."
+        .bind_tracked_artifact(
+            parameter="households_in",
+            artifact=parquet_art,
+        )
+        # Explicit suffixless destination appends .h5
+        .bind_tracked_artifact(
+            parameter="datastore_in",
+            artifact=h5_art,
+            destination=Path("inputs/datastore_in"),
+            source="coupler",
+        )
+        # Compound archive extension (.csv.gz) is preserved in full
+        .bind_tracked_artifact(
+            parameter="linkstats_in",
+            artifact=csvgz_art,
+            destination=Path("inputs/linkstats_in"),
+            source="coupler",
+        )
+        # Directory artifact suffix (.zarr) is preserved
+        .bind_tracked_artifact(
+            parameter="skims_in",
+            artifact=zarr_art,
+        )
+        # preserve_suffix=False leaves destination suffixless
+        .bind_tracked_artifact(
+            parameter="raw_no_suffix",
+            artifact=parquet_art,
+            destination=Path("inputs/raw_no_suffix"),
+            preserve_suffix=False,
+        )
+        .freeze()
+    )
+
+    assert binding.path_for("households_in") == Path("inputs/households_in.parquet")
+    assert binding.path_for("datastore_in") == Path("inputs/datastore_in.h5")
+    assert binding.path_for("linkstats_in") == Path("inputs/linkstats_in.csv.gz")
+    assert binding.path_for("skims_in") == Path("inputs/skims_in.zarr")
+    assert binding.path_for("raw_no_suffix") == Path("inputs/raw_no_suffix")
+
+    with tracker.scenario("strict_suffix_preservation") as scenario:
+        result = scenario.run(
+            fn=consume,
+            name="consume",
+            binding=binding,
+            execution_options=ExecutionOptions(input_binding="paths"),
+        )
+
+    assert result.cache_hit is False
+    assert received["households_in"].name == "households_in.parquet"
+    assert received["households_in"].suffix == ".parquet"
+    assert received["datastore_in"].name == "datastore_in.h5"
+    assert received["linkstats_in"].name == "linkstats_in.csv.gz"
+    assert received["linkstats_in"].suffixes == [".csv", ".gz"]
+    assert received["skims_in"].name == "skims_in.zarr"
+    assert (received["skims_in"] / "chunk" / "0.0").read_bytes() == b"zarr-bytes"
+    assert received["raw_no_suffix"].name == "raw_no_suffix"
+    assert received["raw_no_suffix"].suffix == ""

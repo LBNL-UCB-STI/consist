@@ -413,6 +413,7 @@ class RunTraceCoordinator:
         *,
         tracker: "Tracker",
         cache_hydration: Optional[str],
+        validate_cached_outputs: Optional[str] = None,
         output_paths: Optional[Mapping[str, OutputPathRef]],
         output_sets: Optional[Mapping[str, OutputSet]],
         run_id: str,
@@ -429,6 +430,8 @@ class RunTraceCoordinator:
         materialize_cached_outputs_dir: Optional[Path] = None
         if cache_hydration == "outputs-requested":
             if output_paths is None and output_sets is None:
+                if validate_cached_outputs == "eager":
+                    return {}, None, None
                 raise ValueError(
                     format_problem_cause_fix(
                         problem=(
@@ -678,6 +681,7 @@ class RunTraceCoordinator:
         ) = self._resolve_cache_hydration_targets(
             tracker=tracker,
             cache_hydration=cache_hydration,
+            validate_cached_outputs=invocation.validate_cached_outputs,
             output_paths=invocation.output_paths,
             output_sets=invocation.output_sets,
             run_id=run_id,

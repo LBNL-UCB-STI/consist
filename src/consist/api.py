@@ -1637,6 +1637,30 @@ def materialize_artifact(
     )
 
 
+def ensure_local_path(
+    artifact: Artifact,
+    *,
+    tracker: Optional["Tracker"] = None,
+    target_root: Optional[Path | str] = None,
+    source_root: Optional[Path | str] = None,
+    on_missing: Literal["warn", "raise"] = "warn",
+) -> Optional[Path]:
+    """
+    Ensure a tracked artifact exists locally on disk and return its ``Path``.
+
+    Returns the existing local path if already present on disk, or attempts
+    recovery/materialization via ``tracker`` (or ``artifact.tracker``) and
+    returns the materialized ``Path`` (or ``None`` if unrecoverable and
+    ``on_missing="warn"``).
+    """
+    return artifact.ensure_local_path(
+        tracker=tracker,
+        target_root=target_root,
+        source_root=source_root,
+        on_missing=on_missing,
+    )
+
+
 def stage_inputs(
     inputs_by_key: Mapping[str, Artifact],
     *,

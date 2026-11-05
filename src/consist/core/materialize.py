@@ -1225,7 +1225,7 @@ def _derive_historical_remap(
     tuple[Path, Path] | None
         Historical root and safe relative path, or ``None`` when unmappable.
     """
-    meta = run.meta if isinstance(run.meta, dict) else {}
+    meta = run.meta if (run is not None and isinstance(run.meta, dict)) else {}
     artifact_meta = artifact.meta if isinstance(artifact.meta, dict) else {}
 
     return tracker.fs.get_historical_remap(
@@ -1308,6 +1308,8 @@ def _derive_remappable_relative_path(
         else None
     )
 
+    if prefixes_arg is None:
+        return tracker.fs.get_remappable_relative_path(uri)
     return tracker.fs.get_remappable_relative_path(uri, scheme_prefixes=prefixes_arg)
 
 
@@ -1336,7 +1338,7 @@ def _derive_historical_root(
     Path | None
         Historical root, or ``None`` when no remappable root is recorded.
     """
-    meta = run.meta if isinstance(run.meta, dict) else {}
+    meta = run.meta if (run is not None and isinstance(run.meta, dict)) else {}
     artifact_meta = artifact.meta if isinstance(artifact.meta, dict) else {}
 
     return tracker.fs.get_historical_root(

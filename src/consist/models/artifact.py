@@ -369,6 +369,88 @@ class Artifact(SQLModel, table=True):
         """Return the currently checked locations for this artifact."""
         return self.accessibility().locations
 
+    @property
+    def tracker(self) -> Optional["Tracker"]:
+        """
+        Return the attached runtime ``Tracker`` if alive, falling back to the
+        currently active or default tracker when available.
+        """
+        tracker_ref = get_tracker_ref(self)
+        if tracker_ref is not None:
+            tracker_obj = tracker_ref()
+            if tracker_obj is not None:
+                return cast("Tracker", tracker_obj)
+        from consist.core.context import get_active_tracker, get_default_tracker
+
+        try:
+            return get_active_tracker()
+        except RuntimeError:
+            return get_default_tracker()
+
+    def ensure_local_path(
+        self,
+        *,
+        tracker: Optional["Tracker"] = None,
+        target_root: Optional[Path | str] = None,
+        source_root: Optional[Path | str] = None,
+        on_missing: Literal["warn", "raise"] = "warn",
+    ) -> Optional[Path]:
+        """
+        Ensure this artifact exists on the local filesystem and return its ``Path``.
+
+        Returns the existing local path immediately if already present on disk
+        (when ``target_root`` is not overriding the destination), or attempts
+        recovery/materialization via ``tracker`` (falling back to ``self.tracker``).
+        When recovery is unavailable and ``on_missing="warn"``, logs a warning
+        and returns ``None``.
+        """
+        resolved_tracker = tracker if tracker is not None else self.tracker
+        if target_root is None:
+            candidate = self.as_path(resolved_tracker)
+            try:
+                if candidate.exists():
+                    self.abs_path = str(candidate)
+                    if resolved_tracker is not None:
+                        set_tracker_ref(self, resolved_tracker)
+                    return candidate
+            except OSError:
+                pass
+
+        if resolved_tracker is None:
+            msg = (
+                f"[Consist] Cannot materialize artifact {self.key!r}: "
+                "no Tracker is attached or active in context."
+            )
+            if on_missing == "raise":
+                raise FileNotFoundError(msg)
+            import logging
+
+            logging.warning(msg)
+            return None
+
+        resolved_target_root: Path | str = (
+            target_root if target_root is not None else resolved_tracker.run_dir
+        )
+        result = resolved_tracker.materialize_artifact(
+            self,
+            target_root=resolved_target_root,
+            source_root=source_root,
+            preserve_existing=True,
+            on_missing=on_missing,
+            allow_external_paths=True if target_root is not None else None,
+        )
+        if result.path is not None and result.path.exists():
+            self.abs_path = str(result.path)
+            set_tracker_ref(self, resolved_tracker)
+            return result.path
+
+        if on_missing == "raise":
+            raise FileNotFoundError(
+                f"[Consist] Cannot materialize artifact {self.key!r}: "
+                f"status={result.status}."
+            )
+        return None
+
     @abs_path.setter
     def abs_path(self, value: Optional[str | Path]) -> None:
         """

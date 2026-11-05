@@ -591,13 +591,13 @@ def resolve_run_invocation(
         resolved_validate_cached_outputs = "lazy"
     if cache_hydration_failure not in {"warn", "miss"}:
         raise ValueError("cache_hydration_failure must be one of: 'warn', 'miss'")
-    if (
-        cache_hydration_failure == "miss"
-        and resolved.cache_hydration != "outputs-requested"
-    ):
+    if cache_hydration_failure == "miss" and resolved.cache_hydration not in {
+        "outputs-requested",
+        "outputs-all",
+    }:
         raise ValueError(
             "cache_hydration_failure='miss' requires "
-            "cache_hydration='outputs-requested'"
+            "cache_hydration='outputs-requested' or 'outputs-all'"
         )
     resolved_validate_materialized_inputs = (
         False if validate_materialized_inputs is None else validate_materialized_inputs
