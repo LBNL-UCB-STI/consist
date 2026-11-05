@@ -322,3 +322,31 @@ def test_coupler_view_pop() -> None:
     # Invalid key triggers validation
     with pytest.raises(ValueError):
         beam.pop("")
+
+
+def test_coupler_path_supports_path_string_and_artifact_like() -> None:
+    from consist.core.noop import NoopArtifact
+
+    coupler = Coupler()
+    coupler.set_from_artifact("as_path", Path("workspace/data.csv"))
+    coupler.set_from_artifact("as_str", "workspace/other.csv")
+    coupler.set_from_artifact(
+        "as_noop",
+        NoopArtifact(
+            key="as_noop",
+            path=Path("workspace/persons.parquet"),
+            container_uri="workspace://persons.parquet",
+        ),
+    )
+
+    assert coupler.path("as_path") == Path("workspace/data.csv")
+    assert coupler.path("as_str") == Path("workspace/other.csv")
+    assert coupler.path("as_noop") == Path("workspace/persons.parquet")
+
+    coupler.tracker = type(
+        "TrackerStub",
+        (),
+        {"resolve_uri": lambda _self, uri: f"/resolved/{uri.split('://', 1)[1]}"},
+    )()
+    coupler.set_from_artifact("as_uri_str", "inputs://table.parquet")
+    assert coupler.path("as_uri_str") == Path("/resolved/table.parquet")

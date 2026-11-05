@@ -13,8 +13,9 @@ from typing import (
 )
 
 from consist.core._coupler_shared import CouplerMapMixin
-from consist.models.artifact import Artifact
 from consist.core.validation import validate_artifact_key
+from consist.models.artifact import Artifact
+from consist.protocols import ArtifactLike
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
@@ -310,8 +311,21 @@ class Coupler(CouplerMapMixin[Artifact, DeclaredOutput]):
         artifact = self.require(key) if required else self.get(key)
         if not artifact:
             return None
-        if not self.tracker:
-            raise RuntimeError(
-                f"Cannot resolve path for {key!r}: no tracker attached to Coupler."
-            )
-        return Path(self.tracker.resolve_uri(artifact.container_uri))
+        if isinstance(artifact, Artifact):
+            if not self.tracker:
+                raise RuntimeError(
+                    f"Cannot resolve path for {key!r}: no tracker attached to Coupler."
+                )
+            return Path(self.tracker.resolve_uri(artifact.container_uri))
+        if isinstance(artifact, (Path, str)):
+            if self.tracker is not None and "://" in str(artifact):
+                return Path(self.tracker.resolve_uri(str(artifact)))
+            return Path(artifact)
+        if isinstance(artifact, ArtifactLike):
+            if artifact.path is not None:
+                return Path(artifact.path)
+            if artifact.container_uri:
+                if self.tracker is not None:
+                    return Path(self.tracker.resolve_uri(artifact.container_uri))
+                return Path(artifact.container_uri)
+        return None
