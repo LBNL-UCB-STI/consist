@@ -1552,6 +1552,21 @@ def _direct_artifact_source_path(
     return None
 
 
+def _is_valid_scalar_recovery_candidate(
+    tracker: "Tracker", candidate_path: Path, artifact: Artifact
+) -> bool:
+    if not candidate_path.is_file() or not artifact.hash:
+        return True
+    try:
+        return (
+            tracker.identity.compute_file_checksum(str(candidate_path)) == artifact.hash
+        )
+    except AttributeError:
+        return True
+    except (FileNotFoundError, OSError, ValueError):
+        return False
+
+
 def _select_materialize_artifact_source(
     tracker: "Tracker",
     *,
@@ -1612,7 +1627,7 @@ def _select_materialize_artifact_source(
             return (
                 is_valid_shapefile_bundle_source(candidate_path, artifact) is not False
             )
-        return True
+        return _is_valid_scalar_recovery_candidate(tracker, candidate_path, artifact)
 
     fallback_existing: (
         tuple[
@@ -3056,6 +3071,9 @@ def plan_run_output_hydration(
             is_dir_artifact = _is_directory_artifact(artifact)
             is_bundle_artifact = _is_file_bundle_artifact(artifact)
             has_manifest_validator = is_dir_artifact or is_bundle_artifact
+            has_scalar_hash_validator = not has_manifest_validator and bool(
+                artifact.hash
+            )
             relative_path, source_path, has_candidate_roots = (
                 find_existing_recovery_source_path(
                     tracker,
@@ -3077,10 +3095,20 @@ def plan_run_output_hydration(
                             )
                         )
                         if is_bundle_artifact
+                        else (
+                            lambda candidate, artifact=artifact: (
+                                _is_valid_scalar_recovery_candidate(
+                                    tracker, candidate, artifact
+                                )
+                            )
+                        )
+                        if has_scalar_hash_validator
                         else None
                     ),
                     fallback_validator=(
-                        (lambda _: True) if has_manifest_validator else None
+                        (lambda _: True)
+                        if (has_manifest_validator or has_scalar_hash_validator)
+                        else None
                     ),
                     preserve_raw_paths=has_manifest_validator,
                 )

@@ -967,7 +967,11 @@ class RunLifecycleCoordinator:
                 )
 
         with _track_begin_run_phase("input.materialize_requested_inputs"):
-            if requested_input_materialization == "requested" and requested_input_paths:
+            if (
+                not tracker.current_consist.cached_run
+                and requested_input_materialization == "requested"
+                and requested_input_paths
+            ):
                 staged_inputs = materialize_requested_inputs(
                     tracker=cast(CacheMaterializationContext, tracker),
                     options=tracker._active_run_cache_options,

@@ -371,6 +371,7 @@ def _materialize_cached_outputs_via_run_api(
             items=staged_items,
             allowed_base=allowed_roots,
             on_missing="warn",
+            overwrite_existing=True,
         )
 
 
@@ -554,15 +555,23 @@ def _strict_requested_output_hydration(
             return None
 
         candidate_created: list[Path] = []
+        candidate_backed_up: list[tuple[Path, Path]] = []
+        backed_up_destinations: set[Path] = set()
+        backup_root = staged_root / "_backups"
         accepted = False
         try:
-            from consist.core.materialize import materialize_artifacts_from_sources
+            from consist.core.materialize import (
+                _ensure_destination_not_symlink,
+                materialize_artifacts_from_sources,
+                validate_allowed_materialization_destination,
+            )
 
             items: list[tuple[Artifact, Path, Path]] = []
-            for key in requested_keys:
+            for idx, key in enumerate(requested_keys):
                 staged_path = staged_paths[key]
                 destination = Path(requested_paths[key])
                 output_artifact = outputs_by_key[key]
+                _ensure_destination_not_symlink(destination)
                 if destination.exists():
                     try:
                         manifest_valid = is_valid_directory_artifact_tree(
@@ -581,29 +590,39 @@ def _strict_requested_output_hydration(
                             destination,
                             exc,
                         )
-                    # A mismatched caller-owned destination is deliberately left
-                    # for the ordinary miss path rather than replaced here.
+                        return None
+                    resolved_destination = destination.resolve()
+                    validate_allowed_materialization_destination(
+                        resolved_destination, allowed_roots
+                    )
+                    if staged_path.is_dir() != destination.is_dir():
+                        raise ValueError(
+                            f"Destination type mismatch for {resolved_destination}; "
+                            "refusing to overwrite."
+                        )
+                    backup_root.mkdir(parents=True, exist_ok=True)
+                    backup_path = backup_root / f"{idx}_{destination.name}"
+                    shutil.move(str(destination), str(backup_path))
+                    candidate_backed_up.append((destination, backup_path))
+                    backed_up_destinations.add(destination)
+                elif destination not in backed_up_destinations:
+                    candidate_created.append(destination)
+                items.append((output_artifact, staged_path, destination))
+
+            if items:
+                promoted = materialize_artifacts_from_sources(
+                    items=items,
+                    allowed_base=allowed_roots,
+                    on_missing="warn",
+                    overwrite_existing=True,
+                )
+                if set(promoted) != {artifact.key for artifact, _, _ in items}:
                     logging.debug(
                         "[Consist][cache] candidate %s rejected after materialization: "
                         "copy/validation failure",
                         cached_run.id,
                     )
                     return None
-                candidate_created.append(destination)
-                items.append((output_artifact, staged_path, destination))
-
-            promoted = materialize_artifacts_from_sources(
-                items=items,
-                allowed_base=allowed_roots,
-                on_missing="warn",
-            )
-            if set(promoted) != {artifact.key for artifact, _, _ in items}:
-                logging.debug(
-                    "[Consist][cache] candidate %s rejected after materialization: "
-                    "copy/validation failure",
-                    cached_run.id,
-                )
-                return None
             for key, destination in requested_paths.items():
                 output_artifact = outputs_by_key[key]
                 manifest_valid = is_valid_directory_artifact_tree(
@@ -642,8 +661,6 @@ def _strict_requested_output_hydration(
             )
             return None
         finally:
-            # Only destinations absent before promotion belong to this candidate.
-            # They are retained on success and removed for a rejected admission.
             if not accepted:
                 for destination in candidate_created:
                     try:
@@ -651,6 +668,18 @@ def _strict_requested_output_hydration(
                     except OSError as exc:
                         logging.warning(
                             "[Consist] Failed to remove rejected cached destination %s: %s",
+                            destination,
+                            exc,
+                        )
+                for destination, backup_path in reversed(candidate_backed_up):
+                    try:
+                        _remove_candidate_destination(destination)
+                        if backup_path.exists():
+                            destination.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.move(str(backup_path), str(destination))
+                    except OSError as exc:
+                        logging.warning(
+                            "[Consist] Failed to restore backed-up destination %s: %s",
                             destination,
                             exc,
                         )
@@ -1042,7 +1071,12 @@ def hydrate_cache_hit_outputs(
                     tracker, target_run=target_run
                 )
                 materialized = materialize_artifacts_from_sources(
-                    items=items, allowed_base=allowed_base, on_missing=on_missing
+                    items=items,
+                    allowed_base=allowed_base,
+                    on_missing=on_missing,
+                    overwrite_existing=(
+                        active_options.cache_hydration == "outputs-requested"
+                    ),
                 )
 
             if materialized:

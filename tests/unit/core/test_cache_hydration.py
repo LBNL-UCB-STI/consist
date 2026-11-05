@@ -2002,8 +2002,82 @@ def test_outputs_requested_miss_policy_validates_existing_destination(
         cache_hydration_failure="miss",
         materialize_cached_output_paths={"a": mismatched_destination},
     ) as active:
+        assert active.is_cached
+    assert mismatched_destination.read_text(encoding="utf-8") == "value\n1\n"
+
+    # Non-strict hydration (cache_hydration_failure="warn") also overwrites stale destinations
+    warn_stale_destination = tmp_path / "warn_stale.csv"
+    warn_stale_destination.write_text("value\nstale\n", encoding="utf-8")
+    with tracker_b.start_run(
+        "warn_existing_mismatch",
+        model="producer",
+        cache_hydration="outputs-requested",
+        cache_hydration_failure="warn",
+        materialize_cached_output_paths={"a": warn_stale_destination},
+    ) as active:
+        assert active.is_cached
+    assert warn_stale_destination.read_text(encoding="utf-8") == "value\n1\n"
+
+
+def test_outputs_requested_miss_policy_rolls_back_backed_up_destination_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = str(tmp_path / "provenance.db")
+    tracker_a = Tracker(run_dir=tmp_path / "runs_a", db_path=db_path)
+    _init_core_tables(tracker_a)
+    with tracker_a.start_run("strict_backup_rollback_producer", model="producer"):
+        out_dir = tracker_a.run_dir / "outputs"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        source_a = out_dir / "a.csv"
+        source_b = out_dir / "b.csv"
+        source_a.write_text("value\n1\n", encoding="utf-8")
+        source_b.write_text("value\n2\n", encoding="utf-8")
+        tracker_a.log_artifact(source_a, key="a", direction="output")
+        tracker_a.log_artifact(source_b, key="b", direction="output")
+
+    tracker_b = Tracker(
+        run_dir=tmp_path / "runs_b", db_path=db_path, allow_external_paths=True
+    )
+    _init_core_tables(tracker_b)
+    dest_a = tmp_path / "dest_a.csv"
+    dest_b = tmp_path / "dest_b.csv"
+    dest_a.write_text("value\nstale-a\n", encoding="utf-8")
+
+    # Case 1: output #2 is missing in historical run -> rejected before promotion, dest_a preserved
+    source_b.unlink()
+    with tracker_b.start_run(
+        "strict_backup_rollback_missing_b",
+        model="producer",
+        cache_hydration="outputs-requested",
+        cache_hydration_failure="miss",
+        materialize_cached_output_paths={"a": dest_a, "b": dest_b},
+    ) as active:
         assert not active.is_cached
-    assert mismatched_destination.read_text(encoding="utf-8") == "value\nstale\n"
+    assert dest_a.read_text(encoding="utf-8") == "value\nstale-a\n"
+    assert not dest_b.exists()
+
+    # Case 2: output #2 exists for staging, but promotion fails mid-way after promoting dest_a
+    source_b.write_text("value\n2\n", encoding="utf-8")
+
+    def partial_promote(*, items, **kwargs):
+        art_a, staged_a, target_a = items[0]
+        target_a.write_bytes(staged_a.read_bytes())
+        return {art_a.key: str(target_a.resolve())}
+
+    monkeypatch.setattr(
+        "consist.core.materialize.materialize_artifacts_from_sources",
+        partial_promote,
+    )
+    with tracker_b.start_run(
+        "strict_backup_rollback_partial_promote",
+        model="producer",
+        cache_hydration="outputs-requested",
+        cache_hydration_failure="miss",
+        materialize_cached_output_paths={"a": dest_a, "b": dest_b},
+    ) as active:
+        assert not active.is_cached
+    assert dest_a.read_text(encoding="utf-8") == "value\nstale-a\n"
+    assert not dest_b.exists()
 
 
 def test_outputs_all_uses_artifact_recovery_roots_without_source_root(
@@ -2907,25 +2981,24 @@ def test_outputs_requested_rejects_corrupted_directory_candidate_and_recovers_fr
         tracker_c.engine.dispose()
 
 
-def test_outputs_requested_preserves_caller_owned_corrupted_directory_destination(
-    tmp_path: Path,
+def test_outputs_requested_replaces_stale_and_rolls_back_directory_destination_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """
     When a requested directory output destination already exists on disk before
-    candidate hydration and its contents do not match the cached manifest,
-    _strict_requested_output_hydration must reject the candidate without
-    overwriting the caller-owned destination during candidate evaluation.
+    candidate hydration and its contents do not match the cached manifest:
+    1) If the cached candidate is valid and promotion succeeds, the stale directory
+       destination is replaced with the cached directory.
+    2) If promotion fails after backing up the caller-owned directory destination,
+       the caller-owned directory destination is rolled back before the miss handler runs.
     """
     db_path = str(tmp_path / "provenance.db")
     tracker_a = Tracker(run_dir=tmp_path / "runs_a", db_path=db_path)
     _init_core_tables(tracker_a)
-    observed_caller_bytes: list[bytes] = []
 
     def write_zarr(ctx) -> None:
         zarr_path = ctx.run_dir / "skims.zarr"
         caller_file = zarr_path / "nested" / "0.0"
-        if caller_file.exists():
-            observed_caller_bytes.append(caller_file.read_bytes())
         (zarr_path / "nested").mkdir(parents=True, exist_ok=True)
         caller_file.write_bytes(b"fresh-skim")
 
@@ -2949,7 +3022,28 @@ def test_outputs_requested_preserves_caller_owned_corrupted_directory_destinatio
         observed_during_miss.append((custom_dest / "nested" / "0.0").read_bytes())
         (custom_dest / "nested" / "0.0").write_bytes(b"fresh-skim")
 
-    result = tracker_b.run(
+    # 1) Valid cached candidate replaces stale directory destination on cache hit
+    hit_result = tracker_b.run(
+        fn=write_zarr_custom,
+        name="dir_caller_destination_safety",
+        output_paths={"skims": ArtifactSpec(path=custom_dest, driver="zarr")},
+        cache_options=CacheOptions(
+            cache_hydration="outputs-requested",
+            cache_hydration_failure="miss",
+        ),
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    assert hit_result.cache_hit is True
+    assert observed_during_miss == []
+    assert (custom_dest / "nested" / "0.0").read_bytes() == b"fresh-skim"
+
+    # 2) When promotion fails, the backed-up directory destination is rolled back
+    (custom_dest / "nested" / "0.0").write_bytes(b"caller-uncommitted-bytes")
+    monkeypatch.setattr(
+        "consist.core.materialize.materialize_artifacts_from_sources",
+        lambda **_kwargs: {},
+    )
+    miss_result = tracker_b.run(
         fn=write_zarr_custom,
         name="dir_caller_destination_safety",
         output_paths={"skims": ArtifactSpec(path=custom_dest, driver="zarr")},
@@ -2960,8 +3054,7 @@ def test_outputs_requested_preserves_caller_owned_corrupted_directory_destinatio
         execution_options=ExecutionOptions(inject_context="ctx"),
     )
 
-    assert result.cache_hit is False
-    # Caller-owned destination was untouched when the miss handler began executing.
+    assert miss_result.cache_hit is False
     assert observed_during_miss == [b"caller-uncommitted-bytes"]
 
     if tracker_a.engine:

@@ -826,11 +826,11 @@ class Tracker:
         """
         Default run subdirectory pattern.
 
-        Uses `<parent_run_id>/<model>/iteration_<iteration>` when available, otherwise
+        Uses `<parent_run_id>/<model>/<run_id>` when available, otherwise
         `<model>/<run_id>`.
         """
-        if run.parent_run_id and run.iteration is not None:
-            return f"{run.parent_run_id}/{run.model_name}/iteration_{run.iteration}"
+        if run.parent_run_id:
+            return f"{run.parent_run_id}/{run.model_name}/{run.id}"
         return f"{run.model_name}/{run.id}"
 
     def set_run_subdir_fn(self, fn: Optional[Callable[[Run], str]]) -> None:
@@ -5635,6 +5635,18 @@ class Tracker:
             The same callback, allowing use as a decorator.
         """
         return self.events.on_run_failed(callback)
+
+    def off_run_start(self, callback: Callable[[Run], None]) -> None:
+        """Unregister a previously registered start callback if present."""
+        self.events.off_run_start(callback)
+
+    def off_run_complete(self, callback: Callable[[Run, List[Artifact]], None]) -> None:
+        """Unregister a previously registered completion callback if present."""
+        self.events.off_run_complete(callback)
+
+    def off_run_failed(self, callback: Callable[[Run, Exception], None]) -> None:
+        """Unregister a previously registered failure callback if present."""
+        self.events.off_run_failed(callback)
 
     def _emit_run_start(self, run: Run):
         self.events.emit_start(run)

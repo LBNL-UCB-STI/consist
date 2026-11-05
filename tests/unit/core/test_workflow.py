@@ -382,7 +382,7 @@ def test_step_log_dataframe_defaults_to_run_dir(tracker: Tracker):
     assert abs_path.exists()
     assert (
         abs_path.parent
-        == tracker.run_dir / "outputs" / "scen_df" / "write_df" / "iteration_0"
+        == tracker.run_dir / "outputs" / "scen_df" / "write_df" / "scen_df_write_df"
     )
     assert abs_path.name == "series.parquet"
 
@@ -508,7 +508,11 @@ def test_step_default_path_includes_model_name(tracker: Tracker):
     abs_path = Path(artifact.abs_path)
     assert (
         abs_path.parent
-        == tracker.run_dir / "outputs" / "scen_model_dir" / "model_x" / "iteration_2"
+        == tracker.run_dir
+        / "outputs"
+        / "scen_model_dir"
+        / "model_x"
+        / "scen_model_dir_write_df"
     )
 
 
@@ -1497,3 +1501,124 @@ def test_scenario_log_meta_promotes_stage_and_phase_columns(tmp_path: Path) -> N
     assert persisted.stage == "supply_demand"
     assert persisted.phase == "iteration"
     assert persisted.meta["custom_key"] == "val"
+
+
+def test_scenario_multi_year_output_sets_do_not_collide_in_run_artifact_dir(
+    tmp_path: Path,
+) -> None:
+    from consist.types import OutputSet
+
+    run_dir = tmp_path / "runs"
+    db_path = str(tmp_path / "provenance.duckdb")
+    tracker = Tracker(run_dir=run_dir, db_path=db_path)
+
+    def run_atlas(year: int) -> None:
+        out_root = run_dir / "atlas_out" / f"y{year}"
+        out_root.mkdir(parents=True, exist_ok=True)
+        (out_root / f"vehicles_{year}.csv").write_text(
+            f"year\n{year}\n", encoding="utf-8"
+        )
+
+    with tracker.scenario("multi_year_scen") as sc:
+        res_2015 = sc.run(
+            fn=run_atlas,
+            name="atlas_run",
+            model="atlas",
+            year=2015,
+            iteration=0,
+            config={"year": 2015},
+            output_sets={
+                "atlas_outputs": OutputSet(
+                    root=run_dir / "atlas_out" / "y2015",
+                    include="vehicles_*.csv",
+                )
+            },
+        )
+        res_2017 = sc.run(
+            fn=run_atlas,
+            name="atlas_run",
+            model="atlas",
+            year=2017,
+            iteration=0,
+            config={"year": 2017},
+            output_sets={
+                "atlas_outputs": OutputSet(
+                    root=run_dir / "atlas_out" / "y2017",
+                    include="vehicles_*.csv",
+                )
+            },
+        )
+
+    assert tracker.run_artifact_dir(res_2015.run) != tracker.run_artifact_dir(
+        res_2017.run
+    )
+    manifest_2015 = (
+        tracker.run_artifact_dir(res_2015.run)
+        / "atlas_outputs.output_set_manifest.json"
+    )
+    manifest_2017 = (
+        tracker.run_artifact_dir(res_2017.run)
+        / "atlas_outputs.output_set_manifest.json"
+    )
+    assert manifest_2015.exists()
+    assert manifest_2017.exists()
+    assert "vehicles_2015.csv" in manifest_2015.read_text(encoding="utf-8")
+    assert "vehicles_2017.csv" in manifest_2017.read_text(encoding="utf-8")
+
+
+def test_event_hooks_snapshot_allows_self_unregistration(tracker: Tracker) -> None:
+    seen_start: list[str] = []
+    seen_complete: list[str] = []
+    seen_failed: list[str] = []
+
+    def one_shot_start(run) -> None:
+        seen_start.append(f"one_shot:{run.id}")
+        tracker.off_run_start(one_shot_start)
+
+    def adjacent_start(run) -> None:
+        seen_start.append(f"adjacent:{run.id}")
+
+    def one_shot_complete(run, _outputs) -> None:
+        seen_complete.append(f"one_shot:{run.id}")
+        tracker.off_run_complete(one_shot_complete)
+
+    def adjacent_complete(run, _outputs) -> None:
+        seen_complete.append(f"adjacent:{run.id}")
+
+    def one_shot_failed(run, _err) -> None:
+        seen_failed.append(f"one_shot:{run.id}")
+        tracker.off_run_failed(one_shot_failed)
+
+    def adjacent_failed(run, _err) -> None:
+        seen_failed.append(f"adjacent:{run.id}")
+
+    tracker.on_run_start(one_shot_start)
+    tracker.on_run_start(adjacent_start)
+    tracker.on_run_complete(one_shot_complete)
+    tracker.on_run_complete(adjacent_complete)
+    tracker.on_run_failed(one_shot_failed)
+    tracker.on_run_failed(adjacent_failed)
+
+    with tracker.start_run("hook_run_1", model="demo"):
+        pass
+
+    with pytest.raises(RuntimeError, match="boom"):
+        with tracker.start_run("hook_run_fail", model="demo"):
+            raise RuntimeError("boom")
+
+    assert seen_start == [
+        "one_shot:hook_run_1",
+        "adjacent:hook_run_1",
+        "adjacent:hook_run_fail",
+    ]
+    assert seen_complete == [
+        "one_shot:hook_run_1",
+        "adjacent:hook_run_1",
+    ]
+    assert seen_failed == [
+        "one_shot:hook_run_fail",
+        "adjacent:hook_run_fail",
+    ]
+    tracker.off_run_start(adjacent_start)
+    tracker.off_run_complete(adjacent_complete)
+    tracker.off_run_failed(adjacent_failed)
