@@ -253,7 +253,7 @@ def inspect_matrix_container(
                     )
     else:
         suffix = p.suffix.lower()
-        if suffix == ".omx":
+        if suffix in {".omx", ".omxz"}:
             artifact_format = "omx"
         elif suffix in {".h5", ".hdf5"}:
             artifact_format = "h5"

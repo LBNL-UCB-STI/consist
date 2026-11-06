@@ -451,13 +451,15 @@ def test_run_with_config_overrides_adds_manual_identity_inputs_and_auto_identity
         assert "manual_dep" in digest_map
         assert "activitysim_config" in digest_map
         metadata = result.run.meta.get("resolved_config_identity")
-        assert metadata == {
-            "mode": "auto",
-            "adapter": "activitysim",
-            "label": "activitysim_config",
-            "path": metadata["path"],
-            "digest": digest_map["activitysim_config"],
-        }
+        assert isinstance(metadata, dict)
+        assert metadata["mode"] == "auto"
+        assert metadata["adapter"] == "activitysim"
+        assert metadata["label"] == "activitysim_config"
+        assert metadata["digest"] == digest_map["activitysim_config"]
+        assert metadata.get("root_digests") == [
+            digest_map["activitysim_config_root_0"],
+            digest_map["activitysim_config_root_1"],
+        ]
         assert isinstance(metadata["path"], str)
         assert Path(metadata["path"]).is_dir()
         record = tracker.get_run_record(result.run.id)

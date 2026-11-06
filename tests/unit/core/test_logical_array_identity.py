@@ -559,3 +559,41 @@ def test_public_exports_include_logical_array_identity() -> None:
         assert consist.check_prior_run_expectation is check_prior_run_expectation
         assert len(recorded) >= 1
         assert issubclass(recorded[0].category, DeprecationWarning)
+
+
+def test_omx_float64_and_omxz_float32_logical_digest_equivalence(
+    tmp_path: Path,
+) -> None:
+    """Verify .omxz suffix is recognized by inspect_matrix_container and matches .omx under float32_matrices_v1."""
+    omx_path = tmp_path / "traffic_skims_AM.omx"
+    omxz_path = tmp_path / "traffic_skims_AM.omxz"
+
+    dist = np.array([[1.25, 2.5], [3.75, 5.0]], dtype="<f8")
+    zones = np.array([1, 2], dtype="<i4")
+
+    with h5py.File(omx_path, "w") as h5f:
+        data_grp = h5f.create_group("data")
+        data_grp.create_dataset("DIST__AM", data=dist)
+        lookup_grp = h5f.create_group("lookup")
+        lookup_grp.create_dataset("zone_number", data=zones)
+
+    with h5py.File(omxz_path, "w") as h5f:
+        data_grp = h5f.create_group("data")
+        data_grp.create_dataset(
+            "DIST__AM", data=dist.astype("<f4"), compression="gzip", compression_opts=4
+        )
+        lookup_grp = h5f.create_group("lookup")
+        lookup_grp.create_dataset("zone_number", data=zones)
+
+    meta_omx = inspect_matrix_container(omx_path)
+    meta_omxz = inspect_matrix_container(omxz_path)
+    assert meta_omx.artifact_format == "omx"
+    assert meta_omxz.artifact_format == "omx"
+
+    digest_omx = compute_omx_logical_matrices_sha256(
+        omx_path, policy="float32_matrices_v1"
+    )
+    digest_omxz = compute_omx_logical_matrices_sha256(
+        omxz_path, policy="float32_matrices_v1"
+    )
+    assert digest_omx == digest_omxz

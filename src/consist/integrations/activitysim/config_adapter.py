@@ -94,15 +94,29 @@ except ImportError:  # pragma: no cover - optional dependency
 
 _REFERENCE_KEYS = {
     "SPEC",
+    "SPECIFICATION",
     "SAMPLE_SPEC",
     "COEFFICIENTS",
     "INTERACTION_COEFFICIENTS",
     "COEFFICIENT_TEMPLATE",
+    "COEFFICIENTS_TEMPLATE",
     "LOGSUM_SETTINGS",
     "PROBS_SPEC",
+    "ALTS",
+    "ALTERNATIVES",
 }
 
-_HEURISTIC_SUFFIXES = ("_FILE", "_PATH", "_SPEC", "_SETTINGS")
+_HEURISTIC_SUFFIXES = (
+    "_FILE",
+    "_PATH",
+    "_SPEC",
+    "_SETTINGS",
+    "_COEFFICIENTS",
+    "_COEFFS",
+    "_TEMPLATE",
+    "_ALTS",
+    "_PROBS",
+)
 
 _COEFFICIENT_SUFFIXES = (
     "_coefficients.csv",
@@ -122,9 +136,16 @@ _SETTINGS_ALLOWLIST = {
 
 _MODEL_ALIAS_MAP = {
     "compute_accessibility": "accessibility",
+    "compute_disaggregate_accessibility": "disaggregate_accessibility",
     "atwork_subtour_scheduling": "tour_scheduling_atwork",
     "atwork_subtour_mode_choice": "tour_mode_choice",
+    "parking_location": "parking_location_choice",
+    "initialize_los": "network_los",
     "write_tables": "summarize",
+    "update_tables": "outputs",
+    "route_purpose_and_vehicle": "route_vehicle_purpose_customer",
+    "route_origin_destination_tnc": "route_od_tnc",
+    "write_cvm_trip_matrices": "write_trip_matrices",
 }
 
 _PROBABILITIES_META_KEYS = {
@@ -133,7 +154,44 @@ _PROBABILITIES_META_KEYS = {
     "tour_hour",
     "trip_num",
     "vehicle_year",
+    "purpose_id",
+    "multistop",
+    "outbound",
+    "stop_num",
+    "periods_left_min",
+    "periods_left_max",
+    "duration_offset",
+    "half_tour_stops_remaining_grouped",
+    "ptype",
+    "has_mandatory_tour",
+    "has_joint_tour",
+    "nonmandatory_tour_type",
 }
+
+_PROBABILITIES_IGNORE_KEYS = {"all"}
+
+_COEFF_NON_DIM_KEYS = {
+    "description",
+    "constrain",
+    "is_constrained",
+    "comment",
+    "notes",
+    "label",
+}
+
+_YAML_SETTING_REFERENCE_KEYS = {
+    "LOGSUM_SETTINGS",
+    "COMPUTE_SETTINGS",
+    "SHADOW_PRICE_SETTINGS",
+}
+
+_CONSTANTS_YAML_META_KEYS = {
+    "include_settings",
+    "inherit_settings",
+    "source_file_paths",
+}
+
+_UNRENDERED_TEMPLATE_RE = re.compile(r"^\{([^{}:\n]+):\}$")
 
 _DEFAULT_OVERRIDE_RUNTIME_KWARGS: dict[str, str] = {
     "config_dir": "selected_root_dir",
@@ -314,6 +372,8 @@ class ActivitySimConfigAdapter:
     bundle_cache_dir: Optional[Path] = None
     check_probabilities: bool = False
     root_dirs: Optional[list[Path]] = None
+    primary_config: Optional[Path] = None
+    template_values: Optional[Mapping[str, Any]] = None
     allow_out_of_root_yaml_includes: bool = False
     allow_out_of_root_csv_refs: bool = False
 
@@ -324,6 +384,7 @@ class ActivitySimConfigAdapter:
         identity: IdentityManager,
         strict: bool = False,
         options: Optional[ConfigAdapterOptions] = None,
+        primary_config: Optional[Union[Path, str]] = None,
     ) -> CanonicalConfig:
         """
         Discover ActivitySim config files and compute a content hash.
@@ -338,6 +399,9 @@ class ActivitySimConfigAdapter:
             If True, raise when `settings.yaml` is missing.
         options : Optional[ConfigAdapterOptions], optional
             Adapter override options (e.g., strict mode).
+        primary_config : Optional[Union[Path, str]], optional
+            Optional primary settings file name or path (defaults to
+            ``self.primary_config`` or ``"settings.yaml"``).
 
         Returns
         -------
@@ -354,8 +418,9 @@ class ActivitySimConfigAdapter:
         if yaml is None:
             raise ImportError("PyYAML is required for ActivitySim canonicalization.")
         resolved_strict = options.strict if options is not None else strict
+        target_primary = str(primary_config or self.primary_config or "settings.yaml")
         settings_path = _resolve_yaml_path(
-            "settings.yaml",
+            target_primary,
             root_dirs,
             allow_out_of_root=self.allow_out_of_root_yaml_includes,
         )
@@ -364,14 +429,15 @@ class ActivitySimConfigAdapter:
             if subdir_candidates:
                 candidates = ", ".join(str(path) for path in subdir_candidates)
                 raise FileNotFoundError(
-                    "settings.yaml not found in config_dirs. "
+                    f"{target_primary} not found in config_dirs. "
                     "Pass the specific config subdirectories in order. "
                     f"Found settings.yaml under: {candidates}"
                 )
             if resolved_strict:
-                raise FileNotFoundError("settings.yaml not found in config_dirs.")
+                raise FileNotFoundError(f"{target_primary} not found in config_dirs.")
             logging.warning(
-                "[Consist][ActivitySim] settings.yaml not found in config_dirs=%s",
+                "[Consist][ActivitySim] %s not found in config_dirs=%s",
+                target_primary,
                 [str(p) for p in root_dirs],
             )
         settings = (
@@ -379,15 +445,20 @@ class ActivitySimConfigAdapter:
                 root_dirs,
                 settings_path=settings_path,
                 allow_out_of_root_includes=self.allow_out_of_root_yaml_includes,
+                template_values=self.template_values,
             )
             if settings_path
             else {}
         )
+        inherit_settings = bool(settings.get("inherit_settings", False))
         models = settings.get("models", [])
         config_files = _resolve_model_yamls(
             models,
             root_dirs,
             allow_out_of_root_includes=self.allow_out_of_root_yaml_includes,
+            settings=settings,
+            inherit_settings=inherit_settings,
+            template_values=self.template_values,
         )
         if settings_path:
             config_files.insert(0, settings_path)
@@ -458,6 +529,7 @@ class ActivitySimConfigAdapter:
                 config.root_dirs,
                 settings_path=config.primary_config,
                 allow_out_of_root_includes=self.allow_out_of_root_yaml_includes,
+                template_values=self.template_values,
             )
             if config.primary_config
             else {}
@@ -489,9 +561,20 @@ class ActivitySimConfigAdapter:
             strict=resolved_strict,
             allow_out_of_root_refs=self.allow_out_of_root_csv_refs,
             allow_out_of_root_yaml_includes=self.allow_out_of_root_yaml_includes,
+            template_values=self.template_values,
         )
         for csv_path in referenced:
             add_artifact(csv_path, role="csv")
+
+        identity_options: dict[str, Any] = {
+            "allow_heuristic_refs": allow_heuristics,
+            "allow_out_of_root_yaml_includes": (self.allow_out_of_root_yaml_includes),
+            "allow_out_of_root_csv_refs": self.allow_out_of_root_csv_refs,
+        }
+        if self.template_values is not None:
+            identity_options["template_values"] = {
+                str(k): v for k, v in sorted(self.template_values.items())
+            }
 
         identity, reference_paths = _build_activitysim_config_identity(
             adapter_name=self.model_name,
@@ -499,18 +582,13 @@ class ActivitySimConfigAdapter:
             config=config,
             inherit_settings=inherit_settings,
             referenced_csvs=referenced,
-            options={
-                "allow_heuristic_refs": allow_heuristics,
-                "allow_out_of_root_yaml_includes": (
-                    self.allow_out_of_root_yaml_includes
-                ),
-                "allow_out_of_root_csv_refs": self.allow_out_of_root_csv_refs,
-            },
+            options=identity_options,
             runtime_options={
                 "bundle_configs": bundle_configs,
                 "check_probabilities": self.check_probabilities,
                 "strict": resolved_strict,
             },
+            template_values=self.template_values,
         )
 
         if bundle_configs and not plan_only:
@@ -540,6 +618,18 @@ class ActivitySimConfigAdapter:
         if config.primary_config:
             source_key = _artifact_key_for_path(config.primary_config, config.root_dirs)
             file_hash = identity.identity_hash
+            if resolved_strict:
+                list(
+                    _build_constants_rows(
+                        run_id=run.id if run else "__validate__",
+                        config=config,
+                        settings=settings,
+                        inherit_settings=inherit_settings,
+                        allow_out_of_root_includes=self.allow_out_of_root_yaml_includes,
+                        strict=True,
+                        template_values=self.template_values,
+                    )
+                )
 
             def rows_factory(
                 run_id: str,
@@ -547,6 +637,8 @@ class ActivitySimConfigAdapter:
                 s: dict[str, Any] = settings,
                 inherit: bool = inherit_settings,
                 allow_out_of_root_includes: bool = self.allow_out_of_root_yaml_includes,
+                st: bool = resolved_strict,
+                tv: Optional[Mapping[str, Any]] = self.template_values,
             ) -> Iterable[dict[str, Any]]:
                 return _build_constants_rows(
                     run_id=run_id,
@@ -554,6 +646,8 @@ class ActivitySimConfigAdapter:
                     settings=s,
                     inherit_settings=inherit,
                     allow_out_of_root_includes=allow_out_of_root_includes,
+                    strict=st,
+                    template_values=tv,
                 )
 
             ingestables.extend(
@@ -741,6 +835,8 @@ class ActivitySimConfigAdapter:
         base_bundle_hash = compute_config_pack_hash(
             root_dirs=staged_root_dirs, identity=identity
         )
+        if self.template_values:
+            _render_staged_yaml_templates(staged_root_dirs, self.template_values)
 
         for (file_name, key), value in overrides.constants.items():
             _apply_yaml_override(
@@ -854,6 +950,8 @@ class ActivitySimConfigAdapter:
             base_root_dirs=resolved_base_dirs,
             output_dir=output_dir,
         )
+        if self.template_values:
+            _render_staged_yaml_templates(staged_root_dirs, self.template_values)
 
         for (file_name, key), value in overrides.constants.items():
             _apply_yaml_override(
@@ -888,11 +986,16 @@ class ActivitySimConfigAdapter:
             }
         )
 
-        discovered = self.discover(staged_root_dirs, identity=identity, strict=strict)
         staged_primary = self._map_path_to_staged_roots(
             path=resolved_primary,
             base_root_dirs=resolved_base_dirs,
             staged_root_dirs=staged_root_dirs,
+        )
+        discovered = self.discover(
+            staged_root_dirs,
+            identity=identity,
+            strict=strict,
+            primary_config=staged_primary,
         )
         canonical = CanonicalConfig(
             root_dirs=discovered.root_dirs,
@@ -1019,7 +1122,13 @@ class ActivitySimConfigAdapter:
                 materialize=_materialize,
                 select_root=lambda materialized: self.select_root_dir(materialized),
                 build_run_adapter=lambda materialized: replace(
-                    self, root_dirs=list(materialized.root_dirs)
+                    self,
+                    root_dirs=list(materialized.root_dirs),
+                    primary_config=(
+                        Path(Path(base_primary_config).name)
+                        if base_primary_config is not None
+                        else self.primary_config
+                    ),
                 ),
                 build_override_runtime_kwargs=self._build_override_runtime_kwargs,
             ),
@@ -1291,6 +1400,7 @@ class ActivitySimConfigAdapter:
                 config.root_dirs,
                 settings_path=config.primary_config,
                 allow_out_of_root_includes=self.allow_out_of_root_yaml_includes,
+                template_values=self.template_values,
             )
             if config.primary_config
             else {}
@@ -1304,13 +1414,20 @@ class ActivitySimConfigAdapter:
                 config.root_dirs,
                 inherit_settings,
                 allow_out_of_root_includes=self.allow_out_of_root_yaml_includes,
+                template_values=self.template_values,
             )
-            constants = data.get("CONSTANTS", {}) if isinstance(data, dict) else {}
+            constants_map = (
+                _extract_constants_blocks(file_name, data)
+                if isinstance(data, dict)
+                else {}
+            )
             for key, alias in _parse_facet_entries(entries):
                 const_key = (
                     key[len("CONSTANTS.") :] if key.startswith("CONSTANTS.") else key
                 )
-                value = _get_nested_value(constants, const_key.split("."))
+                value = _get_nested_value(constants_map, const_key.split("."))
+                if value is None and isinstance(data, dict):
+                    value = _get_nested_value(data, key.split("."))
                 facet[alias or key] = value
 
         for file_name, entries in (facet_spec.get("coefficients") or {}).items():
@@ -1421,7 +1538,7 @@ class ActivitySimConfigAdapter:
             ActivitySimConstantsCache,
             columns=columns,
             where=clauses,
-            join_on=join_on,
+            join_on=join_on if join_on is not None else ["content_hash"],
         )
 
     def constants_rows(
@@ -1457,7 +1574,7 @@ class ActivitySimConfigAdapter:
             ActivitySimConstantsCache,
             columns=columns,
             where=clauses,
-            join_on=join_on,
+            join_on=join_on if join_on is not None else ["content_hash"],
             tracker=tracker,
         )
 
@@ -1781,11 +1898,65 @@ def _ensure_yaml() -> None:
         raise ImportError("PyYAML is required for ActivitySim canonicalization.")
 
 
-def _load_yaml(path: Path) -> Dict[str, Any]:
+def _render_yaml_template_text(
+    text: str, template_values: Optional[Mapping[str, Any]]
+) -> str:
+    rendered = text
+    if template_values:
+        for key, val in template_values.items():
+            token = f"{{{key}:}}"
+            if token in rendered:
+                if val is None:
+                    replacement = "null"
+                elif isinstance(val, bool):
+                    replacement = "true" if val else "false"
+                elif isinstance(val, (int, float)):
+                    replacement = str(val)
+                else:
+                    replacement = str(val)
+                rendered = rendered.replace(token, replacement)
+    return rendered
+
+
+def _quote_unrendered_flow_keys_with_question_mark(text: str) -> str:
+    # PyYAML treats `?` inside an unquoted flow-mapping key (e.g. `{Activate Telecommute?:}`)
+    # as a YAML key indicator token (`ParserError`), so quote the inner key so it parses
+    # as `{key: None}` like `{year:}` does.
+    return re.sub(
+        r"\{([^{}:\n]*\?[^{}:\n]*):\}",
+        lambda m: '{"' + m.group(1).replace('"', '\\"') + '":}',
+        text,
+    )
+
+
+def _render_staged_yaml_templates(
+    staged_root_dirs: Sequence[Path], template_values: Mapping[str, Any]
+) -> None:
+    for root_dir in staged_root_dirs:
+        if not root_dir.is_dir():
+            continue
+        for yaml_file in sorted(root_dir.rglob("*.y*ml")):
+            if not yaml_file.is_file() or yaml_file.suffix.lower() not in {
+                ".yaml",
+                ".yml",
+            }:
+                continue
+            original = yaml_file.read_text(encoding="utf-8")
+            updated = _render_yaml_template_text(original, template_values)
+            if updated != original:
+                yaml_file.write_text(updated, encoding="utf-8")
+
+
+def _load_yaml(
+    path: Path, *, template_values: Optional[Mapping[str, Any]] = None
+) -> Dict[str, Any]:
     _ensure_yaml()
     assert yaml is not None
-    with path.open("r", encoding="utf-8") as handle:
-        data = yaml.safe_load(handle) or {}
+    raw_text = path.read_text(encoding="utf-8")
+    rendered_text = _quote_unrendered_flow_keys_with_question_mark(
+        _render_yaml_template_text(raw_text, template_values)
+    )
+    data = yaml.safe_load(rendered_text) or {}
     if isinstance(data, dict):
         return data
     return {}
@@ -1846,11 +2017,12 @@ def _load_yaml_with_includes(
     visited: Set[Path],
     *,
     allow_out_of_root_includes: bool = False,
+    template_values: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     if path in visited:
         return {}
     visited.add(path)
-    data = _load_yaml(path)
+    data = _load_yaml(path, template_values=template_values)
     include_settings = data.pop("include_settings", None)
     merged: Dict[str, Any] = {}
     if include_settings:
@@ -1874,6 +2046,7 @@ def _load_yaml_with_includes(
                 config_dirs,
                 visited,
                 allow_out_of_root_includes=allow_out_of_root_includes,
+                template_values=template_values,
             )
             merged = _deep_merge(merged, include_data)
     merged = _deep_merge(merged, data)
@@ -1885,6 +2058,7 @@ def _load_effective_settings(
     *,
     settings_path: Optional[Path],
     allow_out_of_root_includes: bool = False,
+    template_values: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     if settings_path is None:
         return {}
@@ -1893,15 +2067,28 @@ def _load_effective_settings(
         config_dirs,
         set(),
         allow_out_of_root_includes=allow_out_of_root_includes,
+        template_values=template_values,
     )
-    inherit_settings = bool(primary.get("inherit_settings", False))
-    if not inherit_settings:
+    raw_inherit = primary.get("inherit_settings", False)
+    if not raw_inherit:
         return primary
-    settings_paths = []
+    if isinstance(raw_inherit, str) and raw_inherit.strip():
+        target_names = [raw_inherit.strip()]
+    else:
+        target_names = [settings_path.name]
+        if settings_path.name != "settings.yaml":
+            target_names.append("settings.yaml")
+    settings_paths: list[Path] = []
+    resolved_primary = settings_path.resolve()
     for config_dir in config_dirs:
-        candidate = config_dir / "settings.yaml"
-        if candidate.exists():
-            settings_paths.append(candidate)
+        for target_name in target_names:
+            candidate = (config_dir / target_name).resolve()
+            if (
+                candidate.exists()
+                and candidate != resolved_primary
+                and candidate not in settings_paths
+            ):
+                settings_paths.append(candidate)
     merged: Dict[str, Any] = {}
     for path in reversed(settings_paths):
         merged = _deep_merge(
@@ -1911,8 +2098,10 @@ def _load_effective_settings(
                 config_dirs,
                 set(),
                 allow_out_of_root_includes=allow_out_of_root_includes,
+                template_values=template_values,
             ),
         )
+    merged = _deep_merge(merged, primary)
     return merged
 
 
@@ -1922,31 +2111,45 @@ def _load_effective_yaml(
     inherit_settings: bool,
     *,
     allow_out_of_root_includes: bool = False,
+    template_values: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     candidate = Path(file_name)
     if candidate.suffix == "":
         candidate = candidate.with_suffix(".yaml")
-    if not inherit_settings:
-        path = _resolve_yaml_path(
-            str(candidate),
-            config_dirs,
-            allow_out_of_root=allow_out_of_root_includes,
-        )
-        if path is None:
-            return {}
-        return _load_yaml_with_includes(
-            path,
-            config_dirs,
-            set(),
-            allow_out_of_root_includes=allow_out_of_root_includes,
-        )
-    paths = []
+    top_path = _resolve_yaml_path(
+        str(candidate),
+        config_dirs,
+        allow_out_of_root=allow_out_of_root_includes,
+    )
+    if top_path is None:
+        return {}
+    top_data = _load_yaml_with_includes(
+        top_path,
+        config_dirs,
+        set(),
+        allow_out_of_root_includes=allow_out_of_root_includes,
+        template_values=template_values,
+    )
+    file_inherit = top_data.get("inherit_settings", False)
+    if not inherit_settings and not file_inherit:
+        return top_data
+    target_names = [candidate]
+    if isinstance(file_inherit, str) and file_inherit.strip():
+        inherit_candidate = Path(file_inherit.strip())
+        if inherit_candidate.suffix == "":
+            inherit_candidate = inherit_candidate.with_suffix(".yaml")
+        if inherit_candidate not in target_names:
+            target_names.append(inherit_candidate)
+    paths: list[Path] = []
     for config_dir in config_dirs:
-        path = (config_dir / candidate).resolve()
-        if path.exists() and (
-            allow_out_of_root_includes or _is_within_roots(path, config_dirs)
-        ):
-            paths.append(path)
+        for target_cand in target_names:
+            path = (config_dir / target_cand).resolve()
+            if (
+                path.exists()
+                and (allow_out_of_root_includes or _is_within_roots(path, config_dirs))
+                and path not in paths
+            ):
+                paths.append(path)
     merged: Dict[str, Any] = {}
     for path in reversed(paths):
         merged = _deep_merge(
@@ -1956,9 +2159,42 @@ def _load_effective_yaml(
                 config_dirs,
                 set(),
                 allow_out_of_root_includes=allow_out_of_root_includes,
+                template_values=template_values,
             ),
         )
+    merged = _deep_merge(merged, top_data)
     return merged
+
+
+def _collect_yaml_setting_references(data: Any) -> list[str]:
+    refs: list[str] = []
+
+    def add_ref(val: Any) -> None:
+        if isinstance(val, str):
+            cleaned = val.strip()
+            if cleaned.lower().endswith((".yaml", ".yml")):
+                if cleaned not in refs:
+                    refs.append(cleaned)
+        elif isinstance(val, list):
+            for item in val:
+                add_ref(item)
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if isinstance(key, str):
+                    key_upper = key.upper()
+                    if key_upper in _YAML_SETTING_REFERENCE_KEYS or key_upper.endswith(
+                        "_SETTINGS"
+                    ):
+                        add_ref(value)
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(data)
+    return refs
 
 
 def _resolve_model_yamls(
@@ -1966,6 +2202,9 @@ def _resolve_model_yamls(
     config_dirs: Sequence[Path],
     *,
     allow_out_of_root_includes: bool = False,
+    settings: Optional[Mapping[str, Any]] = None,
+    inherit_settings: bool = False,
+    template_values: Optional[Mapping[str, Any]] = None,
 ) -> list[Path]:
     if not isinstance(models, list):
         logging.warning(
@@ -1976,6 +2215,30 @@ def _resolve_model_yamls(
     active: list[Path] = []
     seen: Set[Path] = set()
     unmatched: list[str] = []
+
+    def enqueue_yaml(path: Path) -> None:
+        resolved = path.resolve()
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        active.append(path)
+        effective_data = _load_effective_yaml(
+            path.name,
+            config_dirs,
+            inherit_settings,
+            allow_out_of_root_includes=allow_out_of_root_includes,
+            template_values=template_values,
+        )
+        for nested_ref in _collect_yaml_setting_references(effective_data):
+            nested_path = _resolve_yaml_path(
+                nested_ref,
+                config_dirs,
+                base_dir=path.parent,
+                allow_out_of_root=allow_out_of_root_includes,
+            )
+            if nested_path is not None:
+                enqueue_yaml(nested_path)
+
     for model in models:
         if not isinstance(model, str):
             continue
@@ -2001,9 +2264,25 @@ def _resolve_model_yamls(
         if path is None:
             unmatched.append(model)
             continue
-        if path not in seen:
-            active.append(path)
-            seen.add(path)
+        enqueue_yaml(path)
+
+    constants_path = _resolve_yaml_path(
+        "constants.yaml",
+        config_dirs,
+        allow_out_of_root=allow_out_of_root_includes,
+    )
+    if constants_path is not None:
+        enqueue_yaml(constants_path)
+
+    if settings is not None and bool(settings.get("use_shadow_pricing")):
+        shadow_path = _resolve_yaml_path(
+            "shadow_pricing.yaml",
+            config_dirs,
+            allow_out_of_root=allow_out_of_root_includes,
+        )
+        if shadow_path is not None:
+            enqueue_yaml(shadow_path)
+
     if unmatched:
         yaml_files: Set[str] = set()
         for config_dir in config_dirs:
@@ -2023,12 +2302,12 @@ def _artifact_key_for_path(path: Path, config_dirs: Sequence[Path]) -> str:
 def _collect_reference_values(data: Any, *, allow_heuristics: bool) -> Set[str]:
     refs: Set[str] = set()
 
-    def collect(value: Any) -> None:
+    def collect(value: Any, *, allow_list: bool = True) -> None:
         if isinstance(value, str):
             cleaned = value.strip()
             if cleaned and cleaned != ".":
                 refs.add(cleaned)
-        elif isinstance(value, list):
+        elif allow_list and isinstance(value, list):
             for item in value:
                 if isinstance(item, str):
                     cleaned = item.strip()
@@ -2040,10 +2319,14 @@ def _collect_reference_values(data: Any, *, allow_heuristics: bool) -> Set[str]:
             for key, value in node.items():
                 if isinstance(key, str):
                     key_upper = key.upper()
+                    is_alts_key = key_upper in {
+                        "ALTS",
+                        "ALTERNATIVES",
+                    } or key_upper.endswith("_ALTS")
                     if key_upper in _REFERENCE_KEYS:
-                        collect(value)
+                        collect(value, allow_list=not is_alts_key)
                     elif allow_heuristics and key_upper.endswith(_HEURISTIC_SUFFIXES):
-                        collect(value)
+                        collect(value, allow_list=not is_alts_key)
                 walk(value)
         elif isinstance(node, list):
             for item in node:
@@ -2056,10 +2339,13 @@ def _collect_reference_values(data: Any, *, allow_heuristics: bool) -> Set[str]:
 def _normalize_csv_reference(name: str) -> list[Path]:
     if not name:
         return []
-    if name.endswith(".csv.gz"):
-        return [Path(name)]
-    candidate = Path(name)
-    if candidate.name in {"", "."}:
+    cleaned = name.strip()
+    if not cleaned or cleaned.lower() in {"none", "null", "~", "."}:
+        return []
+    if cleaned.endswith(".csv.gz"):
+        return [Path(cleaned)]
+    candidate = Path(cleaned)
+    if candidate.name in {"", "."} or candidate.name.lower() in {"none", "null", "~"}:
         return []
     if candidate.suffix not in {"", ".csv"}:
         return []
@@ -2113,6 +2399,7 @@ def _collect_referenced_csvs(
     strict: bool,
     allow_out_of_root_refs: bool,
     allow_out_of_root_yaml_includes: bool = False,
+    template_values: Optional[Mapping[str, Any]] = None,
 ) -> list[Path]:
     referenced: list[Path] = []
     seen: Set[Path] = set()
@@ -2122,6 +2409,7 @@ def _collect_referenced_csvs(
             config_dirs,
             inherit_settings,
             allow_out_of_root_includes=allow_out_of_root_yaml_includes,
+            template_values=template_values,
         )
         for ref in sorted(
             _collect_reference_values(data, allow_heuristics=allow_heuristics)
@@ -2219,6 +2507,28 @@ def _unpack_bundle(*, bundle_path: Path, output_dir: Path) -> list[Path]:
     return staged_root_dirs
 
 
+def _extract_constants_blocks(file_name: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    result: Dict[str, Any] = {}
+    if not isinstance(data, dict):
+        return result
+    top_constants = data.get("CONSTANTS")
+    if isinstance(top_constants, dict):
+        result.update(top_constants)
+    elif Path(file_name).name.lower() in {"constants.yaml", "constants.yml"}:
+        for key, value in data.items():
+            if key in _CONSTANTS_YAML_META_KEYS:
+                continue
+            if isinstance(value, dict) and isinstance(value.get("CONSTANTS"), dict):
+                continue
+            result[key] = value
+    for key, value in data.items():
+        if key == "CONSTANTS":
+            continue
+        if isinstance(value, dict) and isinstance(value.get("CONSTANTS"), dict):
+            result[key] = value["CONSTANTS"]
+    return result
+
+
 def _build_constants_rows(
     *,
     run_id: str,
@@ -2226,19 +2536,41 @@ def _build_constants_rows(
     settings: Dict[str, Any],
     inherit_settings: bool,
     allow_out_of_root_includes: bool,
+    strict: bool = False,
+    template_values: Optional[Mapping[str, Any]] = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for yaml_path in config.config_files:
+    seen_file_names: set[str] = set()
+    yaml_files: list[Path] = list(config.config_files)
+    if config.primary_config and config.primary_config.name not in {
+        p.name for p in yaml_files
+    }:
+        yaml_files.insert(0, config.primary_config)
+    for yaml_path in yaml_files:
+        if yaml_path.name in seen_file_names:
+            continue
+        seen_file_names.add(yaml_path.name)
         # Attribute constants to the active YAML file after inheritance resolution.
-        data = _load_effective_yaml(
-            yaml_path.name,
-            config.root_dirs,
-            inherit_settings,
-            allow_out_of_root_includes=allow_out_of_root_includes,
-        )
-        constants = data.get("CONSTANTS", {})
-        if isinstance(constants, dict):
-            flattened = _flatten_constants(constants)
+        if (
+            config.primary_config is not None
+            and yaml_path.name == config.primary_config.name
+        ):
+            data = settings
+        else:
+            data = _load_effective_yaml(
+                yaml_path.name,
+                config.root_dirs,
+                inherit_settings,
+                allow_out_of_root_includes=allow_out_of_root_includes,
+                template_values=template_values,
+            )
+        constants = _extract_constants_blocks(yaml_path.name, data)
+        if constants:
+            flattened = _flatten_constants(
+                constants,
+                strict=strict,
+                file_name=yaml_path.name,
+            )
             for key, value in flattened.items():
                 rows.append(
                     _format_constant_row(
@@ -2262,6 +2594,27 @@ def _build_constants_rows(
     return rows
 
 
+def _resolve_yaml_override_keys(
+    file_name: str, data: Dict[str, Any], keys: list[str]
+) -> Optional[list[str]]:
+    if _has_nested_key(data, keys):
+        return keys
+    if keys[0] == "CONSTANTS" and len(keys) >= 2:
+        rest = keys[1:]
+        if Path(file_name).name.lower() in {"constants.yaml", "constants.yml"}:
+            if _has_nested_key(data, rest):
+                return rest
+        if len(rest) >= 2:
+            nested_candidate = [rest[0], "CONSTANTS", *rest[1:]]
+            if _has_nested_key(data, nested_candidate):
+                return nested_candidate
+    elif len(keys) >= 2:
+        nested_candidate = [keys[0], "CONSTANTS", *keys[1:]]
+        if _has_nested_key(data, nested_candidate):
+            return nested_candidate
+    return None
+
+
 def _apply_yaml_override(
     *,
     file_name: str,
@@ -2283,9 +2636,10 @@ def _apply_yaml_override(
     keys = key.split(".") if key else []
     if not keys:
         raise ValueError("Override key must be non-empty.")
-    if not _has_nested_key(data, keys):
+    resolved_keys = _resolve_yaml_override_keys(file_name, data, keys)
+    if resolved_keys is None:
         raise KeyError(f"Override key not found: {key} in {file_name}")
-    _set_nested_value(data, keys, value)
+    _set_nested_value(data, resolved_keys, value)
     assert yaml is not None
     with path.open("w", encoding="utf-8") as handle:
         yaml.safe_dump(data, handle, sort_keys=False)
@@ -2328,20 +2682,35 @@ def _parse_facet_entries(entries: Any) -> list[tuple[str, Optional[str]]]:
     return parsed
 
 
-def _flatten_constants(constants: Dict[str, Any]) -> Dict[str, Any]:
+def _flatten_constants(
+    constants: Dict[str, Any],
+    prefix: str = "",
+    *,
+    strict: bool = False,
+    file_name: str = "",
+) -> Dict[str, Any]:
     flattened: Dict[str, Any] = {}
 
-    def walk(prefix: str, value: Any) -> None:
+    def walk(curr_prefix: str, value: Any) -> None:
         if isinstance(value, dict):
+            if len(value) == 1 and next(iter(value.values())) is None:
+                placeholder_key = str(next(iter(value.keys())))
+                if strict:
+                    raise ValueError(
+                        f"[Consist][ActivitySim] Unrendered template placeholder '{{{placeholder_key}:}}' "
+                        f"for constant {curr_prefix!r} in {file_name}. Render settings or pass template_values={{...}}."
+                    )
+                flattened[curr_prefix] = f"{{{placeholder_key}:}}"
+                return
             for key, sub_value in value.items():
-                new_prefix = f"{prefix}.{key}" if prefix else str(key)
+                new_prefix = f"{curr_prefix}.{key}" if curr_prefix else str(key)
                 walk(new_prefix, sub_value)
         elif isinstance(value, list):
-            flattened[prefix] = value
+            flattened[curr_prefix] = value
         else:
-            flattened[prefix] = value
+            flattened[curr_prefix] = value
 
-    walk("", constants)
+    walk(prefix, constants)
     return flattened
 
 
@@ -2363,7 +2732,10 @@ def _format_constant_row(
         value_type = "num"
         value_num = float(value)
     elif isinstance(value, str):
-        value_type = "str"
+        if _UNRENDERED_TEMPLATE_RE.match(value):
+            value_type = "unrendered_template"
+        else:
+            value_type = "str"
         value_str = value
     else:
         value_type = "json"
@@ -2381,19 +2753,35 @@ def _format_constant_row(
     }
 
 
-def _is_coefficients_file(file_name: str) -> bool:
-    name = file_name[:-3] if file_name.endswith(".csv.gz") else file_name
-    return name.endswith(_COEFFICIENT_SUFFIXES)
-
-
 def _is_coefficients_template_file(file_name: str) -> bool:
-    name = file_name[:-3] if file_name.endswith(".csv.gz") else file_name
-    return name.endswith(_COEFFICIENT_TEMPLATE_SUFFIXES)
+    name = (
+        file_name[:-3] if file_name.lower().endswith(".csv.gz") else file_name
+    ).lower()
+    if name.endswith(_COEFFICIENT_TEMPLATE_SUFFIXES):
+        return True
+    return name.endswith(".csv") and (
+        "_coefficients_template_" in name or "_coeffs_template_" in name
+    )
+
+
+def _is_coefficients_file(file_name: str) -> bool:
+    if _is_coefficients_template_file(file_name):
+        return False
+    name = (
+        file_name[:-3] if file_name.lower().endswith(".csv.gz") else file_name
+    ).lower()
+    if name.endswith(_COEFFICIENT_SUFFIXES):
+        return True
+    return name.endswith(".csv") and ("_coefficients_" in name or "_coeffs_" in name)
 
 
 def _is_probabilities_file(file_name: str) -> bool:
-    name = file_name[:-3] if file_name.endswith(".csv.gz") else file_name
-    return name.endswith(_PROBABILITY_SUFFIXES)
+    name = (
+        file_name[:-3] if file_name.lower().endswith(".csv.gz") else file_name
+    ).lower()
+    if name.endswith(_PROBABILITY_SUFFIXES):
+        return True
+    return name.endswith(".csv") and "_probs_" in name
 
 
 def _validate_csv_headers(
@@ -2436,6 +2824,8 @@ def _iter_coefficients_rows(
             return
         assert reader.fieldnames is not None
         fieldnames = [name or "" for name in reader.fieldnames]
+        if any(name.strip().lower() == "expression" for name in fieldnames):
+            return
         coeff_key = (
             "coefficient_name" if "coefficient_name" in fieldnames else "coefficient"
         )
@@ -2445,20 +2835,12 @@ def _iter_coefficients_rows(
             name
             for name in fieldnames
             if name
-            and name
-            not in {
-                coeff_key,
-                value_key,
-                constrain_key,
-                "description",
-                "comment",
-                "notes",
-            }
+            and name not in {coeff_key, value_key}
+            and name.strip().lower() not in _COEFF_NON_DIM_KEYS
         ]
         extra_keys = {
-            "description",
-            "comment",
-            "notes",
+            name for name in fieldnames if name.strip().lower() in _COEFF_NON_DIM_KEYS
+        } | {
             coeff_key,
             value_key,
             constrain_key,
@@ -2475,37 +2857,42 @@ def _iter_coefficients_rows(
             is_constrained = None
             if constrain:
                 is_constrained = constrain.upper() in {"T", "TRUE", "1", "Y", "YES"}
+            dims = (
+                {
+                    key: _coerce_scalar(row.get(key) or "")
+                    for key in dims_keys
+                    if row.get(key) not in {None, ""}
+                }
+                if dims_keys
+                else {}
+            )
+            dims_json_str = json.dumps(dims, sort_keys=True) if dims else None
             if value_key:
                 raw = (row.get(value_key) or "").strip()
                 yield {
                     "run_id": run_id,
                     "file_name": path.name,
                     "coefficient_name": coef_name,
-                    "segment": "",
-                    "source_type": "direct",
+                    "segment": dims_json_str or "" if dims else "",
+                    "source_type": "dimensional" if dims else "direct",
                     "value_raw": raw,
                     "value_num": _parse_float(raw),
-                    "dims_json": None,
+                    "dims_json": dims_json_str if dims else None,
                     "constrain": constrain or None,
                     "is_constrained": is_constrained,
                 }
                 continue
             if coeff_key == "coefficient" and dims_keys:
-                dims = {
-                    key: _coerce_scalar(row.get(key) or "")
-                    for key in dims_keys
-                    if row.get(key) not in {None, ""}
-                }
                 raw = coef_name
                 yield {
                     "run_id": run_id,
                     "file_name": path.name,
                     "coefficient_name": "coefficient",
-                    "segment": "",
+                    "segment": dims_json_str or "",
                     "source_type": "dimensional",
                     "value_raw": raw,
                     "value_num": _parse_float(raw),
-                    "dims_json": json.dumps(dims, sort_keys=True) if dims else None,
+                    "dims_json": dims_json_str,
                     "constrain": constrain or None,
                     "is_constrained": is_constrained,
                 }
@@ -2546,7 +2933,7 @@ def _iter_probabilities_rows(
             dims: Dict[str, Any] = {}
             probs: Dict[str, Any] = {}
             for key, value in row.items():
-                if value is None or value == "":
+                if value is None or value == "" or _is_probabilities_ignore_key(key):
                     continue
                 numeric = _parse_float(value)
                 if numeric is not None:
@@ -2585,7 +2972,7 @@ def _iter_probabilities_entries(
             if not row:
                 continue
             for key, value in row.items():
-                if value is None or value == "":
+                if value is None or value == "" or _is_probabilities_ignore_key(key):
                     continue
                 numeric = _parse_float(value)
                 if numeric is None:
@@ -2612,7 +2999,7 @@ def _iter_probabilities_meta_entries(
             if not row:
                 continue
             for key, value in row.items():
-                if value is None or value == "":
+                if value is None or value == "" or _is_probabilities_ignore_key(key):
                     continue
                 numeric = _parse_float(value)
                 if numeric is None:
@@ -2630,6 +3017,10 @@ def _iter_probabilities_meta_entries(
 
 def _is_probabilities_meta_key(key: str) -> bool:
     return key in _PROBABILITIES_META_KEYS
+
+
+def _is_probabilities_ignore_key(key: str) -> bool:
+    return key.strip().lower() in _PROBABILITIES_IGNORE_KEYS
 
 
 def _digest_path(path: Path, tracker: Optional["Tracker"]) -> str:
@@ -2654,6 +3045,7 @@ def _build_activitysim_config_identity(
     referenced_csvs: Sequence[Path],
     options: Mapping[str, Any],
     runtime_options: Mapping[str, Any],
+    template_values: Optional[Mapping[str, Any]] = None,
 ) -> tuple[CanonicalConfigIdentity, dict[str, Path]]:
     file_entries: list[dict[str, Any]] = []
     references: list[ConfigReference] = []
@@ -2685,6 +3077,7 @@ def _build_activitysim_config_identity(
         config,
         inherit_settings=inherit_settings,
         allow_out_of_root_includes=bool(options.get("allow_out_of_root_yaml_includes")),
+        template_values=template_values,
     )
     for yaml_path in active_yamls:
         add_file(yaml_path, role="yaml")
@@ -2853,6 +3246,7 @@ def _collect_active_yaml_files(
     *,
     inherit_settings: bool,
     allow_out_of_root_includes: bool,
+    template_values: Optional[Mapping[str, Any]] = None,
 ) -> list[Path]:
     active: list[Path] = []
     seen: set[Path] = set()
@@ -2863,7 +3257,7 @@ def _collect_active_yaml_files(
             return
         seen.add(resolved)
         active.append(resolved)
-        data = _load_yaml(resolved)
+        data = _load_yaml(resolved, template_values=template_values)
         include_settings = data.get("include_settings")
         if isinstance(include_settings, str):
             include_names = [include_settings]
@@ -2880,6 +3274,45 @@ def _collect_active_yaml_files(
             )
             if include_path is not None:
                 add_with_includes(include_path)
+
+        raw_file_inherit = data.get("inherit_settings")
+        if isinstance(raw_file_inherit, str) and raw_file_inherit.strip():
+            target_name = raw_file_inherit.strip()
+            for root_dir in config.root_dirs:
+                target_path = (root_dir / target_name).resolve()
+                if (
+                    target_path.exists()
+                    and target_path != resolved
+                    and (
+                        allow_out_of_root_includes
+                        or _is_within_roots(target_path, config.root_dirs)
+                    )
+                ):
+                    add_with_includes(target_path)
+        elif inherit_settings or (
+            isinstance(raw_file_inherit, bool) and raw_file_inherit
+        ):
+            for root_dir in config.root_dirs:
+                cand = (root_dir / resolved.name).resolve()
+                if (
+                    cand.exists()
+                    and cand != resolved
+                    and (
+                        allow_out_of_root_includes
+                        or _is_within_roots(cand, config.root_dirs)
+                    )
+                ):
+                    add_with_includes(cand)
+
+        for ref_name in sorted(_collect_yaml_setting_references(data)):
+            ref_path = _resolve_yaml_path(
+                ref_name,
+                config.root_dirs,
+                base_dir=resolved.parent,
+                allow_out_of_root=allow_out_of_root_includes,
+            )
+            if ref_path is not None:
+                add_with_includes(ref_path)
 
     names: list[str] = []
     for yaml_path in config.config_files:
@@ -3133,8 +3566,15 @@ def _apply_coefficients_override(
     if coeff_key is None:
         raise ValueError(f"Missing coefficient column in {csv_path}")
     value_key = "value" if "value" in fieldnames else None
+    dims_keys = [
+        name
+        for name in fieldnames
+        if name
+        and name not in {coeff_key, value_key}
+        and name.strip().lower() not in _COEFF_NON_DIM_KEYS
+    ]
 
-    if value_key and segment:
+    if value_key and segment and not dims_keys:
         raise ValueError(
             f"Segment override provided for direct coefficients in {csv_path}"
         )
@@ -3142,17 +3582,41 @@ def _apply_coefficients_override(
         raise ValueError(
             f"Template coefficients require a segment column in {csv_path}"
         )
-    if value_key is None and segment not in fieldnames:
-        raise KeyError(f"Segment column '{segment}' not found in {csv_path}")
+    if value_key is None and not (coeff_key == "coefficient" and dims_keys):
+        if segment not in fieldnames:
+            raise KeyError(f"Segment column '{segment}' not found in {csv_path}")
 
     updated = 0
     for row in rows:
         coef = (row.get(coeff_key) or "").strip()
-        if coef != coefficient_name:
-            continue
         if value_key:
+            if coef != coefficient_name:
+                continue
+            if dims_keys and segment:
+                dims = {
+                    key: _coerce_scalar(row.get(key) or "")
+                    for key in dims_keys
+                    if row.get(key) not in {None, ""}
+                }
+                row_segment = json.dumps(dims, sort_keys=True) if dims else ""
+                if row_segment != segment:
+                    continue
             row[value_key] = str(value)
+        elif coeff_key == "coefficient" and dims_keys:
+            if coefficient_name not in {"coefficient", coef}:
+                continue
+            dims = {
+                key: _coerce_scalar(row.get(key) or "")
+                for key in dims_keys
+                if row.get(key) not in {None, ""}
+            }
+            row_segment = json.dumps(dims, sort_keys=True) if dims else ""
+            if segment and row_segment != segment:
+                continue
+            row[coeff_key] = str(value)
         else:
+            if coef != coefficient_name:
+                continue
             row[segment] = str(value)
         updated += 1
 

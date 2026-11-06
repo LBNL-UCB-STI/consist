@@ -41,6 +41,7 @@ from typing import (
     get_origin,
     cast,
 )
+from sqlalchemy import JSON, inspect as sa_inspect
 from sqlmodel import SQLModel
 from consist.models.artifact import Artifact
 from consist.models.run import Run
@@ -857,7 +858,7 @@ def _sqlmodel_to_dlt_columns(model: Type[SQLModel]) -> Dict[str, Dict[str, Any]]
         if origin is None:
             return {annotation}
         if origin in {list, dict, tuple}:
-            return {annotation}
+            return {origin}
         if getattr(origin, "__name__", "") == "Annotated":
             args = get_args(annotation)
             return _normalize_types(args[0]) if args else {annotation}
@@ -871,12 +872,21 @@ def _sqlmodel_to_dlt_columns(model: Type[SQLModel]) -> Dict[str, Dict[str, Any]]
             normalized |= _normalize_types(arg)
         return normalized or {annotation}
 
+    mapper = sa_inspect(model, raiseerr=False)
+    sa_columns = mapper.columns if mapper is not None else {}
     columns: Dict[str, Dict[str, Any]] = {}
     for name, field in model.model_fields.items():
+        sa_col = sa_columns.get(name)
         py_type = field.annotation
         normalized = _normalize_types(py_type)
         dlt_type = "text"
-        if float in normalized:
+        if (
+            (sa_col is not None and isinstance(sa_col.type, JSON))
+            or dict in normalized
+            or list in normalized
+        ):
+            dlt_type = "json"
+        elif float in normalized:
             dlt_type = "double"
         elif int in normalized:
             dlt_type = "bigint"
