@@ -5,6 +5,96 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog], and this project adheres to
 [Semantic Versioning].
 
+## [0.4.1] - 2026-11-06
+
+### Added
+
+- Add `RunCompletionArchivePolicy` and scenario-level
+  `step_run_completion_archive` (`archive_run_outputs(...)`,
+  `step_scope="step"` / `"all"`, `prepend_source_mount_root`, and
+  `ArchiveResult`) for automatic post-step and post-scenario archival to
+  recovery roots by @zneedell
+  ([#295](https://github.com/LBNL-UCB-STI/consist/pull/295),
+  [#301](https://github.com/LBNL-UCB-STI/consist/pull/301)).
+- Add directory manifest validation (`validate_directory_manifests(...)`) during
+  cache validation and directory hydration, with automatic fallback to configured
+  `recovery_roots` when local workspace directories are missing or modified by
+  @zneedell ([#294](https://github.com/LBNL-UCB-STI/consist/pull/294)).
+- Add `ScenarioContext.meta` and `ScenarioContext.log_meta(...)` for reading and
+  mutating scenario header run metadata during an active scenario block by
+  @zneedell ([#296](https://github.com/LBNL-UCB-STI/consist/pull/296)).
+- Add `param_aliases` on `ResolvedBinding` and `BindingResult` for mapping
+  canonical binding names to step-specific function parameter names by
+  @zneedell ([#297](https://github.com/LBNL-UCB-STI/consist/pull/297)).
+- Add `StringCapture` token extraction in `FilenamePattern` (including open
+  captures and directory wildcard support) and `DirectoryOutputSpec` for typed
+  directory output declarations in `OutputSet` by @zneedell
+  ([#298](https://github.com/LBNL-UCB-STI/consist/pull/298),
+  [#301](https://github.com/LBNL-UCB-STI/consist/pull/301)).
+- Add recovery-root input staging, dynamic cache-hit hydration for imperative
+  `log_output_file` / `log_output_dir` outputs (`outputs=[]`),
+  `Artifact.ensure_local_path(...)` (with `on_hydrated` callback support), and
+  `preserve_binding_suffixes` during input staging by @zneedell
+  ([#304](https://github.com/LBNL-UCB-STI/consist/pull/304),
+  [#305](https://github.com/LBNL-UCB-STI/consist/pull/305)).
+- Add `primary_config` and `template_values` options on
+  `ActivitySimConfigAdapter` for non-default settings entrypoints (e.g.,
+  `settings_mp.yaml`, `wait_time_mode.yaml`) and non-destructive `{key:}` YAML
+  template placeholder rendering, plus `.omxz` compressed OpenMatrix support in
+  `inspect_matrix_container` for `.omx` $\leftrightarrow$ `.omxz` logical digest
+  equivalence under `float32_matrices_v1` by @zneedell
+  ([#306](https://github.com/LBNL-UCB-STI/consist/pull/306)).
+- Add a repository-root `CITATION.cff` file pointing to the published Journal
+  of Open Source Software (JOSS) paper (`10.21105/joss.11131`) by @zneedell.
+
+### Changed
+
+- Consolidate artifact layout, source lookup, and live `Coupler` output sync
+  helpers across archival, hydration, and history resolution, and complete NumPy
+  docstrings and workflow documentation for `v0.4.1` archive and `OutputSet`
+  ergonomics by @zneedell
+  ([#301](https://github.com/LBNL-UCB-STI/consist/pull/301),
+  [#302](https://github.com/LBNL-UCB-STI/consist/pull/302),
+  [#303](https://github.com/LBNL-UCB-STI/consist/pull/303)).
+- Compute deterministic multi-root composite digests (`root_digests`) under
+  `resolved_config_identity="auto"` in `run_with_config_overrides` so mutations
+  in CSV-only calibration overlay directories always invalidate the run cache,
+  and support automatic `config_dirs` / `configs_dir` runtime kwarg injection
+  for multi-root runners by @zneedell
+  ([#306](https://github.com/LBNL-UCB-STI/consist/pull/306)).
+
+### Fixed
+
+- Support archiving excluded nested outputs and shapefile bundles under an
+  `OutputSet` root, preserve source resolution after `move` archival with
+  excluded files, harden partial directory rollback, and avoid redundant
+  `copytree` operations when step archive roots already match by @zneedell
+  ([#299](https://github.com/LBNL-UCB-STI/consist/pull/299),
+  [#301](https://github.com/LBNL-UCB-STI/consist/pull/301),
+  [#303](https://github.com/LBNL-UCB-STI/consist/pull/303),
+  [#304](https://github.com/LBNL-UCB-STI/consist/pull/304)).
+- Perform transactional in-place output promotion during archival, guard
+  cache-hit input staging against overwriting live outputs, scope implicit run
+  subdirectories, and accept `Path`, `str`, and `ArtifactLike` entries in
+  `Coupler.path(...)` and live coupler sync loops by @zneedell
+  ([#305](https://github.com/LBNL-UCB-STI/consist/pull/305)).
+- Map SQLAlchemy `JSON` columns (`ActivitySimConstantsCache.value_json`) and
+  `dict`/`list` annotations (`ActivitySimProbabilitiesCache.dims` and `probs`)
+  to `dlt` `data_type="json"` in `dlt_loader`, preventing child-table splitting
+  on list constants and column explosion on wide probability tables by @zneedell
+  ([#306](https://github.com/LBNL-UCB-STI/consist/pull/306)).
+- Harden `ActivitySimConfigAdapter` discovery and ingestion for multi-model
+  regional MPO config packs (SANDAG ABM3 and ActivitySim Prototype MTC / SFBay):
+  ignore `SPEC: None` null sentinels, traverse nested `LOGSUM_SETTINGS` /
+  `*_SETTINGS` YAML references, match infix `*_coefficients_*.csv` and
+  `*_probs_*.csv` tables, exclude expression spec tables from
+  `ActivitySimCoefficientsCache`, filter metadata columns (`Description`)
+  case-insensitively, set deterministic dimensional `segment` keys, expand
+  probability lookup meta keys, honor string `inherit_settings: settings.yaml`
+  and per-file `inherit_settings: true`, and extract top-level `constants.yaml`
+  and nested `CONSTANTS` blocks by @zneedell
+  ([#306](https://github.com/LBNL-UCB-STI/consist/pull/306)).
+
 ## [0.4.0] - 2026-10-30
 
 ### Added
@@ -817,7 +907,9 @@ The format is based on [Keep a Changelog], and this project adheres to
 
 [Semantic Versioning]: https://semver.org/spec/v2.0.0.html
 
-[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.4.1...HEAD
+
+[0.4.1]: https://github.com/LBNL-UCB-STI/consist/compare/v0.4.0...v0.4.1
 
 [0.4.0]: https://github.com/LBNL-UCB-STI/consist/compare/v0.3.5...v0.4.0
 
