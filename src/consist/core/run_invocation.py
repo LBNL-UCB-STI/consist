@@ -149,7 +149,7 @@ class ResolvedRunInvocation:
     code_identity_extra_deps: Optional[List[str]]
     output_mismatch: Literal["warn", "error", "ignore"]
     output_missing: Literal["warn", "error", "ignore"]
-    run_completion_archive: Optional[RunCompletionArchivePolicy]
+    run_completion_archive: Optional[Union[RunCompletionArchivePolicy, Literal[False]]]
     input_binding: InputBindingMode
     load_inputs: Optional[bool]
     input_paths: Optional[Mapping[str, PathLike]]
@@ -591,13 +591,13 @@ def resolve_run_invocation(
         resolved_validate_cached_outputs = "lazy"
     if cache_hydration_failure not in {"warn", "miss"}:
         raise ValueError("cache_hydration_failure must be one of: 'warn', 'miss'")
-    if (
-        cache_hydration_failure == "miss"
-        and resolved.cache_hydration != "outputs-requested"
-    ):
+    if cache_hydration_failure == "miss" and resolved.cache_hydration not in {
+        "outputs-requested",
+        "outputs-all",
+    }:
         raise ValueError(
             "cache_hydration_failure='miss' requires "
-            "cache_hydration='outputs-requested'"
+            "cache_hydration='outputs-requested' or 'outputs-all'"
         )
     resolved_validate_materialized_inputs = (
         False if validate_materialized_inputs is None else validate_materialized_inputs
@@ -691,14 +691,16 @@ def resolve_run_invocation(
                 ),
             )
         )
-    if run_completion_archive is not None and not isinstance(
-        run_completion_archive, RunCompletionArchivePolicy
+    if (
+        run_completion_archive is not None
+        and run_completion_archive is not False
+        and not isinstance(run_completion_archive, RunCompletionArchivePolicy)
     ):
         raise TypeError(
             format_problem_cause_fix(
                 problem=(
                     "output_policy.run_completion_archive must be a "
-                    "RunCompletionArchivePolicy instance or None. "
+                    "RunCompletionArchivePolicy instance, False, or None. "
                     f"Received {type(run_completion_archive).__name__}."
                 ),
                 cause=(
@@ -708,7 +710,7 @@ def resolve_run_invocation(
                 fix=(
                     "Pass output_policy=OutputPolicyOptions("
                     "run_completion_archive=RunCompletionArchivePolicy("
-                    "archive_root=...))."
+                    "archive_root=...)) or False to disable scenario defaults."
                 ),
             )
         )

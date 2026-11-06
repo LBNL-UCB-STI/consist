@@ -325,6 +325,8 @@ result = tracker.exec(
         - restore_cache_options
         - capture_outputs
         - log_meta
+        - set_output_meta
+        - set_archive_root
         # Logging and loading
         - log_artifact
         - log_artifacts

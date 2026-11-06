@@ -382,7 +382,7 @@ def test_step_log_dataframe_defaults_to_run_dir(tracker: Tracker):
     assert abs_path.exists()
     assert (
         abs_path.parent
-        == tracker.run_dir / "outputs" / "scen_df" / "write_df" / "iteration_0"
+        == tracker.run_dir / "outputs" / "scen_df" / "write_df" / "scen_df_write_df"
     )
     assert abs_path.name == "series.parquet"
 
@@ -508,7 +508,11 @@ def test_step_default_path_includes_model_name(tracker: Tracker):
     abs_path = Path(artifact.abs_path)
     assert (
         abs_path.parent
-        == tracker.run_dir / "outputs" / "scen_model_dir" / "model_x" / "iteration_2"
+        == tracker.run_dir
+        / "outputs"
+        / "scen_model_dir"
+        / "model_x"
+        / "scen_model_dir_write_df"
     )
 
 
@@ -844,3 +848,777 @@ def test_run_completion_archive_policy_failure_aborts_run_and_prevents_coupler_u
     assert failed_run.status == "failed"
     post_snapshot = tracker.get_coupler_snapshot("scen_archive_fail", phase="post")
     assert "failing_out" not in post_snapshot
+
+
+def test_scenario_log_meta_persists_to_header_run_while_suspended(
+    tracker: Tracker, tmp_path: Path
+) -> None:
+    import json
+    from types import MappingProxyType
+
+    def write_step(ctx) -> dict[str, Path]:
+        out_path = ctx.run_dir / "step_out.csv"
+        out_path.write_text("col\n1\n", encoding="utf-8")
+        return {"step_out": out_path}
+
+    with tracker.scenario("sc_meta_test") as sc:
+        assert sc._header_record is not None
+        sc._header_record.run.meta = None
+        assert isinstance(sc.meta, MappingProxyType)
+        assert dict(sc.meta) == {}
+        assert sc._header_record.run.meta is None
+        with pytest.raises(TypeError):
+            sc.meta["illegal"] = "value"  # type: ignore[index]
+
+        sc.log_meta(
+            admission_policy="v1",
+            preflight={"ok": True, "artifact_path": tmp_path / "input.csv"},
+        )
+        # Empty call is a safe no-op
+        sc.log_meta()
+
+        assert isinstance(sc.meta, MappingProxyType)
+        assert sc.meta["admission_policy"] == "v1"
+        assert sc.meta["preflight"] == {
+            "ok": True,
+            "artifact_path": str(tmp_path / "input.csv"),
+        }
+
+        # Scenario is suspended while inside the with-block; verify persistence
+        # before any child step runs or scenario completion occurs.
+        assert tracker.current_consist is None
+
+        persisted_while_running = tracker.get_run("sc_meta_test")
+        assert persisted_while_running is not None
+        assert persisted_while_running.status == "running"
+        assert persisted_while_running.meta["admission_policy"] == "v1"
+        assert persisted_while_running.meta["preflight"] == {
+            "ok": True,
+            "artifact_path": str(tmp_path / "input.csv"),
+        }
+
+        consist_json = json.loads(
+            (tracker.run_dir / "consist.json").read_text(encoding="utf-8")
+        )
+        assert consist_json["run"]["id"] == "sc_meta_test"
+        assert consist_json["run"]["status"] == "running"
+        assert consist_json["run"]["meta"]["admission_policy"] == "v1"
+        assert consist_json["run"]["meta"]["preflight"] == {
+            "ok": True,
+            "artifact_path": str(tmp_path / "input.csv"),
+        }
+
+        snapshot_json = json.loads(
+            (tracker.run_dir / "consist_runs" / "sc_meta_test.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert snapshot_json["run"]["meta"]["admission_policy"] == "v1"
+
+        step_result = sc.run(
+            fn=write_step,
+            name="child_step",
+            run_id="sc_meta_test_child_step",
+            outputs=["step_out"],
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+        assert "admission_policy" not in step_result.run.meta
+        assert "preflight" not in step_result.run.meta
+
+    completed_header = tracker.get_run("sc_meta_test")
+    assert completed_header is not None
+    assert completed_header.status == "completed"
+    assert completed_header.meta["admission_policy"] == "v1"
+    assert completed_header.meta["preflight"] == {
+        "ok": True,
+        "artifact_path": str(tmp_path / "input.csv"),
+    }
+    assert len(completed_header.meta["steps"]) == 1
+    assert completed_header.meta["steps"][0]["id"] == "sc_meta_test_child_step"
+    post_snapshot = tracker.get_coupler_snapshot(
+        "sc_meta_test_child_step", phase="post"
+    )
+    assert "step_out" in post_snapshot
+
+
+def test_scenario_log_meta_outside_active_scenario_raises_runtime_error(
+    tracker: Tracker,
+) -> None:
+    from types import MappingProxyType
+
+    sc = tracker.scenario("sc_inactive")
+
+    with pytest.raises(RuntimeError, match="Scenario not active"):
+        _ = sc.meta
+
+    with pytest.raises(RuntimeError, match="Scenario not active"):
+        sc.log_meta(stage="before_enter")
+
+    with sc:
+        sc.log_meta(stage="inside")
+        assert sc.meta["stage"] == "inside"
+
+    with pytest.raises(RuntimeError, match="Scenario not active"):
+        _ = sc.meta
+
+    with pytest.raises(RuntimeError, match="Scenario not active"):
+        sc.log_meta(stage="after_exit")
+
+    with consist.scenario("sc_noop", enabled=False) as noop_sc:
+        assert isinstance(noop_sc.meta, MappingProxyType)
+        assert dict(noop_sc.meta) == {}
+        with pytest.raises(TypeError):
+            noop_sc.meta["x"] = 1  # type: ignore[index]
+        assert noop_sc.log_meta(stage="noop") is None
+        assert dict(noop_sc.meta) == {}
+
+
+def test_scenario_positional_arguments_preserve_legacy_positions(
+    tracker: Tracker,
+) -> None:
+    with tracker.scenario(
+        "sc_pos_args",
+        {"k": 1},
+        ["tag_a"],
+        "custom_model",
+        ["step_tag"],
+        {"step_f": 2},
+        "inputs-missing",
+        "{step}_tmpl",
+        7,
+    ) as sc:
+        assert sc.name_template == "{step}_tmpl"
+        assert sc.cache_epoch == 7
+        assert sc.step_cache_hydration == "inputs-missing"
+        assert sc.step_run_completion_archive is None
+
+
+def test_set_output_meta_attaches_metadata_to_declared_outputs_across_run_and_trace(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    import json
+
+    archive_root = tmp_path / "meta_archive"
+
+    def step_with_meta(ctx) -> dict[str, Path]:
+        out_a = ctx.run_dir / "out_a.csv"
+        out_b = ctx.run_dir / "out_b.csv"
+        out_a.write_text("x\n1\n", encoding="utf-8")
+        out_b.write_text("y\n2\n", encoding="utf-8")
+
+        ctx.set_output_meta("a", {"sidecar": {"v": 1}, "tag": "initial"})
+        consist.set_output_meta("a", {"extra": "merged"})
+        ctx.set_output_meta("b", {"will_be": "replaced"})
+        ctx.set_output_meta("b", {"final": True}, merge=False)
+        return {"a": out_a, "b": out_b}
+
+    with tracker.scenario(
+        "sc_output_meta",
+        step_run_completion_archive=RunCompletionArchivePolicy(
+            archive_root=archive_root
+        ),
+    ) as sc:
+        res = sc.run(
+            fn=step_with_meta,
+            name="step_with_meta",
+            run_id="run_with_meta_1",
+            outputs=["a", "b"],
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+        assert res.cache_hit is False
+        assert res.outputs["a"].meta["sidecar"] == {"v": 1}
+        assert res.outputs["a"].meta["tag"] == "initial"
+        assert res.outputs["a"].meta["extra"] == "merged"
+        assert res.outputs["a"].meta.get("recovery_roots") == [
+            str(archive_root.resolve())
+        ]
+        assert "will_be" not in res.outputs["b"].meta
+        assert res.outputs["b"].meta["final"] is True
+
+        # Coupler and DB also reflect the merged output metadata
+        assert sc.coupler.require("a").meta["sidecar"] == {"v": 1}
+        assert sc.coupler.require("b").meta["final"] is True
+
+        with sc.trace(
+            "trace_with_meta",
+            run_id="trace_with_meta_1",
+            outputs=["traced_out"],
+        ) as t:
+            traced_path = t.run_dir / "traced_out.csv"
+            traced_path.write_text("z\n3\n", encoding="utf-8")
+            t.log_output(traced_path, key="traced_out", initial=1)
+            t.set_output_meta("traced_out", {"added_in_trace": 2})
+
+        assert sc.coupler.require("traced_out").meta["initial"] == 1
+        assert sc.coupler.require("traced_out").meta["added_in_trace"] == 2
+        assert sc.coupler.require("traced_out").meta.get("recovery_roots") == [
+            str(archive_root.resolve())
+        ]
+
+    db_outputs = tracker.get_artifacts_for_run("run_with_meta_1").outputs
+    assert db_outputs["a"].meta["sidecar"] == {"v": 1}
+    assert db_outputs["a"].meta["extra"] == "merged"
+    assert db_outputs["b"].meta["final"] is True
+
+    trace_db_outputs = tracker.get_artifacts_for_run("trace_with_meta_1").outputs
+    assert trace_db_outputs["traced_out"].meta["added_in_trace"] == 2
+
+    snapshot = json.loads(
+        (tracker.run_dir / "consist_runs" / "run_with_meta_1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    snap_by_key = {art["key"]: art for art in snapshot["outputs"]}
+    assert snap_by_key["a"]["meta"]["sidecar"] == {"v": 1}
+    assert snap_by_key["b"]["meta"]["final"] is True
+
+
+def test_scenario_trace_archive_opt_out_and_step_factory(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    archive_root = tmp_path / "factory_archive"
+
+    def policy_factory(step_name: str) -> RunCompletionArchivePolicy | None:
+        if step_name == "skip_by_factory":
+            return None
+        return RunCompletionArchivePolicy(archive_root=archive_root / step_name)
+
+    def write_csv(ctx) -> dict[str, Path]:
+        assert tracker.current_consist is not None
+        run_id = tracker.current_consist.run.id
+        p = ctx.run_dir / f"{run_id}.csv"
+        p.write_text("v\n1\n", encoding="utf-8")
+        return {"out": p}
+
+    with tracker.scenario(
+        "sc_factory_and_opt_out",
+        step_run_completion_archive=policy_factory,
+    ) as sc:
+        # 1. Archived via factory in sc.run
+        r_archived = sc.run(
+            fn=write_csv,
+            name="archived_step",
+            run_id="run_archived_step",
+            outputs=["out"],
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+        assert r_archived.outputs["out"].meta.get("recovery_roots") == [
+            str((archive_root / "archived_step").resolve())
+        ]
+
+        # 2. Skipped via factory returning None
+        r_skipped_factory = sc.run(
+            fn=write_csv,
+            name="skip_by_factory",
+            run_id="run_skip_by_factory",
+            outputs=["out"],
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+        assert "recovery_roots" not in r_skipped_factory.outputs["out"].meta
+
+        # 3. Explicitly opted out via OutputPolicyOptions(run_completion_archive=False)
+        r_opted_out = sc.run(
+            fn=write_csv,
+            name="opted_out_step",
+            run_id="run_opted_out_step",
+            outputs=["out"],
+            execution_options=ExecutionOptions(inject_context="ctx"),
+            output_policy=OutputPolicyOptions(run_completion_archive=False),
+        )
+        assert "recovery_roots" not in r_opted_out.outputs["out"].meta
+
+        # 4. Archived via factory in sc.trace
+        with sc.trace(
+            "traced_archived",
+            run_id="run_traced_archived",
+            outputs=["traced_file"],
+        ) as t:
+            tp = t.run_dir / "traced_file.csv"
+            tp.write_text("t\n1\n", encoding="utf-8")
+            t.log_output(tp, key="traced_file")
+
+        assert sc.coupler.require("traced_file").meta.get("recovery_roots") == [
+            str((archive_root / "traced_archived").resolve())
+        ]
+        assert sc.coupler.require("traced_file").abs_path == str(tp.resolve())
+
+        # 5. Explicitly opted out in sc.trace via run_completion_archive=False
+        with sc.trace(
+            "traced_opt_out",
+            run_id="run_traced_opt_out",
+            outputs=["traced_no_archive"],
+            run_completion_archive=False,
+        ) as t:
+            tp2 = t.run_dir / "traced_no_archive.csv"
+            tp2.write_text("t\n2\n", encoding="utf-8")
+            t.log_output(tp2, key="traced_no_archive")
+
+        assert "recovery_roots" not in sc.coupler.require("traced_no_archive").meta
+
+
+def test_set_output_meta_reserved_keys_trace_demotion_and_post_call_preservation(
+    tracker: Tracker,
+) -> None:
+    # 1. Reserved log_artifact parameter names in set_output_meta with output_paths + return dict
+    def step_reserved(ctx) -> dict[str, Path]:
+        out = ctx.run_dir / "reserved.csv"
+        out.write_text("id\n1\n", encoding="utf-8")
+        ctx.set_output_meta(
+            "reserved",
+            {
+                "key": "user_meta_key",
+                "direction": "north",
+                "path": "/logical/route",
+                "driver": "custom_meta_driver",
+                "schema": "v2",
+                "content_hash": "not_an_override",
+            },
+        )
+        return {"reserved": out}
+
+    res = tracker.run(
+        fn=step_reserved,
+        name="step_reserved_meta",
+        run_id="run_reserved_meta",
+        outputs=["reserved"],
+        output_paths={"reserved": "reserved.csv"},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    art = res.outputs["reserved"]
+    assert art.key == "reserved"
+    assert art.driver == "csv"
+    assert art.meta["key"] == "user_meta_key"
+    assert art.meta["direction"] == "north"
+    assert art.meta["path"] == "/logical/route"
+    assert art.meta["driver"] == "custom_meta_driver"
+    assert art.meta["schema"] == "v2"
+    assert art.meta["content_hash"] == "not_an_override"
+
+    # 2. merge=False on an already-logged output does not wipe subsequent metadata additions
+    def step_post_meta(ctx) -> None:
+        p = ctx.run_dir / "post.csv"
+        p.write_text("id\n2\n", encoding="utf-8")
+        logged = tracker.log_output(p, key="post", initial="drop_me")
+        ctx.set_output_meta("post", {"replaced": True}, merge=False)
+        logged.meta["after_replace"] = "keep_me"
+
+    res_post = tracker.run(
+        fn=step_post_meta,
+        name="step_post_meta",
+        run_id="run_post_meta",
+        outputs=["post"],
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    post_meta = res_post.outputs["post"].meta
+    assert "initial" not in post_meta
+    assert post_meta.get("replaced") is True
+    assert post_meta.get("after_replace") == "keep_me"
+
+    # 3. tracker.trace() cache-hit demotion to miss when set_output_meta is called before log_output
+    with tracker.trace("trace_demote", run_id="trace_demote_1", outputs=["t_out"]) as t:
+        tp = t.run_dir / "t_out.csv"
+        tp.write_text("v\n1\n", encoding="utf-8")
+        t.log_output(tp, key="t_out")
+
+    with tracker.trace("trace_demote", run_id="trace_demote_2", outputs=["t_out"]) as t:
+        # Initially a cache hit before log_output is called
+        assert t.is_cached is True
+        t.set_output_meta("t_out", {"from_demoted_trace": 42})
+        tp2 = t.run_dir / "t_out_demoted.csv"
+        tp2.write_text("v\n2\n", encoding="utf-8")
+        t.log_output(tp2, key="t_out")
+        assert t.is_cached is False
+
+    demoted_out = tracker.get_run_outputs("trace_demote_2")["t_out"]
+    assert demoted_out.meta.get("from_demoted_trace") == 42
+
+
+def test_lazy_callable_archive_root_and_in_run_set_archive_root(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True)
+    db_path = str(tmp_path / "provenance.duckdb")
+    tracker = Tracker(
+        run_dir=workspace,
+        db_path=db_path,
+        mounts={"workspace": str(workspace)},
+    )
+
+    state: dict[str, Path | None] = {"archive_dir": None}
+
+    def beam_like_step() -> None:
+        # Discover archive root during execution
+        state["archive_dir"] = tmp_path / "discovered_beam_archive"
+        out_file = workspace / "beam_out" / "events.csv"
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_text("time,type\n1,departure\n", encoding="utf-8")
+
+    res = tracker.run(
+        fn=beam_like_step,
+        name="beam_like_step",
+        run_id="run_lazy_callable_archive",
+        outputs=["events"],
+        output_paths={"events": workspace / "beam_out" / "events.csv"},
+        output_policy=OutputPolicyOptions(
+            run_completion_archive=RunCompletionArchivePolicy(
+                archive_root=lambda: state["archive_dir"],
+                mode="copy",
+            )
+        ),
+    )
+    discovered = state["archive_dir"]
+    assert discovered is not None
+    assert (discovered / "beam_out" / "events.csv").exists()
+    assert res.outputs["events"].meta["recovery_roots"] == [
+        str(workspace.resolve()),
+        str(discovered.resolve()),
+    ]
+    assert res.outputs["events"].abs_path == str(
+        (workspace / "beam_out" / "events.csv").resolve()
+    )
+
+    # Callable returning None skips archiving cleanly
+    def skipped_archive_step() -> None:
+        out_file = workspace / "beam_out" / "skipped.csv"
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_text("time\n1\n", encoding="utf-8")
+
+    res_skipped = tracker.run(
+        fn=skipped_archive_step,
+        name="skipped_archive_step",
+        run_id="run_skipped_callable_archive",
+        outputs=["skipped"],
+        output_paths={"skipped": workspace / "beam_out" / "skipped.csv"},
+        output_policy=OutputPolicyOptions(
+            run_completion_archive=RunCompletionArchivePolicy(
+                archive_root=lambda: None,
+                mode="copy",
+            )
+        ),
+    )
+    assert "recovery_roots" not in (res_skipped.outputs["skipped"].meta or {})
+
+    # In-run ctx.set_archive_root override and disable
+    in_run_archive = tmp_path / "in_run_override_archive"
+
+    def step_with_ctx_archive(ctx) -> None:
+        out_file = workspace / "beam_out" / "ctx_events.csv"
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_text("time\n2\n", encoding="utf-8")
+        ctx.set_archive_root(in_run_archive, prepend_source_mount_root=False)
+
+    res_ctx = tracker.run(
+        fn=step_with_ctx_archive,
+        name="step_with_ctx_archive",
+        run_id="run_ctx_set_archive_root",
+        outputs=["ctx_events"],
+        output_paths={"ctx_events": workspace / "beam_out" / "ctx_events.csv"},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    assert (in_run_archive / "beam_out" / "ctx_events.csv").exists()
+    assert res_ctx.outputs["ctx_events"].meta["recovery_roots"] == [
+        str(in_run_archive.resolve())
+    ]
+
+    def step_disable_archive(ctx) -> None:
+        out_file = workspace / "beam_out" / "disabled.csv"
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_text("time\n3\n", encoding="utf-8")
+        ctx.set_archive_root(None)
+
+    res_disabled = tracker.run(
+        fn=step_disable_archive,
+        name="step_disable_archive",
+        run_id="run_ctx_disable_archive_root",
+        outputs=["disabled"],
+        output_paths={"disabled": workspace / "beam_out" / "disabled.csv"},
+        output_policy=OutputPolicyOptions(
+            run_completion_archive=RunCompletionArchivePolicy(
+                archive_root=tmp_path / "unused_static_archive",
+                mode="copy",
+            )
+        ),
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    assert "recovery_roots" not in (res_disabled.outputs["disabled"].meta or {})
+
+
+def test_output_artifact_spec_typed_directory_options(
+    tmp_path: Path,
+) -> None:
+    from consist.types import OutputArtifactSpec
+
+    run_dir = tmp_path / "runs"
+    db_path = str(tmp_path / "provenance.duckdb")
+    tracker = Tracker(run_dir=run_dir, db_path=db_path)
+
+    spec_kw = OutputArtifactSpec(
+        path=run_dir / "dir_kw",
+        directory=True,
+        allow_extra_files=True,
+        meta={"custom_tag": "v1"},
+    )
+    assert spec_kw.directory is True
+    assert spec_kw.allow_extra_files is True
+    assert spec_kw.meta == {
+        "custom_tag": "v1",
+        "directory_artifact": True,
+        "directory_allow_extra_files": True,
+    }
+
+    spec_factory = OutputArtifactSpec.for_directory(
+        run_dir / "dir_factory.zarr",
+        allow_extra_files=True,
+        driver="zarr",
+    )
+    assert spec_factory.directory is True
+    assert spec_factory.allow_extra_files is True
+    assert spec_factory.driver == "zarr"
+    assert spec_factory.meta == {
+        "directory_artifact": True,
+        "directory_allow_extra_files": True,
+    }
+
+    with pytest.raises(
+        ValueError, match="allow_extra_files=True requires directory=True"
+    ):
+        OutputArtifactSpec(path=run_dir / "scalar.csv", allow_extra_files=True)
+
+    def write_dirs() -> None:
+        d1 = run_dir / "dir_kw"
+        d1.mkdir(parents=True, exist_ok=True)
+        (d1 / "part.txt").write_text("hello", encoding="utf-8")
+
+    res = tracker.run(
+        fn=write_dirs,
+        name="write_dirs",
+        run_id="run_typed_dir_spec",
+        outputs=["dir_kw"],
+        output_paths={"dir_kw": spec_kw},
+    )
+    logged = res.outputs["dir_kw"]
+    assert logged.meta["directory_artifact"] is True
+    assert logged.meta["directory_allow_extra_files"] is True
+    assert logged.meta["custom_tag"] == "v1"
+    assert "directory_manifest" in logged.meta
+
+
+def test_open_h5py_read_only_falls_back_when_locking_flags_conflict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import types
+    from consist.digest import open_h5py_read_only
+
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def fake_file(*args: object, **kwargs: object) -> str:
+        calls.append((args, kwargs))
+        if kwargs.get("locking") is False:
+            raise OSError(
+                "Unable to synchronously open file (file locking flag values don't match)"
+            )
+        return "opened-with-default-locking"
+
+    fake_h5py = types.SimpleNamespace(File=fake_file)
+    h5_path = tmp_path / "model_data.h5"
+    result = open_h5py_read_only(h5_path, h5py_module=fake_h5py)
+    assert result == "opened-with-default-locking"
+    assert calls == [
+        ((h5_path, "r"), {"locking": False}),
+        ((h5_path, "r"), {}),
+    ]
+
+
+def test_output_policy_error_honors_runtime_output_paths_narrowing_decorator_outputs(
+    tmp_path: Path,
+) -> None:
+    from consist.types import CacheOptions, OutputPolicyOptions
+
+    run_dir = tmp_path / "runs"
+    db_path = str(tmp_path / "provenance.duckdb")
+    tracker = Tracker(run_dir=run_dir, db_path=db_path)
+
+    @tracker.define_step(outputs=["out_a", "out_b"])
+    def conditional_step() -> None:
+        out_a = run_dir / "out_a.txt"
+        out_a.parent.mkdir(parents=True, exist_ok=True)
+        out_a.write_text("only a", encoding="utf-8")
+
+    # 1. Cache miss: runtime output_paths narrows expected outputs to out_a
+    with tracker.scenario("scen_narrow_miss") as sc:
+        res_miss = sc.run(
+            fn=conditional_step,
+            output_paths={"out_a": run_dir / "out_a.txt"},
+            output_policy=OutputPolicyOptions(output_missing="error"),
+        )
+        assert res_miss.cache_hit is False
+        assert set(res_miss.outputs.keys()) == {"out_a"}
+        assert "out_a" in sc.coupler
+
+    # 2. Cache hit: cached run also validates only out_a without failing on out_b
+    with tracker.scenario("scen_narrow_hit") as sc_hit:
+        res_hit = sc_hit.run(
+            fn=conditional_step,
+            output_paths={"out_a": run_dir / "out_a.txt"},
+            output_policy=OutputPolicyOptions(output_missing="error"),
+        )
+        assert res_hit.cache_hit is True
+        assert set(res_hit.outputs.keys()) == {"out_a"}
+
+    # 3. Missing declared runtime output_paths key still raises RuntimeError
+    @tracker.define_step(outputs=["out_a", "out_b"])
+    def missing_step() -> None:
+        pass
+
+    with pytest.raises(RuntimeError, match="out_a"):
+        tracker.run(
+            fn=missing_step,
+            output_paths={"out_a": run_dir / "never_written.txt"},
+            cache_options=CacheOptions(cache_mode="overwrite"),
+            output_policy=OutputPolicyOptions(output_missing="error"),
+        )
+
+
+def test_scenario_log_meta_promotes_stage_and_phase_columns(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs"
+    db_path = str(tmp_path / "provenance.duckdb")
+    tracker = Tracker(run_dir=run_dir, db_path=db_path)
+
+    with tracker.scenario("scen_stage_phase") as sc:
+        sc.log_meta(stage="supply_demand", phase="iteration", custom_key="val")
+        assert sc.meta["stage"] == "supply_demand"
+        assert sc.meta["phase"] == "iteration"
+        assert sc.meta["custom_key"] == "val"
+        assert sc._header_record is not None
+        assert sc._header_record.run.stage == "supply_demand"
+        assert sc._header_record.run.phase == "iteration"
+
+    persisted = tracker.get_run("scen_stage_phase")
+    assert persisted is not None
+    assert persisted.stage == "supply_demand"
+    assert persisted.phase == "iteration"
+    assert persisted.meta["custom_key"] == "val"
+
+
+def test_scenario_multi_year_output_sets_do_not_collide_in_run_artifact_dir(
+    tmp_path: Path,
+) -> None:
+    from consist.types import OutputSet
+
+    run_dir = tmp_path / "runs"
+    db_path = str(tmp_path / "provenance.duckdb")
+    tracker = Tracker(run_dir=run_dir, db_path=db_path)
+
+    def run_atlas(year: int) -> None:
+        out_root = run_dir / "atlas_out" / f"y{year}"
+        out_root.mkdir(parents=True, exist_ok=True)
+        (out_root / f"vehicles_{year}.csv").write_text(
+            f"year\n{year}\n", encoding="utf-8"
+        )
+
+    with tracker.scenario("multi_year_scen") as sc:
+        res_2015 = sc.run(
+            fn=run_atlas,
+            name="atlas_run",
+            model="atlas",
+            year=2015,
+            iteration=0,
+            config={"year": 2015},
+            output_sets={
+                "atlas_outputs": OutputSet(
+                    root=run_dir / "atlas_out" / "y2015",
+                    include="vehicles_*.csv",
+                )
+            },
+        )
+        res_2017 = sc.run(
+            fn=run_atlas,
+            name="atlas_run",
+            model="atlas",
+            year=2017,
+            iteration=0,
+            config={"year": 2017},
+            output_sets={
+                "atlas_outputs": OutputSet(
+                    root=run_dir / "atlas_out" / "y2017",
+                    include="vehicles_*.csv",
+                )
+            },
+        )
+
+    assert tracker.run_artifact_dir(res_2015.run) != tracker.run_artifact_dir(
+        res_2017.run
+    )
+    manifest_2015 = (
+        tracker.run_artifact_dir(res_2015.run)
+        / "atlas_outputs.output_set_manifest.json"
+    )
+    manifest_2017 = (
+        tracker.run_artifact_dir(res_2017.run)
+        / "atlas_outputs.output_set_manifest.json"
+    )
+    assert manifest_2015.exists()
+    assert manifest_2017.exists()
+    assert "vehicles_2015.csv" in manifest_2015.read_text(encoding="utf-8")
+    assert "vehicles_2017.csv" in manifest_2017.read_text(encoding="utf-8")
+
+
+def test_event_hooks_snapshot_allows_self_unregistration(tracker: Tracker) -> None:
+    seen_start: list[str] = []
+    seen_complete: list[str] = []
+    seen_failed: list[str] = []
+
+    def one_shot_start(run) -> None:
+        seen_start.append(f"one_shot:{run.id}")
+        tracker.off_run_start(one_shot_start)
+
+    def adjacent_start(run) -> None:
+        seen_start.append(f"adjacent:{run.id}")
+
+    def one_shot_complete(run, _outputs) -> None:
+        seen_complete.append(f"one_shot:{run.id}")
+        tracker.off_run_complete(one_shot_complete)
+
+    def adjacent_complete(run, _outputs) -> None:
+        seen_complete.append(f"adjacent:{run.id}")
+
+    def one_shot_failed(run, _err) -> None:
+        seen_failed.append(f"one_shot:{run.id}")
+        tracker.off_run_failed(one_shot_failed)
+
+    def adjacent_failed(run, _err) -> None:
+        seen_failed.append(f"adjacent:{run.id}")
+
+    tracker.on_run_start(one_shot_start)
+    tracker.on_run_start(adjacent_start)
+    tracker.on_run_complete(one_shot_complete)
+    tracker.on_run_complete(adjacent_complete)
+    tracker.on_run_failed(one_shot_failed)
+    tracker.on_run_failed(adjacent_failed)
+
+    with tracker.start_run("hook_run_1", model="demo"):
+        pass
+
+    with pytest.raises(RuntimeError, match="boom"):
+        with tracker.start_run("hook_run_fail", model="demo"):
+            raise RuntimeError("boom")
+
+    assert seen_start == [
+        "one_shot:hook_run_1",
+        "adjacent:hook_run_1",
+        "adjacent:hook_run_fail",
+    ]
+    assert seen_complete == [
+        "one_shot:hook_run_1",
+        "adjacent:hook_run_1",
+    ]
+    assert seen_failed == [
+        "one_shot:hook_run_fail",
+        "adjacent:hook_run_fail",
+    ]
+    tracker.off_run_start(adjacent_start)
+    tracker.off_run_complete(adjacent_complete)
+    tracker.off_run_failed(adjacent_failed)

@@ -319,6 +319,8 @@ with tracker.scenario("baseline") as sc:
         - run_id
         - config
         - inputs
+        - meta
+        - log_meta
         - add_input
         - declare_outputs
         - require_outputs
@@ -345,6 +347,8 @@ with tracker.scenario("baseline") as sc:
         - log_input
         - log_output
         - log_meta
+        - set_output_meta
+        - set_archive_root
         - capture_outputs
 
 ## Coupler

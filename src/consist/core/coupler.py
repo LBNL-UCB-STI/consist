@@ -13,8 +13,9 @@ from typing import (
 )
 
 from consist.core._coupler_shared import CouplerMapMixin
-from consist.models.artifact import Artifact
 from consist.core.validation import validate_artifact_key
+from consist.models.artifact import Artifact
+from consist.protocols import ArtifactLike
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
@@ -202,12 +203,25 @@ class Coupler(CouplerMapMixin[Artifact, DeclaredOutput]):
     """
 
     def __init__(self, tracker: Optional["Tracker"] = None) -> None:
-        self.tracker = tracker
+        self._tracker: Optional["Tracker"] = None
         self._artifacts: MutableMapping[str, Artifact] = {}
         self._declared_outputs: MutableMapping[str, DeclaredOutput] = {}
         self._warn_undefined = False
         self._undefined_keys: set[str] = set()
         self._output_descriptions: MutableMapping[str, str] = {}
+        self.tracker = tracker
+
+    @property
+    def tracker(self) -> Optional["Tracker"]:
+        return self._tracker
+
+    @tracker.setter
+    def tracker(self, value: Optional["Tracker"]) -> None:
+        self._tracker = value
+        if value is not None:
+            couplers = value.__dict__.get("_couplers")
+            if couplers is not None:
+                couplers.add(self)
 
     def _validate_artifact_key(self, key: str) -> None:
         validate_artifact_key(key)
@@ -297,8 +311,21 @@ class Coupler(CouplerMapMixin[Artifact, DeclaredOutput]):
         artifact = self.require(key) if required else self.get(key)
         if not artifact:
             return None
-        if not self.tracker:
-            raise RuntimeError(
-                f"Cannot resolve path for {key!r}: no tracker attached to Coupler."
-            )
-        return Path(self.tracker.resolve_uri(artifact.container_uri))
+        if isinstance(artifact, Artifact):
+            if not self.tracker:
+                raise RuntimeError(
+                    f"Cannot resolve path for {key!r}: no tracker attached to Coupler."
+                )
+            return Path(self.tracker.resolve_uri(artifact.container_uri))
+        if isinstance(artifact, (Path, str)):
+            if self.tracker is not None and "://" in str(artifact):
+                return Path(self.tracker.resolve_uri(str(artifact)))
+            return Path(artifact)
+        if isinstance(artifact, ArtifactLike):
+            if artifact.path is not None:
+                return Path(artifact.path)
+            if artifact.container_uri:
+                if self.tracker is not None:
+                    return Path(self.tracker.resolve_uri(artifact.container_uri))
+                return Path(artifact.container_uri)
+        return None

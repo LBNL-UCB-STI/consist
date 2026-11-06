@@ -158,10 +158,10 @@ tracker.run(
 
 Use this when the wrapped code writes a directory tree or ad hoc output files.
 
-### Declared File Output With Metadata
+### Declared File Or Directory Output With Metadata
 
 ```python
-from consist import ArtifactSpec, ExecutionOptions
+from consist import ArtifactSpec, ExecutionOptions, OutputArtifactSpec
 
 result = scenario.run(
     name="generate_firms",
@@ -172,19 +172,30 @@ result = scenario.run(
             path=output_dir / "synthetic_firms.csv",
             schema=SyntheticFirms,
             profile_file_schema=True,
-        )
+        ),
+        "skims_dir": OutputArtifactSpec.for_directory(
+            output_dir / "skims",
+            allow_extra_files=True,
+        ),
     },
     profile_file_schema=True,
     execution_options=ExecutionOptions(input_binding="paths"),
 )
 ```
 
-Use `ArtifactSpec` when the output path itself should carry schema, driver,
-facet, or profiling metadata. `schema=...` is a non-strict logical tag for
-declared outputs; it does not validate file contents. These declarations apply
-when Consist logs the artifact, so newly added schema or profiling metadata is
-not backfilled onto existing cached artifacts. Force a rerun or change the cache
-version/epoch when persisted metadata needs to change.
+Use `ArtifactSpec` / `OutputArtifactSpec` when the output path itself should
+carry schema, driver, facet, directory, or profiling metadata. Use
+`OutputArtifactSpec.for_directory(path, allow_extra_files=True)` when declaring
+a directory output whose underlying tool may later drop unlisted scratch files
+into that directory. When metadata for a declared output (`outputs=[...]` or
+`output_paths={...}`) is computed dynamically inside the step body, call
+`_consist_ctx.set_output_meta("key", field=value)` (or
+`tracker.set_output_meta(...)`) before the step returns so Consist merges those
+fields into `artifact.meta` when the output is finalized. `schema=...` is a
+non-strict logical tag for declared outputs; it does not validate file contents.
+These declarations apply when Consist logs the artifact, so newly added schema
+or profiling metadata is not backfilled onto existing cached artifacts. Force a
+rerun or change the cache version/epoch when persisted metadata needs to change.
 
 ### Container-Backed Step With Stable Output Paths
 
@@ -238,7 +249,13 @@ result = tracker.run(
 
 Use `OutputSet` when callers should see one logical output artifact even though
 the tool wrote many member files. Only `root` and `include` are required;
-`expected_members` and `expected_count` are optional completeness checks. Consist
+`expected_members` and `expected_count` are optional completeness checks. When
+filename segments should become typed facet metadata on member artifacts, pass
+`FilenamePattern.glob(...).with_captures(...)` to `include=` using `IntCapture`,
+`EnumCapture`, or `StringCapture` (with optional `pattern=...` regex). If a
+step also logs a sibling directory artifact, shapefile bundle, or scalar output
+under `OutputSet.root`, exclude its subpath via `OutputSet(exclude=...)` so both
+the `OutputSet` and the sibling artifact can be archived cleanly. Consist
 logs one parent artifact with `driver="artifact_set"`, child file artifacts
 linked by `parent_artifact_id`, and a JSON manifest artifact. Cache hydration
 restores child files under the declared set root and returns the parent in
@@ -358,6 +375,17 @@ run, translate mounts, stage consumer-specific paths, or decide restart policy;
 those remain downstream responsibilities. Persisted `OutputSet` hydration is
 not implied by this exact-destination API.
 
+When steps should archive their outputs to a durable recovery root as soon as
+they complete, prefer declarative `RunCompletionArchivePolicy` (via
+`OutputPolicyOptions(run_completion_archive=...)` or
+`scenario(..., step_run_completion_archive=...)`, paired with
+`_consist_ctx.set_archive_root(path)` when the archive destination is computed
+inside the step body) over manual post-run archive loops. Both declarative
+run-completion archiving and `tracker.archive_run_outputs(...)` automatically
+skip virtual unbacked ingested tables when `keys=None` and sync updated
+`recovery_roots` and `abs_path` back onto live `RunResult.outputs` and scenario
+`coupler` artifacts.
+
 Archive reporting is a bounded operational surface: use
 `archive_run_output_files(...)` only when a workflow needs a file-only copy,
 verification, and registration report. It is not a replacement for ordinary
@@ -462,7 +490,9 @@ with tracker.scenario(
 ```
 
 Use this shape when downstream scenario names are metadata, but cache identity
-must still reflect the actual step inputs and config.
+must still reflect the actual step inputs and config. Use `scenario.log_meta(...)`
+(and read `scenario.meta`) to attach runtime metadata to the scenario header run
+without affecting child step cache keys.
 
 ### Recursive Directory Capture
 

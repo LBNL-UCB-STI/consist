@@ -22,6 +22,7 @@ from consist.types import (
     FilenamePattern,
     IntCapture,
     OutputSet,
+    StringCapture,
 )
 
 
@@ -134,6 +135,8 @@ def _compile_filename_pattern(
                     rf"(?:{'|'.join(re.escape(value) for value in allowed)})"
                     rf")"
                 )
+            elif isinstance(capture, StringCapture):
+                capture_regex = rf"(?P<{group_name}>(?:{capture.pattern}))"
             else:  # pragma: no cover - defensive for future capture kinds
                 raise TypeError(f"unsupported capture type: {type(capture)!r}")
             regex_parts.append(capture_regex)
@@ -173,6 +176,13 @@ def _extract_filename_pattern_facets(
                     f"{captured_value!r} for capture {capture.name!r}"
                 )
             value = captured_value
+        elif isinstance(capture, StringCapture):
+            if not captured_value or "/" in captured_value or "\\" in captured_value:
+                raise ValueError(
+                    f"output-set member {member_relative_path} produced invalid value "
+                    f"{captured_value!r} for capture {capture.name!r}"
+                )
+            value = str(captured_value)
         else:  # pragma: no cover - defensive for future capture kinds
             raise TypeError(f"unsupported capture type: {type(capture)!r}")
         previous_value = captured_values.get(capture.name)
@@ -806,6 +816,13 @@ def _manifest_include_value(
                     "name": capture.name,
                     "wildcard": capture.wildcard,
                     "allowed": sorted(capture.allowed),
+                }
+            elif isinstance(capture, StringCapture):
+                payload = {
+                    "kind": "string",
+                    "name": capture.name,
+                    "wildcard": capture.wildcard,
+                    "pattern": capture.pattern,
                 }
             else:  # pragma: no cover - defensive for future capture kinds
                 raise TypeError(f"unsupported capture type: {type(capture)!r}")

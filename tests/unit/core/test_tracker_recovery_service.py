@@ -427,3 +427,976 @@ def test_run_completion_archive_policy_requires_database(tmp_path: Path) -> None
                 )
             ),
         )
+
+
+def test_run_completion_archive_policy_preserves_abs_path_on_miss_and_hydrated_hit(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    from consist.types import CacheOptions
+
+    archive_miss = tmp_path / "archive_miss"
+    archive_hit = tmp_path / "archive_hit"
+    out_file = tracker.run_dir / "workspace_out" / "skims.omx"
+
+    def step(ctx) -> dict[str, Path]:
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_bytes(b"omx-bytes")
+        return {"skims": out_file}
+
+    with tracker.scenario(
+        "sc_abs_path_miss",
+        step_run_completion_archive=RunCompletionArchivePolicy(
+            archive_root=archive_miss,
+            mode="copy",
+        ),
+    ) as sc_miss:
+        miss_res = sc_miss.run(
+            fn=step,
+            name="produce_skims",
+            run_id="abs_path_miss_run",
+            outputs=["skims"],
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+        expected_abs = str(out_file.resolve())
+        assert miss_res.cache_hit is False
+        assert miss_res.outputs["skims"].abs_path == expected_abs
+        assert sc_miss.coupler.require("skims").abs_path == expected_abs
+        assert sc_miss.coupler.require("skims").path == out_file.resolve()
+
+    # Remove workspace file so cache hit must hydrate it from archive_miss,
+    # then archive to archive_hit via RunCompletionArchivePolicy(mode="copy").
+    out_file.unlink()
+    assert not out_file.exists()
+
+    with tracker.scenario(
+        "sc_abs_path_hit",
+        step_run_completion_archive=RunCompletionArchivePolicy(
+            archive_root=archive_hit,
+            mode="copy",
+        ),
+    ) as sc_hit:
+        hit_res = sc_hit.run(
+            fn=step,
+            name="produce_skims",
+            run_id="abs_path_hit_run",
+            outputs=["skims"],
+            output_paths={"skims": out_file},
+            cache_options=CacheOptions(cache_hydration="outputs-requested"),
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+        expected_abs = str(out_file.resolve())
+        assert hit_res.cache_hit is True
+        assert out_file.exists()
+        assert hit_res.outputs["skims"].abs_path == expected_abs
+        assert sc_hit.coupler.require("skims").abs_path == expected_abs
+        assert sc_hit.coupler.require("skims").path == out_file.resolve()
+
+
+@pytest.mark.parametrize("scalar_declared_first", [True, False])
+def test_archive_run_outputs_handles_nested_scalar_and_child_directory_inside_directory_artifact(
+    tracker: Tracker,
+    tmp_path: Path,
+    scalar_declared_first: bool,
+) -> None:
+    archive_root = tmp_path / f"archive_nested_{scalar_declared_first}"
+    beam_root = tracker.run_dir / "beam_outputs"
+    iter_dir = beam_root / "ITERS" / "it.0"
+    zarr_dir = beam_root / "skims.zarr"
+
+    def step(ctx) -> None:
+        iter_dir.mkdir(parents=True, exist_ok=True)
+        zarr_dir.mkdir(parents=True, exist_ok=True)
+        events_file = iter_dir / "0.events.csv.gz"
+        events_file.write_bytes(b"events-payload")
+        linkstats_file = iter_dir / "0.linkstats.csv.gz"
+        linkstats_file.write_bytes(b"linkstats-payload")
+        (zarr_dir / ".zgroup").write_text('{"zarr_format":2}\n', encoding="utf-8")
+        (zarr_dir / "0.0").write_bytes(b"zarr-chunk")
+
+        if scalar_declared_first:
+            tracker.log_output(events_file, key="events")
+            tracker.log_output(
+                zarr_dir, key="skims_zarr", artifact_kind="directory", driver="zarr"
+            )
+            tracker.log_output(iter_dir, key="beam_iter_dir", artifact_kind="directory")
+            tracker.log_output(
+                beam_root, key="beam_output_root_dir", artifact_kind="directory"
+            )
+        else:
+            tracker.log_output(
+                beam_root, key="beam_output_root_dir", artifact_kind="directory"
+            )
+            tracker.log_output(iter_dir, key="beam_iter_dir", artifact_kind="directory")
+            tracker.log_output(
+                zarr_dir, key="skims_zarr", artifact_kind="directory", driver="zarr"
+            )
+            tracker.log_output(events_file, key="events")
+
+    output_keys = (
+        ["events", "skims_zarr", "beam_iter_dir", "beam_output_root_dir"]
+        if scalar_declared_first
+        else ["beam_output_root_dir", "beam_iter_dir", "skims_zarr", "events"]
+    )
+    res = tracker.run(
+        fn=step,
+        name=f"nested_dir_step_{scalar_declared_first}",
+        run_id=f"nested_dir_run_{scalar_declared_first}",
+        outputs=output_keys,
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        output_policy=OutputPolicyOptions(
+            run_completion_archive=RunCompletionArchivePolicy(
+                archive_root=archive_root,
+                mode="copy",
+            )
+        ),
+    )
+
+    expected_root = str(archive_root.resolve())
+    for key in output_keys:
+        assert res.outputs[key].meta.get("recovery_roots") == [expected_root]
+        assert res.outputs[key].abs_path is not None
+
+    assert (
+        archive_root / "beam_outputs" / "ITERS" / "it.0" / "0.events.csv.gz"
+    ).read_bytes() == b"events-payload"
+    assert (
+        archive_root / "beam_outputs" / "ITERS" / "it.0" / "0.linkstats.csv.gz"
+    ).read_bytes() == b"linkstats-payload"
+    assert (archive_root / "beam_outputs" / "skims.zarr" / "0.0").read_bytes() == (
+        b"zarr-chunk"
+    )
+
+    # Also test direct archive_artifact(dir_artifact) when a nested scalar was archived first
+    manual_archive = tmp_path / f"manual_archive_{scalar_declared_first}"
+    tracker.archive_artifact(res.outputs["events"], manual_archive, mode="copy")
+    tracker.archive_artifact(
+        res.outputs["beam_output_root_dir"], manual_archive, mode="copy"
+    )
+    assert (
+        manual_archive / "beam_outputs" / "ITERS" / "it.0" / "0.linkstats.csv.gz"
+    ).read_bytes() == b"linkstats-payload"
+
+    # Also verify mode="move" on archive_run_outputs with nested outputs
+    move_archive = tmp_path / f"move_archive_{scalar_declared_first}"
+    moved = tracker.archive_run_outputs(
+        f"nested_dir_run_{scalar_declared_first}",
+        move_archive,
+        mode="move",
+    )
+    assert set(moved.keys()) == set(output_keys)
+    assert not beam_root.exists()
+    assert (
+        move_archive / "beam_outputs" / "ITERS" / "it.0" / "0.events.csv.gz"
+    ).read_bytes() == b"events-payload"
+    assert (
+        move_archive / "beam_outputs" / "ITERS" / "it.0" / "0.linkstats.csv.gz"
+    ).read_bytes() == b"linkstats-payload"
+
+
+def test_archive_directory_artifact_rollback_preserves_preexisting_files_and_recovery_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "runs"
+    db_path = str(tmp_path / "provenance.duckdb")
+    tracker = Tracker(run_dir=run_dir, db_path=db_path)
+
+    dir_path = run_dir / "shared_dir"
+    (dir_path / "nested").mkdir(parents=True)
+    nested_scalar = dir_path / "nested" / "scalar.csv"
+    nested_scalar.write_text("id\n1\n", encoding="utf-8")
+    (dir_path / "other.txt").write_text("other-content", encoding="utf-8")
+
+    with tracker.start_run("rollback_and_fallback_run", model="test"):
+        scalar_art = tracker.log_output(nested_scalar, key="scalar")
+        dir_art = tracker.log_output(dir_path, key="dir_out", artifact_kind="directory")
+
+    # 1. Pre-populate archive destination with the nested scalar, then fail set_artifact_recovery_roots
+    archive_a = tmp_path / "archive_a"
+    tracker.archive_artifact(scalar_art, archive_a, mode="copy")
+    archived_scalar = archive_a / "shared_dir" / "nested" / "scalar.csv"
+    assert archived_scalar.exists()
+
+    orig_set_roots = tracker.set_artifact_recovery_roots
+
+    def fail_set_roots(*args, **kwargs):
+        raise RuntimeError("simulated DB failure during recovery root registration")
+
+    monkeypatch.setattr(tracker, "set_artifact_recovery_roots", fail_set_roots)
+    with pytest.raises(RuntimeError, match="simulated DB failure"):
+        tracker.archive_artifact(dir_art, archive_a, mode="copy")
+    monkeypatch.setattr(tracker, "set_artifact_recovery_roots", orig_set_roots)
+
+    # Pre-existing scalar must remain intact, while newly copied other.txt was rolled back
+    assert archived_scalar.read_text(encoding="utf-8") == "id\n1\n"
+    assert not (archive_a / "shared_dir" / "other.txt").exists()
+
+    # 2. Succeed archiving to archive_a, corrupt primary source, and archive to archive_b via fallback
+    tracker.archive_artifact(dir_art, archive_a, mode="copy")
+    (dir_path / "other.txt").write_text("corrupted-in-workspace", encoding="utf-8")
+
+    archive_b = tmp_path / "archive_b"
+    refreshed_dir = tracker.get_run_outputs("rollback_and_fallback_run")["dir_out"]
+    dest_b = tracker.archive_artifact(refreshed_dir, archive_b, mode="copy")
+    assert (dest_b / "other.txt").read_text(encoding="utf-8") == "other-content"
+
+
+def test_archive_shapefile_bundle_move_to_same_destination_sets_abs_path(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs"
+    db_path = str(tmp_path / "provenance.duckdb")
+    tracker = Tracker(run_dir=run_dir, db_path=db_path)
+
+    shp_dir = run_dir / "shapes"
+    shp_dir.mkdir(parents=True)
+    for ext in (".shp", ".shx", ".dbf"):
+        (shp_dir / f"zones{ext}").write_bytes(f"payload-{ext}".encode("utf-8"))
+
+    with tracker.start_run("shp_same_dest_run", model="test"):
+        shp_art = tracker.log_output(shp_dir / "zones.shp", key="zones")
+
+    archive_root = tmp_path / "archive"
+    bundle_dest = tracker.archive_artifact(shp_art, archive_root, mode="copy")
+    # Remove original workspace files so recovery resolves from archive_root
+    for ext in (".shp", ".shx", ".dbf"):
+        (shp_dir / f"zones{ext}").unlink()
+
+    shp_art.abs_path = None
+    # Archiving with mode="move" when source already resolves to the archive bundle root
+    tracker.archive_artifact(shp_art, archive_root, mode="move")
+    assert shp_art.abs_path == str((bundle_dest / "zones.shp").resolve())
+    assert (bundle_dest / "zones.shp").exists()
+
+
+def test_archive_run_outputs_filters_virtual_ingested_and_syncs_last_consist_and_coupler(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True)
+    db_path = str(tmp_path / "provenance.duckdb")
+    tracker = Tracker(
+        run_dir=workspace,
+        db_path=db_path,
+        mounts={"workspace": str(workspace)},
+    )
+
+    out_path = workspace / "outputs" / "metrics.csv"
+    out_path.parent.mkdir(parents=True)
+
+    with tracker.scenario("sync_scenario") as sc:
+        sc.coupler.declare_outputs("bootstrap_base_path", "metrics")
+        sc.coupler.set("bootstrap_base_path", str(workspace / "bootstrap.h5"))
+
+        def step_fn() -> None:
+            out_path.write_text("id,val\n1,10\n", encoding="utf-8")
+            # Also log a virtual unbacked ingested table row
+            virtual_art = tracker.log_artifact(
+                "db://ingested_summary",
+                key="ingested_summary",
+                direction="output",
+                driver="duckdb",
+                is_ingested=True,
+            )
+            virtual_art.abs_path = None
+
+        res = sc.run(
+            fn=step_fn,
+            name="produce_and_ingest",
+            run_id="run_produce_and_ingest",
+            outputs=["metrics"],
+            output_paths={"metrics": out_path},
+        )
+        archive_root = tmp_path / "archive_post_step"
+        archived = tracker.archive_run_outputs(
+            res.run.id,
+            archive_root,
+            mode="copy",
+        )
+        assert set(archived.keys()) == {"metrics"}
+        expected_roots = [
+            str(workspace.resolve()),
+            str(archive_root.resolve()),
+        ]
+        assert archived.outputs["metrics"].meta["recovery_roots"] == expected_roots
+        assert archived.outputs["metrics"].abs_path == str(out_path.resolve())
+
+        # Verify in-memory sync onto ScenarioContext.coupler and tracker._last_consist
+        coupler_art = sc.coupler.require("metrics")
+        assert coupler_art.meta["recovery_roots"] == expected_roots
+        assert coupler_art.abs_path == str(out_path.resolve())
+
+        assert tracker._last_consist is not None
+        last_metrics = next(
+            a for a in tracker._last_consist.outputs if a.key == "metrics"
+        )
+        assert last_metrics.meta["recovery_roots"] == expected_roots
+        assert last_metrics.abs_path == str(out_path.resolve())
+
+    # Also test prepend_source_mount_root=False
+    archive_root_no_prepend = tmp_path / "archive_no_prepend"
+    with tracker.start_run("run_no_prepend", model="test"):
+        out_b = workspace / "outputs" / "metrics_b.csv"
+        out_b.write_text("id,val\n2,20\n", encoding="utf-8")
+        tracker.log_output(out_b, key="metrics_b")
+
+    archived_b = tracker.archive_run_outputs(
+        "run_no_prepend",
+        archive_root_no_prepend,
+        mode="copy",
+        prepend_source_mount_root=False,
+    )
+    assert archived_b.outputs["metrics_b"].meta["recovery_roots"] == [
+        str(archive_root_no_prepend.resolve())
+    ]
+
+
+def test_archive_directory_and_shapefile_under_separate_workspace_mount(
+    tmp_path: Path,
+) -> None:
+    """Archiving directory and shapefile artifacts under workspace:// when mounts['workspace'] != run_dir."""
+    run_dir = tmp_path / "consist_runs"
+    workspace_root = tmp_path / "workspace_root"
+    run_dir.mkdir(parents=True)
+    workspace_root.mkdir(parents=True)
+    db_path = str(tmp_path / "provenance.duckdb")
+
+    tracker = Tracker(
+        run_dir=run_dir,
+        db_path=db_path,
+        mounts={"workspace": str(workspace_root)},
+    )
+
+    zarr_dir = workspace_root / "beam_outputs" / "skims.zarr"
+    zarr_dir.mkdir(parents=True)
+    (zarr_dir / ".zgroup").write_text('{"zarr_format": 2}\n', encoding="utf-8")
+    (zarr_dir / "0.0").write_bytes(b"\x01\x02\x03\x04")
+
+    shp_dir = workspace_root / "beam_outputs" / "zones_bundle"
+    shp_dir.mkdir(parents=True)
+    for ext in (".shp", ".shx", ".dbf"):
+        (shp_dir / f"zones{ext}").write_bytes(f"payload-{ext}".encode("utf-8"))
+
+    with tracker.start_run("separate_ws_mount_run", model="beam"):
+        dir_art = tracker.log_output(zarr_dir, key="skims_zarr")
+        shp_art = tracker.log_output(shp_dir / "zones.shp", key="zones_shp")
+
+    assert dir_art.container_uri == "workspace://beam_outputs/skims.zarr"
+    assert shp_art.container_uri == "workspace://beam_outputs/zones_bundle/zones.shp"
+    assert "recovery_roots" not in (dir_art.meta or {})
+    assert "recovery_roots" not in (shp_art.meta or {})
+
+    # Verify get_historical_root and resolve_historical_path respect mounts["workspace"]
+    run_record = tracker.get_run("separate_ws_mount_run")
+    assert run_record is not None
+    assert (
+        tracker.fs.get_historical_root(
+            dir_art.container_uri,
+            original_run_dir=run_record.meta.get("_physical_run_dir"),
+            mounts_snapshot=run_record.meta.get("mounts"),
+            artifact_mount_root=dir_art.meta.get("mount_root"),
+        )
+        == workspace_root.resolve()
+    )
+    assert tracker.fs.resolve_historical_path(
+        dir_art.container_uri, str(run_dir)
+    ) == str(zarr_dir.resolve())
+    assert tracker.resolve_historical_path(dir_art, run_record) == Path(
+        zarr_dir.resolve()
+    )
+
+    archive_root = tmp_path / "archive_store"
+    archived = tracker.archive_run_outputs(
+        "separate_ws_mount_run",
+        archive_root,
+        mode="copy",
+    )
+    expected_roots = [
+        str(workspace_root.resolve()),
+        str(archive_root.resolve()),
+    ]
+    assert set(archived.keys()) == {"skims_zarr", "zones_shp"}
+    assert archived.outputs["skims_zarr"].meta["recovery_roots"] == expected_roots
+    assert archived.outputs["zones_shp"].meta["recovery_roots"] == expected_roots
+    assert (archive_root / "beam_outputs" / "skims.zarr" / "0.0").exists()
+    assert (
+        archive_root / "beam_outputs" / "zones_bundle" / "zones.shp" / "zones.shp"
+    ).exists()
+
+    # Also verify fallback to _find_current_managed_uri_source when run record lacks mounts snapshot
+    zarr_dir_2 = workspace_root / "beam_outputs" / "iter_dir.zarr"
+    zarr_dir_2.mkdir(parents=True)
+    (zarr_dir_2 / ".zgroup").write_text('{"zarr_format": 2}\n', encoding="utf-8")
+    (zarr_dir_2 / "events.bin").write_bytes(b"\x05\x06\x07\x08")
+
+    shp_dir_2 = workspace_root / "beam_outputs" / "links_bundle"
+    shp_dir_2.mkdir(parents=True)
+    for ext in (".shp", ".shx", ".dbf"):
+        (shp_dir_2 / f"links{ext}").write_bytes(f"links-{ext}".encode("utf-8"))
+
+    with tracker.start_run("legacy_ws_mount_run", model="beam_legacy"):
+        dir_art_2 = tracker.log_output(zarr_dir_2, key="iter_dir")
+        shp_art_2 = tracker.log_output(shp_dir_2 / "links.shp", key="links_shp")
+
+    # Simulate a legacy run record without mounts snapshot or artifact mount_root,
+    # where original_run_dir points to run_dir (which doesn't contain beam_outputs)
+    dir_art_2.meta.pop("mount_root", None)
+    shp_art_2.meta.pop("mount_root", None)
+    tracker.db.update_artifact_meta(dir_art_2, dir_art_2.meta)
+    tracker.db.update_artifact_meta(shp_art_2, shp_art_2.meta)
+    legacy_run = tracker.get_run("legacy_ws_mount_run")
+    assert legacy_run is not None
+    legacy_run.meta.pop("mounts", None)
+    with tracker.db.session_scope() as session:
+        db_run = session.get(type(legacy_run), "legacy_ws_mount_run")
+        if db_run is not None:
+            db_run.meta = dict(legacy_run.meta)
+            session.add(db_run)
+            session.commit()
+
+    archive_root_2 = tmp_path / "archive_store_2"
+    archived_2 = tracker.archive_run_outputs(
+        "legacy_ws_mount_run",
+        archive_root_2,
+        mode="copy",
+    )
+    assert set(archived_2.keys()) == {"iter_dir", "links_shp"}
+    assert (archive_root_2 / "beam_outputs" / "iter_dir.zarr" / "events.bin").exists()
+    assert (
+        archive_root_2 / "beam_outputs" / "links_bundle" / "links.shp" / "links.shp"
+    ).exists()
+
+
+def test_run_completion_archive_rerun_with_fast_hashing_and_modified_outputs(
+    tmp_path: Path,
+) -> None:
+    """Re-running a step into the same step-scoped archive root succeeds under fast hashing, both for identical bytes with newer mtime and for modified outputs."""
+    run_dir = tmp_path / "runs"
+    workspace = tmp_path / "workspace"
+    run_dir.mkdir(parents=True)
+    workspace.mkdir(parents=True)
+    tracker = Tracker(
+        run_dir=run_dir,
+        db_path=str(tmp_path / "provenance.duckdb"),
+        mounts={"workspace": str(workspace)},
+        hashing_strategy="fast",
+    )
+    archive_root = tmp_path / "consist-recovery" / "asim__preprocess__y2015__i0__main"
+    policy = OutputPolicyOptions(
+        run_completion_archive=RunCompletionArchivePolicy(
+            archive_root=archive_root,
+            mode="copy",
+        )
+    )
+
+    out_csv = workspace / "asim" / "households.csv"
+    out_dir = workspace / "asim" / "configs"
+
+    def step_v1(ctx) -> None:
+        out_csv.parent.mkdir(parents=True, exist_ok=True)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_csv.write_bytes(b"hh_id\n1\n")
+        (out_dir / "settings.yaml").write_text("iter: 1\n", encoding="utf-8")
+        tracker.log_output(out_csv, key="households")
+        tracker.log_output(out_dir, key="configs_dir", artifact_kind="directory")
+
+    res_1 = tracker.run(
+        fn=step_v1,
+        name="asim_preprocess",
+        run_id="asim_preprocess_run_1",
+        config={"attempt": 1},
+        outputs=["households", "configs_dir"],
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        output_policy=policy,
+    )
+    expected_root = str(archive_root.resolve())
+    assert expected_root in res_1.outputs["households"].meta["recovery_roots"]
+
+    # Re-run 2: identical bytes but newer mtime under fast hashing
+    def step_v1_newer_mtime(ctx) -> None:
+        import os
+
+        out_csv.write_bytes(b"hh_id\n1\n")
+        future_ns = out_csv.stat().st_mtime_ns + 5_000_000_000
+        os.utime(out_csv, ns=(future_ns, future_ns))
+        tracker.log_output(out_csv, key="households")
+        tracker.log_output(out_dir, key="configs_dir", artifact_kind="directory")
+
+    res_2 = tracker.run(
+        fn=step_v1_newer_mtime,
+        name="asim_preprocess",
+        run_id="asim_preprocess_run_2",
+        config={"attempt": 2},
+        outputs=["households", "configs_dir"],
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        output_policy=policy,
+    )
+    assert expected_root in res_2.outputs["households"].meta["recovery_roots"]
+
+    # Re-run 3: code/config change produces different scalar & directory bytes into the same archive_root
+    def step_v2_modified(ctx) -> None:
+        out_csv.write_bytes(b"hh_id\n1\n2\n3\n")
+        (out_dir / "settings.yaml").write_text("iter: 2\n", encoding="utf-8")
+        tracker.log_output(out_csv, key="households")
+        tracker.log_output(out_dir, key="configs_dir", artifact_kind="directory")
+
+    res_3 = tracker.run(
+        fn=step_v2_modified,
+        name="asim_preprocess",
+        run_id="asim_preprocess_run_3",
+        config={"attempt": 3},
+        outputs=["households", "configs_dir"],
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        output_policy=policy,
+    )
+    assert expected_root in res_3.outputs["households"].meta["recovery_roots"]
+    assert expected_root in res_3.outputs["configs_dir"].meta["recovery_roots"]
+    assert (
+        archive_root / "asim" / "households.csv"
+    ).read_bytes() == b"hh_id\n1\n2\n3\n"
+    assert (archive_root / "asim" / "configs" / "settings.yaml").read_text(
+        encoding="utf-8"
+    ) == "iter: 2\n"
+
+    # Superseded runs must have the overwritten step-scoped archive_root evicted
+    superseded_outputs_1 = tracker.get_run_outputs("asim_preprocess_run_1")
+    superseded_outputs_2 = tracker.get_run_outputs("asim_preprocess_run_2")
+    for key in ("households", "configs_dir"):
+        assert expected_root not in superseded_outputs_1[key].meta.get(
+            "recovery_roots", []
+        )
+        assert expected_root not in superseded_outputs_2[key].meta.get(
+            "recovery_roots", []
+        )
+
+
+def test_archive_scalar_skips_or_rejects_in_place_modified_workspace_source(
+    tmp_path: Path,
+) -> None:
+    """Archiving a scalar artifact whose workspace file was modified in place falls back to a valid recovery root or raises ValueError."""
+    run_dir = tmp_path / "runs"
+    workspace = tmp_path / "workspace"
+    run_dir.mkdir(parents=True)
+    workspace.mkdir(parents=True)
+    tracker = Tracker(
+        run_dir=run_dir,
+        db_path=str(tmp_path / "provenance.duckdb"),
+        mounts={"workspace": str(workspace)},
+        hashing_strategy="fast",
+    )
+
+    h5_file = workspace / "urbansim" / "datastore.h5"
+    h5_file.parent.mkdir(parents=True, exist_ok=True)
+    h5_file.write_bytes(b"original-urbansim-h5")
+
+    with tracker.start_run("usim_postprocess", model="urbansim"):
+        tracker.log_output(h5_file, key="usim_datastore_h5")
+
+    archive_1 = tmp_path / "archive_1"
+    tracker.archive_run_outputs("usim_postprocess", archive_1, mode="copy")
+    assert (
+        archive_1 / "urbansim" / "datastore.h5"
+    ).read_bytes() == b"original-urbansim-h5"
+
+    # Simulate a downstream step mutating the workspace file in place
+    h5_file.write_bytes(b"mutated-in-place-by-downstream-step")
+
+    # Archiving to a second root skips the mutated workspace copy and uses archive_1
+    archive_2 = tmp_path / "archive_2"
+    tracker.archive_run_outputs("usim_postprocess", archive_2, mode="copy")
+    assert (
+        archive_2 / "urbansim" / "datastore.h5"
+    ).read_bytes() == b"original-urbansim-h5"
+
+    # If no valid recovery copy exists, archiving rejects the mutated workspace source
+    unarchived_file = workspace / "urbansim" / "unarchived.h5"
+    unarchived_file.write_bytes(b"clean-bytes")
+    with tracker.start_run("usim_unarchived", model="urbansim"):
+        tracker.log_output(unarchived_file, key="unarchived_h5")
+
+    unarchived_file.write_bytes(b"corrupted-in-place-bytes")
+    with pytest.raises(ValueError, match="does not match artifact hash"):
+        tracker.archive_run_outputs(
+            "usim_unarchived", tmp_path / "archive_3", mode="copy"
+        )
+
+
+def test_run_completion_archive_policy_replaces_stale_step_archive_root_in_move_mode(
+    tmp_path: Path,
+) -> None:
+    """Re-running a multi-output step with mode='move' into a preexisting archive root preserves all outputs when a later output conflicts."""
+    run_dir = tmp_path / "runs"
+    workspace = tmp_path / "workspace"
+    run_dir.mkdir(parents=True)
+    workspace.mkdir(parents=True)
+    tracker = Tracker(
+        run_dir=run_dir,
+        db_path=str(tmp_path / "provenance.duckdb"),
+        mounts={"workspace": str(workspace)},
+    )
+    archive_root = tmp_path / "consist-recovery" / "step_move_replace"
+
+    out_first = workspace / "asim" / "first_new.csv"
+    out_second = workspace / "asim" / "second_conflict.csv"
+
+    with tracker.start_run("move_step_run_1", model="move_step"):
+        out_second.parent.mkdir(parents=True, exist_ok=True)
+        out_second.write_bytes(b"v1-bytes\n")
+        tracker.log_output(out_second, key="second")
+        tracker._archive_service.archive_current_run_outputs_for_completion_policy(
+            archive_root, mode="move"
+        )
+
+    assert (archive_root / "asim" / "second_conflict.csv").read_bytes() == b"v1-bytes\n"
+    assert not out_second.exists()
+
+    with tracker.start_run("move_step_run_2", model="move_step", config={"attempt": 2}):
+        out_first.parent.mkdir(parents=True, exist_ok=True)
+        out_first.write_bytes(b"first-v2-bytes\n")
+        out_second.write_bytes(b"v2-different-bytes\n")
+        tracker.log_output(out_first, key="first")
+        tracker.log_output(out_second, key="second")
+        tracker._archive_service.archive_current_run_outputs_for_completion_policy(
+            archive_root, mode="move"
+        )
+
+    expected_root = str(archive_root.resolve())
+    run_2_outputs = tracker.get_run_outputs("move_step_run_2")
+    assert run_2_outputs["first"].meta["recovery_roots"] == [expected_root]
+    assert run_2_outputs["second"].meta["recovery_roots"] == [expected_root]
+    assert (archive_root / "asim" / "first_new.csv").read_bytes() == b"first-v2-bytes\n"
+    assert (
+        archive_root / "asim" / "second_conflict.csv"
+    ).read_bytes() == b"v2-different-bytes\n"
+    assert not out_first.exists()
+    assert not out_second.exists()
+
+    # Mid-archive failure during replace rolls back archive_root, DB recovery_roots, and preserves workspace sources
+    with tracker.start_run("move_step_run_3", model="move_step", config={"attempt": 3}):
+        out_first.write_bytes(b"first-v3-bytes\n")
+        out_second.write_bytes(b"v3-missing-bytes\n")
+        art_first_3 = tracker.log_output(out_first, key="first")
+        tracker.log_output(out_second, key="second")
+        out_second.unlink()
+        with pytest.raises(FileNotFoundError):
+            tracker._archive_service.archive_current_run_outputs_for_completion_policy(
+                archive_root, mode="move"
+            )
+
+    assert out_first.exists()
+    assert out_first.read_bytes() == b"first-v3-bytes\n"
+    assert art_first_3.abs_path == str(out_first.resolve())
+    assert "recovery_roots" not in (
+        tracker.get_run_outputs("move_step_run_3")["first"].meta or {}
+    )
+    assert (archive_root / "asim" / "first_new.csv").read_bytes() == b"first-v2-bytes\n"
+    assert (
+        archive_root / "asim" / "second_conflict.csv"
+    ).read_bytes() == b"v2-different-bytes\n"
+
+
+def test_archive_shapefile_bundle_skips_in_place_modified_workspace_sidecar(
+    tmp_path: Path,
+) -> None:
+    """Archiving a Shapefile bundle whose workspace sidecar was modified in place falls back to an intact recovery root."""
+    run_dir = tmp_path / "runs"
+    workspace = tmp_path / "workspace"
+    run_dir.mkdir(parents=True)
+    workspace.mkdir(parents=True)
+    tracker = Tracker(
+        run_dir=run_dir,
+        db_path=str(tmp_path / "provenance.duckdb"),
+        mounts={"workspace": str(workspace)},
+    )
+
+    bundle_dir = workspace / "gis" / "zones_bundle"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    shp_path = bundle_dir / "zones.shp"
+    shx_path = bundle_dir / "zones.shx"
+    dbf_path = bundle_dir / "zones.dbf"
+    shp_path.write_bytes(b"shp-v1")
+    shx_path.write_bytes(b"shx-v1")
+    dbf_path.write_bytes(b"dbf-v1")
+
+    with tracker.start_run("gis_export", model="gis"):
+        tracker.log_output(shp_path, key="zones", driver="shapefile")
+
+    archive_1 = tmp_path / "archive_1"
+    tracker.archive_run_outputs("gis_export", archive_1, mode="copy")
+    assert (
+        archive_1 / "gis" / "zones_bundle" / "zones.shp" / "zones.dbf"
+    ).read_bytes() == b"dbf-v1"
+
+    # Mutate the workspace .dbf sidecar in place
+    dbf_path.write_bytes(b"dbf-mutated-in-place")
+
+    archive_2 = tmp_path / "archive_2"
+    tracker.archive_run_outputs("gis_export", archive_2, mode="copy")
+    assert (
+        archive_2 / "gis" / "zones_bundle" / "zones.shp" / "zones.dbf"
+    ).read_bytes() == b"dbf-v1"
+
+
+def test_run_completion_archive_policy_cache_hit_does_not_copytree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Warm cache hits and identical fast-hash reruns into an existing archive root do not invoke shutil.copytree or create replace temp dirs."""
+    import shutil
+
+    run_dir = tmp_path / "runs"
+    workspace = tmp_path / "workspace"
+    run_dir.mkdir(parents=True)
+    workspace.mkdir(parents=True)
+    tracker = Tracker(
+        run_dir=run_dir,
+        db_path=str(tmp_path / "provenance.duckdb"),
+        mounts={"workspace": str(workspace)},
+        hashing_strategy="fast",
+    )
+    archive_root = tmp_path / "consist-recovery" / "step_no_copytree"
+    policy = OutputPolicyOptions(
+        run_completion_archive=RunCompletionArchivePolicy(
+            archive_root=archive_root,
+            mode="copy",
+        )
+    )
+
+    out_csv = workspace / "asim" / "persons.csv"
+    out_dir = workspace / "asim" / "bundle_dir"
+
+    def step_fn(ctx) -> None:
+        out_csv.parent.mkdir(parents=True, exist_ok=True)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_csv.write_bytes(b"person_id\n10\n20\n")
+        (out_dir / "meta.json").write_text('{"ok": true}\n', encoding="utf-8")
+        tracker.log_output(out_csv, key="persons")
+        tracker.log_output(out_dir, key="bundle_dir", artifact_kind="directory")
+
+    res_1 = tracker.run(
+        fn=step_fn,
+        name="no_copytree_step",
+        run_id="no_copytree_run_1",
+        config={"iter": 1},
+        outputs=["persons", "bundle_dir"],
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        output_policy=policy,
+    )
+    assert not res_1.cache_hit
+    expected_root = str(archive_root.resolve())
+    assert expected_root in res_1.outputs["persons"].meta["recovery_roots"]
+
+    def fail_copytree(*args, **kwargs):
+        raise AssertionError("unexpected copytree")
+
+    monkeypatch.setattr(shutil, "copytree", fail_copytree)
+
+    # 1. Warm cache hit
+    res_hit = tracker.run(
+        fn=step_fn,
+        name="no_copytree_step",
+        run_id="no_copytree_run_hit",
+        config={"iter": 1},
+        outputs=["persons", "bundle_dir"],
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        output_policy=policy,
+    )
+    assert res_hit.cache_hit
+    assert expected_root in res_hit.outputs["persons"].meta["recovery_roots"]
+    assert not list(
+        archive_root.parent.glob(f".consist-archive-replace-{archive_root.name}-*")
+    )
+
+    # 2. Identical fast-hash rerun (cache_hit=False, identical output bytes)
+    res_rerun = tracker.run(
+        fn=step_fn,
+        name="no_copytree_step",
+        run_id="no_copytree_run_2",
+        config={"iter": 2},
+        outputs=["persons", "bundle_dir"],
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        output_policy=policy,
+    )
+    assert not res_rerun.cache_hit
+    assert expected_root in res_rerun.outputs["persons"].meta["recovery_roots"]
+    assert (
+        expected_root
+        in tracker.get_run_outputs("no_copytree_run_1")["persons"].meta[
+            "recovery_roots"
+        ]
+    )
+    assert not list(
+        archive_root.parent.glob(f".consist-archive-replace-{archive_root.name}-*")
+    )
+
+
+def test_run_completion_archive_policy_move_mode_deletes_scalar_sources_on_existing_archive_root(
+    tmp_path: Path,
+) -> None:
+    """In mode='move', scalar workspace sources are deleted and artifact.abs_path points to the archive destination even when archive_root already exists."""
+    run_dir = tmp_path / "runs"
+    workspace = tmp_path / "workspace"
+    run_dir.mkdir(parents=True)
+    workspace.mkdir(parents=True)
+    tracker = Tracker(
+        run_dir=run_dir,
+        db_path=str(tmp_path / "provenance.duckdb"),
+        mounts={"workspace": str(workspace)},
+    )
+    archive_root = tmp_path / "consist-recovery" / "step_move_scalar"
+    out_csv = workspace / "asim" / "trips.csv"
+    expected_archived_csv = (archive_root / "asim" / "trips.csv").resolve()
+
+    for attempt, payload in (
+        (1, b"trip_id\n1\n"),
+        (2, b"trip_id\n1\n"),
+        (3, b"trip_id\n1\n2\n"),
+    ):
+        with tracker.start_run(
+            f"move_scalar_{attempt}",
+            model="move_scalar_step",
+            config={"attempt": attempt},
+        ):
+            out_csv.parent.mkdir(parents=True, exist_ok=True)
+            out_csv.write_bytes(payload)
+            art = tracker.log_output(out_csv, key="trips")
+            archived = tracker._archive_service.archive_current_run_outputs_for_completion_policy(
+                archive_root, mode="move"
+            )
+        assert not out_csv.exists()
+        assert expected_archived_csv.read_bytes() == payload
+        assert art.abs_path == str(expected_archived_csv)
+        assert archived.outputs["trips"].abs_path == str(expected_archived_csv)
+        assert tracker._last_consist is not None
+        assert tracker._last_consist.outputs[0].abs_path == str(expected_archived_csv)
+
+
+def test_run_completion_archive_policy_evicts_stale_files_when_output_set_shrinks(
+    tmp_path: Path,
+) -> None:
+    """When a subsequent run produces a strict subset of files with identical bytes into the same step archive root, stale files are removed and superseded recovery_roots are evicted."""
+    run_dir = tmp_path / "runs"
+    workspace = tmp_path / "workspace"
+    run_dir.mkdir(parents=True)
+    workspace.mkdir(parents=True)
+    tracker = Tracker(
+        run_dir=run_dir,
+        db_path=str(tmp_path / "provenance.duckdb"),
+        mounts={"workspace": str(workspace)},
+    )
+    archive_root = tmp_path / "consist-recovery" / "step_shrink"
+    policy = OutputPolicyOptions(
+        run_completion_archive=RunCompletionArchivePolicy(
+            archive_root=archive_root,
+            mode="copy",
+        )
+    )
+    file_a = workspace / "asim" / "a.csv"
+    file_b = workspace / "asim" / "b.csv"
+
+    def step_ab(ctx) -> None:
+        file_a.parent.mkdir(parents=True, exist_ok=True)
+        file_a.write_bytes(b"col\n1\n")
+        file_b.write_bytes(b"col\n2\n")
+        tracker.log_output(file_a, key="a")
+        tracker.log_output(file_b, key="b")
+
+    res_1 = tracker.run(
+        fn=step_ab,
+        name="shrink_step",
+        run_id="shrink_run_1",
+        config={"attempt": 1},
+        outputs=["a", "b"],
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        output_policy=policy,
+    )
+    expected_root = str(archive_root.resolve())
+    assert (archive_root / "asim" / "a.csv").read_bytes() == b"col\n1\n"
+    assert (archive_root / "asim" / "b.csv").read_bytes() == b"col\n2\n"
+    assert expected_root in res_1.outputs["a"].meta["recovery_roots"]
+    assert expected_root in res_1.outputs["b"].meta["recovery_roots"]
+
+    def step_only_a(ctx) -> None:
+        file_a.write_bytes(b"col\n1\n")
+        tracker.log_output(file_a, key="a")
+
+    res_2 = tracker.run(
+        fn=step_only_a,
+        name="shrink_step",
+        run_id="shrink_run_2",
+        config={"attempt": 2},
+        outputs=["a"],
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        output_policy=policy,
+    )
+    assert (archive_root / "asim" / "a.csv").read_bytes() == b"col\n1\n"
+    assert not (archive_root / "asim" / "b.csv").exists()
+    assert expected_root in res_2.outputs["a"].meta["recovery_roots"]
+
+    run_1_outputs = tracker.get_run_outputs("shrink_run_1")
+    assert expected_root not in run_1_outputs["a"].meta.get("recovery_roots", [])
+    assert expected_root not in run_1_outputs["b"].meta.get("recovery_roots", [])
+
+
+def test_cache_hit_preserves_imperative_outputs_when_output_paths_passed_and_outputs_is_none(
+    tmp_path: Path,
+) -> None:
+    """When outputs=None and output_paths is provided alongside imperative log_output calls, a cache hit preserves both declared and imperative outputs in RunResult.outputs and scenario.coupler."""
+    run_dir = tmp_path / "runs"
+    workspace = tmp_path / "workspace"
+    run_dir.mkdir(parents=True)
+    workspace.mkdir(parents=True)
+    tracker = Tracker(
+        run_dir=run_dir,
+        db_path=str(tmp_path / "provenance.duckdb"),
+        mounts={"workspace": str(workspace)},
+    )
+    declared_path = workspace / "declared.csv"
+    imperative_path = workspace / "imperative.csv"
+    annual_dir = workspace / "annual"
+
+    def step_fn(ctx) -> None:
+        declared_path.write_text("id\n1\n", encoding="utf-8")
+        imperative_path.write_text("id\n2\n", encoding="utf-8")
+        annual_dir.mkdir(parents=True, exist_ok=True)
+        (annual_dir / "annual_2030.csv").write_text("year\n2030\n", encoding="utf-8")
+        ctx.log_output(imperative_path, key="imperative")
+
+    with tracker.scenario("mixed_outputs_fresh") as sc_fresh:
+        res_fresh = sc_fresh.run(
+            fn=step_fn,
+            name="mixed_outputs_step",
+            run_id="mixed_outputs_1",
+            config={"v": 1},
+            outputs=None,
+            output_paths={"declared": declared_path},
+            output_sets={
+                "annual": OutputSet(root=annual_dir, include="annual_*.csv"),
+            },
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+        assert not res_fresh.cache_hit
+        assert set(res_fresh.outputs.keys()) == {"declared", "imperative", "annual"}
+        assert "declared" in sc_fresh.coupler
+        assert "imperative" in sc_fresh.coupler
+        assert "annual" in sc_fresh.coupler
+
+    with tracker.scenario("mixed_outputs_cached") as sc_cached:
+        res_cached = sc_cached.run(
+            fn=step_fn,
+            name="mixed_outputs_step",
+            run_id="mixed_outputs_2",
+            config={"v": 1},
+            outputs=None,
+            output_paths={"declared": declared_path},
+            output_sets={
+                "annual": OutputSet(root=annual_dir, include="annual_*.csv"),
+            },
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+        assert res_cached.cache_hit
+        assert set(res_cached.outputs.keys()) == {"declared", "imperative", "annual"}
+        assert "declared" in sc_cached.coupler
+        assert "imperative" in sc_cached.coupler
+        assert "annual" in sc_cached.coupler

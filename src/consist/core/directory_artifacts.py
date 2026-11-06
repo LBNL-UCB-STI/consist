@@ -6,6 +6,7 @@ import os
 import shutil
 import tempfile
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -220,8 +221,71 @@ def validate_shapefile_bundle_destination(
     return True
 
 
-def validate_directory_tree(root: Path, manifest: Mapping[str, Any]) -> None:
-    """Raise when ``root`` is not an exact match for ``manifest``."""
+def is_directory_artifact(artifact: Artifact) -> bool:
+    """Return whether ``artifact`` carries immutable directory-artifact metadata."""
+    meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
+    return meta.get("directory_artifact") is True
+
+
+def is_file_bundle_artifact(artifact: Artifact) -> bool:
+    """Return whether ``artifact`` represents a multi-file sidecar bundle."""
+    meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
+    return (
+        meta.get("file_bundle_artifact") is True
+        or meta.get("file_bundle") == "shapefile"
+    )
+
+
+def file_bundle_entry_name(
+    artifact: Artifact,
+    *,
+    fallback: str | None = None,
+) -> str | None:
+    """Return a validated single-segment bundle entry filename if present."""
+    meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
+    entry = meta.get("file_bundle_entry")
+    if isinstance(entry, str) and entry and Path(entry).name == entry:
+        return entry
+    return fallback
+
+
+def resolve_file_bundle_root(path: str | Path) -> Path:
+    """Return the enclosing directory for a file-bundle source or target path."""
+    candidate = Path(path)
+    return candidate if candidate.is_dir() else candidate.parent
+
+
+def resolve_artifact_entry_path(
+    artifact: Artifact,
+    target_path: str | Path,
+) -> str:
+    """Return the resolved runtime ``abs_path`` for ``artifact`` at ``target_path``.
+
+    When a file-bundle artifact is materialized or archived into a bundle
+    directory ``target_path``, returns the resolved path of the primary entry
+    file inside that directory.
+    """
+    resolved = Path(target_path).resolve()
+    if is_file_bundle_artifact(artifact) and resolved.is_dir():
+        entry = file_bundle_entry_name(artifact)
+        if entry is not None:
+            return str((resolved / entry).resolve())
+    return str(resolved)
+
+
+def directory_allows_extra_files(artifact: Artifact) -> bool:
+    """Return whether ``artifact`` allows extra unrecorded entries in its directory tree."""
+    meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
+    return meta.get("directory_allow_extra_files") is True
+
+
+def validate_directory_tree(
+    root: Path,
+    manifest: Mapping[str, Any],
+    *,
+    allow_extra_files: bool = False,
+) -> None:
+    """Raise when ``root`` does not satisfy ``manifest``."""
     expected_entries = _validate_manifest(manifest)
     actual = build_directory_manifest(root)
     actual_entries = actual["entries"]
@@ -233,11 +297,12 @@ def validate_directory_tree(root: Path, manifest: Mapping[str, Any]) -> None:
         raise ValueError(
             "directory artifact is missing expected member(s): " + ", ".join(missing)
         )
-    extra = sorted(set(actual_by_path) - set(expected_by_path))
-    if extra:
-        raise ValueError(
-            "directory artifact contains unexpected member(s): " + ", ".join(extra)
-        )
+    if not allow_extra_files:
+        extra = sorted(set(actual_by_path) - set(expected_by_path))
+        if extra:
+            raise ValueError(
+                "directory artifact contains unexpected member(s): " + ", ".join(extra)
+            )
     for path in sorted(expected_by_path):
         expected = expected_by_path[path]
         actual_entry = actual_by_path[path]
@@ -291,6 +356,54 @@ def get_validated_directory_manifest(artifact: Artifact) -> dict[str, Any] | Non
     return normalized
 
 
+def require_directory_artifact_manifest(artifact: Artifact) -> dict[str, Any]:
+    """Return validated directory manifest for ``artifact`` or raise ``ValueError``."""
+    meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
+    manifest = meta.get("directory_manifest")
+    if not isinstance(manifest, Mapping):
+        raise ValueError(
+            f"directory artifact {artifact.key!r} has no persisted manifest"
+        )
+    normalized = validate_directory_manifest(manifest)
+    if artifact.hash != normalized["tree_hash"]:
+        raise ValueError(
+            f"directory artifact {artifact.key!r} manifest does not match artifact identity"
+        )
+    return normalized
+
+
+def require_shapefile_bundle_metadata(
+    artifact: Artifact,
+    *,
+    fallback_uri_name: bool = False,
+) -> tuple[str, dict[str, Any]]:
+    """Return validated ``(entry_name, manifest)`` for a Shapefile bundle artifact."""
+    meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
+    fallback: str | None = None
+    if fallback_uri_name:
+        uri = artifact.container_uri or ""
+        uri_path = uri.split("://", 1)[-1] if "://" in uri else uri
+        fallback = Path(uri_path).name or None
+    entry = file_bundle_entry_name(artifact, fallback=fallback)
+    if entry is None:
+        raise ValueError(
+            f"shapefile bundle artifact {artifact.key!r} has no valid entry"
+        )
+    manifest = (
+        meta.get("file_bundle_manifest") or meta.get("directory_manifest")
+        if fallback_uri_name
+        else meta.get("file_bundle_manifest")
+    )
+    if not isinstance(manifest, Mapping):
+        raise ValueError(f"shapefile bundle artifact {artifact.key!r} has no manifest")
+    normalized = validate_directory_manifest(manifest)
+    if artifact.hash != normalized["tree_hash"]:
+        raise ValueError(
+            f"shapefile bundle artifact {artifact.key!r} manifest does not match artifact identity"
+        )
+    return entry, normalized
+
+
 def is_valid_directory_artifact_tree(path: Path, artifact: Artifact) -> bool | None:
     """Validate ``path`` against ``artifact``'s directory manifest, if present.
 
@@ -311,35 +424,222 @@ def is_valid_directory_artifact_tree(path: Path, artifact: Artifact) -> bool | N
     if manifest is None:
         return None
     try:
-        validate_directory_tree(Path(path), manifest)
+        validate_directory_tree(
+            Path(path),
+            manifest,
+            allow_extra_files=directory_allows_extra_files(artifact),
+        )
     except (OSError, ValueError):
         return False
     return True
 
 
-def materialize_directory_tree(
+def is_valid_shapefile_bundle_source(path: Path, artifact: Artifact) -> bool | None:
+    """Validate ``path`` against ``artifact``'s Shapefile bundle manifest, if present.
+
+    Returns:
+      - ``None`` if ``artifact`` is not a file-bundle artifact.
+      - ``True`` if ``path`` resolves to a bundle root that satisfies
+        ``validate_shapefile_bundle_root``.
+      - ``False`` if ``artifact`` is a file-bundle artifact and ``path`` is
+        missing, corrupted, contains missing/duplicate sidecars or symlinks,
+        or has invalid bundle metadata.
+    """
+    if not is_file_bundle_artifact(artifact):
+        return None
+    try:
+        entry, manifest = require_shapefile_bundle_metadata(
+            artifact, fallback_uri_name=True
+        )
+        bundle_root = resolve_file_bundle_root(Path(path))
+        validate_shapefile_bundle_root(
+            bundle_root,
+            entry,
+            manifest,
+            require_clean_root=False,
+        )
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _inspect_existing_directory_destination(
+    destination_path: Path,
+    normalized_manifest: Mapping[str, Any],
+    *,
+    allow_extra_files: bool,
+) -> list[dict[str, Any]]:
+    """Validate existing entries in ``destination_path`` and return missing manifest entries."""
+    expected_entries = normalized_manifest["entries"]
+    actual = build_directory_manifest(destination_path)
+    actual_entries = actual["entries"]
+    expected_by_path = {entry["path"]: entry for entry in expected_entries}
+    actual_by_path = {entry["path"]: entry for entry in actual_entries}
+
+    if not allow_extra_files:
+        extra = sorted(set(actual_by_path) - set(expected_by_path))
+        if extra:
+            raise ValueError(
+                "directory artifact contains unexpected member(s): " + ", ".join(extra)
+            )
+    for path in sorted(actual_by_path):
+        expected = expected_by_path.get(path)
+        if expected is None:
+            continue
+        actual_entry = actual_by_path[path]
+        if expected["kind"] != actual_entry["kind"]:
+            raise ValueError(f"directory artifact member type mismatch: {path}")
+        if expected["kind"] == "file":
+            if expected["sha256"] != actual_entry["sha256"]:
+                raise ValueError(f"directory artifact file hash mismatch: {path}")
+            if expected["size"] != actual_entry["size"]:
+                raise ValueError(f"directory artifact file size mismatch: {path}")
+
+    return [entry for entry in expected_entries if entry["path"] not in actual_by_path]
+
+
+def _mkdir_with_tracking(target_dir: Path, created_dirs: list[Path]) -> None:
+    """Create missing directories along ``target_dir`` and record them in ``created_dirs``."""
+    missing_parents: list[Path] = []
+    current = target_dir
+    while not current.exists():
+        missing_parents.append(current)
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    for directory in reversed(missing_parents):
+        directory.mkdir()
+        created_dirs.append(directory)
+
+
+@dataclass(frozen=True)
+class PublishedDirectoryTree:
+    """Published directory tree state used for rollback on post-copy failures."""
+
+    published: bool
+    created_root: bool = False
+    created_files: tuple[Path, ...] = ()
+    created_directories: tuple[Path, ...] = ()
+
+
+def rollback_published_directory_tree(
+    destination: Path,
+    published: PublishedDirectoryTree,
+) -> None:
+    """Rollback directory tree files and directories published before failure."""
+    if not published.published:
+        return
+    if published.created_root:
+        if destination.exists() and not destination.is_symlink():
+            shutil.rmtree(destination)
+        return
+    for file_path in reversed(published.created_files):
+        try:
+            file_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    for dir_path in sorted(
+        published.created_directories,
+        key=lambda path: len(path.parts),
+        reverse=True,
+    ):
+        try:
+            dir_path.rmdir()
+        except OSError:
+            pass
+
+
+def materialize_directory_tree_with_rollback_info(
     source: Path,
     destination: Path,
     manifest: Mapping[str, Any],
     *,
     preserve_existing: bool,
-) -> bool:
+    allow_extra_files: bool = False,
+) -> PublishedDirectoryTree:
     """Copy a verified directory tree into an exact destination atomically.
 
-    Returns ``True`` when a new destination is published and ``False`` when an
-    existing, already-verified destination is preserved.
+    Returns a ``PublishedDirectoryTree`` describing whether bytes were published
+    and which files/directories were newly created so callers can safely roll
+    back without destroying pre-existing files.
     """
     normalized_manifest = validate_directory_manifest(manifest)
     source_path = Path(source)
     destination_path = Path(destination)
     _reject_symlink_components(source_path, label="source")
-    if validate_directory_destination(
-        destination_path,
+    _reject_symlink_components(destination_path.parent, label="destination")
+    if destination_path.is_symlink():
+        raise ValueError(
+            f"directory artifact destination cannot be a symlink: {destination_path}"
+        )
+    if destination_path.exists():
+        if not destination_path.is_dir():
+            raise ValueError(
+                f"directory artifact destination type mismatch: {destination_path}"
+            )
+        if not preserve_existing:
+            raise ValueError(
+                "directory artifact hydration requires a clean destination when "
+                "preserve_existing=False"
+            )
+        missing_entries = _inspect_existing_directory_destination(
+            destination_path,
+            normalized_manifest,
+            allow_extra_files=allow_extra_files,
+        )
+        if not missing_entries:
+            return PublishedDirectoryTree(published=False)
+
+        validate_directory_tree(
+            source_path,
+            normalized_manifest,
+            allow_extra_files=allow_extra_files,
+        )
+        created_files: list[Path] = []
+        created_dirs: list[Path] = []
+        try:
+            for entry in missing_entries:
+                target = destination_path / entry["path"]
+                if entry["kind"] == "directory":
+                    _mkdir_with_tracking(target, created_dirs)
+                else:
+                    _mkdir_with_tracking(target.parent, created_dirs)
+                    shutil.copy2(source_path / entry["path"], target)
+                    created_files.append(target)
+            validate_directory_tree(
+                source_path,
+                normalized_manifest,
+                allow_extra_files=allow_extra_files,
+            )
+            validate_directory_tree(
+                destination_path,
+                normalized_manifest,
+                allow_extra_files=allow_extra_files,
+            )
+            return PublishedDirectoryTree(
+                published=True,
+                created_root=False,
+                created_files=tuple(created_files),
+                created_directories=tuple(created_dirs),
+            )
+        except Exception:
+            rollback_published_directory_tree(
+                destination_path,
+                PublishedDirectoryTree(
+                    published=True,
+                    created_root=False,
+                    created_files=tuple(created_files),
+                    created_directories=tuple(created_dirs),
+                ),
+            )
+            raise
+
+    validate_directory_tree(
+        source_path,
         normalized_manifest,
-        preserve_existing=preserve_existing,
-    ):
-        return False
-    validate_directory_tree(source_path, normalized_manifest)
+        allow_extra_files=allow_extra_files,
+    )
 
     destination_path.parent.mkdir(parents=True, exist_ok=True)
     staging_root = Path(
@@ -358,7 +658,11 @@ def materialize_directory_tree(
             else:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source_path / entry["path"], target)
-        validate_directory_tree(source_path, normalized_manifest)
+        validate_directory_tree(
+            source_path,
+            normalized_manifest,
+            allow_extra_files=allow_extra_files,
+        )
         validate_directory_tree(staging, normalized_manifest)
         if destination_path.is_symlink():
             raise ValueError(
@@ -369,9 +673,35 @@ def materialize_directory_tree(
                 f"directory artifact destination already exists: {destination_path}"
             )
         os.rename(staging, destination_path)
-        return True
+        return PublishedDirectoryTree(
+            published=True,
+            created_root=True,
+        )
     finally:
         shutil.rmtree(staging_root, ignore_errors=True)
+
+
+def materialize_directory_tree(
+    source: Path,
+    destination: Path,
+    manifest: Mapping[str, Any],
+    *,
+    preserve_existing: bool,
+    allow_extra_files: bool = False,
+) -> bool:
+    """Copy a verified directory tree into an exact destination atomically.
+
+    Returns ``True`` when a new destination is published (or a partially
+    populated destination is completed) and ``False`` when an existing,
+    already-verified destination is preserved.
+    """
+    return materialize_directory_tree_with_rollback_info(
+        source,
+        destination,
+        manifest,
+        preserve_existing=preserve_existing,
+        allow_extra_files=allow_extra_files,
+    ).published
 
 
 def validate_directory_destination(
@@ -379,12 +709,15 @@ def validate_directory_destination(
     manifest: Mapping[str, Any],
     *,
     preserve_existing: bool,
+    allow_extra_files: bool = False,
 ) -> bool:
     """Validate an exact directory destination before source bytes are needed.
 
-    Returns ``True`` when an existing destination exactly matches the manifest
-    and may be retained. Returns ``False`` when the destination does not yet
-    exist. Unsafe or conflicting destinations raise ``ValueError``.
+    Returns ``True`` when an existing destination already contains all manifest
+    entries with matching digests and may be retained without copying. Returns
+    ``False`` when the destination does not yet exist or is only partially
+    populated with valid manifest entries. Unsafe or conflicting destinations
+    raise ``ValueError``.
     """
     normalized_manifest = validate_directory_manifest(manifest)
     destination_path = Path(destination)
@@ -404,8 +737,12 @@ def validate_directory_destination(
             "directory artifact hydration requires a clean destination when "
             "preserve_existing=False"
         )
-    validate_directory_tree(destination_path, normalized_manifest)
-    return True
+    missing_entries = _inspect_existing_directory_destination(
+        destination_path,
+        normalized_manifest,
+        allow_extra_files=allow_extra_files,
+    )
+    return not missing_entries
 
 
 def _shapefile_bundle_entries(root: Path, shapefile_name: str) -> list[dict[str, Any]]:

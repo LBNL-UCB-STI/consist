@@ -83,12 +83,17 @@ from consist.types import (
     ArtifactRef,
     CacheOptions,
     DriverType,
+    EnumCapture as EnumCapture,
     ExecutionOptions,
+    FilenameCapture as FilenameCapture,
+    FilenamePattern as FilenamePattern,
     InputBindingMode,
     IdentityInputs,
+    IntCapture as IntCapture,
     OutputPolicyOptions,
     OutputSet,
     RunCompletionArchivePolicy,
+    StringCapture as StringCapture,
 )
 
 if TYPE_CHECKING:
@@ -493,7 +498,12 @@ def scenario(
     enabled: bool = True,
     step_tags: Optional[list[str]] = None,
     step_facet: Optional[dict[str, Any]] = None,
-    step_run_completion_archive: Optional[RunCompletionArchivePolicy] = None,
+    step_run_completion_archive: Optional[
+        Union[
+            RunCompletionArchivePolicy,
+            Callable[[str], Optional[RunCompletionArchivePolicy]],
+        ]
+    ] = None,
     **kwargs: Any,
 ):
     """
@@ -523,9 +533,11 @@ def scenario(
         ``scenario.trace(...)`` calls. These defaults do not apply to the
         scenario header run itself, and per-step ``facet=...`` values take
         precedence on key collisions.
-    step_run_completion_archive : Optional[RunCompletionArchivePolicy], optional
-        Default run-completion archive policy applied to child ``scenario.run(...)``
-        calls unless overridden by a step's ``output_policy.run_completion_archive``.
+    step_run_completion_archive : Optional[Union[RunCompletionArchivePolicy, Callable[[str], Optional[RunCompletionArchivePolicy]]]], optional
+        Default run-completion archive policy (or per-step callback taking
+        ``step_name``) applied to child ``scenario.run(...)`` and
+        ``scenario.trace(...)`` calls unless overridden by a step's
+        ``output_policy.run_completion_archive``.
     **kwargs : Any
         Additional metadata (e.g., tags, config) forwarded to the header run.
 
@@ -687,7 +699,7 @@ def run(
     cache_options : Optional[CacheOptions]
         Grouped cache controls for run execution.
     output_policy : Optional[OutputPolicyOptions]
-        Grouped output mismatch/missing policy controls.
+        Grouped output mismatch, missing, and run-completion archive policy controls.
     execution_options : Optional[ExecutionOptions]
         Grouped runtime execution controls. For path-bound workflows, this is
         also where you request local input staging via
@@ -1024,6 +1036,10 @@ def trace(
     tracker: Optional["Tracker"] = None,
     adapter: Optional["ConfigAdapter"] = None,
     identity_inputs: IdentityInputs = None,
+    output_policy: Optional[OutputPolicyOptions] = None,
+    run_completion_archive: Optional[
+        Union[RunCompletionArchivePolicy, Literal[False]]
+    ] = None,
     **kwargs: Any,
 ) -> Iterator["Tracker"]:
     """
@@ -1042,6 +1058,10 @@ def trace(
         Config adapter used to resolve adapter-driven identity for the trace.
     identity_inputs : IdentityInputs
         Additional hash-only identity inputs that contribute to cache keys.
+    output_policy : Optional[OutputPolicyOptions]
+        Optional output policy options for the trace.
+    run_completion_archive : Optional[Union[RunCompletionArchivePolicy, Literal[False]]]
+        Optional run-completion archive policy (or ``False`` to explicitly opt out).
     **kwargs : Any
         Additional metadata or parameters for this trace.
 
@@ -1059,6 +1079,8 @@ def trace(
         name=name,
         adapter=adapter,
         identity_inputs=identity_inputs,
+        output_policy=output_policy,
+        run_completion_archive=run_completion_archive,
         **kwargs,
     ) as active:
         yield active
@@ -1612,6 +1634,30 @@ def materialize_artifact(
         validate_content_hash=validate_content_hash,
         allow_external_paths=allow_external_paths,
         scheme_prefixes=scheme_prefixes,
+    )
+
+
+def ensure_local_path(
+    artifact: Artifact,
+    *,
+    tracker: Optional["Tracker"] = None,
+    target_root: Optional[Path | str] = None,
+    source_root: Optional[Path | str] = None,
+    on_missing: Literal["warn", "raise"] = "warn",
+) -> Optional[Path]:
+    """
+    Ensure a tracked artifact exists locally on disk and return its ``Path``.
+
+    Returns the existing local path if already present on disk, or attempts
+    recovery/materialization via ``tracker`` (or ``artifact.tracker``) and
+    returns the materialized ``Path`` (or ``None`` if unrecoverable and
+    ``on_missing="warn"``).
+    """
+    return artifact.ensure_local_path(
+        tracker=tracker,
+        target_root=target_root,
+        source_root=source_root,
+        on_missing=on_missing,
     )
 
 
@@ -3865,6 +3911,35 @@ def log_meta(**kwargs: Any) -> None:
         If called when no `Tracker` is active in the current context.
     """
     get_active_tracker().log_meta(**kwargs)
+
+
+def set_output_meta(
+    key: str,
+    meta: Mapping[str, Any],
+    *,
+    merge: bool = True,
+    tracker: Optional["Tracker"] = None,
+) -> None:
+    """
+    Register metadata to attach to a declared output artifact on run completion.
+
+    Parameters
+    ----------
+    key : str
+        Output artifact key.
+    meta : Mapping[str, Any]
+        Metadata dictionary to merge into or replace on the output artifact.
+    merge : bool, default True
+        When True, merge ``meta`` into any existing metadata on the output artifact.
+        When False, replace any existing metadata on the output artifact.
+    tracker : Optional[Tracker], optional
+        Tracker instance to use. Defaults to the active run's tracker.
+    """
+    tr = tracker if tracker is not None else _require_active_run_tracker()
+    tr.set_output_meta(key, meta, merge=merge)
+
+
+set_pending_output_meta = set_output_meta
 
 
 def __getattr__(name: str) -> Any:

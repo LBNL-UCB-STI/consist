@@ -8,11 +8,12 @@ in-memory snapshot helpers used to serialize full run records.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Sequence
 
-from pydantic import BaseModel, ConfigDict, Field as PydanticField
+from pydantic import BaseModel, ConfigDict, Field as PydanticField, PrivateAttr
 
 from sqlalchemy import Column, DateTime, Index, JSON, String
 from sqlmodel import Field, SQLModel
@@ -646,6 +647,15 @@ def resolve_run_result_output(
     )
 
 
+@dataclass(slots=True)
+class _PendingOutputMetaEntry:
+    """In-flight output metadata queued by ``set_output_meta(...)``."""
+
+    meta: Dict[str, Any]
+    merge: bool = True
+    applied_object_ids: set[int] = field(default_factory=set)
+
+
 class ConsistRecord(SQLModel):
     """
     A comprehensive record of a run, acting as the primary log entry.
@@ -676,3 +686,38 @@ class ConsistRecord(SQLModel):
     # Optional, minimal, queryable config facet (not persisted to Run table).
     # This is included in the per-run `consist.json` snapshot for inspection/debugging.
     facet: Dict[str, Any] = PydanticField(default_factory=dict)
+
+    _pending_output_meta: Dict[str, _PendingOutputMetaEntry] = PrivateAttr(
+        default_factory=dict
+    )
+    _pending_archive_policy: Any = PrivateAttr(default=None)
+
+    def sync_output_artifact(
+        self,
+        *,
+        key: Optional[str] = None,
+        artifact_id: str | uuid.UUID | None = None,
+        meta: Optional[Dict[str, Any]] = None,
+        abs_path: Optional[str] = None,
+        preserve_existing_abs_path: bool = False,
+    ) -> List[Artifact]:
+        """Synchronize ``meta`` and/or ``abs_path`` across matching recorded outputs."""
+        matched: List[Artifact] = []
+        target_id = str(artifact_id) if artifact_id is not None else None
+        for recorded in self.outputs:
+            matches_key = key is not None and recorded.key == key
+            matches_id = (
+                target_id is not None
+                and recorded.id is not None
+                and str(recorded.id) == target_id
+            )
+            if not (matches_key or matches_id):
+                continue
+            if meta is not None:
+                recorded.meta = dict(meta)
+            if abs_path is not None and (
+                not preserve_existing_abs_path or recorded.abs_path is None
+            ):
+                recorded.abs_path = abs_path
+            matched.append(recorded)
+        return matched

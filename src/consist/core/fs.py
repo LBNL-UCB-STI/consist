@@ -1,7 +1,55 @@
 import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
-from typing import Optional, Union, Dict, cast
+from typing import Any, Dict, Optional, Union, cast
+
+
+def resolve_historical_artifact_path(
+    fs: Any,
+    artifact: Any,
+    run: Any,
+    *,
+    fallback_to_current_uri: bool = True,
+) -> Optional[Path]:
+    """Resolve an artifact's historical path using metadata from ``run`` and ``artifact``."""
+    run_meta = run.meta if run is not None and isinstance(run.meta, Mapping) else {}
+    original_run_dir_raw = run_meta.get("_physical_run_dir")
+    original_run_dir = (
+        original_run_dir_raw
+        if isinstance(original_run_dir_raw, str) and original_run_dir_raw
+        else None
+    )
+    raw_mounts = run_meta.get("mounts")
+    mounts_snapshot = (
+        {
+            str(k): str(v)
+            for k, v in raw_mounts.items()
+            if isinstance(k, str) and isinstance(v, str)
+        }
+        if isinstance(raw_mounts, Mapping)
+        else None
+    )
+    artifact_meta = (
+        artifact.meta
+        if artifact is not None and isinstance(artifact.meta, Mapping)
+        else {}
+    )
+    raw_mount_root = artifact_meta.get("mount_root")
+    artifact_mount_root = (
+        raw_mount_root if isinstance(raw_mount_root, str) and raw_mount_root else None
+    )
+    if not fallback_to_current_uri and not (
+        original_run_dir or mounts_snapshot or artifact_mount_root
+    ):
+        return None
+    return Path(
+        fs.resolve_historical_path(
+            artifact.container_uri,
+            original_run_dir,
+            mounts_snapshot=mounts_snapshot,
+            artifact_mount_root=artifact_mount_root,
+        )
+    )
 
 
 class FileSystemManager:
@@ -178,7 +226,14 @@ class FileSystemManager:
                 files[f] = f.stat().st_mtime_ns
         return files
 
-    def resolve_historical_path(self, uri: str, original_run_dir: Optional[str]) -> str:
+    def resolve_historical_path(
+        self,
+        uri: str,
+        original_run_dir: Optional[str | Path],
+        *,
+        mounts_snapshot: Optional[Mapping[str, str]] = None,
+        artifact_mount_root: Optional[str] = None,
+    ) -> str:
         """
         Resolve an artifact URI relative to a historical run directory.
 
@@ -186,18 +241,36 @@ class FileSystemManager:
         ----------
         uri : str
             Portable URI recorded by a previous run.
-        original_run_dir : Optional[str]
+        original_run_dir : Optional[str | Path]
             Absolute workspace path of the original run.
+        mounts_snapshot : Optional[Mapping[str, str]], optional
+            Historical mount table recorded in ``run.meta["mounts"]``.
+        artifact_mount_root : Optional[str], optional
+            Historical mount root recorded in ``artifact.meta["mount_root"]``.
 
         Returns
         -------
         str
             Absolute path where the artifact lived during the historical run.
         """
+        if "://" in uri:
+            scheme, rel_raw = uri.split("://", 1)
+            if scheme != "file":
+                rel_path = rel_raw.lstrip("/")
+                if mounts_snapshot and isinstance(mounts_snapshot.get(scheme), str):
+                    return str(Path(mounts_snapshot[scheme]) / rel_path)
+                if artifact_mount_root:
+                    return str(Path(artifact_mount_root) / rel_path)
+
         # Case 1: Workspace scheme (Ephemeral)
         # If the URI is virtualized to the workspace, its physical location
-        # depends entirely on where that run happened.
-        if uri.startswith("workspace://") and original_run_dir:
+        # depends entirely on where that run happened unless "workspace" is
+        # explicitly mounted in the current config.
+        if (
+            uri.startswith("workspace://")
+            and original_run_dir
+            and "workspace" not in self.mounts
+        ):
             rel_path = uri.replace("workspace://", "").lstrip("/")
             return str(Path(original_run_dir) / rel_path)
 
@@ -210,6 +283,21 @@ class FileSystemManager:
         # If it's "inputs://data.csv" and "inputs" points to a shared /data drive
         # that is mounted in the current config, standard resolution works fine.
         return self.resolve_uri(uri)
+
+    def resolve_historical_artifact_path(
+        self,
+        artifact: Any,
+        run: Any,
+        *,
+        fallback_to_current_uri: bool = True,
+    ) -> Optional[Path]:
+        """Resolve an artifact's historical path using metadata from ``run`` and ``artifact``."""
+        return resolve_historical_artifact_path(
+            self,
+            artifact,
+            run,
+            fallback_to_current_uri=fallback_to_current_uri,
+        )
 
     @staticmethod
     def normalize_recovery_roots(
@@ -377,7 +465,7 @@ class FileSystemManager:
         Path | None
             Most specific applicable root, or ``None`` for unmappable URIs.
         """
-        if uri.startswith("workspace://") or uri.startswith("./"):
+        if uri.startswith("./"):
             if not original_run_dir:
                 return None
             path = Path(original_run_dir)
@@ -392,7 +480,7 @@ class FileSystemManager:
 
         if mounts_snapshot and isinstance(mounts_snapshot.get(scheme), str):
             mount_path = Path(mounts_snapshot[scheme])
-            if original_run_dir:
+            if original_run_dir and scheme != "workspace":
                 try:
                     orig_dir_path = Path(original_run_dir)
                     rel = mount_path.resolve().relative_to(orig_dir_path.resolve())
@@ -408,7 +496,7 @@ class FileSystemManager:
 
         if artifact_mount_root:
             mount_path = Path(artifact_mount_root)
-            if original_run_dir:
+            if original_run_dir and scheme != "workspace":
                 try:
                     orig_dir_path = Path(original_run_dir)
                     rel = mount_path.resolve().relative_to(orig_dir_path.resolve())
@@ -421,6 +509,10 @@ class FileSystemManager:
                 except (ValueError, RuntimeError):
                     pass
             return mount_path.resolve() if resolve else mount_path.absolute()
+
+        if scheme == "workspace" and original_run_dir:
+            path = Path(original_run_dir)
+            return path.resolve() if resolve else path.absolute()
 
         return None
 

@@ -50,12 +50,15 @@ class _FakeTracker:
         self.current_consist = current_consist
         self.db = None
         self.fs = SimpleNamespace(
-            resolve_historical_path=lambda uri, original_run_dir: uri,
-            normalize_recovery_roots=lambda roots: [],
-            get_remappable_relative_path=lambda uri: None,
-            get_historical_root=lambda **kwargs: None,
+            resolve_historical_path=lambda uri, original_run_dir, **kwargs: uri,
+            normalize_recovery_roots=lambda roots, **kwargs: [],
+            get_remappable_relative_path=lambda uri, **kwargs: None,
+            get_historical_root=lambda *args, **kwargs: None,
         )
-        self.identity = SimpleNamespace(compute_file_checksum=compute_file_checksum)
+        self.identity = SimpleNamespace(
+            compute_file_checksum=compute_file_checksum,
+            hashing_strategy="full",
+        )
         self.run_dir = run_dir
         self.mounts = {}
         self.allow_external_paths = False
@@ -382,3 +385,151 @@ def test_requested_input_staging_rejects_unknown_binding_key(
             )
 
     assert called is False
+
+
+def test_requested_input_staging_recovers_cold_scratch_from_recovery_roots(
+    tracker, tmp_path: Path
+) -> None:
+    import shutil
+    from consist.core.materialize import find_existing_recovery_source_path
+
+    archive_dir = tmp_path / "archive"
+    events_path = tracker.run_dir / "beam" / "output" / "0.events.parquet"
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    events_path.write_bytes(b"parquet-events-bytes")
+
+    skims_dir = tracker.run_dir / "beam" / "output" / "0.skims.zarr"
+    (skims_dir / "chunk").mkdir(parents=True, exist_ok=True)
+    (skims_dir / "chunk" / "0.0").write_bytes(b"zarr-chunk-bytes")
+
+    tracker.begin_run("beam_producer", "beam")
+    events_artifact = tracker.log_artifact(
+        events_path,
+        key="events",
+        direction="output",
+    )
+    skims_artifact = tracker.log_output(
+        skims_dir,
+        key="skims",
+        artifact_kind="directory",
+        driver="zarr",
+    )
+    tracker.end_run(status="completed")
+
+    tracker.archive_artifact(events_artifact, archive_dir, mode="copy")
+    tracker.archive_artifact(skims_artifact, archive_dir, mode="copy")
+
+    # Simulate cold-scratch wipe of producer outputs
+    events_path.unlink()
+    shutil.rmtree(skims_dir)
+
+    # Verify find_existing_recovery_source_path also works when run=None
+    _, recovered_null_run, _ = find_existing_recovery_source_path(
+        tracker,
+        artifact=events_artifact,
+        run=None,
+        source_root=None,
+    )
+    assert recovered_null_run is not None
+    assert recovered_null_run.read_bytes() == b"parquet-events-bytes"
+
+    staged_events = tracker.run_dir / "staged" / "events.parquet"
+    staged_skims = tracker.run_dir / "staged" / "skims.zarr"
+    received: list[tuple[Path, Path]] = []
+
+    def consume(events: Path, skims: Path) -> None:
+        received.append((events, skims))
+        assert events.read_bytes() == b"parquet-events-bytes"
+        assert (skims / "chunk" / "0.0").read_bytes() == b"zarr-chunk-bytes"
+
+    with tracker.scenario("cold_scratch_requested_inputs") as scenario:
+        result = scenario.run(
+            fn=consume,
+            inputs={"events": events_artifact, "skims": skims_artifact},
+            execution_options=ExecutionOptions(
+                input_binding="paths",
+                input_materialization="requested",
+                input_paths={
+                    "events": staged_events,
+                    "skims": staged_skims,
+                },
+            ),
+        )
+
+    assert result.cache_hit is False
+    assert received == [(staged_events.resolve(), staged_skims.resolve())]
+    assert staged_events.read_bytes() == b"parquet-events-bytes"
+    assert (staged_skims / "chunk" / "0.0").read_bytes() == b"zarr-chunk-bytes"
+
+
+def test_requested_input_staging_skips_corrupted_first_recovery_root(
+    tracker, tmp_path: Path
+) -> None:
+    import shutil
+
+    bad_archive = tmp_path / "archive_bad"
+    good_archive = tmp_path / "archive_good"
+
+    events_path = tracker.run_dir / "beam" / "output" / "0.events.parquet"
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    events_path.write_bytes(b"valid-events-payload")
+
+    skims_dir = tracker.run_dir / "beam" / "output" / "0.skims.zarr"
+    (skims_dir / "chunk").mkdir(parents=True, exist_ok=True)
+    (skims_dir / "chunk" / "0.0").write_bytes(b"valid-zarr-chunk")
+
+    tracker.begin_run("beam_multi_root", "beam")
+    events_artifact = tracker.log_artifact(
+        events_path,
+        key="events",
+        direction="output",
+    )
+    skims_artifact = tracker.log_output(
+        skims_dir,
+        key="skims",
+        artifact_kind="directory",
+        driver="zarr",
+    )
+    tracker.end_run(status="completed")
+
+    tracker.archive_artifact(events_artifact, bad_archive, mode="copy")
+    tracker.archive_artifact(events_artifact, good_archive, mode="copy")
+    tracker.archive_artifact(skims_artifact, bad_archive, mode="copy")
+    tracker.archive_artifact(skims_artifact, good_archive, mode="copy")
+
+    # Corrupt the copies in the first recovery root (bad_archive)
+    (bad_archive / "beam" / "output" / "0.events.parquet").write_bytes(
+        b"corrupted-events"
+    )
+    (bad_archive / "beam" / "output" / "0.skims.zarr" / "chunk" / "0.0").write_bytes(
+        b"corrupted-zarr-chunk"
+    )
+
+    # Wipe scratch copies
+    events_path.unlink()
+    shutil.rmtree(skims_dir)
+
+    staged_events = tracker.run_dir / "staged_multi" / "events.parquet"
+    staged_skims = tracker.run_dir / "staged_multi" / "skims.zarr"
+
+    def consume(events: Path, skims: Path) -> None:
+        assert events.read_bytes() == b"valid-events-payload"
+        assert (skims / "chunk" / "0.0").read_bytes() == b"valid-zarr-chunk"
+
+    with tracker.scenario("multi_root_requested_inputs") as scenario:
+        result = scenario.run(
+            fn=consume,
+            inputs={"events": events_artifact, "skims": skims_artifact},
+            execution_options=ExecutionOptions(
+                input_binding="paths",
+                input_materialization="requested",
+                input_paths={
+                    "events": staged_events,
+                    "skims": staged_skims,
+                },
+            ),
+        )
+
+    assert result.cache_hit is False
+    assert staged_events.read_bytes() == b"valid-events-payload"
+    assert (staged_skims / "chunk" / "0.0").read_bytes() == b"valid-zarr-chunk"

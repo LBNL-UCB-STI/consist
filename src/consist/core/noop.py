@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from types import MappingProxyType
 import inspect
 import logging
 from typing import (
@@ -59,6 +60,32 @@ class NoopArtifact:
     @property
     def abs_path(self) -> Optional[str]:
         return str(self.path) if self.path is not None else None
+
+    @property
+    def tracker(self) -> None:
+        return None
+
+    def ensure_local_path(
+        self,
+        *,
+        tracker: Any = None,
+        target_root: Optional[Path | str] = None,
+        source_root: Optional[Path | str] = None,
+        on_missing: Literal["warn", "raise"] = "warn",
+    ) -> Optional[Path]:
+        del tracker, target_root, source_root
+        if self.path is not None and self.path.exists():
+            return self.path
+        if on_missing == "raise":
+            raise FileNotFoundError(
+                f"Cannot ensure local path for noop artifact {self.key!r}: {self.path!r} does not exist."
+            )
+        logging.warning(
+            "[Consist] Cannot ensure local path for noop artifact %r: %r does not exist.",
+            self.key,
+            self.path,
+        )
+        return None
 
 
 @dataclass
@@ -232,6 +259,18 @@ class NoopRunContext:
             )
         return artifacts
 
+    def set_output_meta(
+        self,
+        key: str,
+        meta: Mapping[str, Any],
+        *,
+        merge: bool = True,
+    ) -> None:
+        _ = (key, meta, merge)
+        return None
+
+    set_pending_output_meta = set_output_meta
+
 
 class NoopScenarioContext:
     """
@@ -242,16 +281,24 @@ class NoopScenarioContext:
         self,
         name: str,
         *,
-        step_run_completion_archive: Optional[RunCompletionArchivePolicy] = None,
+        step_run_completion_archive: Optional[
+            Union[
+                RunCompletionArchivePolicy,
+                Any,
+            ]
+        ] = None,
         resume_from_run_id: Optional[str] = None,
         resume_phase: CouplerSnapshotPhase = "post",
         **kwargs: Any,
     ) -> None:
-        if step_run_completion_archive is not None and not isinstance(
-            step_run_completion_archive, RunCompletionArchivePolicy
+        if (
+            step_run_completion_archive is not None
+            and not isinstance(step_run_completion_archive, RunCompletionArchivePolicy)
+            and not callable(step_run_completion_archive)
         ):
             raise TypeError(
-                "step_run_completion_archive must be a RunCompletionArchivePolicy or None."
+                "step_run_completion_archive must be a RunCompletionArchivePolicy, "
+                "a callable returning RunCompletionArchivePolicy | None, or None."
             )
         self.name = name
         self.step_run_completion_archive = step_run_completion_archive
@@ -274,6 +321,14 @@ class NoopScenarioContext:
         artifact = _build_noop_artifact(path, key=key, meta=kwargs)
         self._inputs[key] = artifact
         return artifact
+
+    @property
+    def meta(self) -> Mapping[str, Any]:
+        return MappingProxyType({})
+
+    def log_meta(self, **metadata: Any) -> None:
+        _ = metadata
+        return None
 
     def declare_outputs(
         self,
@@ -467,6 +522,19 @@ class NoopTracker(TrackerLike):
     ) -> Dict[str, NoopArtifact]:
         self._warn_disabled()
         return NoopRunContext().log_artifacts(outputs, **metadata)
+
+    def set_output_meta(
+        self,
+        key: str,
+        meta: Mapping[str, Any],
+        *,
+        merge: bool = True,
+    ) -> None:
+        self._warn_disabled()
+        _ = (key, meta, merge)
+        return None
+
+    set_pending_output_meta = set_output_meta
 
     @contextmanager
     def scenario(self, name: str, **kwargs: Any) -> Iterator[NoopScenarioContext]:

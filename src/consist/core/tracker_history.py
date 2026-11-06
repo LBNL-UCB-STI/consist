@@ -40,9 +40,11 @@ class TrackerHistoryService(_TrackerServiceBase):
         if not run:
             return Path(self.resolve_uri(artifact.container_uri))
 
-        old_dir = run.meta.get("_physical_run_dir")
-        path_str = self.fs.resolve_historical_path(artifact.container_uri, old_dir)
-        return Path(path_str)
+        resolved = self.fs.resolve_historical_artifact_path(
+            artifact, run, fallback_to_current_uri=True
+        )
+        assert resolved is not None
+        return resolved
 
     def resolve_canonical_run_id(
         self,

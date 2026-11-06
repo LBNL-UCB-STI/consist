@@ -154,8 +154,14 @@ tracker.log_output(
 )
 ```
 
-For a non-Zarr directory tree, declare `artifact_kind="directory"` explicitly.
-Consist persists a complete tree manifest. Directory hydration with
+For a non-Zarr directory tree, declare `artifact_kind="directory"` explicitly on
+`log_output(...)`, or use `OutputArtifactSpec.for_directory(path, ...)` in
+`output_paths={...}`. Consist persists a complete tree manifest. When a tool
+writes transient scratch files into that same directory after logging, opt into
+`allow_extra_files=True` (via `log_output(..., allow_extra_files=True)` or
+`OutputArtifactSpec.for_directory(path, allow_extra_files=True)`) so recovery
+copies and validates only the recorded manifest members while ignoring
+unlisted extra files. Directory hydration with
 `db_fallback="never"` requires `source_root` and reads only the corresponding
 URI-relative tree below that root. It validates every member, stages the copy,
 and publishes it atomically. With `preserve_existing=False`, the destination
@@ -250,11 +256,42 @@ tracker.archive_artifact(
 Use `mode="copy"` when the workspace file should remain in place. Use
 `mode="move"` when the archive copy should become the durable byte source.
 
-For an ordinary file output whose historical and recorded recovery locations no
-longer exist, archival can use the artifact's currently configured managed URI
-mount as a final source fallback. The file must still match the artifact's
-recorded identity before Consist records the recovery root; this does not
-change directory, bundle, or OutputSet archival rules.
+### Automatic Run-Completion Archiving
+
+Instead of calling `archive_run_outputs(...)` manually after each step, you can
+configure a declarative `RunCompletionArchivePolicy` on an individual step via
+`OutputPolicyOptions(run_completion_archive=...)` or as a scenario-wide default
+via `scenario(..., step_run_completion_archive=...)` (which can be a static
+policy, a `Callable[[str], RunCompletionArchivePolicy | None]`, or overridden per
+step with `run_completion_archive=False`):
+
+```python
+from consist import OutputPolicyOptions, RunCompletionArchivePolicy
+
+policy = RunCompletionArchivePolicy(
+    archive_root=Path("/archive/iteration_004"),
+    mode="copy",
+)
+
+with tracker.scenario("sim", step_run_completion_archive=policy) as sc:
+    sc.run(fn=step_a, outputs=["persons"])
+```
+
+When the archive root is only known inside the step body, omit `archive_root` on
+the policy and call `ctx.set_archive_root(path)` (or `tracker.set_archive_root(path)`)
+during execution. Both automatic run-completion archiving and
+`tracker.archive_run_outputs(...)` automatically skip virtual unbacked ingested
+table artifacts when `keys=None` and synchronize updated `recovery_roots` and
+`abs_path` values back onto live `RunResult.outputs` and active scenario
+`coupler` entries.
+
+When an output's historical run directory and previously recorded recovery
+locations no longer hold the source bytes (or when `mounts={"workspace": ...}`
+points to a live workspace directory distinct from `tracker.run_dir`), archival
+resolves the live source through the currently configured managed URI mount for
+ordinary files, immutable directory artifacts, and shapefile bundles alike. The
+source bytes must still satisfy the artifact's recorded hash or manifest before
+Consist records the recovery root.
 
 `archive_current_run_outputs(...)` and `archive_run_outputs(...)` now return an
 `ArchivedOutputs` mapping. Treat the mapping like a read-only `Mapping[str,

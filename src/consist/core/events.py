@@ -65,6 +65,27 @@ class EventManager:
         self._on_failed.append(callback)
         return callback
 
+    def off_run_start(self, callback: Callable[[Run], None]) -> None:
+        """Unregister a previously registered start callback if present."""
+        try:
+            self._on_start.remove(callback)
+        except ValueError:
+            pass
+
+    def off_run_complete(self, callback: Callable[[Run, List[Artifact]], None]) -> None:
+        """Unregister a previously registered completion callback if present."""
+        try:
+            self._on_complete.remove(callback)
+        except ValueError:
+            pass
+
+    def off_run_failed(self, callback: Callable[[Run, Exception], None]) -> None:
+        """Unregister a previously registered failure callback if present."""
+        try:
+            self._on_failed.remove(callback)
+        except ValueError:
+            pass
+
     # --- Emission ---
 
     def emit_start(self, run: Run):
@@ -76,7 +97,7 @@ class EventManager:
         run : Run
             Run that just began.
         """
-        for hook in self._on_start:
+        for hook in list(self._on_start):
             try:
                 hook(run)
             except Exception as e:
@@ -93,7 +114,7 @@ class EventManager:
         outputs : List[Artifact]
             Artifacts produced by the run.
         """
-        for hook in self._on_complete:
+        for hook in list(self._on_complete):
             try:
                 hook(run, outputs)
             except Exception as e:
@@ -110,7 +131,7 @@ class EventManager:
         error : Exception
             Exception raised during execution.
         """
-        for hook in self._on_failed:
+        for hook in list(self._on_failed):
             try:
                 hook(run, error)
             except Exception as e:

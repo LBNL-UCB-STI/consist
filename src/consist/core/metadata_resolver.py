@@ -282,6 +282,8 @@ class MetadataResolver:
             resolved_outputs = list(resolved_outputs)
         resolved_output_paths = _resolve_meta(output_paths, step_def.output_paths)
         resolved_output_sets = _resolve_meta(output_sets, step_def.output_sets)
+        if outputs is None and output_paths is not None:
+            resolved_outputs = None
         resolved_inputs = _resolve_meta(inputs, step_def.inputs)
         resolved_input_keys = _resolve_meta(input_keys, step_def.input_keys)
         resolved_optional_input_keys = _resolve_meta(

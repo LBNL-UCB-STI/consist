@@ -85,53 +85,71 @@ def test_tracker_run_requested_input_materialization_validates_fast_hash(
     assert tracker.identity.compute_file_checksum(staged_path) == input_artifact.hash
 
 
-def test_tracker_run_requested_input_materialization_runs_on_cache_hit(
+def test_tracker_run_requested_input_materialization_skips_on_cache_hit_and_preserves_in_place_output(
     tracker, sample_csv
 ) -> None:
+    from consist.types import CacheOptions
+
     source = sample_csv("cache_hit_stage.csv", rows=2)
     staged_path = tracker.run_dir / "workspace" / "cache_hit_stage.csv"
+    in_place_path = tracker.run_dir / "workspace" / "datastore.txt"
+    in_place_source = tracker.run_dir / "seed" / "datastore_pre.txt"
+    in_place_source.parent.mkdir(parents=True, exist_ok=True)
+    in_place_source.write_text("pre-step\n", encoding="utf-8")
     calls: list[Path] = []
 
-    def step(data: Path, ctx) -> None:
+    def step(data: Path, datastore: Path, ctx) -> None:
         calls.append(data)
         assert data == staged_path
-        ctx.run_dir.mkdir(parents=True, exist_ok=True)
-        (ctx.run_dir / "out.txt").write_text("ok\n", encoding="utf-8")
+        assert datastore == in_place_path
+        assert datastore.read_text(encoding="utf-8") == "pre-step\n"
+        datastore.write_text("post-step\n", encoding="utf-8")
 
     first = tracker.run(
         fn=step,
         name="requested_input_stage_cache_hit",
-        inputs={"data": source},
-        output_paths={"out": "out.txt"},
+        inputs={"data": source, "datastore": in_place_source},
+        output_paths={"datastore": in_place_path},
         execution_options=ExecutionOptions(
             inject_context="ctx",
             input_binding="paths",
             input_materialization="requested",
-            input_paths={"data": staged_path},
+            input_paths={"data": staged_path, "datastore": in_place_path},
         ),
     )
     assert first.cache_hit is False
     assert staged_path.exists()
+    assert in_place_path.read_text(encoding="utf-8") == "post-step\n"
+
+    # Archive post-step output so cache-hit output hydration can recover it
+    archive_dir = tracker.run_dir / "archive"
+    tracker.archive_artifact(first.outputs["datastore"], archive_dir, mode="copy")
 
     staged_path.unlink()
+    in_place_path.write_text("pre-step\n", encoding="utf-8")
 
     second = tracker.run(
         fn=step,
         name="requested_input_stage_cache_hit",
-        inputs={"data": source},
-        output_paths={"out": "out.txt"},
+        inputs={"data": source, "datastore": in_place_source},
+        output_paths={"datastore": in_place_path},
+        cache_options=CacheOptions(
+            cache_hydration="outputs-requested",
+            cache_hydration_failure="miss",
+        ),
         execution_options=ExecutionOptions(
             inject_context="ctx",
             input_binding="paths",
             input_materialization="requested",
-            input_paths={"data": staged_path},
+            input_paths={"data": staged_path, "datastore": in_place_path},
         ),
     )
 
     assert second.cache_hit is True
     assert calls == [staged_path]
-    assert staged_path.exists()
-    assert second.run.meta["staged_inputs"]["data"] == str(staged_path.resolve())
+    assert not staged_path.exists()
+    assert "staged_inputs" not in (second.run.meta or {})
+    assert in_place_path.read_text(encoding="utf-8") == "post-step\n"
 
 
 def test_scenario_run_requested_input_materialization_stages_coupler_input(

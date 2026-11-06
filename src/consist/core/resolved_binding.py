@@ -273,7 +273,7 @@ def _validate_resolved_binding(
         raise ValueError("resolved binding step name must not be empty")
     if not _STEP_IDENTITY_PATTERN.fullmatch(step_contract):
         raise ValueError("invalid step contract identity")
-    destinations: set[Path] = set()
+    destinations: dict[Path, BoundArtifact] = {}
     for key, resolved_input in inputs.items():
         if not key or not resolved_input.parameter:
             raise ValueError("resolved binding input parameter must not be empty")
@@ -285,9 +285,22 @@ def _validate_resolved_binding(
             continue
         if destination.is_absolute() or ".." in destination.parts:
             raise ValueError("resolved binding destinations must be relative paths")
-        if destination in destinations:
-            raise ValueError("duplicate execution destination in resolved binding")
-        destinations.add(destination)
+        existing = destinations.get(destination)
+        if existing is not None:
+            if (
+                existing.identity,
+                existing.locator,
+                existing.artifact_kind,
+                existing.directory_manifest,
+            ) != (
+                resolved_input.artifact.identity,
+                resolved_input.artifact.locator,
+                resolved_input.artifact.artifact_kind,
+                resolved_input.artifact.directory_manifest,
+            ):
+                raise ValueError("duplicate execution destination in resolved binding")
+            continue
+        destinations[destination] = resolved_input.artifact
     for parameter, evidence in admission_evidence.items():
         try:
             bound = inputs[parameter]
@@ -354,6 +367,23 @@ class ResolvedBinding:
             MappingProxyType(dict(self.admission_evidence)),
         )
         object.__setattr__(self, "diagnostics", MappingProxyType(dict(diagnostics)))
+
+    def input_for(self, parameter: str) -> ResolvedInput:
+        """Return the resolved input contract for ``parameter``."""
+        return self.inputs[parameter]
+
+    def path_for(self, parameter: str) -> Path:
+        """Return the execution destination path for ``parameter``."""
+        destination = self.input_for(parameter).destination
+        if destination is None:
+            raise ValueError(
+                f"resolved binding input {parameter!r} has no execution destination"
+            )
+        return destination
+
+    def artifact_for(self, parameter: str) -> BoundArtifact:
+        """Return the bound artifact contract for ``parameter``."""
+        return self.input_for(parameter).artifact
 
     def identity_json(self) -> str:
         """Serialize the cache-partitioning execution contract deterministically."""
@@ -540,6 +570,41 @@ def _validate_strict_binding_invocation_context(
     return context
 
 
+_COMPOUND_ARCHIVE_EXTENSIONS = frozenset(
+    {
+        ".gz",
+        ".bz2",
+        ".xz",
+        ".zst",
+        ".lz4",
+        ".zip",
+    }
+)
+
+
+def _extract_artifact_suffix(artifact: "Artifact") -> str:
+    """Return the file extension(s) from an artifact's URI or path."""
+    for candidate in (artifact.container_uri, artifact.abs_path):
+        if not candidate:
+            continue
+        raw_path = candidate.split("://", 1)[1] if "://" in candidate else candidate
+        name = Path(raw_path).name
+        if not name:
+            continue
+        suffixes = Path(name).suffixes
+        if not suffixes:
+            continue
+        if (
+            len(suffixes) >= 2
+            and suffixes[-1].lower() in _COMPOUND_ARCHIVE_EXTENSIONS
+            and any(ch.isalpha() for ch in suffixes[-2])
+        ):
+            return f"{suffixes[-2]}{suffixes[-1]}"
+        if any(ch.isalpha() for ch in suffixes[-1]):
+            return suffixes[-1]
+    return ""
+
+
 class ResolvedBindingBuilder:
     """Build one immutable resolved binding without retaining runtime objects."""
 
@@ -583,15 +648,26 @@ class ResolvedBindingBuilder:
         *,
         parameter: str,
         artifact: "Artifact",
-        destination: Path | None,
+        destination: Path | str | None = None,
         source: Literal[
             "explicit", "coupler", "fallback", "pinned", "external_admitted"
-        ],
+        ] = "explicit",
         selected_role: str | None = None,
+        preserve_suffix: bool = True,
     ) -> "ResolvedBindingBuilder":
         """Bind a locally tracked artifact after deriving its trusted identity."""
         identity = ArtifactIdentity.from_artifact(artifact)
         manifest = artifact.meta.get("directory_manifest")
+        dest_path = (
+            Path("inputs") / parameter if destination is None else Path(destination)
+        )
+        suffix = _extract_artifact_suffix(artifact) if preserve_suffix else ""
+        has_alpha_suffix = any(ch.isalpha() for ch in dest_path.suffix)
+        resolved_dest = (
+            dest_path.with_name(f"{dest_path.name}{suffix}")
+            if suffix and not has_alpha_suffix
+            else dest_path
+        )
         return self.bind_artifact(
             parameter=parameter,
             artifact=BoundArtifact(
@@ -607,7 +683,7 @@ class ResolvedBindingBuilder:
                     else None
                 ),
             ),
-            destination=destination,
+            destination=resolved_dest,
             source=source,
             selected_role=selected_role,
         )

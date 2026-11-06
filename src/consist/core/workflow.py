@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 import inspect
+import os
 import uuid
 import functools
 import concurrent.futures
@@ -54,6 +56,7 @@ from consist.core.resolved_binding import (
     step_contract_identity,
 )
 from consist.core.run_invocation import resolve_run_invocation
+from consist.core.run_options import resolve_trace_output_policy
 from consist.digest import normalize_json
 from consist.types import (
     ArtifactRef,
@@ -379,6 +382,90 @@ class RunContext:
         """
         self._tracker.log_meta(**kwargs)
 
+    def set_output_meta(
+        self,
+        key: str,
+        meta: Mapping[str, Any],
+        *,
+        merge: bool = True,
+    ) -> None:
+        """
+        Attach or queue metadata for an output artifact key during step execution.
+
+        This is a thin wrapper around ``Tracker.set_output_meta``. If an output
+        with ``key`` has already been logged in the current run, its metadata is
+        updated immediately; otherwise the metadata is queued and applied when the
+        declared output is finalized at the end of the step.
+
+        Parameters
+        ----------
+        key : str
+            Declared or logged output artifact key to update.
+        meta : Mapping[str, Any]
+            JSON-serializable metadata mapping to merge into (or replace on) the
+            output artifact's ``meta`` dictionary.
+        merge : bool, default True
+            When ``True``, merge ``meta`` into existing user metadata on the
+            output artifact. When ``False``, replace existing user metadata while
+            preserving Consist system metadata keys.
+
+        Raises
+        ------
+        RuntimeError
+            If no run is currently active.
+        ValueError
+            If ``key`` is empty or whitespace-only.
+        TypeError
+            If ``meta`` is not a mapping or does not normalize to a JSON object.
+        """
+        self._tracker.set_output_meta(key, meta, merge=merge)
+
+    set_pending_output_meta = set_output_meta
+
+    def set_archive_root(
+        self,
+        archive_root: Union[
+            str,
+            os.PathLike[str],
+            Callable[[], Optional[Union[str, os.PathLike[str]]]],
+            None,
+        ],
+        *,
+        mode: Literal["copy"] = "copy",
+        prepend_source_mount_root: bool = True,
+    ) -> None:
+        """
+        Set, override, or disable the run-completion archive root for the active step.
+
+        This is a thin wrapper around ``Tracker.set_archive_root``.
+
+        Parameters
+        ----------
+        archive_root : Union[str, os.PathLike[str], Callable[[], Optional[Union[str, os.PathLike[str]]]], None]
+            Destination directory path, a zero-argument callable returning an
+            optional destination path, or ``None`` to disable run-completion
+            archival for the active step.
+        mode : Literal["copy"], default "copy"
+            Archive transfer mode (``"copy"``).
+        prepend_source_mount_root : bool, default True
+            When ``True``, nest archived files under the last path segment of the
+            source mount root to prevent layout collisions across mounts.
+
+        Raises
+        ------
+        RuntimeError
+            If no run is currently active.
+        ValueError
+            If ``archive_root`` is an empty string or ``mode`` is invalid.
+        TypeError
+            If ``archive_root`` or ``prepend_source_mount_root`` has an invalid type.
+        """
+        self._tracker.set_archive_root(
+            archive_root,
+            mode=mode,
+            prepend_source_mount_root=prepend_source_mount_root,
+        )
+
     @property
     def inputs(self) -> Dict[str, Artifact]:
         """
@@ -495,7 +582,6 @@ class ScenarioContext:
         tags: Optional[List[str]] = None,
         model: str = "scenario",
         step_cache_hydration: Optional[str] = None,
-        step_run_completion_archive: Optional[RunCompletionArchivePolicy] = None,
         name_template: Optional[str] = None,
         cache_epoch: Optional[int] = None,
         coupler: Optional[Coupler] = None,
@@ -503,13 +589,22 @@ class ScenarioContext:
         output_sets: Optional[Mapping[str, OutputSet]] = None,
         resume_from_run_id: Optional[str] = None,
         resume_phase: CouplerSnapshotPhase = "post",
+        step_run_completion_archive: Optional[
+            Union[
+                RunCompletionArchivePolicy,
+                Callable[[str], Optional[RunCompletionArchivePolicy]],
+            ]
+        ] = None,
         **kwargs: Any,
     ):
-        if step_run_completion_archive is not None and not isinstance(
-            step_run_completion_archive, RunCompletionArchivePolicy
+        if (
+            step_run_completion_archive is not None
+            and not isinstance(step_run_completion_archive, RunCompletionArchivePolicy)
+            and not callable(step_run_completion_archive)
         ):
             raise TypeError(
-                "step_run_completion_archive must be a RunCompletionArchivePolicy or None."
+                "step_run_completion_archive must be a RunCompletionArchivePolicy, "
+                "a callable returning RunCompletionArchivePolicy | None, or None."
             )
         self.tracker = tracker
         self.name = name
@@ -560,8 +655,34 @@ class ScenarioContext:
         # - Consistency: Artifacts in coupler are independent copies (no cross-run mutations)
         #
         self.coupler = coupler or Coupler(tracker=tracker)
+        if self.coupler.tracker is None:
+            self.coupler.tracker = tracker
         if require_outputs:
             self.coupler.require_outputs(*require_outputs)
+
+    def _resolve_step_run_completion_archive(
+        self,
+        step_name: str,
+        step_policy: Optional[Union[RunCompletionArchivePolicy, Literal[False]]],
+    ) -> Optional[RunCompletionArchivePolicy]:
+        if step_policy is False:
+            return None
+        if isinstance(step_policy, RunCompletionArchivePolicy):
+            return step_policy
+        scenario_policy = self.step_run_completion_archive
+        if scenario_policy is None:
+            return None
+        if isinstance(scenario_policy, RunCompletionArchivePolicy):
+            return scenario_policy
+        resolved = scenario_policy(step_name)
+        if resolved is None or resolved is False:
+            return None
+        if not isinstance(resolved, RunCompletionArchivePolicy):
+            raise TypeError(
+                "step_run_completion_archive callable must return a "
+                "RunCompletionArchivePolicy or None."
+            )
+        return resolved
 
     @property
     def run_id(self) -> str:
@@ -650,6 +771,58 @@ class ScenarioContext:
 
         self._inputs[key] = artifact
         return artifact
+
+    @property
+    def meta(self) -> Mapping[str, Any]:
+        """
+        Read-only view of scenario header run metadata.
+
+        Returns
+        -------
+        Mapping[str, Any]
+            Immutable view of the scenario header run's ``meta`` dictionary.
+
+        Raises
+        ------
+        RuntimeError
+            If the scenario context is inactive.
+        """
+        if not self._header_record:
+            raise RuntimeError("Scenario not active. Use within 'with' block.")
+        return MappingProxyType(self._header_record.run.meta or {})
+
+    def log_meta(self, **metadata: Any) -> None:
+        """
+        Record key-value metadata on the scenario header run and persist immediately.
+
+        Unlike ``Tracker.log_meta``, which requires an active step run,
+        ``ScenarioContext.log_meta`` targets the suspended scenario header run
+        within an active ``with tracker.scenario(...) as sc:`` block.
+
+        Parameters
+        ----------
+        **metadata : Any
+            JSON-serializable metadata keys and values to merge into the scenario
+            header run's ``meta`` dictionary. Keys ``stage`` and ``phase`` are
+            also promoted to top-level ``Run`` fields when provided as strings.
+
+        Raises
+        ------
+        RuntimeError
+            If the scenario context is inactive.
+        """
+        if not self._header_record:
+            raise RuntimeError("Scenario not active. Use within 'with' block.")
+        if not metadata:
+            return
+
+        prev = self.tracker.current_consist
+        self.tracker.current_consist = self._header_record
+        try:
+            self._header_record.run.updated_at = datetime.now(timezone.utc)
+            self.tracker.log_meta(**metadata)
+        finally:
+            self.tracker.current_consist = prev
 
     def declare_outputs(
         self,
@@ -1653,17 +1826,21 @@ class ScenarioContext:
                 )
             if strict_binding is not None:
                 bound_inputs: dict[str, Artifact] = {}
+                resolved_by_id: dict[uuid.UUID, Artifact] = {}
                 for parameter, resolved_input in strict_binding.inputs.items():
                     locator = resolved_input.artifact.locator
                     if not isinstance(locator, TrackedArtifactLocator):
                         raise ValueError(
                             f"Resolved binding locator is unsupported for {parameter!r}."
                         )
-                    artifact = self.tracker.get_artifact(locator.artifact_id)
+                    artifact = resolved_by_id.get(locator.artifact_id)
                     if artifact is None:
-                        raise ValueError(
-                            f"Resolved binding artifact is unavailable for {parameter!r}."
-                        )
+                        artifact = self.tracker.get_artifact(locator.artifact_id)
+                        if artifact is None:
+                            raise ValueError(
+                                f"Resolved binding artifact is unavailable for {parameter!r}."
+                            )
+                        resolved_by_id[locator.artifact_id] = artifact
                     if (
                         ArtifactIdentity.from_artifact(artifact)
                         != resolved_input.artifact.identity
@@ -1848,10 +2025,9 @@ class ScenarioContext:
             if resolved_cache_hydration is not None
             else self.step_cache_hydration
         )
-        effective_run_completion_archive = (
-            resolved_invocation.run_completion_archive
-            if resolved_invocation.run_completion_archive is not None
-            else self.step_run_completion_archive
+        effective_run_completion_archive = self._resolve_step_run_completion_archive(
+            resolved_name,
+            resolved_invocation.run_completion_archive,
         )
 
         promoted_inputs = self._promote_inputs_for_binding(
@@ -2002,6 +2178,10 @@ class ScenarioContext:
         code_identity_extra_deps: Optional[List[str]] = None,
         output_mismatch: str = "warn",
         output_missing: str = "warn",
+        output_policy: Optional[OutputPolicyOptions] = None,
+        run_completion_archive: Optional[
+            Union[RunCompletionArchivePolicy, Literal[False]]
+        ] = None,
     ):
         """
         Manual tracing context manager for scenario steps.
@@ -2016,10 +2196,12 @@ class ScenarioContext:
         if not self._header_record:
             raise RuntimeError("Scenario not active. Use within 'with' block.")
 
-        output_mismatch_policy = cast(
-            Literal["warn", "error", "ignore"], output_mismatch
+        resolved_output_policy = resolve_trace_output_policy(
+            output_policy=output_policy,
+            output_mismatch=output_mismatch,
+            output_missing=output_missing,
+            run_completion_archive=run_completion_archive,
         )
-        output_missing_policy = cast(Literal["warn", "error", "ignore"], output_missing)
 
         resolved_invocation = resolve_run_invocation(
             fn=None,
@@ -2054,10 +2236,7 @@ class ScenarioContext:
                 code_identity=code_identity,
                 code_identity_extra_deps=code_identity_extra_deps,
             ),
-            output_policy=OutputPolicyOptions(
-                output_mismatch=output_mismatch_policy,
-                output_missing=output_missing_policy,
-            ),
+            output_policy=resolved_output_policy,
             execution_options=None,
             default_name_template=self.name_template,
             allow_template=True,
@@ -2109,6 +2288,10 @@ class ScenarioContext:
         effective_cache_hydration = (
             resolved_cache_hydration or self.step_cache_hydration
         )
+        effective_run_completion_archive = self._resolve_step_run_completion_archive(
+            resolved_name,
+            resolved_invocation.run_completion_archive,
+        )
 
         try:
             self.tracker._active_coupler = self.coupler
@@ -2150,6 +2333,11 @@ class ScenarioContext:
                 code_identity_extra_deps=resolved_invocation.code_identity_extra_deps,
                 output_mismatch=resolved_invocation.output_mismatch,
                 output_missing=resolved_invocation.output_missing,
+                output_policy=OutputPolicyOptions(
+                    output_mismatch=resolved_invocation.output_mismatch,
+                    output_missing=resolved_invocation.output_missing,
+                    run_completion_archive=effective_run_completion_archive,
+                ),
             ) as t:
                 if t.is_cached:
                     current_consist = t.current_consist

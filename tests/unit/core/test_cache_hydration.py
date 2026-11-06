@@ -694,7 +694,7 @@ def test_miss_policy_requires_requested_output_hydration(tmp_path: Path) -> None
 
     with pytest.raises(
         ValueError,
-        match="cache_hydration_failure='miss' requires cache_hydration='outputs-requested'",
+        match="cache_hydration_failure='miss' requires cache_hydration='outputs-requested' or 'outputs-all'",
     ):
         tracker.run(
             fn=lambda: None,
@@ -2002,8 +2002,82 @@ def test_outputs_requested_miss_policy_validates_existing_destination(
         cache_hydration_failure="miss",
         materialize_cached_output_paths={"a": mismatched_destination},
     ) as active:
+        assert active.is_cached
+    assert mismatched_destination.read_text(encoding="utf-8") == "value\n1\n"
+
+    # Non-strict hydration (cache_hydration_failure="warn") also overwrites stale destinations
+    warn_stale_destination = tmp_path / "warn_stale.csv"
+    warn_stale_destination.write_text("value\nstale\n", encoding="utf-8")
+    with tracker_b.start_run(
+        "warn_existing_mismatch",
+        model="producer",
+        cache_hydration="outputs-requested",
+        cache_hydration_failure="warn",
+        materialize_cached_output_paths={"a": warn_stale_destination},
+    ) as active:
+        assert active.is_cached
+    assert warn_stale_destination.read_text(encoding="utf-8") == "value\n1\n"
+
+
+def test_outputs_requested_miss_policy_rolls_back_backed_up_destination_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = str(tmp_path / "provenance.db")
+    tracker_a = Tracker(run_dir=tmp_path / "runs_a", db_path=db_path)
+    _init_core_tables(tracker_a)
+    with tracker_a.start_run("strict_backup_rollback_producer", model="producer"):
+        out_dir = tracker_a.run_dir / "outputs"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        source_a = out_dir / "a.csv"
+        source_b = out_dir / "b.csv"
+        source_a.write_text("value\n1\n", encoding="utf-8")
+        source_b.write_text("value\n2\n", encoding="utf-8")
+        tracker_a.log_artifact(source_a, key="a", direction="output")
+        tracker_a.log_artifact(source_b, key="b", direction="output")
+
+    tracker_b = Tracker(
+        run_dir=tmp_path / "runs_b", db_path=db_path, allow_external_paths=True
+    )
+    _init_core_tables(tracker_b)
+    dest_a = tmp_path / "dest_a.csv"
+    dest_b = tmp_path / "dest_b.csv"
+    dest_a.write_text("value\nstale-a\n", encoding="utf-8")
+
+    # Case 1: output #2 is missing in historical run -> rejected before promotion, dest_a preserved
+    source_b.unlink()
+    with tracker_b.start_run(
+        "strict_backup_rollback_missing_b",
+        model="producer",
+        cache_hydration="outputs-requested",
+        cache_hydration_failure="miss",
+        materialize_cached_output_paths={"a": dest_a, "b": dest_b},
+    ) as active:
         assert not active.is_cached
-    assert mismatched_destination.read_text(encoding="utf-8") == "value\nstale\n"
+    assert dest_a.read_text(encoding="utf-8") == "value\nstale-a\n"
+    assert not dest_b.exists()
+
+    # Case 2: output #2 exists for staging, but promotion fails mid-way after promoting dest_a
+    source_b.write_text("value\n2\n", encoding="utf-8")
+
+    def partial_promote(*, items, **kwargs):
+        art_a, staged_a, target_a = items[0]
+        target_a.write_bytes(staged_a.read_bytes())
+        return {art_a.key: str(target_a.resolve())}
+
+    monkeypatch.setattr(
+        "consist.core.materialize.materialize_artifacts_from_sources",
+        partial_promote,
+    )
+    with tracker_b.start_run(
+        "strict_backup_rollback_partial_promote",
+        model="producer",
+        cache_hydration="outputs-requested",
+        cache_hydration_failure="miss",
+        materialize_cached_output_paths={"a": dest_a, "b": dest_b},
+    ) as active:
+        assert not active.is_cached
+    assert dest_a.read_text(encoding="utf-8") == "value\nstale-a\n"
+    assert not dest_b.exists()
 
 
 def test_outputs_all_uses_artifact_recovery_roots_without_source_root(
@@ -2804,6 +2878,21 @@ def test_inputs_missing_validation_preserves_valid_and_rehydrates_corrupted_dire
         "skims": str(destination.resolve())
     }
 
+    # 3) When validate_materialized_inputs is disabled (default), missing directory
+    #    inputs should not perform manifest tree validation during recovery discovery.
+    import shutil
+
+    shutil.rmtree(destination)
+    with tracker_b.start_run(
+        "consumer_unvalidated_dir_recovery",
+        model="consumer",
+        inputs=[artifact],
+        cache_mode="overwrite",
+        cache_hydration="inputs-missing",
+        validate_materialized_inputs=False,
+    ):
+        assert (destination / "nested" / "0.0").read_bytes() == b"corrupted-historical"
+
     if tracker_a.engine:
         tracker_a.engine.dispose()
     if tracker_b.engine:
@@ -2892,25 +2981,24 @@ def test_outputs_requested_rejects_corrupted_directory_candidate_and_recovers_fr
         tracker_c.engine.dispose()
 
 
-def test_outputs_requested_preserves_caller_owned_corrupted_directory_destination(
-    tmp_path: Path,
+def test_outputs_requested_replaces_stale_and_rolls_back_directory_destination_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """
     When a requested directory output destination already exists on disk before
-    candidate hydration and its contents do not match the cached manifest,
-    _strict_requested_output_hydration must reject the candidate without
-    overwriting the caller-owned destination during candidate evaluation.
+    candidate hydration and its contents do not match the cached manifest:
+    1) If the cached candidate is valid and promotion succeeds, the stale directory
+       destination is replaced with the cached directory.
+    2) If promotion fails after backing up the caller-owned directory destination,
+       the caller-owned directory destination is rolled back before the miss handler runs.
     """
     db_path = str(tmp_path / "provenance.db")
     tracker_a = Tracker(run_dir=tmp_path / "runs_a", db_path=db_path)
     _init_core_tables(tracker_a)
-    observed_caller_bytes: list[bytes] = []
 
     def write_zarr(ctx) -> None:
         zarr_path = ctx.run_dir / "skims.zarr"
         caller_file = zarr_path / "nested" / "0.0"
-        if caller_file.exists():
-            observed_caller_bytes.append(caller_file.read_bytes())
         (zarr_path / "nested").mkdir(parents=True, exist_ok=True)
         caller_file.write_bytes(b"fresh-skim")
 
@@ -2934,7 +3022,28 @@ def test_outputs_requested_preserves_caller_owned_corrupted_directory_destinatio
         observed_during_miss.append((custom_dest / "nested" / "0.0").read_bytes())
         (custom_dest / "nested" / "0.0").write_bytes(b"fresh-skim")
 
-    result = tracker_b.run(
+    # 1) Valid cached candidate replaces stale directory destination on cache hit
+    hit_result = tracker_b.run(
+        fn=write_zarr_custom,
+        name="dir_caller_destination_safety",
+        output_paths={"skims": ArtifactSpec(path=custom_dest, driver="zarr")},
+        cache_options=CacheOptions(
+            cache_hydration="outputs-requested",
+            cache_hydration_failure="miss",
+        ),
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    assert hit_result.cache_hit is True
+    assert observed_during_miss == []
+    assert (custom_dest / "nested" / "0.0").read_bytes() == b"fresh-skim"
+
+    # 2) When promotion fails, the backed-up directory destination is rolled back
+    (custom_dest / "nested" / "0.0").write_bytes(b"caller-uncommitted-bytes")
+    monkeypatch.setattr(
+        "consist.core.materialize.materialize_artifacts_from_sources",
+        lambda **_kwargs: {},
+    )
+    miss_result = tracker_b.run(
         fn=write_zarr_custom,
         name="dir_caller_destination_safety",
         output_paths={"skims": ArtifactSpec(path=custom_dest, driver="zarr")},
@@ -2945,11 +3054,240 @@ def test_outputs_requested_preserves_caller_owned_corrupted_directory_destinatio
         execution_options=ExecutionOptions(inject_context="ctx"),
     )
 
-    assert result.cache_hit is False
-    # Caller-owned destination was untouched when the miss handler began executing.
+    assert miss_result.cache_hit is False
     assert observed_during_miss == [b"caller-uncommitted-bytes"]
 
     if tracker_a.engine:
         tracker_a.engine.dispose()
     if tracker_b.engine:
         tracker_b.engine.dispose()
+
+
+def test_cache_hit_abs_path_populated_for_skipped_existing_and_shapefile_bundles(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "provenance.db")
+    tracker = Tracker(run_dir=tmp_path / "runs", db_path=db_path)
+    _init_core_tables(tracker)
+
+    def produce(ctx) -> None:
+        csv_path = ctx.run_dir / "table.csv"
+        csv_path.write_text("x\n1\n", encoding="utf-8")
+        tracker.log_output(csv_path, key="table")
+
+        shp_dir = ctx.run_dir / "shapes"
+        shp_dir.mkdir(parents=True, exist_ok=True)
+        for ext in (".shp", ".shx", ".dbf"):
+            (shp_dir / f"zones{ext}").write_bytes(f"shp-{ext}".encode("utf-8"))
+        tracker.log_output(shp_dir / "zones.shp", key="zones")
+
+        bundle_root = ctx.run_dir / "bundle"
+        bundle_root.mkdir(parents=True, exist_ok=True)
+        (bundle_root / "part_a.csv").write_text("a\n1\n", encoding="utf-8")
+
+    output_sets = {
+        "bundle_set": OutputSet(
+            root="bundle",
+            include=FilenamePattern(
+                pattern="part_*.csv",
+                captures=(EnumCapture(name="part", allowed=("a",), wildcard=1),),
+            ),
+        )
+    }
+
+    tracker.run(
+        fn=produce,
+        name="produce_for_abs_path",
+        run_id="produce_abs_1",
+        outputs=["table", "zones"],
+        output_sets=output_sets,
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+
+    out_all_dir = tracker.run_dir / "outputs" / "hydrated_all"
+    rel_prefix = Path("outputs") / "produce_for_abs_path" / "produce_abs_1"
+    tracker.set_run_subdir_fn(lambda _run: "hydrated_all")
+    hit_1 = tracker.run(
+        fn=produce,
+        name="produce_for_abs_path",
+        run_id="produce_abs_hit_1",
+        outputs=["table", "zones"],
+        output_sets=output_sets,
+        cache_options=CacheOptions(
+            cache_hydration="outputs-all",
+        ),
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    assert hit_1.cache_hit is True
+    assert hit_1.outputs["table"].abs_path == str(
+        (out_all_dir / rel_prefix / "table.csv").resolve()
+    )
+    assert hit_1.outputs["zones"].abs_path == str(
+        (out_all_dir / rel_prefix / "shapes" / "zones.shp" / "zones.shp").resolve()
+    )
+
+    # Second cache hit into the same out_all_dir hits skipped_existing (preserve_existing=True)
+    # and must still populate abs_path for both scalar and shapefile bundle outputs.
+    hit_2 = tracker.run(
+        fn=produce,
+        name="produce_for_abs_path",
+        run_id="produce_abs_hit_2",
+        outputs=["table", "zones"],
+        output_sets=output_sets,
+        cache_options=CacheOptions(
+            cache_hydration="outputs-all",
+        ),
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    assert hit_2.cache_hit is True
+    assert hit_2.outputs["table"].abs_path == str(
+        (out_all_dir / rel_prefix / "table.csv").resolve()
+    )
+    assert hit_2.outputs["zones"].abs_path == str(
+        (out_all_dir / rel_prefix / "shapes" / "zones.shp" / "zones.shp").resolve()
+    )
+    tracker.set_run_subdir_fn(None)
+
+    # Verify outputs-requested with materialize_cached_output_set_roots sets parent OutputSet abs_path
+    tracker_b = Tracker(run_dir=tmp_path / "runs_b", db_path=db_path)
+    _init_core_tables(tracker_b)
+    hit_3 = tracker_b.run(
+        fn=produce,
+        name="produce_for_abs_path",
+        run_id="produce_abs_hit_3",
+        outputs=["table", "zones"],
+        output_sets=output_sets,
+        cache_options=CacheOptions(
+            cache_hydration="outputs-requested",
+            cache_hydration_failure="warn",
+        ),
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    assert hit_3.cache_hit is True
+    expected_set_root = (
+        tracker_b.run_dir
+        / "outputs"
+        / "produce_for_abs_path"
+        / "produce_abs_hit_3"
+        / "bundle"
+    )
+    assert (expected_set_root / "part_a.csv").exists()
+    assert hit_3.outputs["bundle_set"].abs_path == str(expected_set_root.resolve())
+
+    if tracker.engine:
+        tracker.engine.dispose()
+    if tracker_b.engine:
+        tracker_b.engine.dispose()
+
+
+def test_dynamic_logged_outputs_hydrated_on_cold_scratch_with_eager_validation(
+    tmp_path: Path,
+) -> None:
+    import shutil
+
+    db_path = str(tmp_path / "provenance.db")
+    workspace_dir = tmp_path / "workspace"
+    archive_dir = tmp_path / "archive"
+    tracker = Tracker(run_dir=workspace_dir, db_path=db_path)
+    _init_core_tables(tracker)
+
+    calls = 0
+
+    def run_dynamic_step(ctx) -> None:
+        nonlocal calls
+        calls += 1
+        out_dir = workspace_dir / "beam" / "output" / "ITERS" / "it.0"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        events_file = out_dir / "0.events.parquet"
+        events_file.write_bytes(f"events-{calls}".encode("utf-8"))
+        ctx.log_output(events_file, key="events_parquet")
+
+        skims_dir = out_dir / "0.skims.zarr"
+        (skims_dir / "chunk").mkdir(parents=True, exist_ok=True)
+        (skims_dir / "chunk" / "0.0").write_bytes(f"skims-{calls}".encode("utf-8"))
+        ctx.log_output(skims_dir, key="skims_zarr", artifact_kind="directory")
+
+    with tracker.scenario("dynamic_step_run_1") as scenario:
+        res1 = scenario.run(
+            fn=run_dynamic_step,
+            name="beam_step",
+            config={"iteration": 0},
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+    assert res1.cache_hit is False
+    assert calls == 1
+
+    for art in res1.outputs.values():
+        tracker.archive_artifact(art, archive_dir, mode="copy")
+
+    # Simulate cold scratch wipe
+    shutil.rmtree(workspace_dir / "beam")
+
+    # 1) Cache hit with outputs-requested + validate_cached_outputs="eager" hydrates dynamic outputs
+    with tracker.scenario("dynamic_step_run_2") as scenario:
+        res2 = scenario.run(
+            fn=run_dynamic_step,
+            name="beam_step",
+            config={"iteration": 0},
+            cache_options=CacheOptions(
+                cache_hydration="outputs-requested",
+                cache_hydration_failure="miss",
+                validate_cached_outputs="eager",
+            ),
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+    assert res2.cache_hit is True
+    assert calls == 1
+    hydrated_events = (
+        workspace_dir / "beam" / "output" / "ITERS" / "it.0" / "0.events.parquet"
+    )
+    hydrated_skims = (
+        workspace_dir / "beam" / "output" / "ITERS" / "it.0" / "0.skims.zarr"
+    )
+    assert hydrated_events.read_bytes() == b"events-1"
+    assert (hydrated_skims / "chunk" / "0.0").read_bytes() == b"skims-1"
+    assert res2.outputs["events_parquet"].abs_path == str(hydrated_events.resolve())
+    assert res2.outputs["skims_zarr"].abs_path == str(hydrated_skims.resolve())
+
+    # 2) Cache hit with outputs-all + cache_hydration_failure="miss" also hydrates dynamic outputs
+    shutil.rmtree(workspace_dir / "beam")
+    with tracker.scenario("dynamic_step_run_3") as scenario:
+        res3 = scenario.run(
+            fn=run_dynamic_step,
+            name="beam_step",
+            config={"iteration": 0},
+            cache_options=CacheOptions(
+                cache_hydration="outputs-all",
+                cache_hydration_failure="miss",
+            ),
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+    assert res3.cache_hit is True
+    assert calls == 1
+    assert hydrated_events.read_bytes() == b"events-1"
+    assert (hydrated_skims / "chunk" / "0.0").read_bytes() == b"skims-1"
+
+    # 3) If archive copy is missing/unrecoverable, cache_hydration="outputs-all" +
+    #    cache_hydration_failure="miss" (even with lazy validation) rejects the hit and re-executes
+    shutil.rmtree(workspace_dir / "beam")
+    (archive_dir / "beam" / "output" / "ITERS" / "it.0" / "0.events.parquet").unlink()
+
+    with tracker.scenario("dynamic_step_run_4_miss") as scenario:
+        res4 = scenario.run(
+            fn=run_dynamic_step,
+            name="beam_step",
+            config={"iteration": 0},
+            cache_options=CacheOptions(
+                cache_hydration="outputs-all",
+                cache_hydration_failure="miss",
+                validate_cached_outputs="lazy",
+            ),
+            execution_options=ExecutionOptions(inject_context="ctx"),
+        )
+    assert res4.cache_hit is False
+    assert calls == 2
+    assert hydrated_events.read_bytes() == b"events-2"
+    assert (hydrated_skims / "chunk" / "0.0").read_bytes() == b"skims-2"
+
+    if tracker.engine:
+        tracker.engine.dispose()

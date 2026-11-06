@@ -1331,3 +1331,244 @@ def test_directory_artifact_hydration_prefers_valid_recovery_root_and_reports_fa
             on_missing="raise",
             db_fallback="if_ingested",
         )
+
+
+def test_materialize_directory_tree_completes_partially_populated_destination_and_rolls_back_on_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source_dir"
+    (source / "nested").mkdir(parents=True)
+    (source / "a.txt").write_text("file-a", encoding="utf-8")
+    (source / "nested" / "b.txt").write_text("file-b", encoding="utf-8")
+    (source / "nested" / "c.txt").write_text("file-c", encoding="utf-8")
+    manifest = build_directory_manifest(source)
+
+    destination = tmp_path / "dest_dir"
+    destination.mkdir(parents=True)
+    (destination / "a.txt").write_text("file-a", encoding="utf-8")
+
+    # Failure midway through completing missing entries rolls back only newly created paths
+    original_copy2 = directory_artifacts.shutil.copy2
+    copy_count = 0
+
+    def fail_on_second_copy(src, dst, *args, **kwargs):
+        nonlocal copy_count
+        copy_count += 1
+        if copy_count == 2:
+            raise OSError("copy failed midway")
+        return original_copy2(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(directory_artifacts.shutil, "copy2", fail_on_second_copy)
+    with pytest.raises(OSError, match="copy failed midway"):
+        materialize_directory_tree(
+            source, destination, manifest, preserve_existing=True
+        )
+    assert (destination / "a.txt").read_text(encoding="utf-8") == "file-a"
+    assert not (destination / "nested").exists()
+
+    # Restore copy2 and complete the partially populated destination
+    monkeypatch.setattr(directory_artifacts.shutil, "copy2", original_copy2)
+    copied = materialize_directory_tree(
+        source, destination, manifest, preserve_existing=True
+    )
+    assert copied is True
+    validate_directory_tree(destination, manifest)
+
+    # Subsequent preserve_existing=True call on complete tree returns False without needing source
+    shutil.rmtree(source)
+    assert (
+        materialize_directory_tree(
+            source, destination, manifest, preserve_existing=True
+        )
+        is False
+    )
+
+
+def test_directory_allow_extra_files_validation_and_materialization(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "shared_workspace"
+    (source / "sub").mkdir(parents=True)
+    (source / "tracked.csv").write_text("id\n1\n", encoding="utf-8")
+    (source / "sub" / "nested.csv").write_text("id\n2\n", encoding="utf-8")
+    manifest = build_directory_manifest(source)
+
+    artifact = Artifact(
+        key="shared_dir",
+        container_uri="./shared_workspace",
+        driver="directory",
+        hash=manifest["tree_hash"],
+        meta={
+            "directory_artifact": True,
+            "directory_allow_extra_files": True,
+            "directory_manifest": manifest,
+        },
+    )
+    assert directory_artifacts.directory_allows_extra_files(artifact) is True
+
+    # Add extra files and directories into source
+    (source / "extra_step_output.parquet").write_bytes(b"extra-data")
+    (source / "sub" / "extra_sub.txt").write_text("extra-sub", encoding="utf-8")
+    (source / "extra_dir").mkdir()
+
+    with pytest.raises(ValueError, match="unexpected"):
+        validate_directory_tree(source, manifest, allow_extra_files=False)
+    validate_directory_tree(source, manifest, allow_extra_files=True)
+    assert is_valid_directory_artifact_tree(source, artifact) is True
+
+    # Materialize into a destination that already has extra files
+    destination = tmp_path / "dest_shared"
+    destination.mkdir()
+    (destination / "preexisting_extra.txt").write_text("keep-me", encoding="utf-8")
+
+    copied = materialize_directory_tree(
+        source,
+        destination,
+        manifest,
+        preserve_existing=True,
+        allow_extra_files=True,
+    )
+    assert copied is True
+    assert (destination / "preexisting_extra.txt").read_text(
+        encoding="utf-8"
+    ) == "keep-me"
+    assert (destination / "tracked.csv").read_text(encoding="utf-8") == "id\n1\n"
+    assert (destination / "sub" / "nested.csv").read_text(encoding="utf-8") == "id\n2\n"
+    # Unlisted extra files in source are not part of the manifest copy
+    assert not (destination / "extra_step_output.parquet").exists()
+
+    # Modifying or deleting a tracked manifest file still fails validation
+    (destination / "tracked.csv").write_text("id\n999\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="hash mismatch"):
+        validate_directory_tree(destination, manifest, allow_extra_files=True)
+    (destination / "tracked.csv").unlink()
+    with pytest.raises(ValueError, match="missing"):
+        validate_directory_tree(destination, manifest, allow_extra_files=True)
+
+
+def test_partial_directory_rollback_and_stage_hydration_completion(
+    tracker: Tracker,
+    tmp_path: Path,
+) -> None:
+    source = tracker.run_dir / "outputs" / "partial_dir"
+    (source / "sub" / "deep").mkdir(parents=True)
+    (source / "a.txt").write_text("a-bytes", encoding="utf-8")
+    (source / "sub" / "b.txt").write_text("b-bytes", encoding="utf-8")
+    (source / "sub" / "deep" / "c.txt").write_text("c-bytes", encoding="utf-8")
+
+    with tracker.start_run("partial_dir_producer", model="test"):
+        art = tracker.log_output(source, key="dir_out", artifact_kind="directory")
+
+    manifest = art.meta["directory_manifest"]
+    dest = tmp_path / "partial_dest"
+    (dest / "sub").mkdir(parents=True)
+    (dest / "sub" / "b.txt").write_text("b-bytes", encoding="utf-8")
+
+    # 1. Rollback of partial completion preserves pre-existing files/dirs
+    published = directory_artifacts.materialize_directory_tree_with_rollback_info(
+        source,
+        dest,
+        manifest,
+        preserve_existing=True,
+    )
+    assert published.published is True
+    assert published.created_root is False
+    assert (dest / "a.txt").exists()
+    assert (dest / "sub" / "deep" / "c.txt").exists()
+
+    directory_artifacts.rollback_published_directory_tree(dest, published)
+    assert dest.exists()
+    assert (dest / "sub" / "b.txt").read_text(encoding="utf-8") == "b-bytes"
+    assert not (dest / "a.txt").exists()
+    assert not (dest / "sub" / "deep").exists()
+
+    # 2. materialize_artifact / hydrate_run_outputs with preserve_existing=True completes partial destination
+    stage_root = tracker.run_dir / "staged_partial"
+    stage_target = stage_root / "outputs" / "partial_dir"
+    (stage_target / "sub").mkdir(parents=True)
+    (stage_target / "sub" / "b.txt").write_text("b-bytes", encoding="utf-8")
+    materialized = tracker.materialize_artifact(
+        art,
+        target_root=stage_root,
+        preserve_existing=True,
+    )
+    assert materialized.status in {
+        "materialized_from_historical_root",
+        "materialized_directory_from_filesystem",
+    }
+    assert (stage_target / "a.txt").read_text(encoding="utf-8") == "a-bytes"
+    assert (stage_target / "sub" / "deep" / "c.txt").read_text(
+        encoding="utf-8"
+    ) == "c-bytes"
+
+    hydrate_root = tracker.run_dir / "hydrated_partial"
+    partial_hydrated_dir = hydrate_root / "outputs" / "partial_dir"
+    (partial_hydrated_dir / "sub").mkdir(parents=True)
+    (partial_hydrated_dir / "sub" / "b.txt").write_text("b-bytes", encoding="utf-8")
+    hydrated = tracker.hydrate_run_outputs(
+        "partial_dir_producer",
+        target_root=hydrate_root,
+        preserve_existing=True,
+    )
+    assert hydrated["dir_out"].status == "materialized_directory_from_filesystem"
+    assert (partial_hydrated_dir / "a.txt").read_text(encoding="utf-8") == "a-bytes"
+    assert (partial_hydrated_dir / "sub" / "deep" / "c.txt").read_text(
+        encoding="utf-8"
+    ) == "c-bytes"
+
+
+def test_artifact_layout_and_record_sync_helpers(tmp_path: Path) -> None:
+    from consist.models.artifact import Artifact, merge_artifact_output_meta
+    from consist.models.run import ConsistRecord, Run
+
+    bundle_dir = tmp_path / "bundle_dir"
+    bundle_dir.mkdir(parents=True)
+    entry_file = bundle_dir / "parcels.shp"
+    entry_file.write_bytes(b"shp")
+
+    bundle_art = Artifact(
+        key="parcels",
+        container_uri="inputs://bundle_dir/parcels.shp",
+        driver="shapefile",
+        meta={
+            "file_bundle_artifact": True,
+            "file_bundle": "shapefile",
+            "file_bundle_entry": "parcels.shp",
+            "custom": "old",
+        },
+    )
+    assert directory_artifacts.is_file_bundle_artifact(bundle_art) is True
+    assert directory_artifacts.file_bundle_entry_name(bundle_art) == "parcels.shp"
+    assert directory_artifacts.resolve_file_bundle_root(bundle_dir) == bundle_dir
+    assert directory_artifacts.resolve_file_bundle_root(entry_file) == bundle_dir
+    assert directory_artifacts.resolve_artifact_entry_path(
+        bundle_art, bundle_dir
+    ) == str(entry_file.resolve())
+
+    replaced_meta = merge_artifact_output_meta(
+        bundle_art.meta,
+        {"custom": "new"},
+        merge=False,
+    )
+    assert replaced_meta["file_bundle_entry"] == "parcels.shp"
+    assert replaced_meta["custom"] == "new"
+
+    record = ConsistRecord(
+        run=Run(id="sync_test_run", model_name="test", config_hash=None, git_hash=None),
+        outputs=[bundle_art],
+    )
+    matched = record.sync_output_artifact(
+        key="parcels",
+        meta=replaced_meta,
+        abs_path=str(entry_file.resolve()),
+    )
+    assert len(matched) == 1
+    assert bundle_art.meta["custom"] == "new"
+    assert bundle_art.abs_path == str(entry_file.resolve())
+    record.sync_output_artifact(
+        artifact_id=bundle_art.id,
+        abs_path=str(bundle_dir.resolve()),
+        preserve_existing_abs_path=True,
+    )
+    assert bundle_art.abs_path == str(entry_file.resolve())

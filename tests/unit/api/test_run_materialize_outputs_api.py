@@ -827,7 +827,10 @@ def test_archive_run_outputs_uses_current_configured_mount_for_run_owned_file(
         assert archived["shared"].read_text(encoding="utf-8") == "historical\n"
         refreshed = tracker_b.get_run_outputs(run_id)["shared"]
         assert refreshed.container_uri == artifact.container_uri
-        assert refreshed.recovery_roots == [str(archive_root.resolve())]
+        assert refreshed.recovery_roots == [
+            str(current_workspace.resolve()),
+            str(archive_root.resolve()),
+        ]
 
         current_path.unlink()
         restored_root = tracker_b.run_dir / "restored"

@@ -45,12 +45,17 @@ from consist.core.container_policy import validate_recovery_registration_policy
 from consist.core.directory_artifacts import (
     build_directory_manifest,
     build_shapefile_bundle_manifest,
+    directory_allows_extra_files,
+    file_bundle_entry_name,
+    is_directory_artifact as _is_directory_artifact,
+    is_file_bundle_artifact as _is_file_bundle_artifact,
     is_valid_directory_artifact_tree,
+    is_valid_shapefile_bundle_source,
     materialize_directory_tree,
     materialize_shapefile_bundle,
+    require_directory_artifact_manifest as _directory_artifact_manifest,
+    require_shapefile_bundle_metadata,
     validate_directory_destination,
-    validate_directory_manifest,
-    validate_directory_tree,
     validate_shapefile_bundle_destination,
     validate_shapefile_bundle_root,
 )
@@ -783,43 +788,8 @@ def _make_hydrated_output(
     )
 
 
-def _is_directory_artifact(artifact: Artifact) -> bool:
-    """Return whether an artifact has the strict directory-artifact contract."""
-    meta = artifact.meta if isinstance(artifact.meta, dict) else {}
-    return meta.get("directory_artifact") is True
-
-
-def _is_file_bundle_artifact(artifact: Artifact) -> bool:
-    """Return whether an artifact has the strict Shapefile bundle contract."""
-    meta = artifact.meta if isinstance(artifact.meta, dict) else {}
-    return (
-        meta.get("file_bundle_artifact") is True
-        or meta.get("file_bundle") == "shapefile"
-    )
-
-
 def _shapefile_bundle_metadata(artifact: Artifact) -> tuple[str, dict[str, object]]:
-    meta = artifact.meta if isinstance(artifact.meta, dict) else {}
-    entry = meta.get("file_bundle_entry")
-    if not (isinstance(entry, str) and Path(entry).name == entry):
-        uri = artifact.container_uri or ""
-        uri_path = uri.split("://", 1)[-1] if "://" in uri else uri
-        entry_name = Path(uri_path).name
-        if entry_name:
-            entry = entry_name
-        else:
-            raise ValueError(
-                f"shapefile bundle artifact {artifact.key!r} has no valid entry"
-            )
-    manifest = meta.get("file_bundle_manifest") or meta.get("directory_manifest")
-    if not isinstance(manifest, Mapping):
-        raise ValueError(f"shapefile bundle artifact {artifact.key!r} has no manifest")
-    normalized = validate_directory_manifest(manifest)
-    if artifact.hash != normalized["tree_hash"]:
-        raise ValueError(
-            f"shapefile bundle artifact {artifact.key!r} manifest does not match artifact identity"
-        )
-    return entry, normalized
+    return require_shapefile_bundle_metadata(artifact, fallback_uri_name=True)
 
 
 def _is_legacy_zarr_artifact(artifact: Artifact) -> bool:
@@ -830,21 +800,6 @@ def _is_legacy_zarr_artifact(artifact: Artifact) -> bool:
 def _is_legacy_shapefile_artifact(artifact: Artifact) -> bool:
     """Return whether a Shapefile artifact predates immutable bundle manifests."""
     return artifact.driver == "shapefile" and not _is_file_bundle_artifact(artifact)
-
-
-def _directory_artifact_manifest(artifact: Artifact) -> dict[str, object]:
-    meta = artifact.meta if isinstance(artifact.meta, dict) else {}
-    manifest = meta.get("directory_manifest")
-    if not isinstance(manifest, Mapping):
-        raise ValueError(
-            f"directory artifact {artifact.key!r} has no persisted manifest"
-        )
-    normalized = validate_directory_manifest(manifest)
-    if artifact.hash != normalized["tree_hash"]:
-        raise ValueError(
-            f"directory artifact {artifact.key!r} manifest does not match artifact identity"
-        )
-    return normalized
 
 
 def _make_materialized_artifact(
@@ -1270,7 +1225,7 @@ def _derive_historical_remap(
     tuple[Path, Path] | None
         Historical root and safe relative path, or ``None`` when unmappable.
     """
-    meta = run.meta if isinstance(run.meta, dict) else {}
+    meta = run.meta if (run is not None and isinstance(run.meta, dict)) else {}
     artifact_meta = artifact.meta if isinstance(artifact.meta, dict) else {}
 
     return tracker.fs.get_historical_remap(
@@ -1353,6 +1308,8 @@ def _derive_remappable_relative_path(
         else None
     )
 
+    if prefixes_arg is None:
+        return tracker.fs.get_remappable_relative_path(uri)
     return tracker.fs.get_remappable_relative_path(uri, scheme_prefixes=prefixes_arg)
 
 
@@ -1381,7 +1338,7 @@ def _derive_historical_root(
     Path | None
         Historical root, or ``None`` when no remappable root is recorded.
     """
-    meta = run.meta if isinstance(run.meta, dict) else {}
+    meta = run.meta if (run is not None and isinstance(run.meta, dict)) else {}
     artifact_meta = artifact.meta if isinstance(artifact.meta, dict) else {}
 
     return tracker.fs.get_historical_root(
@@ -1472,6 +1429,7 @@ def find_existing_recovery_source_path(
     run,
     source_root: Path | None,
     source_validator: Callable[[Path], bool] | None = None,
+    fallback_validator: Callable[[Path], bool] | None = None,
     preserve_raw_paths: bool = False,
 ) -> tuple[Path | None, Path | None, bool]:
     """Find the first valid filesystem source for historical recovery.
@@ -1489,6 +1447,9 @@ def find_existing_recovery_source_path(
     source_validator : callable, optional
         Predicate applied to existing candidates. False candidates are skipped;
         exceptions are propagated to the caller.
+    fallback_validator : callable, optional
+        Secondary predicate applied across candidates only when no candidate
+        satisfies ``source_validator``.
     preserve_raw_paths : bool, default False
         Whether the validator should receive unresolved candidate paths for
         caller-owned symlink validation.
@@ -1524,17 +1485,21 @@ def find_existing_recovery_source_path(
         recovery_roots=recovery_roots,
         preserve_raw_paths=preserve_raw_paths,
     )
-    for root in candidate_roots:
-        candidate = root / relative_path
-        validator_path = candidate if preserve_raw_paths else candidate.resolve()
-        if candidate.exists() and (
-            source_validator is None or source_validator(validator_path)
-        ):
-            return (
-                relative_path,
-                candidate if preserve_raw_paths else candidate.resolve(),
-                True,
-            )
+    validators = (
+        (source_validator, fallback_validator)
+        if fallback_validator is not None
+        else (source_validator,)
+    )
+    for validator in validators:
+        for root in candidate_roots:
+            candidate = root / relative_path
+            validator_path = candidate if preserve_raw_paths else candidate.resolve()
+            if candidate.exists() and (validator is None or validator(validator_path)):
+                return (
+                    relative_path,
+                    candidate if preserve_raw_paths else candidate.resolve(),
+                    True,
+                )
 
     return relative_path, None, bool(candidate_roots)
 
@@ -1587,6 +1552,21 @@ def _direct_artifact_source_path(
     return None
 
 
+def _is_valid_scalar_recovery_candidate(
+    tracker: "Tracker", candidate_path: Path, artifact: Artifact
+) -> bool:
+    if not candidate_path.is_file() or not artifact.hash:
+        return True
+    try:
+        return (
+            tracker.identity.compute_file_checksum(str(candidate_path)) == artifact.hash
+        )
+    except AttributeError:
+        return True
+    except (FileNotFoundError, OSError, ValueError):
+        return False
+
+
 def _select_materialize_artifact_source(
     tracker: "Tracker",
     *,
@@ -1636,6 +1616,19 @@ def _select_materialize_artifact_source(
         else None
     )
     is_dir_artifact = _is_directory_artifact(artifact)
+    is_bundle_artifact = _is_file_bundle_artifact(artifact)
+
+    def _is_valid_manifest_candidate(candidate_path: Path) -> bool:
+        if is_dir_artifact:
+            return (
+                is_valid_directory_artifact_tree(candidate_path, artifact) is not False
+            )
+        if is_bundle_artifact:
+            return (
+                is_valid_shapefile_bundle_source(candidate_path, artifact) is not False
+            )
+        return _is_valid_scalar_recovery_candidate(tracker, candidate_path, artifact)
+
     fallback_existing: (
         tuple[
             Path,
@@ -1659,21 +1652,14 @@ def _select_materialize_artifact_source(
         seen_roots.add(root_key)
         candidate = resolved_root / relative_path
         if candidate.exists():
-            if (
-                not is_dir_artifact
-                or is_valid_directory_artifact_tree(candidate, artifact) is not False
-            ):
+            if _is_valid_manifest_candidate(candidate):
                 return candidate, source_kind, True
             if fallback_existing is None:
                 fallback_existing = (candidate, source_kind, True)
         if unprefixed_rel is not None and unprefixed_rel != relative_path:
             fallback_candidate = resolved_root / unprefixed_rel
             if fallback_candidate.exists():
-                if (
-                    not is_dir_artifact
-                    or is_valid_directory_artifact_tree(fallback_candidate, artifact)
-                    is not False
-                ):
+                if _is_valid_manifest_candidate(fallback_candidate):
                     return fallback_candidate, source_kind, True
                 if fallback_existing is None:
                     fallback_existing = (fallback_candidate, source_kind, True)
@@ -1685,10 +1671,7 @@ def _select_materialize_artifact_source(
         allow_tracker_uri=not bool(artifact.run_id),
     )
     if direct_source is not None:
-        if (
-            not is_dir_artifact
-            or is_valid_directory_artifact_tree(direct_source, artifact) is not False
-        ):
+        if _is_valid_manifest_candidate(direct_source):
             return direct_source, "artifact_uri", bool(candidate_roots)
         if fallback_existing is None:
             fallback_existing = (
@@ -1890,9 +1873,8 @@ def materialize_artifact(
                 )
             if should_validate:
                 meta = artifact.meta if isinstance(artifact.meta, dict) else {}
-                entry = meta.get("file_bundle_entry")
-                if not (isinstance(entry, str) and Path(entry).name == entry):
-                    entry = destination.name
+                entry = file_bundle_entry_name(artifact, fallback=destination.name)
+                assert entry is not None
                 manifest = meta.get("file_bundle_manifest") or meta.get(
                     "directory_manifest"
                 )
@@ -1966,15 +1948,21 @@ def materialize_artifact(
                     message=f"Destination {destination} exists but is not a directory.",
                     resolvable=False,
                 )
+            manifest = (
+                artifact.meta.get("directory_manifest")
+                if isinstance(artifact.meta, dict)
+                else None
+            )
+            needs_partial_completion = False
             if should_validate:
-                manifest = (
-                    artifact.meta.get("directory_manifest")
-                    if isinstance(artifact.meta, dict)
-                    else None
-                )
                 if manifest is not None:
                     try:
-                        validate_directory_tree(destination, manifest)
+                        already_complete = validate_directory_destination(
+                            destination,
+                            manifest,
+                            preserve_existing=True,
+                            allow_extra_files=directory_allows_extra_files(artifact),
+                        )
                     except (ValueError, OSError) as exc:
                         return _make_materialized_artifact(
                             artifact,
@@ -1988,6 +1976,21 @@ def materialize_artifact(
                             ),
                             resolvable=False,
                         )
+                    if not already_complete:
+                        if source_path is None:
+                            return _make_materialized_artifact(
+                                artifact,
+                                status="hash_mismatch",
+                                path=None,
+                                source_path=source_path,
+                                target_path=destination,
+                                message=(
+                                    f"Existing destination for artifact {artifact.key!r} "
+                                    "is incomplete and no recovery source is available."
+                                ),
+                                resolvable=False,
+                            )
+                        needs_partial_completion = True
                 elif expected_hash:
                     try:
                         dest_manifest = build_directory_manifest(destination)
@@ -2017,14 +2020,26 @@ def materialize_artifact(
                             ),
                             resolvable=False,
                         )
-            return _make_materialized_artifact(
-                artifact,
-                status="already_present",
-                path=destination,
-                source_path=source_path,
-                target_path=destination,
-                resolvable=True,
-            )
+            elif (
+                isinstance(manifest, Mapping)
+                and isinstance(manifest.get("entries"), list)
+                and source_path is not None
+            ):
+                needs_partial_completion = any(
+                    isinstance(entry, Mapping)
+                    and isinstance(entry.get("path"), str)
+                    and not (destination / entry["path"]).exists()
+                    for entry in manifest["entries"]
+                )
+            if not needs_partial_completion:
+                return _make_materialized_artifact(
+                    artifact,
+                    status="already_present",
+                    path=destination,
+                    source_path=source_path,
+                    target_path=destination,
+                    resolvable=True,
+                )
 
         else:
             if destination.is_dir():
@@ -2088,9 +2103,8 @@ def materialize_artifact(
 
     if _is_file_bundle_artifact(artifact):
         meta = artifact.meta if isinstance(artifact.meta, dict) else {}
-        entry = meta.get("file_bundle_entry")
-        if not (isinstance(entry, str) and Path(entry).name == entry):
-            entry = destination.name
+        entry = file_bundle_entry_name(artifact, fallback=destination.name)
+        assert entry is not None
 
         manifest = meta.get("file_bundle_manifest") or meta.get("directory_manifest")
 
@@ -2283,6 +2297,7 @@ def materialize_artifact(
                         destination,
                         manifest,
                         preserve_existing=preserve_existing,
+                        allow_extra_files=directory_allows_extra_files(artifact),
                     )
                 except (ValueError, OSError) as exc:
                     return _make_materialized_artifact(
@@ -2339,11 +2354,34 @@ def materialize_artifact(
                     )
 
         try:
-            materialized, skipped_existing = _materialize_path(
-                source=source_path,
-                destination=destination,
-                preserve_existing=preserve_existing,
-            )
+            if (
+                preserve_existing
+                and destination.exists()
+                and isinstance(manifest, Mapping)
+                and isinstance(manifest.get("entries"), list)
+            ):
+                materialized_any = False
+                for entry in manifest["entries"]:
+                    if not isinstance(entry, Mapping) or not isinstance(
+                        entry.get("path"), str
+                    ):
+                        continue
+                    rel_member = entry["path"]
+                    member_mat, _ = _materialize_path(
+                        source=source_path / rel_member,
+                        destination=destination / rel_member,
+                        preserve_existing=True,
+                    )
+                    if member_mat:
+                        materialized_any = True
+                materialized = materialized_any
+                skipped_existing = not materialized_any
+            else:
+                materialized, skipped_existing = _materialize_path(
+                    source=source_path,
+                    destination=destination,
+                    preserve_existing=preserve_existing,
+                )
         except (OSError, shutil.Error, RuntimeError, ValueError) as exc:
             if on_missing == "raise":
                 raise RuntimeError(
@@ -2957,6 +2995,7 @@ def plan_run_output_hydration(
                     destination,
                     _directory_artifact_manifest(artifact),
                     preserve_existing=preserve_existing,
+                    allow_extra_files=directory_allows_extra_files(artifact),
                 )
             except ValueError as exc:
                 outputs[artifact.key] = _make_hydrated_output(
@@ -3030,6 +3069,11 @@ def plan_run_output_hydration(
                 tracker, selected_run=run, artifact=artifact
             )
             is_dir_artifact = _is_directory_artifact(artifact)
+            is_bundle_artifact = _is_file_bundle_artifact(artifact)
+            has_manifest_validator = is_dir_artifact or is_bundle_artifact
+            has_scalar_hash_validator = not has_manifest_validator and bool(
+                artifact.hash
+            )
             relative_path, source_path, has_candidate_roots = (
                 find_existing_recovery_source_path(
                     tracker,
@@ -3044,23 +3088,32 @@ def plan_run_output_hydration(
                             )
                         )
                         if is_dir_artifact
+                        else (
+                            lambda candidate, artifact=artifact: (
+                                is_valid_shapefile_bundle_source(candidate, artifact)
+                                is not False
+                            )
+                        )
+                        if is_bundle_artifact
+                        else (
+                            lambda candidate, artifact=artifact: (
+                                _is_valid_scalar_recovery_candidate(
+                                    tracker, candidate, artifact
+                                )
+                            )
+                        )
+                        if has_scalar_hash_validator
                         else None
                     ),
-                    preserve_raw_paths=is_dir_artifact,
+                    fallback_validator=(
+                        (lambda _: True)
+                        if (has_manifest_validator or has_scalar_hash_validator)
+                        else None
+                    ),
+                    preserve_raw_paths=has_manifest_validator,
                 )
             )
-            if is_dir_artifact and source_path is None:
-                relative_path, source_path, has_candidate_roots = (
-                    find_existing_recovery_source_path(
-                        tracker,
-                        artifact=artifact,
-                        run=owning_run,
-                        source_root=source_root,
-                        source_validator=None,
-                        preserve_raw_paths=True,
-                    )
-                )
-            if _is_file_bundle_artifact(artifact) and source_path is not None:
+            if is_bundle_artifact and source_path is not None:
                 source_path = (
                     source_path if source_path.is_dir() else source_path.parent
                 )
@@ -3317,6 +3370,7 @@ def execute_planned_output_hydration(
                     item.destination,
                     manifest,
                     preserve_existing=preserve_existing,
+                    allow_extra_files=directory_allows_extra_files(item.artifact),
                 )
                 status: HydrationStatus = (
                     "materialized_directory_from_filesystem"

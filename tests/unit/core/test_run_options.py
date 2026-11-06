@@ -138,7 +138,8 @@ def test_run_completion_archive_policy_validation_and_round_trip() -> None:
     with pytest.raises(ValueError, match="mode must be 'copy'"):
         RunCompletionArchivePolicy(archive_root="/tmp/archive", mode="move")  # type: ignore[arg-type]
 
-    policy = RunCompletionArchivePolicy(archive_root="/tmp/archive")
+    policy = RunCompletionArchivePolicy(archive_root="  /tmp/archive  ")
+    assert policy.archive_root == Path("/tmp/archive")
     merged = merge_run_options(
         output_policy=OutputPolicyOptions(
             output_missing="error",

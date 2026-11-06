@@ -196,7 +196,7 @@ capture binds to a numbered wildcard explicitly, so the filename layout stays
 fail-closed and discovery-only patterns remain unchanged:
 
 ``` python
-from consist import EnumCapture, FilenamePattern, IntCapture, OutputSet
+from consist import EnumCapture, FilenamePattern, IntCapture, OutputSet, StringCapture
 
 yearly = OutputSet(
     root="annual",
@@ -215,6 +215,13 @@ purpose = OutputSet(
         )
     ),
 )
+
+region = OutputSet(
+    root="regional_outputs",
+    include=FilenamePattern.glob("summary_*.parquet").with_captures(
+        StringCapture(name="region", wildcard=1, pattern=r"[a-z0-9_]+")
+    ),
+)
 ```
 
 Capture-aware patterns match the output-set relative path, reject `**`, and
@@ -222,8 +229,9 @@ require every wildcard to be bound. Captured values are stored with their real
 types on member artifacts, so `year` is queryable as an integer rather than a
 string.
 
-The current capture surface is intentionally narrow: integer and enum-style
-captures cover the supported v1 cases. If you need another typed capture, open
+The current capture surface covers integer (`IntCapture`), closed-vocabulary
+(`EnumCapture`), and single-segment string (`StringCapture`, with an optional
+fullmatch `pattern=...` regex) captures. If you need another typed capture, open
 an issue first so the extension can be designed deliberately instead of growing
 ad hoc.
 

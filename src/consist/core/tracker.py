@@ -524,6 +524,7 @@ class Tracker:
         # In-Memory State (The Source of Truth)
         self.current_consist: Optional[ConsistRecord] = None
         self._active_coupler: Optional["Coupler"] = None
+        self._couplers: weakref.WeakSet["Coupler"] = weakref.WeakSet()
 
         # Introspection State (Last completed run)
         self._last_consist: Optional[ConsistRecord] = None
@@ -825,11 +826,11 @@ class Tracker:
         """
         Default run subdirectory pattern.
 
-        Uses `<parent_run_id>/<model>/iteration_<iteration>` when available, otherwise
+        Uses `<parent_run_id>/<model>/<run_id>` when available, otherwise
         `<model>/<run_id>`.
         """
-        if run.parent_run_id and run.iteration is not None:
-            return f"{run.parent_run_id}/{run.model_name}/iteration_{run.iteration}"
+        if run.parent_run_id:
+            return f"{run.parent_run_id}/{run.model_name}/{run.id}"
         return f"{run.model_name}/{run.id}"
 
     def set_run_subdir_fn(self, fn: Optional[Callable[[Run], str]]) -> None:
@@ -1170,9 +1171,14 @@ class Tracker:
         *,
         mode: Literal["copy", "move"] = "copy",
         append: bool = True,
+        prepend_source_mount_root: bool = True,
     ) -> Path:
         return self._archive_service.archive_artifact(
-            artifact, archive_root, mode=mode, append=append
+            artifact,
+            archive_root,
+            mode=mode,
+            append=append,
+            prepend_source_mount_root=prepend_source_mount_root,
         )
 
     def register_artifact_recovery_copy(
@@ -1268,9 +1274,15 @@ class Tracker:
         keys: Sequence[str] | None = None,
         mode: Literal["copy", "move"] = "copy",
         append: bool = True,
+        prepend_source_mount_root: bool = True,
     ) -> ArchivedOutputs:
         return self._archive_service.archive_run_outputs(
-            run_id, archive_root, keys=keys, mode=mode, append=append
+            run_id,
+            archive_root,
+            keys=keys,
+            mode=mode,
+            append=append,
+            prepend_source_mount_root=prepend_source_mount_root,
         )
 
     def archive_current_run_outputs(
@@ -1280,9 +1292,14 @@ class Tracker:
         keys: Sequence[str] | None = None,
         mode: Literal["copy", "move"] = "copy",
         append: bool = True,
+        prepend_source_mount_root: bool = True,
     ) -> ArchivedOutputs:
         return self._archive_service.archive_current_run_outputs(
-            archive_root, keys=keys, mode=mode, append=append
+            archive_root,
+            keys=keys,
+            mode=mode,
+            append=append,
+            prepend_source_mount_root=prepend_source_mount_root,
         )
 
     def _parse_artifact_facet_from_registered_parsers(
@@ -1645,9 +1662,9 @@ class Tracker:
             Supports DataFrame/Series/xarray returns and path-like returns. If omitted,
             Consist auto-logs artifact-like returns (Path/str/Artifact or dict[str, ...])
             when ``output_paths`` is not provided.
-        output_paths : Optional[Mapping[str, ArtifactRef]], optional
-            Output file paths to log. Dict maps artifact keys to host paths,
-            Artifact refs, or ``ArtifactSpec`` declarations.
+        output_paths : Optional[Mapping[str, OutputPathRef]], optional
+            Output file or directory paths to log. Dict maps artifact keys to host
+            paths, ``Artifact`` refs, or ``OutputArtifactSpec`` declarations.
         profile_file_schema : bool | {"if_changed"} | None, optional
             Run-scoped default for automatic file schema profiling of logged
             inputs and declared file outputs. Per-artifact specs can override it.
@@ -1666,7 +1683,8 @@ class Tracker:
             `cache_epoch`, `validate_cached_outputs`, `code_identity`,
             `code_identity_extra_deps`).
         output_policy : Optional[OutputPolicyOptions], optional
-            Grouped output policies (`output_mismatch`, `output_missing`).
+            Grouped output policies (`output_mismatch`, `output_missing`,
+            `run_completion_archive`).
         execution_options : Optional[ExecutionOptions], optional
             Grouped execution controls (`input_binding`, legacy `load_inputs`,
             `input_materialization`, `input_paths`,
@@ -2026,6 +2044,10 @@ class Tracker:
         code_identity_extra_deps: Optional[List[str]] = None,
         output_mismatch: str = "warn",
         output_missing: str = "warn",
+        output_policy: Optional[OutputPolicyOptions] = None,
+        run_completion_archive: Optional[
+            Union[RunCompletionArchivePolicy, Literal[False]]
+        ] = None,
     ) -> Iterator["Tracker"]:
         """
         Context manager for inline tracing of a run with inline execution.
@@ -2092,8 +2114,9 @@ class Tracker:
 
         outputs : Optional[List[str]], optional
             Names of output artifacts to log. Each item is a key name for logged outputs.
-        output_paths : Optional[Mapping[str, ArtifactRef]], optional
-            Output file paths to log. Dict maps artifact keys to host paths or Artifact refs.
+        output_paths : Optional[Mapping[str, OutputPathRef]], optional
+            Output file or directory paths to log. Dict maps artifact keys to host
+            paths, ``Artifact`` refs, or ``OutputArtifactSpec`` declarations.
         capture_dir : Optional[Path], optional
             Directory to scan for outputs. New/modified files are auto-logged.
         capture_pattern : str, default "*"
@@ -2124,6 +2147,12 @@ class Tracker:
             Behavior when output count doesn't match: "warn", "error", or "ignore".
         output_missing : str, default "warn"
             Behavior when expected outputs are missing: "warn", "error", or "ignore".
+        output_policy : Optional[OutputPolicyOptions], optional
+            Grouped output policies (`output_mismatch`, `output_missing`,
+            `run_completion_archive`).
+        run_completion_archive : Optional[Union[RunCompletionArchivePolicy, Literal[False]]], optional
+            Optional run-completion archive policy for this traced run, or ``False``
+            to disable a scenario-level archive policy.
 
         Yields
         ------
@@ -2212,6 +2241,8 @@ class Tracker:
             code_identity_extra_deps=code_identity_extra_deps,
             output_mismatch=output_mismatch,
             output_missing=output_missing,
+            output_policy=output_policy,
+            run_completion_archive=run_completion_archive,
         ) as active_tracker:
             yield active_tracker
 
@@ -2224,13 +2255,18 @@ class Tracker:
         step_tags: Optional[List[str]] = None,
         step_facet: Optional[Dict[str, Any]] = None,
         step_cache_hydration: Optional[str] = None,
-        step_run_completion_archive: Optional[RunCompletionArchivePolicy] = None,
         name_template: Optional[str] = None,
         cache_epoch: Optional[int] = None,
         coupler: Optional["Coupler"] = None,
         require_outputs: Optional[Iterable[str]] = None,
         resume_from_run_id: Optional[str] = None,
         resume_phase: CouplerSnapshotPhase = "post",
+        step_run_completion_archive: Optional[
+            Union[
+                RunCompletionArchivePolicy,
+                Callable[[str], Optional[RunCompletionArchivePolicy]],
+            ]
+        ] = None,
         **kwargs: Any,
     ) -> ScenarioContext:
         """
@@ -2267,9 +2303,6 @@ class Tracker:
         step_cache_hydration : Optional[str], optional
             Default cache hydration policy for all scenario steps unless overridden
             in a specific `scenario.trace(...)` or `scenario.run(...)`.
-        step_run_completion_archive : Optional[RunCompletionArchivePolicy], optional
-            Default run-completion archive policy for all `scenario.run(...)` steps
-            unless overridden via per-step `output_policy.run_completion_archive`.
         name_template : Optional[str], optional
             Optional step name template applied when scenario.run() is called without
             an explicit name and no step-level template is provided.
@@ -2284,6 +2317,11 @@ class Tracker:
             the scenario.
         resume_phase : CouplerSnapshotPhase, default "post"
             The snapshot phase ("init", "pre", or "post") to restore when resuming.
+        step_run_completion_archive : Optional[Union[RunCompletionArchivePolicy, Callable[[str], Optional[RunCompletionArchivePolicy]]]], optional
+            Default run-completion archive policy (or a ``Callable[[step_name], Optional[RunCompletionArchivePolicy]]``)
+            for all ``scenario.run(...)`` and ``scenario.trace(...)`` steps unless
+            overridden per step via ``run_completion_archive`` or
+            ``output_policy.run_completion_archive`` (including ``False`` to disable).
         **kwargs : Any
             Additional metadata or arguments for the header run (including `facet_from`).
 
@@ -2310,13 +2348,13 @@ class Tracker:
             step_tags=step_tags,
             step_facet=step_facet,
             step_cache_hydration=step_cache_hydration,
-            step_run_completion_archive=step_run_completion_archive,
             name_template=name_template,
             cache_epoch=cache_epoch,
             coupler=coupler,
             require_outputs=require_outputs,
             resume_from_run_id=resume_from_run_id,
             resume_phase=resume_phase,
+            step_run_completion_archive=step_run_completion_archive,
             **kwargs,
         )
 
@@ -3141,6 +3179,10 @@ class Tracker:
             Whether to index scalar facet fields for querying.
         **meta : Any
             Additional key-value pairs to store in the artifact's `meta` field.
+            For directory outputs (``artifact_kind="directory"`` or Zarr
+            directories), pass ``allow_extra_files=True`` (or
+            ``directory_allow_extra_files=True``) to tolerate extra unrecorded
+            files during cache validation and historical recovery.
 
         Returns
         -------
@@ -5594,6 +5636,18 @@ class Tracker:
         """
         return self.events.on_run_failed(callback)
 
+    def off_run_start(self, callback: Callable[[Run], None]) -> None:
+        """Unregister a previously registered start callback if present."""
+        self.events.off_run_start(callback)
+
+    def off_run_complete(self, callback: Callable[[Run, List[Artifact]], None]) -> None:
+        """Unregister a previously registered completion callback if present."""
+        self.events.off_run_complete(callback)
+
+    def off_run_failed(self, callback: Callable[[Run, Exception], None]) -> None:
+        """Unregister a previously registered failure callback if present."""
+        self.events.off_run_failed(callback)
+
     def _emit_run_start(self, run: Run):
         self.events.emit_start(run)
 
@@ -5816,6 +5870,139 @@ class Tracker:
         self._flush_json()
         # We also sync to DB immediately so external monitors can see progress/tags
         self._sync_run_to_db(self.current_consist.run)
+
+    def set_output_meta(
+        self,
+        key: str,
+        meta: Mapping[str, Any],
+        *,
+        merge: bool = True,
+    ) -> None:
+        """
+        Attach or queue metadata for a declared or logged output artifact key.
+
+        If an output artifact with ``key`` has already been logged in the active
+        run (for example via ``log_output`` or ``log_artifact``), its metadata is
+        updated immediately in memory, DuckDB, and ``consist.json``. When the step
+        finishes on a cache miss, Consist also merges (or replaces, when
+        ``merge=False``) this metadata into any declared output logged for ``key``
+        before persisting to DuckDB, applying ``RunCompletionArchivePolicy``,
+        flushing ``consist.json``, and snapshotting the scenario coupler. On cache
+        hits, calling ``set_output_meta`` is a no-op.
+
+        Parameters
+        ----------
+        key : str
+            Declared or logged output artifact key to update.
+        meta : Mapping[str, Any]
+            JSON-serializable metadata mapping to merge into (or replace on) the
+            output artifact's ``meta`` dictionary.
+        merge : bool, default True
+            When ``True``, merge ``meta`` into existing user metadata on the
+            output artifact. When ``False``, replace existing user metadata while
+            preserving Consist system metadata keys.
+
+        Raises
+        ------
+        RuntimeError
+            If no run is currently active.
+        ValueError
+            If ``key`` is empty or whitespace-only.
+        TypeError
+            If ``meta`` is not a mapping or does not normalize to a JSON object.
+        """
+        if not self.current_consist:
+            raise RuntimeError("set_output_meta requires an active run.")
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError("key must be a non-empty string.")
+        if not isinstance(meta, MappingABC):
+            raise TypeError("meta must be a mapping.")
+        normalized = normalize_json(dict(meta))
+        if not isinstance(normalized, dict):
+            raise TypeError("meta must normalize to a JSON object mapping.")
+        from consist.models.run import _PendingOutputMetaEntry
+
+        existing_entry = self.current_consist._pending_output_meta.get(key)
+        if merge and existing_entry is not None:
+            merged_pending = dict(existing_entry.meta)
+            merged_pending.update(normalized)
+            entry = _PendingOutputMetaEntry(
+                meta=merged_pending,
+                merge=existing_entry.merge,
+            )
+        else:
+            entry = _PendingOutputMetaEntry(meta=dict(normalized), merge=merge)
+        self.current_consist._pending_output_meta[key] = entry
+
+        if self.is_cached:
+            return
+
+        from consist.models.artifact import merge_artifact_output_meta
+
+        for art in self.current_consist.outputs:
+            if art.key == key:
+                existing_art_meta = dict(art.meta) if isinstance(art.meta, dict) else {}
+                art.meta = merge_artifact_output_meta(
+                    existing_art_meta, normalized, merge=merge
+                )
+                entry.applied_object_ids.add(id(art))
+                if self.db is not None:
+                    self.db.update_artifact_meta(art, dict(art.meta))
+                self._flush_json()
+
+    set_pending_output_meta = set_output_meta
+
+    def set_archive_root(
+        self,
+        archive_root: Union[
+            str,
+            os.PathLike[str],
+            Callable[[], Optional[Union[str, os.PathLike[str]]]],
+            None,
+        ],
+        *,
+        mode: Literal["copy"] = "copy",
+        prepend_source_mount_root: bool = True,
+    ) -> None:
+        """
+        Dynamically set, override, or disable the run-completion archive policy
+        for the currently active run.
+
+        Passing ``archive_root=None`` disables run-completion archival for the
+        active run even if a scenario- or step-level ``RunCompletionArchivePolicy``
+        was configured.
+
+        Parameters
+        ----------
+        archive_root : Union[str, os.PathLike[str], Callable[[], Optional[Union[str, os.PathLike[str]]]], None]
+            Destination directory path, a zero-argument callable returning an
+            optional destination path, or ``None`` to disable run-completion
+            archival for the active run.
+        mode : Literal["copy"], default "copy"
+            Archive transfer mode (``"copy"``).
+        prepend_source_mount_root : bool, default True
+            When ``True``, nest archived files under the last path segment of the
+            source mount root to prevent layout collisions across mounts.
+
+        Raises
+        ------
+        RuntimeError
+            If no run is currently active.
+        ValueError
+            If ``archive_root`` is an empty string or ``mode`` is invalid.
+        TypeError
+            If ``archive_root`` or ``prepend_source_mount_root`` has an invalid type.
+        """
+        if not self.current_consist:
+            raise RuntimeError("set_archive_root requires an active run.")
+        if archive_root is None:
+            self.current_consist._pending_archive_policy = False
+            return
+        self.current_consist._pending_archive_policy = RunCompletionArchivePolicy(
+            archive_root=archive_root,
+            mode=mode,
+            prepend_source_mount_root=prepend_source_mount_root,
+        )
 
     def define_step(self, **kwargs) -> Callable:
         """
