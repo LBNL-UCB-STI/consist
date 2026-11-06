@@ -960,3 +960,613 @@ def test_bundle_configs_disambiguates_duplicate_directory_basenames(
     assert [d.name for d in extracted] == ["configs", "1_configs"]
     assert (extracted[0] / "settings.yaml").exists()
     assert (extracted[1] / "settings_local.yaml").exists()
+
+
+def test_constants_list_and_probabilities_dlt_ingest(tracker, tmp_path: Path):
+    from sqlmodel import Session, select
+    from consist.models.activitysim import (
+        ActivitySimProbabilitiesCache,
+        ActivitySimProbabilitiesEntriesCache,
+        ActivitySimProbabilitiesMetaEntriesCache,
+    )
+
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    (config_dir / "settings.yaml").write_text(
+        "models:\n  - stop_frequency\n", encoding="utf-8"
+    )
+    (config_dir / "stop_frequency.yaml").write_text(
+        "PROBS_SPEC: stop_frequency_probs_1.csv\n"
+        "CONSTANTS:\n"
+        "  auto_modes:\n"
+        "    - DRIVEALONEFREE\n"
+        "    - SHARED2FREE\n"
+        "  nested:\n"
+        "    threshold: 3.5\n",
+        encoding="utf-8",
+    )
+    (config_dir / "stop_frequency_probs_1.csv").write_text(
+        "purpose_id,outbound,0_stops,1_stop,All\n1,True,0.6,0.4,1.0\n",
+        encoding="utf-8",
+    )
+
+    adapter = ActivitySimConfigAdapter()
+    with tracker.start_run("as_dlt_json_test", "activitysim"):
+        tracker.canonicalize_config(adapter, [config_dir], strict=True, ingest=True)
+
+    const_rows = adapter.constants_rows(
+        key="CONSTANTS.auto_modes", value_column="value_json", tracker=tracker
+    )
+    assert len(const_rows) == 1
+    assert const_rows[0][1] == ["DRIVEALONEFREE", "SHARED2FREE"]
+
+    with Session(tracker.engine) as session:
+        prob_cache_rows = session.exec(
+            select(ActivitySimProbabilitiesCache).where(
+                ActivitySimProbabilitiesCache.file_name == "stop_frequency_probs_1.csv"
+            )
+        ).all()
+        assert len(prob_cache_rows) == 1
+        assert prob_cache_rows[0].dims == {"purpose_id": 1.0, "outbound": True}
+        assert prob_cache_rows[0].probs == {"0_stops": 0.6, "1_stop": 0.4}
+
+    prob_rows = adapter.run_link_rows(
+        ActivitySimProbabilitiesEntriesCache,
+        columns=[ActivitySimProbabilitiesEntriesCache.value_num],
+        where=[
+            ActivitySimProbabilitiesEntriesCache.file_name
+            == "stop_frequency_probs_1.csv",
+            ActivitySimProbabilitiesEntriesCache.key == "0_stops",
+        ],
+        tracker=tracker,
+    )
+    assert len(prob_rows) == 1
+    assert prob_rows[0][0] == pytest.approx(0.6)
+
+    all_rows = adapter.run_link_rows(
+        ActivitySimProbabilitiesEntriesCache,
+        columns=[ActivitySimProbabilitiesEntriesCache.value_num],
+        where=[
+            ActivitySimProbabilitiesEntriesCache.file_name
+            == "stop_frequency_probs_1.csv",
+            ActivitySimProbabilitiesEntriesCache.key == "All",
+        ],
+        tracker=tracker,
+    )
+    assert all_rows == []
+
+    meta_rows = adapter.run_link_rows(
+        ActivitySimProbabilitiesMetaEntriesCache,
+        columns=[ActivitySimProbabilitiesMetaEntriesCache.value_num],
+        where=[
+            ActivitySimProbabilitiesMetaEntriesCache.file_name
+            == "stop_frequency_probs_1.csv",
+            ActivitySimProbabilitiesMetaEntriesCache.key == "purpose_id",
+        ],
+        tracker=tracker,
+    )
+    assert len(meta_rows) == 1
+    assert meta_rows[0][0] == pytest.approx(1.0)
+
+
+def test_multi_root_csv_only_overlay_identity(tracker, tmp_path: Path):
+    base_dir = tmp_path / "common"
+    overlay_dir = tmp_path / "resident"
+    base_dir.mkdir()
+    overlay_dir.mkdir()
+
+    (base_dir / "settings.yaml").write_text(
+        "inherit_settings: true\nmodels:\n  - stop_frequency\n",
+        encoding="utf-8",
+    )
+    (base_dir / "stop_frequency.yaml").write_text(
+        "COEFFICIENTS: stop_frequency_coefficients.csv\n",
+        encoding="utf-8",
+    )
+    (base_dir / "stop_frequency_coefficients.csv").write_text(
+        "coefficient_name,value\ntime,-0.02\n",
+        encoding="utf-8",
+    )
+    # Overlay has ONLY a CSV file and no settings.yaml
+    (overlay_dir / "stop_frequency_coefficients.csv").write_text(
+        "coefficient_name,value\ntime,-0.05\n",
+        encoding="utf-8",
+    )
+
+    adapter = ActivitySimConfigAdapter()
+    captured_dirs: list[list[Path]] = []
+    captured_configs_dir: list[list[Path]] = []
+    captured_var_kwargs: list[list[str]] = []
+    captured_both: list[tuple[Path, list[Path] | None]] = []
+
+    def step_with_config_dirs(config_dirs: list[Path]) -> None:
+        captured_dirs.append(list(config_dirs))
+
+    def step_with_configs_dir(configs_dir: list[Path]) -> None:
+        captured_configs_dir.append(list(configs_dir))
+
+    def step_with_var_kwargs(**kwargs) -> None:
+        captured_var_kwargs.append(sorted(kwargs.keys()))
+
+    def step_with_both(config_dir: Path, config_dirs: list[Path] | None = None) -> None:
+        captured_both.append((config_dir, config_dirs))
+
+    res1 = adapter.run_with_config_overrides(
+        tracker=tracker,
+        base_config_dirs=[overlay_dir, base_dir],
+        overrides=ConfigOverrides(),
+        output_dir=tmp_path / "staged_1",
+        fn=step_with_config_dirs,
+        name="as_multi_root_step",
+        model="activitysim",
+    )
+    assert len(captured_dirs) == 1
+    assert len(captured_dirs[0]) == 2
+    digest_1 = res1.run.meta["resolved_config_identity"]["digest"]
+    root_digests_1 = res1.run.meta["resolved_config_identity"]["root_digests"]
+    assert len(root_digests_1) == 2
+
+    # Mutate CSV in overlay_dir (which has no settings.yaml)
+    (overlay_dir / "stop_frequency_coefficients.csv").write_text(
+        "coefficient_name,value\ntime,-0.09\n",
+        encoding="utf-8",
+    )
+
+    res2 = adapter.run_with_config_overrides(
+        tracker=tracker,
+        base_config_dirs=[overlay_dir, base_dir],
+        overrides=ConfigOverrides(),
+        output_dir=tmp_path / "staged_2",
+        fn=step_with_config_dirs,
+        name="as_multi_root_step",
+        model="activitysim",
+    )
+    digest_2 = res2.run.meta["resolved_config_identity"]["digest"]
+    root_digests_2 = res2.run.meta["resolved_config_identity"]["root_digests"]
+    assert digest_2 != digest_1
+    assert root_digests_2[0] != root_digests_1[0]
+    assert root_digests_2[1] == root_digests_1[1]
+    assert res2.run.config_hash != res1.run.config_hash
+
+    # Verify configs_dir injection, **kwargs fallback, and config_dir precedence
+    adapter.run_with_config_overrides(
+        tracker=tracker,
+        base_config_dirs=[overlay_dir, base_dir],
+        overrides=ConfigOverrides(),
+        output_dir=tmp_path / "staged_configs_dir",
+        fn=step_with_configs_dir,
+        name="as_configs_dir_step",
+        model="activitysim",
+        config={"case": "configs_dir"},
+    )
+    assert len(captured_configs_dir) == 1
+    assert len(captured_configs_dir[0]) == 2
+
+    adapter.run_with_config_overrides(
+        tracker=tracker,
+        base_config_dirs=[overlay_dir, base_dir],
+        overrides=ConfigOverrides(),
+        output_dir=tmp_path / "staged_var_kwargs",
+        fn=step_with_var_kwargs,
+        name="as_var_kwargs_step",
+        model="activitysim",
+        config={"case": "var_kwargs"},
+    )
+    assert captured_var_kwargs == [["config_dir"]]
+
+    adapter.run_with_config_overrides(
+        tracker=tracker,
+        base_config_dirs=[overlay_dir, base_dir],
+        overrides=ConfigOverrides(),
+        output_dir=tmp_path / "staged_both",
+        fn=step_with_both,
+        name="as_both_step",
+        model="activitysim",
+        config={"case": "both"},
+    )
+    assert len(captured_both) == 1
+    assert captured_both[0][1] is None
+
+
+def test_spec_none_and_logsum_settings_discovery(tracker, tmp_path: Path):
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    (config_dir / "settings.yaml").write_text(
+        "use_shadow_pricing: true\n"
+        "models:\n"
+        "  - compute_disaggregate_accessibility\n"
+        "  - parking_location\n"
+        "  - work_from_home\n",
+        encoding="utf-8",
+    )
+    (config_dir / "constants.yaml").write_text(
+        "walk_speed: 3.0\n",
+        encoding="utf-8",
+    )
+    (config_dir / "shadow_pricing.yaml").write_text(
+        "SHADOW_PRICE_MAX_ITERATIONS: 5\n",
+        encoding="utf-8",
+    )
+    (config_dir / "disaggregate_accessibility.yaml").write_text(
+        "LOGSUM_SETTINGS: tour_mode_choice_logsum.yaml\n",
+        encoding="utf-8",
+    )
+    (config_dir / "tour_mode_choice_logsum.yaml").write_text(
+        "COEFFICIENTS: tour_mode_choice_coefficients.csv\n",
+        encoding="utf-8",
+    )
+    (config_dir / "tour_mode_choice_coefficients.csv").write_text(
+        "coefficient_name,value\nivt,-0.02\n",
+        encoding="utf-8",
+    )
+    (config_dir / "parking_location_choice.yaml").write_text(
+        "SPECIFICATION: parking_spec.csv\nALTS: parking_alts.csv\n",
+        encoding="utf-8",
+    )
+    (config_dir / "parking_spec.csv").write_text(
+        "Label,Description,Expression\nutil_park,Park,1\n",
+        encoding="utf-8",
+    )
+    (config_dir / "parking_alts.csv").write_text(
+        "alt,id\npark1,1\n",
+        encoding="utf-8",
+    )
+    (config_dir / "work_from_home.yaml").write_text(
+        "SPEC: None\nCONSTANTS:\n  wfh_flag: 1\n",
+        encoding="utf-8",
+    )
+
+    adapter = ActivitySimConfigAdapter()
+    plan = tracker.prepare_config(adapter, [config_dir], strict=True)
+    yaml_names = {p.name for p in plan.canonical.config_files}
+    assert "constants.yaml" in yaml_names
+    assert "shadow_pricing.yaml" in yaml_names
+    assert "disaggregate_accessibility.yaml" in yaml_names
+    assert "tour_mode_choice_logsum.yaml" in yaml_names
+    assert "parking_location_choice.yaml" in yaml_names
+    assert "work_from_home.yaml" in yaml_names
+
+    artifact_names = {spec.path.name for spec in plan.artifacts}
+    assert "tour_mode_choice_coefficients.csv" in artifact_names
+    assert "parking_spec.csv" in artifact_names
+    assert "parking_alts.csv" in artifact_names
+
+
+def test_infix_coefficients_and_probabilities_files_ingested(tracker, tmp_path: Path):
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    (config_dir / "settings.yaml").write_text(
+        "models:\n  - stop_frequency\n  - cdap\n",
+        encoding="utf-8",
+    )
+    (config_dir / "stop_frequency.yaml").write_text(
+        "SPEC_SEGMENTS:\n"
+        "  - WORK:\n"
+        "      COEFFICIENTS: stop_frequency_coefficients_work.csv\n"
+        "PROBS_SPEC: stop_frequency_probs_1.csv\n"
+        "COEFFICIENT_TEMPLATE: tour_mode_choice_coefficients_template_estb.csv\n",
+        encoding="utf-8",
+    )
+    # SFBay Description column should NOT become a dimensional segment
+    (config_dir / "stop_frequency_coefficients_work.csv").write_text(
+        "Description,value,coefficient_name\nWork intercept,-1.25,asc_work\n",
+        encoding="utf-8",
+    )
+    (config_dir / "stop_frequency_probs_1.csv").write_text(
+        "purpose_id,0_stops,1_stop\n1,0.7,0.3\n",
+        encoding="utf-8",
+    )
+    (config_dir / "tour_mode_choice_coefficients_template_estb.csv").write_text(
+        "coefficient_name,work\ncoef_ivt,coef_ivt_work\n",
+        encoding="utf-8",
+    )
+    # Expression spec table named *_coefficients.csv should be skipped as coefficients
+    (config_dir / "cdap.yaml").write_text(
+        "INDIV_AND_HH_SPEC: cdap_indiv_and_hh_coefficients.csv\n",
+        encoding="utf-8",
+    )
+    (config_dir / "cdap_indiv_and_hh_coefficients.csv").write_text(
+        "Description,Expression,M,N,H\nWork,ptype == 1,1.0,0.0,0.0\n",
+        encoding="utf-8",
+    )
+
+    adapter = ActivitySimConfigAdapter()
+    with tracker.start_run("as_infix_test", "activitysim"):
+        tracker.canonicalize_config(adapter, [config_dir], strict=True, ingest=True)
+
+    from consist.models.activitysim import (
+        ActivitySimCoefficientsCache,
+        ActivitySimCoefficientTemplateRefsCache,
+    )
+
+    coeff_rows = adapter.coefficients_rows(
+        file_name="stop_frequency_coefficients_work.csv",
+        coefficient="asc_work",
+        columns=[
+            ActivitySimCoefficientsCache.segment,
+            ActivitySimCoefficientsCache.source_type,
+            ActivitySimCoefficientsCache.value_num,
+        ],
+        tracker=tracker,
+    )
+    assert len(coeff_rows) == 1
+    assert coeff_rows[0][0] == ""
+    assert coeff_rows[0][1] == "direct"
+    assert coeff_rows[0][2] == pytest.approx(-1.25)
+
+    # Verify cdap_indiv_and_hh_coefficients.csv was skipped
+    cdap_rows = adapter.coefficients_rows(
+        file_name="cdap_indiv_and_hh_coefficients.csv",
+        tracker=tracker,
+    )
+    assert cdap_rows == []
+
+    # Verify infix template refs were ingested
+    tmpl_rows = adapter.run_link_rows(
+        ActivitySimCoefficientTemplateRefsCache,
+        columns=[
+            ActivitySimCoefficientTemplateRefsCache.coefficient_name,
+            ActivitySimCoefficientTemplateRefsCache.segment,
+            ActivitySimCoefficientTemplateRefsCache.referenced_coefficient,
+        ],
+        where=ActivitySimCoefficientTemplateRefsCache.file_name
+        == "tour_mode_choice_coefficients_template_estb.csv",
+        tracker=tracker,
+    )
+    assert len(tmpl_rows) == 1
+    assert tuple(tmpl_rows[0]) == ("coef_ivt", "work", "coef_ivt_work")
+
+
+def test_dimensional_coefficients_unique_primary_keys(tracker, tmp_path: Path):
+    from consist.models.activitysim import ActivitySimCoefficientsCache
+
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    (config_dir / "settings.yaml").write_text(
+        "models:\n  - accessibility\n  - parking_location\n",
+        encoding="utf-8",
+    )
+    (config_dir / "accessibility.yaml").write_text(
+        "COEFFICIENTS: accessibility_coefficients.csv\n",
+        encoding="utf-8",
+    )
+    (config_dir / "accessibility_coefficients.csv").write_text(
+        "coefficient_name,purpose,value,constrain\n"
+        "decay_exp,work,-0.05,T\n"
+        "decay_exp,retail,-0.08,F\n",
+        encoding="utf-8",
+    )
+    (config_dir / "parking_location_choice.yaml").write_text(
+        "COEFFICIENTS: parking_location_coefficients.csv\n",
+        encoding="utf-8",
+    )
+    (config_dir / "parking_location_coefficients.csv").write_text(
+        "purpose,income_group,coefficient\nwork,low,-1.5\nwork,high,-0.5\n",
+        encoding="utf-8",
+    )
+
+    adapter = ActivitySimConfigAdapter()
+    with tracker.start_run("as_dim_coeffs", "activitysim"):
+        tracker.canonicalize_config(adapter, [config_dir], strict=True, ingest=True)
+
+    acc_rows = adapter.coefficients_rows(
+        file_name="accessibility_coefficients.csv",
+        coefficient="decay_exp",
+        columns=[
+            ActivitySimCoefficientsCache.segment,
+            ActivitySimCoefficientsCache.source_type,
+            ActivitySimCoefficientsCache.value_num,
+            ActivitySimCoefficientsCache.dims_json,
+        ],
+        tracker=tracker,
+    )
+    assert len(acc_rows) == 2
+    segments = {row[0] for row in acc_rows}
+    assert segments == {'{"purpose": "retail"}', '{"purpose": "work"}'}
+    assert all(row[1] == "dimensional" for row in acc_rows)
+    assert all(row[0] == row[3] for row in acc_rows)
+
+    park_rows = adapter.coefficients_rows(
+        file_name="parking_location_coefficients.csv",
+        coefficient="coefficient",
+        columns=[
+            ActivitySimCoefficientsCache.segment,
+            ActivitySimCoefficientsCache.source_type,
+            ActivitySimCoefficientsCache.value_num,
+            ActivitySimCoefficientsCache.dims_json,
+        ],
+        tracker=tracker,
+    )
+    assert len(park_rows) == 2
+    park_segments = {row[0] for row in park_rows}
+    assert len(park_segments) == 2
+    assert all(row[1] == "dimensional" for row in park_rows)
+
+
+def test_inherit_settings_filename_and_nondefault_primary_config(
+    tracker, tmp_path: Path
+):
+    common_dir = tmp_path / "common"
+    ext_dir = tmp_path / "ext"
+    common_dir.mkdir()
+    ext_dir.mkdir()
+
+    (common_dir / "settings.yaml").write_text(
+        "households_sample_size: 1000\nmodels:\n  - initialize_households\n",
+        encoding="utf-8",
+    )
+    (common_dir / "initialize_households.yaml").write_text(
+        "CONSTANTS:\n  base_const: 10\n  override_const: 1\n",
+        encoding="utf-8",
+    )
+    (ext_dir / "settings_mp.yaml").write_text(
+        "inherit_settings: settings.yaml\nhouseholds_sample_size: 250\n",
+        encoding="utf-8",
+    )
+    (ext_dir / "initialize_households.yaml").write_text(
+        "inherit_settings: true\nCONSTANTS:\n  override_const: 2\n",
+        encoding="utf-8",
+    )
+
+    adapter = ActivitySimConfigAdapter(primary_config=Path("settings_mp.yaml"))
+    with tracker.start_run("as_inherit_mp", "activitysim"):
+        tracker.canonicalize_config(
+            adapter, [ext_dir, common_dir], strict=True, ingest=True
+        )
+
+    sample_rows = adapter.constants_rows(
+        file_name="settings_mp.yaml",
+        key="households_sample_size",
+        value_column="value_num",
+        tracker=tracker,
+    )
+    assert len(sample_rows) == 1
+    assert sample_rows[0][1] == pytest.approx(250.0)
+
+    base_const_rows = adapter.constants_rows(
+        file_name="initialize_households.yaml",
+        key="CONSTANTS.base_const",
+        value_column="value_num",
+        tracker=tracker,
+    )
+    assert len(base_const_rows) == 1
+    assert base_const_rows[0][1] == pytest.approx(10.0)
+
+    override_const_rows = adapter.constants_rows(
+        file_name="initialize_households.yaml",
+        key="CONSTANTS.override_const",
+        value_column="value_num",
+        tracker=tracker,
+    )
+    assert len(override_const_rows) == 1
+    assert override_const_rows[0][1] == pytest.approx(2.0)
+
+    # Also verify run_with_config_overrides propagates base_primary_config
+    captured_primary: list[Path | None] = []
+
+    def check_step(config_dirs: list[Path]) -> None:
+        captured_primary.append(config_dirs[0] / "settings_mp.yaml")
+
+    adapter.run_with_config_overrides(
+        tracker=tracker,
+        base_config_dirs=[ext_dir, common_dir],
+        base_primary_config=Path("settings_mp.yaml"),
+        overrides=ConfigOverrides(
+            constants={("settings_mp.yaml", "households_sample_size"): 500}
+        ),
+        output_dir=tmp_path / "staged_mp",
+        fn=check_step,
+        name="as_mp_override_step",
+        model="activitysim",
+    )
+    assert captured_primary[0] is not None and captured_primary[0].exists()
+
+
+def test_sandag_template_placeholder_detection_and_rendering(tracker, tmp_path: Path):
+    from consist.models.activitysim import (
+        ActivitySimConfigIngestRunLink,
+        ActivitySimConstantsCache,
+    )
+
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    (config_dir / "settings.yaml").write_text(
+        "models:\n  - route_stops\n",
+        encoding="utf-8",
+    )
+    (config_dir / "constants.yaml").write_text(
+        "year: {year:}\nSeniorAge: 65\nTurnOnTelecommute: {Activate Telecommute?:}\n",
+        encoding="utf-8",
+    )
+    (config_dir / "route_stops.yaml").write_text(
+        "location_settings_estb:\n  CONSTANTS:\n    sample_size: 20\n",
+        encoding="utf-8",
+    )
+
+    # 1. strict=True without template_values raises ValueError
+    strict_adapter = ActivitySimConfigAdapter()
+    with pytest.raises(ValueError, match="Unrendered template placeholder"):
+        tracker.prepare_config(strict_adapter, [config_dir], strict=True)
+
+    # 2. strict=False without template_values emits value_type="unrendered_template"
+    with tracker.start_run("as_unrendered_non_strict", "activitysim"):
+        tracker.canonicalize_config(
+            strict_adapter, [config_dir], strict=False, ingest=True
+        )
+
+    unrendered_rows = strict_adapter.constants_rows(
+        file_name="constants.yaml",
+        key="CONSTANTS.year",
+        columns=[
+            ActivitySimConstantsCache.value_type,
+            ActivitySimConstantsCache.value_str,
+        ],
+        tracker=tracker,
+    )
+    assert len(unrendered_rows) == 1
+    assert tuple(unrendered_rows[0]) == ("unrendered_template", "{year:}")
+
+    unrendered_q_rows = strict_adapter.constants_rows(
+        file_name="constants.yaml",
+        key="CONSTANTS.TurnOnTelecommute",
+        columns=[
+            ActivitySimConstantsCache.value_type,
+            ActivitySimConstantsCache.value_str,
+        ],
+        tracker=tracker,
+    )
+    assert len(unrendered_q_rows) == 1
+    assert tuple(unrendered_q_rows[0]) == (
+        "unrendered_template",
+        "{Activate Telecommute?:}",
+    )
+
+    # 3. With template_values provided, renders cleanly in strict=True and materializes rendered YAML
+    rendered_adapter = ActivitySimConfigAdapter(
+        template_values={"year": 2022, "Activate Telecommute?": 1}
+    )
+    with tracker.start_run("as_rendered_strict", "activitysim"):
+        tracker.canonicalize_config(
+            rendered_adapter, [config_dir], strict=True, ingest=True
+        )
+
+    year_rows = rendered_adapter.constants_rows(
+        file_name="constants.yaml",
+        key="CONSTANTS.year",
+        columns=[
+            ActivitySimConstantsCache.value_type,
+            ActivitySimConstantsCache.value_num,
+        ],
+        where=ActivitySimConfigIngestRunLink.run_id == "as_rendered_strict",
+        tracker=tracker,
+    )
+    assert len(year_rows) == 1
+    assert year_rows[0][0] == "num"
+    assert year_rows[0][1] == pytest.approx(2022.0)
+
+    estb_rows = rendered_adapter.constants_rows(
+        file_name="route_stops.yaml",
+        key="CONSTANTS.location_settings_estb.sample_size",
+        value_column="value_num",
+        where=ActivitySimConfigIngestRunLink.run_id == "as_rendered_strict",
+        tracker=tracker,
+    )
+    assert len(estb_rows) == 1
+    assert estb_rows[0][1] == pytest.approx(20.0)
+
+    # Verify materialize_from_config_dirs writes rendered YAML to staged directory
+    staged = rendered_adapter.materialize_from_config_dirs(
+        base_config_dirs=[config_dir],
+        base_primary_config=None,
+        overrides=ConfigOverrides(
+            constants={("constants.yaml", "CONSTANTS.SeniorAge"): 67}
+        ),
+        output_dir=tmp_path / "staged_rendered",
+        identity=tracker.identity,
+    )
+    staged_constants_text = (staged.root_dirs[0] / "constants.yaml").read_text(
+        encoding="utf-8"
+    )
+    assert "{year:}" not in staged_constants_text
+    assert "2022" in staged_constants_text
+    assert "67" in staged_constants_text

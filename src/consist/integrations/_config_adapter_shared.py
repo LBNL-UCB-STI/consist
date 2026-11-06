@@ -245,43 +245,83 @@ def run_with_config_overrides_orchestrated(
     auto_identity_label = identity_label.strip()
     merged_identity_inputs: list[Any] = list(identity_inputs or [])
     auto_identity_path: Path | None = None
+    materialized_roots = list(materialized.root_dirs)
     if resolved_config_identity == "auto":
         auto_identity_path = selected_root
-        merged_identity_inputs.append((auto_identity_label, selected_root))
+        if len(materialized_roots) <= 1:
+            merged_identity_inputs.append((auto_identity_label, selected_root))
+        else:
+            for idx, root_dir in enumerate(materialized_roots):
+                merged_identity_inputs.append(
+                    (f"{auto_identity_label}_root_{idx}", root_dir)
+                )
     resolved_identity_inputs = merged_identity_inputs or None
 
-    run_result = tracker.run(
-        fn=fn,
-        name=name,
-        model=model,
-        config=config,
-        adapter=run_adapter,
-        identity_inputs=resolved_identity_inputs,
-        outputs=outputs,
-        execution_options=resolved_execution_options,
-        **resolved_run_kwargs,
-    )
+    original_hashing_strategy = tracker.identity.hashing_strategy
+    if resolved_config_identity == "auto":
+        tracker.identity.hashing_strategy = "full"
+    try:
+        run_result = tracker.run(
+            fn=fn,
+            name=name,
+            model=model,
+            config=config,
+            adapter=run_adapter,
+            identity_inputs=resolved_identity_inputs,
+            outputs=outputs,
+            execution_options=resolved_execution_options,
+            **resolved_run_kwargs,
+        )
+    finally:
+        tracker.identity.hashing_strategy = original_hashing_strategy
     auto_digest: str | None = None
+    root_digests: list[str] | None = None
     if resolved_config_identity == "auto":
         consist_hash_inputs = (
             run_result.run.meta.get("consist_hash_inputs")
             if isinstance(run_result.run.meta, dict)
             else None
         )
-        if isinstance(consist_hash_inputs, dict):
-            resolved_digest = consist_hash_inputs.get(auto_identity_label)
-            if isinstance(resolved_digest, str):
-                auto_digest = resolved_digest
+        if len(materialized_roots) <= 1:
+            if isinstance(consist_hash_inputs, dict):
+                resolved_digest = consist_hash_inputs.get(auto_identity_label)
+                if isinstance(resolved_digest, str):
+                    auto_digest = resolved_digest
+            if auto_digest is None:
+                auto_digest = tracker.identity.digest_path(
+                    selected_root, hashing_strategy_override="full"
+                )
+        else:
+            collected_digests: list[str] = []
+            for idx, root_dir in enumerate(materialized_roots):
+                root_label = f"{auto_identity_label}_root_{idx}"
+                root_digest = (
+                    consist_hash_inputs.get(root_label)
+                    if isinstance(consist_hash_inputs, dict)
+                    else None
+                )
+                if not isinstance(root_digest, str):
+                    root_digest = tracker.identity.digest_path(
+                        root_dir, hashing_strategy_override="full"
+                    )
+                collected_digests.append(root_digest)
+            root_digests = collected_digests
+            auto_digest = canonical_json_sha256({"root_digests": collected_digests})
+            if isinstance(consist_hash_inputs, dict):
+                consist_hash_inputs[auto_identity_label] = auto_digest
 
     if run_result.run.meta is None:
         run_result.run.meta = {}
-    run_result.run.meta["resolved_config_identity"] = {
+    resolved_identity_meta: dict[str, Any] = {
         "mode": resolved_config_identity,
         "adapter": run_adapter.model_name,
         "label": auto_identity_label,
         "path": str(auto_identity_path) if auto_identity_path is not None else None,
         "digest": auto_digest,
     }
+    if root_digests is not None:
+        resolved_identity_meta["root_digests"] = root_digests
+    run_result.run.meta["resolved_config_identity"] = resolved_identity_meta
     tracker._flush_run_snapshot(run_result.run)
     tracker._sync_run_to_db(run_result.run)
     return run_result
@@ -301,6 +341,21 @@ def callable_accepts_kwarg(fn: Any, runtime_key: str) -> bool:
     )
 
 
+def _callable_has_explicit_named_param(fn: Any, runtime_key: str) -> bool:
+    """Return True only when ``runtime_key`` is an explicit named parameter on ``fn``."""
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return False
+    parameter = signature.parameters.get(runtime_key)
+    if parameter is None:
+        return False
+    return parameter.kind in (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    )
+
+
 def build_override_runtime_kwargs(
     *,
     fn: Any,
@@ -316,11 +371,15 @@ def build_override_runtime_kwargs(
     - are not already provided by the caller, and
     - are accepted by the target callable.
     """
-    mapping = (
-        dict(explicit_mapping)
-        if explicit_mapping is not None
-        else dict(default_mapping)
-    )
+    if explicit_mapping is not None:
+        mapping = dict(explicit_mapping)
+    else:
+        mapping = dict(default_mapping)
+        if not _callable_has_explicit_named_param(fn, "config_dir"):
+            for plural_key in ("config_dirs", "configs_dir"):
+                if _callable_has_explicit_named_param(fn, plural_key):
+                    mapping = {plural_key: "root_dirs"}
+                    break
     existing = dict(existing_runtime_kwargs or {})
     resolved_sources: dict[str, Any] = {
         "selected_root_dir": selected_root,
