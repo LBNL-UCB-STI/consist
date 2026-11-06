@@ -1910,8 +1910,6 @@ def _render_yaml_template_text(
                     replacement = "null"
                 elif isinstance(val, bool):
                     replacement = "true" if val else "false"
-                elif isinstance(val, (int, float)):
-                    replacement = str(val)
                 else:
                     replacement = str(val)
                 rendered = rendered.replace(token, replacement)
@@ -2323,9 +2321,9 @@ def _collect_reference_values(data: Any, *, allow_heuristics: bool) -> Set[str]:
                         "ALTS",
                         "ALTERNATIVES",
                     } or key_upper.endswith("_ALTS")
-                    if key_upper in _REFERENCE_KEYS:
-                        collect(value, allow_list=not is_alts_key)
-                    elif allow_heuristics and key_upper.endswith(_HEURISTIC_SUFFIXES):
+                    if key_upper in _REFERENCE_KEYS or (
+                        allow_heuristics and key_upper.endswith(_HEURISTIC_SUFFIXES)
+                    ):
                         collect(value, allow_list=not is_alts_key)
                 walk(value)
         elif isinstance(node, list):
@@ -2541,11 +2539,9 @@ def _build_constants_rows(
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     seen_file_names: set[str] = set()
-    yaml_files: list[Path] = list(config.config_files)
-    if config.primary_config and config.primary_config.name not in {
-        p.name for p in yaml_files
-    }:
-        yaml_files.insert(0, config.primary_config)
+    yaml_files: list[Path] = (
+        [config.primary_config] if config.primary_config else []
+    ) + list(config.config_files)
     for yaml_path in yaml_files:
         if yaml_path.name in seen_file_names:
             continue
@@ -2873,11 +2869,11 @@ def _iter_coefficients_rows(
                     "run_id": run_id,
                     "file_name": path.name,
                     "coefficient_name": coef_name,
-                    "segment": dims_json_str or "" if dims else "",
+                    "segment": dims_json_str or "",
                     "source_type": "dimensional" if dims else "direct",
                     "value_raw": raw,
                     "value_num": _parse_float(raw),
-                    "dims_json": dims_json_str if dims else None,
+                    "dims_json": dims_json_str,
                     "constrain": constrain or None,
                     "is_constrained": is_constrained,
                 }
@@ -3589,29 +3585,24 @@ def _apply_coefficients_override(
     updated = 0
     for row in rows:
         coef = (row.get(coeff_key) or "").strip()
-        if value_key:
-            if coef != coefficient_name:
-                continue
-            if dims_keys and segment:
-                dims = {
-                    key: _coerce_scalar(row.get(key) or "")
-                    for key in dims_keys
-                    if row.get(key) not in {None, ""}
-                }
-                row_segment = json.dumps(dims, sort_keys=True) if dims else ""
-                if row_segment != segment:
-                    continue
-            row[value_key] = str(value)
-        elif coeff_key == "coefficient" and dims_keys:
-            if coefficient_name not in {"coefficient", coef}:
-                continue
+        row_segment = ""
+        if dims_keys:
             dims = {
                 key: _coerce_scalar(row.get(key) or "")
                 for key in dims_keys
                 if row.get(key) not in {None, ""}
             }
             row_segment = json.dumps(dims, sort_keys=True) if dims else ""
-            if segment and row_segment != segment:
+        if value_key:
+            if coef != coefficient_name or (
+                dims_keys and segment and row_segment != segment
+            ):
+                continue
+            row[value_key] = str(value)
+        elif coeff_key == "coefficient" and dims_keys:
+            if coefficient_name not in {"coefficient", coef} or (
+                segment and row_segment != segment
+            ):
                 continue
             row[coeff_key] = str(value)
         else:
