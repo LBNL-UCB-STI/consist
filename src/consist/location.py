@@ -592,6 +592,75 @@ if "register_at_fork" in os.__dict__:
     os.register_at_fork(after_in_child=_reset_ledgers_after_fork)
 
 
+def _normalize_ledger_path_key(db_path: Path | str | None) -> str | None:
+    if db_path is None:
+        return None
+    raw = str(db_path).strip()
+    if not raw or raw == ":memory:":
+        return None
+    return str(Path(raw).expanduser().resolve())
+
+
+def register_live_ledger(
+    ledger: Any,
+    *,
+    instance_key: str,
+    db_path: Path | str | None = None,
+) -> None:
+    """Register a live ledger in the process-local weak registry by instance key and path."""
+    norm = _normalize_ledger_path_key(db_path)
+    with _lock:
+        _live_ledgers[instance_key] = ledger
+        if norm is not None:
+            _live_ledgers[norm] = ledger
+            _live_ledgers[f"path:{norm}"] = ledger
+
+
+def unregister_live_ledger(
+    ledger: Any | None = None,
+    *,
+    instance_key: str | None = None,
+    db_path: Path | str | None = None,
+) -> None:
+    """Remove a ledger from the process-local weak registry."""
+    norm = _normalize_ledger_path_key(db_path)
+    with _lock:
+        if instance_key is not None and (
+            ledger is None or _live_ledgers.get(instance_key) is ledger
+        ):
+            _live_ledgers.pop(instance_key, None)
+        if norm is not None:
+            if ledger is None or _live_ledgers.get(norm) is ledger:
+                _live_ledgers.pop(norm, None)
+            if ledger is None or _live_ledgers.get(f"path:{norm}") is ledger:
+                _live_ledgers.pop(f"path:{norm}", None)
+
+
+def lookup_live_ledger(ref: LedgerRef | str | None) -> Any | None:
+    """Look up a live in-process ledger by `LedgerRef` or `instance_key`."""
+    if ref is None:
+        return None
+    key = ref.instance_key if isinstance(ref, LedgerRef) else str(ref)
+    with _lock:
+        led = _live_ledgers.get(key)
+        if led is not None:
+            return led
+        if isinstance(ref, LedgerRef) and ref.db_uri:
+            norm = _normalize_ledger_path_key(ref.db_uri)
+            if norm is not None:
+                return _live_ledgers.get(f"path:{norm}") or _live_ledgers.get(norm)
+        return None
+
+
+def lookup_live_ledger_by_path(db_path: Path | str) -> Any | None:
+    """Look up a live in-process ledger by database path."""
+    norm = _normalize_ledger_path_key(db_path)
+    if norm is None:
+        return None
+    with _lock:
+        return _live_ledgers.get(f"path:{norm}") or _live_ledgers.get(norm)
+
+
 __all__ = [
     "EMPTY_META",
     "DbTableChangeToken",
@@ -610,6 +679,10 @@ __all__ = [
     "ObservationBasis",
     "SiteContext",
     "Witness",
+    "lookup_live_ledger",
+    "lookup_live_ledger_by_path",
+    "register_live_ledger",
+    "unregister_live_ledger",
     "witness_from_json",
     "witness_to_json",
 ]

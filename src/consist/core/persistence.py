@@ -66,6 +66,7 @@ from consist.models.run import (
     resolve_canonical_run_meta_field,
 )
 from consist.models.run_config_kv import RunConfigKV
+from consist.store.detect import ConsistError, DatabaseMigrationRequired
 
 if TYPE_CHECKING:
     from consist.models.artifact import Artifact
@@ -108,7 +109,7 @@ def _coerce_run_tags(run_tags: Any) -> Any:
     return run_tags
 
 
-class IncompatibleSchemaError(RuntimeError):
+class IncompatibleSchemaError(ConsistError):
     """Raised when a Consist database uses a newer schema version than supported."""
 
 
@@ -118,7 +119,9 @@ _V05_NOTICE_LOCK = threading.Lock()
 
 __all__ = [
     "ArtifactSchemaSelection",
+    "ConsistError",
     "DatabaseManager",
+    "DatabaseMigrationRequired",
     "IncompatibleSchemaError",
     "ProvenanceWriter",
     "SchemaProfileSource",
