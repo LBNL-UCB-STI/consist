@@ -4,6 +4,7 @@ import ast
 from datetime import datetime, timezone
 import os
 from pathlib import Path
+from typing import Any
 import uuid
 
 import duckdb
@@ -143,15 +144,26 @@ def test_init_v2_schema_rolls_back_atomically_on_failure(
         assert tables == set()
 
 
-def test_every_v1_sqlmodel_main_table_is_covered_by_v2_or_tripwires() -> None:
-    # Ensure all SQLModel models are imported so SQLModel.metadata.tables is populated.
+def _consist_v1_main_sqlmodel_tables() -> list[Any]:
+    """Return only Consist's built-in `consist.models.*` main-schema SQLModel tables."""
     import consist.core.persistence  # noqa: F401
 
-    main_sqlmodel_tables = {
-        table.name
-        for table in SQLModel.metadata.tables.values()
-        if table.schema is None
-    }
+    tables: dict[str, Any] = {}
+    queue = list(SQLModel.__subclasses__())
+    while queue:
+        cls = queue.pop()
+        queue.extend(cls.__subclasses__())
+        if not cls.__module__.startswith("consist.models"):
+            continue
+        table = cls.__dict__.get("__table__")
+        if table is not None and table.schema is None:
+            tables[table.name] = table
+    return list(tables.values())
+
+
+def test_every_v1_sqlmodel_main_table_is_covered_by_v2_or_tripwires() -> None:
+    main_sqlmodel_tables = {t.name for t in _consist_v1_main_sqlmodel_tables()}
+    assert len(main_sqlmodel_tables) >= 8
     covered = set(V2_TABLE_NAMES) | set(V2_VIEW_NAMES) | set(V1_ONLY_TABLE_NAMES)
     missing = main_sqlmodel_tables - covered
     assert missing == set()
@@ -192,9 +204,7 @@ def test_version_matrix_tripwire_defense_against_real_v2_database(
             assert v1_table in inspector.get_view_names()
             assert v1_table not in inspector.get_table_names()
 
-        main_v1_tables = [
-            t for t in SQLModel.metadata.tables.values() if t.schema is None
-        ]
+        main_v1_tables = _consist_v1_main_sqlmodel_tables()
         SQLModel.metadata.create_all(engine, tables=main_v1_tables)
 
         # Any attempt to query/insert v1 columns on a tripwire view or v2 table fails at bind time.
