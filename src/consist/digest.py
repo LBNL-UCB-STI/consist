@@ -281,6 +281,123 @@ def _quote_sql_ident(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
+def _has_nontrivial_pandas_index(df: Any) -> bool:
+    """Return True when a pandas DataFrame carries a named, MultiIndex, or non-default index."""
+    idx = df.index
+    names = list(idx.names)
+    if len(names) > 1:
+        return True
+    if names and names[0] is not None:
+        return True
+    # Unnamed single-level index: check if it is the default 0..N-1 positional index
+    if idx.__class__.__name__ == "RangeIndex":
+        return not (int(idx.start) == 0 and int(idx.step) == 1)
+    if idx.dtype.kind in ("i", "u"):
+        n = len(df)
+        if len(idx) == n and all(int(v) == i for i, v in enumerate(idx.tolist())):
+            return False
+    return len(idx) > 0
+
+
+def _dataframe_to_arrow_table_with_index(df: Any, pa_mod: Any) -> Any:
+    """Convert a pandas DataFrame to a PyArrow Table, preserving non-trivial indexes as leading columns."""
+    if len(set(df.columns)) != len(df.columns):
+        raise ValueError("Duplicate column names are not supported in digest_table")
+    if not _has_nontrivial_pandas_index(df):
+        return pa_mod.Table.from_pandas(df, preserve_index=False)
+
+    idx_names = [
+        str(name) if name is not None else f"__index_level_{i}__"
+        for i, name in enumerate(df.index.names)
+    ]
+    overlap = set(idx_names) & set(str(c) for c in df.columns)
+    if overlap:
+        raise ValueError(
+            f"Index level name(s) {sorted(overlap)} collide with DataFrame columns"
+        )
+    df_copy = df.copy()
+    df_copy.index.names = idx_names
+    df_reset = df_copy.reset_index()
+    return pa_mod.Table.from_pandas(df_reset, preserve_index=False)
+
+
+def _materialize_arrow_pandas_index(
+    table: Any,
+    pa_mod: Any,
+    columns: Sequence[str] | None,
+) -> tuple[Any, Sequence[str] | None]:
+    """Ensure non-trivial pandas indexes in a PyArrow Table are materialized as leading columns."""
+    meta = table.schema.pandas_metadata
+    if not meta:
+        return table, columns
+    raw_idx_cols = meta.get("index_columns", [])
+    if not raw_idx_cols:
+        return table, columns
+
+    has_nontrivial = False
+    for entry in raw_idx_cols:
+        if isinstance(entry, str):
+            has_nontrivial = True
+            break
+        if isinstance(entry, Mapping) and entry.get("kind") == "range":
+            if (
+                entry.get("name") is not None
+                or int(entry.get("start", 0)) != 0
+                or int(entry.get("step", 1)) != 1
+            ):
+                has_nontrivial = True
+                break
+
+    if not has_nontrivial:
+        return table, columns
+
+    idx_col_names: list[str] = []
+    for i, entry in enumerate(raw_idx_cols):
+        if isinstance(entry, str):
+            if entry in table.column_names:
+                idx_col_names.append(entry)
+        elif isinstance(entry, Mapping) and entry.get("kind") == "range":
+            col_name = (
+                str(entry["name"])
+                if entry.get("name") is not None
+                else f"__index_level_{i}__"
+            )
+            start = int(entry.get("start", 0))
+            stop = int(entry.get("stop", 0))
+            step = int(entry.get("step", 1))
+            if col_name not in table.column_names:
+                arr = pa_mod.array(range(start, stop, step), type=pa_mod.int64())
+                table = table.append_column(col_name, arr)
+            idx_col_names.append(col_name)
+
+    if columns is None and idx_col_names:
+        idx_set = set(idx_col_names)
+        non_idx_cols = [c for c in table.column_names if c not in idx_set]
+        columns = [*idx_col_names, *non_idx_cols]
+    return table, columns
+
+
+def _read_hdf5_dataframe_for_digest(
+    source_path: Path,
+    h5_key: str | None = None,
+) -> Any:
+    """Read an HDF5 fixed or table store member into a pandas DataFrame."""
+    pd_mod = importlib.import_module("pandas")
+    if h5_key is not None:
+        return pd_mod.read_hdf(source_path, key=h5_key)
+
+    with pd_mod.HDFStore(str(source_path), mode="r") as store:
+        keys = store.keys()
+        if not keys:
+            raise ValueError(f"HDF5 store contains no tables: {source_path}")
+        if len(keys) > 1:
+            raise ValueError(
+                f"HDF5 store {source_path} contains multiple keys {keys}; "
+                "specify h5_key to select a table."
+            )
+        return store.get(keys[0])
+
+
 def digest_table(
     source: Any,
     columns: Sequence[str] | None = None,
@@ -289,16 +406,20 @@ def digest_table(
     key_columns: Sequence[str] | None = None,
     profile: str = "ctd1",
     sqlite_table: str | None = None,
+    h5_key: str | None = None,
+    member: str | None = None,
 ) -> str:
     """Compute an order-invariant canonical SHA-256 tabular digest.
 
     Parameters
     ----------
-    source : pyarrow.Table, pyarrow.RecordBatch, pandas.DataFrame, Path, or str
+    source : pyarrow.Table, pyarrow.RecordBatch, pandas.DataFrame, DuckDBPyRelation, Path, or str
         Tabular data source to digest. If a Path/str is given, reads from Parquet,
-        CSV, or SQLite (if ``sqlite_table`` is provided).
+        CSV, HDF5 (``format="fixed"`` or ``format="table"``), or SQLite (if
+        ``sqlite_table`` is provided).
     columns : Sequence[str], optional
-        Declared column projection in strict order. If omitted, uses source column order.
+        Declared column projection in strict order. If omitted, uses source column order
+        (with non-trivial index columns placed first).
     key : Sequence[str], optional
         Sort key columns defining row ordering (``ASC NULLS FIRST``). If omitted,
         sorts across all projected columns.
@@ -310,6 +431,10 @@ def digest_table(
         "view_table/v1"), returns ``"sha256:<64-hex>"``.
     sqlite_table : str, optional
         Table name when ``source`` points to a SQLite database.
+    h5_key : str, optional
+        HDF5 key/path when ``source`` points to an HDF5 file.
+    member : str, optional
+        Alias for ``h5_key``.
 
     Returns
     -------
@@ -326,9 +451,16 @@ def digest_table(
         raise ValueError("Duplicate column names are not supported in digest_table")
 
     resolved_keys = key if key is not None else key_columns
+    effective_h5_key = h5_key if h5_key is not None else member
 
     if isinstance(source, (str, Path)):
+        raw_str = str(source)
         source_path = Path(source)
+        if not source_path.exists() and effective_h5_key is None and "::" in raw_str:
+            path_part, key_part = raw_str.split("::", 1)
+            source_path = Path(path_part)
+            effective_h5_key = key_part
+
         if not source_path.exists():
             raise FileNotFoundError(f"Source file not found: {source_path}")
 
@@ -379,21 +511,30 @@ def digest_table(
                     table = pa.table({})
             if columns is None:
                 columns = cols_to_query
+        elif effective_h5_key is not None or source_path.suffix.lower() in (
+            ".h5",
+            ".hdf5",
+            ".hdf",
+        ):
+            df_h5 = _read_hdf5_dataframe_for_digest(
+                source_path, h5_key=effective_h5_key
+            )
+            table = _dataframe_to_arrow_table_with_index(df_h5, pa)
         elif source_path.suffix.lower() == ".csv":
             import pyarrow.csv as pa_csv
 
             table = pa_csv.read_csv(source_path)
         else:
-            table = pq.read_table(
-                source_path,
-                columns=list(columns) if columns is not None else None,
-            )
+            table = pq.read_table(source_path)
+            table, columns = _materialize_arrow_pandas_index(table, pa, columns)
     elif isinstance(source, pa.Table):
-        table = source
+        table, columns = _materialize_arrow_pandas_index(source, pa, columns)
     elif isinstance(source, pa.RecordBatch):
-        table = pa.Table.from_batches([source])
+        table, columns = _materialize_arrow_pandas_index(
+            pa.Table.from_batches([source]), pa, columns
+        )
     elif isinstance(source, pa.RecordBatchReader):
-        table = source.read_all()
+        table, columns = _materialize_arrow_pandas_index(source.read_all(), pa, columns)
     else:
         # Check DataFrame or DuckDB relation via duck typing
         pandas_mod = sys.modules.get("pandas")
@@ -401,11 +542,7 @@ def digest_table(
             pandas_mod is not None
             and isinstance(source, pandas_mod.__dict__.get("DataFrame", ()))
         ) or source.__class__.__name__ == "DataFrame":
-            if len(set(source.columns)) != len(source.columns):
-                raise ValueError(
-                    "Duplicate column names are not supported in digest_table"
-                )
-            table = pa.Table.from_pandas(source, preserve_index=False)
+            table = _dataframe_to_arrow_table_with_index(source, pa)
         else:
             duckdb_mod = sys.modules.get("duckdb")
             if duckdb_mod is not None:
@@ -688,7 +825,9 @@ def normalize_logical_matrices_identity(raw_val: str) -> str:
     if not isinstance(raw_val, str):
         raise ValueError("logical matrices identity must be a string")
     val = raw_val.strip()
-    if val.startswith("sha256:logical_matrices:"):
+    if val.startswith("sha256:logical_matrices:v1:"):
+        digest = val.removeprefix("sha256:logical_matrices:v1:")
+    elif val.startswith("sha256:logical_matrices:"):
         digest = val.removeprefix("sha256:logical_matrices:")
     elif val.startswith("sha256:"):
         raise ValueError(
@@ -1741,12 +1880,614 @@ class MatrixContainerSummary:
     facets: Mapping[str, Any] = field(default_factory=dict)
 
 
+# --- v2 Content Identity Hub, SchemeRegistry, Identity & Comparison Engine ---
+
+_LOWER_HEX_RE = re.compile(r"^[0-9a-f]+$")
+_POLICY_SCHEME_RE = re.compile(r"^sha256:manifest-v1\+p:[0-9a-f]{64}$")
+
+
+class Kind(Enum):
+    """Classification of what equality on a digest scheme guarantees."""
+
+    BYTES = "bytes"
+    CONTAINER = "container"
+    LOGICAL = "logical"
+    FILTERED = "filtered"
+    SEMANTIC = "semantic"
+    HISTORICAL = "historical"
+
+
+class Agreement(Enum):
+    """Outcome of comparing two identities under an expectation contract."""
+
+    MATCH = "match"
+    MISMATCH = "mismatch"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class SchemeSpec:
+    """Metadata specification for a registered digest scheme."""
+
+    name: str
+    kind: Kind
+    applies_to: frozenset[str] = frozenset(
+        {"file", "tree", "bundle", "table", "matrix_set", "member"}
+    )
+    cost_rank: int = 10
+    hex_len: int = 64
+    aliases: tuple[str, ...] = ()
+    content_pure: bool = True
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name:
+            raise ValueError("SchemeSpec.name must be a non-empty string")
+        object.__setattr__(self, "applies_to", frozenset(self.applies_to))
+        object.__setattr__(self, "aliases", tuple(self.aliases))
+
+
+_FILE_DRIVERS: frozenset[str] = frozenset(
+    {
+        "file",
+        "parquet",
+        "csv",
+        "tsv",
+        "json",
+        "geojson",
+        "h5",
+        "hdf5",
+        "omx",
+        "netcdf",
+        "nc",
+        "feather",
+        "arrow",
+        "sqlite",
+        "txt",
+        "bin",
+    }
+)
+
+_BUILTIN_SCHEME_SPECS: tuple[SchemeSpec, ...] = (
+    SchemeSpec(
+        name="blake3:file",
+        kind=Kind.BYTES,
+        applies_to=_FILE_DRIVERS,
+        cost_rank=5,
+    ),
+    SchemeSpec(
+        name="sha256:file",
+        kind=Kind.BYTES,
+        applies_to=_FILE_DRIVERS,
+        cost_rank=10,
+    ),
+    SchemeSpec(
+        name="blosc2:header:v1",
+        kind=Kind.CONTAINER,
+        applies_to=frozenset({"blosc2", "zarr", "file", "tree"}),
+        cost_rank=15,
+    ),
+    SchemeSpec(
+        name="sha256:manifest-v1",
+        kind=Kind.CONTAINER,
+        applies_to=frozenset(
+            {"tree", "bundle", "directory", "zarr", "shapefile", "gtfs"}
+        ),
+        cost_rank=20,
+    ),
+    SchemeSpec(
+        name="sha256:legacy-dir-v0",
+        kind=Kind.CONTAINER,
+        applies_to=frozenset({"tree", "directory"}),
+        cost_rank=25,
+        content_pure=False,
+    ),
+    SchemeSpec(
+        name="ctd1:sha256",
+        kind=Kind.LOGICAL,
+        applies_to=frozenset(
+            {
+                "table",
+                "file",
+                "member",
+                "parquet",
+                "csv",
+                "tsv",
+                "h5_table",
+                "hdf5",
+                "h5",
+                "duckdb",
+                "sqlite",
+                "feather",
+                "arrow",
+                "dataframe",
+            }
+        ),
+        cost_rank=30,
+    ),
+    SchemeSpec(
+        name="sha256:logical_matrix:v1",
+        kind=Kind.LOGICAL,
+        applies_to=frozenset(
+            {"member", "matrix", "omx", "h5", "hdf5", "zarr", "npy", "npz"}
+        ),
+        cost_rank=35,
+        aliases=("sha256:logical_matrix",),
+    ),
+    SchemeSpec(
+        name="sha256:logical_matrices:v1",
+        kind=Kind.LOGICAL,
+        applies_to=frozenset(
+            {
+                "file",
+                "tree",
+                "matrix_set",
+                "member",
+                "omx",
+                "h5",
+                "hdf5",
+                "zarr",
+                "netcdf",
+                "nc",
+                "npz",
+            }
+        ),
+        cost_rank=40,
+        aliases=("sha256:logical_matrices",),
+    ),
+    SchemeSpec(
+        name="core_state/v1:sha256",
+        kind=Kind.LOGICAL,
+        applies_to=frozenset({"tree", "table"}),
+        cost_rank=45,
+    ),
+    SchemeSpec(
+        name="legacy-v1:unverified",
+        kind=Kind.HISTORICAL,
+        applies_to=frozenset({"historical"}),
+        cost_rank=999,
+        content_pure=False,
+    ),
+)
+
+
+class SchemeRegistry:
+    """Registry of digest schemes."""
+
+    _by_name: dict[str, SchemeSpec] = {}
+    _canonical_specs: dict[str, SchemeSpec] = {}
+
+    @classmethod
+    def register(cls, spec: SchemeSpec) -> SchemeSpec:
+        """Register a `SchemeSpec` by its canonical name and any aliases."""
+        if not isinstance(spec, SchemeSpec):
+            raise TypeError(f"Expected SchemeSpec, got {type(spec).__name__}")
+        cls._canonical_specs[spec.name] = spec
+        for alias in (spec.name, *spec.aliases):
+            cls._by_name[alias] = spec
+        return spec
+
+    @classmethod
+    def get(cls, scheme: str) -> SchemeSpec:
+        """Return the `SchemeSpec` for `scheme`, or raise `ValueError` if unregistered."""
+        if not isinstance(scheme, str) or not scheme:
+            raise ValueError(f"Invalid digest scheme {scheme!r}")
+        if _POLICY_SCHEME_RE.match(scheme):
+            return SchemeSpec(
+                name=scheme,
+                kind=Kind.FILTERED,
+                applies_to=frozenset({"tree", "bundle", "directory"}),
+                cost_rank=22,
+                hex_len=64,
+                content_pure=True,
+            )
+        try:
+            return cls._by_name[scheme]
+        except KeyError:
+            raise ValueError(f"Unregistered digest scheme {scheme!r}") from None
+
+    @classmethod
+    def is_historical(cls, scheme_or_digest: str | Digest | SchemeSpec) -> bool:
+        """Return True iff the given scheme, `Digest`, or `SchemeSpec` has `Kind.HISTORICAL`."""
+        if isinstance(scheme_or_digest, (Digest, SchemeSpec)):
+            return scheme_or_digest.kind is Kind.HISTORICAL
+        return cls.get(scheme_or_digest).kind is Kind.HISTORICAL
+
+    @classmethod
+    def all_specs(cls) -> tuple[SchemeSpec, ...]:
+        """Return all registered canonical `SchemeSpec` entries."""
+        return tuple(cls._canonical_specs.values())
+
+
+for _spec in _BUILTIN_SCHEME_SPECS:
+    SchemeRegistry.register(_spec)
+
+
+@dataclass(frozen=True, slots=True)
+class Digest:
+    """Scheme-qualified cryptographic digest."""
+
+    scheme: str
+    hex: str
+
+    def __post_init__(self) -> None:
+        spec = SchemeRegistry.get(self.scheme)
+        if not isinstance(self.hex, str) or not _LOWER_HEX_RE.fullmatch(self.hex):
+            raise ValueError(
+                f"Digest.hex must be a non-empty lowercase hex string, got {self.hex!r}"
+            )
+        if spec.hex_len > 0 and len(self.hex) != spec.hex_len:
+            raise ValueError(
+                f"Expected {spec.hex_len}-char lowercase hex for {spec.name}, got {self.hex!r}"
+            )
+        object.__setattr__(self, "scheme", spec.name)
+
+    @property
+    def value(self) -> str:
+        """Alias for `hex`."""
+        return self.hex
+
+    @property
+    def kind(self) -> Kind:
+        """Return the `Kind` of this digest's scheme."""
+        return SchemeRegistry.get(self.scheme).kind
+
+    @classmethod
+    def parse(cls, value: str) -> Digest:
+        """Parse `<scheme>:<hex>` using `rpartition(':')`."""
+        if not isinstance(value, str):
+            raise ValueError(f"Expected digest string, got {value!r}")
+        scheme, sep, hex_val = value.strip().rpartition(":")
+        if not sep or not scheme or not hex_val or scheme == "sha256":
+            raise ValueError(f"Unqualified or malformed digest {value!r}")
+        return cls(scheme=scheme, hex=hex_val)
+
+    def __str__(self) -> str:
+        return f"{self.scheme}:{self.hex}"
+
+
+class IdentityConflict(ValueError):
+    """Raised when two claims for the same scheme contradict."""
+
+
+@dataclass(frozen=True, slots=True)
+class Identity:
+    """Anchor-keyed content identity (never None). Equality and hash depend ONLY on `anchor`."""
+
+    anchor: Digest
+    claims: tuple[Digest, ...] = field(default=(), compare=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.anchor, Digest):
+            raise ValueError(
+                f"Identity.anchor must be a Digest, got {type(self.anchor).__name__}"
+            )
+        seen_by_scheme: dict[str, Digest] = {self.anchor.scheme: self.anchor}
+        for claim in self.claims:
+            if not isinstance(claim, Digest):
+                raise ValueError(
+                    f"Identity.claims elements must be Digest instances, got {type(claim).__name__}"
+                )
+            if self.anchor.kind is Kind.HISTORICAL or claim.kind is Kind.HISTORICAL:
+                raise ValueError(
+                    "Kind.HISTORICAL digests cannot participate in Identity.claims"
+                )
+            existing = seen_by_scheme.get(claim.scheme)
+            if existing is not None:
+                if existing.hex != claim.hex:
+                    raise IdentityConflict(
+                        f"Conflicting digests for scheme {claim.scheme!r}: "
+                        f"{existing.hex} != {claim.hex}"
+                    )
+                continue
+            seen_by_scheme[claim.scheme] = claim
+
+        object.__setattr__(self, "claims", tuple(seen_by_scheme.values())[1:])
+
+    @property
+    def all_digests(self) -> tuple[Digest, ...]:
+        """Return `(anchor, *claims)` in order without duplicates."""
+        return (self.anchor, *self.claims)
+
+    @property
+    def verifiable(self) -> bool:
+        """Return True iff `anchor` is not `Kind.HISTORICAL`."""
+        return self.anchor.kind is not Kind.HISTORICAL
+
+    def by_scheme(self) -> dict[str, Digest]:
+        """Return a mapping of `scheme -> Digest` across `all_digests`."""
+        return {d.scheme: d for d in self.all_digests}
+
+    def get(self, scheme: str) -> Digest | None:
+        """Return the `Digest` for `scheme` if present on this `Identity`."""
+        canonical = SchemeRegistry.get(scheme).name
+        return self.by_scheme().get(canonical)
+
+    def with_claim(self, d: Digest) -> Identity:
+        """Return a new `Identity` with `d` appended to `claims` (or `self` if already present)."""
+        nxt = Identity(anchor=self.anchor, claims=(*self.claims, d))
+        return self if nxt.claims == self.claims else nxt
+
+    @staticmethod
+    def refines(old: Identity, new: Identity) -> bool:
+        """Return True iff `new` has the same anchor as `old` and preserves all of `old`'s digests."""
+        if not isinstance(old, Identity) or not isinstance(new, Identity):
+            raise TypeError("Identity.refines requires two Identity instances")
+        if old.anchor != new.anchor:
+            return False
+        new_by_scheme = new.by_scheme()
+        return all(
+            new_by_scheme.get(scheme) == digest
+            for scheme, digest in old.by_scheme().items()
+        )
+
+
+def refines(a: Identity | SchemeSpec, b: Identity | SchemeSpec) -> bool:
+    """Return True if `b` refines `a` (for `Identity`) or scheme `a` refines scheme `b` (for `SchemeSpec`)."""
+    if isinstance(a, Identity) and isinstance(b, Identity):
+        return Identity.refines(a, b)
+    if isinstance(a, SchemeSpec) and isinstance(b, SchemeSpec):
+        if Kind.HISTORICAL in (a.kind, b.kind):
+            return False
+        if a.name == b.name:
+            return True
+        return (
+            a.kind in (Kind.BYTES, Kind.CONTAINER)
+            and a.content_pure
+            and b.content_pure
+            and bool(a.applies_to & b.applies_to)
+        )
+    raise TypeError(
+        "refines() requires two Identity instances or two SchemeSpec instances"
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class Expectation:
+    """Comparison contract specifying accepted digest kinds and optional pinned schemes."""
+
+    accepts_kinds: frozenset[Kind] = frozenset(
+        {Kind.BYTES, Kind.CONTAINER, Kind.LOGICAL, Kind.SEMANTIC, Kind.FILTERED}
+    )
+    pinned_schemes: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        kinds = frozenset(self.accepts_kinds)
+        if any(not isinstance(k, Kind) for k in kinds) or Kind.HISTORICAL in kinds:
+            raise ValueError(
+                "Expectation accepts_kinds must be non-HISTORICAL Kind values"
+            )
+        pinned = frozenset(
+            SchemeRegistry.get(s).name for s in (self.pinned_schemes or ())
+        )
+        if any(SchemeRegistry.is_historical(s) for s in pinned):
+            raise ValueError("Expectation cannot pin a Kind.HISTORICAL digest scheme")
+        object.__setattr__(self, "accepts_kinds", kinds)
+        object.__setattr__(self, "pinned_schemes", pinned)
+
+
+class Contract:
+    """Built-in `Expectation` presets for artifact identity comparison."""
+
+    EXACT_BYTES: Expectation = Expectation(
+        accepts_kinds=frozenset({Kind.BYTES, Kind.CONTAINER}),
+    )
+    LOGICAL_DATA: Expectation = Expectation(
+        accepts_kinds=frozenset({Kind.LOGICAL}),
+    )
+    SCHEMA_ONLY: Expectation = Expectation(
+        accepts_kinds=frozenset({Kind.SEMANTIC}),
+    )
+    ANY_SHARED: Expectation = Expectation(
+        accepts_kinds=frozenset(
+            {Kind.BYTES, Kind.CONTAINER, Kind.LOGICAL, Kind.SEMANTIC, Kind.FILTERED}
+        ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class Verdict:
+    """Result of comparing two `Identity` objects under an `Expectation` contract."""
+
+    agreement: Agreement
+    matched_scheme: str | None = None
+    needed: tuple[str, ...] = ()
+    agree_reachable: bool = True
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.needed, tuple):
+            object.__setattr__(self, "needed", tuple(self.needed))
+
+
+def compare(
+    a: Identity,
+    b: Identity,
+    contract: Expectation = Contract.LOGICAL_DATA,
+    *,
+    driver_a: str | None = None,
+    driver_b: str | None = None,
+) -> Verdict:
+    """Compare two `Identity` objects under `contract` and optional driver constraints."""
+    if a.anchor.kind is Kind.HISTORICAL or b.anchor.kind is Kind.HISTORICAL:
+        return Verdict(Agreement.UNKNOWN, None, (), False)
+
+    map_a = a.by_scheme()
+    map_b = b.by_scheme()
+
+    shared_schemes = [s for s in map_a if s in map_b]
+    agree_schemes = [s for s in shared_schemes if map_a[s].hex == map_b[s].hex]
+    differ_schemes = [s for s in shared_schemes if map_a[s].hex != map_b[s].hex]
+    for s_agree in agree_schemes:
+        for s_diff in differ_schemes:
+            if refines(SchemeRegistry.get(s_agree), SchemeRegistry.get(s_diff)):
+                raise IdentityConflict(
+                    f"Scheme {s_agree!r} agrees but refined scheme {s_diff!r} differs"
+                )
+
+    norm_driver_a = driver_a.strip().lower() if isinstance(driver_a, str) else None
+    norm_driver_b = driver_b.strip().lower() if isinstance(driver_b, str) else None
+
+    all_scheme_names = {
+        *(spec.name for spec in SchemeRegistry.all_specs()),
+        *map_a,
+        *map_b,
+        *contract.pinned_schemes,
+    }
+    candidates = sorted(
+        (
+            spec
+            for s in all_scheme_names
+            if (spec := SchemeRegistry.get(s)).kind in contract.accepts_kinds
+            and (not contract.pinned_schemes or spec.name in contract.pinned_schemes)
+            and (norm_driver_a is None or norm_driver_a in spec.applies_to)
+            and (norm_driver_b is None or norm_driver_b in spec.applies_to)
+        ),
+        key=lambda s: (s.cost_rank, s.name),
+    )
+
+    first_mismatch: str | None = None
+    for spec in candidates:
+        if spec.name in map_a and spec.name in map_b:
+            if map_a[spec.name].hex == map_b[spec.name].hex:
+                return Verdict(Agreement.MATCH, spec.name, (), True)
+            if first_mismatch is None:
+                first_mismatch = spec.name
+
+    if first_mismatch is not None:
+        return Verdict(Agreement.MISMATCH, first_mismatch, (), True)
+
+    needed = tuple(
+        spec.name
+        for spec in candidates
+        if spec.name not in map_a or spec.name not in map_b
+    )
+    return Verdict(Agreement.UNKNOWN, None, needed, bool(candidates))
+
+
+# --- v2 Digest Helpers for `sha256:manifest-v1`, `ctd1:sha256`, and Logical Matrices ---
+
+
+def _reject_manifest_symlink_components(path: Path, *, label: str) -> None:
+    candidate = Path(path).expanduser().absolute()
+    for p in reversed((candidate, *candidate.parents)):
+        if p.is_symlink():
+            raise ValueError(
+                f"directory artifact {label} cannot traverse a symlink: {p}"
+            )
+
+
+def build_manifest_v1(root: Path | str) -> dict[str, Any]:
+    """Build a deterministic v1-compatible directory manifest (`version=1`, `entries`, `tree_hash`).
+
+    Produces byte-for-byte identical canonical JSON and `tree_hash` to
+    `consist.core.directory_artifacts.build_directory_manifest`.
+    """
+    root_path = Path(root).expanduser().absolute()
+    _reject_manifest_symlink_components(root_path, label="root")
+    if not root_path.is_dir():
+        raise ValueError(f"directory artifact root must be a directory: {root_path}")
+
+    entries: list[dict[str, Any]] = []
+
+    def visit(directory: Path) -> None:
+        with os.scandir(directory) as scan:
+            children = sorted(scan, key=lambda entry: entry.name)
+        for child in children:
+            child_path = Path(child.path)
+            relative_path = child_path.relative_to(root_path).as_posix()
+            if child.is_symlink():
+                raise ValueError(
+                    f"directory artifact cannot contain a symlink: {child_path}"
+                )
+            if child.is_dir(follow_symlinks=False):
+                entries.append({"kind": "directory", "path": relative_path})
+                visit(child_path)
+                continue
+            if child.is_file(follow_symlinks=False):
+                entries.append(
+                    {
+                        "kind": "file",
+                        "path": relative_path,
+                        "sha256": file_sha256(child_path),
+                        "size": child.stat(follow_symlinks=False).st_size,
+                    }
+                )
+                continue
+            raise ValueError(
+                "directory artifact cannot contain a non-regular filesystem entry: "
+                f"{child_path}"
+            )
+
+    visit(root_path)
+    entries.sort(key=lambda entry: (entry["path"], entry["kind"]))
+    identity_payload = {"version": 1, "entries": entries}
+    return {**identity_payload, "tree_hash": canonical_json_sha256(identity_payload)}
+
+
+def compute_manifest_v1_digest(root: Path | str) -> Digest:
+    """Compute `Digest('sha256:manifest-v1', tree_hash)` for a directory tree."""
+    manifest = build_manifest_v1(root)
+    return Digest("sha256:manifest-v1", manifest["tree_hash"])
+
+
+def compute_ctd1_digest(
+    source: Any,
+    columns: Sequence[str] | None = None,
+    key: Sequence[str] | None = None,
+    *,
+    key_columns: Sequence[str] | None = None,
+    sqlite_table: str | None = None,
+    h5_key: str | None = None,
+    member: str | None = None,
+) -> Digest:
+    """Compute a `Digest('ctd1:sha256', <hex>)` over a tabular data source."""
+    raw = digest_table(
+        source,
+        columns=columns,
+        key=key,
+        key_columns=key_columns,
+        profile="ctd1",
+        sqlite_table=sqlite_table,
+        h5_key=h5_key,
+        member=member,
+    )
+    return Digest.parse(raw)
+
+
+def compute_logical_matrix_digest(
+    name: str,
+    arr: np.ndarray,
+    *,
+    policy: ArrayCanonicalizationPolicy | LogicalProfileName = "preserve_canonical",
+    na_value: Any = None,
+) -> Digest:
+    """Compute `Digest('sha256:logical_matrix:v1', <hex>)` for a single named matrix."""
+    hex_val = compute_array_entry_sha256(name, arr, policy=policy, na_value=na_value)
+    return Digest("sha256:logical_matrix:v1", hex_val)
+
+
 __all__ = [
     # Constants & Protocols
     "ARRAY_BINARY_PROTOCOL_VERSION",
     "FLOAT32_MATRICES_V1_POLICY",
     "PRESERVE_CANONICAL_POLICY",
     "LogicalProfileName",
+    # v2 Content Identity Hub & Comparison Engine
+    "Kind",
+    "SchemeSpec",
+    "SchemeRegistry",
+    "Digest",
+    "IdentityConflict",
+    "Identity",
+    "Expectation",
+    "Contract",
+    "Agreement",
+    "Verdict",
+    "refines",
+    "compare",
+    "build_manifest_v1",
+    "compute_manifest_v1_digest",
+    "compute_ctd1_digest",
+    "compute_logical_matrix_digest",
     # Dataclasses
     "ArrayCanonicalizationPolicy",
     "MatrixContainerSummary",
