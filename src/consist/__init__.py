@@ -18,7 +18,7 @@ except PackageNotFoundError:
     __version__ = "unknown"
 
 if TYPE_CHECKING:
-    from consist import admission, digest, gtfs
+    from consist import admission, digest, gtfs, location, meta
     from consist.api import (
         RelationConnectionLeakWarning,
         RunContext,
@@ -522,6 +522,8 @@ __all__ = [
     "admission",
     "digest",
     "gtfs",
+    "location",
+    "meta",
     "AdmissionEvidence",
     "AlignedPair",
     "ArchivedOutputs",
@@ -684,7 +686,7 @@ __all__ = [
 
 
 def __getattr__(name: str) -> Any:
-    if name in ("digest", "gtfs", "admission"):
+    if name in ("digest", "gtfs", "admission", "location", "meta"):
         module = importlib.import_module(f"consist.{name}")
         globals()[name] = module
         return module
@@ -713,5 +715,5 @@ def __dir__() -> list[str]:
     return sorted(
         set(globals().keys())
         | set(_CORE_EXPORTS.keys())
-        | {"digest", "gtfs", "admission"}
+        | {"digest", "gtfs", "admission", "location", "meta"}
     )

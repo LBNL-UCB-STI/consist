@@ -13,7 +13,14 @@ from consist.core.directory_artifacts import build_directory_manifest
 from consist.core.identity import CodeIdentityDescriptor, IdentityManager
 from consist.core.run_resolution import InputBindingRole
 from consist.core.tracker import Tracker
-from consist.digest import canonical_json_sha256, canonical_json_str, digest_table
+from consist.digest import (
+    Digest,
+    canonical_json_sha256,
+    canonical_json_str,
+    compute_ctd1_digest,
+    compute_manifest_v1_digest,
+    digest_table,
+)
 from consist.models.artifact import Artifact
 from consist.models.run import ConsistRecord
 
@@ -279,6 +286,96 @@ def test_golden_ctd1_duckdb_vs_parquet_and_arrow_parity(tmp_path: Path) -> None:
             digest_table(rel, columns=["id", "mode", "weight"], key=["id"])
             == expected_ctd1
         )
+        assert compute_ctd1_digest(
+            rel, columns=["id", "mode", "weight"], key=["id"]
+        ) == Digest.parse(expected_ctd1)
+
+
+def test_golden_ctd1_hdf5_fixed_and_table_and_nontrivial_index_parity(
+    tmp_path: Path,
+) -> None:
+    df = pd.DataFrame(
+        {
+            "id": [2, 1],
+            "mode": ["WALK", "DRIVE"],
+            "weight": [1.5, -0.0],
+        }
+    )
+    expected_ctd1 = (
+        "ctd1:sha256:fce9c342e6cee687af7b7fd0c841cd956af246fc5b9cb65bca31c9808e6871ef"
+    )
+
+    h5_fixed_path = tmp_path / "golden_fixed.h5"
+    h5_table_path = tmp_path / "golden_table.h5"
+    df.to_hdf(h5_fixed_path, key="/trips", mode="w", format="fixed")
+    df.to_hdf(h5_table_path, key="/trips", mode="w", format="table")
+
+    assert digest_table(h5_fixed_path, h5_key="/trips") == expected_ctd1
+    assert digest_table(h5_table_path, h5_key="/trips") == expected_ctd1
+    assert digest_table(f"{h5_fixed_path}::/trips") == expected_ctd1
+    assert str(compute_ctd1_digest(h5_table_path, h5_key="/trips")) == expected_ctd1
+
+    # Non-trivial named single-level Index round-tripped across DataFrame, HDF5, Parquet, CSV, DuckDB
+    df_named_idx = df.set_index("id")
+    parquet_idx_path = tmp_path / "named_idx.parquet"
+    csv_idx_path = tmp_path / "named_idx.csv"
+    h5_idx_fixed = tmp_path / "named_idx_fixed.h5"
+    h5_idx_table = tmp_path / "named_idx_table.h5"
+
+    df_named_idx.to_parquet(parquet_idx_path)
+    df_named_idx.to_csv(csv_idx_path)
+    df_named_idx.to_hdf(h5_idx_fixed, key="/trips", mode="w", format="fixed")
+    df_named_idx.to_hdf(h5_idx_table, key="/trips", mode="w", format="table")
+
+    assert digest_table(df_named_idx) == expected_ctd1
+    assert digest_table(pa.Table.from_pandas(df_named_idx)) == expected_ctd1
+    assert digest_table(parquet_idx_path) == expected_ctd1
+    assert (
+        digest_table(parquet_idx_path, columns=["id", "mode", "weight"])
+        == expected_ctd1
+    )
+    assert digest_table(csv_idx_path) == expected_ctd1
+    assert digest_table(h5_idx_fixed, h5_key="/trips") == expected_ctd1
+    assert digest_table(h5_idx_table, h5_key="/trips") == expected_ctd1
+
+    with duckdb.connect() as con:
+        df_reset = df_named_idx.reset_index()
+        con.register("df_reset_view", df_reset)
+        rel_idx = con.sql("SELECT id, mode, weight FROM df_reset_view")
+        assert digest_table(rel_idx) == expected_ctd1
+
+    # Non-trivial MultiIndex round-tripped across DataFrame, Arrow, HDF5 (fixed & table), Parquet, CSV, DuckDB
+    multi_idx = pd.MultiIndex.from_tuples(
+        [(20, "p2"), (10, "p1")],
+        names=["hh_id", "person_code"],
+    )
+    df_multi = pd.DataFrame(
+        {"trips": [3, 5], "score": [0.25, -0.0]},
+        index=multi_idx,
+    )
+    parquet_multi_path = tmp_path / "multi_idx.parquet"
+    csv_multi_path = tmp_path / "multi_idx.csv"
+    h5_multi_fixed = tmp_path / "multi_fixed.h5"
+    h5_multi_table = tmp_path / "multi_table.h5"
+    df_multi.to_parquet(parquet_multi_path)
+    df_multi.to_csv(csv_multi_path)
+    df_multi.to_hdf(h5_multi_fixed, key="/persons", mode="w", format="fixed")
+    df_multi.to_hdf(h5_multi_table, key="/persons", mode="w", format="table")
+
+    expected_multi = compute_ctd1_digest(df_multi)
+    assert compute_ctd1_digest(pa.Table.from_pandas(df_multi)) == expected_multi
+    assert compute_ctd1_digest(parquet_multi_path) == expected_multi
+    assert compute_ctd1_digest(csv_multi_path) == expected_multi
+    assert compute_ctd1_digest(h5_multi_fixed, h5_key="/persons") == expected_multi
+    assert compute_ctd1_digest(h5_multi_table, h5_key="/persons") == expected_multi
+
+    with duckdb.connect() as con:
+        df_multi_reset = df_multi.reset_index()
+        con.register("df_multi_view", df_multi_reset)
+        rel_multi = con.sql(
+            "SELECT hh_id, person_code, trips, score FROM df_multi_view"
+        )
+        assert compute_ctd1_digest(rel_multi) == expected_multi
 
 
 def test_golden_v1_directory_manifest_canonical_json_and_tree_hash(
@@ -308,3 +405,6 @@ def test_golden_v1_directory_manifest_canonical_json_and_tree_hash(
         == "cf052b4219689018f5499b4ff2eb8a34c9f4db946ba74587c0ef633affe33c68"  # pragma: allowlist secret
     )
     assert canonical_json_sha256(identity) == manifest["tree_hash"]
+    assert compute_manifest_v1_digest(root) == Digest(
+        "sha256:manifest-v1", manifest["tree_hash"]
+    )

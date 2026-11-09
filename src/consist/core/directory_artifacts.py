@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from consist.digest import canonical_json_sha256, file_sha256
+from consist.digest import build_manifest_v1, canonical_json_sha256, file_sha256
 
 if TYPE_CHECKING:
     from consist.models.artifact import Artifact
@@ -27,46 +27,7 @@ def build_directory_manifest(root: Path) -> dict[str, Any]:
     ones, and every regular file is represented by a normalized relative path.
     Symlinks and non-regular filesystem entries are rejected.
     """
-    root_path = Path(root).expanduser().absolute()
-    _reject_symlink_components(root_path, label="root")
-    if not root_path.is_dir():
-        raise ValueError(f"directory artifact root must be a directory: {root_path}")
-
-    entries: list[dict[str, Any]] = []
-
-    def visit(directory: Path) -> None:
-        with os.scandir(directory) as scan:
-            children = sorted(scan, key=lambda entry: entry.name)
-        for child in children:
-            child_path = Path(child.path)
-            relative_path = _normalize_relative_path(child_path.relative_to(root_path))
-            if child.is_symlink():
-                raise ValueError(
-                    f"directory artifact cannot contain a symlink: {child_path}"
-                )
-            if child.is_dir(follow_symlinks=False):
-                entries.append({"kind": "directory", "path": relative_path})
-                visit(child_path)
-                continue
-            if child.is_file(follow_symlinks=False):
-                entries.append(
-                    {
-                        "kind": "file",
-                        "path": relative_path,
-                        "sha256": file_sha256(child_path),
-                        "size": child.stat(follow_symlinks=False).st_size,
-                    }
-                )
-                continue
-            raise ValueError(
-                "directory artifact cannot contain a non-regular filesystem entry: "
-                f"{child_path}"
-            )
-
-    visit(root_path)
-    entries.sort(key=lambda entry: (entry["path"], entry["kind"]))
-    identity = {"version": _MANIFEST_VERSION, "entries": entries}
-    return {**identity, "tree_hash": canonical_json_sha256(identity)}
+    return build_manifest_v1(root)
 
 
 def build_shapefile_bundle_manifest(shapefile: Path) -> dict[str, Any]:
