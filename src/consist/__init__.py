@@ -18,7 +18,7 @@ except PackageNotFoundError:
     __version__ = "unknown"
 
 if TYPE_CHECKING:
-    from consist import admission, digest, gtfs, location, meta
+    from consist import admission, digest, gtfs, location, meta, store
     from consist.api import (
         RelationConnectionLeakWarning,
         RunContext,
@@ -150,6 +150,8 @@ if TYPE_CHECKING:
         resolve_callable,
     )
     from consist.core.persistence import (
+        ConsistError,
+        DatabaseMigrationRequired,
         IncompatibleSchemaError,
     )
     from consist.core.resolved_binding import (
@@ -253,8 +255,13 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     ),
     "CommandExecutionError": ("consist.core.command_exec", "CommandExecutionError"),
     "CommandExecutionResult": ("consist.core.command_exec", "CommandExecutionResult"),
+    "ConsistError": ("consist.core.persistence", "ConsistError"),
     "Coupler": ("consist.core.coupler", "Coupler"),
     "CouplerSnapshotPhase": ("consist.models.run", "CouplerSnapshotPhase"),
+    "DatabaseMigrationRequired": (
+        "consist.core.persistence",
+        "DatabaseMigrationRequired",
+    ),
     "DriverType": ("consist.types", "DriverType"),
     "EnumCapture": ("consist.types", "EnumCapture"),
     "ExecutionAttempt": ("consist.core.orchestration", "ExecutionAttempt"),
@@ -524,6 +531,7 @@ __all__ = [
     "gtfs",
     "location",
     "meta",
+    "store",
     "AdmissionEvidence",
     "AlignedPair",
     "ArchivedOutputs",
@@ -545,8 +553,10 @@ __all__ = [
     "CanonicalizationSnapshot",
     "CommandExecutionError",
     "CommandExecutionResult",
+    "ConsistError",
     "Coupler",
     "CouplerSnapshotPhase",
+    "DatabaseMigrationRequired",
     "DriverType",
     "EnumCapture",
     "ExecutionAttempt",
@@ -686,7 +696,7 @@ __all__ = [
 
 
 def __getattr__(name: str) -> Any:
-    if name in ("digest", "gtfs", "admission", "location", "meta"):
+    if name in ("digest", "gtfs", "admission", "location", "meta", "store"):
         module = importlib.import_module(f"consist.{name}")
         globals()[name] = module
         return module
@@ -715,5 +725,5 @@ def __dir__() -> list[str]:
     return sorted(
         set(globals().keys())
         | set(_CORE_EXPORTS.keys())
-        | {"digest", "gtfs", "admission", "location", "meta"}
+        | {"digest", "gtfs", "admission", "location", "meta", "store"}
     )
