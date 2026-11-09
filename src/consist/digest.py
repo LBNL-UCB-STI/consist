@@ -33,7 +33,15 @@ import re
 import sqlite3
 import struct
 import sys
-from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    ClassVar,
+    Literal,
+    Protocol,
+    cast,
+    runtime_checkable,
+)
 import unicodedata
 
 if TYPE_CHECKING:
@@ -2265,23 +2273,37 @@ class Expectation:
         object.__setattr__(self, "pinned_schemes", pinned)
 
 
+@dataclass(frozen=True, slots=True)
 class Contract:
-    """Built-in `Expectation` presets for artifact identity comparison."""
+    """Built-in `Expectation` presets and per-(step, role) staging/verification contract."""
 
-    EXACT_BYTES: Expectation = Expectation(
+    EXACT_BYTES: ClassVar[Expectation] = Expectation(
         accepts_kinds=frozenset({Kind.BYTES, Kind.CONTAINER}),
     )
-    LOGICAL_DATA: Expectation = Expectation(
+    LOGICAL_DATA: ClassVar[Expectation] = Expectation(
         accepts_kinds=frozenset({Kind.LOGICAL}),
     )
-    SCHEMA_ONLY: Expectation = Expectation(
+    SCHEMA_ONLY: ClassVar[Expectation] = Expectation(
         accepts_kinds=frozenset({Kind.SEMANTIC}),
     )
-    ANY_SHARED: Expectation = Expectation(
+    ANY_SHARED: ClassVar[Expectation] = Expectation(
         accepts_kinds=frozenset(
             {Kind.BYTES, Kind.CONTAINER, Kind.LOGICAL, Kind.SEMANTIC, Kind.FILTERED}
         ),
     )
+
+    equivalence: str = "sha256:file"
+    mutates: bool = False
+    allow_extra_files: bool = False
+    witness: str = "structural"
+
+    def __post_init__(self) -> None:
+        spec = SchemeRegistry.get(self.equivalence)
+        if spec.kind is Kind.HISTORICAL:
+            raise ValueError(
+                "Kind.HISTORICAL cannot be used as a Contract equivalence scheme"
+            )
+        object.__setattr__(self, "equivalence", spec.name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2465,6 +2487,23 @@ def compute_logical_matrix_digest(
     return Digest("sha256:logical_matrix:v1", hex_val)
 
 
+def compute_logical_matrices_digest(
+    matrices: Mapping[str, np.ndarray] | Sequence[tuple[str, np.ndarray]],
+    *,
+    zone_ids: Sequence[int] | np.ndarray | None = None,
+    lookups: Mapping[str, np.ndarray | Sequence[Any]] | None = None,
+    policy: ArrayCanonicalizationPolicy | LogicalProfileName = "preserve_canonical",
+) -> Digest:
+    """Compute `Digest('sha256:logical_matrices:v1', <hex>)` for a mapping/sequence of matrices."""
+    hex_val = compute_logical_matrices_sha256(
+        matrices,
+        zone_ids=zone_ids,
+        lookups=lookups,
+        policy=policy,
+    )
+    return Digest("sha256:logical_matrices:v1", hex_val)
+
+
 __all__ = [
     # Constants & Protocols
     "ARRAY_BINARY_PROTOCOL_VERSION",
@@ -2488,6 +2527,7 @@ __all__ = [
     "compute_manifest_v1_digest",
     "compute_ctd1_digest",
     "compute_logical_matrix_digest",
+    "compute_logical_matrices_digest",
     # Dataclasses
     "ArrayCanonicalizationPolicy",
     "MatrixContainerSummary",

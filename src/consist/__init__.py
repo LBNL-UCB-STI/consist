@@ -18,7 +18,23 @@ except PackageNotFoundError:
     __version__ = "unknown"
 
 if TYPE_CHECKING:
-    from consist import admission, digest, gtfs, location, meta, store
+    from consist import admission, artifact, digest, engine, gtfs, location, meta, store
+    from consist.artifact import (
+        HintLedger,
+        MissingOutputError,
+    )
+    from consist.engine import (
+        PendingOutput,
+        ResolvedLocation,
+        ensure_digest,
+        locate,
+        resolve_uri_to_path,
+        seal,
+        stage,
+        verify,
+        verify_path_digest,
+        virtualize_path,
+    )
     from consist.api import (
         RelationConnectionLeakWarning,
         RunContext,
@@ -272,6 +288,7 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "FilenameCapture": ("consist.types", "FilenameCapture"),
     "FilenamePattern": ("consist.types", "FilenamePattern"),
     "H5ChildSpec": ("consist.types", "H5ChildSpec"),
+    "HintLedger": ("consist.artifact", "HintLedger"),
     "HydratedRunOutput": ("consist.core.materialize", "HydratedRunOutput"),
     "HydratedRunOutputsResult": (
         "consist.core.materialize",
@@ -284,6 +301,7 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "IntCapture": ("consist.types", "IntCapture"),
     "MaterializationResult": ("consist.core.materialize", "MaterializationResult"),
     "MaterializedArtifact": ("consist.core.materialize", "MaterializedArtifact"),
+    "MissingOutputError": ("consist.artifact", "MissingOutputError"),
     "NoopArtifact": ("consist.core.noop", "NoopArtifact"),
     "NoopCoupler": ("consist.core.noop", "NoopCoupler"),
     "NoopRunResult": ("consist.core.noop", "NoopRunResult"),
@@ -293,6 +311,7 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "OutputPathRef": ("consist.types", "OutputPathRef"),
     "OutputPolicyOptions": ("consist.types", "OutputPolicyOptions"),
     "OutputSet": ("consist.types", "OutputSet"),
+    "PendingOutput": ("consist.engine", "PendingOutput"),
     "PythonCallableTarget": ("consist.core.orchestration", "PythonCallableTarget"),
     "RelationConnectionLeakWarning": ("consist.api", "RelationConnectionLeakWarning"),
     "ResolvedBinding": ("consist.core.resolved_binding", "ResolvedBinding"),
@@ -300,6 +319,7 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
         "consist.core.resolved_binding",
         "ResolvedBindingBuilder",
     ),
+    "ResolvedLocation": ("consist.engine", "ResolvedLocation"),
     "RestoredCouplerSnapshotResult": (
         "consist.core.workflow",
         "RestoredCouplerSnapshotResult",
@@ -351,6 +371,7 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "db_session": ("consist.api", "db_session"),
     "define_step": ("consist.api", "define_step"),
     "diff_coupler_snapshots": ("consist.api", "diff_coupler_snapshots"),
+    "ensure_digest": ("consist.engine", "ensure_digest"),
     "ensure_local_path": ("consist.api", "ensure_local_path"),
     "exec": ("consist.api", "exec"),
     "execute_worker_run": ("consist.core.orchestration", "execute_worker_run"),
@@ -382,6 +403,7 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "load": ("consist.api", "load"),
     "load_df": ("consist.api", "load_df"),
     "load_relation": ("consist.api", "load_relation"),
+    "locate": ("consist.engine", "locate"),
     "log_artifact": ("consist.api", "log_artifact"),
     "log_artifacts": ("consist.api", "log_artifacts"),
     "log_dataframe": ("consist.api", "log_dataframe"),
@@ -411,22 +433,28 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "resolve_canonical_run_id": ("consist.api", "resolve_canonical_run_id"),
     "resolve_run_output_paths": ("consist.api", "resolve_run_output_paths"),
     "resolve_step_contract": ("consist.core.step_contracts", "resolve_step_contract"),
+    "resolve_uri_to_path": ("consist.engine", "resolve_uri_to_path"),
     "run": ("consist.api", "run"),
     "run_query": ("consist.api", "run_query"),
     "run_set": ("consist.api", "run_set"),
     "scenario": ("consist.api", "scenario"),
+    "seal": ("consist.engine", "seal"),
     "set_artifact_recovery_roots": ("consist.api", "set_artifact_recovery_roots"),
     "set_current_tracker": ("consist.api", "set_current_tracker"),
     "set_output_meta": ("consist.api", "set_output_meta"),
     "set_pending_output_meta": ("consist.api", "set_pending_output_meta"),
     "single_step_scenario": ("consist.api", "single_step_scenario"),
+    "stage": ("consist.engine", "stage"),
     "stage_artifact": ("consist.api", "stage_artifact"),
     "stage_inputs": ("consist.api", "stage_inputs"),
     "start_run": ("consist.api", "start_run"),
     "to_df": ("consist.api", "to_df"),
     "trace": ("consist.api", "trace"),
     "use_tracker": ("consist.api", "use_tracker"),
+    "verify": ("consist.engine", "verify"),
+    "verify_path_digest": ("consist.engine", "verify_path_digest"),
     "view": ("consist.api", "view"),
+    "virtualize_path": ("consist.engine", "virtualize_path"),
 }
 
 _DEPRECATED_TOP_LEVEL_EXPORTS: dict[str, tuple[str, str]] = {
@@ -527,7 +555,9 @@ _DEPRECATED_TOP_LEVEL_EXPORTS: dict[str, tuple[str, str]] = {
 __all__ = [
     "__version__",
     "admission",
+    "artifact",
     "digest",
+    "engine",
     "gtfs",
     "location",
     "meta",
@@ -567,12 +597,14 @@ __all__ = [
     "FilenameCapture",
     "FilenamePattern",
     "H5ChildSpec",
+    "HintLedger",
     "HydratedRunOutput",
     "HydratedRunOutputsResult",
     "IncompatibleSchemaError",
     "IntCapture",
     "MaterializationResult",
     "MaterializedArtifact",
+    "MissingOutputError",
     "NoopArtifact",
     "NoopCoupler",
     "NoopRunResult",
@@ -582,10 +614,12 @@ __all__ = [
     "OutputPathRef",
     "OutputPolicyOptions",
     "OutputSet",
+    "PendingOutput",
     "PythonCallableTarget",
     "RelationConnectionLeakWarning",
     "ResolvedBinding",
     "ResolvedBindingBuilder",
+    "ResolvedLocation",
     "RestoredCouplerSnapshotResult",
     "Run",
     "RunCompletionArchivePolicy",
@@ -625,6 +659,7 @@ __all__ = [
     "db_session",
     "define_step",
     "diff_coupler_snapshots",
+    "ensure_digest",
     "ensure_local_path",
     "exec",
     "execute_worker_run",
@@ -653,6 +688,7 @@ __all__ = [
     "load",
     "load_df",
     "load_relation",
+    "locate",
     "log_artifact",
     "log_artifacts",
     "log_dataframe",
@@ -676,27 +712,42 @@ __all__ = [
     "resolve_canonical_run_id",
     "resolve_run_output_paths",
     "resolve_step_contract",
+    "resolve_uri_to_path",
     "run",
     "run_query",
     "run_set",
     "scenario",
+    "seal",
     "set_artifact_recovery_roots",
     "set_current_tracker",
     "set_output_meta",
     "set_pending_output_meta",
     "single_step_scenario",
+    "stage",
     "stage_artifact",
     "stage_inputs",
     "start_run",
     "to_df",
     "trace",
     "use_tracker",
+    "verify",
+    "verify_path_digest",
     "view",
+    "virtualize_path",
 ]
 
 
 def __getattr__(name: str) -> Any:
-    if name in ("digest", "gtfs", "admission", "location", "meta", "store"):
+    if name in (
+        "digest",
+        "gtfs",
+        "admission",
+        "location",
+        "meta",
+        "store",
+        "artifact",
+        "engine",
+    ):
         module = importlib.import_module(f"consist.{name}")
         globals()[name] = module
         return module
@@ -725,5 +776,14 @@ def __dir__() -> list[str]:
     return sorted(
         set(globals().keys())
         | set(_CORE_EXPORTS.keys())
-        | {"digest", "gtfs", "admission", "location", "meta", "store"}
+        | {
+            "digest",
+            "gtfs",
+            "admission",
+            "location",
+            "meta",
+            "store",
+            "artifact",
+            "engine",
+        }
     )
