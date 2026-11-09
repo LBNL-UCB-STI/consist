@@ -21,6 +21,21 @@ class Person(SQLModel, table=True):
     income: float
 
 
+class FinalTrip(SQLModel, table=True):
+    __tablename__ = "final_trips"
+
+    trip_id: int = Field(primary_key=True)
+    household_id: int
+    trip_mode: str
+
+
+class FinalHousehold(SQLModel, table=True):
+    __tablename__ = "final_households"
+
+    household_id: int = Field(primary_key=True)
+    auto_ownership: int
+
+
 def _make_tracker(tmp_path: Path) -> Tracker:
     run_dir = tmp_path / "runs"
     return Tracker(run_dir=run_dir, db_path=str(tmp_path / "provenance.duckdb"))
@@ -351,3 +366,132 @@ def test_ibis_view_handles_missing_cold_file(tmp_path: Path) -> None:
     assert df.empty
     assert "consist_year" in df.columns
     assert "person_id" in df.columns
+
+
+def test_multiple_ibis_views_can_be_opened_and_joined_on_same_tracker(
+    tmp_path: Path,
+) -> None:
+    tracker = _make_tracker(tmp_path)
+    trips_path = tmp_path / "final_trips.parquet"
+    households_path = tmp_path / "final_households.parquet"
+    pd.DataFrame(
+        [
+            {"trip_id": 1, "household_id": 100, "trip_mode": "DRIVE"},
+            {"trip_id": 2, "household_id": 100, "trip_mode": "WALK"},
+            {"trip_id": 3, "household_id": 200, "trip_mode": "TRANSIT"},
+        ]
+    ).to_parquet(trips_path)
+    pd.DataFrame(
+        [
+            {"household_id": 100, "auto_ownership": 2},
+            {"household_id": 200, "auto_ownership": 0},
+        ]
+    ).to_parquet(households_path)
+
+    with tracker.start_run(
+        "run-multi", "activitysim", year=2025, cache_mode="overwrite"
+    ):
+        tracker.log_artifact(str(trips_path), key="final_trips", driver="parquet")
+        tracker.log_artifact(
+            str(households_path), key="final_households", driver="parquet"
+        )
+
+    trips = ibis_view(tracker, model=FinalTrip, key="final_trips")
+    households = ibis_view(tracker, model=FinalHousehold, key="final_households")
+
+    assert ibis_connection(tracker) is ibis_connection(tracker)
+
+    # Tracker methods and new runs must remain usable while cached Ibis backend is open
+    runs = tracker.find_runs()
+    assert [r.id for r in runs] == ["run-multi"]
+    assert tracker.get_artifact("final_trips", run_id="run-multi") is not None
+
+    with tracker.start_run(
+        "run-multi-followup", "activitysim", year=2025, cache_mode="overwrite"
+    ):
+        pass
+
+    assert len(tracker.find_runs()) == 2
+    assert len(trips.to_pandas()) == 3
+
+    joined = (
+        trips.join(households, ["consist_run_id", "household_id"])
+        .select("trip_id", "household_id", "trip_mode", "auto_ownership")
+        .order_by("trip_id")
+        .to_pandas()
+    )
+    assert joined.to_dict("records") == [
+        {
+            "trip_id": 1,
+            "household_id": 100,
+            "trip_mode": "DRIVE",
+            "auto_ownership": 2,
+        },
+        {
+            "trip_id": 2,
+            "household_id": 100,
+            "trip_mode": "WALK",
+            "auto_ownership": 2,
+        },
+        {
+            "trip_id": 3,
+            "household_id": 200,
+            "trip_mode": "TRANSIT",
+            "auto_ownership": 0,
+        },
+    ]
+
+
+def test_ibis_view_remains_usable_after_ibis_grouped_view_exits(
+    tmp_path: Path,
+) -> None:
+    tracker = _make_tracker(tmp_path)
+    cold_path = tmp_path / "people_grouped_keepalive.parquet"
+    pd.DataFrame(
+        [
+            {"person_id": 1, "home_zone_id": 10, "age": 21, "income": 100_000.0},
+            {"person_id": 2, "home_zone_id": 10, "age": 34, "income": 120_000.0},
+        ]
+    ).to_parquet(cold_path)
+
+    with tracker.start_run("run-keepalive", "model", year=2024, cache_mode="overwrite"):
+        art = tracker.log_artifact(
+            str(cold_path),
+            key="ibis_person",
+            driver="parquet",
+            profile_file_schema=True,
+            facet={"home_zone_id": 10},
+            facet_index=True,
+        )
+
+    people = ibis_view(tracker, model=Person)
+    assert len(people.to_pandas()) == 2
+
+    with ibis_grouped_view(
+        tracker,
+        view_name="v_people_grouped_keepalive",
+        artifact_id=art.id,
+        attach_facets=["home_zone_id"],
+        mode="hybrid",
+    ) as grouped_table:
+        assert len(grouped_table.to_pandas()) == 2
+
+    # Shared cached backend must still be connected after exiting ibis_grouped_view
+    df_after = people.to_pandas().sort_values("person_id").reset_index(drop=True)
+    assert df_after["person_id"].tolist() == [1, 2]
+
+
+def test_tracker_close_disconnects_and_evicts_cached_ibis_backend(
+    tmp_path: Path,
+) -> None:
+    from consist.integrations.ibis import _CACHED_BACKENDS, _is_backend_connected
+
+    tracker = _make_tracker(tmp_path)
+    backend = ibis_connection(tracker)
+    assert tracker in _CACHED_BACKENDS
+    assert _is_backend_connected(backend) is True
+
+    tracker.close()
+
+    assert tracker not in _CACHED_BACKENDS
+    assert _is_backend_connected(backend) is False

@@ -749,6 +749,9 @@ class Tracker:
         """
         Dispose database engines and clean up any temporary local snapshot directory.
         """
+        from consist.integrations.ibis import close_tracker_ibis_connection
+
+        close_tracker_ibis_connection(self)
         hot_store = self._compat_attr("hot_data_store")
         if hot_store is not None:
             hot_store.dispose_engine()

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import importlib
+from pathlib import Path
 import uuid
+import weakref
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, Iterable, Iterator, Literal, cast
 
@@ -37,6 +39,93 @@ _OPEN_CONNECTION_HINT = (
     "Close the active SQLAlchemy session or exit the current run before using "
     "Ibis, because ibis.connect() opens its own DuckDB handle."
 )
+
+_CACHED_BACKENDS: weakref.WeakKeyDictionary[
+    "Tracker", tuple[str, "IbisDuckDBBackend"]
+] = weakref.WeakKeyDictionary()
+
+
+def _normalize_db_path(db_path: str) -> str:
+    if db_path.startswith((":memory:", "md:", "motherduck:")):
+        return db_path
+    return str(Path(db_path).resolve())
+
+
+def _duckdb_engine_user_agent() -> str | None:
+    """Return the custom_user_agent string used by duckdb_engine, if available."""
+    try:
+        import duckdb_engine
+        import sqlalchemy
+    except ImportError:
+        return None
+    try:
+        supports_user_agent = bool(duckdb_engine.supports_user_agent)
+        engine_version = str(duckdb_engine.__version__)
+    except AttributeError:
+        return None
+    if not supports_user_agent:
+        return None
+    return f"duckdb_engine/{engine_version}(sqlalchemy/{sqlalchemy.__version__})"
+
+
+def _ensure_no_open_duckdb_connections(tracker: "Tracker") -> None:
+    """Raise RuntimeError if tracker.engine currently has a checked-out connection."""
+    db = tracker.db
+    if db is None:
+        return
+    try:
+        has_open = bool(db.has_open_connections)
+    except AttributeError:
+        has_open = False
+    if has_open:
+        raise RuntimeError(_OPEN_CONNECTION_HINT)
+
+
+def _is_backend_connected(backend: "IbisDuckDBBackend") -> bool:
+    try:
+        con = backend.con
+    except AttributeError:
+        return False
+    if con is None:
+        return False
+    try:
+        con.execute("SELECT 1")
+    except Exception:
+        return False
+    return True
+
+
+@contextmanager
+def suspend_tracker_ibis_connection(tracker: "Tracker") -> Iterator[None]:
+    """Temporarily disconnect a cached Ibis DuckDB backend while SQLAlchemy runs."""
+    cached = _CACHED_BACKENDS.get(tracker)
+    if cached is None:
+        yield
+        return
+    _cached_path, backend = cached
+    if not _is_backend_connected(backend):
+        yield
+        return
+    backend.disconnect()
+    try:
+        yield
+    finally:
+        try:
+            backend.reconnect()
+        except duckdb.ConnectionException as exc:
+            raise RuntimeError(_OPEN_CONNECTION_HINT) from exc
+
+
+def close_tracker_ibis_connection(tracker: "Tracker") -> None:
+    """Disconnect and evict any cached Ibis DuckDB backend for ``tracker``."""
+    cached = _CACHED_BACKENDS.pop(tracker, None)
+    if cached is None:
+        return
+    _cached_path, backend = cached
+    try:
+        backend.disconnect()
+    except Exception:
+        pass
 
 
 def _import_ibis() -> ModuleType:
@@ -135,7 +224,16 @@ def _connect_backend(db_path: str) -> "IbisDuckDBBackend":
     """
     ibis = _import_ibis()
     connect = cast(Any, ibis).connect
+    user_agent = _duckdb_engine_user_agent()
     try:
+        if user_agent is not None:
+            try:
+                return cast(
+                    "IbisDuckDBBackend",
+                    connect(db_path, custom_user_agent=user_agent),
+                )
+            except TypeError:
+                return cast("IbisDuckDBBackend", connect(db_path))
         return cast("IbisDuckDBBackend", connect(db_path))
     except duckdb.ConnectionException as exc:
         raise RuntimeError(_OPEN_CONNECTION_HINT) from exc
@@ -174,7 +272,27 @@ def ibis_connection(
     """
     resolved_tracker = _resolve_tracker(tracker)
     db_path = _require_db_path(resolved_tracker)
-    return _connect_backend(db_path)
+    _ensure_no_open_duckdb_connections(resolved_tracker)
+    norm_path = _normalize_db_path(db_path)
+    cached = _CACHED_BACKENDS.get(resolved_tracker)
+    if cached is not None:
+        cached_path, cached_backend = cached
+        if cached_path == norm_path:
+            if _is_backend_connected(cached_backend):
+                return cached_backend
+            try:
+                reconnect = cached_backend.reconnect
+            except AttributeError:
+                reconnect = None
+            if reconnect is not None:
+                try:
+                    reconnect()
+                    return cached_backend
+                except duckdb.ConnectionException as exc:
+                    raise RuntimeError(_OPEN_CONNECTION_HINT) from exc
+    backend = _connect_backend(db_path)
+    _CACHED_BACKENDS[resolved_tracker] = (norm_path, backend)
+    return backend
 
 
 def ibis_view(
@@ -218,7 +336,8 @@ def ibis_view(
     """
     resolved_tracker = _resolve_tracker(tracker)
     _require_db_path(resolved_tracker)
-    view_cls = resolved_tracker.view(model, key)
+    with suspend_tracker_ibis_connection(resolved_tracker):
+        view_cls = resolved_tracker.view(model, key)
     view_name = cast(str, view_cls.__tablename__)
     return ibis_connection(resolved_tracker).table(view_name)
 
@@ -347,28 +466,29 @@ def ibis_grouped_view(
     """
     resolved_tracker = _resolve_tracker(tracker)
     _require_db_path(resolved_tracker)
-    schema_id = _resolve_grouped_view_schema_id(
-        resolved_tracker, artifact_id=artifact_id
-    )
-    resolved_tracker.create_grouped_view(
-        view_name=view_name,
-        schema_id=schema_id,
-        namespace=namespace,
-        params=params,
-        drivers=drivers,
-        attach_facets=attach_facets,
-        include_system_columns=include_system_columns,
-        mode=mode,
-        if_exists=if_exists,
-        missing_files=missing_files,
-        run_id=run_id,
-        parent_run_id=parent_run_id,
-        model=model,
-        status=status,
-        year=year,
-        iteration=iteration,
-        schema_compatible=schema_compatible,
-    )
+    with suspend_tracker_ibis_connection(resolved_tracker):
+        schema_id = _resolve_grouped_view_schema_id(
+            resolved_tracker, artifact_id=artifact_id
+        )
+        resolved_tracker.create_grouped_view(
+            view_name=view_name,
+            schema_id=schema_id,
+            namespace=namespace,
+            params=params,
+            drivers=drivers,
+            attach_facets=attach_facets,
+            include_system_columns=include_system_columns,
+            mode=mode,
+            if_exists=if_exists,
+            missing_files=missing_files,
+            run_id=run_id,
+            parent_run_id=parent_run_id,
+            model=model,
+            status=status,
+            year=year,
+            iteration=iteration,
+            schema_compatible=schema_compatible,
+        )
 
     backend = ibis_connection(resolved_tracker)
     ibis = _import_ibis()
@@ -383,4 +503,6 @@ def ibis_grouped_view(
             ) from exc
         yield table
     finally:
-        backend.disconnect()
+        cached = _CACHED_BACKENDS.get(resolved_tracker)
+        if cached is None or cached[1] is not backend:
+            backend.disconnect()
