@@ -1,6 +1,6 @@
 [project]
 name = "consist"
-version = "0.4.1"
+version = "0.4.2"
 description = "Provenance tracking, intelligent caching, and data virtualization for scientific simulation workflows."
 readme = "README.md"
 authors = [
@@ -8,7 +8,7 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
-    "duckdb>=1.4.2",
+    "duckdb>=1.4.2,<2.0.0",
     "duckdb-engine>=0.17.0",
     "click>=8.3.1",
     "pandas>=2.1.0",

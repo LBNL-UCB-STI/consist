@@ -8,6 +8,7 @@ import uuid
 import json
 import contextvars
 import threading
+import warnings
 from dataclasses import dataclass
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -29,7 +30,7 @@ from typing import (
 )
 
 import pandas as pd
-from sqlalchemy import func, or_
+from sqlalchemy import event, func, or_
 from sqlalchemy.orm import aliased
 from sqlalchemy.pool import NullPool
 from sqlmodel import create_engine, Session, select, SQLModel, col, delete
@@ -107,9 +108,18 @@ def _coerce_run_tags(run_tags: Any) -> Any:
     return run_tags
 
 
+class IncompatibleSchemaError(RuntimeError):
+    """Raised when a Consist database uses a newer schema version than supported."""
+
+
+_V05_NOTICE_EMITTED_DBS: set[str] = set()
+_V05_NOTICE_LOCK = threading.Lock()
+
+
 __all__ = [
     "ArtifactSchemaSelection",
     "DatabaseManager",
+    "IncompatibleSchemaError",
     "ProvenanceWriter",
     "SchemaProfileSource",
 ]
@@ -407,6 +417,19 @@ class DatabaseManager:
             poolclass=NullPool,
             connect_args=connect_args,
         )
+        self._active_connections = 0
+        self._active_connections_lock = threading.Lock()
+
+        @event.listens_for(self.engine.pool, "checkout")
+        def _on_checkout(_dbapi_con: Any, _con_record: Any, _con_proxy: Any) -> None:
+            with self._active_connections_lock:
+                self._active_connections += 1
+
+        @event.listens_for(self.engine.pool, "checkin")
+        def _on_checkin(_dbapi_con: Any, _con_record: Any) -> None:
+            with self._active_connections_lock:
+                self._active_connections = max(0, self._active_connections - 1)
+
         self._session_ctx: contextvars.ContextVar[Session | None] = (
             contextvars.ContextVar("consist_session", default=None)
         )
@@ -416,18 +439,103 @@ class DatabaseManager:
         self._snapshot_ops = DatabaseSnapshotOps(self)
         self._init_schema()
 
+    @property
+    def has_open_connections(self) -> bool:
+        """Return whether any SQLAlchemy connection is currently checked out."""
+        with self._active_connections_lock:
+            return self._active_connections > 0
+
+    def dispose(self) -> None:
+        """Dispose the underlying SQLAlchemy engine."""
+        self.engine.dispose()
+
+    def _check_compatible_schema_version(self) -> None:
+        """Refuse opening databases stamped with Consist schema version >= 2."""
+        with self.engine.connect() as conn:
+            has_schema_table = (
+                conn.exec_driver_sql(
+                    "SELECT count(*) FROM information_schema.tables "
+                    "WHERE table_schema = 'main' AND table_name = 'consist_schema'"
+                ).scalar()
+                or 0
+            )
+            if int(has_schema_table) <= 0:
+                return
+            max_version = conn.exec_driver_sql(
+                "SELECT MAX(version) FROM consist_schema"
+            ).scalar()
+        if max_version is not None and int(max_version) >= 2:
+            raise IncompatibleSchemaError(
+                f"Database {self.db_path!r} uses Consist schema version "
+                f"{int(max_version)}, which is incompatible with this release. "
+                'Please upgrade Consist: pip install -U "consist>=0.5"'
+            )
+
+    def _ensure_consist_schema_v1(self) -> None:
+        """Create `consist_schema` and stamp `version = 1` on v1 databases if empty."""
+        if self._read_only or self._skip_schema_init:
+            return
+        from consist import __version__ as consist_version
+
+        with self.engine.begin() as conn:
+            conn.exec_driver_sql(
+                """
+                CREATE TABLE IF NOT EXISTS consist_schema (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TIMESTAMPTZ NOT NULL,
+                    consist_version VARCHAR NOT NULL
+                )
+                """
+            )
+            conn.exec_driver_sql(
+                "INSERT INTO consist_schema (version, applied_at, consist_version) "
+                "VALUES (?, ?, ?) ON CONFLICT (version) DO NOTHING",
+                (1, datetime.now(timezone.utc), str(consist_version)),
+            )
+
+    def _maybe_emit_v05_upgrade_notice(self, *, db_preexisted: bool) -> None:
+        """Emit an opt-in one-time FutureWarning when opening an existing v1 database."""
+        if not db_preexisted or self.db_path == ":memory:":
+            return
+        show_raw = os.environ.get("CONSIST_SHOW_V05_NOTICE", "").strip().lower()
+        if show_raw not in {"1", "true", "yes"}:
+            return
+        silence_raw = os.environ.get("CONSIST_SILENCE_V05_NOTICE", "").strip().lower()
+        if silence_raw in {"1", "true", "yes"}:
+            return
+        norm_path = str(Path(self.db_path).resolve())
+        with _V05_NOTICE_LOCK:
+            if norm_path in _V05_NOTICE_EMITTED_DBS:
+                return
+            _V05_NOTICE_EMITTED_DBS.add(norm_path)
+        warnings.warn(
+            f"Consist 0.5 will require a one-time upgrade of this database "
+            f"({self.db_path}: `consist migrate {self.db_path}` or "
+            f"`Tracker(..., auto_migrate=True)`). Your data will be kept. "
+            f"To silence: CONSIST_SILENCE_V05_NOTICE=1",
+            FutureWarning,
+            stacklevel=3,
+        )
+
     def _init_schema(self):
         """Creates tables if they don't exist, wrapped in retry logic."""
-        if self._skip_schema_init:
-            return
-
         db_preexisted = (
             self.db_path != ":memory:"
             and Path(self.db_path).exists()
             and Path(self.db_path).stat().st_size > 0
         )
+        if self._skip_schema_init:
+            if db_preexisted:
+                self.execute_with_retry(
+                    self._check_compatible_schema_version,
+                    operation_name="check_schema_version",
+                )
+                self._maybe_emit_v05_upgrade_notice(db_preexisted=db_preexisted)
+            return
 
         def _create():
+            self._check_compatible_schema_version()
+            self._ensure_consist_schema_v1()
             SQLModel.metadata.create_all(
                 self.engine,
                 tables=[
@@ -459,6 +567,7 @@ class DatabaseManager:
             self._ensure_schema_links_view()
 
         self.execute_with_retry(_create, operation_name="init_schema")
+        self._maybe_emit_v05_upgrade_notice(db_preexisted=db_preexisted)
 
     def _table_has_column(self, *, table_name: str, column_name: str) -> bool:
         if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", table_name or ""):

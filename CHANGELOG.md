@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog], and this project adheres to
 [Semantic Versioning].
 
+## [0.4.2] - 2026-11-09
+
+### Added
+
+- Add `consist_schema` version tracking and `IncompatibleSchemaError` forward-schema
+  guard in `DatabaseManager` so databases created by newer Consist schema versions fail
+  fast with a clear upgrade message before any writes occur by @zneedell
+  ([#308](https://github.com/LBNL-UCB-STI/consist/pull/308)).
+- Add `scripts/v1_db_census.py` for read-only inspection of provenance databases across
+  workspace directories by @zneedell
+  ([#308](https://github.com/LBNL-UCB-STI/consist/pull/308)).
+
+### Changed
+
+- Pin `duckdb>=1.4.2,<2.0.0` in `pyproject.toml` to ensure compatibility with Ibis
+  DuckDB backend connections by @zneedell
+  ([#308](https://github.com/LBNL-UCB-STI/consist/pull/308)).
+
+### Fixed
+
+- Cache and reuse a single Ibis DuckDB backend per `(Tracker, db_path)` with matching
+  SQLAlchemy `duckdb_engine` connection configuration, and explicitly close the cached
+  Ibis backend in `Tracker.close()`, fixing DuckDB connection configuration conflicts
+  when opening multiple `ibis_view(...)` / `ibis_grouped_view(...)` handles on the same
+  tracker by @zneedell
+  ([#308](https://github.com/LBNL-UCB-STI/consist/pull/308)).
+- Fall back to `recovery_roots` and `ensure_local_path(...)` when resolving cold-file
+  artifacts in `ViewFactory.create_hybrid_view(...)` and `create_grouped_hybrid_view(...)`
+  so moved or archived cold files remain queryable through hybrid and Ibis views by
+  @zneedell ([#308](https://github.com/LBNL-UCB-STI/consist/pull/308)).
+
 ## [0.4.1] - 2026-11-06
 
 ### Added
@@ -907,7 +938,9 @@ The format is based on [Keep a Changelog], and this project adheres to
 
 [Semantic Versioning]: https://semver.org/spec/v2.0.0.html
 
-[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.4.2...HEAD
+
+[0.4.2]: https://github.com/LBNL-UCB-STI/consist/compare/v0.4.1...v0.4.2
 
 [0.4.1]: https://github.com/LBNL-UCB-STI/consist/compare/v0.4.0...v0.4.1
 

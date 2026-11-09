@@ -691,3 +691,43 @@ def test_grouped_view_resolution_handles_shared_run_instance(tracker, tmp_path, 
     assert result["id"].tolist() == [1, 2]
     assert result["value"].tolist() == [10.0, 20.0]
     assert result["facet_beam_sub_iteration"].tolist() == [1, 2]
+
+
+def test_hybrid_view_resolves_archived_move_mode_outputs_via_ensure_local_path(
+    tracker, tmp_path
+):
+    class ArchivedZone(SQLModel, table=True):
+        __tablename__ = "archived_zones"
+        id: int = Field(primary_key=True)
+        val: str
+
+    archive_dir = tmp_path / "archive_root"
+    with tracker.start_run("r_archive_move", "m", year=2025, cache_mode="overwrite"):
+        out_path = tracker.run_artifact_dir() / "zones.parquet"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"id": [1, 2], "val": ["A", "B"]}).to_parquet(out_path)
+        art = tracker.log_artifact(
+            str(out_path),
+            key="archived_zones",
+            driver="parquet",
+            direction="output",
+        )
+
+    primary_path = Path(tracker.resolve_uri(art.container_uri))
+    assert primary_path.exists()
+
+    tracker.archive_run_outputs(
+        "r_archive_move",
+        archive_dir,
+        keys=["archived_zones"],
+        mode="move",
+    )
+    assert not primary_path.exists()
+
+    tracker.view(ArchivedZone, "archived_zones")
+    with tracker.engine.connect() as conn:
+        df = pd.read_sql("SELECT * FROM v_archived_zones ORDER BY id", conn)
+    assert len(df) == 2
+    assert df["id"].tolist() == [1, 2]
+    assert df["val"].tolist() == ["A", "B"]
+    assert not primary_path.exists()

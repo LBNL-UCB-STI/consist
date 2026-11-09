@@ -149,6 +149,9 @@ if TYPE_CHECKING:
         execute_worker_run,
         resolve_callable,
     )
+    from consist.core.persistence import (
+        IncompatibleSchemaError,
+    )
     from consist.core.resolved_binding import (
         AdmissionEvidence,
         ArtifactIdentity,
@@ -266,6 +269,10 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "HydratedRunOutputsResult": (
         "consist.core.materialize",
         "HydratedRunOutputsResult",
+    ),
+    "IncompatibleSchemaError": (
+        "consist.core.persistence",
+        "IncompatibleSchemaError",
     ),
     "IntCapture": ("consist.types", "IntCapture"),
     "MaterializationResult": ("consist.core.materialize", "MaterializationResult"),
@@ -550,6 +557,7 @@ __all__ = [
     "H5ChildSpec",
     "HydratedRunOutput",
     "HydratedRunOutputsResult",
+    "IncompatibleSchemaError",
     "IntCapture",
     "MaterializationResult",
     "MaterializedArtifact",
