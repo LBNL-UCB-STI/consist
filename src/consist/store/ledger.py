@@ -13,14 +13,19 @@ import os
 from pathlib import Path
 import socket
 import time
-from typing import Any, Literal, TypeAlias
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 import uuid
 
 import duckdb
 
 from consist.digest import Digest, Identity, Kind, SchemeRegistry
 from consist.location import (
+    DirTreeStat,
+    FileStat,
     LedgerRef,
+    Location,
+    MemberOf,
+    Mount,
     Observation,
     Witness,
     register_live_ledger,
@@ -31,6 +36,9 @@ from consist.location import (
 from consist.meta import FrozenMeta
 from consist.store.detect import SchemaState
 from consist.store.schema import init_v2_schema
+
+if TYPE_CHECKING:
+    from consist.artifact import Artifact
 
 LocationStatus: TypeAlias = Literal[
     "pending_transfer", "active", "evicted", "failed_transfer"
@@ -110,6 +118,9 @@ class StoreLedger:
         self._overlay_events: list[dict[str, Any]] = []
         self._overlay_digests: dict[tuple[str, str], str] = {}
         self._overlay_digest_conflicts: list[dict[str, Any]] = []
+        self._memoized_observations: dict[str, list[Observation]] = {}
+        self._memoized_locations: dict[tuple[str, str, str], Any] = {}
+        self.mounts: dict[str, Mount] = {}
 
         target = ":memory:" if self.db_path is None else str(self.db_path)
         if self.read_only and self.db_path is not None and not self.db_path.exists():
@@ -457,6 +468,129 @@ class StoreLedger:
         )
         return True
 
+    def get_promotion(
+        self,
+        historical_anchor: Digest | str,
+    ) -> tuple[Digest, str, dict[str, Any] | None] | None:
+        """Return `(verified_anchor, basis, evidence_dict)` for `historical_anchor` if promoted."""
+        hist = _coerce_digest(historical_anchor)
+        row = self._con.execute(
+            "SELECT verified_anchor, basis, evidence FROM anchor_promotion "
+            "WHERE historical_anchor = ?",
+            [str(hist)],
+        ).fetchone()
+        if row is None:
+            return None
+        ver_str, basis_raw, ev_raw = row
+        ev_dict: dict[str, Any] | None = None
+        if isinstance(ev_raw, str) and ev_raw:
+            parsed = json.loads(ev_raw)
+            ev_dict = dict(parsed) if isinstance(parsed, Mapping) else None
+        elif isinstance(ev_raw, Mapping):
+            ev_dict = dict(ev_raw)
+        return (Digest.parse(str(ver_str)), str(basis_raw), ev_dict)
+
+    def resolve_effective_identity(
+        self,
+        recorded_anchor: Digest | str,
+    ) -> tuple[Identity, Digest | None, Digest | None]:
+        """Resolve `(effective_identity, recorded_anchor_when_promoted, asserted_or_verified_anchor)`.
+
+        - For non-`Kind.HISTORICAL` anchors: returns `(self.get_identity(recorded_anchor), None, None)`.
+        - For `Kind.HISTORICAL` anchors:
+          - If no promotion exists: returns `(Identity(anchor=recorded_anchor), None, None)`.
+          - If `basis in ("v1_fast_recomputed", "caller_supplied_match")`:
+            returns `(self.get_identity(verified_anchor), recorded_anchor, verified_anchor)`.
+          - If `basis == "asserted"`:
+            returns `(Identity(anchor=recorded_anchor), None, verified_anchor)` so `Artifact.identity`
+            stays `Kind.HISTORICAL` while `locate()` can still find locations under `verified_anchor`.
+        """
+        rec_digest = _coerce_digest(recorded_anchor)
+        if rec_digest.kind is not Kind.HISTORICAL:
+            return (self.get_identity(rec_digest), None, None)
+
+        promo = self.get_promotion(rec_digest)
+        if promo is None:
+            return (Identity(anchor=rec_digest), None, None)
+
+        verified_anchor, basis, _evidence = promo
+        if basis in ("v1_fast_recomputed", "caller_supplied_match"):
+            return (self.get_identity(verified_anchor), rec_digest, verified_anchor)
+        if basis == "asserted":
+            return (Identity(anchor=rec_digest), None, verified_anchor)
+        return (Identity(anchor=rec_digest), None, None)
+
+    def load_artifact(self, artifact_id: uuid.UUID | str) -> Artifact | None:
+        """Load a frozen `Artifact` handle by `id`, resolving any `anchor_promotion`."""
+        from consist.artifact import Artifact
+
+        art_uuid = (
+            artifact_id
+            if isinstance(artifact_id, uuid.UUID)
+            else uuid.UUID(str(artifact_id))
+        )
+        row = self._con.execute(
+            "SELECT id, key, driver, anchor, run_id, schema_id, meta "
+            "FROM artifact WHERE id = ?",
+            [art_uuid],
+        ).fetchone()
+        if row is None:
+            return None
+
+        _row_id, key, driver, raw_anchor, run_id, schema_id, raw_meta = row
+        effective_identity, recorded_anchor_opt, verified_anchor_opt = (
+            self.resolve_effective_identity(str(raw_anchor))
+        )
+        if isinstance(raw_meta, str) and raw_meta:
+            parsed_meta = json.loads(raw_meta)
+            meta_dict = dict(parsed_meta) if isinstance(parsed_meta, Mapping) else {}
+        elif isinstance(raw_meta, Mapping):
+            meta_dict = dict(raw_meta)
+        else:
+            meta_dict = {}
+
+        hint_obs: list[Observation] = []
+        for cand_anchor in (
+            effective_identity.anchor,
+            verified_anchor_opt,
+            recorded_anchor_opt,
+        ):
+            if cand_anchor is not None and len(hint_obs) < 4:
+                for obs in self.memoized_candidates(
+                    cand_anchor,
+                    limit=4 - len(hint_obs),
+                ):
+                    if obs not in hint_obs:
+                        hint_obs.append(obs)
+
+        return Artifact(
+            id=art_uuid,
+            key=str(key),
+            driver=str(driver),
+            identity=effective_identity,
+            recorded_anchor=recorded_anchor_opt,
+            origin=self.ref,
+            run_id=str(run_id) if run_id is not None else None,
+            schema_id=str(schema_id) if schema_id is not None else None,
+            meta=FrozenMeta(meta_dict),
+            hints=tuple(hint_obs[:4]),
+        )
+
+    def update_artifact_meta(self, artifact: Artifact, **changes: Any) -> Artifact:
+        """Persist merged `FrozenMeta` changes for `artifact` and return a new `Artifact`."""
+        updated = artifact.with_meta(**changes)
+        if not self.read_only:
+            meta_json = json.dumps(
+                updated.meta.to_dict(),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            self._con.execute(
+                "UPDATE artifact SET meta = ? WHERE id = ?",
+                [meta_json, updated.id],
+            )
+        return updated
+
     def record_artifact(
         self,
         *,
@@ -630,6 +764,7 @@ class StoreLedger:
             )
 
         witness_json = serialize_witness_json(observation.witness)
+        self._remember_observation(observation)
         if self.read_only:
             self._overlay_observations.setdefault(
                 obs_id,
@@ -674,6 +809,202 @@ class StoreLedger:
         )
         return obs_id
 
+    def _remember_observation(self, observation: Observation) -> None:
+        place = observation.place_key
+        anchor_str = str(observation.identity.anchor)
+        # Remove superseded observations at the same physical place across all anchors
+        for a_key, obs_list in list(self._memoized_observations.items()):
+            filtered = [
+                existing for existing in obs_list if existing.place_key != place
+            ]
+            if filtered:
+                self._memoized_observations[a_key] = filtered
+            else:
+                self._memoized_observations.pop(a_key, None)
+
+        current = self._memoized_observations.get(anchor_str, [])
+        self._memoized_observations[anchor_str] = [observation, *current][:4]
+
+    def memoized_candidates(
+        self,
+        anchor: Digest | str,
+        *,
+        limit: int = 4,
+    ) -> tuple[Observation, ...]:
+        """Return up to `limit` current `Observation` candidates for `anchor`."""
+        max_items = max(0, int(limit))
+        if max_items == 0:
+            return ()
+        anchor_digest = _coerce_digest(anchor)
+        anchor_str = str(anchor_digest)
+        cached = list(self._memoized_observations.get(anchor_str, ()))
+        if len(cached) >= max_items or self._closed:
+            return tuple(cached[:max_items])
+
+        rows = self.locate_current([anchor_digest], include_evicted=False)
+        reconstructed: list[Observation] = []
+        identity = self.get_identity(anchor_digest)
+        for row in rows:
+            obs = Observation(
+                location=Location(
+                    uri=str(row["uri"]),
+                    member=str(row["member"])
+                    if row.get("member") is not None
+                    else None,
+                ),
+                identity=identity,
+                access_driver=str(row["access_driver"]),
+                witness=row.get("witness"),
+                basis=row["basis"],
+                site=str(row["site"]),
+                scope_key=(
+                    str(row["scope_key"]) if row.get("scope_key") is not None else None
+                ),
+                mount_instance_id=(
+                    str(row["mount_instance_id"])
+                    if row.get("mount_instance_id") is not None
+                    else None
+                ),
+                observed_at_ns=int(row["observed_at_ns"]),
+            )
+            reconstructed.append(obs)
+            if len(reconstructed) >= max_items:
+                break
+
+        if reconstructed:
+            self._memoized_observations[anchor_str] = reconstructed[:4]
+            return tuple(reconstructed[:max_items])
+        return tuple(cached[:max_items])
+
+    def memoize_location(
+        self,
+        anchor: Digest | str,
+        resolved: Any,
+        *,
+        member: str | None = None,
+        site: str = "local",
+    ) -> None:
+        """Memoize a verified `ResolvedLocation` for `(anchor, member, site)`."""
+        self._memoized_locations[(str(anchor), member or "", site)] = resolved
+
+    def get_memoized_location(
+        self,
+        anchor: Digest | str,
+        *,
+        member: str | None = None,
+        site: str = "local",
+    ) -> Any | None:
+        """Return a memoized `ResolvedLocation` for `(anchor, member, site)`, if any."""
+        return self._memoized_locations.get((str(anchor), member or "", site))
+
+    def record_archive_copy(
+        self,
+        *,
+        src_uri: str,
+        dst_uri: str,
+        site: str,
+        dst_path: Path | None = None,
+        scope_key: str | None = None,
+        mount_instance_id: str | None = None,
+        observed_at_ns: int | None = None,
+        writer: str | None = None,
+    ) -> list[uuid.UUID]:
+        """Carry along active parent and container-child observations from `src_uri` to `dst_uri`."""
+        ts_ns = time.time_ns() if observed_at_ns is None else int(observed_at_ns)
+        effective_writer = writer or self.writer
+
+        current_rows = [
+            row
+            for row in self.query_location_current(site=site, include_evicted=False)
+            if str(row["uri"]) == src_uri
+            and str(row.get("status", "active")) == "active"
+        ]
+        if not current_rows:
+            return []
+
+        parent_stat: FileStat | None = None
+        if dst_path is not None and Path(dst_path).is_file():
+            parent_stat = FileStat.capture(dst_path, observed_at_ns=ts_ns)
+        else:
+            for row in current_rows:
+                w = row.get("witness")
+                if isinstance(w, FileStat):
+                    parent_stat = w
+                    break
+                if isinstance(w, MemberOf):
+                    parent_stat = w.parent
+                    break
+
+        src_scheme = src_uri.split("://", 1)[0] if "://" in src_uri else ""
+        dst_scheme = dst_uri.split("://", 1)[0] if "://" in dst_uri else ""
+        same_scheme = bool(src_scheme and src_scheme == dst_scheme)
+
+        current_rows.sort(
+            key=lambda r: (r.get("member") is not None, str(r.get("member") or ""))
+        )
+        new_obs_ids: list[uuid.UUID] = []
+        for row in current_rows:
+            row_member = str(row["member"]) if row.get("member") is not None else None
+            row_identity = self.get_identity(str(row["anchor"]))
+            old_witness = row.get("witness")
+            if row_member is None:
+                if dst_path is not None and Path(dst_path).is_dir():
+                    new_witness: Witness | None = DirTreeStat.capture(
+                        dst_path,
+                        observed_at_ns=ts_ns,
+                    )
+                    repr_kind = "tree"
+                else:
+                    new_witness = (
+                        parent_stat if parent_stat is not None else old_witness
+                    )
+                    repr_kind = (
+                        "tree" if isinstance(new_witness, DirTreeStat) else "file"
+                    )
+            else:
+                new_witness = (
+                    MemberOf(parent=parent_stat, member=row_member)
+                    if parent_stat is not None
+                    else old_witness
+                )
+                repr_kind = "member"
+
+            derived_obs = Observation(
+                location=Location(uri=dst_uri, member=row_member),
+                identity=row_identity,
+                access_driver=str(row["access_driver"]),
+                witness=new_witness,
+                basis="derived",
+                site=site,
+                scope_key=(
+                    scope_key
+                    if scope_key is not None
+                    else (
+                        str(row["scope_key"])
+                        if same_scheme and row.get("scope_key") is not None
+                        else None
+                    )
+                ),
+                mount_instance_id=(
+                    mount_instance_id
+                    if mount_instance_id is not None
+                    else (
+                        str(row["mount_instance_id"])
+                        if same_scheme and row.get("mount_instance_id") is not None
+                        else None
+                    )
+                ),
+                observed_at_ns=ts_ns,
+            )
+            new_id = self.record_observation(
+                derived_obs,
+                repr_kind=repr_kind,
+                writer=effective_writer,
+            )
+            new_obs_ids.append(new_id)
+
+        return new_obs_ids
+
     def record_location_event(
         self,
         *,
@@ -690,6 +1021,9 @@ class StoreLedger:
         rank = resolve_status_rank(status, status_rank)
         ts_ns = time.time_ns() if at_ns is None else int(at_ns)
         effective_writer = writer or self.writer
+        if status in ("evicted", "failed_transfer"):
+            self._memoized_observations.clear()
+            self._memoized_locations.clear()
 
         if self.read_only:
             if not any(e["event_id"] == ev_id for e in self._overlay_events):
@@ -747,7 +1081,13 @@ class StoreLedger:
         include_evicted: bool = True,
     ) -> list[dict[str, Any]]:
         """Merge DuckDB `artifact_location` + `location_event` with the in-memory overlay."""
-        cur = self._con.execute("SELECT * FROM artifact_location")
+        if site is not None:
+            cur = self._con.execute(
+                "SELECT * FROM artifact_location WHERE site = ?",
+                [site],
+            )
+        else:
+            cur = self._con.execute("SELECT * FROM artifact_location")
         db_obs = self._rows_to_location_dicts(cur.description, cur.fetchall())
         all_obs = db_obs + [dict(v) for v in self._overlay_observations.values()]
 

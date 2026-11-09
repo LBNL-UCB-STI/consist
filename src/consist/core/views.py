@@ -19,6 +19,8 @@ from typing import (
 from sqlalchemy import Column
 from sqlmodel import select, Session, text, SQLModel, Field, col
 
+from consist.artifact import Artifact as V2Artifact
+from consist.engine import locate
 from consist.models.artifact import Artifact
 from consist.models.run import Run
 
@@ -118,6 +120,24 @@ class GroupedViewRecord:
     facet_values: Dict[str, Any]
 
 
+def build_v2_hot_artifact_join_sql(
+    hot_alias: str = "h",
+    artifact_alias: str = "a",
+) -> str:
+    """Return the explicit UUID cast join predicate between a dlt hot table (`VARCHAR`) and v2 `artifact` (`UUID`)."""
+    return f"TRY_CAST({hot_alias}.consist_artifact_id AS UUID) = {artifact_alias}.id"
+
+
+def _model_tablename(model: Type[SQLModel]) -> str:
+    try:
+        raw = model.__tablename__
+    except AttributeError:
+        raw = None
+    if isinstance(raw, str) and raw:
+        return raw
+    return model.__name__.lower()
+
+
 @lru_cache(maxsize=None)
 def _create_view_model_cached(model: Type[T], view_name: str) -> Type[T]:
     """
@@ -133,7 +153,7 @@ def _create_view_model_cached(model: Type[T], view_name: str) -> Type[T]:
     # under `from __future__ import annotations`).
     annotations: Dict[str, Any] = {}
     for field_name, field_info in model.model_fields.items():
-        ann = getattr(field_info, "annotation", None)
+        ann = field_info.annotation
         annotations[field_name] = ann if ann is not None else Any
     annotations.update(
         {
@@ -160,7 +180,10 @@ def _create_view_model_cached(model: Type[T], view_name: str) -> Type[T]:
     # 4. Clone Fields
     for field_name, field_info in model.model_fields.items():
         if field_name not in namespace:
-            sa_column = getattr(field_info, "sa_column", None)
+            try:
+                sa_column = field_info.sa_column  # type: ignore[attr-defined]
+            except AttributeError:
+                sa_column = None
             if isinstance(sa_column, Column):
                 # NOTE:
                 # SQLAlchemy `Column` objects are bound to a specific `Table` instance.
@@ -175,7 +198,7 @@ def _create_view_model_cached(model: Type[T], view_name: str) -> Type[T]:
                 # We therefore create a *new* Column with the same name and type so
                 # the view model preserves the original column names for quoting and
                 # for typed empty views, without sharing SQLAlchemy state.
-                sa_column = Column(
+                cloned_col = Column(
                     sa_column.name,
                     copy(sa_column.type),
                     nullable=sa_column.nullable,
@@ -183,25 +206,20 @@ def _create_view_model_cached(model: Type[T], view_name: str) -> Type[T]:
                     index=sa_column.index,
                     unique=sa_column.unique,
                 )
-
-            default_factory = getattr(field_info, "default_factory", None)
-            if default_factory is not None:
-                if sa_column is not None:
-                    namespace[field_name] = Field(
-                        default_factory=default_factory, sa_column=sa_column
+                namespace[field_name] = (
+                    Field(
+                        default_factory=field_info.default_factory,
+                        sa_column=cloned_col,
                     )
-                else:
-                    namespace[field_name] = Field(default_factory=default_factory)
+                    if field_info.default_factory is not None
+                    else Field(default=field_info.default, sa_column=cloned_col)
+                )
             else:
-                if sa_column is not None:
-                    namespace[field_name] = Field(
-                        default=getattr(field_info, "default", None),
-                        sa_column=sa_column,
-                    )
-                else:
-                    namespace[field_name] = Field(
-                        default=getattr(field_info, "default", None)
-                    )
+                namespace[field_name] = (
+                    Field(default_factory=field_info.default_factory)
+                    if field_info.default_factory is not None
+                    else Field(default=field_info.default)
+                )
 
     # 5. Create Dynamic Class
     def exec_body(ns):
@@ -222,13 +240,7 @@ def create_view_model(model: Type[T], name: Optional[str] = None) -> Type[T]:
     Ensures table=True is passed to the metaclass.
     """
     # 1. Determine View Name
-    table_name = getattr(model, "__tablename__", None)
-    if name:
-        view_name = name
-    elif table_name is not None:
-        view_name = f"v_{table_name}"
-    else:
-        view_name = f"v_{model.__name__.lower()}"
+    view_name = name or f"v_{_model_tablename(model)}"
     return _create_view_model_cached(model, view_name)
 
 
@@ -270,11 +282,7 @@ class ViewRegistry:
 
             cached = self._class_cache.get(name)
             if cached is not None:
-                concept_key = (
-                    key
-                    or getattr(model, "__tablename__", None)
-                    or model.__name__.lower()
-                )
+                concept_key = key or _model_tablename(model)
                 view_name = f"v_{concept_key}"
                 factory.create_hybrid_view(view_name, concept_key, schema_model=model)
                 return cached
@@ -331,9 +339,7 @@ class ViewFactory:
         """
         Creates both the SQL View and the Python SQLModel class for a given schema.
         """
-        concept_key = (
-            key or getattr(model, "__tablename__", None) or model.__name__.lower()
-        )
+        concept_key = key or _model_tablename(model)
         view_name = f"v_{concept_key}"
 
         # Pass schema_model to handle empty states
@@ -674,12 +680,11 @@ class ViewFactory:
                 if schema_model:
                     schema_columns: List[str] = []
                     for attr_name, field_info in schema_model.model_fields.items():
-                        sa_col = getattr(field_info, "sa_column", None)
-                        col_name = (
-                            getattr(sa_col, "name", None)
-                            if sa_col is not None
-                            else None
-                        )
+                        try:
+                            sa_col = field_info.sa_column  # type: ignore[attr-defined]
+                        except AttributeError:
+                            sa_col = None
+                        col_name = sa_col.name if isinstance(sa_col, Column) else None
                         sql_name = (
                             str(col_name)
                             if isinstance(col_name, str) and col_name
@@ -926,6 +931,12 @@ class ViewFactory:
         *,
         hydrate_missing: bool = True,
     ) -> Optional[Path]:
+        if isinstance(record.artifact, V2Artifact):
+            try:
+                return locate(record.artifact, mounts=self.tracker.mounts).path
+            except FileNotFoundError:
+                return None
+
         primary_path = Path(self.tracker.resolve_uri(record.artifact.container_uri))
         if primary_path.exists():
             return primary_path
@@ -986,7 +997,15 @@ class ViewFactory:
 
             resolved_path = self._resolve_cold_record_path(record)
             if resolved_path is None:
-                abs_path = self.tracker.resolve_uri(record.artifact.container_uri)
+                if isinstance(record.artifact, V2Artifact):
+                    hint_uri = (
+                        record.artifact.hints[0].location.uri
+                        if record.artifact.hints
+                        else record.artifact.key
+                    )
+                    abs_path = self.tracker.resolve_uri(hint_uri)
+                else:
+                    abs_path = self.tracker.resolve_uri(record.artifact.container_uri)
                 if missing_files == "error":
                     raise FileNotFoundError(abs_path)
                 if missing_files == "warn":

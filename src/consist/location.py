@@ -18,6 +18,7 @@ import socket
 import threading
 import time
 from typing import Any, Literal, TypeAlias
+import uuid
 import weakref
 
 from consist.digest import Identity
@@ -71,6 +72,33 @@ class FileStat:
             raise ValueError(f"FileStat.size must be non-negative, got {self.size}")
 
     @classmethod
+    def from_os_stat(
+        cls,
+        st: os.stat_result,
+        *,
+        observed_at_ns: int | None = None,
+    ) -> FileStat:
+        """Construct a `FileStat` witness from an `os.stat_result`."""
+        now_ns = time.time_ns() if observed_at_ns is None else observed_at_ns
+        mtime_ns = (
+            st.st_mtime_ns
+            if st.st_mtime_ns is not None
+            else int(st.st_mtime * 1_000_000_000)
+        )
+        ctime_ns = (
+            st.st_ctime_ns
+            if st.st_ctime_ns is not None
+            else int(st.st_ctime * 1_000_000_000)
+        )
+        return cls(
+            size=st.st_size,
+            mtime_ns=mtime_ns,
+            ctime_ns=ctime_ns,
+            ino=st.st_ino,
+            racy=(now_ns - mtime_ns) < _RACY_WINDOW_NS,
+        )
+
+    @classmethod
     def capture(
         cls,
         path: Path | str,
@@ -78,15 +106,9 @@ class FileStat:
         observed_at_ns: int | None = None,
     ) -> FileStat:
         """Stat `path` and construct a `FileStat` witness."""
-        st = Path(path).stat()
-        now_ns = time.time_ns() if observed_at_ns is None else observed_at_ns
-        racy = (now_ns - st.st_mtime_ns) < _RACY_WINDOW_NS
-        return cls(
-            size=st.st_size,
-            mtime_ns=st.st_mtime_ns,
-            ctime_ns=st.st_ctime_ns,
-            ino=st.st_ino,
-            racy=racy,
+        return cls.from_os_stat(
+            Path(path).stat(),
+            observed_at_ns=observed_at_ns,
         )
 
     def check(
@@ -430,6 +452,20 @@ class Mount:
                 f"Unknown mount scope {self.scope!r}; expected one of {sorted(_VALID_MOUNT_SCOPES)}"
             )
 
+    def resolve_instance_id(self) -> str | None:
+        """Resolve explicit or `.consist-mount-instance` marker ID for this mount."""
+        if self.instance_id is not None:
+            return self.instance_id
+        if self.scope in ("node", "job"):
+            marker = self.root / ".consist-mount-instance"
+            try:
+                if marker.is_file():
+                    val = marker.read_text(encoding="utf-8").strip()
+                    return val or None
+            except OSError:
+                return None
+        return None
+
 
 @dataclass(frozen=True, slots=True)
 class SiteContext:
@@ -567,6 +603,39 @@ class Observation:
     scope_key: str | None = None
     mount_instance_id: str | None = None
     observed_at_ns: int = field(default_factory=time.time_ns)
+
+    @property
+    def place_key(self) -> tuple[str, str, str, str, str]:
+        """Return the 5-tuple physical place partition key for supersession."""
+        return (
+            self.site,
+            self.scope_key or "",
+            self.mount_instance_id or "",
+            self.location.uri,
+            self.location.member or "",
+        )
+
+    def to_location_row(
+        self,
+        *,
+        observation_id: uuid.UUID | None = None,
+    ) -> dict[str, Any]:
+        """Convert this `Observation` into a location dictionary compatible with `locate_current`."""
+        return {
+            "observation_id": observation_id,
+            "anchor": str(self.identity.anchor),
+            "uri": self.location.uri,
+            "member": self.location.member,
+            "access_driver": self.access_driver,
+            "witness": self.witness,
+            "basis": self.basis,
+            "site": self.site,
+            "scope_key": self.scope_key,
+            "mount_instance_id": self.mount_instance_id,
+            "observed_at_ns": self.observed_at_ns,
+            "status": "active",
+            "transfer_ref": None,
+        }
 
 
 @dataclass(frozen=True, slots=True)
