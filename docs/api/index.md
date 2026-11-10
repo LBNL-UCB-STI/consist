@@ -39,8 +39,7 @@ def write_answer() -> Path:
     out.write_text("42\n")
     return out
 
-with consist.use_tracker(tracker):
-    result = consist.run(fn=write_answer, outputs=["answer"])
+result = tracker.run(fn=write_answer, outputs=["answer"])
 
 print(result.outputs["answer"].path)
 ```

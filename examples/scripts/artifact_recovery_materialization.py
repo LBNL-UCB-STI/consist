@@ -12,7 +12,7 @@ def main() -> None:
     tracker = Tracker(
         run_dir=base_dir / "workspace",
         db_path=base_dir / "consist.duckdb",
-        project_root=".",
+        project_root=Path(__file__).resolve().parents[2],
         allow_external_paths=True,
     )
 
@@ -26,7 +26,7 @@ def main() -> None:
     archive_root = base_dir / "archive"
     tracker.archive_artifact(artifact, archive_root, mode="copy")
 
-    original_path = artifact.as_path()
+    original_path = artifact.path
     original_path.unlink()
 
     fresh_workspace = base_dir / "fresh_workspace"
@@ -38,7 +38,7 @@ def main() -> None:
 
     print(f"status: {result.status}")
     print(f"path: {result.path}")
-    print(f"artifact.as_path(): {result.artifact.as_path()}")
+    print(f"artifact.path: {result.artifact.path}")
 
 
 if __name__ == "__main__":

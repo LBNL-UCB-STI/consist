@@ -44,8 +44,7 @@ def write_output() -> Path:
     out.write_text("hello\n")
     return out
 
-with consist.use_tracker(tracker):
-    result = consist.run(fn=write_output, outputs=["report"])
+result = tracker.run(fn=write_output, outputs=["report"])
 
 artifact = result.outputs["report"]
 print(artifact.key)

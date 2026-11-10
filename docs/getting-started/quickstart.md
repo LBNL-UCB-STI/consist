@@ -151,7 +151,6 @@ first = tracker.run(
     inputs={"data_path": Path("input.csv")},
     outputs={"summary": "summary.txt"},
     execution_options=ExecutionOptions(
-        input_binding="paths",
         input_materialization="requested",
         input_paths={
             "data_path": tracker.run_dir / "workspace" / "input.csv"
@@ -161,11 +160,12 @@ first = tracker.run(
 ```
 
 By default, requested staging is restricted to the tracker run directory and
-configured mount roots. This example keeps a fixed path within the
-tracker-managed workspace, so it works on both cache misses and cache hits
-without weakening that safety boundary. If a subprocess genuinely requires a
-durable workspace outside `tracker.run_dir`, prefer configuring that directory
-as a mount root. For a one-off external destination, opt in on the tracker with
+configured mount roots. This example stages `data_path` to a fixed path within
+the tracker-managed workspace before execution on a cache miss (and skips input
+staging on a cache hit so cached outputs are reused without overwriting
+workspace files). If a subprocess genuinely requires a durable workspace outside
+`tracker.run_dir`, prefer configuring that directory as a mount root. For a
+one-off external destination, opt in on the tracker with
 `Tracker(..., allow_external_paths=True)` or set
 `CONSIST_ALLOW_EXTERNAL_PATHS=1`.
 

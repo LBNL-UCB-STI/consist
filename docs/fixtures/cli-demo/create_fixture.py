@@ -5,7 +5,7 @@ import shutil
 from pathlib import Path
 
 import consist
-from consist import ExecutionOptions, Tracker
+from consist import Tracker
 
 
 HERE = Path(__file__).resolve().parent
@@ -69,7 +69,6 @@ def main() -> None:
         config={"source": "cleaned"},
         inputs={"cleaned_path": consist.ref(clean_result, key="cleaned")},
         outputs=["summary"],
-        execution_options=ExecutionOptions(input_binding="paths"),
     )
 
 

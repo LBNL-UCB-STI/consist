@@ -98,7 +98,7 @@ with tracker.start_run("weekday_transit", "gtfs"):
         feed_keys=["beartransit"],
     )
 
-trips = tracker.load(weekday.table_artifacts["trips"]).df()
+trips = weekday.table_artifacts["trips"].as_df()
 children = tracker.get_child_artifacts(weekday.selected_service_artifact)
 RouteView = tracker.view(GtfsRoutes)
 ```

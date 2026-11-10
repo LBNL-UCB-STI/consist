@@ -70,29 +70,24 @@ kwargs. It does not change `ScenarioContext.trace(...)`.
 ```python
 from pathlib import Path
 import consist
-from consist import BindingResult, ExecutionOptions, Tracker
+from consist import BindingResult, Tracker
 
 tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
 
 
-def prepare(raw: Path) -> dict[str, Path]:
-    out = consist.output_path("prepared", ext="parquet")
-    out.write_text("prepared\n")
-    return {"prepared": out}
+def prepare(raw: Path, prepared: Path) -> None:
+    prepared.write_text(raw.read_text())
 
 
-def analyze(prepared: Path) -> dict[str, Path]:
-    out = consist.output_path("analysis", ext="parquet")
-    out.write_text(prepared.read_text())
-    return {"analysis": out}
+def analyze(prepared: Path, analysis: Path) -> None:
+    analysis.write_text(prepared.read_text())
 
 
 with tracker.scenario("baseline") as sc:
     prep = sc.run(
         fn=prepare,
         inputs={"raw": Path("raw.csv")},
-        execution_options=ExecutionOptions(input_binding="paths"),
-        outputs=["prepared"],
+        outputs={"prepared": "prepared.txt"},
     )
 
     sc.run(
@@ -101,8 +96,7 @@ with tracker.scenario("baseline") as sc:
             inputs={"prepared": consist.ref(prep, key="prepared")},
             input_keys=["prepared"],
         ),
-        execution_options=ExecutionOptions(input_binding="loaded"),
-        outputs=["analysis"],
+        outputs={"analysis": "analysis.txt"},
     )
 ```
 

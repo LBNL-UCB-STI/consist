@@ -105,7 +105,7 @@ print(persons.status)
 print(persons.path)
 
 if persons.resolvable:
-    print(persons.artifact.as_path())
+    print(persons.artifact.path)
 ```
 
 Use `target_root` under the tracker `run_dir` or a configured mount root when
@@ -170,7 +170,7 @@ automatically. Their bundle manifest includes required `.shp`, `.shx`, and
 `.dbf` files plus every same-stem regular sidecar. Archive and hydrate them
 through a clean bundle root, so the full bundle is atomically published; the
 hydration result exposes that root as `path` and the native `.shp` member as
-`entry_path` (and on the detached artifact's `as_path()`). Zarr and Shapefile
+`entry_path` (and on the detached artifact's `.path`). Zarr and Shapefile
 artifacts logged before their manifest contracts remain loadable from bytes but
 cannot be archived or hydrated exactly; re-log them to create a new
 recovery-capable artifact.
@@ -206,7 +206,7 @@ result = tracker.materialize_artifact(
 )
 
 if result.resolvable:
-    print(result.artifact.as_path())
+    print(result.artifact.path)
 ```
 
 For known historical run outputs, prefer `hydrate_run_outputs(...)`; it handles

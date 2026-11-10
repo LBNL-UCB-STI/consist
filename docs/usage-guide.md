@@ -36,18 +36,16 @@ from pathlib import Path
 
 import pandas as pd
 
-from consist import ExecutionOptions, Tracker
+from consist import Tracker
 
 tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
 
 
-def summarize_trips(trips_path: Path, threshold: float) -> dict[str, Path]:
+def summarize_trips(trips_path: Path, summary: Path, threshold: float = 1.0) -> None:
     trips = pd.read_parquet(trips_path)
-    out = Path("./summary.parquet")
     trips.loc[trips["distance"] >= threshold].groupby("mode").size().to_frame(
         "count"
-    ).to_parquet(out)
-    return {"summary": out}
+    ).to_parquet(summary)
 
 
 result = tracker.run(
@@ -55,8 +53,7 @@ result = tracker.run(
     fn=summarize_trips,
     inputs={"trips_path": Path("inputs/trips.parquet")},
     config={"threshold": 1.0},
-    outputs=["summary"],
-    execution_options=ExecutionOptions(input_binding="paths"),
+    outputs={"summary": "summary.parquet"},
 )
 
 summary_artifact = result.outputs["summary"]
@@ -66,28 +63,27 @@ Reach for this first when:
 
 - The step has a clear callable boundary.
 - Inputs and config fully describe the computation.
-- Outputs can be returned as `dict[str, Path]` or declared with
-  `output_paths={...}`.
+- Outputs can be declared via `outputs={"key": "filename"}` (with `: Path`
+  parameters) or returned from `outputs=["key"]`.
 - Use `ArtifactSpec(path=..., schema=..., profile_file_schema=True)` inside
-  `output_paths` when a legacy file-writing step needs non-strict logical schema
+  `outputs={...}` when a file-writing step needs non-strict logical schema
   metadata at the same declaration site as the output path.
 
 Use options objects for policy controls:
 
 ```python
-from consist import CacheOptions, ExecutionOptions, OutputPolicyOptions
+from consist import CacheOptions, OutputPolicyOptions
 
 result = tracker.run(
     fn=summarize_trips,
     inputs={"trips_path": Path("inputs/trips.parquet")},
-    outputs=["summary"],
+    outputs={"summary": "summary.parquet"},
     cache_options=CacheOptions(
         cache_mode="reuse",
         cache_hydration="inputs-missing",
         code_identity="callable_module",
     ),
     output_policy=OutputPolicyOptions(output_missing="error"),
-    execution_options=ExecutionOptions(input_binding="paths"),
 )
 ```
 
@@ -128,22 +124,19 @@ from consist import ExecutionOptions, Tracker
 tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
 
 
-def run_legacy_tool(config_path: Path) -> dict[str, Path]:
-    report = Path("./report.txt")
+def run_legacy_tool(config_path: Path, report: Path) -> None:
     subprocess.run(
         ["legacy-tool", "--config", str(config_path), "--out", str(report)],
         check=True,
     )
-    return {"report": report}
 
 
 result = tracker.run(
     name="legacy_report",
     fn=run_legacy_tool,
     inputs={"config_path": Path("./configs/baseline.yaml")},
-    outputs=["report"],
+    outputs={"report": "report.txt"},
     execution_options=ExecutionOptions(
-        input_binding="paths",
         input_materialization="requested",
         input_materialization_mode="copy",
         input_paths={
@@ -156,7 +149,7 @@ result = tracker.run(
 Use this when:
 
 - A subprocess or model expects fixed filenames.
-- The same local file contract must hold on cache hits and misses.
+- The tool requires its input staged at a fixed local path when executing on a cache miss.
 - You do not want manual copies to become hidden workflow state.
 
 For lower-level staging helpers, see [Materialization](api/materialize.md).
@@ -173,23 +166,19 @@ from pathlib import Path
 import pandas as pd
 
 import consist
-from consist import ExecutionOptions, Tracker
+from consist import Tracker
 
 tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
 
 
-def clean(raw_path: Path) -> dict[str, Path]:
+def clean(raw_path: Path, cleaned: Path) -> None:
     df = pd.read_csv(raw_path)
-    out = Path("./cleaned.parquet")
-    df[df["value"] > 0].to_parquet(out)
-    return {"cleaned": out}
+    df[df["value"] > 0].to_parquet(cleaned)
 
 
-def analyze(cleaned_path: Path) -> dict[str, Path]:
+def analyze(cleaned_path: Path, analysis: Path) -> None:
     df = pd.read_parquet(cleaned_path)
-    out = Path("./analysis.parquet")
-    df.groupby("category").size().to_frame("count").to_parquet(out)
-    return {"analysis": out}
+    df.groupby("category").size().to_frame("count").to_parquet(analysis)
 
 
 with tracker.scenario("baseline") as sc:
@@ -197,16 +186,14 @@ with tracker.scenario("baseline") as sc:
         name="clean",
         fn=clean,
         inputs={"raw_path": Path("inputs/raw.csv")},
-        outputs=["cleaned"],
-        execution_options=ExecutionOptions(input_binding="paths"),
+        outputs={"cleaned": "cleaned.parquet"},
     )
 
     sc.run(
         name="analyze",
         fn=analyze,
         inputs={"cleaned_path": consist.ref(cleaned, key="cleaned")},
-        outputs=["analysis"],
-        execution_options=ExecutionOptions(input_binding="paths"),
+        outputs={"analysis": "analysis.parquet"},
     )
 ```
 
@@ -320,7 +307,7 @@ Inside a scenario, `sc.trace(...)` records a child run under the scenario:
 with tracker.scenario("baseline") as sc:
     with sc.trace(name="validate", inputs=consist.refs(cleaned, "cleaned")):
         artifact = consist.ref(cleaned, key="cleaned")
-        df = consist.load_df(artifact, tracker=tracker)
+        df = artifact.as_df()
         assert not df.empty
 ```
 

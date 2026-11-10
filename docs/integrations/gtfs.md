@@ -60,7 +60,7 @@ with tracker.start_run("weekday_transit", "gtfs"):
 print(weekday.service_slice_hash)
 print(weekday.manifest["feeds"][0]["selection"]["active_service_ids"])
 weekday.selected_tables["trips"].head()
-tracker.load(weekday.table_artifacts["trips"]).df().head()
+weekday.table_artifacts["trips"].as_df().head()
 tracker.get_child_artifacts(weekday.selected_service_artifact)
 ```
 

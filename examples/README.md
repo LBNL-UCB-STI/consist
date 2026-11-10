@@ -18,7 +18,7 @@ Examples are tiered:
   raw feed discovery, service-date canonicalization, semantic GTFS identity,
   and a tiny route-summary model over the selected service slice.
 - `02_parameter_sweep_monte_carlo.ipynb`: moderate-scale sweep with
-  `scenario.run(...)` + `scenario.trace(...)`.
+  `scenario.map_runs(...)` + `scenario.trace(...)`.
 - `scripts/research_pipeline_native.py`: compact script template for native
   Python workflows.
 - `scripts/artifact_recovery_materialization.py`: compact recovery example that
@@ -81,8 +81,12 @@ Generated SQLModel modules are written under `examples/src/generated/`.
 
 - Generated code should stay in `examples/src/generated/` (or equivalent
   dedicated package in real projects).
-- Prefer managed output helpers inside active runs:
-  `consist.output_path(...)` or injected `ctx.output_path(...)`.
+- Prefer `: Path` parameter annotations with symmetric `inputs={"raw": ...}` and
+  `outputs={"cleaned": target_path}` declarations, or `outputs=["cleaned"]` with
+  `consist.output_path(...)` / `ctx.output_path(...)` when Consist manages the
+  run-local path.
+- Prefer `artifact.path` and `artifact.as_df()` when reading output paths or
+  tabular data.
 
 Concise vs explicit input wiring patterns:
 

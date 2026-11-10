@@ -41,7 +41,8 @@ result = tracker.run(
 That pattern applies equally to `Tracker.run(...)` and
 `ScenarioContext.run(...)`. It keeps canonical artifact identity in
 `inputs={...}` while ensuring the callable sees a real local file at the
-requested destination, including on cache hits.
+requested destination when the step executes on a cache miss (and skips input
+staging on a cache hit so in-place workspace outputs are not overwritten).
 
 When migrating legacy calls, move direct policy kwargs into the matching options
 object: cache behavior goes in `CacheOptions(...)`, output validation and

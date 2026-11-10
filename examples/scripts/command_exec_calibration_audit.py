@@ -31,7 +31,9 @@ def _write_mock_simulator_cli(script_path: Path) -> None:
     """Create a tiny standalone CLI script representing a legacy simulator binary."""
     script_path.write_text(
         """#!/usr/bin/env python3
-import argparse, csv, json, sys
+import argparse
+import csv
+import json
 from pathlib import Path
 
 parser = argparse.ArgumentParser()
@@ -97,6 +99,7 @@ def main() -> None:
     tracker = Tracker(
         run_dir=EXAMPLE_ROOT / ".consist" / "runs",
         db_path=EXAMPLE_ROOT / ".consist" / "provenance.duckdb",
+        project_root=Path(__file__).resolve().parents[2],
     )
 
     cmd = [

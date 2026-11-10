@@ -43,23 +43,19 @@ For `Tracker.run(...)`, `Tracker.trace(...)`, `ScenarioContext.run(...)`,
 `consist.trace(...)` wrappers, use `adapter=` and `identity_inputs=`:
 
 ```python
-import consist
-from consist import use_tracker
+tracker.run(
+    fn=run_beam,
+    name="beam",
+    adapter=adapter,
+    identity_inputs=[("beam_hocon", config_root / "sfbay-pilates-base.conf")],
+)
 
-with use_tracker(tracker):
-    consist.run(
-        fn=run_beam,
-        name="beam",
-        adapter=adapter,
-        identity_inputs=[("beam_hocon", config_root / "sfbay-pilates-base.conf")],
-    )
-
-    with consist.trace(
-        "beam_trace",
-        adapter=adapter,
-        identity_inputs=[("beam_hocon", config_root / "sfbay-pilates-base.conf")],
-    ):
-        run_beam()
+with tracker.trace(
+    "beam_trace",
+    adapter=adapter,
+    identity_inputs=[("beam_hocon", config_root / "sfbay-pilates-base.conf")],
+):
+    run_beam()
 ```
 
 `config_plan` is not accepted on run/trace public surfaces. Use `adapter=...`

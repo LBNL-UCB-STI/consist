@@ -224,7 +224,7 @@ print(persons.status)
 print(persons.path)
 
 if persons.resolvable:
-    path = persons.artifact.as_path()
+    path = persons.artifact.path
     print(path)
 ```
 
@@ -234,7 +234,7 @@ In this flow:
 - `hydrated["persons"].path` tells you where Consist expected or created the
   destination.
 - `hydrated["persons"].artifact` is a detached artifact view. When
-  `resolvable` is `True`, `artifact.as_path()` points at the hydrated
+  `resolvable` is `True`, `artifact.path` points at the hydrated
   destination in the new workspace. The detached artifact also preserves
   `artifact.hash`, Consist's canonical artifact fingerprint surface.
 
