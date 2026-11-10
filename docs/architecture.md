@@ -16,9 +16,11 @@ An **artifact** is the handle you get back from Consist that ties all three toge
 
 | Question | Term | In code |
 | :--- | :--- | :--- |
-| What is it called in this step? | **Name** | `art.key` |
-| What does it contain? | **Fingerprint** | `art.identity`, `art.digest()` |
-| Where can I read it right now? | **Location** | `art.path`, `art.location` |
+| What was it called when it was produced? | **Name** | `art.key` |
+| What does it contain? | **Fingerprint** | `art.hash` |
+| Where can I read it right now? | **Location** | `art.path`, `art.locations` |
+
+The same artifact can have a different name in each step that uses it; names are recorded per run.
 
 ---
 
@@ -34,7 +36,7 @@ flowchart LR
     Config["Config"] --> Sig
     Inputs["Inputs (name + fingerprint)"] --> Sig
     Outputs["Declared outputs (name + format)"] --> Sig
-    Sig --> Result["Outputs"]
+    Sig --> Result["Reuse earlier run, or execute"]
 ```
 
 The recipe includes:
@@ -50,7 +52,7 @@ Notice what is **not** in the signature: **locations**. Consist cares *what* an 
 
 ## When is a result reused?
 
-Before executing a step, Consist checks whether an earlier completed run with the same **signature** already exists and whether its output files are still available at a valid **location**.
+Before executing a step, Consist checks whether an earlier completed run has the same **signature**. If it does, the step is skipped, even if that run's output files have since been deleted. Consist only needs the files when something reads them: a later step that has to execute, or your own code calling `.path` or `.as_df()`.
 
 | If you change... | Reused? | Why |
 | :--- | :--- | :--- |
@@ -64,7 +66,7 @@ Before executing a step, Consist checks whether an earlier completed run with th
 | `runtime_kwargs` | **Yes** | Treated as runtime tuning, not part of the recipe |
 
 > [!NOTE]
-> **Containers and host volume paths:** When you run a container step and map host directories through `tracker.mounts`, Consist records portable mount prefixes (`inputs://...`, `workspace://...`) so moving a mounted directory across machines still reuses cached runs. Unmounted raw host volume paths remain host-specific; see the [Container Integration Guide](containers-guide.md) for details.
+> **Containers and host volume paths:** One exception: unmounted host volume paths are part of a container step's recipe. When you map host directories through `tracker.mounts`, Consist records portable mount prefixes (`inputs://...`, `workspace://...`) so moving a mounted directory across machines still reuses cached runs; see the [Container Integration Guide](containers-guide.md) for details.
 
 ### Cache modes
 
@@ -72,9 +74,9 @@ You can control how Consist uses the cache on any run via `cache_mode`:
 
 | Mode | Behavior |
 | :--- | :--- |
-| `reuse` (default) | Reuse a matching prior run if its outputs can still be read; otherwise execute the step. |
+| `reuse` (default) | Reuse a matching prior run by signature; otherwise execute the step. |
 | `overwrite` | Always execute the step and record the new outputs as the latest result. |
-| `readonly` | Reuse matching cached runs, or execute without writing new records to the database. |
+| `readonly` | Reuse matching cached runs, or execute and write output files and `consist.json` to `run_dir` without writing new records to `provenance.duckdb`. |
 
 ---
 
@@ -98,15 +100,16 @@ print(cleaned.path)      # Current readable Path on disk
 df = cleaned.as_df()     # Load directly into a DataFrame
 ```
 
-Always read files through `artifact.path` or `artifact.as_df()` rather than hardcoding paths into your own `run_dir` subfolder. On a cache hit, `cleaned.path` automatically resolves to wherever those bytes live right now — whether in the original run folder, a shared archive, or a staged local copy.
+Don't build paths to output files yourself. On a cache hit, `cleaned.path` points to wherever the contents are now — whether in the original run folder or a shared archive. If no copy exists anywhere on disk, reading the file (or calling `.as_df()` without a DuckDB copy) raises `FileNotFoundError`.
 
 ### Ghost Mode
 
-Because Consist separates an artifact's **fingerprint** from its **location**, you can delete bulky intermediate files to save disk space without losing provenance ("Ghost Mode"):
+Because Consist separates an artifact's **fingerprint** from its **location**, you can delete bulky intermediate outputs to save disk space without losing provenance ("Ghost Mode"):
 
-- Downstream steps whose final outputs are still on disk continue to hit the cache, even if intermediate files in the middle of the pipeline were deleted.
-- If an intermediate artifact was ingested into DuckDB, `artifact.as_df()` can still load it directly from the database after the file on disk is gone.
-- If a missing intermediate file is needed again for a new downstream branch, Consist knows which upstream run produced that fingerprint and re-executes only the steps required to regenerate it.
+- **Unchanged pipelines skip every step:** In a pipeline `A → B → C`, if you delete `A`'s outputs on disk but keep `B`'s, rerunning the pipeline skips all three steps. `B`'s signature depends on the *fingerprint* of `A`'s output — which Consist still has in the database — not on the file itself.
+- **Downstream changes only need the immediate parent's output:** If you later change `C`'s code or config while `A`'s output is still deleted, `A` and `B` still hit the cache and `C` executes normally using `B`'s surviving output file, without ever regenerating `A`.
+- **Ingested tables stay readable without files:** If an intermediate artifact was ingested into DuckDB, `artifact.as_df()` (and downstream steps with `input_binding="loaded"`) can still load it directly from the database after the file on disk is gone.
+- **When a deleted file *is* needed again:** If `B` itself misses (for example, you change `B`'s code) and `A`'s output was neither archived nor ingested, `B` raises an error naming `A`'s artifact and producing `run_id` and explaining how to regenerate `A` (by running `A` with `validate_cached_outputs="eager"` or `cache_mode="overwrite"`).
 
 ---
 
@@ -146,13 +149,13 @@ Because `provenance.duckdb` indexes every run and artifact, you can query output
 
 ## Upgraded from 0.4?
 
-If you upgraded an existing project from Consist 0.4 using `consist migrate <db_path>`, Consist verifies existing files on disk and computes their v2 fingerprints.
+If you upgraded an existing project from Consist 0.4 using `consist migrate <db_path>`, Consist verifies existing files on disk and computes their v2 fingerprints. In `--quick` mode (`consist migrate <db_path> --quick`), any artifact whose v1 record already had a full SHA-256 hash, a directory manifest, a logical matrix hash, or an ingested DuckDB table keeps its verified status immediately.
 
-Any historical run whose files were already deleted, overwritten, or skipped with `consist migrate <db_path> --quick` is preserved as **history-only**:
+Only historical runs whose files were already deleted or overwritten, or whose v1 record only had a quick size-and-timestamp check (`--quick` skips re-reading these from disk), become **history-only**:
 
-- It remains **fully visible** in lineage graphs, run queries, and hybrid views.
-- It **never produces a false cache hit**, because its original file contents could not be verified on disk during migration.
-- If you later restore the original file from a backup or archive, you can upgrade that artifact to full cache-eligible status at any time:
+- They remain **fully visible** in lineage graphs, run queries, and hybrid views.
+- They **never produce a false cache hit**, because their original file contents were not verified on disk during migration.
+- If you later restore or mount the original file, you can upgrade that artifact to full cache-eligible status at any time:
 
 ```bash
 consist promote ./provenance.duckdb <artifact-id-or-historical-fingerprint> --path /path/to/restored_file.parquet

@@ -29,8 +29,6 @@ BANNED_INTERNAL_TERMS: tuple[str, ...] = (
     "container_uri",
     "abs_path",
     "content_id",
-    "Artifact.hash",
-    "artifact.hash",
     "RunArtifactLink",
     "_physical_run_dir",
     "action-v2",

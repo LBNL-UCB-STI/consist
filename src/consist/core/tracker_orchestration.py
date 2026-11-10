@@ -1685,11 +1685,16 @@ class RunTraceCoordinator:
                         else:
                             artifact_path = artifact.path
                         if not artifact_path.exists():
+                            origin_detail = (
+                                f" (key={artifact.key!r}, produced by run {artifact.run_id!r})"
+                                if artifact.run_id
+                                else f" (key={artifact.key!r})"
+                            )
                             raise ValueError(
                                 format_problem_cause_fix(
                                     problem=(
                                         "input_binding='paths' requires a materialized "
-                                        f"local path for input {param_name!r}."
+                                        f"local path for input {param_name!r}{origin_detail}."
                                     ),
                                     cause=(
                                         "The bound input artifact does not currently "
@@ -1697,8 +1702,11 @@ class RunTraceCoordinator:
                                     ),
                                     fix=(
                                         "Use cache_hydration='inputs-missing', ensure "
-                                        "the source path is accessible on this host, or "
-                                        "switch to input_binding='loaded'."
+                                        "the source path is accessible on this host, "
+                                        "re-run the producing step with "
+                                        "validate_cached_outputs='eager' or "
+                                        "cache_mode='overwrite', or switch to "
+                                        "input_binding='loaded'."
                                     ),
                                 )
                             )

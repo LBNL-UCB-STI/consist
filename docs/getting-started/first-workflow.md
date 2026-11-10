@@ -35,7 +35,7 @@ This tutorial uses `: Path` parameter annotations with symmetric `inputs={...}`
 and `outputs={...}` dictionaries throughout. That keeps the callable boundary
 explicit and makes it obvious which files each step reads and writes. If you
 prefer hydrated tables or objects instead, see the loaded-binding examples in
-the quickstart and usage guide.
+the [Usage Guide](../usage-guide.md#input-binding).
 
 === "Without Consist"
 

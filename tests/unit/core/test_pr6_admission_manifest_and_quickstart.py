@@ -109,29 +109,216 @@ def test_readme_quick_example_and_quickstart_workflow(
     assert calls["summarize"] == 1
     assert report.outputs["summary"].path.exists()
 
-    # Also test the quickstart.md summarize_values pattern
+    # Also test the rewritten quickstart.md workflow end-to-end
     (tmp_path / "input.csv").write_text("value\n4\n9\n16\n", encoding="utf-8")
+    qs_calls = {"summarize": 0, "make_report": 0}
 
-    def summarize_values(data_path: Path, summary: Path) -> None:
-        df = pd.read_csv(data_path)
-        summary.write_text(f"mean={df['value'].mean():.1f}\n", encoding="utf-8")
+    def qs_summarize(data: Path, summary: Path) -> None:
+        qs_calls["summarize"] += 1
+        mean = pd.read_csv(data)["value"].mean()
+        summary.write_text(f"mean={mean:.1f}\n", encoding="utf-8")
 
     qs_first = tracker.run(
-        fn=summarize_values,
-        inputs={"data_path": "input.csv"},
+        fn=qs_summarize,
+        inputs={"data": "input.csv"},
         outputs={"summary": "summary.txt"},
     )
     qs_second = tracker.run(
-        fn=summarize_values,
-        inputs={"data_path": "input.csv"},
+        fn=qs_summarize,
+        inputs={"data": "input.csv"},
         outputs={"summary": "summary.txt"},
     )
     assert qs_first.cache_hit is False
     assert qs_second.cache_hit is True
+    assert qs_calls["summarize"] == 1
     assert (
         qs_second.outputs["summary"].path.read_text(encoding="utf-8").strip()
         == "mean=9.7"
     )
+
+    # Change input.csv -> cache miss (mean=12.7)
+    (tmp_path / "input.csv").write_text("value\n4\n9\n25\n", encoding="utf-8")
+    qs_changed = tracker.run(
+        fn=qs_summarize,
+        inputs={"data": "input.csv"},
+        outputs={"summary": "summary.txt"},
+    )
+    assert qs_changed.cache_hit is False
+    assert qs_calls["summarize"] == 2
+    assert (
+        qs_changed.outputs["summary"].path.read_text(encoding="utf-8").strip()
+        == "mean=12.7"
+    )
+
+    # Put original data back -> cache hit (content-based, ignores new timestamp)
+    (tmp_path / "input.csv").write_text("value\n4\n9\n16\n", encoding="utf-8")
+    qs_reverted = tracker.run(
+        fn=qs_summarize,
+        inputs={"data": "input.csv"},
+        outputs={"summary": "summary.txt"},
+    )
+    assert qs_reverted.cache_hit is True
+    assert qs_calls["summarize"] == 2
+    assert (
+        qs_reverted.outputs["summary"].path.read_text(encoding="utf-8").strip()
+        == "mean=9.7"
+    )
+
+    # Connect two steps (make_report consuming qs_reverted.outputs["summary"])
+    def make_report(summary: Path, report: Path) -> None:
+        qs_calls["make_report"] += 1
+        report.write_text("# Report\n\n" + summary.read_text(encoding="utf-8"))
+
+    report_res = tracker.run(
+        fn=make_report,
+        inputs={"summary": qs_reverted.outputs["summary"]},
+        outputs={"report": "report.md"},
+    )
+    assert report_res.cache_hit is False
+    assert qs_calls["make_report"] == 1
+    assert (
+        report_res.outputs["report"].path.read_text(encoding="utf-8")
+        == "# Report\n\nmean=9.7\n"
+    )
+
+
+def test_ghost_mode_lazy_caching_and_downstream_behavior(
+    tmp_path: Path,
+) -> None:
+    """
+    Verify Ghost Mode claims in docs/architecture.md:
+    1. In pipeline A -> B -> C, deleting A's output on disk while keeping B's
+       causes rerunning A -> B -> C to hit cache on all three steps without
+       executing A, B, or C.
+    2. If C misses (e.g. C's config changes) while A's output is deleted and
+       B's output is still present, A and B still hit cache and C executes
+       using B's surviving output without rerunning A.
+    3. Reading a deleted cached output raises FileNotFoundError, and if B
+       itself misses when A's output is deleted and un-archived, B raises a
+       clear error naming A's artifact key and producing run_id.
+    """
+    tracker = Tracker(run_dir=tmp_path / "runs", db_path=tmp_path / "provenance.duckdb")
+    raw_input = tmp_path / "raw.csv"
+    raw_input.write_text("x\n1\n2\n3\n", encoding="utf-8")
+
+    counts = {"a": 0, "b": 0, "c": 0}
+
+    def step_a(raw: Path, a_out: Path) -> None:
+        counts["a"] += 1
+        df = pd.read_csv(raw)
+        df["a"] = df["x"] * 10
+        df.to_csv(a_out, index=False)
+
+    def step_b(a_in: Path, b_out: Path, scale: int = 2) -> None:
+        counts["b"] += 1
+        df = pd.read_csv(a_in)
+        df["b"] = df["a"] * scale
+        df.to_csv(b_out, index=False)
+
+    def step_c(b_in: Path, c_out: Path, offset: int = 0) -> None:
+        counts["c"] += 1
+        df = pd.read_csv(b_in)
+        total = int(df["b"].sum()) + offset
+        c_out.write_text(f"total={total}\n", encoding="utf-8")
+
+    # Initial pipeline run: A -> B -> C all execute
+    res_a1 = tracker.run(
+        fn=step_a,
+        inputs={"raw": raw_input},
+        outputs={"a_out": "a.csv"},
+    )
+    res_b1 = tracker.run(
+        fn=step_b,
+        inputs={"a_in": res_a1.outputs["a_out"]},
+        outputs={"b_out": "b.csv"},
+        config={"scale": 2},
+    )
+    res_c1 = tracker.run(
+        fn=step_c,
+        inputs={"b_in": res_b1.outputs["b_out"]},
+        outputs={"c_out": "c.txt"},
+        config={"offset": 0},
+    )
+    assert (res_a1.cache_hit, res_b1.cache_hit, res_c1.cache_hit) == (
+        False,
+        False,
+        False,
+    )
+    assert counts == {"a": 1, "b": 1, "c": 1}
+
+    # Delete A's bulky intermediate output on disk ("Ghost Mode")
+    res_a1.outputs["a_out"].path.unlink()
+    assert not res_a1.outputs["a_out"].path.exists()
+    assert res_b1.outputs["b_out"].path.exists()
+
+    # 1. Rerun A -> B -> C unchanged: all three hit cache, none execute!
+    res_a2 = tracker.run(
+        fn=step_a,
+        inputs={"raw": raw_input},
+        outputs={"a_out": "a.csv"},
+    )
+    res_b2 = tracker.run(
+        fn=step_b,
+        inputs={"a_in": res_a2.outputs["a_out"]},
+        outputs={"b_out": "b.csv"},
+        config={"scale": 2},
+    )
+    res_c2 = tracker.run(
+        fn=step_c,
+        inputs={"b_in": res_b2.outputs["b_out"]},
+        outputs={"c_out": "c.txt"},
+        config={"offset": 0},
+    )
+    assert (res_a2.cache_hit, res_b2.cache_hit, res_c2.cache_hit) == (
+        True,
+        True,
+        True,
+    )
+    assert counts == {"a": 1, "b": 1, "c": 1}
+    assert res_c2.outputs["c_out"].path.read_text(encoding="utf-8") == "total=120\n"
+
+    # 2. Change C's config while A's output is still deleted:
+    # A and B hit cache, C executes using B's surviving output without rerunning A!
+    res_a3 = tracker.run(
+        fn=step_a,
+        inputs={"raw": raw_input},
+        outputs={"a_out": "a.csv"},
+    )
+    res_b3 = tracker.run(
+        fn=step_b,
+        inputs={"a_in": res_a3.outputs["a_out"]},
+        outputs={"b_out": "b.csv"},
+        config={"scale": 2},
+    )
+    res_c3 = tracker.run(
+        fn=step_c,
+        inputs={"b_in": res_b3.outputs["b_out"]},
+        outputs={"c_out": "c.txt"},
+        config={"offset": 5},
+    )
+    assert (res_a3.cache_hit, res_b3.cache_hit, res_c3.cache_hit) == (
+        True,
+        True,
+        False,
+    )
+    assert counts == {"a": 1, "b": 1, "c": 2}
+    assert res_c3.outputs["c_out"].path.read_text(encoding="utf-8") == "total=125\n"
+
+    # 3. Reading A's deleted output raises FileNotFoundError
+    with pytest.raises(FileNotFoundError):
+        res_a3.outputs["a_out"].path.read_text(encoding="utf-8")
+    with pytest.raises(FileNotFoundError):
+        res_a3.outputs["a_out"].as_df()
+
+    # And if B itself misses while A's output is deleted, B raises an error naming
+    # A's artifact key ('a_out') and producing run_id
+    with pytest.raises(ValueError, match=r"key='a_out'.*produced by run"):
+        tracker.run(
+            fn=step_b,
+            inputs={"a_in": res_a3.outputs["a_out"]},
+            outputs={"b_out": "b.csv"},
+            config={"scale": 3},
+        )
 
 
 def test_decision_d3_quick_migration_historical_run_promote_and_view_factory(

@@ -313,9 +313,8 @@ with tracker.scenario("baseline") as sc:
 
 Important distinction:
 
-- `run(...)` can skip callable execution on a cache hit.
-- `trace(...)` enters your Python block; use it when explicit lifecycle control
-  matters more than skip-on-hit function execution.
+- `run(...)` can skip callable execution on a cache hit (and can fingerprint the callable's module when run outside a Git repository).
+- `trace(...)` enters your Python block; use it when explicit lifecycle control matters more than skip-on-hit function execution. Because `trace(...)` has no callable to fingerprint, it requires a Git repository with at least one commit (`pip install "consist[git]"`).
 
 ## Command Execution: `consist exec` & `Tracker.exec(...)`
 
