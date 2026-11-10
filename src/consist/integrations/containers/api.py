@@ -301,7 +301,11 @@ def _reuse_or_execute_container(
             cached_outputs,
             requested_outputs,
         )
-        if set(requested_outputs).issubset(set(cached_outputs)):
+        normalized_requested = {
+            tracker.fs.virtualize_path(p) for p in requested_outputs
+        }
+        normalized_cached = {tracker.fs.virtualize_path(p) for p in cached_outputs}
+        if normalized_requested.issubset(normalized_cached):
             logger.info(f"✅ [Consist] Container cache hit: {run_id} -> {cached.id}")
             # Re-link cached artifacts to current run for provenance (inputs + outputs).
             if tracker.db and tracker.engine:
@@ -590,10 +594,6 @@ def run_container(
         if volume_modes is not None
         else {}
     )
-    virtualized_declared_outputs: List[str] = [
-        tracker.fs.virtualize_path(p) for p in outputs_str
-    ]
-
     manifest = _build_container_manifest(
         image=image,
         image_digest=image_digest,
@@ -616,7 +616,7 @@ def run_container(
         working_dir=working_dir,
         volumes=virtualized_volumes,
         volume_modes=virtualized_volume_modes,
-        declared_outputs=virtualized_declared_outputs,
+        declared_outputs=outputs_str,
         extra_args={},
     )
 

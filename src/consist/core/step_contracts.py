@@ -358,7 +358,7 @@ def resolve_step_contract(
         inputs=resolved.inputs,
         input_keys=resolved.input_keys,
         optional_input_keys=resolved.optional_input_keys,
-        outputs=resolved.outputs,
+        outputs=list(resolved.outputs) if resolved.outputs is not None else None,
         output_paths=resolved.output_paths,
         output_sets=resolved.output_sets,
         cache_mode=resolved.cache_mode,

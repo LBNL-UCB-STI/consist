@@ -254,23 +254,24 @@ class RunTraceCoordinator:
                 ) from exc
             return values or None
 
+        adapter_any: Any = adapter
         raw_root_dirs: Any = None
         try:
-            raw_root_dirs = adapter.root_dirs  # type: ignore[attr-defined]
+            raw_root_dirs = adapter_any.root_dirs
         except AttributeError:
             raw_root_dirs = None
         root_dirs = _coerce_roots(raw_root_dirs)
         if root_dirs is None:
             raw_config_dirs: Any = None
             try:
-                raw_config_dirs = adapter.config_dirs  # type: ignore[attr-defined]
+                raw_config_dirs = adapter_any.config_dirs
             except AttributeError:
                 raw_config_dirs = None
             root_dirs = _coerce_roots(raw_config_dirs)
         if root_dirs is None:
             primary_config: Any = None
             try:
-                primary_config = adapter.primary_config  # type: ignore[attr-defined]
+                primary_config = adapter_any.primary_config
             except AttributeError:
                 primary_config = None
             if primary_config is not None:

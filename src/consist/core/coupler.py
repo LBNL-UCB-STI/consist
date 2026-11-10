@@ -236,7 +236,7 @@ class Coupler(CouplerMapMixin[Any, DeclaredOutput]):
     def __init__(self, tracker: Optional["Tracker"] = None) -> None:
         self._tracker: Optional["Tracker"] = None
         self._artifacts: MutableMapping[str, Any] = {}
-        self._history: dict[str, list[CouplerArtifact]] = {}
+        self._history: MutableMapping[str, list[CouplerArtifact]] = {}
         self._stat_cache: dict[tuple[str, int, int, int], V2Artifact] = {}
         self._declared_outputs: MutableMapping[str, DeclaredOutput] = {}
         self._warn_undefined = False
