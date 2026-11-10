@@ -491,10 +491,21 @@ class Artifact(SQLModel, table=True):
             if tracker_obj is not None:
                 try:
                     resolved = Path(tracker_obj.resolve_uri(self.container_uri))
-                    if resolved.exists() or not self.abs_path:
+                    if resolved.exists():
                         return resolved
                 except (ValueError, RuntimeError, OSError, TypeError):
                     resolved = None
+                else:
+                    try:
+                        best_loc = self.accessibility(
+                            cast("Tracker", tracker_obj)
+                        ).best_location
+                        if best_loc is not None and best_loc.exists:
+                            return best_loc.path
+                    except Exception:
+                        pass
+                    if not self.abs_path:
+                        return resolved
 
         if self.abs_path:
             return Path(self.abs_path)
@@ -555,14 +566,17 @@ class Artifact(SQLModel, table=True):
                 if tracker_candidate is not None:
                     tracker_obj = cast(_TrackerWithFS, tracker_candidate)
 
+        fallback_primary = (
+            Path(self.abs_path) if self.abs_path else Path(self.container_uri)
+        )
         try:
             primary_path = (
                 Path(tracker_obj.resolve_uri(self.container_uri))
                 if tracker_obj is not None
-                else self.path
+                else fallback_primary
             )
         except Exception:
-            primary_path = self.path
+            primary_path = fallback_primary
         locations = [
             ArtifactLocationStatus(
                 label="primary",
