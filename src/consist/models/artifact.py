@@ -612,10 +612,48 @@ class Artifact(SQLModel, table=True):
         Load this artifact as a pandas DataFrame.
 
         This is equivalent to ``consist.load_df(self, ...)`` and supports the same
-        loader options.
+        loader options, with a direct local-file pandas fallback when no active
+        tracker/database session is bound.
         """
         # reason: keep the import local to avoid a circular dependency at module import time.
         from consist.api import load_df
+
+        if not kwargs:
+            try:
+                return load_df(
+                    self,
+                    tracker=tracker,
+                    db_fallback=db_fallback,
+                    columns=columns,
+                    close=close,
+                )
+            except RuntimeError:
+                if db_fallback == "always":
+                    raise
+
+        from consist.artifact import read_local_df
+
+        local_path: Optional[Path] = None
+        try:
+            local_path = self.as_path(tracker=tracker)
+        except Exception:
+            if self.abs_path:
+                local_path = Path(self.abs_path)
+            elif self.container_uri and "://" not in self.container_uri:
+                local_path = Path(self.container_uri)
+
+        if local_path is not None and local_path.exists():
+            try:
+                return read_local_df(
+                    local_path,
+                    driver=self.driver,
+                    member=self.table_path,
+                    default_h5_key="data",
+                    columns=columns,
+                    **kwargs,
+                )
+            except ValueError:
+                pass
 
         return load_df(
             self,

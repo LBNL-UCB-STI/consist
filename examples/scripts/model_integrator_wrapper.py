@@ -1,4 +1,5 @@
 from pathlib import Path
+import shutil
 import pandas as pd
 
 import consist
@@ -12,15 +13,35 @@ from consist import Tracker, output_path
 # ---------------------------------------------------------------------------------
 
 
+def _write_example_inputs(inputs_dir: Path) -> None:
+    """Create deterministic input files so this template runs self-contained."""
+    inputs_dir.mkdir(parents=True, exist_ok=True)
+    (inputs_dir / "land_use.csv").write_text(
+        "zone_id,households,jobs\n1,1200,800\n2,950,1500\n",
+        encoding="utf-8",
+    )
+    (inputs_dir / "rail_network_v2.gpkg").write_text(
+        "mock_gpkg_payload_v2\n",
+        encoding="utf-8",
+    )
+
+
 def main():
+    example_workspace = Path("examples/runs/model_integrator_wrapper")
+    if example_workspace.exists():
+        shutil.rmtree(example_workspace)
+    inputs_dir = example_workspace / "data" / "raw_inputs"
+    outputs_dir = example_workspace / "runs" / "outputs"
+    _write_example_inputs(inputs_dir)
+
     # 1. Initialize the Tracker
     # Point 'run_dir' to where you want logs and outputs to live.
     # Provide 'db_path' to enable a searchable DuckDB of all your "Studies".
     tracker = Tracker(
-        run_dir=Path("./runs"),
-        db_path="provenance.duckdb",
-        project_root=".",
-        mounts={"inputs": "./data/raw_inputs", "outputs": "./runs/outputs"},
+        run_dir=example_workspace / "runs",
+        db_path=example_workspace / "provenance.duckdb",
+        project_root=Path(__file__).resolve().parents[2],
+        mounts={"inputs": str(inputs_dir), "outputs": str(outputs_dir)},
     )
 
     # 2. Define a Scenario (or "Study")
@@ -36,11 +57,10 @@ def main():
             tags=["baseline", "official"],
             year=2040,
             config={"pop_growth": 1.05, "network": "existing"},
+            facet_from=["pop_growth", "network"],
+            inputs={"land_use": inputs_dir / "land_use.csv"},
         ):
             print("Running Baseline Simulation...")
-
-            # Log your input files (using URI scheme for portability)
-            tracker.log_artifact("inputs://land_use.csv", key="land_use")
 
             # --- PSEUDO-CODE: Run your model here ---
             # os.system("activitysim run -c ./configs/baseline")
@@ -63,12 +83,13 @@ def main():
             tags=["policy", "light_rail"],
             year=2040,
             config={"pop_growth": 1.05, "network": "rail_expansion_v2"},
+            facet_from=["pop_growth", "network"],
+            inputs={
+                "land_use": inputs_dir / "land_use.csv",
+                "network": inputs_dir / "rail_network_v2.gpkg",
+            },
         ):
             print("Running Policy Alternative Simulation...")
-
-            # Consist detects that 'land_use' is the same as the baseline
-            tracker.log_artifact("inputs://land_use.csv", key="land_use")
-            tracker.log_artifact("inputs://rail_network_v2.gpkg", key="network")
 
             # --- PSEUDO-CODE: Run your model here ---
             # os.system("activitysim run -c ./configs/rail_policy")
@@ -117,14 +138,10 @@ def main():
 
     def compare_final_vmt(left_run, right_run, model_name):
         left_vmt = float(
-            consist.load_df(
-                tracker.get_run_outputs(left_run.id)["final_vmt"], tracker=tracker
-            ).loc[0, "value"]
+            tracker.get_run_outputs(left_run.id)["final_vmt"].as_df().loc[0, "value"]
         )
         right_vmt = float(
-            consist.load_df(
-                tracker.get_run_outputs(right_run.id)["final_vmt"], tracker=tracker
-            ).loc[0, "value"]
+            tracker.get_run_outputs(right_run.id)["final_vmt"].as_df().loc[0, "value"]
         )
         return pd.DataFrame(
             [

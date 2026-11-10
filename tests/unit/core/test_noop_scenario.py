@@ -34,6 +34,7 @@ def test_noop_scenario_coupler_view_namespaces_keys() -> None:
         beam = sc.coupler.view("beam")
         artifact = beam.set("plans", "plans.csv")
 
-        assert artifact == "plans.csv"
-        assert beam.require("plans") == "plans.csv"
-        assert sc.coupler.require("beam/plans") == "plans.csv"
+        assert isinstance(artifact, consist.LocalRef)
+        assert artifact.path == Path("plans.csv")
+        assert beam.require("plans") == artifact
+        assert sc.coupler.require("beam/plans") == artifact

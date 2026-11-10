@@ -109,7 +109,7 @@ result = tracker.run(
     config={"scenario": "baseline"},
     adapter=adapter,
     identity_inputs=[("asim_config", config_dir)],
-    cache_options=CacheOptions(cache_mode="auto"),
+    cache_options=CacheOptions(cache_mode="reuse"),
 )
 ```
 

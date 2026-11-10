@@ -20,7 +20,7 @@ layer straight before choosing an option:
 | Cache reuse | Can this step skip execution? | Run signature and cache lookup |
 | Metadata hydration | Which prior artifacts belong to this result? | Default cache-hit behavior |
 | Filesystem materialization | Do bytes need to exist at a local path? | `cache_hydration`, requested input staging, `hydrate_run_outputs(...)` |
-| DuckDB ingestion | Should tabular bytes be queryable and recoverable from the database? | `tracker.ingest(...)`, `consist.load_df(..., db_fallback=...)` |
+| DuckDB ingestion | Should tabular bytes be queryable and recoverable from the database? | `tracker.ingest(...)`, `artifact.as_df(db_fallback=...)` |
 
 This page uses **materialization** to mean filesystem byte recovery or staging.
 DuckDB ingestion is a storage/querying choice covered in
@@ -223,7 +223,7 @@ Hydration recovers information about an artifact:
 - producing run
 - logical URI and resolved path
 - metadata and format
-- canonical fingerprint on `artifact.hash`
+- canonical fingerprint
 
 Filesystem materialization moves or recreates bytes:
 
@@ -235,8 +235,8 @@ Filesystem materialization moves or recreates bytes:
 Default cache-hit behavior is metadata hydration. This keeps parameter sweeps
 and large simulations from duplicating files unnecessarily.
 
-Use `consist.load_df(...)`, `consist.load(...)`, or `consist.load_relation(...)`
-when you need to read artifact bytes. See
+Use `artifact.as_df()`, `consist.load_df(...)`, `consist.load(...)`, or
+`consist.load_relation(...)` when you need to read artifact bytes. See
 [Data Storage and Ingestion](data-materialization.md) for ingestion and database
 fallback behavior.
 
@@ -320,12 +320,16 @@ from pathlib import Path
 
 from consist import ExecutionOptions
 
+
+def run_tool(config_path: Path, report: Path) -> None:
+    ...
+
+
 result = tracker.run(
     fn=run_tool,
     inputs={"config_path": config_artifact},
-    outputs=["report"],
+    outputs={"report": "report.txt"},
     execution_options=ExecutionOptions(
-        input_binding="paths",
         input_materialization="requested",
         input_materialization_mode="copy",
         input_paths={
@@ -335,9 +339,10 @@ result = tracker.run(
 )
 ```
 
-This staging runs before execution on cache misses and before returning cached
-results on cache hits. It keeps `inputs={...}` as the source of identity and
-lineage while making fixed-path tools practical.
+This staging runs before execution on cache misses (and skips input staging on
+cache hits so in-place workspace outputs are not overwritten). It keeps
+`inputs={...}` as the source of identity and lineage while making fixed-path
+tools practical.
 
 Use low-level `stage_artifact(...)` or `stage_inputs(...)` only when staging is
 needed outside a run lifecycle. See [Materialization](../api/materialize.md).
@@ -390,7 +395,7 @@ tracker = Tracker(run_dir="runs", cache_epoch=2)
 
 
 @define_step(cache_version=3)
-def simulate(...):
+def simulate() -> None:
     ...
 
 

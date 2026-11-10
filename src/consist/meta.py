@@ -172,8 +172,51 @@ class FrozenMeta(dict[str, Any], Mapping[str, Any]):
 EMPTY_META: FrozenMeta = FrozenMeta()
 _EMPTY_META = EMPTY_META
 
+SYSTEM_META_KEYS: frozenset[str] = frozenset(
+    {
+        "recovery_roots",
+        "hash_semantics",
+        "hash_algorithm",
+        "hashing_strategy",
+        "directory_manifest",
+        "directory_artifact",
+        "is_dir",
+        "is_ingested",
+        "canonical_table_digest",
+        "admission_file_identity",
+        "admission_identity",
+        "logical_identity",
+        "logical_profile",
+        "schema_id",
+        "_dlt_load_id",
+        "_dlt_id",
+        "_dlt_table_name",
+        "_dlt_schema_name",
+    }
+)
+
+
+def strip_system_meta(
+    raw: Mapping[str, Any] | None,
+    *,
+    extra_keys: Iterable[str] = (),
+) -> FrozenMeta:
+    """Return a `FrozenMeta` with internal system keys removed."""
+    if not raw:
+        return EMPTY_META
+    blocked = SYSTEM_META_KEYS | frozenset(extra_keys)
+    cleaned = {
+        str(k): v
+        for k, v in raw.items()
+        if (ks := str(k)) not in blocked and not ks.startswith("_dlt_")
+    }
+    return FrozenMeta(cleaned) if cleaned else EMPTY_META
+
+
 __all__ = [
     "EMPTY_META",
     "FrozenList",
     "FrozenMeta",
+    "SYSTEM_META_KEYS",
+    "strip_system_meta",
 ]

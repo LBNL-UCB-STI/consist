@@ -1203,39 +1203,6 @@ def _output_set_hydration_kind(tracker: "Tracker", artifact: Artifact) -> str | 
     return None
 
 
-def _derive_historical_remap(
-    tracker: "Tracker",
-    *,
-    artifact: Artifact,
-    run,
-) -> tuple[Path, Path] | None:
-    """Derive a recoverable historical root and URI-relative artifact path.
-
-    Parameters
-    ----------
-    tracker : Tracker
-        Tracker that owns filesystem URI policy.
-    artifact : Artifact
-        Artifact whose canonical URI is being remapped.
-    run : Run
-        Historical producing run containing mount metadata.
-
-    Returns
-    -------
-    tuple[Path, Path] | None
-        Historical root and safe relative path, or ``None`` when unmappable.
-    """
-    meta = run.meta if (run is not None and isinstance(run.meta, dict)) else {}
-    artifact_meta = artifact.meta if isinstance(artifact.meta, dict) else {}
-
-    return tracker.fs.get_historical_remap(
-        artifact.container_uri,
-        original_run_dir=meta.get("_physical_run_dir"),
-        mounts_snapshot=meta.get("mounts"),
-        artifact_mount_root=artifact_meta.get("mount_root"),
-    )
-
-
 def _derive_remappable_relative_path(
     tracker: "Tracker",
     *,

@@ -31,13 +31,11 @@ python setup_data.py
 
 ## Define the Pipeline
 
-This tutorial uses `input_binding="paths"` throughout. That keeps the callable
-boundary explicit and makes it obvious which files each step reads and writes.
-If you prefer hydrated tables or objects instead, see the loaded-binding
-examples in the quickstart and usage guide.
-
-Adding Consist requires minimal changes to existing functions: return
-`dict[str, Path]`, declare `outputs=[...]`, and bind named inputs as paths.
+This tutorial uses `: Path` parameter annotations with symmetric `inputs={...}`
+and `outputs={...}` dictionaries throughout. That keeps the callable boundary
+explicit and makes it obvious which files each step reads and writes. If you
+prefer hydrated tables or objects instead, see the loaded-binding examples in
+the quickstart and usage guide.
 
 === "Without Consist"
 
@@ -51,27 +49,27 @@ Adding Consist requires minimal changes to existing functions: return
     CLEANED_PATH = Path("./cleaned.parquet")  # (1)!
 
 
-    def clean_data(raw_path: Path, config_path: Path) -> None:
+    def clean_data(raw_path: Path, config_path: Path, cleaned: Path) -> None:
         """Remove rows below threshold and write cleaned output."""
         threshold = json.loads(config_path.read_text())["threshold"]
         df = pd.read_csv(raw_path)
-        df[df["value"] >= threshold].to_parquet(CLEANED_PATH, index=False)
+        df[df["value"] >= threshold].to_parquet(cleaned, index=False)
 
 
-    def summarize(cleaned_path: Path) -> None:
+    def summarize(cleaned_path: Path, summary: Path) -> None:
         """Compute summary statistics from cleaned data."""
         df = pd.read_parquet(cleaned_path)
-        pd.Series({"mean": df["value"].mean(), "count": len(df)}).to_json("./summary.json")
+        pd.Series({"mean": df["value"].mean(), "count": len(df)}).to_json(summary)
 
 
-    clean_data(Path("./data/raw.csv"), Path("./config.json"))
-    summarize(CLEANED_PATH)  # (2)!
+    clean_data(Path("./data/raw.csv"), Path("./config.json"), CLEANED_PATH)
+    summarize(CLEANED_PATH, Path("./summary.json"))  # (2)!
 
     final = pd.read_json(Path("./summary.json"), typ="series")
     print(f"Result: {final.to_dict()}")
     ```
 
-    1. The output path must be declared somewhere both functions can see. If
+    1. The output path must be coordinated manually between steps. If
        `clean_data` ever writes to a different location, `summarize` breaks silently.
     2. The dependency between steps is implicit — this call only works because
        `clean_data` happened to run first and write to `CLEANED_PATH`.
@@ -88,63 +86,58 @@ Adding Consist requires minimal changes to existing functions: return
     from pathlib import Path
     import pandas as pd
     import json
-    import consist
-    from consist import ExecutionOptions, Tracker
+    from consist import Tracker
 
     tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
 
 
-    def clean_data(raw_path: Path, config_path: Path) -> dict[str, Path]:  # (1)!
+    def clean_data(raw_path: Path, config_path: Path, cleaned: Path) -> None:  # (1)!
         """Remove rows below threshold and write cleaned output."""
         threshold = json.loads(config_path.read_text())["threshold"]
         df = pd.read_csv(raw_path)
-        out_path = Path("./cleaned.parquet")
-        df[df["value"] >= threshold].to_parquet(out_path, index=False)
-        return {"cleaned": out_path}
+        df[df["value"] >= threshold].to_parquet(cleaned, index=False)
 
 
-    def summarize(cleaned_path: Path) -> dict[str, Path]:
+    def summarize(cleaned_path: Path, summary: Path) -> None:
         """Compute summary statistics from cleaned data."""
         df = pd.read_parquet(cleaned_path)
-        out_path = Path("./summary.json")
-        pd.Series({"mean": df["value"].mean(), "count": len(df)}).to_json(out_path)
-        return {"summary": out_path}
+        pd.Series({"mean": df["value"].mean(), "count": len(df)}).to_json(summary)
 
 
     # Step 1: Clean
     clean_result = tracker.run(
         fn=clean_data,
         inputs={  # (2)!
-            "raw_path": Path("./data/raw.csv"),
-            "config_path": Path("./config.json"),
+            "raw_path": "./data/raw.csv",
+            "config_path": "./config.json",
         },
-        outputs=["cleaned"],
-        execution_options=ExecutionOptions(input_binding="paths"),
+        outputs={"cleaned": "cleaned.parquet"},
     )
     print(f"Clean: {clean_result.run.status}")
 
     # Step 2: Summarize (consumes output from Step 1)
     summary_result = tracker.run(
         fn=summarize,
-        inputs={"cleaned_path": consist.ref(clean_result, key="cleaned")},  # (3)!
-        outputs=["summary"],
-        execution_options=ExecutionOptions(input_binding="paths"),
+        inputs={"cleaned_path": clean_result.outputs["cleaned"]},  # (3)!
+        outputs={"summary": "summary.json"},
     )
     print(f"Summarize: {summary_result.run.status}")
 
-    # Load final result
+    # Inspect intermediate table and load final result
+    cleaned_df = clean_result.outputs["cleaned"].as_df()
     final = pd.read_json(summary_result.outputs["summary"].path, typ="series")
-    print(f"Result: {final.to_dict()}")
+    print(f"Cleaned rows: {len(cleaned_df)}, Result: {final.to_dict()}")
     ```
 
-    1. The function now returns `{"cleaned": out_path}` and `tracker.run(...)`
-       declares `outputs=["cleaned"]`, so Consist knows which artifact to log.
-    2. `inputs` declares the hashed dependencies, and
-       `input_binding="paths"` passes those named inputs into the function body
-       as local `Path` objects.
-    3. `consist.ref(...)` passes the upstream artifact explicitly. With
-       `input_binding="paths"`, Consist resolves that artifact to a local path
-       before calling `summarize`.
+    1. Because `raw_path`, `config_path`, and `cleaned` are annotated with
+       `: Path`, Consist passes local `Path` objects for both inputs and outputs
+       directly into `clean_data`.
+    2. `inputs` and `outputs` map parameter names to relative or absolute file
+       paths, and Consist verifies that `cleaned.parquet` exists when the step
+       completes.
+    3. Passing `clean_result.outputs["cleaned"]` (or `consist.ref(clean_result, key="cleaned")`)
+       wires the upstream artifact into `summarize` and resolves its local `.path`
+       automatically.
 
 ## Run and Observe Caching
 
@@ -159,7 +152,7 @@ Output:
 ```
 Clean: completed
 Summarize: completed
-Result: {'mean': 35.0, 'count': 4}
+Cleaned rows: 4, Result: {'mean': 35.0, 'count': 4}
 ```
 
 Run again without changes:
@@ -184,15 +177,15 @@ Run again:
 python workflow.py
 ```
 
-Consist detects that `config.json`'s content hash changed and re-executes `clean_data`. Because its output artifact changes, `summarize` also re-executes — its input hash now differs from the cached version.
+Consist detects that `config.json`'s content fingerprint changed and re-executes `clean_data`. Because its output artifact changes, `summarize` also re-executes — its input fingerprint now differs from the cached version.
 
 ```
 Clean: completed
 Summarize: completed
-Result: {'mean': 40.0, 'count': 3}
+Cleaned rows: 3, Result: {'mean': 40.0, 'count': 3}
 ```
 
-This is the Merkle DAG at work: a change to any input propagates downstream automatically. The `config.json` file is just another hashed input — no special configuration API required.
+This is the Merkle DAG at work: a change to any input propagates downstream automatically. The `config.json` file is just another fingerprinted input — no special configuration API required.
 
 ## View Lineage
 
@@ -202,15 +195,15 @@ Query the provenance database:
 python -m consist.cli runs --db-path ./provenance.duckdb --limit 10
 ```
 
-Each run shows its inputs, outputs, config hash, and status. Artifacts link to their producing runs, forming a complete lineage graph.
+Each run shows its inputs, outputs, config fingerprint, and status. Artifacts link to their producing runs, forming a complete lineage graph.
 
 ## Summary
 
 This workflow demonstrated:
 
-- **Cacheable function steps** using `tracker.run(...)` with `dict[str, Path]` returns
-- **Artifact passing** where one step's output becomes another's input
-- **Cache invalidation** triggered by config changes
+- **Cacheable function steps** using `tracker.run(...)` with symmetric `inputs={...}` and `outputs={...}`
+- **Artifact passing** where one step's output handle (`clean_result.outputs["cleaned"]`) becomes another step's input
+- **Cache invalidation** triggered by input file changes
 - **Lineage tracking** linking runs through their artifacts
 
 ## Next Steps

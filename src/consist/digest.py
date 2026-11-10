@@ -17,7 +17,8 @@ This is a leaf module in Consist's dependency graph:
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 import dataclasses
 from dataclasses import dataclass, field
@@ -856,94 +857,40 @@ def normalize_logical_matrices_identity(raw_val: str) -> str:
     return f"sha256:logical_matrices:{digest.lower()}"
 
 
-def canonicalize_float32_array(arr: np.ndarray) -> bytes:
-    """
-    Return little-endian float32 bytes with canonical IEEE-754 bit patterns.
-
-    Parameters
-    ----------
-    arr : numpy.ndarray
-        Input array-like object to convert to ``<f4`` and canonicalize.
-
-    Returns
-    -------
-    bytes
-        C-contiguous row-major little-endian ``<f4`` byte representation with
-        ``-0.0f`` normalized to ``+0.0f`` (``0x00000000``) and all ``NaN``
-        payloads normalized to canonical quiet ``NaN`` (``0x7fc00000``).
-
-    Notes
-    -----
-    Matches the floating-point canonicalization contract of BEAM's Scala
-    ``OmxSkimWriter`` / ``SkimsProvenanceMetadata``.
-    """
+def _canonicalize_ieee_float_ndarray(
+    arr: Any,
+    float_dtype: str,
+    uint_dtype: str,
+    qnan_bits: int,
+) -> np.ndarray:
+    """Return a C-contiguous little-endian float ndarray with `-0.0 -> +0.0` and `NaN -> qnan_bits`."""
     import numpy as np
 
-    f32 = np.ascontiguousarray(arr, dtype="<f4")
-    u32 = f32.view("<u4")
-    needs_copy = bool(np.any(f32 == 0.0) or np.any(np.isnan(f32)))
-    if needs_copy:
-        u32 = u32.copy()
-        u32[f32 == 0.0] = 0
-        u32[np.isnan(f32)] = 0x7FC00000
-    return u32.tobytes()
+    flt = np.ascontiguousarray(arr, dtype=float_dtype)
+    uint_view = flt.view(uint_dtype)
+    if bool(np.any(flt == 0.0) or np.any(np.isnan(flt))):
+        flt = flt.copy()
+        uint_view = flt.view(uint_dtype)
+        uint_view[flt == 0.0] = 0
+        uint_view[np.isnan(flt)] = qnan_bits
+    return flt
+
+
+def canonicalize_float32_array(arr: np.ndarray) -> bytes:
+    """Return little-endian float32 bytes with canonical IEEE-754 bit patterns (`-0.0 -> +0.0`, `NaN -> 0x7fc00000`)."""
+    return _canonicalize_ieee_float_ndarray(arr, "<f4", "<u4", 0x7FC00000).tobytes()
 
 
 def canonicalize_float64_array(arr: np.ndarray) -> bytes:
-    """
-    Return little-endian float64 bytes with canonical IEEE-754 bit patterns.
-
-    Parameters
-    ----------
-    arr : numpy.ndarray
-        Input array-like object to convert to ``<f8`` and canonicalize.
-
-    Returns
-    -------
-    bytes
-        C-contiguous row-major little-endian ``<f8`` byte representation with
-        ``-0.0`` normalized to ``+0.0`` (``0x0000000000000000``) and all
-        ``NaN`` payloads normalized to canonical quiet ``NaN``
-        (``0x7ff8000000000000``).
-    """
-    import numpy as np
-
-    f64 = np.ascontiguousarray(arr, dtype="<f8")
-    u64 = f64.view("<u8")
-    needs_copy = bool(np.any(f64 == 0.0) or np.any(np.isnan(f64)))
-    if needs_copy:
-        u64 = u64.copy()
-        u64[f64 == 0.0] = 0
-        u64[np.isnan(f64)] = 0x7FF8000000000000
-    return u64.tobytes()
+    """Return little-endian float64 bytes with canonical IEEE-754 bit patterns (`-0.0 -> +0.0`, `NaN -> 0x7ff8000000000000`)."""
+    return _canonicalize_ieee_float_ndarray(
+        arr, "<f8", "<u8", 0x7FF8000000000000
+    ).tobytes()
 
 
 def canonicalize_float16_array(arr: np.ndarray) -> bytes:
-    """
-    Return little-endian float16 bytes with canonical IEEE-754 bit patterns.
-
-    Parameters
-    ----------
-    arr : numpy.ndarray
-        Input array-like object to convert to ``<f2`` and canonicalize.
-
-    Returns
-    -------
-    bytes
-        C-contiguous row-major little-endian ``<f2`` byte representation with
-        ``-0.0`` normalized to ``+0.0`` (``0x0000``) and all ``NaN`` payloads
-        normalized to canonical quiet ``NaN`` (``0x7e00``).
-    """
-    import numpy as np
-
-    f16 = np.ascontiguousarray(arr, dtype="<f2")
-    u16 = f16.view("<u2")
-    needs_copy = bool(np.any(f16 == 0.0) or np.any(np.isnan(f16)))
-    if needs_copy:
-        u16 = u16.copy()
-        u16[f16 == 0.0] = 0
-        u16[np.isnan(f16)] = 0x7E00
-    return u16.tobytes()
+    """Return little-endian float16 bytes with canonical IEEE-754 bit patterns (`-0.0 -> +0.0`, `NaN -> 0x7e00`)."""
+    return _canonicalize_ieee_float_ndarray(arr, "<f2", "<u2", 0x7E00).tobytes()
 
 
 def canonicalize_float_array(
@@ -951,47 +898,20 @@ def canonicalize_float_array(
     *,
     target_dtype: Literal["preserve", "float32", "float64"] = "preserve",
 ) -> np.ndarray:
-    """
-    Return a C-contiguous little-endian float array with canonicalized ``-0.0`` and ``NaN`` bits.
-
-    Parameters
-    ----------
-    arr : numpy.ndarray
-        Input floating-point (or numeric, when ``target_dtype`` is explicit)
-        array to canonicalize.
-    target_dtype : {"preserve", "float32", "float64"}, default "preserve"
-        Target floating-point width. ``"preserve"`` retains the input float
-        width (``float16``, ``float32``, or ``float64``) while normalizing
-        endianness and IEEE-754 bit patterns.
-
-    Returns
-    -------
-    numpy.ndarray
-        Canonicalized C-contiguous little-endian NumPy array with the same
-        shape as ``arr``.
-
-    Raises
-    ------
-    ValueError
-        If ``target_dtype="preserve"`` and ``arr`` does not have a supported
-        floating-point dtype.
-    """
+    """Return a C-contiguous little-endian float array with canonicalized ``-0.0`` and ``NaN`` bits."""
     import numpy as np
 
     raw = np.asarray(arr)
     if target_dtype == "float32" or (
         target_dtype == "preserve" and raw.dtype.kind == "f" and raw.dtype.itemsize == 4
     ):
-        raw_bytes = canonicalize_float32_array(raw)
-        return np.frombuffer(raw_bytes, dtype="<f4").reshape(raw.shape)
+        return _canonicalize_ieee_float_ndarray(raw, "<f4", "<u4", 0x7FC00000)
     if target_dtype == "float64" or (
         target_dtype == "preserve" and raw.dtype.kind == "f" and raw.dtype.itemsize == 8
     ):
-        raw_bytes = canonicalize_float64_array(raw)
-        return np.frombuffer(raw_bytes, dtype="<f8").reshape(raw.shape)
+        return _canonicalize_ieee_float_ndarray(raw, "<f8", "<u8", 0x7FF8000000000000)
     if target_dtype == "preserve" and raw.dtype.kind == "f" and raw.dtype.itemsize == 2:
-        raw_bytes = canonicalize_float16_array(raw)
-        return np.frombuffer(raw_bytes, dtype="<f2").reshape(raw.shape)
+        return _canonicalize_ieee_float_ndarray(raw, "<f2", "<u2", 0x7E00)
     raise ValueError(
         f"canonicalize_float_array requires a floating-point array or explicit float target_dtype, got {raw.dtype}."
     )
@@ -1111,6 +1031,30 @@ def _format_shape(shape: Sequence[int]) -> str:
     return f"({','.join(str(d) for d in dims)})"
 
 
+@runtime_checkable
+class _HasAttrs(Protocol):
+    @property
+    def attrs(self) -> Any: ...
+
+
+@runtime_checkable
+class _HasShape(Protocol):
+    @property
+    def shape(self) -> Any: ...
+
+
+@runtime_checkable
+class _HasKeys(Protocol):
+    def keys(self) -> Any: ...
+    def __getitem__(self, key: Any) -> Any: ...
+    def __contains__(self, key: Any) -> bool: ...
+
+
+@runtime_checkable
+class _ToListable(Protocol):
+    def tolist(self) -> Any: ...
+
+
 def _stream_dataset_into_hasher(
     hasher: Any,
     name: str,
@@ -1138,7 +1082,11 @@ def _stream_dataset_into_hasher(
 
     if include_na_attribute:
         resolved_na = na_value
-        if resolved_na is None and hasattr(dataset, "attrs") and "NA" in dataset.attrs:
+        if (
+            resolved_na is None
+            and isinstance(dataset, _HasAttrs)
+            and "NA" in dataset.attrs
+        ):
             resolved_na = _decode_attr_value(dataset.attrs["NA"])
         if resolved_na is not None:
             _update_string(hasher, f"NA={resolved_na}")
@@ -1319,6 +1267,61 @@ def _iter_sorted_matrices(
         yield key_str, np.asarray(arr)
 
 
+def _extract_attr_zone_ids(attrs_owner: Any) -> Any:
+    import numpy as np
+
+    if isinstance(attrs_owner, _HasAttrs) and "original_zone_ids" in attrs_owner.attrs:
+        raw_zones = attrs_owner.attrs["original_zone_ids"]
+        return np.asarray(
+            raw_zones.tolist() if isinstance(raw_zones, _ToListable) else raw_zones
+        )
+    return None
+
+
+def _stream_lookup_entries(
+    hasher: Any,
+    *,
+    policy: ArrayCanonicalizationPolicy,
+    zone_count: int,
+    single_zone_candidates: Sequence[Callable[[], Any]],
+    preserve_entries: Sequence[tuple[str, Any]],
+    chunk_rows: int = _DEFAULT_CHUNK_ROWS,
+) -> None:
+    """Stream lookup datasets into `hasher` according to `policy.lookup_policy`."""
+    import numpy as np
+
+    if policy.lookup_policy == "single_int32_zone_number":
+        raw_lookup: Any = None
+        for getter in single_zone_candidates:
+            raw_lookup = getter()
+            if raw_lookup is not None:
+                break
+        zone_arr = (
+            np.arange(1, zone_count + 1, dtype="<i4")
+            if raw_lookup is None
+            else _coerce_int32_zone_lookup(raw_lookup)
+        )
+        _stream_dataset_into_hasher(
+            hasher,
+            "lookup/zone_number",
+            zone_arr,
+            dtype_policy="preserve",
+            canonicalize_float_bits=False,
+            chunk_rows=chunk_rows,
+        )
+        return
+
+    for lkey, lds in preserve_entries:
+        _stream_dataset_into_hasher(
+            hasher,
+            f"lookup/{lkey}",
+            lds,
+            dtype_policy="preserve",
+            canonicalize_float_bits=policy.canonicalize_float_bits,
+            chunk_rows=chunk_rows,
+        )
+
+
 def compute_logical_matrices_sha256(
     matrices: Mapping[str, np.ndarray] | Iterable[tuple[str, np.ndarray]],
     *,
@@ -1326,48 +1329,10 @@ def compute_logical_matrices_sha256(
     lookups: Mapping[str, np.ndarray | Sequence[Any]] | None = None,
     policy: ArrayCanonicalizationPolicy | LogicalProfileName = "preserve_canonical",
 ) -> str:
-    """
-    Compute the canonical logical SHA-256 hex digest over lookup and data arrays.
-
-    Parameters
-    ----------
-    matrices : Mapping[str, numpy.ndarray] or Iterable[tuple[str, numpy.ndarray]]
-        Data matrices keyed by matrix name. Mapping or Sequence inputs are
-        sorted lexicographically by UTF-8 key; streaming iterators must yield
-        ``(name, array)`` pairs in sorted key order.
-    zone_ids : Sequence[int] or numpy.ndarray or None, optional
-        Optional 1D zone identifier array. Under ``"preserve_canonical"``,
-        included as ``"lookup/zone_number"`` when not already present in
-        ``lookups``. Under ``"float32_matrices_v1"``, coerced to ``<i4`` and
-        hashed as ``"lookup/zone_number"`` (defaulting to ``1..N`` when absent).
-    lookups : Mapping[str, numpy.ndarray or Sequence[Any]] or None, optional
-        Optional mapping of lookup/coordinate arrays. Under
-        ``"preserve_canonical"``, every lookup array is hashed in sorted key
-        order under ``"lookup/<key>"`` with its native dtype preserved.
-    policy : ArrayCanonicalizationPolicy or {"preserve_canonical", "float32_matrices_v1"}, default "preserve_canonical"
-        Canonicalization policy or named profile.
-
-    Returns
-    -------
-    str
-        64-character lowercase hexadecimal SHA-256 digest.
-
-    Raises
-    ------
-    ValueError
-        If ``matrices`` is empty, a streaming iterator yields unsorted keys, or
-        any lookup/data array cannot be canonicalized under ``policy``.
-
-    Notes
-    -----
-    Each entry is framed with 4-byte little-endian length-prefixed UTF-8 strings
-    for ``name``, ``dtype``, and ``shape``, followed by C-contiguous
-    little-endian array bytes.
-    """
+    """Compute the canonical logical SHA-256 hex digest over lookup and data arrays."""
     import numpy as np
 
     resolved_policy = resolve_canonicalization_policy(policy)
-
     hasher = hashlib.sha256()
     matrix_iter = _iter_sorted_matrices(matrices)
     first_matrix = next(matrix_iter, None)
@@ -1377,55 +1342,33 @@ def compute_logical_matrices_sha256(
     first_name, first_arr = first_matrix
     default_zone_count = int(first_arr.shape[0]) if first_arr.ndim >= 1 else 0
 
-    if resolved_policy.lookup_policy == "single_int32_zone_number":
-        raw_zone_lookup: Any = zone_ids
-        if raw_zone_lookup is None and lookups:
-            for pkey in _PRIMARY_LOOKUP_KEYS:
-                if pkey in lookups:
-                    raw_zone_lookup = lookups[pkey]
-                    break
-            if raw_zone_lookup is None:
-                first_lkey = sorted(lookups.keys())[0]
-                raw_zone_lookup = lookups[first_lkey]
-        if raw_zone_lookup is None:
-            zone_arr = np.arange(1, default_zone_count + 1, dtype="<i4")
-        else:
-            zone_arr = _coerce_int32_zone_lookup(raw_zone_lookup)
-        _stream_dataset_into_hasher(
-            hasher,
-            "lookup/zone_number",
-            zone_arr,
-            dtype_policy="preserve",
-            canonicalize_float_bits=False,
-        )
-    else:
-        effective_lookups: dict[str, np.ndarray] = {}
-        if lookups:
-            for lkey, lval in lookups.items():
-                clean_key = str(lkey).removeprefix("lookup/").lstrip("/")
-                effective_lookups[clean_key] = np.asarray(lval)
-        if zone_ids is not None and "zone_number" not in effective_lookups:
-            effective_lookups["zone_number"] = np.asarray(zone_ids)
+    def _from_lookups_map() -> Any:
+        if not lookups:
+            return None
+        for pkey in _PRIMARY_LOOKUP_KEYS:
+            if pkey in lookups:
+                return lookups[pkey]
+        return lookups[sorted(lookups.keys())[0]]
 
-        for lkey in sorted(effective_lookups.keys()):
-            larr = effective_lookups[lkey]
-            _stream_dataset_into_hasher(
-                hasher,
-                f"lookup/{lkey}",
-                larr,
-                dtype_policy="preserve",
-                canonicalize_float_bits=resolved_policy.canonicalize_float_bits,
-            )
+    effective_lookups: dict[str, np.ndarray] = {}
+    if lookups:
+        for lkey, lval in lookups.items():
+            clean_key = str(lkey).removeprefix("lookup/").lstrip("/")
+            effective_lookups[clean_key] = np.asarray(lval)
+    if zone_ids is not None and "zone_number" not in effective_lookups:
+        effective_lookups["zone_number"] = np.asarray(zone_ids)
 
-    _stream_dataset_into_hasher(
+    _stream_lookup_entries(
         hasher,
-        first_name,
-        first_arr,
-        dtype_policy=resolved_policy.dtype_policy,
-        canonicalize_float_bits=resolved_policy.canonicalize_float_bits,
-        include_na_attribute=resolved_policy.include_na_attribute,
+        policy=resolved_policy,
+        zone_count=default_zone_count,
+        single_zone_candidates=(lambda: zone_ids, _from_lookups_map),
+        preserve_entries=[
+            (k, effective_lookups[k]) for k in sorted(effective_lookups.keys())
+        ],
     )
-    for matrix_name, matrix_arr in matrix_iter:
+
+    for matrix_name, matrix_arr in ((first_name, first_arr), *matrix_iter):
         _stream_dataset_into_hasher(
             hasher,
             matrix_name,
@@ -1443,14 +1386,9 @@ def _resolve_h5_group(h5f: Any, group_path: str) -> Any | None:
     clean = group_path.strip("/")
     if not clean:
         return h5f
-    if clean in h5f:
-        return h5f[clean]
-    upper = clean.upper()
-    if upper in h5f:
-        return h5f[upper]
-    lower = clean.lower()
-    if lower in h5f:
-        return h5f[lower]
+    for candidate in (clean, clean.upper(), clean.lower()):
+        if candidate in h5f:
+            return h5f[candidate]
     return None
 
 
@@ -1479,38 +1417,7 @@ def compute_omx_logical_matrices_sha256(
     policy: ArrayCanonicalizationPolicy | LogicalProfileName = "preserve_canonical",
     chunk_rows: int = _DEFAULT_CHUNK_ROWS,
 ) -> str:
-    """
-    Compute the canonical logical matrices SHA-256 hex digest for an OMX/HDF5 file.
-
-    Parameters
-    ----------
-    omx_path_or_handle : str or pathlib.Path or h5py.File
-        Filesystem path to an OpenMatrix (``.omx``) or HDF5 (``.h5``/``.hdf5``)
-        file, or an already-open ``h5py.File``-like object.
-    policy : ArrayCanonicalizationPolicy or {"preserve_canonical", "float32_matrices_v1"}, default "preserve_canonical"
-        Canonicalization policy controlling lookup resolution, dtype handling,
-        and HDF5 group paths.
-    chunk_rows : int, default 512
-        Number of leading-dimension rows streamed per chunk to bound peak memory
-        when hashing multi-gigabyte containers.
-
-    Returns
-    -------
-    str
-        64-character lowercase hexadecimal SHA-256 digest.
-
-    Raises
-    ------
-    ValueError
-        If no data group or matrices are found, or if an array cannot be
-        canonicalized under ``policy``.
-
-    Notes
-    -----
-    Streams one dataset and row chunk at a time in sorted UTF-8 key order so
-    multi-gigabyte OMX files are hashed in constant memory regardless of HDF5
-    chunk layout, compression filter, or write timestamp.
-    """
+    """Compute the canonical logical matrices SHA-256 hex digest for an OMX/HDF5 file."""
     resolved_policy = resolve_canonicalization_policy(policy)
     if isinstance(omx_path_or_handle, (str, Path)):
         omx_path = Path(omx_path_or_handle)
@@ -1536,25 +1443,23 @@ def _compute_omx_logical_matrices_sha256_from_h5(
     policy: ArrayCanonicalizationPolicy,
     chunk_rows: int,
 ) -> str:
-    import numpy as np
-
     data_group = _resolve_h5_group(h5f, policy.h5_data_group)
     lookup_group = _resolve_h5_group(h5f, policy.h5_lookup_group)
     lookup_group_name = policy.h5_lookup_group.strip("/").lower()
 
     data_container: Any = None
     matrix_names: list[str] = []
-    if data_group is not None and hasattr(data_group, "keys"):
+    if data_group is not None and isinstance(data_group, _HasKeys):
         data_container = data_group
         matrix_names = sorted(
-            str(k) for k in data_group.keys() if hasattr(data_group[k], "shape")
+            str(k) for k in data_group.keys() if isinstance(data_group[k], _HasShape)
         )
-    elif policy.allow_root_h5_datasets and hasattr(h5f, "keys"):
+    elif policy.allow_root_h5_datasets and isinstance(h5f, _HasKeys):
         data_container = h5f
         matrix_names = sorted(
             str(k)
             for k in h5f.keys()
-            if str(k).lower() != lookup_group_name and hasattr(h5f[k], "shape")
+            if str(k).lower() != lookup_group_name and isinstance(h5f[k], _HasShape)
         )
     else:
         raise ValueError("OMX file does not contain a /data group.")
@@ -1564,90 +1469,49 @@ def _compute_omx_logical_matrices_sha256_from_h5(
 
     first_ds = data_container[matrix_names[0]]
     zone_count = int(first_ds.shape[0]) if len(first_ds.shape) >= 1 else 0
-
     hasher = hashlib.sha256()
 
-    if policy.lookup_policy == "single_int32_zone_number":
-        raw_lookup: Any = None
-        if lookup_group is not None and hasattr(lookup_group, "keys"):
+    def _from_h5_lookup_group() -> Any:
+        if lookup_group is not None and isinstance(lookup_group, _HasKeys):
             for lkey in _PRIMARY_LOOKUP_KEYS:
                 if lkey in lookup_group:
-                    raw_lookup = lookup_group[lkey][...]
-                    break
-            if raw_lookup is None:
-                sorted_lkeys = sorted(str(k) for k in lookup_group.keys())
-                if sorted_lkeys:
-                    raw_lookup = lookup_group[sorted_lkeys[0]][...]
+                    return lookup_group[lkey][...]
+            sorted_lkeys = sorted(str(k) for k in lookup_group.keys())
+            if sorted_lkeys:
+                return lookup_group[sorted_lkeys[0]][...]
+        return None
 
-        if (
-            raw_lookup is None
-            and hasattr(h5f, "attrs")
-            and "original_zone_ids" in h5f.attrs
+    h5_preserve_entries: list[tuple[str, Any]] = []
+    if lookup_group is not None and isinstance(lookup_group, _HasKeys):
+        for lkey in sorted(
+            str(k)
+            for k in lookup_group.keys()
+            if isinstance(lookup_group[k], _HasShape)
         ):
-            raw_zones = h5f.attrs["original_zone_ids"]
-            if hasattr(raw_zones, "tolist"):
-                raw_lookup = np.asarray(raw_zones.tolist())
-            elif isinstance(raw_zones, (list, tuple)):
-                raw_lookup = np.asarray(raw_zones)
+            h5_preserve_entries.append((lkey, lookup_group[lkey]))
+    if not h5_preserve_entries:
+        attr_zones = _extract_attr_zone_ids(h5f)
+        if attr_zones is not None:
+            h5_preserve_entries.append(("zone_number", attr_zones))
 
-        if raw_lookup is None:
-            raw_lookup = _load_omx_sidecar_mapping_zone_ids(omx_path)
-
-        if raw_lookup is None:
-            zone_vector = np.arange(1, zone_count + 1, dtype="<i4")
-        else:
-            zone_vector = _coerce_int32_zone_lookup(raw_lookup)
-
-        _stream_dataset_into_hasher(
-            hasher,
-            "lookup/zone_number",
-            zone_vector,
-            dtype_policy="preserve",
-            canonicalize_float_bits=False,
-            chunk_rows=chunk_rows,
-        )
-    else:
-        has_lookup_entries = False
-        if lookup_group is not None and hasattr(lookup_group, "keys"):
-            sorted_lkeys = sorted(
-                str(k) for k in lookup_group.keys() if hasattr(lookup_group[k], "shape")
-            )
-            for lkey in sorted_lkeys:
-                has_lookup_entries = True
-                lookup_ds = lookup_group[lkey]
-                _stream_dataset_into_hasher(
-                    hasher,
-                    f"lookup/{lkey}",
-                    lookup_ds,
-                    dtype_policy="preserve",
-                    canonicalize_float_bits=policy.canonicalize_float_bits,
-                    chunk_rows=chunk_rows,
-                )
-
-        if (
-            not has_lookup_entries
-            and hasattr(h5f, "attrs")
-            and "original_zone_ids" in h5f.attrs
-        ):
-            raw_zones = h5f.attrs["original_zone_ids"]
-            zone_arr = np.asarray(
-                raw_zones.tolist() if hasattr(raw_zones, "tolist") else raw_zones
-            )
-            _stream_dataset_into_hasher(
-                hasher,
-                "lookup/zone_number",
-                zone_arr,
-                dtype_policy="preserve",
-                canonicalize_float_bits=policy.canonicalize_float_bits,
-                chunk_rows=chunk_rows,
-            )
+    _stream_lookup_entries(
+        hasher,
+        policy=policy,
+        zone_count=zone_count,
+        single_zone_candidates=(
+            _from_h5_lookup_group,
+            lambda: _extract_attr_zone_ids(h5f),
+            lambda: _load_omx_sidecar_mapping_zone_ids(omx_path),
+        ),
+        preserve_entries=h5_preserve_entries,
+        chunk_rows=chunk_rows,
+    )
 
     for name in matrix_names:
-        ds = data_container[name]
         _stream_dataset_into_hasher(
             hasher,
             name,
-            ds,
+            data_container[name],
             dtype_policy=policy.dtype_policy,
             canonicalize_float_bits=policy.canonicalize_float_bits,
             include_na_attribute=policy.include_na_attribute,
@@ -1663,37 +1527,7 @@ def compute_zarr_logical_matrices_sha256(
     policy: ArrayCanonicalizationPolicy | LogicalProfileName = "preserve_canonical",
     chunk_rows: int = _DEFAULT_CHUNK_ROWS,
 ) -> str:
-    """
-    Compute the canonical logical matrices SHA-256 hex digest for a Zarr store.
-
-    Parameters
-    ----------
-    zarr_path : str or pathlib.Path
-        Filesystem path to a Zarr directory store.
-    policy : ArrayCanonicalizationPolicy or {"preserve_canonical", "float32_matrices_v1"}, default "preserve_canonical"
-        Canonicalization policy controlling coordinate inclusion, dtype
-        handling, and optional 3D dimension unstacking (``policy.unstack_dim``).
-    chunk_rows : int, default 512
-        Number of leading-dimension rows streamed per chunk to bound peak memory.
-
-    Returns
-    -------
-    str
-        64-character lowercase hexadecimal SHA-256 digest.
-
-    Raises
-    ------
-    ValueError
-        If ``zarr_path`` is not a directory, contains no data variables, or
-        cannot be canonicalized under ``policy``.
-
-    Notes
-    -----
-    Supports both 2D/N-D Zarr variables and 3D+ variables unstacked along
-    ``policy.unstack_dim`` (for example ``unstack_dim="time_period"`` so a 3D
-    Zarr ``DIST(time_period, otaz, dtaz)`` produces the exact same digest as an
-    OMX file with ``/data/DIST__AM``, ``/data/DIST__PM``, etc.).
-    """
+    """Compute the canonical logical matrices SHA-256 hex digest for a Zarr store."""
     resolved_policy = resolve_canonicalization_policy(policy)
     store_path = Path(zarr_path)
     if not store_path.is_dir():
@@ -1736,83 +1570,54 @@ def _compute_zarr_logical_matrices_sha256_from_xarray(
     virtual_entries.sort(key=lambda item: item[0])
     first_da = virtual_entries[0][1]
     zone_count = int(first_da.shape[0]) if len(first_da.shape) >= 1 else 0
-
     hasher = hashlib.sha256()
-    attrs = dict(ds.attrs) if hasattr(ds, "attrs") else {}
 
-    if policy.lookup_policy == "single_int32_zone_number":
-        raw_lookup: Any = None
+    def _from_primary_coords() -> Any:
         for pkey in _PRIMARY_LOOKUP_KEYS:
             if pkey in ds.coords and pkey != unstack_dim:
-                raw_lookup = ds.coords[pkey].values
-                break
-        if raw_lookup is None and "original_zone_ids" in attrs:
-            raw_zones = attrs["original_zone_ids"]
-            raw_lookup = np.asarray(
-                raw_zones.tolist() if hasattr(raw_zones, "tolist") else raw_zones
-            )
-        if raw_lookup is None:
-            for ckey in sorted(str(k) for k in ds.coords.keys()):
-                if ckey != unstack_dim:
-                    raw_lookup = ds.coords[ckey].values
-                    break
+                return ds.coords[pkey].values
+        return None
 
-        if raw_lookup is None:
-            zone_vector = np.arange(1, zone_count + 1, dtype="<i4")
-        else:
-            zone_vector = _coerce_int32_zone_lookup(raw_lookup)
+    def _from_any_coord() -> Any:
+        for ckey in sorted(str(k) for k in ds.coords.keys()):
+            if ckey != unstack_dim:
+                return ds.coords[ckey].values
+        return None
 
-        _stream_dataset_into_hasher(
-            hasher,
-            "lookup/zone_number",
-            zone_vector,
-            dtype_policy="preserve",
-            canonicalize_float_bits=False,
-            chunk_rows=chunk_rows,
-        )
+    coord_keys = sorted(
+        str(k)
+        for k in ds.coords.keys()
+        if str(k) != unstack_dim and ds.coords[k].ndim >= 1
+    )
+    attr_zones = _extract_attr_zone_ids(ds)
+    if (
+        set(coord_keys) in ({"otaz", "dtaz"}, {"origin", "destination"})
+        and "zone_number" not in coord_keys
+        and attr_zones is not None
+    ):
+        zarr_preserve_entries: list[tuple[str, Any]] = [("zone_number", attr_zones)]
     else:
-        coord_keys = sorted(
-            str(k)
-            for k in ds.coords.keys()
-            if str(k) != unstack_dim and ds.coords[k].ndim >= 1
-        )
-        # If the dataset uses symmetric 2D origin/destination dimension coords
-        # (e.g. otaz/dtaz or origin/destination) and also carries original_zone_ids
-        # or zone_number metadata, check whether a canonical zone_number lookup
-        # is represented.
-        if (
-            set(coord_keys) in ({"otaz", "dtaz"}, {"origin", "destination"})
-            and "zone_number" not in coord_keys
-            and "original_zone_ids" in attrs
-        ):
-            raw_zones = attrs["original_zone_ids"]
-            zone_arr = np.asarray(
-                raw_zones.tolist() if hasattr(raw_zones, "tolist") else raw_zones
-            )
-            _stream_dataset_into_hasher(
-                hasher,
-                "lookup/zone_number",
-                zone_arr,
-                dtype_policy="preserve",
-                canonicalize_float_bits=policy.canonicalize_float_bits,
-                chunk_rows=chunk_rows,
-            )
-        else:
-            for ckey in coord_keys:
-                coord_arr = np.asarray(ds.coords[ckey].values)
-                _stream_dataset_into_hasher(
-                    hasher,
-                    f"lookup/{ckey}",
-                    coord_arr,
-                    dtype_policy="preserve",
-                    canonicalize_float_bits=policy.canonicalize_float_bits,
-                    chunk_rows=chunk_rows,
-                )
+        zarr_preserve_entries = [
+            (ckey, np.asarray(ds.coords[ckey].values)) for ckey in coord_keys
+        ]
+
+    _stream_lookup_entries(
+        hasher,
+        policy=policy,
+        zone_count=zone_count,
+        single_zone_candidates=(
+            _from_primary_coords,
+            lambda: attr_zones,
+            _from_any_coord,
+        ),
+        preserve_entries=zarr_preserve_entries,
+        chunk_rows=chunk_rows,
+    )
 
     for entry_name, da in virtual_entries:
         na_val = (
             _decode_attr_value(da.attrs["NA"])
-            if hasattr(da, "attrs") and "NA" in da.attrs
+            if isinstance(da, _HasAttrs) and "NA" in da.attrs
             else None
         )
         _stream_dataset_into_hasher(
@@ -1915,7 +1720,9 @@ class Agreement(Enum):
     """Outcome of comparing two identities under an expectation contract."""
 
     MATCH = "match"
+    AGREE = "match"
     MISMATCH = "mismatch"
+    DISAGREE = "mismatch"
     UNKNOWN = "unknown"
 
 
@@ -2259,24 +2066,70 @@ def refines(a: Identity | SchemeSpec, b: Identity | SchemeSpec) -> bool:
 class Expectation:
     """Comparison contract specifying accepted digest kinds and optional pinned schemes."""
 
-    accepts_kinds: frozenset[Kind] = frozenset(
+    accepts_kinds: frozenset[Kind] | frozenset[Digest] = frozenset(
         {Kind.BYTES, Kind.CONTAINER, Kind.LOGICAL, Kind.SEMANTIC, Kind.FILTERED}
     )
     pinned_schemes: frozenset[str] = frozenset()
+    digests: frozenset[Digest] = field(default=frozenset(), compare=False)
+    basis: tuple[tuple[str, str], ...] = field(default=(), compare=False)
 
     def __post_init__(self) -> None:
-        kinds = frozenset(self.accepts_kinds)
-        if any(not isinstance(k, Kind) for k in kinds) or Kind.HISTORICAL in kinds:
-            raise ValueError(
-                "Expectation accepts_kinds must be non-HISTORICAL Kind values"
+        raw_first = tuple(self.accepts_kinds or ())
+        if raw_first and all(isinstance(item, Digest) for item in raw_first):
+            extracted_digests: frozenset[Digest] = frozenset(
+                item for item in raw_first if isinstance(item, Digest)
             )
-        pinned = frozenset(
-            SchemeRegistry.get(s).name for s in (self.pinned_schemes or ())
-        )
-        if any(SchemeRegistry.is_historical(s) for s in pinned):
-            raise ValueError("Expectation cannot pin a Kind.HISTORICAL digest scheme")
+            non_hist = [d for d in extracted_digests if d.kind is not Kind.HISTORICAL]
+            kinds = (
+                frozenset(d.kind for d in non_hist)
+                if non_hist
+                else frozenset(
+                    {
+                        Kind.BYTES,
+                        Kind.CONTAINER,
+                        Kind.LOGICAL,
+                        Kind.SEMANTIC,
+                        Kind.FILTERED,
+                    }
+                )
+            )
+            pinned = frozenset(
+                SchemeRegistry.get(s).name
+                for s in (self.pinned_schemes or tuple(d.scheme for d in non_hist))
+            )
+            object.__setattr__(self, "digests", extracted_digests)
+        else:
+            if any(not isinstance(k, Kind) for k in raw_first):
+                raise ValueError(
+                    "Expectation accepts_kinds must be non-HISTORICAL Kind values"
+                )
+            kinds = frozenset(k for k in raw_first if isinstance(k, Kind))
+            if Kind.HISTORICAL in kinds:
+                raise ValueError(
+                    "Expectation accepts_kinds must be non-HISTORICAL Kind values"
+                )
+            pinned = frozenset(
+                SchemeRegistry.get(s).name for s in (self.pinned_schemes or ())
+            )
+            if any(SchemeRegistry.is_historical(s) for s in pinned):
+                raise ValueError(
+                    "Expectation cannot pin a Kind.HISTORICAL digest scheme"
+                )
+            object.__setattr__(
+                self,
+                "digests",
+                frozenset(
+                    d if isinstance(d, Digest) else Digest.parse(str(d))
+                    for d in (self.digests or ())
+                ),
+            )
         object.__setattr__(self, "accepts_kinds", kinds)
         object.__setattr__(self, "pinned_schemes", pinned)
+        object.__setattr__(
+            self,
+            "basis",
+            tuple((str(k), str(v)) for k, v in (self.basis or ())),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -2324,6 +2177,16 @@ class Verdict:
     def __post_init__(self) -> None:
         if not isinstance(self.needed, tuple):
             object.__setattr__(self, "needed", tuple(self.needed))
+
+    @property
+    def decided_by(self) -> str | None:
+        """Alias for `matched_scheme`."""
+        return self.matched_scheme
+
+    @property
+    def compute(self) -> tuple[str, ...]:
+        """Alias for `needed` schemes to compute."""
+        return self.needed
 
 
 def compare(
@@ -2403,7 +2266,12 @@ def _reject_manifest_symlink_components(path: Path, *, label: str) -> None:
             )
 
 
-def build_manifest_v1(root: Path | str) -> dict[str, Any]:
+def build_manifest_v1(
+    root: Path | str,
+    *,
+    max_workers: int = 1,
+    file_hasher: Callable[[Path], tuple[str, int]] | None = None,
+) -> dict[str, Any]:
     """Build a deterministic v1-compatible directory manifest (`version=1`, `entries`, `tree_hash`).
 
     Produces byte-for-byte identical canonical JSON and `tree_hash` to
@@ -2415,6 +2283,7 @@ def build_manifest_v1(root: Path | str) -> dict[str, Any]:
         raise ValueError(f"directory artifact root must be a directory: {root_path}")
 
     entries: list[dict[str, Any]] = []
+    file_items: list[tuple[str, Path, int]] = []
 
     def visit(directory: Path) -> None:
         with os.scandir(directory) as scan:
@@ -2429,23 +2298,37 @@ def build_manifest_v1(root: Path | str) -> dict[str, Any]:
             if child.is_dir(follow_symlinks=False):
                 entries.append({"kind": "directory", "path": relative_path})
                 visit(child_path)
-                continue
-            if child.is_file(follow_symlinks=False):
-                entries.append(
-                    {
-                        "kind": "file",
-                        "path": relative_path,
-                        "sha256": file_sha256(child_path),
-                        "size": child.stat(follow_symlinks=False).st_size,
-                    }
+            elif child.is_file(follow_symlinks=False):
+                file_items.append(
+                    (
+                        relative_path,
+                        child_path,
+                        child.stat(follow_symlinks=False).st_size,
+                    )
                 )
-                continue
-            raise ValueError(
-                "directory artifact cannot contain a non-regular filesystem entry: "
-                f"{child_path}"
-            )
+            else:
+                raise ValueError(
+                    "directory artifact cannot contain a non-regular filesystem entry: "
+                    f"{child_path}"
+                )
 
     visit(root_path)
+
+    def _hash_item(item: tuple[str, Path, int]) -> dict[str, Any]:
+        rel_posix, fpath, st_size = item
+        sha_hex, size = (
+            file_hasher(fpath)
+            if file_hasher is not None
+            else (file_sha256(fpath), st_size)
+        )
+        return {"kind": "file", "path": rel_posix, "sha256": sha_hex, "size": size}
+
+    if len(file_items) > 1 and max_workers > 1:
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            entries.extend(pool.map(_hash_item, file_items))
+    else:
+        entries.extend(_hash_item(item) for item in file_items)
+
     entries.sort(key=lambda entry: (entry["path"], entry["kind"]))
     identity_payload = {"version": 1, "entries": entries}
     return {**identity_payload, "tree_hash": canonical_json_sha256(identity_payload)}

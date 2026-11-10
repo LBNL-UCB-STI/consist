@@ -205,14 +205,14 @@ share a schema identity instead of a single `concept_key`.
 Example:
 
 ```python
-df = consist.load_df(artifact, tracker=tracker, db_fallback="always")
+df = artifact.as_df(tracker=tracker, db_fallback="always")
 ```
 
 ## Choosing A Query Surface
 
 Use the narrowest surface that matches the task:
 
-- `consist.load_df(...)` for one artifact when you want an eager pandas DataFrame.
+- `artifact.as_df()` (or `consist.load_df(...)`) for one artifact when you want an eager pandas DataFrame.
 - `consist.ibis_view(...)` or `consist.ibis_connection(...)` when you want lazy,
   dataframe-style analysis over a Consist DuckDB view. This is the recommended
   surface for tabular tracker analysis when you are willing to install the
@@ -277,7 +277,7 @@ from pathlib import Path
 
 import duckdb
 
-path = artifact.as_path(tracker)
+path = artifact.path
 
 con = duckdb.connect()
 con.sql("LOAD spatial")

@@ -10,6 +10,7 @@ from consist.core.admission import (
     AdmissionReport,
     DeclaredDigestExpectation,
     FileIdentity,
+    HydratedAdmittedInput,
     PriorRunExpectation,
     admission_file_identity,
     check_admission_reference,
@@ -19,6 +20,7 @@ from consist.core.admission import (
     check_expected_identity,
     check_prior_run_expectation,
     compare_path_to_identity,
+    hydrate_admitted_input,
 )
 from consist.core.logical_array_identity import (
     ARTIFACT_PROVENANCE_SCHEMA_VERSION,
@@ -39,6 +41,7 @@ __all__ = [
     "ArtifactProvenanceSidecar",
     "DeclaredDigestExpectation",
     "FileIdentity",
+    "HydratedAdmittedInput",
     "MatrixContainerSummary",
     "PriorRunExpectation",
     "admission_directory_identity",
@@ -51,6 +54,7 @@ __all__ = [
     "check_expected_identity",
     "check_prior_run_expectation",
     "compare_path_to_identity",
+    "hydrate_admitted_input",
     "inspect_matrix_container",
     "read_artifact_provenance_sidecar",
     "write_artifact_provenance_sidecar",

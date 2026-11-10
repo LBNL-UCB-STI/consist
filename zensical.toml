@@ -51,7 +51,7 @@ Copyright &copy; 2026 The Regents of the University of California, through Lawre
 # ]
 nav = [
     { "Home" = "index.md" },
-    { "Getting Started" = ["getting-started/installation.md", "getting-started/quickstart.md", "getting-started/first-workflow.md"] },
+    { "Getting Started" = ["getting-started/installation.md", "getting-started/quickstart.md", "getting-started/first-workflow.md", "migrating-to-0.5.md"] },
     { "Concepts" = ["concepts/overview.md", "concepts/config-management.md", "concepts/decorators-and-metadata.md", "concepts/caching-and-hydration.md", "concepts/data-materialization.md", "concepts/grouped-views.md"] },
     { "Guides" = ["usage-guide.md", "building-domain-tracker.md", "containers-guide.md", "dlt-loader-guide.md", "schema-export.md", "mounts-and-portability.md", "guides/historical-recovery.md"] },
     { "Operations" = ["cli-reference.md", "db-maintenance.md", "troubleshooting.md"] },

@@ -372,6 +372,8 @@ class ArtifactManager:
             return artifact.model_copy(deep=True, update=updates or None)
 
         def _attach_content_id(artifact: Artifact) -> None:
+            if artifact.content_id is not None:
+                return
             effective_driver = driver or artifact.driver
             content_identity = artifact.meta.get("content_identity")
             if (
@@ -486,21 +488,32 @@ class ArtifactManager:
             if hash_state.effective_hash is None:
                 return
             _validate_content_hash()
-            existing_hash = getattr(artifact, "hash", None)
+            existing_hash = artifact.hash
             if existing_hash == hash_state.effective_hash:
                 return
             if existing_hash and not force_hash_override:
                 logging.warning(
                     "[Consist Warning] Ignoring content_hash override for artifact key=%s uri=%s "
                     "(existing hash differs). Use force_hash_override=True to override.",
-                    getattr(artifact, "key", None),
-                    getattr(artifact, "container_uri", None),
+                    artifact.key,
+                    artifact.container_uri,
                 )
                 return
             artifact.hash = hash_state.effective_hash
             hash_state.caller_supplied_override_applied = True
 
         _warn_output_reuse_deprecated()
+
+        from consist.artifact import Artifact as V2Artifact
+        from consist.core.noop import LocalRef
+        from consist.core.run_resolution import convert_v2_artifact_to_legacy
+
+        if isinstance(path, V2Artifact):
+            path = convert_v2_artifact_to_legacy(self.tracker, path, key_override=key)
+        elif isinstance(path, LocalRef):
+            if key is None:
+                key = path.key
+            path = path.path
 
         if isinstance(path, Artifact):
             source_artifact = path

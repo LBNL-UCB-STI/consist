@@ -12,6 +12,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
+import json
 import os
 from pathlib import Path
 import socket
@@ -434,6 +435,116 @@ def witness_from_json(
     return cls.from_json_dict(payload)
 
 
+def serialize_witness_json(
+    witness: Witness | str | Mapping[str, Any] | None,
+) -> str | None:
+    """Serialize a `Witness` or JSON mapping/string into canonical compact JSON."""
+    if witness is None:
+        return None
+    if isinstance(witness, str):
+        try:
+            payload = json.loads(witness)
+        except ValueError:
+            return None
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    if isinstance(witness, Mapping):
+        return json.dumps(dict(witness), sort_keys=True, separators=(",", ":"))
+    kind, payload = witness_to_json(witness)
+    if kind is None or payload is None:
+        return None
+    return json.dumps({"kind": kind, **payload}, sort_keys=True, separators=(",", ":"))
+
+
+def deserialize_witness_json(raw: str | Mapping[str, Any] | None) -> Witness | None:
+    """Reconstruct a `Witness` from `artifact_location.witness_json` or manifest JSON."""
+    if not raw:
+        return None
+    if isinstance(raw, str):
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return None
+    elif isinstance(raw, Mapping):
+        data = dict(raw)
+    else:
+        return None
+    if not isinstance(data, Mapping):
+        return None
+    if isinstance(kind := data.get("kind"), str):
+        inner = data["payload"] if isinstance(data.get("payload"), Mapping) else data
+        return witness_from_json(kind, inner)
+    for inferred_kind, req_keys in (
+        ("dir_tree_stat", ("file_count", "entries")),
+        ("member_of", ("parent", "member")),
+        ("db_table_change_token", ("token",)),
+        ("object_etag", ("etag",)),
+        ("file_stat", ("size", "mtime_ns")),
+    ):
+        if all(k in data for k in req_keys):
+            return witness_from_json(inferred_kind, data)
+    return None
+
+
+def normalize_mounts(
+    mounts: Sequence[Mount] | Mapping[str, Mount | Path | str] | None,
+    *,
+    strip_trailing_punct: bool = False,
+) -> dict[str, Mount]:
+    """Normalize a sequence or mapping of mounts into a `name -> Mount` dictionary."""
+    if mounts is None:
+        return {}
+    out: dict[str, Mount] = {}
+    if isinstance(mounts, Mapping):
+        for name, target in mounts.items():
+            key = str(name).strip().rstrip(":/") if strip_trailing_punct else str(name)
+            out[key] = (
+                target
+                if isinstance(target, Mount)
+                else Mount(name=key, root=Path(target))
+            )
+    else:
+        for item in mounts:
+            if isinstance(item, Mount):
+                out[item.name] = item
+    return out
+
+
+_SUFFIX_DRIVERS: dict[str, str] = {
+    ".parquet": "parquet",
+    ".pq": "parquet",
+    ".csv": "csv",
+    ".tsv": "tsv",
+    ".json": "json",
+    ".geojson": "geojson",
+    ".omx": "omx",
+    ".nc": "netcdf",
+    ".netcdf": "netcdf",
+    ".feather": "feather",
+    ".arrow": "feather",
+    ".zarr": "zarr",
+}
+
+
+def infer_path_driver(
+    path: Path,
+    *,
+    is_dir: bool = False,
+    member: str | None = None,
+    h5_default: str = "hdf5",
+    fallback_to_ext: bool = False,
+) -> str:
+    """Infer a storage driver string from `path`, `is_dir`, and optional `member`."""
+    suffix = path.suffix.lower()
+    if is_dir or path.is_dir():
+        return "zarr" if suffix == ".zarr" else "directory"
+    if suffix in (".h5", ".hdf5", ".hdf"):
+        return "h5_table" if member is not None else h5_default
+    if suffix in _SUFFIX_DRIVERS:
+        return _SUFFIX_DRIVERS[suffix]
+    ext = suffix.lstrip(".")
+    return ext if (fallback_to_ext and ext) else "file"
+
+
 MountScope: TypeAlias = Literal["site", "node", "job", "global"]
 _VALID_MOUNT_SCOPES: frozenset[str] = frozenset({"site", "node", "job", "global"})
 
@@ -550,28 +661,15 @@ class SiteContext:
                 "",
             )
         )
-        if not site and mounts:
-            items = (
-                [
-                    (
-                        t.name or str(k) if isinstance(t, Mount) else str(k),
-                        t.root if isinstance(t, Mount) else Path(t),
-                    )
-                    for k, t in mounts.items()
-                ]
-                if isinstance(mounts, Mapping)
-                else [(m.name, m.root) for m in mounts if isinstance(m, Mount)]
+        if not site and (norm_mounts := normalize_mounts(mounts)):
+            payload = "".join(
+                f"{k}={p}\n"
+                for k, p in sorted(
+                    (m.name or k, str(m.root.expanduser().resolve()))
+                    for k, m in norm_mounts.items()
+                )
             )
-            if items:
-                payload = "".join(
-                    f"{k}={p}\n"
-                    for k, p in sorted(
-                        (k, str(r.expanduser().resolve())) for k, r in items
-                    )
-                )
-                site = (
-                    f"mounts:{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:12]}"
-                )
+            site = f"mounts:{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:12]}"
         return cls(
             site=site or f"host:{resolved_node}",
             node_name=resolved_node,
@@ -754,9 +852,13 @@ __all__ = [
     "ObservationBasis",
     "SiteContext",
     "Witness",
+    "deserialize_witness_json",
+    "infer_path_driver",
     "lookup_live_ledger",
     "lookup_live_ledger_by_path",
+    "normalize_mounts",
     "register_live_ledger",
+    "serialize_witness_json",
     "unregister_live_ledger",
     "witness_from_json",
     "witness_to_json",

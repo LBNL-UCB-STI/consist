@@ -10,7 +10,7 @@ This section establishes the mental model for Consist before covering API detail
 ## Core Abstractions
 
 **Artifact**: A file with provenance metadata: path, format, canonical
-fingerprint (`artifact.hash`), producing run, and ingestion status. Fingerprint
+fingerprint, producing run, and ingestion status. Fingerprint
 semantics follow the active hashing strategy, so under `fast` hashing the value
 may be metadata-based rather than a strict byte-content digest.
 
@@ -96,46 +96,45 @@ For a full term index, see the [Glossary](../glossary.md).
 
 **Inputs** are files or values that influence computation. File inputs are hashed by content or metadata depending on the hashing strategy (`full` vs `fast`).
 
-**Outputs** are named artifacts registered via a function's `dict[str, Path]`
-return value together with declared `outputs=[...]`, or explicitly via
-`output_paths`. Consist stores their paths and provenance metadata for lookup
-and querying.
+**Outputs** are named artifacts declared via `outputs={"key": "filename"}` (where
+Consist injects `: Path` output parameters into your function), or via
+`outputs=["key"]` when your function returns a path or DataFrame. Consist stores
+their paths and provenance metadata for lookup and querying.
 
 ### Recommended pattern: file-based I/O
 
-The recommended pattern is for functions to accept file paths as inputs, write
-output files, and return a `dict[str, Path]` mapping artifact keys to output
-paths. Declare the matching artifact keys in `outputs=[...]` when calling
-`tracker.run(...)`; Consist then logs those returned paths as artifacts.
+The recommended pattern is for functions to accept input and output file paths
+via `: Path` type annotations, and declare `inputs={...}` and `outputs={...}`
+when calling `tracker.run(...)`:
 
 ``` python
 import pandas as pd
 from pathlib import Path
 
-def summarize_trips(trips_path: Path) -> dict[str, Path]:
+def summarize_trips(trips_path: Path, summary: Path) -> None:
     df = pd.read_parquet(trips_path)
-    out = Path("./summary.parquet")
-    df.groupby("mode")["distance_miles"].mean().to_frame().to_parquet(out)
-    return {"summary": out}
+    df.groupby("mode")["distance_miles"].mean().to_frame().to_parquet(summary)
 
 result = tracker.run(
     fn=summarize_trips,
     inputs={"trips_path": trips_artifact},  # path resolved from artifact; hashed into the signature
-    outputs=["summary"],
+    outputs={"summary": "summary.parquet"},
 )
 ```
 
 The function is a plain Python callable: testable without a tracker, honest about its I/O, and readable without framework knowledge.
 
-### When to use `output_paths`
+### When a step writes to fixed paths without `: Path` output parameters
 
-If a function writes files but returns `None` (e.g., a legacy tool or subprocess wrapper), register outputs explicitly:
+If a function writes files to a fixed path without accepting an output `: Path`
+parameter (e.g., a legacy tool or subprocess wrapper), declare the target paths
+in `outputs={...}` (or `output_paths={...}`):
 
 ``` python
 result = tracker.run(
     fn=run_legacy_model,
     inputs={"config": config_artifact},
-    output_paths={"results": Path("./model_output.csv")},
+    outputs={"results": Path("./model_output.csv")},
 )
 ```
 
@@ -148,7 +147,7 @@ from consist import ArtifactSpec
 result = tracker.run(
     fn=run_legacy_model,
     inputs={"config": config_artifact},
-    output_paths={
+    outputs={
         "synthetic_firms": ArtifactSpec(
             path=Path("./synthetic_firms.csv"),
             schema=SyntheticFirms,

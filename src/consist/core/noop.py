@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+import os
 from pathlib import Path
 from types import MappingProxyType
 import inspect
@@ -11,6 +12,7 @@ from typing import (
     Dict,
     Iterable,
     Iterator,
+    List,
     Literal,
     Mapping,
     MutableMapping,
@@ -21,41 +23,126 @@ from typing import (
 )
 import uuid
 
+from consist.artifact import (
+    Artifact as V2Artifact,
+    EMPTY_META,
+    FrozenMeta,
+    MissingOutputError,
+    read_local_df,
+)
 from consist.core._coupler_shared import CouplerMapMixin
 from consist.core.coupler import CouplerView, DeclaredOutput
+from consist.core.decorators import (
+    get_callable_name,
+    get_required_runtime_kwargs,
+    get_step_definition,
+)
 from consist.core.output_sets import (
     build_output_set_manifest,
     discover_output_set_members,
 )
+from consist.core.run_invocation import (
+    DeclaredOutputSpec,
+    infer_path_annotated_parameters,
+    normalize_declared_outputs_mapping,
+    prepare_declared_output_targets,
+)
 from consist.core.validation import validate_artifact_key
+from consist.models.artifact import Artifact as LegacyArtifact
 from consist.protocols import TrackerLike
-from consist.types import ExecutionOptions, OutputSet, RunCompletionArchivePolicy
+from consist.types import (
+    ExecutionOptions,
+    InputBindingMode,
+    OutputPathRef,
+    OutputPolicyOptions,
+    OutputSet,
+    RunCompletionArchivePolicy,
+)
 
 from consist.models.run import Run, CouplerSnapshotPhase
 from consist.core.workflow import RestoredCouplerSnapshotResult
+from consist.location import infer_path_driver
 
 
-@dataclass
-class NoopArtifact:
+def _infer_local_ref_driver(path: Path) -> str:
+    return infer_path_driver(
+        path,
+        is_dir=path.suffix.lower() == ".zarr",
+        h5_default="h5",
+        fallback_to_ext=True,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class LocalRef:
     """
-    Minimal artifact placeholder for noop mode.
+    Lightweight, zero-I/O local path wrapper for noop mode (``NoopCoupler[LocalRef]``).
 
-    Provides stable accessors for `path` and `get_path()` so integrations can
-    rely on a consistent artifact interface when Consist is disabled.
+    Provides structural parity with ``Artifact`` (``.path``, ``.get_path()``,
+    ``.as_path()``, ``.locate()``, ``.as_df()``, ``.with_meta()``, ``os.PathLike``)
+    without reading or hashing bytes on disk at construction time.
     """
 
-    key: str
     path: Path
-    container_uri: str
-    meta: Dict[str, Any] = field(default_factory=dict)
-    driver: str = "file"
-    run_id: Optional[str] = None
-    id: Optional[str] = None
+    key: str = ""
+    driver: str = ""
+    container_uri: str = ""
     table_path: Optional[str] = None
     array_path: Optional[str] = None
+    meta: Mapping[str, Any] = field(default_factory=lambda: EMPTY_META)
+    run_id: Optional[str] = None
+    id: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        coerced_path = (
+            self.path if isinstance(self.path, Path) else Path(os.fspath(self.path))
+        )
+        object.__setattr__(self, "path", coerced_path)
+        if not self.key:
+            object.__setattr__(self, "key", coerced_path.name)
+        frozen_meta = FrozenMeta(self.meta) if self.meta else EMPTY_META
+        object.__setattr__(self, "meta", frozen_meta)
+        if not self.container_uri:
+            object.__setattr__(self, "container_uri", str(coerced_path))
+        if not self.driver:
+            object.__setattr__(self, "driver", _infer_local_ref_driver(coerced_path))
+
+    def __fspath__(self) -> str:
+        return os.fspath(self.path)
 
     def get_path(self) -> Path:
         return self.path
+
+    def as_path(self, tracker: Any = None) -> Path:
+        del tracker
+        return self.path
+
+    def locate(
+        self,
+        *,
+        ledger: Any = None,
+        mounts: Any = None,
+        verify: str = "exists",
+    ) -> Optional[Path]:
+        del ledger, mounts, verify
+        return self.path
+
+    def with_meta(self, **changes: Any) -> LocalRef:
+        merged = dict(self.meta)
+        merged.update(changes)
+        return replace(self, meta=FrozenMeta(merged))
+
+    def as_df(self, **kwargs: Any) -> Any:
+        resolved = self.path
+        if not resolved.exists():
+            raise FileNotFoundError(f"LocalRef file not found at {resolved}")
+        return read_local_df(
+            resolved,
+            driver=self.driver,
+            member=self.table_path,
+            default_h5_key="data",
+            **kwargs,
+        )
 
     @property
     def abs_path(self) -> Optional[str]:
@@ -88,6 +175,9 @@ class NoopArtifact:
         return None
 
 
+NoopArtifact = LocalRef
+
+
 @dataclass
 class NoopRunResult:
     """
@@ -110,7 +200,7 @@ class NoopRunResult:
 
 class NoopCoupler(CouplerMapMixin[Any, DeclaredOutput]):
     """
-    Coupler-compatible helper for noop mode.
+    Coupler-compatible helper for noop mode (``NoopCoupler[LocalRef]``).
     """
 
     def __init__(self) -> None:
@@ -119,9 +209,24 @@ class NoopCoupler(CouplerMapMixin[Any, DeclaredOutput]):
         self._warn_undefined = False
         self._undefined_keys: set[str] = set()
         self._output_descriptions: MutableMapping[str, str] = {}
+        self._history: MutableMapping[str, list[Any]] = {}
 
     def _validate_artifact_key(self, key: str) -> None:
         validate_artifact_key(key)
+
+    def _coerce_artifact(self, key: str, artifact: Any) -> Any:
+        if artifact is None:
+            return None
+        if isinstance(artifact, LocalRef):
+            return artifact if artifact.key == key else replace(artifact, key=key)
+        if isinstance(artifact, (V2Artifact, LegacyArtifact)):
+            return artifact
+        if isinstance(artifact, (str, Path, os.PathLike)):
+            return LocalRef(path=Path(os.fspath(artifact)), key=key)
+        raise TypeError(
+            f"NoopCoupler.set({key!r}, ...) expected a LocalRef, Artifact, or path, "
+            f"got {type(artifact).__name__}: {artifact!r}"
+        )
 
     def _create_declared_output(self) -> DeclaredOutput:
         return DeclaredOutput()
@@ -130,7 +235,12 @@ class NoopCoupler(CouplerMapMixin[Any, DeclaredOutput]):
         return None
 
     def set(self, key: str, artifact: Any) -> Any:
-        return self._store_artifact(key, artifact)
+        self._validate_artifact_key(key)
+        coerced = self._coerce_artifact(key, artifact)
+        stored = self._store_artifact(key, coerced, validate_key=False)
+        if stored is not None:
+            self._history.setdefault(key, []).append(stored)
+        return stored
 
     def set_from_artifact(self, key: str, value: Any) -> Any:
         """
@@ -141,16 +251,14 @@ class NoopCoupler(CouplerMapMixin[Any, DeclaredOutput]):
 
         All forms are stored in the coupler and can be retrieved with get() or require().
         """
-        return self._store_artifact(key, value, validate_key=False)
-
-    def keys(self) -> Sequence[str]:
-        return list(self._artifacts.keys())
-
-    def items(self) -> Sequence[tuple[str, Any]]:
-        return list(self._artifacts.items())
-
-    def values(self) -> Sequence[Any]:
-        return list(self._artifacts.values())
+        stored = self._store_artifact(key, value, validate_key=False)
+        if (
+            isinstance(stored, (LocalRef, V2Artifact, LegacyArtifact))
+            and isinstance(key, str)
+            and bool(key)
+        ):
+            self._history.setdefault(key, []).append(stored)
+        return stored
 
     def view(self, namespace: str) -> CouplerView:
         """
@@ -161,28 +269,33 @@ class NoopCoupler(CouplerMapMixin[Any, DeclaredOutput]):
         """
         return CouplerView(self, namespace)
 
-    def __contains__(self, key: object) -> bool:
-        return key in self._artifacts
-
-    def __getitem__(self, key: str) -> Any:
-        return self.require(key)
-
-    def __setitem__(self, key: str, artifact: Any) -> None:
-        self.set(key, artifact)
-
     def path(self, key: str, *, required: bool = True) -> Optional[Path]:
         artifact = self.require(key) if required else self.get(key)
         if artifact is None:
             return None
-        path_getter = getattr(artifact, "get_path", None)
-        if callable(path_getter):
-            return Path(path_getter())
-        path_value = getattr(artifact, "path", None)
-        if path_value is not None:
-            return Path(path_value)
-        container_uri = getattr(artifact, "container_uri", None)
-        if container_uri is not None:
-            return Path(container_uri)
+        if isinstance(artifact, LocalRef):
+            return artifact.path
+        if isinstance(artifact, V2Artifact):
+            located = artifact.locate()
+            return located if located is not None else artifact.path
+        if isinstance(artifact, LegacyArtifact):
+            return artifact.path
+        if isinstance(artifact, (Path, str, os.PathLike)):
+            return Path(os.fspath(artifact))
+        try:
+            return Path(artifact.get_path())
+        except AttributeError:
+            pass
+        try:
+            if artifact.path is not None:
+                return Path(artifact.path)
+        except AttributeError:
+            pass
+        try:
+            if artifact.container_uri is not None:
+                return Path(artifact.container_uri)
+        except AttributeError:
+            pass
         return None
 
 
@@ -217,7 +330,7 @@ class NoopRunContext:
         _ = facet_schema_version
         _ = facet_index
         if key is None:
-            if isinstance(path, NoopArtifact):
+            if isinstance(path, NoopArtifact) and path.key is not None:
                 key = path.key
             else:
                 key = Path(path).stem if path is not None else "artifact"
@@ -320,6 +433,7 @@ class NoopScenarioContext:
     def add_input(self, path: Any, key: str, **kwargs: Any) -> NoopArtifact:
         artifact = _build_noop_artifact(path, key=key, meta=kwargs)
         self._inputs[key] = artifact
+        self.coupler.set(key, artifact)
         return artifact
 
     @property
@@ -369,9 +483,12 @@ class NoopScenarioContext:
         name: Optional[str] = None,
         *,
         run_id: Optional[str] = None,
-        outputs: Optional[Sequence[str]] = None,
+        config: Optional[Dict[str, Any]] = None,
+        inputs: Optional[Union[Mapping[str, Any], Iterable[Any]]] = None,
+        outputs: Optional[Union[Sequence[str], Mapping[str, OutputPathRef]]] = None,
         output_paths: Optional[Mapping[str, Any]] = None,
         output_sets: Optional[Mapping[str, OutputSet]] = None,
+        output_policy: Optional[OutputPolicyOptions] = None,
         execution_options: Optional[ExecutionOptions] = None,
         runtime_kwargs: Optional[Dict[str, Any]] = None,
         inject_context: bool | str | None = None,
@@ -405,13 +522,46 @@ class NoopScenarioContext:
             if resolved_inject_context_value is not None
             else False
         )
+        step_def = get_step_definition(fn)
+        effective_inputs: Any = inputs if inputs is not None else step_def.inputs
+        resolved_inputs: Any = effective_inputs
+        if isinstance(effective_inputs, Mapping):
+            resolved_map: Dict[str, Any] = {}
+            for k, v in effective_inputs.items():
+                if isinstance(v, str) and v in self.coupler:
+                    resolved_map[str(k)] = self.coupler.require(v)
+                elif isinstance(v, str) and v in self._inputs:
+                    resolved_map[str(k)] = self._inputs[v]
+                else:
+                    resolved_map[str(k)] = v
+            resolved_inputs = resolved_map
+        elif isinstance(effective_inputs, Iterable) and not isinstance(
+            effective_inputs, (str, bytes)
+        ):
+            items = list(effective_inputs)
+            if items and all(isinstance(item, str) for item in items):
+                promoted: Dict[str, Any] = {}
+                for item in items:
+                    key_str = str(item)
+                    leaf = key_str.rsplit("/", 1)[-1]
+                    if key_str in self.coupler:
+                        promoted[leaf] = self.coupler.require(key_str)
+                    elif key_str in self._inputs:
+                        promoted[leaf] = self._inputs[key_str]
+                    else:
+                        promoted[leaf] = Path(key_str)
+                resolved_inputs = promoted
         return _run_noop_step(
             fn=fn,
             name=name,
             run_id=run_id,
+            config=config,
+            inputs=resolved_inputs,
             outputs=outputs,
             output_paths=output_paths,
             output_sets=output_sets,
+            output_policy=output_policy,
+            execution_options=execution_options,
             runtime_kwargs=resolved_runtime_kwargs,
             inject_context=resolved_inject_context,
             default_name=self.name,
@@ -547,9 +697,12 @@ class NoopTracker(TrackerLike):
         name: Optional[str] = None,
         *,
         run_id: Optional[str] = None,
-        outputs: Optional[Sequence[str]] = None,
+        config: Optional[Dict[str, Any]] = None,
+        inputs: Optional[Union[Mapping[str, Any], Iterable[Any]]] = None,
+        outputs: Optional[Union[Sequence[str], Mapping[str, OutputPathRef]]] = None,
         output_paths: Optional[Mapping[str, Any]] = None,
         output_sets: Optional[Mapping[str, OutputSet]] = None,
+        output_policy: Optional[OutputPolicyOptions] = None,
         execution_options: Optional[ExecutionOptions] = None,
         runtime_kwargs: Optional[Dict[str, Any]] = None,
         inject_context: bool | str | None = None,
@@ -588,9 +741,13 @@ class NoopTracker(TrackerLike):
             fn=fn,
             name=name,
             run_id=run_id,
+            config=config,
+            inputs=inputs,
             outputs=outputs,
             output_paths=output_paths,
             output_sets=output_sets,
+            output_policy=output_policy,
+            execution_options=execution_options,
             runtime_kwargs=resolved_runtime_kwargs,
             inject_context=resolved_inject_context,
             output_base_dir=self._output_base_dir,
@@ -637,18 +794,56 @@ def _build_noop_artifact(
     value: Any, *, key: str, meta: Optional[Dict[str, Any]] = None
 ) -> NoopArtifact:
     validate_artifact_key(key)
-    if isinstance(value, NoopArtifact):
-        return value
-    table_path = getattr(value, "table_path", None)
-    array_path = getattr(value, "array_path", None)
-    path_value = getattr(value, "path", None)
+    if isinstance(value, LocalRef):
+        if value.key == key and not meta:
+            return value
+        merged_meta = dict(value.meta)
+        if meta:
+            merged_meta.update(meta)
+        return replace(value, key=key, meta=merged_meta)
+    if isinstance(value, LegacyArtifact):
+        path = value.path
+        return LocalRef(
+            key=key,
+            path=path,
+            container_uri=str(path),
+            meta=dict(meta or {}),
+            driver=value.driver,
+            table_path=value.table_path,
+            array_path=value.array_path,
+        )
+    if isinstance(value, V2Artifact):
+        located = value.locate()
+        path = located if located is not None else value.path
+        return LocalRef(
+            key=key,
+            path=path,
+            container_uri=str(path),
+            meta=dict(meta or {}),
+            driver=value.driver,
+        )
+    table_path: Optional[str] = None
+    array_path: Optional[str] = None
+    path_value: Any = None
+    try:
+        table_path = value.table_path
+    except AttributeError:
+        pass
+    try:
+        array_path = value.array_path
+    except AttributeError:
+        pass
+    try:
+        path_value = value.path
+    except AttributeError:
+        pass
     if path_value is not None:
         try:
             path = Path(path_value)
         except Exception:
             path = None
         if path is not None:
-            return NoopArtifact(
+            return LocalRef(
                 key=key,
                 path=path,
                 container_uri=str(path),
@@ -657,7 +852,7 @@ def _build_noop_artifact(
                 array_path=array_path,
             )
     path = Path(value) if value is not None else Path(key)
-    return NoopArtifact(
+    return LocalRef(
         key=key,
         path=path,
         container_uri=str(path),
@@ -667,31 +862,132 @@ def _build_noop_artifact(
     )
 
 
+def _extract_input_path(value: Any) -> Path:
+    if isinstance(value, LocalRef):
+        return value.path
+    if isinstance(value, V2Artifact):
+        located = value.locate()
+        return located if located is not None else value.path
+    if isinstance(value, LegacyArtifact):
+        return value.path
+    if isinstance(value, (Path, str, os.PathLike)):
+        return Path(os.fspath(value))
+    try:
+        return Path(value.get_path())
+    except AttributeError:
+        pass
+    try:
+        return Path(value.path)
+    except AttributeError as exc:
+        raise TypeError(
+            f"Cannot resolve input path from {type(value).__name__}: {value!r}"
+        ) from exc
+
+
+def _load_noop_input_value(value: Any) -> Any:
+    if isinstance(value, (LocalRef, V2Artifact, LegacyArtifact)):
+        return value.as_df()
+    if isinstance(value, (Path, str, os.PathLike)):
+        return LocalRef(path=Path(os.fspath(value))).as_df()
+    return value
+
+
 def _run_noop_step(
     *,
     fn: Optional[Any],
     name: Optional[str],
     run_id: Optional[str],
-    outputs: Optional[Sequence[str]],
-    output_paths: Optional[Mapping[str, Any]],
-    output_sets: Optional[Mapping[str, OutputSet]],
-    runtime_kwargs: Optional[Dict[str, Any]],
-    inject_context: bool | str,
+    config: Optional[Dict[str, Any]] = None,
+    inputs: Optional[Union[Mapping[str, Any], Iterable[Any]]] = None,
+    outputs: Optional[Union[Sequence[str], Mapping[str, OutputPathRef]]] = None,
+    output_paths: Optional[Mapping[str, Any]] = None,
+    output_sets: Optional[Mapping[str, OutputSet]] = None,
+    output_policy: Optional[OutputPolicyOptions] = None,
+    execution_options: Optional[ExecutionOptions] = None,
+    runtime_kwargs: Optional[Dict[str, Any]] = None,
+    inject_context: bool | str = False,
     default_name: Optional[str] = None,
     on_outputs: Optional[Any] = None,
     output_base_dir: Optional[Path] = None,
 ) -> NoopRunResult:
     if fn is None and name is None:
         raise ValueError("Noop run requires name when fn is None.")
-    resolved_name = name or getattr(fn, "__name__", "run")
+    fn_name = get_callable_name(fn)
+    step_def = get_step_definition(fn)
+
+    resolved_name = name or fn_name or "run"
     base = default_name or resolved_name
     resolved_run_id = run_id or f"{base}_{resolved_name}_{uuid.uuid4().hex[:8]}"
     base_dir = output_base_dir or Path.cwd()
 
+    effective_outputs: Any = outputs if outputs is not None else step_def.outputs
+    raw_output_paths: Any = (
+        output_paths if output_paths is not None else step_def.output_paths
+    )
+    effective_output_paths: Optional[Mapping[str, Any]] = (
+        raw_output_paths if isinstance(raw_output_paths, Mapping) else None
+    )
+    effective_inputs: Any = inputs if inputs is not None else step_def.inputs
+    raw_config: Any = config if config is not None else (step_def.config or {})
+    effective_config: Dict[str, Any] = (
+        dict(raw_config) if isinstance(raw_config, Mapping) else {}
+    )
+
+    declared_output_specs: Optional[Dict[str, DeclaredOutputSpec]] = None
+    outputs_list: Optional[List[str]] = None
+    if isinstance(effective_outputs, Mapping):
+        if effective_output_paths is not None:
+            raise ValueError(
+                "Cannot specify both outputs={...} mapping and output_paths={...}."
+            )
+        declared_output_specs = normalize_declared_outputs_mapping(effective_outputs)
+        outputs_list = list(declared_output_specs.keys())
+    elif effective_outputs is not None:
+        outputs_list = list(effective_outputs)
+
+    effective_output_missing: str = (
+        output_policy.output_missing
+        if output_policy is not None and output_policy.output_missing is not None
+        else ("error" if declared_output_specs is not None else "warn")
+    )
+
+    raw_input_binding: Any = (
+        execution_options.input_binding
+        if execution_options is not None and execution_options.input_binding is not None
+        else step_def.input_binding
+    )
+    explicit_input_binding: Optional[InputBindingMode] = (
+        raw_input_binding if raw_input_binding in ("loaded", "paths", "none") else None
+    )
+    raw_load_inputs: Any = (
+        execution_options.load_inputs
+        if execution_options is not None and execution_options.load_inputs is not None
+        else step_def.load_inputs
+    )
+    explicit_load_inputs: Optional[bool] = (
+        raw_load_inputs if isinstance(raw_load_inputs, bool) else None
+    )
+    explicit_binding_requested = (
+        explicit_input_binding is not None or explicit_load_inputs is not None
+    )
+    effective_input_binding: InputBindingMode
+    if explicit_input_binding is not None:
+        effective_input_binding = explicit_input_binding
+    elif explicit_load_inputs is True:
+        effective_input_binding = "loaded"
+    elif explicit_load_inputs is False:
+        effective_input_binding = "none"
+    elif isinstance(effective_inputs, Mapping):
+        effective_input_binding = "loaded"
+    else:
+        effective_input_binding = "none"
+
     call_kwargs: Dict[str, Any] = dict(runtime_kwargs or {})
-    required_runtime = getattr(fn, "__consist_runtime_required__", ()) if fn else ()
+    required_runtime: Tuple[str, ...] = get_required_runtime_kwargs(fn)
     if required_runtime:
-        missing = [name for name in required_runtime if name not in call_kwargs]
+        missing = [
+            req_name for req_name in required_runtime if req_name not in call_kwargs
+        ]
         if missing:
             missing_list = ", ".join(sorted(missing))
             raise ValueError(
@@ -701,12 +997,65 @@ def _run_noop_step(
                 "@consist.require_runtime_kwargs."
             )
 
+    declared_target_paths: Dict[str, Path] = (
+        prepare_declared_output_targets(
+            declared_output_specs,
+            default_base_dir=base_dir,
+        )
+        if declared_output_specs is not None
+        else {}
+    )
+
     if fn is not None:
         sig = inspect.signature(fn)
         params = sig.parameters
         has_var_kw = any(
             p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
         )
+        path_annotated_params = infer_path_annotated_parameters(fn)
+
+        if "config" in params and "config" not in call_kwargs and effective_config:
+            call_kwargs["config"] = effective_config
+
+        for param_name, param in params.items():
+            if param.kind in (
+                inspect.Parameter.VAR_POSITIONAL,
+                inspect.Parameter.VAR_KEYWORD,
+            ):
+                continue
+            if param_name in call_kwargs:
+                continue
+            if (
+                effective_input_binding != "none"
+                and isinstance(effective_inputs, Mapping)
+                and param_name in effective_inputs
+            ):
+                raw_in = effective_inputs[param_name]
+                use_paths = effective_input_binding == "paths" or (
+                    not explicit_binding_requested
+                    and param_name in path_annotated_params
+                )
+                if use_paths:
+                    in_path = _extract_input_path(raw_in)
+                    if not in_path.exists():
+                        raise ValueError(
+                            f"input_binding='paths' requires a materialized local path for input {param_name!r}."
+                        )
+                    call_kwargs[param_name] = in_path
+                else:
+                    call_kwargs[param_name] = _load_noop_input_value(raw_in)
+                continue
+            if param_name in declared_target_paths:
+                call_kwargs[param_name] = declared_target_paths[param_name]
+                continue
+            if param_name in effective_config:
+                call_kwargs[param_name] = effective_config[param_name]
+
+        if has_var_kw and declared_target_paths:
+            for role, target_path in declared_target_paths.items():
+                if role not in call_kwargs:
+                    call_kwargs[role] = target_path
+
         if inject_context:
             ctx_name = (
                 inject_context if isinstance(inject_context, str) else "_consist_ctx"
@@ -728,25 +1077,50 @@ def _run_noop_step(
     if fn is not None:
         result = fn(**call_kwargs)
 
+    if declared_output_specs is not None and result is not None:
+        raise ValueError(
+            f"Run {resolved_name!r} declared outputs={{role: path}} mapping and must return None, "
+            f"got {type(result).__name__}."
+        )
+
     outputs_map: Dict[str, NoopArtifact] = {}
-    if output_paths:
-        for key, ref in output_paths.items():
+    if declared_output_specs is not None:
+        for role, spec in declared_output_specs.items():
+            target_path = declared_target_paths[role]
+            if not target_path.exists():
+                if effective_output_missing == "error":
+                    raise MissingOutputError(role=role, path=target_path)
+                if effective_output_missing == "warn":
+                    logging.warning(
+                        "[Consist] Declared output %r was not produced at %s.",
+                        role,
+                        target_path,
+                    )
+                continue
+            outputs_map[role] = _build_noop_artifact(target_path, key=role)
+
+    if effective_output_paths:
+        for key, ref in effective_output_paths.items():
             outputs_map[str(key)] = _build_noop_artifact(ref, key=str(key))
 
-    if outputs and result is not None:
+    if outputs_list and declared_output_specs is None and result is not None:
         if isinstance(result, Mapping):
             for key, value in result.items():
                 outputs_map[str(key)] = _build_noop_artifact(value, key=str(key))
-        elif isinstance(result, (list, tuple)) and len(result) == len(outputs):
-            for key, value in zip(outputs, result):
+        elif isinstance(result, (list, tuple)) and len(result) == len(outputs_list):
+            for key, value in zip(outputs_list, result):
                 outputs_map[str(key)] = _build_noop_artifact(value, key=str(key))
         else:
-            if len(outputs) == 1:
-                outputs_map[str(outputs[0])] = _build_noop_artifact(
-                    result, key=str(outputs[0])
+            if len(outputs_list) == 1:
+                outputs_map[str(outputs_list[0])] = _build_noop_artifact(
+                    result, key=str(outputs_list[0])
                 )
-    elif outputs is None and output_paths is None and result is not None:
-        fn_name = getattr(fn, "__name__", None) if fn is not None else None
+    elif (
+        outputs_list is None
+        and declared_output_specs is None
+        and effective_output_paths is None
+        and result is not None
+    ):
         default_key = (
             fn_name
             if isinstance(fn_name, str) and fn_name and fn_name != "<lambda>"
@@ -804,9 +1178,17 @@ def _run_noop_step(
 
 
 def _resolve_noop_output_path(ref: Any, base_dir: Path) -> Path:
-    if isinstance(ref, NoopArtifact):
+    if isinstance(ref, LocalRef):
         return ref.path
-    ref_path = getattr(ref, "path", None)
+    if isinstance(ref, LegacyArtifact):
+        return ref.path
+    if isinstance(ref, V2Artifact):
+        located = ref.locate()
+        return located if located is not None else ref.path
+    try:
+        ref_path = ref.path
+    except AttributeError:
+        ref_path = None
     if ref_path is not None:
         return Path(ref_path)
     ref_str = str(ref)
@@ -816,3 +1198,14 @@ def _resolve_noop_output_path(ref: Any, base_dir: Path) -> Path:
     if not candidate.is_absolute():
         return base_dir / candidate
     return candidate
+
+
+__all__ = [
+    "LocalRef",
+    "NoopArtifact",
+    "NoopCoupler",
+    "NoopRunContext",
+    "NoopRunResult",
+    "NoopScenarioContext",
+    "NoopTracker",
+]

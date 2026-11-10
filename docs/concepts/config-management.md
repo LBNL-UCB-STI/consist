@@ -136,12 +136,12 @@ facet = tracker.get_config_facet(facet_id)
 ### Practical Example
 
 ```python
-consist.run(
+tracker.run(
     fn=my_model,
     config={"full_config_path": "activitysim_config.yaml"},  # (1)!
     facet={"year": 2030, "mode_choice_coefficient": 0.5},    # (2)!
-    inputs={...},
-    outputs=[...],
+    inputs={"raw": Path("inputs/raw.parquet")},
+    outputs={"summary": "summary.parquet"},
 )
 ```
 
@@ -190,13 +190,12 @@ database filtering.
 ```python
 asim_config_dir = Path("./configs/activitysim")
 
-with use_tracker(tracker):
-    result = consist.run(
-        fn=run_activitysim,
-        name="asim_baseline",
-        config={"scenario": "baseline"},
-        identity_inputs=[("asim_config", asim_config_dir)],  # (1)!
-    )
+result = tracker.run(
+    fn=run_activitysim,
+    name="asim_baseline",
+    config={"scenario": "baseline"},
+    identity_inputs=[("asim_config", asim_config_dir)],  # (1)!
+)
 ```
 
 1. The directory is hashed. If any file inside changes, the signature changes
@@ -247,7 +246,7 @@ from consist.integrations.activitysim import ActivitySimConfigAdapter
 
 adapter = ActivitySimConfigAdapter(root_dirs=[overlay_dir])
 
-consist.run(
+tracker.run(
     fn=run_activitysim,
     name="activitysim",
     config={"scenario": "baseline"},
@@ -266,31 +265,26 @@ For details on writing or using adapters, see the
 ### `run` with config and facet
 
 ```python
-import consist
-from consist import use_tracker
-
-with use_tracker(tracker):
-    consist.run(
-        fn=run_beam_step,
-        name="beam",
-        config=beam_cfg,
-        facet={"memory_gb": beam_cfg.memory_gb},
-        identity_inputs=[("beam_hocon", beam_cfg_path)],
-    )
+tracker.run(
+    fn=run_beam_step,
+    name="beam",
+    config=beam_cfg,
+    facet={"memory_gb": beam_cfg.memory_gb},
+    identity_inputs=[("beam_hocon", beam_cfg_path)],
+)
 ```
 
 ### Scenario run with `facet_from`
 
 ```python
-with use_tracker(tracker):
-    with consist.scenario("demo", tags=["travel"]) as sc:
-        sc.run(
-            fn=run_activitysim,
-            name="activitysim",
-            config=asim_cfg,
-            facet_from=["scenario", "sample_rate"],
-            identity_inputs=[("asim_yaml", asim_config_dir)],
-        )
+with tracker.scenario("demo", tags=["travel"]) as sc:
+    sc.run(
+        fn=run_activitysim,
+        name="activitysim",
+        config=asim_cfg,
+        facet_from=["scenario", "sample_rate"],
+        identity_inputs=[("asim_yaml", asim_config_dir)],
+    )
 ```
 
 ---

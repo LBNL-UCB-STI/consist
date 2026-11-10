@@ -15,6 +15,9 @@ ZENSICAL_TOML = REPO_ROOT / "zensical.toml"
 USER_FACING_MENTAL_MODEL_PAGES: tuple[Path, ...] = (
     DOCS_DIR / "architecture.md",
     DOCS_DIR / "glossary.md",
+    DOCS_DIR / "migrating-to-0.5.md",
+    DOCS_DIR / "getting-started" / "quickstart.md",
+    DOCS_DIR / "getting-started" / "first-workflow.md",
 )
 
 BANNED_INTERNAL_TERMS: tuple[str, ...] = (

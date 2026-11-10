@@ -59,13 +59,12 @@ def main():
         tags=["baseline_2025"],
     ) as sc:
         # Step 1: Preprocess
+        # Because raw_data_path is annotated `: Path`, Consist injects the local Path
+        # directly from inputs={"raw_data_path": ...}.
         preprocess_result = sc.run(
             preprocess,
-            inputs={"raw_data": raw_path},
+            inputs={"raw_data_path": raw_path},
             outputs=["clean_data"],
-            execution_options=ExecutionOptions(
-                runtime_kwargs={"raw_data_path": raw_path}
-            ),
         )
 
         # Step 2: Simulate

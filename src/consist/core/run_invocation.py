@@ -8,8 +8,26 @@ both execution paths share the same normalization logic.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Union
+import inspect
+import os
+from pathlib import Path, PurePath
+import types
+import weakref
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Union,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 
 from consist.core.error_messages import format_problem_cause_fix
 from consist.core.metadata_resolver import MetadataResolver, ResolvedStepIdentity
@@ -30,6 +48,260 @@ from consist.types import (
     RunCompletionArchivePolicy,
     RunInputRef,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class DeclaredOutputSpec:
+    """Normalized specification for a single ``outputs={role: path}`` entry."""
+
+    role: str
+    raw_value: Union[str, Path]
+    is_dir: bool
+
+
+def normalize_declared_outputs_mapping(
+    outputs: Mapping[str, Any],
+) -> Dict[str, DeclaredOutputSpec]:
+    """Validate and normalize an ``outputs={role: path}`` mapping."""
+    specs: Dict[str, DeclaredOutputSpec] = {}
+    for raw_role, raw_target in outputs.items():
+        if (
+            not isinstance(raw_role, str)
+            or not raw_role
+            or raw_role.strip() != raw_role
+        ):
+            raise ValueError(
+                format_problem_cause_fix(
+                    problem=(
+                        "outputs mapping keys must be non-empty strings without "
+                        f"surrounding whitespace. Received {raw_role!r}."
+                    ),
+                    cause="An invalid output role key was supplied.",
+                    fix="Use clean string role keys such as outputs={'cleaned': out_path}.",
+                )
+            )
+        if not isinstance(raw_target, (str, Path, os.PathLike)):
+            raise TypeError(
+                format_problem_cause_fix(
+                    problem=(
+                        f"outputs[{raw_role!r}] must be a str or Path. "
+                        f"Received {type(raw_target).__name__}."
+                    ),
+                    cause=(
+                        "Symmetric outputs={role: path} mappings require filesystem "
+                        "paths or URI strings."
+                    ),
+                    fix=(
+                        f"Pass a Path or path string for outputs[{raw_role!r}], e.g. "
+                        f"outputs={{'{raw_role}': Path('out.parquet')}}."
+                    ),
+                )
+            )
+        raw_str = raw_target if isinstance(raw_target, str) else os.fspath(raw_target)
+        is_dir = isinstance(raw_str, str) and raw_str.endswith(("/", "\\"))
+        normalized_value: Union[str, Path] = (
+            raw_target
+            if isinstance(raw_target, (str, Path))
+            else Path(os.fspath(raw_target))
+        )
+        specs[raw_role] = DeclaredOutputSpec(
+            role=raw_role,
+            raw_value=normalized_value,
+            is_dir=is_dir,
+        )
+    return specs
+
+
+def resolve_declared_output_target_path(
+    spec: DeclaredOutputSpec,
+    *,
+    default_base_dir: Path,
+    resolve_uri_fn: Optional[Callable[[str], Optional[str]]] = None,
+) -> Path:
+    """Resolve a ``DeclaredOutputSpec`` into an absolute filesystem ``Path``."""
+    raw_value = spec.raw_value
+    if isinstance(raw_value, str) and "://" in raw_value and resolve_uri_fn is not None:
+        resolved_uri = resolve_uri_fn(raw_value)
+        target = Path(resolved_uri) if resolved_uri else Path(raw_value)
+    else:
+        target = Path(raw_value)
+    if not target.is_absolute():
+        target = default_base_dir / target
+    return target.resolve()
+
+
+def prepare_declared_output_targets(
+    specs: Mapping[str, DeclaredOutputSpec],
+    *,
+    default_base_dir: Path,
+    resolve_path_fn: Optional[Callable[[Union[str, Path]], Path]] = None,
+    resolve_uri_fn: Optional[Callable[[str], Optional[str]]] = None,
+) -> Dict[str, Path]:
+    """Resolve and pre-create parent/target directories for ``DeclaredOutputSpec`` entries."""
+    targets: Dict[str, Path] = {}
+    for role, spec in specs.items():
+        if resolve_path_fn is not None:
+            target_path = resolve_path_fn(spec.raw_value)
+        else:
+            target_path = resolve_declared_output_target_path(
+                spec,
+                default_base_dir=default_base_dir,
+                resolve_uri_fn=resolve_uri_fn,
+            )
+        if spec.is_dir:
+            target_path.mkdir(parents=True, exist_ok=True)
+        else:
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+        targets[role] = target_path
+    return targets
+
+
+def build_declared_outputs_identity(
+    specs: Mapping[str, DeclaredOutputSpec],
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Build the canonical step-identity payload for ``outputs={role: path}`` (Decision D1).
+
+    Only sorted role keys, directory vs. file semantics (``is_dir``), and lowercase
+    file/directory extensions (``ext``) participate in identity. Destination directory and
+    filename stem are intentionally excluded so relocating a workspace or renaming
+    a scratch file does not invalidate cache hits.
+    """
+    payload: Dict[str, Dict[str, Any]] = {}
+    for role in sorted(specs.keys()):
+        spec = specs[role]
+        raw_str = str(spec.raw_value).rstrip("/\\")
+        ext = "".join(Path(raw_str).suffixes).lower()
+        payload[role] = {
+            "is_dir": bool(spec.is_dir),
+            "ext": ext,
+        }
+    return payload
+
+
+_PATH_ANNOTATION_STRINGS = frozenset(
+    {
+        "Path",
+        "pathlib.Path",
+        "PurePath",
+        "pathlib.PurePath",
+        "PosixPath",
+        "pathlib.PosixPath",
+        "WindowsPath",
+        "pathlib.WindowsPath",
+        "os.PathLike",
+        "PathLike",
+    }
+)
+
+
+def _annotation_is_path_type(annotation: Any) -> bool:
+    if annotation is inspect.Parameter.empty or annotation is None:
+        return False
+    if annotation in (Path, PurePath, os.PathLike):
+        return True
+    if isinstance(annotation, type) and issubclass(annotation, (PurePath, os.PathLike)):
+        return True
+    origin = get_origin(annotation)
+    if origin in (Path, PurePath, os.PathLike):
+        return True
+    if isinstance(origin, type) and issubclass(origin, (PurePath, os.PathLike)):
+        return True
+    if origin is Union or origin is types.UnionType:
+        non_none_args = [arg for arg in get_args(annotation) if arg is not type(None)]
+        return bool(non_none_args) and all(
+            _annotation_is_path_type(arg) for arg in non_none_args
+        )
+    if isinstance(annotation, str):
+        cleaned = annotation.strip()
+        if cleaned.startswith("Optional[") and cleaned.endswith("]"):
+            inner = cleaned[len("Optional[") : -1].strip()
+            return _annotation_is_path_type(inner)
+        if cleaned.startswith("typing.Optional[") and cleaned.endswith("]"):
+            inner = cleaned[len("typing.Optional[") : -1].strip()
+            return _annotation_is_path_type(inner)
+        if "|" in cleaned:
+            parts = [
+                part.strip()
+                for part in cleaned.split("|")
+                if part.strip() not in {"None", "NoneType"}
+            ]
+            return bool(parts) and all(_annotation_is_path_type(part) for part in parts)
+        if cleaned.startswith("os.PathLike[") and cleaned.endswith("]"):
+            return True
+        if cleaned.startswith("PathLike[") and cleaned.endswith("]"):
+            return True
+        return cleaned in _PATH_ANNOTATION_STRINGS
+    return False
+
+
+_PATH_ANNOTATION_CACHE: weakref.WeakKeyDictionary[Any, frozenset[str]] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def infer_path_annotated_parameters(fn: Any) -> frozenset[str]:
+    """
+    Return the parameter names of ``fn`` whose type annotations are ``Path``
+    (or ``Optional[Path]`` / ``Path | None`` / ``os.PathLike``).
+    """
+    if fn is None or not callable(fn):
+        return frozenset()
+    try:
+        cached = _PATH_ANNOTATION_CACHE.get(fn)
+        if cached is not None:
+            return cached
+    except TypeError:
+        pass
+
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return frozenset()
+
+    eligible_params = [
+        (param_name, param.annotation)
+        for param_name, param in sig.parameters.items()
+        if param.kind
+        not in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        )
+        and param.annotation is not inspect.Parameter.empty
+    ]
+    if not eligible_params:
+        result: frozenset[str] = frozenset()
+        try:
+            _PATH_ANNOTATION_CACHE[fn] = result
+        except TypeError:
+            pass
+        return result
+
+    matched: set[str] = set()
+    unresolved_string_params: list[tuple[str, str]] = []
+    for param_name, annotation in eligible_params:
+        if _annotation_is_path_type(annotation):
+            matched.add(param_name)
+        elif isinstance(annotation, str):
+            unresolved_string_params.append((param_name, annotation))
+
+    if unresolved_string_params:
+        try:
+            resolved_hints = get_type_hints(fn)
+        except Exception:
+            resolved_hints = {}
+        for param_name, _ in unresolved_string_params:
+            if param_name in resolved_hints and _annotation_is_path_type(
+                resolved_hints[param_name]
+            ):
+                matched.add(param_name)
+
+    result = frozenset(matched)
+    try:
+        _PATH_ANNOTATION_CACHE[fn] = result
+    except TypeError:
+        pass
+    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +432,20 @@ class ResolvedRunInvocation:
     container: Optional[Mapping[str, Any]]
     runtime_kwargs: Optional[Dict[str, Any]]
     inject_context: Union[bool, str]
+    declared_output_specs: Optional[Dict[str, DeclaredOutputSpec]] = None
+    requested_input_binding: Optional[InputBindingMode] = None
+
+    @property
+    def outputs_for_delegation(
+        self,
+    ) -> Optional[Union[Sequence[str], Mapping[str, OutputPathRef]]]:
+        """Return declared outputs in the shape expected when delegating to ``Tracker.run``/``trace``."""
+        if self.declared_output_specs is not None:
+            return {
+                role: spec.raw_value
+                for role, spec in self.declared_output_specs.items()
+            }
+        return self.outputs
 
 
 def _resolve_input_binding(
@@ -236,7 +522,7 @@ def resolve_run_invocation(
     iteration: Optional[int],
     phase: Optional[str],
     stage: Optional[str],
-    outputs: Optional[List[str]],
+    outputs: Optional[Union[Sequence[str], Mapping[str, OutputPathRef]]],
     output_paths: Optional[Mapping[str, OutputPathRef]],
     output_sets: Optional[Mapping[str, OutputSet]],
     cache_options: Optional[CacheOptions],
@@ -398,8 +684,6 @@ def resolve_run_invocation(
         inject_context = False
     if output_mismatch is None:
         output_mismatch = "warn"
-    if output_missing is None:
-        output_missing = "warn"
 
     if executor not in {"python", "container"}:
         raise ValueError(
@@ -589,6 +873,32 @@ def resolve_run_invocation(
         resolved_cache_mode = "reuse"
     if resolved_validate_cached_outputs is None:
         resolved_validate_cached_outputs = "lazy"
+
+    declared_output_specs: Optional[Dict[str, DeclaredOutputSpec]] = None
+    resolved_outputs_list: Optional[List[str]]
+    if isinstance(resolved.outputs, Mapping):
+        if resolved.output_paths is not None:
+            raise ValueError(
+                format_problem_cause_fix(
+                    problem=(
+                        "Cannot specify both outputs={...} mapping and output_paths={...}."
+                    ),
+                    cause=(
+                        "outputs={role: path} is the unified symmetric replacement "
+                        "for output_paths."
+                    ),
+                    fix="Use outputs={role: path} alone and remove output_paths.",
+                )
+            )
+        declared_output_specs = normalize_declared_outputs_mapping(resolved.outputs)
+        resolved_outputs_list = list(declared_output_specs.keys())
+    else:
+        resolved_outputs_list = (
+            list(resolved.outputs) if resolved.outputs is not None else None
+        )
+
+    if output_missing is None:
+        output_missing = "error" if declared_output_specs is not None else "warn"
     if cache_hydration_failure not in {"warn", "miss"}:
         raise ValueError("cache_hydration_failure must be one of: 'warn', 'miss'")
     if cache_hydration_failure == "miss" and resolved.cache_hydration not in {
@@ -763,7 +1073,7 @@ def resolve_run_invocation(
         inputs=resolved.inputs,
         input_keys=resolved.input_keys,
         optional_input_keys=resolved.optional_input_keys,
-        outputs=resolved.outputs,
+        outputs=resolved_outputs_list,
         output_paths=resolved.output_paths,
         output_sets=(
             dict(resolved.output_sets) if resolved.output_sets is not None else None
@@ -801,4 +1111,6 @@ def resolve_run_invocation(
         container=container,
         runtime_kwargs=runtime_kwargs_dict,
         inject_context=inject_context,
+        declared_output_specs=declared_output_specs,
+        requested_input_binding=resolved.input_binding,
     )

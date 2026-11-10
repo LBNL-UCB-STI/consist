@@ -113,7 +113,7 @@ Runtime-aware `config`:
         "year": ctx.year,
     }
 )
-def simulate(...):
+def simulate() -> None:
     ...
 ```
 
@@ -125,7 +125,7 @@ Runtime-aware `identity_inputs`:
         ("asim_config", ctx.require_runtime("settings")["config_dir"])
     ]
 )
-def load_inputs(...):
+def load_inputs() -> None:
     ...
 ```
 
@@ -143,7 +143,7 @@ Declarative adapter handoff metadata:
         ("asim_config", ctx.require_runtime("settings")["config_dir"])
     ],
 )
-def run_model(...):
+def run_model() -> None:
     ...
 ```
 

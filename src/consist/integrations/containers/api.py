@@ -67,8 +67,12 @@ class ContainerResult:
 
 def _resolve_image_digest(backend, image: str, pull_latest: bool) -> str:
     """Resolve image digest (backend handles pull_latest internally if supported)."""
-    if getattr(backend, "resolve_image_digest", None):
-        return backend.resolve_image_digest(image)
+    try:
+        resolver = backend.resolve_image_digest
+    except AttributeError:
+        return image
+    if callable(resolver):
+        return resolver(image)
     return image
 
 
@@ -214,7 +218,11 @@ def _validate_host_path(
 def _ensure_output_within_run_dir(
     path: Path, tracker: Tracker, *, strict_mounts: bool
 ) -> None:
-    if getattr(tracker, "allow_external_paths", False) or (not strict_mounts):
+    try:
+        allow_external = bool(tracker.allow_external_paths)
+    except AttributeError:
+        allow_external = False
+    if allow_external or (not strict_mounts):
         return
     base_dir = tracker.run_dir.resolve()
     resolved = path.resolve()
@@ -293,7 +301,11 @@ def _reuse_or_execute_container(
             cached_outputs,
             requested_outputs,
         )
-        if set(requested_outputs).issubset(set(cached_outputs)):
+        normalized_requested = {
+            tracker.fs.virtualize_path(p) for p in requested_outputs
+        }
+        normalized_cached = {tracker.fs.virtualize_path(p) for p in cached_outputs}
+        if normalized_requested.issubset(normalized_cached):
             logger.info(f"✅ [Consist] Container cache hit: {run_id} -> {cached.id}")
             # Re-link cached artifacts to current run for provenance (inputs + outputs).
             if tracker.db and tracker.engine:
@@ -317,14 +329,23 @@ def _reuse_or_execute_container(
             items: list[tuple[Artifact, Path]] = []
 
             for host_out in requested_outputs:
-                target = Path(host_out).resolve()
+                if "://" in host_out:
+                    target = Path(tracker.resolve_uri(host_out)).resolve()
+                else:
+                    target = Path(host_out).resolve()
                 match = next(
                     (
                         a
                         for a in output_arts
                         if a.key == target.name
                         or Path(a.container_uri).name == target.name
-                        or (output_key_map and output_key_map.get(str(target)) == a.key)
+                        or (
+                            output_key_map
+                            and (
+                                output_key_map.get(str(target)) == a.key
+                                or output_key_map.get(host_out) == a.key
+                            )
+                        )
                     ),
                     None,
                 )
@@ -561,6 +582,18 @@ def run_container(
 
     outputs_str = [p for _, p in output_specs]
 
+    virtualized_volumes: Dict[str, str] = {
+        tracker.fs.virtualize_path(host_path): container_path
+        for host_path, container_path in volumes.items()
+    }
+    virtualized_volume_modes: Dict[str, Literal["ro", "rw"]] = (
+        {
+            tracker.fs.virtualize_path(host_path): mode
+            for host_path, mode in volume_modes.items()
+        }
+        if volume_modes is not None
+        else {}
+    )
     manifest = _build_container_manifest(
         image=image,
         image_digest=image_digest,
@@ -581,8 +614,8 @@ def run_container(
         environment=environment,
         backend=backend_type,
         working_dir=working_dir,
-        volumes=volumes,
-        volume_modes=volume_modes or {},
+        volumes=virtualized_volumes,
+        volume_modes=virtualized_volume_modes,
         declared_outputs=outputs_str,
         extra_args={},
     )
@@ -717,6 +750,10 @@ def run_container(
         meta_cfg["image"] = image
         tracker.log_meta(**{step_key: meta_cfg})
 
+        output_key_map = {p: k for k, p in output_specs}
+        for k, p in output_specs:
+            output_key_map[tracker.fs.virtualize_path(p)] = k
+
         # 3. Execute with cache-aware wrapper
         _reuse_or_execute_container(
             tracker=tracker,
@@ -724,7 +761,7 @@ def run_container(
             inputs=resolved_inputs,
             run_id=tracker.current_consist.run.id,
             execute_fn=lambda: _execute_backend_and_log_outputs(tracker),
-            output_key_map={p: k for k, p in output_specs},
+            output_key_map=output_key_map,
         )
         return _collect_result(tracker, tracker.current_consist.run.id)
 
@@ -747,6 +784,10 @@ def run_container(
             image_digest=image_digest,
         )
 
+    output_key_map = {p: k for k, p in output_specs}
+    for k, p in output_specs:
+        output_key_map[tracker.fs.virtualize_path(p)] = k
+
     with tracker.start_run(
         run_id=run_id,
         model="container_step",
@@ -762,7 +803,7 @@ def run_container(
             inputs=resolved_inputs,
             run_id=run_id,
             execute_fn=lambda: _execute_backend_and_log_outputs(t),
-            output_key_map={p: k for k, p in output_specs},
+            output_key_map=output_key_map,
         )
 
         return _collect_result(tracker, run_id)

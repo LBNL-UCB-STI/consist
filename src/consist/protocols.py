@@ -38,11 +38,20 @@ class ArtifactRecordLike(ArtifactLike, Protocol):
     loaders, identity helpers, and schema-aware workflows.
     """
 
-    id: Any
-    key: str
-    table_path: Optional[str]
-    array_path: Optional[str]
-    meta: dict[str, Any]
+    @property
+    def id(self) -> Any: ...
+
+    @property
+    def key(self) -> str: ...
+
+    @property
+    def table_path(self) -> Optional[str]: ...
+
+    @property
+    def array_path(self) -> Optional[str]: ...
+
+    @property
+    def meta(self) -> Mapping[str, Any]: ...
 
     @property
     def driver(self) -> str: ...

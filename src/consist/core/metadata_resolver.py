@@ -14,7 +14,11 @@ from typing import (
     cast,
 )
 
-from consist.core.decorators import StepDefinition
+from consist.core.decorators import (
+    StepDefinition,
+    get_callable_name,
+    get_step_definition,
+)
 from consist.core.step_context import StepContext, format_step_name, resolve_metadata
 from consist.types import IdentityInputs, InputBindingMode
 
@@ -33,7 +37,7 @@ class ResolvedStepMetadata:
     tags: Optional[List[str]]
     facet: Optional[Any]
     facet_index: Optional[bool]
-    outputs: Optional[List[str]]
+    outputs: Optional[Union[List[str], Dict[str, Any]]]
     output_paths: Optional[Mapping[str, Any]]
     output_sets: Optional[Mapping[str, Any]]
     inputs: Optional[Union[Mapping[str, Any], Iterable[Any]]]
@@ -83,10 +87,10 @@ class MetadataResolver:
         consist_state: Optional[Any],
         runtime_kwargs: Optional[Dict[str, Any]],
     ) -> tuple[StepDefinition, StepContext | None, str | None]:
-        func_name = getattr(fn, "__name__", None) if fn is not None else None
-        step_def = StepDefinition()
-        if self._apply_step_defaults and fn is not None:
-            step_def = getattr(fn, "__consist_step__", StepDefinition())
+        func_name = get_callable_name(fn)
+        step_def = (
+            get_step_definition(fn) if self._apply_step_defaults else StepDefinition()
+        )
 
         ctx: StepContext | None = None
         if fn is not None:
@@ -216,7 +220,7 @@ class MetadataResolver:
         consist_workspace: Optional[Path],
         consist_state: Optional[Any],
         runtime_kwargs: Optional[Dict[str, Any]],
-        outputs: Optional[List[str]],
+        outputs: Optional[Union[Iterable[str], Mapping[str, Any]]],
         output_paths: Optional[Mapping[str, Any]],
         output_sets: Optional[Mapping[str, Any]] = None,
         cache_mode: Optional[str],
@@ -279,7 +283,10 @@ class MetadataResolver:
         resolved_facet_index = _resolve_meta(facet_index, step_def.facet_index)
         resolved_outputs = _resolve_meta(outputs, step_def.outputs)
         if resolved_outputs is not None:
-            resolved_outputs = list(resolved_outputs)
+            if isinstance(resolved_outputs, Mapping):
+                resolved_outputs = dict(resolved_outputs)
+            else:
+                resolved_outputs = list(resolved_outputs)
         resolved_output_paths = _resolve_meta(output_paths, step_def.output_paths)
         resolved_output_sets = _resolve_meta(output_sets, step_def.output_sets)
         if outputs is None and output_paths is not None:
