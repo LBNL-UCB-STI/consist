@@ -1395,7 +1395,18 @@ def import_run_manifest(
                         identity=identity,
                         access_driver=loc.access_driver,
                         witness=witness_obj,
-                        basis=loc.basis,
+                        basis=(
+                            loc.basis
+                            if loc.basis
+                            in (
+                                "computed",
+                                "derived",
+                                "implied",
+                                "declared",
+                                "trusted_foreign",
+                            )
+                            else "computed"
+                        ),
                         site=loc.site,
                         scope_key=loc.scope_key,
                         mount_instance_id=loc.mount_instance_id,

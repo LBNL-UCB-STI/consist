@@ -2066,7 +2066,7 @@ def refines(a: Identity | SchemeSpec, b: Identity | SchemeSpec) -> bool:
 class Expectation:
     """Comparison contract specifying accepted digest kinds and optional pinned schemes."""
 
-    accepts_kinds: frozenset[Kind] = frozenset(
+    accepts_kinds: frozenset[Kind] | frozenset[Digest] = frozenset(
         {Kind.BYTES, Kind.CONTAINER, Kind.LOGICAL, Kind.SEMANTIC, Kind.FILTERED}
     )
     pinned_schemes: frozenset[str] = frozenset()
@@ -2076,7 +2076,9 @@ class Expectation:
     def __post_init__(self) -> None:
         raw_first = tuple(self.accepts_kinds or ())
         if raw_first and all(isinstance(item, Digest) for item in raw_first):
-            extracted_digests = frozenset(raw_first)
+            extracted_digests: frozenset[Digest] = frozenset(
+                item for item in raw_first if isinstance(item, Digest)
+            )
             non_hist = [d for d in extracted_digests if d.kind is not Kind.HISTORICAL]
             kinds = (
                 frozenset(d.kind for d in non_hist)
@@ -2097,8 +2099,12 @@ class Expectation:
             )
             object.__setattr__(self, "digests", extracted_digests)
         else:
-            kinds = frozenset(self.accepts_kinds)
-            if any(not isinstance(k, Kind) for k in kinds) or Kind.HISTORICAL in kinds:
+            if any(not isinstance(k, Kind) for k in raw_first):
+                raise ValueError(
+                    "Expectation accepts_kinds must be non-HISTORICAL Kind values"
+                )
+            kinds = frozenset(k for k in raw_first if isinstance(k, Kind))
+            if Kind.HISTORICAL in kinds:
                 raise ValueError(
                     "Expectation accepts_kinds must be non-HISTORICAL Kind values"
                 )
