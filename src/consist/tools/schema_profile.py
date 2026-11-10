@@ -69,48 +69,6 @@ def _parquet_pandas_metadata(path: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _parquet_index_columns(path: str) -> List[str]:
-    metadata = _parquet_pandas_metadata(path)
-    if not metadata:
-        return []
-    raw_index_columns = metadata.get("index_columns") or []
-    index_columns: List[str] = []
-    for level, entry in enumerate(raw_index_columns):
-        name = entry
-        if isinstance(entry, dict):
-            name = entry.get("name")
-        index_columns.append(_normalize_index_name(name, level))
-    return index_columns
-
-
-def _index_info_from_df(df: Any) -> tuple[List[str], Dict[str, str]]:
-    try:
-        # reason: pandas is only needed for DataFrame inspection, so keep the dependency local.
-        import pandas as pd
-    except ImportError:
-        return [], {}
-
-    if not isinstance(df, pd.DataFrame):
-        return [], {}
-
-    names: List[str] = []
-    dtypes: Dict[str, str] = {}
-
-    index = df.index
-    if isinstance(index, pd.MultiIndex):
-        for i, name in enumerate(index.names):
-            norm_name = _normalize_index_name(name, i)
-            names.append(norm_name)
-            dtype = index.get_level_values(i).dtype
-            dtypes[norm_name] = str(dtype).lower()
-    else:
-        norm_name = _normalize_index_name(index.name, 0)
-        names.append(norm_name)
-        dtypes[norm_name] = str(index.dtype).lower()
-
-    return names, dtypes
-
-
 def _pandas_type_to_logical(pandas_type: Optional[str]) -> str:
     if not pandas_type:
         return "UNKNOWN"

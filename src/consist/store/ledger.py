@@ -28,10 +28,11 @@ from consist.location import (
     Mount,
     Observation,
     Witness,
+    deserialize_witness_json,
+    normalize_mounts,
     register_live_ledger,
+    serialize_witness_json,
     unregister_live_ledger,
-    witness_from_json,
-    witness_to_json,
 )
 from consist.meta import FrozenMeta
 from consist.store.detect import SchemaState
@@ -61,25 +62,6 @@ def resolve_status_rank(status: str, status_rank: int | None = None) -> int:
     if status_rank is not None:
         return int(status_rank)
     return LOCATION_STATUS_RANKS[status]
-
-
-def serialize_witness_json(witness: Witness | None) -> str | None:
-    """Serialize a `Witness` into a single JSON string for `artifact_location.witness_json`."""
-    kind, payload = witness_to_json(witness)
-    if kind is None or payload is None:
-        return None
-    merged = {"kind": kind, **payload}
-    return json.dumps(merged, sort_keys=True, separators=(",", ":"))
-
-
-def deserialize_witness_json(raw: str | Mapping[str, Any] | None) -> Witness | None:
-    """Reconstruct a `Witness` from `artifact_location.witness_json`."""
-    if raw is None:
-        return None
-    data = json.loads(raw) if isinstance(raw, str) else dict(raw)
-    if not isinstance(data, Mapping) or not isinstance(kind := data.get("kind"), str):
-        return None
-    return witness_from_json(kind, data)
 
 
 def _coerce_digest(val: Digest | str) -> Digest:
@@ -121,19 +103,9 @@ class StoreLedger:
         self._overlay_digest_conflicts: list[dict[str, Any]] = []
         self._memoized_observations: dict[str, list[Observation]] = {}
         self._memoized_locations: dict[tuple[str, str, str], Any] = {}
-        self.mounts: dict[str, Mount] = {}
-        if mounts is not None:
-            if isinstance(mounts, Mapping):
-                for name, val in mounts.items():
-                    key = str(name).strip().rstrip(":/")
-                    self.mounts[key] = (
-                        val
-                        if isinstance(val, Mount)
-                        else Mount(name=key, root=Path(val))
-                    )
-            else:
-                for m in mounts:
-                    self.mounts[m.name] = m
+        self.mounts: dict[str, Mount] = normalize_mounts(
+            mounts, strip_trailing_punct=True
+        )
 
         target = ":memory:" if self.db_path is None else str(self.db_path)
         if self.read_only and self.db_path is not None and not self.db_path.exists():
@@ -400,44 +372,6 @@ class StoreLedger:
             ],
         )
 
-    def record_digest_policy(
-        self,
-        policy_sha256: str,
-        policy_json: Mapping[str, Any] | str,
-        *,
-        created_at: datetime | None = None,
-    ) -> None:
-        """Insert a filter policy definition into `digest_policy`."""
-        now = created_at if created_at is not None else datetime.now(timezone.utc)
-        payload = (
-            policy_json
-            if isinstance(policy_json, str)
-            else json.dumps(dict(policy_json), sort_keys=True, separators=(",", ":"))
-        )
-        self._con.execute(
-            "INSERT INTO digest_policy (policy_sha256, policy_json, created_at) "
-            "VALUES (?, ?, ?) ON CONFLICT (policy_sha256) DO NOTHING",
-            [policy_sha256, payload, now],
-        )
-
-    def record_content_derivation(
-        self,
-        src_anchor: Digest | str,
-        dst_anchor: Digest | str,
-        kind: str,
-        *,
-        created_at: datetime | None = None,
-    ) -> None:
-        """Insert a cross-representation derivation link into `content_derivation`."""
-        src = _coerce_digest(src_anchor)
-        dst = _coerce_digest(dst_anchor)
-        now = created_at if created_at is not None else datetime.now(timezone.utc)
-        self._con.execute(
-            "INSERT INTO content_derivation (src_anchor, dst_anchor, kind, created_at) "
-            "VALUES (?, ?, ?, ?) ON CONFLICT (src_anchor, dst_anchor, kind) DO NOTHING",
-            [str(src), str(dst), kind, now],
-        )
-
     def record_anchor_promotion(
         self,
         historical_anchor: Digest | str,
@@ -533,7 +467,12 @@ class StoreLedger:
             return (Identity(anchor=rec_digest), None, verified_anchor)
         return (Identity(anchor=rec_digest), None, None)
 
-    def load_artifact(self, artifact_id: uuid.UUID | str) -> Artifact | None:
+    def load_artifact(
+        self,
+        artifact_id: uuid.UUID | str,
+        *,
+        include_locations: bool = True,
+    ) -> Artifact | None:
         """Load a frozen `Artifact` handle by `id`, resolving any `anchor_promotion`."""
         from consist.artifact import Artifact
 
@@ -563,19 +502,24 @@ class StoreLedger:
             meta_dict = {}
 
         hint_obs: list[Observation] = []
-        cand_anchors = (
-            (verified_anchor_opt, effective_identity.anchor, recorded_anchor_opt)
-            if effective_identity.anchor.kind is Kind.HISTORICAL
-            else (effective_identity.anchor, verified_anchor_opt, recorded_anchor_opt)
-        )
-        for cand_anchor in cand_anchors:
-            if cand_anchor is not None and len(hint_obs) < 4:
-                for obs in self.memoized_candidates(
-                    cand_anchor,
-                    limit=4 - len(hint_obs),
-                ):
-                    if obs not in hint_obs:
-                        hint_obs.append(obs)
+        if include_locations:
+            cand_anchors = (
+                (verified_anchor_opt, effective_identity.anchor, recorded_anchor_opt)
+                if effective_identity.anchor.kind is Kind.HISTORICAL
+                else (
+                    effective_identity.anchor,
+                    verified_anchor_opt,
+                    recorded_anchor_opt,
+                )
+            )
+            for cand_anchor in cand_anchors:
+                if cand_anchor is not None and len(hint_obs) < 4:
+                    for obs in self.memoized_candidates(
+                        cand_anchor,
+                        limit=4 - len(hint_obs),
+                    ):
+                        if obs not in hint_obs:
+                            hint_obs.append(obs)
 
         return Artifact(
             id=art_uuid,

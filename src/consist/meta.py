@@ -205,7 +205,11 @@ def strip_system_meta(
     if not raw:
         return EMPTY_META
     blocked = SYSTEM_META_KEYS | frozenset(extra_keys)
-    cleaned = {str(k): v for k, v in raw.items() if str(k) not in blocked}
+    cleaned = {
+        str(k): v
+        for k, v in raw.items()
+        if (ks := str(k)) not in blocked and not ks.startswith("_dlt_")
+    }
     return FrozenMeta(cleaned) if cleaned else EMPTY_META
 
 

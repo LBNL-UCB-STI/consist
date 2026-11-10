@@ -934,6 +934,7 @@ def test_pr6_modules_have_no_getattr_setattr_or_ponytail_comments() -> None:
         root / "src" / "consist" / "manifest.py",
         root / "src" / "consist" / "admission.py",
         root / "src" / "consist" / "core" / "admission.py",
+        root / "src" / "consist" / "core" / "logical_array_identity.py",
         root / "src" / "consist" / "engine.py",
         root / "src" / "consist" / "digest.py",
         root / "src" / "consist" / "meta.py",

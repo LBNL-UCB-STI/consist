@@ -2423,30 +2423,6 @@ class ScenarioContext:
             f"ScenarioContext {label} must be a mapping or Pydantic model."
         )
 
-    def _as_artifact_list(self, value: Any) -> List[Artifact]:
-        if value is None:
-            return []
-        if isinstance(value, list):
-            return [item for item in value if isinstance(item, Artifact)]
-        if isinstance(value, tuple):
-            return [item for item in value if isinstance(item, Artifact)]
-        if isinstance(value, Mapping):
-            return [item for item in value.values() if isinstance(item, Artifact)]
-        if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
-            return [item for item in value if isinstance(item, Artifact)]
-        return []
-
-    def _extract_facet_from_config(
-        self, config: Optional[Any], facet_from: List[str]
-    ) -> Dict[str, Any]:
-        if config is None:
-            raise ValueError("facet_from requires a config to extract from.")
-        config_dict = self._coerce_mapping(config, "config")
-        missing = [key for key in facet_from if key not in config_dict]
-        if missing:
-            raise KeyError(f"facet_from keys not found in config: {missing}")
-        return {key: config_dict[key] for key in facet_from}
-
     def _record_step_in_parent(self, child_run, child_inputs, child_outputs):
         header_record = self._header_record
         if header_record is None:

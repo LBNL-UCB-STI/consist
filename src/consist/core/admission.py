@@ -1343,7 +1343,7 @@ def _query_expected_artifact_v2_ledger(
         )
     )
     rows = con.execute(
-        f"SELECT DISTINCT a.id, a.key, a.driver, a.anchor, a.run_id, a.schema_id, a.meta "
+        f"SELECT DISTINCT a.id "
         f"FROM run_binding rb "
         f"JOIN artifact a ON a.id = rb.artifact_id "
         f"WHERE rb.run_id = ? {dir_clause}"
@@ -1358,35 +1358,10 @@ def _query_expected_artifact_v2_ledger(
     if len(rows) != 1:
         return (None, f"{role_prefix}_ambiguous", None)
 
-    art_id, art_key, art_driver, art_anchor, art_run_id, art_schema_id, art_raw_meta = (
-        rows[0]
-    )
-    effective_identity, recorded_anchor, _verified_anchor = (
-        ledger.resolve_effective_identity(str(art_anchor))
-    )
-    raw_meta_dict: dict[str, Any] = {}
-    if isinstance(art_raw_meta, str) and art_raw_meta:
-        try:
-            loaded_meta = json.loads(art_raw_meta)
-            if isinstance(loaded_meta, Mapping):
-                raw_meta_dict = dict(loaded_meta)
-        except ValueError:
-            raw_meta_dict = {}
-    elif isinstance(art_raw_meta, Mapping):
-        raw_meta_dict = dict(art_raw_meta)
-
-    v2_art = V2Artifact(
-        id=art_id if isinstance(art_id, uuid.UUID) else uuid.UUID(str(art_id)),
-        key=str(art_key),
-        driver=str(art_driver),
-        identity=effective_identity,
-        hints=(),
-        run_id=str(art_run_id) if art_run_id is not None else None,
-        origin=ledger.ref,
-        meta=strip_system_meta(raw_meta_dict),
-        recorded_anchor=recorded_anchor,
-        schema_id=str(art_schema_id) if art_schema_id is not None else None,
-    )
+    v2_art = ledger.load_artifact(rows[0][0], include_locations=False)
+    if v2_art is None:
+        return (None, f"{role_prefix}_absent", None)
+    v2_art = replace(v2_art, meta=strip_system_meta(v2_art.meta))
 
     historical_v1_hash: str | None = None
     if not v2_art.identity.verifiable:
@@ -2425,6 +2400,78 @@ def _unreadable_hydrated_input(
     )
 
 
+def _coerce_declared_digest_expectation(
+    expectation: DeclaredDigestExpectation | AdmissionIdentity | Digest | str,
+) -> tuple[DeclaredDigestExpectation | None, Digest]:
+    if isinstance(expectation, DeclaredDigestExpectation):
+        return (expectation, _admission_identity_to_digest(expectation.identity))
+    if isinstance(expectation, AdmissionIdentity):
+        return (
+            DeclaredDigestExpectation(identity=expectation),
+            _admission_identity_to_digest(expectation),
+        )
+    if isinstance(expectation, Digest):
+        target_digest = expectation
+    else:
+        raw_str = expectation.strip()
+        if _ADMISSION_IDENTITY.fullmatch(raw_str):
+            adm_obj = AdmissionIdentity.parse(raw_str)
+            return (
+                DeclaredDigestExpectation(identity=adm_obj),
+                _admission_identity_to_digest(adm_obj),
+            )
+        target_digest = Digest.parse(raw_str)
+    adm_str = _digest_to_admission_identity_str(target_digest)
+    decl = (
+        DeclaredDigestExpectation(identity=AdmissionIdentity.parse(adm_str))
+        if _ADMISSION_IDENTITY.fullmatch(adm_str)
+        else None
+    )
+    return (decl, target_digest)
+
+
+def _report_from_verdict(
+    verdict: Verdict,
+    *,
+    local_path: Path,
+    role: str,
+    expected_digest: Digest,
+    observed_digest: Digest | None,
+    include_reason: bool = False,
+) -> AdmissionReport:
+    outcome: AdmissionOutcome = (
+        "verified"
+        if verdict.agreement == Agreement.AGREE
+        else ("mismatched" if verdict.agreement == Agreement.DISAGREE else "unverified")
+    )
+    obs_tag = (
+        "matched"
+        if outcome == "verified"
+        else ("mismatched" if outcome == "mismatched" else "unverified")
+    )
+    return _report(
+        outcome=outcome,
+        execution_path=local_path,
+        physical_target_path=_resolved_path(local_path),
+        expected_source="declared_digest",
+        expected_run_id=None,
+        artifact_key=None,
+        input_role=role,
+        expected_artifact_id=_digest_to_admission_identity_str(expected_digest),
+        observed_artifact_id=(
+            _digest_to_admission_identity_str(observed_digest)
+            if observed_digest is not None
+            else None
+        ),
+        observations=(obs_tag,),
+        reason=(
+            "Resolved file does not match the expected digest."
+            if include_reason and outcome != "verified"
+            else None
+        ),
+    )
+
+
 def hydrate_admitted_input(
     artifact_or_path: V2Artifact | Artifact | str | Path,
     *,
@@ -2679,35 +2726,7 @@ def hydrate_admitted_input(
         expectation,
         (DeclaredDigestExpectation, AdmissionIdentity, Digest, str),
     ):
-        if isinstance(expectation, DeclaredDigestExpectation):
-            decl = expectation
-            target_digest = _admission_identity_to_digest(decl.identity)
-        elif isinstance(expectation, AdmissionIdentity):
-            decl = DeclaredDigestExpectation(identity=expectation)
-            target_digest = _admission_identity_to_digest(expectation)
-        elif isinstance(expectation, Digest):
-            target_digest = expectation
-            adm_str = _digest_to_admission_identity_str(expectation)
-            decl = (
-                DeclaredDigestExpectation(identity=AdmissionIdentity.parse(adm_str))
-                if _ADMISSION_IDENTITY.fullmatch(adm_str)
-                else None
-            )
-        else:
-            raw_str = expectation.strip()
-            if _ADMISSION_IDENTITY.fullmatch(raw_str):
-                adm_obj = AdmissionIdentity.parse(raw_str)
-                decl = DeclaredDigestExpectation(identity=adm_obj)
-                target_digest = _admission_identity_to_digest(adm_obj)
-            else:
-                target_digest = Digest.parse(raw_str)
-                adm_str = _digest_to_admission_identity_str(target_digest)
-                decl = (
-                    DeclaredDigestExpectation(identity=AdmissionIdentity.parse(adm_str))
-                    if _ADMISSION_IDENTITY.fullmatch(adm_str)
-                    else None
-                )
-
+        decl, target_digest = _coerce_declared_digest_expectation(expectation)
         if contract is None:
             effective_contract = Contract(equivalence=target_digest.scheme)
 
@@ -2740,41 +2759,17 @@ def hydrate_admitted_input(
                 expectation=decl,
             )
         else:
-            outcome: AdmissionOutcome = (
-                "verified"
-                if verdict.agreement == Agreement.AGREE
-                else (
-                    "mismatched"
-                    if verdict.agreement == Agreement.DISAGREE
-                    else "unverified"
-                )
-            )
             obs_digest = (
                 v2_art.identity.get(verdict.matched_scheme)
                 if verdict.matched_scheme is not None
                 else v2_art.identity.anchor
             )
-            report = _report(
-                outcome=outcome,
-                execution_path=local_path,
-                physical_target_path=_resolved_path(local_path),
-                expected_source="declared_digest",
-                expected_run_id=None,
-                artifact_key=None,
-                input_role=role,
-                expected_artifact_id=_digest_to_admission_identity_str(target_digest),
-                observed_artifact_id=(
-                    _digest_to_admission_identity_str(obs_digest)
-                    if obs_digest is not None
-                    else None
-                ),
-                observations=(
-                    ("matched",)
-                    if outcome == "verified"
-                    else (
-                        ("mismatched",) if outcome == "mismatched" else ("unverified",)
-                    )
-                ),
+            report = _report_from_verdict(
+                verdict,
+                local_path=local_path,
+                role=role,
+                expected_digest=target_digest,
+                observed_digest=obs_digest,
             )
         return HydratedAdmittedInput(
             artifact=v2_art,
@@ -2809,11 +2804,6 @@ def hydrate_admitted_input(
         effective_mounts=effective_mounts,
     )
 
-    outcome_v2: AdmissionOutcome = (
-        "verified"
-        if verdict.agreement == Agreement.AGREE
-        else ("mismatched" if verdict.agreement == Agreement.DISAGREE else "unverified")
-    )
     matched_scheme = verdict.matched_scheme or effective_contract.equivalence
     obs_d = v2_art.identity.get(matched_scheme) or v2_art.identity.anchor
     exp_d = (
@@ -2824,26 +2814,13 @@ def hydrate_admitted_input(
         if v2_exp.digests
         else obs_d
     )
-    report = _report(
-        outcome=outcome_v2,
-        execution_path=local_path,
-        physical_target_path=_resolved_path(local_path),
-        expected_source="declared_digest",
-        expected_run_id=None,
-        artifact_key=None,
-        input_role=role,
-        expected_artifact_id=_digest_to_admission_identity_str(exp_d),
-        observed_artifact_id=_digest_to_admission_identity_str(obs_d),
-        observations=(
-            ("matched",)
-            if outcome_v2 == "verified"
-            else (("mismatched",) if outcome_v2 == "mismatched" else ("unverified",))
-        ),
-        reason=(
-            None
-            if outcome_v2 == "verified"
-            else "Resolved file does not match the expected digest."
-        ),
+    report = _report_from_verdict(
+        verdict,
+        local_path=local_path,
+        role=role,
+        expected_digest=exp_d,
+        observed_digest=obs_d,
+        include_reason=True,
     )
     return HydratedAdmittedInput(
         artifact=v2_art,

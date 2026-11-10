@@ -28,6 +28,8 @@ from consist.digest import (
     ArrayCanonicalizationPolicy,
     LogicalProfileName,
     MatrixContainerSummary,
+    _HasKeys,
+    _HasShape,
     _decode_attr_value,
     _resolve_h5_group,
     canonicalize_float16_array,
@@ -272,21 +274,21 @@ def inspect_matrix_container(
                     lookup_group = _resolve_h5_group(
                         h5f, resolved_policy.h5_lookup_group
                     )
-                    if data_group is not None and hasattr(data_group, "keys"):
+                    if isinstance(data_group, _HasKeys):
                         variable_names = sorted(
                             str(k)
                             for k in data_group.keys()
-                            if hasattr(data_group[k], "shape")
+                            if isinstance(data_group[k], _HasShape)
                         )
                         if variable_names:
                             shape = tuple(
                                 int(d) for d in data_group[variable_names[0]].shape
                             )
-                    if lookup_group is not None and hasattr(lookup_group, "keys"):
+                    if isinstance(lookup_group, _HasKeys):
                         coord_keys = sorted(
                             str(k)
                             for k in lookup_group.keys()
-                            if hasattr(lookup_group[k], "shape")
+                            if isinstance(lookup_group[k], _HasShape)
                         )
             except Exception as exc:
                 logger.debug("Unable to inspect HDF5/OMX file %s: %s", p, exc)

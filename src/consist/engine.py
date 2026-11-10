@@ -29,13 +29,13 @@ from consist.digest import (
     Kind,
     SchemeRegistry,
     Verdict,
+    build_manifest_v1,
     canonical_json_str,
     compare,
     compute_ctd1_digest,
     compute_logical_matrix_digest,
     compute_omx_logical_matrices_sha256,
     compute_zarr_logical_matrices_sha256,
-    digest_bytes,
     open_h5py_read_only,
 )
 from consist.location import (
@@ -48,28 +48,18 @@ from consist.location import (
     Observation,
     SiteContext,
     Witness,
+    deserialize_witness_json,
+    infer_path_driver,
     lookup_live_ledger,
+    normalize_mounts as _normalize_mounts,
 )
 from consist.meta import EMPTY_META, FrozenMeta
 from consist.store.detect import ConsistError
-from consist.store.ledger import StoreLedger, deserialize_witness_json
+from consist.store.ledger import StoreLedger
 
 _STREAM_CHUNK_BYTES: int = 1024 * 1024  # 1 MiB
 _default_mounts: dict[str, Mount] = {}
 _T = TypeVar("_T")
-
-_SUFFIX_DRIVERS: dict[str, str] = {
-    ".parquet": "parquet",
-    ".csv": "csv",
-    ".tsv": "tsv",
-    ".json": "json",
-    ".geojson": "geojson",
-    ".omx": "omx",
-    ".nc": "netcdf",
-    ".netcdf": "netcdf",
-    ".feather": "feather",
-    ".arrow": "feather",
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,25 +95,6 @@ class PendingOutput:
             object.__setattr__(self, "path", Path(self.path))
         if isinstance(self.artifact_id, str):
             object.__setattr__(self, "artifact_id", uuid.UUID(self.artifact_id))
-
-
-def _normalize_mounts(
-    mounts: Sequence[Mount] | Mapping[str, Mount | Path | str] | None,
-) -> dict[str, Mount]:
-    if mounts is None:
-        return {}
-    out: dict[str, Mount] = {}
-    if isinstance(mounts, Mapping):
-        for name, target in mounts.items():
-            if isinstance(target, Mount):
-                out[str(name)] = target
-            else:
-                out[str(name)] = Mount(name=str(name), root=Path(target))
-    else:
-        for item in mounts:
-            if isinstance(item, Mount):
-                out[item.name] = item
-    return out
 
 
 def virtualize_path(
@@ -328,100 +299,32 @@ def _tee_hash_and_copy_file(
     return (Digest("sha256:file", hasher.hexdigest()), stat_after, dst_stat)
 
 
-def _reject_symlink_ancestors(path: Path) -> None:
-    candidate = path.expanduser().absolute()
-    for p in reversed((candidate, *candidate.parents)):
-        if p.is_symlink():
-            raise ValueError(f"directory artifact root cannot traverse a symlink: {p}")
-
-
-def _build_manifest_v1_parallel(
+def _compute_manifest_v1_and_witness(
     root: Path,
     *,
     max_workers: int = 4,
 ) -> tuple[Digest, bytes, int, int, DirTreeStat]:
-    """Walk `root`, hash regular files in parallel, and build `sha256:manifest-v1` + `DirTreeStat`."""
-    root_path = Path(root).expanduser().absolute()
-    _reject_symlink_ancestors(root_path)
-    if not root_path.is_dir():
-        raise ValueError(f"directory artifact root must be a directory: {root_path}")
+    """Build `sha256:manifest-v1` + `DirTreeStat` using `build_manifest_v1`."""
 
-    dir_entries: list[dict[str, Any]] = []
-    file_items: list[tuple[str, Path]] = []
+    def _hash_pinned(fpath: Path) -> tuple[str, int]:
+        d, fstat = _hash_file_descriptor_pinned(fpath)
+        return (d.hex, fstat.size)
 
-    def visit(directory: Path) -> None:
-        with os.scandir(directory) as scan:
-            children = sorted(scan, key=lambda entry: entry.name)
-        for child in children:
-            child_path = Path(child.path)
-            rel_posix = child_path.relative_to(root_path).as_posix()
-            if child.is_symlink():
-                raise ValueError(
-                    f"directory artifact cannot contain a symlink: {child_path}"
-                )
-            if child.is_dir(follow_symlinks=False):
-                dir_entries.append({"kind": "directory", "path": rel_posix})
-                visit(child_path)
-            elif child.is_file(follow_symlinks=False):
-                file_items.append((rel_posix, child_path))
-            else:
-                raise ValueError(
-                    "directory artifact cannot contain a non-regular filesystem entry: "
-                    f"{child_path}"
-                )
-
-    visit(root_path)
-
-    def _hash_one(item: tuple[str, Path]) -> tuple[str, str, FileStat]:
-        rel_posix, fpath = item
-        file_digest, fstat = _hash_file_descriptor_pinned(fpath)
-        return (rel_posix, file_digest.hex, fstat)
-
-    if len(file_items) > 1 and max_workers > 1:
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            hashed_files = list(pool.map(_hash_one, file_items))
-    else:
-        hashed_files = [_hash_one(item) for item in file_items]
-
-    entries: list[dict[str, Any]] = list(dir_entries)
-    stat_entries: list[tuple[str, FileStat]] = []
-    for rel_posix, sha_hex, fstat in hashed_files:
-        entries.append(
-            {
-                "kind": "file",
-                "path": rel_posix,
-                "sha256": sha_hex,
-                "size": fstat.size,
-            }
-        )
-        stat_entries.append((rel_posix, fstat))
-
-    entries.sort(key=lambda e: (e["path"], e["kind"]))
-    stat_entries.sort(key=lambda pair: pair[0])
-
-    identity_payload = {"version": 1, "entries": entries}
-    canonical_bytes = canonical_json_str(identity_payload).encode("utf-8")
-    tree_hash = digest_bytes(canonical_bytes)
-    digest = Digest("sha256:manifest-v1", tree_hash)
-
-    now_ns = time.time_ns()
-    root_mtime_ns = root_path.stat().st_mtime_ns
-    total_bytes = sum(fs.size for _, fs in stat_entries)
-    max_mtime_ns = max(
-        (fs.mtime_ns for _, fs in stat_entries),
-        default=root_mtime_ns,
+    manifest = build_manifest_v1(
+        root, max_workers=max_workers, file_hasher=_hash_pinned
     )
-    racy = any(fs.racy for _, fs in stat_entries) or (
-        (now_ns - max_mtime_ns) < 2_000_000_000
+    entries = manifest["entries"]
+    canonical_bytes = canonical_json_str({"version": 1, "entries": entries}).encode(
+        "utf-8"
     )
-    dir_witness = DirTreeStat(
-        file_count=len(stat_entries),
-        total_bytes=total_bytes,
-        max_mtime_ns=max_mtime_ns,
-        entries=tuple(stat_entries),
-        racy=racy,
+    dir_witness = DirTreeStat.capture(root)
+    return (
+        Digest("sha256:manifest-v1", manifest["tree_hash"]),
+        canonical_bytes,
+        len(entries),
+        dir_witness.total_bytes,
+        dir_witness,
     )
-    return (digest, canonical_bytes, len(entries), total_bytes, dir_witness)
 
 
 def _read_single_matrix_from_path(
@@ -552,7 +455,7 @@ def compute_scheme_digest(
 
     if canonical_scheme == "sha256:manifest-v1":
         digest, body_bytes, entry_count, total_bytes, dir_stat = (
-            _build_manifest_v1_parallel(path, max_workers=max_workers)
+            _compute_manifest_v1_and_witness(path, max_workers=max_workers)
         )
         if ledger is not None and not ledger.read_only:
             ledger.record_content(digest, "tree")
@@ -1400,12 +1303,7 @@ def stage(
 def _infer_driver(po: PendingOutput, resolved_path: Path) -> str:
     if po.driver is not None and po.driver.strip():
         return po.driver.strip()
-    if po.is_dir or resolved_path.is_dir():
-        return "zarr" if resolved_path.suffix.lower() == ".zarr" else "directory"
-    suffix = resolved_path.suffix.lower()
-    if suffix in (".h5", ".hdf5", ".hdf"):
-        return "h5_table" if po.member is not None else "hdf5"
-    return _SUFFIX_DRIVERS.get(suffix, "file")
+    return infer_path_driver(resolved_path, is_dir=po.is_dir, member=po.member)
 
 
 def _resolve_archive_dest(
@@ -1558,7 +1456,7 @@ def seal(
 
         if po.is_dir or resolved_path.is_dir():
             anchor, body_bytes, entry_count, total_bytes, dir_stat = (
-                _build_manifest_v1_parallel(
+                _compute_manifest_v1_and_witness(
                     resolved_path,
                     max_workers=max(1, max_workers),
                 )

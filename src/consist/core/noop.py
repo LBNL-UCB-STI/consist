@@ -61,20 +61,16 @@ from consist.types import (
 
 from consist.models.run import Run, CouplerSnapshotPhase
 from consist.core.workflow import RestoredCouplerSnapshotResult
+from consist.location import infer_path_driver
 
 
 def _infer_local_ref_driver(path: Path) -> str:
-    suffix = path.suffix.lower()
-    if suffix == ".zarr":
-        return "zarr"
-    ext = suffix.lstrip(".")
-    if ext == "pq":
-        return "parquet"
-    if ext in {"h5", "hdf5"}:
-        return "h5"
-    if ext in {"nc", "netcdf"}:
-        return "netcdf"
-    return ext if ext else "file"
+    return infer_path_driver(
+        path,
+        is_dir=path.suffix.lower() == ".zarr",
+        h5_default="h5",
+        fallback_to_ext=True,
+    )
 
 
 @dataclass(frozen=True, slots=True)

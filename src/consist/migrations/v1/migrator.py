@@ -38,7 +38,7 @@ from consist.digest import (
     open_h5py_read_only,
 )
 from consist.engine import (
-    _build_manifest_v1_parallel,
+    _compute_manifest_v1_and_witness,
     _hash_file_descriptor_pinned,
     _normalize_mounts,
     compute_scheme_digest,
@@ -53,6 +53,7 @@ from consist.location import (
     Observation,
     Witness,
 )
+from consist.meta import strip_system_meta
 from consist.migrations.v1.fasthash import (
     RACY_STAT_WINDOW_NS,
     stat_v1_fast_file_hash,
@@ -90,16 +91,6 @@ ClassificationBasis = Literal[
 ]
 
 _HEX_CHARS = frozenset("0123456789abcdefABCDEF")
-_STRIPPED_META_KEYS = frozenset(
-    {
-        "recovery_roots",
-        "hash_semantics",
-        "hashing_strategy",
-        "directory_manifest",
-        "directory_artifact",
-        "is_dir",
-    }
-)
 
 
 def _is_64_hex(val: str | None) -> bool:
@@ -913,7 +904,7 @@ def _classify_cold_artifact_on_disk(
         if candidate_path.is_dir():
             try:
                 anchor_dir, body_bytes, entry_count, total_bytes, dir_stat = (
-                    _build_manifest_v1_parallel(
+                    _compute_manifest_v1_and_witness(
                         candidate_path,
                         max_workers=max(1, max_workers),
                     )
@@ -1290,26 +1281,6 @@ def plan_migration(
         )
 
 
-def _sanitize_meta_for_v2(
-    raw_meta: Mapping[str, Any],
-    *,
-    strip_keys: frozenset[str] = _STRIPPED_META_KEYS,
-    extra: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    cleaned: dict[str, Any] = {}
-    for k, v in raw_meta.items():
-        k_str = str(k)
-        if k_str in strip_keys or k_str.startswith("_dlt_"):
-            continue
-        cleaned[k_str] = v
-    if extra:
-        for k, v in extra.items():
-            k_str = str(k)
-            if k_str not in cleaned and k_str not in strip_keys:
-                cleaned[k_str] = v
-    return json.loads(json.dumps(cleaned, default=str))
-
-
 def apply_migration(
     v1_path: Path | str,
     output_v2_path: Path | str,
@@ -1410,7 +1381,11 @@ def apply_migration(
                 if art.parent_artifact_id is not None:
                     extra_meta["parent_artifact_id"] = str(art.parent_artifact_id)
 
-                v2_meta = _sanitize_meta_for_v2(art.meta, extra=extra_meta)
+                v2_meta = json.loads(
+                    json.dumps(
+                        {**extra_meta, **strip_system_meta(art.meta)}, default=str
+                    )
+                )
                 ledger.record_artifact(
                     artifact_id=art.id,
                     key=art.key,
@@ -1558,10 +1533,18 @@ def apply_migration(
                 if run.signature is not None and sig_val is None:
                     extra_run_meta["v1_signature"] = run.signature
 
-                v2_run_meta = _sanitize_meta_for_v2(
-                    run.meta,
-                    strip_keys=frozenset(),
-                    extra=extra_run_meta,
+                v2_run_meta = json.loads(
+                    json.dumps(
+                        {
+                            **extra_run_meta,
+                            **{
+                                str(k): v
+                                for k, v in run.meta.items()
+                                if not str(k).startswith("_dlt_")
+                            },
+                        },
+                        default=str,
+                    )
                 )
                 ledger.record_run(
                     run_id=run.id,
@@ -2025,51 +2008,41 @@ def _resolve_promotion_target(
 ) -> tuple[uuid.UUID, Digest, str, str | None, str | None, str | None]:
     """Return `(artifact_id, historical_anchor, driver, v1_hash, table_path, array_path)`."""
     raw_target = str(target).strip()
-    art_row: tuple[Any, ...] | None = None
-
+    queries: list[tuple[str, list[Any]]] = []
     if raw_target.startswith("legacy-v1:unverified:"):
+        queries.append(("anchor = ? ORDER BY created_at DESC", [raw_target]))
+    try:
+        target_uuid = target if isinstance(target, uuid.UUID) else uuid.UUID(raw_target)
+        queries.append(("id = ?", [target_uuid]))
+    except ValueError:
+        pass
+    queries.extend(
+        [
+            (
+                "key = ? AND anchor LIKE 'legacy-v1:unverified:%' "
+                "AND anchor NOT IN (SELECT historical_anchor FROM main.anchor_promotion) "
+                "ORDER BY created_at DESC",
+                [raw_target],
+            ),
+            (
+                "key = ? AND anchor LIKE 'legacy-v1:unverified:%' ORDER BY created_at DESC",
+                [raw_target],
+            ),
+            ("key = ? ORDER BY created_at DESC", [raw_target]),
+        ]
+    )
+
+    art_row: tuple[Any, ...] | None = None
+    for idx, (clause, params) in enumerate(queries):
         art_row = con.execute(
-            "SELECT id, anchor, driver FROM main.artifact WHERE anchor = ? "
-            "ORDER BY created_at DESC LIMIT 1",
-            [raw_target],
+            f"SELECT id, anchor, driver FROM main.artifact WHERE {clause} LIMIT 1",
+            params,
         ).fetchone()
-        if art_row is None:
+        if art_row is not None:
+            break
+        if idx == 0 and raw_target.startswith("legacy-v1:unverified:"):
             hist_digest = Digest.parse(raw_target)
             return (uuid.uuid4(), hist_digest, "file", hist_digest.hex, None, None)
-
-    if art_row is None:
-        try:
-            target_uuid = (
-                target if isinstance(target, uuid.UUID) else uuid.UUID(raw_target)
-            )
-            art_row = con.execute(
-                "SELECT id, anchor, driver FROM main.artifact WHERE id = ?",
-                [target_uuid],
-            ).fetchone()
-        except ValueError:
-            art_row = None
-
-    if art_row is None:
-        art_row = con.execute(
-            "SELECT id, anchor, driver FROM main.artifact "
-            "WHERE key = ? AND anchor LIKE 'legacy-v1:unverified:%' "
-            "AND anchor NOT IN (SELECT historical_anchor FROM main.anchor_promotion) "
-            "ORDER BY created_at DESC LIMIT 1",
-            [raw_target],
-        ).fetchone()
-        if art_row is None:
-            art_row = con.execute(
-                "SELECT id, anchor, driver FROM main.artifact "
-                "WHERE key = ? AND anchor LIKE 'legacy-v1:unverified:%' "
-                "ORDER BY created_at DESC LIMIT 1",
-                [raw_target],
-            ).fetchone()
-        if art_row is None:
-            art_row = con.execute(
-                "SELECT id, anchor, driver FROM main.artifact "
-                "WHERE key = ? ORDER BY created_at DESC LIMIT 1",
-                [raw_target],
-            ).fetchone()
 
     if art_row is None:
         raise ConsistError(

@@ -37,10 +37,11 @@ from consist.location import (
     Observation,
     SiteContext,
     Witness,
-    witness_from_json,
+    deserialize_witness_json,
+    serialize_witness_json,
 )
 from consist.meta import strip_system_meta
-from consist.store.ledger import StoreLedger, deserialize_witness_json
+from consist.store.ledger import StoreLedger
 
 SCHEMA_VERSION = 2
 
@@ -127,50 +128,6 @@ def _parse_ts(val: Any) -> datetime | None:
             return datetime.fromisoformat(val.strip().replace("Z", "+00:00"))
         except ValueError:
             return None
-    return None
-
-
-def _encode_manifest_witness_json(witness_json: Any) -> str | None:
-    if witness_json is None:
-        return None
-    if isinstance(witness_json, str):
-        try:
-            payload = json.loads(witness_json)
-        except ValueError:
-            return None
-    elif isinstance(witness_json, Mapping):
-        payload = dict(witness_json)
-    else:
-        return None
-    return canonical_json_str(payload)
-
-
-def _decode_manifest_witness_json(raw_witness_json: str | None) -> Any:
-    if not raw_witness_json:
-        return None
-    parsed_witness = deserialize_witness_json(raw_witness_json)
-    if parsed_witness is not None:
-        return parsed_witness
-    try:
-        loaded = json.loads(raw_witness_json)
-    except ValueError:
-        return None
-    if not isinstance(loaded, Mapping):
-        return None
-    if isinstance(loaded.get("kind"), str) and isinstance(
-        loaded.get("payload"), Mapping
-    ):
-        return witness_from_json(loaded["kind"], loaded["payload"])
-    if "file_count" in loaded and "entries" in loaded:
-        return witness_from_json("dir_tree_stat", loaded)
-    if "parent" in loaded and "member" in loaded:
-        return witness_from_json("member_of", loaded)
-    if "token" in loaded:
-        return witness_from_json("db_table_change_token", loaded)
-    if "etag" in loaded:
-        return witness_from_json("object_etag", loaded)
-    if "size" in loaded and "mtime_ns" in loaded:
-        return witness_from_json("file_stat", loaded)
     return None
 
 
@@ -1092,7 +1049,7 @@ def export_run_manifest(
                 ),
                 basis=str(lrow.get("basis") or "computed"),
                 observed_at_ns=int(lrow.get("observed_at_ns") or 0),
-                witness_json=_encode_manifest_witness_json(lrow.get("witness_json")),
+                witness_json=serialize_witness_json(lrow.get("witness_json")),
             )
             for lrow in matched_loc_rows
         )
@@ -1432,7 +1389,7 @@ def import_run_manifest(
 
                 fresh_imported_paths: set[tuple[Path, str | None]] = set()
                 for loc in entry.locations:
-                    witness_obj = _decode_manifest_witness_json(loc.witness_json)
+                    witness_obj = deserialize_witness_json(loc.witness_json)
                     obs = Observation(
                         location=Location(uri=loc.uri, member=loc.member),
                         identity=identity,
