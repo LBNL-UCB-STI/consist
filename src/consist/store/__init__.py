@@ -8,6 +8,7 @@ from __future__ import annotations
 from consist.store.detect import (
     ConsistError,
     DatabaseMigrationRequired,
+    IncompatibleSchemaError,
     SchemaState,
     _migration_workdir,
     _resolve_auto_migrate,
@@ -19,6 +20,7 @@ from consist.store.ledger import (
     LocationStatus,
     StoreLedger,
     deserialize_witness_json,
+    open_v2_store,
     resolve_status_rank,
     serialize_witness_json,
 )
@@ -36,6 +38,7 @@ from consist.store.schema import (
 __all__ = [
     "ConsistError",
     "DatabaseMigrationRequired",
+    "IncompatibleSchemaError",
     "LOCATION_STATUS_RANKS",
     "LocationStatus",
     "SchemaState",
@@ -53,6 +56,7 @@ __all__ = [
     "inspect_v1_summary",
     "install_v1_tripwires",
     "load_v2_schema_sql",
+    "open_v2_store",
     "resolve_status_rank",
     "serialize_witness_json",
 ]

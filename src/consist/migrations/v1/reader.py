@@ -11,7 +11,7 @@ columns (`hash_algorithm`, `hash_semantics`, `content_id`, `parent_artifact_id`,
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 import json
@@ -123,6 +123,8 @@ class V1ArtifactRecord:
     created_at: datetime | None = None
     content_hash: str | None = None
     content_meta: dict[str, Any] | None = None
+    is_dir: bool = False
+    facet_kv: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,6 +195,8 @@ class V1DatabaseReader:
             read_only=True,
         )
         self._closed = False
+        self._main_tables_cache: set[str] | None = None
+        self._table_columns_cache: dict[tuple[str, str], dict[str, str]] = {}
 
     def __enter__(self) -> V1DatabaseReader:
         return self
@@ -205,22 +209,35 @@ class V1DatabaseReader:
             self._closed = True
             self._con.close()
 
+    @property
+    def connection(self) -> duckdb.DuckDBPyConnection:
+        """Return the underlying read-only DuckDB connection."""
+        return self._con
+
     def _main_tables(self) -> set[str]:
-        return {
-            str(r[0])
-            for r in self._con.execute(
-                "SELECT table_name FROM duckdb_tables() WHERE schema_name = 'main'"
-            ).fetchall()
-        }
+        if self._main_tables_cache is None:
+            self._main_tables_cache = {
+                str(r[0])
+                for r in self._con.execute(
+                    "SELECT table_name FROM duckdb_tables() WHERE schema_name = 'main'"
+                ).fetchall()
+            }
+        return set(self._main_tables_cache)
 
     def _columns_for(self, schema_name: str, table_name: str) -> dict[str, str]:
+        cache_key = (schema_name, table_name)
+        cached = self._table_columns_cache.get(cache_key)
+        if cached is not None:
+            return dict(cached)
         rows = self._con.execute(
             "SELECT column_name, data_type FROM duckdb_columns() "
             "WHERE schema_name = ? AND table_name = ? "
             "ORDER BY column_index",
             [schema_name, table_name],
         ).fetchall()
-        return {str(col_name): str(dtype) for col_name, dtype in rows}
+        cols = {str(col_name): str(dtype) for col_name, dtype in rows}
+        self._table_columns_cache[cache_key] = cols
+        return dict(cols)
 
     def _count_rows(self, schema_name: str, table_name: str) -> int:
         q_schema = _quote_ident(schema_name)
@@ -403,6 +420,29 @@ class V1DatabaseReader:
                 )
                 content_by_id[ac_id] = (c_hash, c_meta)
 
+        kv_by_art_id: dict[uuid.UUID, dict[str, Any]] = {}
+        _, kv_rows = self._fetch_rows(
+            "artifact_kv",
+            required_cols={"artifact_id", "key_path"},
+        )
+        for kv_row in kv_rows:
+            kv_art_id = _parse_uuid(kv_row.get("artifact_id"))
+            key_path = _opt_str(kv_row.get("key_path"))
+            if kv_art_id is None or not key_path:
+                continue
+            val: Any = None
+            for val_col in (
+                "value_str",
+                "value_num",
+                "value_bool",
+                "value_json",
+                "value",
+            ):
+                if kv_row.get(val_col) is not None:
+                    val = kv_row[val_col]
+                    break
+            kv_by_art_id.setdefault(kv_art_id, {})[key_path] = val
+
         for row in rows:
             art_id = _parse_uuid(row["id"])
             if art_id is None:
@@ -448,6 +488,21 @@ class V1DatabaseReader:
             raw_facet = row.get("facet") if "facet" in art_cols else meta.get("facet")
             facet = _parse_json_obj(raw_facet) if raw_facet is not None else None
 
+            facet_kv: dict[str, Any] = {}
+            if facet is not None:
+                facet_kv.update(facet)
+            if art_id in kv_by_art_id:
+                facet_kv.update(kv_by_art_id[art_id])
+
+            driver_str = str(row.get("driver") or "other")
+            is_dir_val = bool(
+                row.get("is_dir")
+                or meta.get("is_dir")
+                or meta.get("directory_artifact")
+                or isinstance(meta.get("directory_manifest"), Mapping)
+                or driver_str in ("directory", "zarr")
+            )
+
             content_id = _parse_uuid(row.get("content_id"))
             content_hash: str | None = None
             content_meta: dict[str, Any] | None = None
@@ -458,7 +513,7 @@ class V1DatabaseReader:
                 id=art_id,
                 key=str(row.get("key") or ""),
                 container_uri=str(uri_val or ""),
-                driver=str(row.get("driver") or "other"),
+                driver=driver_str,
                 hash=_opt_str(row.get("hash")),
                 hash_algorithm=_opt_str(hash_alg),
                 hash_semantics=hash_sem,
@@ -474,6 +529,8 @@ class V1DatabaseReader:
                 created_at=_parse_datetime(row.get("created_at")),
                 content_hash=content_hash,
                 content_meta=content_meta,
+                is_dir=is_dir_val,
+                facet_kv=facet_kv,
             )
 
     def iter_links(self) -> Iterator[V1LinkRecord]:
@@ -519,6 +576,22 @@ class V1DatabaseReader:
                 mtime_ns=int(mtime_val) if mtime_val is not None else None,
                 raw=row,
             )
+
+    def read_runs(self) -> list[V1RunRecord]:
+        """Materialize all `V1RunRecord` rows from `main.run`."""
+        return list(self.iter_runs())
+
+    def read_artifacts(self) -> list[V1ArtifactRecord]:
+        """Materialize all `V1ArtifactRecord` rows from `main.artifact`."""
+        return list(self.iter_artifacts())
+
+    def read_links(self) -> list[V1LinkRecord]:
+        """Materialize all `V1LinkRecord` rows from `main.run_artifact_link`."""
+        return list(self.iter_links())
+
+    def read_dir_entries(self) -> list[V1DirEntryRecord]:
+        """Materialize all `V1DirEntryRecord` rows from `main.run_artifact_dir_entry`."""
+        return list(self.iter_dir_entries())
 
 
 __all__ = [

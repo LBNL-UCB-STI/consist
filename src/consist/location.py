@@ -364,11 +364,17 @@ class ObjectETag:
 class DbTableChangeToken:
     """Database table witness (`duckdb://`, `dlt` load ID / row count token)."""
 
-    token: str
+    token: str = ""
     row_count: int | None = None
     load_id: str | None = None
 
     def __post_init__(self) -> None:
+        if (not isinstance(self.token, str) or not self.token) and self.load_id:
+            object.__setattr__(
+                self,
+                "token",
+                f"{self.load_id}:{self.row_count if self.row_count is not None else 0}",
+            )
         if not isinstance(self.token, str) or not self.token:
             raise ValueError("DbTableChangeToken.token must be a non-empty string")
 

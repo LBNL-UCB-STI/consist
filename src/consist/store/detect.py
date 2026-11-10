@@ -20,6 +20,10 @@ class ConsistError(RuntimeError):
     """Base exception class for Consist user-facing runtime and store errors."""
 
 
+class IncompatibleSchemaError(ConsistError):
+    """Raised when a Consist database uses a newer schema version than supported."""
+
+
 class SchemaState(enum.Enum):
     """Startup schema state of a Consist DuckDB database path."""
 
@@ -237,6 +241,7 @@ def inspect_v1_summary(db_path: Path | str) -> DatabaseMigrationRequired:
 __all__ = [
     "ConsistError",
     "DatabaseMigrationRequired",
+    "IncompatibleSchemaError",
     "SchemaState",
     "_migration_workdir",
     "_resolve_auto_migrate",

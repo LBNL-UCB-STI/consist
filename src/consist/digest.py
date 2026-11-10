@@ -392,7 +392,13 @@ def _read_hdf5_dataframe_for_digest(
     """Read an HDF5 fixed or table store member into a pandas DataFrame."""
     pd_mod = importlib.import_module("pandas")
     if h5_key is not None:
-        return pd_mod.read_hdf(source_path, key=h5_key)
+        try:
+            return pd_mod.read_hdf(source_path, key=h5_key)
+        except (KeyError, TypeError, ValueError):
+            with open_h5py_read_only(source_path) as h5f:
+                norm_key = f"/{h5_key.lstrip('/')}"
+                ds = h5f[h5_key] if h5_key in h5f else h5f[norm_key]
+                return pd_mod.DataFrame(ds[...])
 
     with pd_mod.HDFStore(str(source_path), mode="r") as store:
         keys = store.keys()

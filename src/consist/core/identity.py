@@ -377,6 +377,8 @@ class IdentityManager:
             List of additional file paths (relative to project root) that this
             function depends on. Their content will be mixed into the hash.
 
+        Notes
+        -----
         Transparent decorators are unwrapped before inspection so orchestration
         wrappers created with ``functools.wraps`` retain the identity of the
         callable they execute.

@@ -5921,5 +5921,188 @@ def exec_cmd(
         raise typer.Exit(code=result.exit_code)
 
 
+@app.command(name="migrate")
+def migrate_cmd(
+    target_or_action: str = typer.Argument(
+        ...,
+        help="Path to the DuckDB database file (or 'undo' followed by the DB path).",
+    ),
+    second_arg: Optional[str] = typer.Argument(
+        None,
+        help="Database path when the first argument is 'undo'.",
+    ),
+    quick: bool = typer.Option(
+        False,
+        "--quick",
+        help="Migrate database metadata, manifests, and dlt tables without hashing cold files on disk.",
+    ),
+    workers: Optional[int] = typer.Option(
+        None,
+        "--workers",
+        "-w",
+        help="Number of worker threads for cold-file hashing.",
+    ),
+    checkpoint: bool = typer.Option(
+        False,
+        "--checkpoint",
+        help="Flush any non-empty DuckDB WAL file before migrating.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Plan and classify the v1 database without modifying files on disk.",
+    ),
+    snapshot_dir: Optional[List[Path]] = typer.Option(
+        None,
+        "--snapshot-dir",
+        help="Additional directory to search for cold artifacts.",
+    ),
+    undo: bool = typer.Option(
+        False,
+        "--undo",
+        help="Restore the database from its most recent .v1-backup-YYYY-MM-DD.duckdb file.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Force undo even if new v2 runs were recorded after migration.",
+    ),
+    site: str = typer.Option(
+        "local",
+        "--site",
+        help="Site name for recorded artifact location observations.",
+    ),
+) -> None:
+    """Upgrade a Consist v1 DuckDB database to the v2 schema (or undo a migration)."""
+    from consist.migrations.v1.migrator import migrate_v1_to_v2, undo_migration
+    from consist.store.detect import ConsistError
+
+    if target_or_action.strip().lower() == "undo" and second_arg is not None:
+        is_undo = True
+        db_file = Path(second_arg)
+    else:
+        is_undo = undo
+        db_file = Path(target_or_action)
+
+    try:
+        if is_undo:
+            restored_from = undo_migration(db_file, force=force)
+            console.print(
+                f"[green]Restored v1 database[/green] '{db_file}' from backup '{restored_from}'."
+            )
+            return
+
+        result = migrate_v1_to_v2(
+            db_file,
+            quick=quick,
+            workers=workers,
+            checkpoint=checkpoint,
+            dry_run=dry_run,
+            snapshot_dirs=tuple(snapshot_dir or ()),
+            site=site,
+        )
+    except (ConsistError, FileNotFoundError, ValueError) as exc:
+        console.print(f"[red]Migration Error:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if result.already_v2:
+        console.print(
+            f"[cyan]Database '{result.v2_path}' is already on Consist v2 schema.[/cyan]"
+        )
+        return
+
+    plan = result.plan
+    verified_cnt = plan.counts_by_outcome.get("verified", 0)
+    historical_cnt = plan.counts_by_outcome.get("historical", 0)
+    mode_label = (
+        "DRY RUN" if dry_run else ("QUICK MIGRATION" if quick else "FULL MIGRATION")
+    )
+
+    summary_lines = [
+        f"[bold]Database[/bold]: {result.v2_path}",
+        f"[bold]Mode[/bold]: {mode_label}",
+        f"[bold]Runs[/bold]: {plan.run_count}  |  [bold]Artifacts[/bold]: {plan.artifact_count}  |  [bold]Links[/bold]: {plan.link_count}",
+        f"[bold]Outcomes[/bold]: [green]{verified_cnt} verified[/green], [yellow]{historical_cnt} historical[/yellow]",
+    ]
+    if plan.counts_by_basis:
+        basis_str = ", ".join(
+            f"{k}={v}" for k, v in sorted(plan.counts_by_basis.items())
+        )
+        summary_lines.append(f"[bold]By Basis[/bold]: {basis_str}")
+    if result.backup_path is not None:
+        summary_lines.append(f"[bold]Backup[/bold]: {result.backup_path}")
+    summary_lines.append(
+        f"[bold]Verification[/bold]: {'OK' if result.verification.ok else 'FAILED'}"
+    )
+    console.print(
+        Panel(
+            "\n".join(summary_lines),
+            title="Consist v1 -> v2 Migration",
+            border_style="green" if result.verification.ok else "red",
+        )
+    )
+
+
+@app.command(name="promote")
+def promote_cmd(
+    db_path: Path = typer.Argument(
+        ...,
+        help="Path to the v2 DuckDB database file.",
+    ),
+    target: str = typer.Argument(
+        ...,
+        help="Historical anchor ('legacy-v1:unverified:<hex>'), artifact UUID, or artifact key.",
+    ),
+    path: Path = typer.Option(
+        ...,
+        "--path",
+        "-p",
+        help="Local file or directory path to verify and promote.",
+    ),
+    asserted: bool = typer.Option(
+        False,
+        "--asserted",
+        help="Record an asserted location promotion when v1 fast-stat hash cannot be matched.",
+    ),
+    by: Optional[str] = typer.Option(
+        None,
+        "--by",
+        "--asserted-by",
+        help="Username or identifier asserting the promotion.",
+    ),
+    expected_digest: Optional[str] = typer.Option(
+        None,
+        "--expected-digest",
+        help="Expected scheme-qualified v2 digest (e.g. 'sha256:file:<hex>').",
+    ),
+    site: str = typer.Option(
+        "local",
+        "--site",
+        help="Site name for the recorded location observation.",
+    ),
+) -> None:
+    """Promote a historical ('legacy-v1:unverified:*') artifact using a restored file or directory."""
+    from consist.migrations.v1.migrator import promote_historical_artifact
+    from consist.store.detect import ConsistError
+
+    try:
+        hist_anchor, ver_anchor, basis = promote_historical_artifact(
+            db_path,
+            target,
+            path=path,
+            asserted=asserted,
+            asserted_by=by,
+            expected_digest=expected_digest,
+            site=site,
+        )
+    except (ConsistError, FileNotFoundError, ValueError) as exc:
+        console.print(f"[red]Promotion Error:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.print(
+        f"[green]Promoted[/green] {hist_anchor} -> {ver_anchor} (basis={basis})"
+    )
+
+
 if __name__ == "__main__":
     app()
