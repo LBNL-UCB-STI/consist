@@ -505,15 +505,10 @@ class ArtifactManager:
         _warn_output_reuse_deprecated()
 
         from consist.artifact import Artifact as V2Artifact
-        from consist.core.noop import LocalRef
         from consist.core.run_resolution import convert_v2_artifact_to_legacy
 
         if isinstance(path, V2Artifact):
             path = convert_v2_artifact_to_legacy(self.tracker, path, key_override=key)
-        elif isinstance(path, LocalRef):
-            if key is None:
-                key = path.key
-            path = path.path
 
         if isinstance(path, Artifact):
             source_artifact = path

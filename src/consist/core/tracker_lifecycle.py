@@ -584,7 +584,6 @@ class RunLifecycleCoordinator:
         with _track_begin_run_phase("input_binding.total"):
             if inputs:
                 from consist.artifact import Artifact as V2Artifact
-                from consist.core.noop import LocalRef
                 from consist.core.run_resolution import convert_v2_artifact_to_legacy
 
                 normalized_inputs: list[Any] = []
@@ -593,8 +592,6 @@ class RunLifecycleCoordinator:
                         normalized_inputs.append(
                             convert_v2_artifact_to_legacy(tracker, raw_item)
                         )
-                    elif isinstance(raw_item, LocalRef):
-                        normalized_inputs.append(raw_item.path)
                     else:
                         normalized_inputs.append(raw_item)
                 inputs = normalized_inputs

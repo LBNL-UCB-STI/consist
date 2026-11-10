@@ -22,7 +22,6 @@ from typing import (
 
 from consist.artifact import Artifact as V2Artifact
 from consist.core.error_messages import format_problem_cause_fix
-from consist.core.noop import LocalRef
 from consist.models.artifact import Artifact, set_tracker_ref
 from consist.models.run import Run, RunResult, resolve_run_result_output
 from consist.types import ArtifactRef, RunInputRef
@@ -184,8 +183,6 @@ def resolve_input_reference_configured(
         return ref
     if isinstance(ref, V2Artifact):
         return convert_v2_artifact_to_legacy(tracker, ref, key_override=key)
-    if isinstance(ref, LocalRef):
-        ref = ref.path
     if isinstance(ref, RunResult):
         return resolve_run_result_output(ref)
 
@@ -197,12 +194,7 @@ def resolve_input_reference_configured(
                     return convert_v2_artifact_to_legacy(
                         tracker, resolved_ref, key_override=key
                     )
-                if isinstance(resolved_ref, LocalRef):
-                    resolved_ref = resolved_ref.path
-                else:
-                    return resolved_ref
-                ref = resolved_ref
-                ref_str = str(ref)
+                return resolved_ref
             else:
                 ref_str = ref
         else:
@@ -336,8 +328,6 @@ def resolve_output_path(tracker: "Tracker", ref: ArtifactRef, base_dir: Path) ->
         if ref.primary_location is not None:
             return Path(tracker.resolve_uri(ref.primary_location.uri))
         return ref.path
-    if isinstance(ref, LocalRef):
-        ref = ref.path
     ref_str = str(ref)
     if isinstance(ref, str) and "://" in ref_str:
         return Path(tracker.resolve_uri(ref_str))

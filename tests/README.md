@@ -92,8 +92,7 @@ From `tests/conftest.py`:
 
 ## Current Priorities
 
-- Continue coverage on `src/consist/core/netcdf_views.py` and
-  `src/consist/core/noop.py` (lowest high-value core modules).
+- Continue coverage on `src/consist/core/netcdf_views.py` (lowest high-value core module).
 - Continue branch coverage in `src/consist/cli.py` (long command/shell tail).
 - Keep strengthening negative-path testing for DB retry and ingestion contracts.
 

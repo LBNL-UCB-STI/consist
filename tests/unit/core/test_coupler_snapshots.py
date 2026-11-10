@@ -400,48 +400,6 @@ def test_tracker_get_coupler_snapshot_attaches_tracker_ref(
     assert art.path == out_file.resolve()
 
 
-def test_noop_scenario_context_snapshot_methods() -> None:
-    from consist.core.noop import NoopTracker
-
-    noop = NoopTracker()
-    with noop.scenario("noop_scen") as sc:
-        # capture
-        sc.capture_coupler_snapshot(phase="post", run_id="r1", step_ordinal=1)
-        # restore
-        restored = sc.restore_coupler_snapshot(run_id="r1", phase="post")
-        assert not restored
-        assert restored.artifacts == {}
-        # find_latest
-        found = sc.find_latest_coupler_snapshot(scenario_run_id="noop_scen")
-        assert found is None
-
-    # NoopTracker methods
-    snap = noop.get_coupler_snapshot("r1", phase="post")
-    assert snap == {}
-    diff = noop.diff_coupler_snapshots("r1", "r2")
-    assert diff.empty
-
-
-def test_noop_diff_schema_parity(tracker: Tracker) -> None:
-    from consist.core.noop import NoopTracker
-
-    db = tracker.db
-    assert db is not None
-    real_diff = db.diff_coupler_snapshots("r1", "r2")
-    noop = NoopTracker()
-    noop_diff = noop.diff_coupler_snapshots("r1", "r2")
-    assert list(noop_diff.columns) == list(real_diff.columns)
-
-
-def test_noop_scenario_context_resume_attrs() -> None:
-    from consist.core.noop import NoopTracker
-
-    noop = NoopTracker()
-    with noop.scenario("s", resume_from_run_id="run_123", resume_phase="pre") as sc:
-        assert sc.resume_from_run_id == "run_123"
-        assert sc.resume_phase == "pre"
-
-
 def test_synthesize_non_existent_run_returns_empty(tracker: Tracker) -> None:
     db = tracker.db
     assert db is not None
