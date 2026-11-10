@@ -84,9 +84,9 @@ class LocalRef:
     """
 
     path: Path
-    key: Optional[str] = None
-    driver: Optional[str] = None
-    container_uri: Optional[str] = None
+    key: str = ""
+    driver: str = ""
+    container_uri: str = ""
     table_path: Optional[str] = None
     array_path: Optional[str] = None
     meta: Mapping[str, Any] = field(default_factory=lambda: EMPTY_META)
@@ -98,11 +98,13 @@ class LocalRef:
             self.path if isinstance(self.path, Path) else Path(os.fspath(self.path))
         )
         object.__setattr__(self, "path", coerced_path)
+        if not self.key:
+            object.__setattr__(self, "key", coerced_path.name)
         frozen_meta = FrozenMeta(self.meta) if self.meta else EMPTY_META
         object.__setattr__(self, "meta", frozen_meta)
-        if self.container_uri is None:
+        if not self.container_uri:
             object.__setattr__(self, "container_uri", str(coerced_path))
-        if self.driver is None:
+        if not self.driver:
             object.__setattr__(self, "driver", _infer_local_ref_driver(coerced_path))
 
     def __fspath__(self) -> str:
@@ -207,7 +209,7 @@ class NoopCoupler(CouplerMapMixin[Any, DeclaredOutput]):
         self._warn_undefined = False
         self._undefined_keys: set[str] = set()
         self._output_descriptions: MutableMapping[str, str] = {}
-        self._history: Dict[str, list[Any]] = {}
+        self._history: MutableMapping[str, list[Any]] = {}
 
     def _validate_artifact_key(self, key: str) -> None:
         validate_artifact_key(key)
@@ -521,10 +523,8 @@ class NoopScenarioContext:
             else False
         )
         step_def = get_step_definition(fn)
-        effective_inputs = inputs if inputs is not None else step_def.inputs
-        resolved_inputs: Optional[Union[Mapping[str, Any], Iterable[Any]]] = (
-            effective_inputs
-        )
+        effective_inputs: Any = inputs if inputs is not None else step_def.inputs
+        resolved_inputs: Any = effective_inputs
         if isinstance(effective_inputs, Mapping):
             resolved_map: Dict[str, Any] = {}
             for k, v in effective_inputs.items():
@@ -921,12 +921,16 @@ def _run_noop_step(
     base_dir = output_base_dir or Path.cwd()
 
     effective_outputs: Any = outputs if outputs is not None else step_def.outputs
-    effective_output_paths: Optional[Mapping[str, Any]] = (
+    raw_output_paths: Any = (
         output_paths if output_paths is not None else step_def.output_paths
     )
+    effective_output_paths: Optional[Mapping[str, Any]] = (
+        raw_output_paths if isinstance(raw_output_paths, Mapping) else None
+    )
     effective_inputs: Any = inputs if inputs is not None else step_def.inputs
-    effective_config: Dict[str, Any] = dict(
-        config if config is not None else (step_def.config or {})
+    raw_config: Any = config if config is not None else (step_def.config or {})
+    effective_config: Dict[str, Any] = (
+        dict(raw_config) if isinstance(raw_config, Mapping) else {}
     )
 
     declared_output_specs: Optional[Dict[str, DeclaredOutputSpec]] = None
@@ -947,15 +951,21 @@ def _run_noop_step(
         else ("error" if declared_output_specs is not None else "warn")
     )
 
-    explicit_input_binding: Optional[InputBindingMode] = (
+    raw_input_binding: Any = (
         execution_options.input_binding
         if execution_options is not None and execution_options.input_binding is not None
         else step_def.input_binding
     )
-    explicit_load_inputs: Optional[bool] = (
+    explicit_input_binding: Optional[InputBindingMode] = (
+        raw_input_binding if raw_input_binding in ("loaded", "paths", "none") else None
+    )
+    raw_load_inputs: Any = (
         execution_options.load_inputs
         if execution_options is not None and execution_options.load_inputs is not None
         else step_def.load_inputs
+    )
+    explicit_load_inputs: Optional[bool] = (
+        raw_load_inputs if isinstance(raw_load_inputs, bool) else None
     )
     explicit_binding_requested = (
         explicit_input_binding is not None or explicit_load_inputs is not None

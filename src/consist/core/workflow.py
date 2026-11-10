@@ -1913,7 +1913,7 @@ class ScenarioContext:
         ):
             invocation_inputs = self._promote_inputs_for_binding(
                 invocation_inputs,
-                requested_input_binding or "paths",
+                "loaded" if requested_input_binding == "loaded" else "paths",
             )
 
         resolved_invocation = resolve_run_invocation(
