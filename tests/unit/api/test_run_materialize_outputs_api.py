@@ -1489,6 +1489,7 @@ def test_archive_run_outputs_moves_all_output_set_members_and_manifest(
     [member] = tracker.get_child_artifacts(parent)
     manifest = tracker.get_artifact(parent.meta["manifest_artifact_id"])
     assert manifest is not None
+    parent_source = Path(parent.path)
     member_source = Path(member.path)
     manifest_source = Path(manifest.path)
     archive_root = tmp_path / "move_archive_output_set"
@@ -1498,7 +1499,8 @@ def test_archive_run_outputs_moves_all_output_set_members_and_manifest(
     assert (archived["annual"] / "annual_2030.csv").is_file()
     assert not member_source.exists()
     assert not manifest_source.exists()
-    assert not Path(parent.path).exists()
+    assert not parent_source.exists()
+    assert Path(parent.path) == archived["annual"]
     refreshed_parent = archived.outputs["annual"]
     refreshed_members = tracker.get_child_artifacts(refreshed_parent)
     refreshed_manifest = tracker.get_artifact(

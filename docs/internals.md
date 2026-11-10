@@ -29,7 +29,7 @@ flowchart TD
 | :--- | :--- | :--- |
 | **Fingerprint** | `art.identity`, `art.anchor` | `content.anchor` (`VARCHAR` primary key, formatted `<scheme>:<hex>`) + `content_digest(anchor, scheme, value, basis)` |
 | **Name** | `art.key`, `inputs`/`outputs` keys | `run_binding.slot` (paired with `direction`, `ordinal`, `role`, `anchor`, and `artifact_id`) and `artifact.key` |
-| **Location** | `art.path`, `art.primary_location`, `art.uri` | `artifact_location` observations + `location_event` status transitions, queried via `artifact_location_current` and `locate_current(anchors)` |
+| **Location** | `art.path`, `art.primary_location` | `artifact_location` observations + `location_event` status transitions, queried via `artifact_location_current` and `locate_current(anchors)` |
 | **Artifact** | `Artifact` | `artifact(id, key, driver, anchor, run_id, schema_id, meta, created_at)` |
 | **Run** | `Run` | `run(id, model_name, status, code_hash, config_hash, input_hash, signature, signature_scheme, cache_status, ...)` |
 
@@ -160,6 +160,8 @@ from consist import use_tracker
 
 with use_tracker(tracker):
     with consist.scenario("baseline") as sc:
-        with sc.step(name="simulate"):
+        def simulate() -> None:
             consist.log_dataframe(df, key="results")
+
+        sc.run(fn=simulate, name="simulate")
 ```
