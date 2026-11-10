@@ -110,7 +110,7 @@ class ActionBindingIdentity:
 
     kind: str
     role: str | int
-    mode: Literal["content-v1", "legacy-provenance-v1"]
+    mode: Literal["content-v1", "legacy-provenance-v1", "historical-v1"]
     value: str
     fallback_reason: str | None = None
 
@@ -715,18 +715,31 @@ class IdentityManager:
         resolved_bindings: list[ActionBindingIdentity] = []
         for role in binding_roles:
             artifact = inputs[role.input_index]
-            try:
-                value = str(ArtifactIdentity.from_artifact(artifact))
-                mode: Literal["content-v1", "legacy-provenance-v1"] = "content-v1"
-                fallback_reason = None
-            except ValueError:
-                value = self._compute_legacy_input_signature(
-                    artifact,
-                    path_resolver=path_resolver,
-                    signature_lookup=signature_lookup,
+            meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
+            if meta.get("v2_historical_unverified") is True:
+                anchor_str = meta.get("v2_identity_anchor")
+                value = (
+                    str(anchor_str)
+                    if isinstance(anchor_str, str) and anchor_str
+                    else f"sha256:historical-v1:{artifact.hash or ('0' * 64)}"
                 )
-                mode = "legacy-provenance-v1"
-                fallback_reason = self._action_binding_fallback_reason(artifact)
+                mode: Literal["content-v1", "legacy-provenance-v1", "historical-v1"] = (
+                    "historical-v1"
+                )
+                fallback_reason: str | None = "historical_unverified_anchor"
+            else:
+                try:
+                    value = str(ArtifactIdentity.from_artifact(artifact))
+                    mode = "content-v1"
+                    fallback_reason = None
+                except ValueError:
+                    value = self._compute_legacy_input_signature(
+                        artifact,
+                        path_resolver=path_resolver,
+                        signature_lookup=signature_lookup,
+                    )
+                    mode = "legacy-provenance-v1"
+                    fallback_reason = self._action_binding_fallback_reason(artifact)
             binding = ActionBindingIdentity(
                 kind=role.kind,
                 role=role.role,

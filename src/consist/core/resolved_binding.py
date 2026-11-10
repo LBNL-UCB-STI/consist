@@ -11,16 +11,13 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Literal, Mapping, TYPE_CHECKING, TypeAlias, cast
+from typing import Any, Literal, Mapping, Optional, TypeAlias, cast
 
 from consist.core.directory_artifacts import (
     materialize_directory_tree,
     validate_directory_manifest,
     validate_directory_tree,
 )
-
-if TYPE_CHECKING:
-    from consist.models.artifact import Artifact
 
 
 JSONValue: TypeAlias = (
@@ -67,11 +64,21 @@ def step_contract_identity(callable_: Any, step_name: str) -> str:
         source = inspect.getsource(callable_)
     except (OSError, TypeError):
         source = None
+    module_name: Optional[str] = None
+    qualname: Optional[str] = None
+    try:
+        module_name = callable_.__module__
+    except AttributeError:
+        module_name = None
+    try:
+        qualname = callable_.__qualname__
+    except AttributeError:
+        qualname = None
     payload = {
         "version": 1,
         "step_name": step_name,
-        "module": getattr(callable_, "__module__", None),
-        "qualname": getattr(callable_, "__qualname__", None),
+        "module": module_name,
+        "qualname": qualname,
         "signature": str(inspect.signature(callable_)),
         "source": source,
     }
@@ -111,7 +118,29 @@ class ArtifactIdentity:
     @classmethod
     def from_artifact(cls, artifact: Any) -> "ArtifactIdentity":
         """Return a strict identity only when persisted semantics prove it."""
+        from consist.artifact import Artifact as V2Artifact
+        from consist.digest import Kind
+
+        if isinstance(artifact, V2Artifact):
+            if not artifact.identity.verifiable:
+                raise ValueError(
+                    "artifact has an unverified historical anchor and does not declare a trusted immutable identity"
+                )
+            anchor = artifact.identity.anchor
+            if anchor.kind == Kind.CONTAINER or anchor.scheme in (
+                "sha256:manifest-v1",
+                "sha256:dir_manifest",
+            ):
+                return cls.parse(f"sha256:manifest-v1:{anchor.hex}")
+            if anchor.kind == Kind.BYTES or anchor.scheme == "sha256:file":
+                return cls.parse(f"sha256:file:{anchor.hex}")
+            return cls.parse(f"sha256:file:{anchor.hex}")
+
         meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
+        if meta.get("v2_historical_unverified") is True:
+            raise ValueError(
+                "artifact has an unverified historical anchor and does not declare a trusted immutable identity"
+            )
         semantics = meta.get("hash_semantics")
         artifact_hash = artifact.hash
         if semantics == {
@@ -582,9 +611,17 @@ _COMPOUND_ARCHIVE_EXTENSIONS = frozenset(
 )
 
 
-def _extract_artifact_suffix(artifact: "Artifact") -> str:
+def _extract_artifact_suffix(artifact: Any) -> str:
     """Return the file extension(s) from an artifact's URI or path."""
-    for candidate in (artifact.container_uri, artifact.abs_path):
+    from consist.artifact import Artifact as V2Artifact
+
+    if isinstance(artifact, V2Artifact):
+        candidates: tuple[str | None, ...] = tuple(
+            obs.location.uri for obs in artifact.hints if obs.location.uri
+        )
+    else:
+        candidates = (artifact.container_uri, artifact.abs_path)
+    for candidate in candidates:
         if not candidate:
             continue
         raw_path = candidate.split("://", 1)[1] if "://" in candidate else candidate
@@ -647,7 +684,7 @@ class ResolvedBindingBuilder:
         self,
         *,
         parameter: str,
-        artifact: "Artifact",
+        artifact: Any,
         destination: Path | str | None = None,
         source: Literal[
             "explicit", "coupler", "fallback", "pinned", "external_admitted"
@@ -656,8 +693,19 @@ class ResolvedBindingBuilder:
         preserve_suffix: bool = True,
     ) -> "ResolvedBindingBuilder":
         """Bind a locally tracked artifact after deriving its trusted identity."""
+        from consist.artifact import Artifact as V2Artifact
+        from consist.core.directory_artifacts import build_directory_manifest
+
         identity = ArtifactIdentity.from_artifact(artifact)
         manifest = artifact.meta.get("directory_manifest")
+        if (
+            identity.kind == "manifest-v1"
+            and not isinstance(manifest, Mapping)
+            and isinstance(artifact, V2Artifact)
+        ):
+            located = artifact.locate()
+            if located is not None and located.is_dir():
+                manifest = build_directory_manifest(located)
         dest_path = (
             Path("inputs") / parameter if destination is None else Path(destination)
         )

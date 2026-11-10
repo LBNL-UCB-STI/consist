@@ -583,6 +583,21 @@ class RunLifecycleCoordinator:
 
         with _track_begin_run_phase("input_binding.total"):
             if inputs:
+                from consist.artifact import Artifact as V2Artifact
+                from consist.core.noop import LocalRef
+                from consist.core.run_resolution import convert_v2_artifact_to_legacy
+
+                normalized_inputs: list[Any] = []
+                for raw_item in inputs:
+                    if isinstance(raw_item, V2Artifact):
+                        normalized_inputs.append(
+                            convert_v2_artifact_to_legacy(tracker, raw_item)
+                        )
+                    elif isinstance(raw_item, LocalRef):
+                        normalized_inputs.append(raw_item.path)
+                    else:
+                        normalized_inputs.append(raw_item)
+                inputs = normalized_inputs
                 known_latest_by_index: Dict[int, Optional[Artifact]] = {}
                 if tracker.db:
                     lookup_by_index: Dict[
@@ -751,6 +766,13 @@ class RunLifecycleCoordinator:
                             )
                         )
                         input_hash = action_identity.value
+                        if any(
+                            binding.mode == "historical-v1"
+                            for binding in action_identity.bindings
+                        ):
+                            run.meta["cache_ineligible_reason"] = (
+                                "historical_unverified_input"
+                            )
                         run.meta["input_identity"] = {
                             "mode": "action-v2",
                             "version": 2,
@@ -781,6 +803,14 @@ class RunLifecycleCoordinator:
                                 )
                             ],
                         }
+                    if any(
+                        isinstance(inp.meta, MappingABC)
+                        and inp.meta.get("v2_historical_unverified") is True
+                        for inp in current_consist.inputs
+                    ):
+                        run.meta["cache_ineligible_reason"] = (
+                            "historical_unverified_input"
+                        )
                     run.input_hash = input_hash
                     run.signature = tracker.identity.calculate_run_signature(
                         code_hash=git_hash,
@@ -799,7 +829,10 @@ class RunLifecycleCoordinator:
 
         cached_output_ids: Optional[List[uuid.UUID]] = None
 
-        if cache_mode == "reuse":
+        has_historical_unverified_input = (
+            run.meta.get("cache_ineligible_reason") == "historical_unverified_input"
+        )
+        if cache_mode == "reuse" and not has_historical_unverified_input:
             with _track_begin_run_phase("cache.lookup"):
                 cache_key = (
                     (run.config_hash, run.input_hash, run.git_hash)

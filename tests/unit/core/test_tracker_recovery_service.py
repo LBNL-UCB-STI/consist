@@ -687,6 +687,7 @@ def test_archive_run_outputs_filters_virtual_ingested_and_syncs_last_consist_and
 
     with tracker.scenario("sync_scenario") as sc:
         sc.coupler.declare_outputs("bootstrap_base_path", "metrics")
+        (workspace / "bootstrap.h5").write_bytes(b"bootstrap_stub")
         sc.coupler.set("bootstrap_base_path", str(workspace / "bootstrap.h5"))
 
         def step_fn() -> None:

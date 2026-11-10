@@ -17,6 +17,7 @@ from consist.location import (
     EMPTY_META,
     FrozenMeta,
     LedgerRef,
+    Location,
     Observation,
     lookup_live_ledger,
 )
@@ -30,7 +31,60 @@ _ARRAY_MEMBER_DRIVERS: frozenset[str] = frozenset(
 )
 
 
-class MissingOutputError(ConsistError):
+def read_local_df(
+    path: Path,
+    *,
+    driver: str | None = None,
+    member: str | None = None,
+    default_h5_key: str | None = None,
+    columns: Sequence[str] | None = None,
+    **kwargs: Any,
+) -> Any:
+    """Load a local tabular file into a `pandas.DataFrame`."""
+    pd = importlib.import_module("pandas")
+    suffix = path.suffix.lower().lstrip(".")
+    drv = (driver or "").strip().lower().lstrip(".")
+    fmt = suffix if drv in ("", "file", "table") else drv
+
+    read_kwargs = dict(kwargs)
+    if columns is not None and "columns" not in read_kwargs:
+        read_kwargs["columns"] = list(columns)
+
+    if fmt in ("parquet", "pq") or suffix in ("parquet", "pq"):
+        return pd.read_parquet(path, **read_kwargs)
+    if fmt == "csv" or suffix == "csv":
+        if "columns" in read_kwargs and "usecols" not in read_kwargs:
+            read_kwargs["usecols"] = read_kwargs.pop("columns")
+        return pd.read_csv(path, **read_kwargs)
+    if fmt == "tsv" or suffix == "tsv":
+        if "columns" in read_kwargs and "usecols" not in read_kwargs:
+            read_kwargs["usecols"] = read_kwargs.pop("columns")
+        sep = read_kwargs.pop("sep", "\t")
+        return pd.read_csv(path, sep=sep, **read_kwargs)
+    if fmt == "json" or suffix == "json":
+        df = pd.read_json(path, **kwargs)
+        return df[list(columns)] if columns is not None else df
+    if fmt in ("feather", "arrow") or suffix in ("feather", "arrow"):
+        return pd.read_feather(path, **read_kwargs)
+    if fmt in ("pickle", "pkl") or suffix in ("pickle", "pkl"):
+        df = pd.read_pickle(path, **kwargs)
+        return df[list(columns)] if columns is not None else df
+    if fmt in ("hdf5", "h5", "h5_table", "hdf", "openmatrix", "omx") or suffix in (
+        "h5",
+        "hdf5",
+        "hdf",
+        "omx",
+    ):
+        h5_key = member if member is not None else default_h5_key
+        if h5_key is not None and "key" not in read_kwargs:
+            read_kwargs["key"] = h5_key
+        return pd.read_hdf(path, **read_kwargs)
+    raise ValueError(
+        f"Unsupported driver/format {driver or path.suffix!r} for read_local_df() on {path}"
+    )
+
+
+class MissingOutputError(ConsistError, FileNotFoundError):
     """Raised when a declared `PendingOutput` is missing on disk at `seal()` time."""
 
     def __init__(
@@ -273,6 +327,36 @@ class Artifact:
 
         return locate(self).path
 
+    def locate(
+        self,
+        *,
+        ledger: Any = None,
+        site_context: Any = None,
+        mounts: Any = None,
+        verify_on_stale: bool = True,
+    ) -> Path | None:
+        """Resolve and return a verified local filesystem `Path` for this artifact, or `None` if not found."""
+        from consist.engine import locate
+
+        try:
+            return locate(
+                self,
+                ledger=ledger,
+                site_context=site_context,
+                mounts=mounts,
+                verify_on_stale=verify_on_stale,
+            ).path
+        except FileNotFoundError:
+            return None
+
+    @property
+    def primary_location(self) -> Location | None:
+        """Return the first candidate `Location` for this artifact if available."""
+        uri, member = self._first_candidate_location()
+        if uri is None:
+            return None
+        return Location(uri=uri, member=member)
+
     def with_meta(self, **changes: Any) -> Artifact:
         """Return a new `Artifact` with `changes` merged into `self.meta`."""
         merged: dict[str, Any] = {**self.meta.to_dict(), **changes}
@@ -282,38 +366,21 @@ class Artifact:
         """Load this artifact into a `pandas.DataFrame`."""
         from consist.engine import locate
 
-        drv = self.driver.strip().lower()
-        pd = importlib.import_module("pandas")
         try:
             resolved = locate(self)
         except FileNotFoundError:
             resolved = None
 
         if resolved is not None:
-            local_path = resolved.path
-            fmt = (
-                local_path.suffix.lower().lstrip(".")
-                if drv in ("file", "table")
-                else drv
-            )
-            if fmt == "parquet":
-                return pd.read_parquet(local_path, **kwargs)
-            if fmt == "csv":
-                return pd.read_csv(local_path, **kwargs)
-            if fmt == "tsv":
-                sep = kwargs.pop("sep", "\t")
-                return pd.read_csv(local_path, sep=sep, **kwargs)
-            if fmt == "json":
-                return pd.read_json(local_path, **kwargs)
-            if fmt in ("feather", "arrow"):
-                return pd.read_feather(local_path, **kwargs)
-            if fmt in ("hdf5", "h5", "h5_table", "hdf"):
-                call_kwargs = (
-                    {"key": resolved.member, **kwargs}
-                    if resolved.member is not None
-                    else kwargs
+            try:
+                return read_local_df(
+                    resolved.path,
+                    driver=self.driver,
+                    member=resolved.member,
+                    **kwargs,
                 )
-                return pd.read_hdf(local_path, **call_kwargs)
+            except ValueError:
+                pass
 
         from consist.api import load_df
 
@@ -393,4 +460,5 @@ __all__ = [
     "Artifact",
     "HintLedger",
     "MissingOutputError",
+    "read_local_df",
 ]

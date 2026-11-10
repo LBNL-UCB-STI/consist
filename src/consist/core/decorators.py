@@ -7,19 +7,21 @@ from typing import (
     List,
     Mapping,
     Optional,
+    Sequence,
     TypeVar,
     Union,
     Dict,
 )
 
 from consist.core.step_context import StepContext
-from consist.types import IdentityInputs, InputBindingMode, OutputSet
+from consist.types import IdentityInputs, InputBindingMode, OutputPathRef, OutputSet
 
 if TYPE_CHECKING:
     from consist.core.config_canonicalization import ConfigAdapter
 
 T = TypeVar("T")
 MetaValue = Union[T, Callable[[StepContext], T]]
+DeclaredOutputsLike = Union[Sequence[str], Mapping[str, OutputPathRef]]
 
 
 @dataclass(frozen=True)
@@ -32,7 +34,7 @@ class StepDefinition:
     description: Optional[MetaValue[str]] = None
 
     # Outputs
-    outputs: Optional[MetaValue[List[str]]] = None
+    outputs: Optional[MetaValue[DeclaredOutputsLike]] = None
     schema_outputs: Optional[MetaValue[List[str]]] = None
     output_paths: Optional[MetaValue[Mapping[str, Any]]] = None
     output_sets: Optional[MetaValue[Mapping[str, OutputSet]]] = None
@@ -72,7 +74,7 @@ def define_step(
     *,
     model: Optional[MetaValue[str]] = None,
     name_template: Optional[MetaValue[str]] = None,
-    outputs: Optional[MetaValue[List[str]]] = None,
+    outputs: Optional[MetaValue[DeclaredOutputsLike]] = None,
     schema_outputs: Optional[MetaValue[List[str]]] = None,
     output_paths: Optional[MetaValue[Mapping[str, Any]]] = None,
     output_sets: Optional[MetaValue[Mapping[str, OutputSet]]] = None,
@@ -115,36 +117,32 @@ def define_step(
         raise TypeError(f"unexpected keyword arguments '{joined}'")
 
     def decorator(func: Callable) -> Callable:
-        setattr(
-            func,
-            "__consist_step__",
-            StepDefinition(
-                model=model,
-                name_template=name_template,
-                description=description,
-                outputs=outputs,
-                schema_outputs=schema_outputs,
-                output_paths=output_paths,
-                output_sets=output_sets,
-                inputs=inputs,
-                input_keys=input_keys,
-                optional_input_keys=optional_input_keys,
-                config=config,
-                adapter=adapter,
-                identity_inputs=identity_inputs,
-                facet=facet,
-                facet_index=facet_index,
-                cache_mode=cache_mode,
-                cache_hydration=cache_hydration,
-                cache_version=cache_version,
-                validate_cached_outputs=validate_cached_outputs,
-                input_binding=input_binding,
-                load_inputs=load_inputs,
-                tags=tags,
-                facet_from=facet_from,
-                facet_schema_version=facet_schema_version,
-                extra=extra or None,
-            ),
+        func.__dict__["__consist_step__"] = StepDefinition(
+            model=model,
+            name_template=name_template,
+            description=description,
+            outputs=outputs,
+            schema_outputs=schema_outputs,
+            output_paths=output_paths,
+            output_sets=output_sets,
+            inputs=inputs,
+            input_keys=input_keys,
+            optional_input_keys=optional_input_keys,
+            config=config,
+            adapter=adapter,
+            identity_inputs=identity_inputs,
+            facet=facet,
+            facet_index=facet_index,
+            cache_mode=cache_mode,
+            cache_hydration=cache_hydration,
+            cache_version=cache_version,
+            validate_cached_outputs=validate_cached_outputs,
+            input_binding=input_binding,
+            load_inputs=load_inputs,
+            tags=tags,
+            facet_from=facet_from,
+            facet_schema_version=facet_schema_version,
+            extra=extra or None,
         )
         return func
 
@@ -165,7 +163,40 @@ def require_runtime_kwargs(*names: str) -> Callable[[Callable], Callable]:
             raise ValueError("require_runtime_kwargs expects non-empty string names.")
 
     def decorator(func: Callable) -> Callable:
-        setattr(func, "__consist_runtime_required__", tuple(names))
+        func.__dict__["__consist_runtime_required__"] = tuple(names)
         return func
 
     return decorator
+
+
+def get_callable_name(fn: Optional[Any]) -> Optional[str]:
+    """Return ``fn.__name__`` if ``fn`` is a named callable, else ``None``."""
+    if fn is None:
+        return None
+    try:
+        name = fn.__name__
+    except AttributeError:
+        return None
+    return name if isinstance(name, str) and name else None
+
+
+def get_step_definition(fn: Optional[Any]) -> StepDefinition:
+    """Return the ``StepDefinition`` attached to ``fn``, or an empty ``StepDefinition()``."""
+    if fn is None:
+        return StepDefinition()
+    try:
+        candidate = fn.__consist_step__
+    except AttributeError:
+        return StepDefinition()
+    return candidate if isinstance(candidate, StepDefinition) else StepDefinition()
+
+
+def get_required_runtime_kwargs(fn: Optional[Any]) -> tuple[str, ...]:
+    """Return the tuple of required runtime kwarg names attached to ``fn``."""
+    if fn is None:
+        return ()
+    try:
+        req = fn.__consist_runtime_required__
+    except AttributeError:
+        return ()
+    return req if isinstance(req, tuple) else ()

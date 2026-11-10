@@ -722,7 +722,7 @@ def locate(
     primary_anchor = artifact.identity.anchor
 
     # Fast-path: check memoized ResolvedLocation when no custom mounts override resolution
-    if mounts is None:
+    if not mounts:
         hint_member = (
             artifact.hints[0].location.member if len(artifact.hints) == 1 else None
         )
@@ -928,6 +928,16 @@ def locate(
                 refreshed_obs,
                 repr_kind=repr_kind,
             )
+        elif (
+            artifact.origin is None and refreshed_witness is not None and artifact.hints
+        ):
+            updated_hints = tuple(
+                replace(obs, witness=refreshed_witness)
+                if (obs.location.uri == uri and obs.location.member == cand_member)
+                else obs
+                for obs in artifact.hints
+            )
+            object.__setattr__(artifact, "hints", updated_hints)
 
         resolved_loc = ResolvedLocation(
             path=local_path,
@@ -1264,6 +1274,7 @@ def seal(
     archive_root: Path | str | None = None,
     archive_mount_name: str = "archive",
     max_workers: int = 4,
+    _update_default_mounts: bool = True,
 ) -> dict[str, Artifact]:
     """Validate, hash (with single-pass tee copy when archiving), and record declared outputs."""
     items: list[PendingOutput] = []
@@ -1302,7 +1313,8 @@ def seal(
 
     if ledger is not None:
         ledger.mounts.update(mount_map)
-    _default_mounts.update(mount_map)
+    if _update_default_mounts:
+        _default_mounts.update(mount_map)
 
     # Pre-compute collision-safe archive destination paths before parallel work.
     archive_dests: dict[int, Path] = {}
@@ -1553,6 +1565,44 @@ def seal(
     return sealed_artifacts
 
 
+def observe(
+    path: Path | str,
+    *,
+    key: str | None = None,
+    driver: str | None = None,
+    member: str | None = None,
+    ledger: StoreLedger | None = None,
+    site_context: SiteContext | None = None,
+    mounts: Sequence[Mount] | Mapping[str, Mount | Path | str] | None = None,
+) -> Artifact:
+    """Observe an existing local file or directory and return a v2 `Artifact`."""
+    resolved_path = Path(path).expanduser().resolve()
+    if not resolved_path.exists():
+        raise FileNotFoundError(f"Cannot observe non-existent path: {resolved_path}")
+    role_key = (
+        key
+        if (key is not None and key.strip())
+        else (resolved_path.stem or resolved_path.name or "artifact")
+    )
+    po = PendingOutput(
+        role=role_key,
+        path=resolved_path,
+        driver=driver,
+        member=member,
+        is_dir=resolved_path.is_dir(),
+        key=role_key,
+    )
+    sealed = seal(
+        [po],
+        ledger=ledger,
+        run_id=None,
+        site_context=site_context,
+        mounts=mounts,
+        _update_default_mounts=False,
+    )
+    return sealed[role_key]
+
+
 __all__ = [
     "Contract",
     "PendingOutput",
@@ -1560,6 +1610,7 @@ __all__ = [
     "compute_scheme_digest",
     "ensure_digest",
     "locate",
+    "observe",
     "resolve_uri_to_path",
     "seal",
     "stage",

@@ -142,6 +142,7 @@ class CouplerMapMixin(Generic[TArtifact, TDeclaredOutput]):
     """
 
     _artifacts: MutableMapping[str, TArtifact]
+    _history: MutableMapping[str, list[TArtifact]]
     _declared_outputs: MutableMapping[str, TDeclaredOutput]
     _warn_undefined: bool
     _undefined_keys: builtins.set[str]
@@ -189,8 +190,29 @@ class CouplerMapMixin(Generic[TArtifact, TDeclaredOutput]):
             )
 
     def clear(self) -> None:
-        """Clear all stored artifacts."""
+        """Clear all stored artifacts and history."""
         self._artifacts.clear()
+        self._history.clear()
+
+    def history(self, key: str) -> tuple[TArtifact, ...]:
+        """Return the chronological history of artifacts stored for ``key``."""
+        self._validate_artifact_key(key)
+        return tuple(self._history.get(key, ()))
+
+    def previous(self, key: str) -> TArtifact | None:
+        """Return the previous artifact stored for ``key`` before the current one, or ``None``."""
+        self._validate_artifact_key(key)
+        hist = self._history.get(key, ())
+        return hist[-2] if len(hist) >= 2 else None
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._artifacts
+
+    def __getitem__(self, key: str) -> TArtifact:
+        return self.require(key)
+
+    def __setitem__(self, key: str, artifact: TArtifact) -> None:
+        self.set(key, artifact)
 
     def __len__(self) -> int:
         """Return the number of stored artifacts."""

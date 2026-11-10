@@ -20,6 +20,7 @@ from typing import (
     Literal,
     Mapping,
     Iterator,
+    Sequence,
     Union,
     cast,
     Tuple,
@@ -46,6 +47,7 @@ from consist.core.orchestration import (
     RunSpecResult,
     BatchResult,
 )
+from consist.core.decorators import get_callable_name, get_step_definition
 from consist.core.error_messages import format_problem_cause_fix
 from consist.core.metadata_resolver import MetadataResolver, ResolvedStepIdentity
 from consist.core.resolved_binding import (
@@ -55,7 +57,10 @@ from consist.core.resolved_binding import (
     _create_strict_binding_invocation_context,
     step_contract_identity,
 )
-from consist.core.run_invocation import resolve_run_invocation
+from consist.core.run_invocation import (
+    infer_path_annotated_parameters,
+    resolve_run_invocation,
+)
 from consist.core.run_options import resolve_trace_output_policy
 from consist.digest import normalize_json
 from consist.types import (
@@ -1432,7 +1437,9 @@ class ScenarioContext:
             merged.update(self._coerce_mapping(facet, "facet"))
         return normalize_json(merged)
 
-    def _resolve_input_value(self, value: RunInputRef) -> ArtifactRef:
+    def _resolve_input_value(
+        self, value: RunInputRef, key: Optional[str] = None
+    ) -> ArtifactRef:
         def _resolve_coupler_ref(ref: str) -> Optional[ArtifactRef]:
             if ref in self.coupler:
                 return self.coupler.require(ref)
@@ -1440,6 +1447,7 @@ class ScenarioContext:
 
         return self.tracker._resolve_input_reference(
             value,
+            key=key,
             type_label="Scenario inputs",
             missing_path_error=format_problem_cause_fix(
                 problem="Scenario input path does not exist: {path!s}",
@@ -1483,7 +1491,7 @@ class ScenarioContext:
                         raise TypeError(
                             f"inputs mapping keys must be str (got {type(key)})."
                         )
-                    resolved_dict[key] = self._resolve_input_value(value)
+                    resolved_dict[key] = self._resolve_input_value(value, key=key)
                 resolved_inputs = resolved_dict
             else:
                 resolved_inputs = [self._resolve_input_value(v) for v in list(inputs)]
@@ -1667,7 +1675,7 @@ class ScenarioContext:
         phase: Optional[str] = None,
         stage: Optional[str] = None,
         parent_run_id: Optional[str] = None,
-        outputs: Optional[List[str]] = None,
+        outputs: Optional[Union[Sequence[str], Mapping[str, OutputPathRef]]] = None,
         output_paths: Optional[Mapping[str, OutputPathRef]] = None,
         output_sets: Optional[Mapping[str, OutputSet]] = None,
         profile_file_schema: bool | Literal["if_changed"] | None = None,
@@ -1742,7 +1750,7 @@ class ScenarioContext:
         if not self._header_record:
             raise RuntimeError("Scenario not active. Use within 'with' block.")
 
-        func_name = getattr(fn, "__name__", None) if fn is not None else None
+        func_name = get_callable_name(fn)
         if (
             fn is not None
             and func_name is None
@@ -1860,19 +1868,52 @@ class ScenarioContext:
         else:
             invocation_inputs = inputs
 
-        requested_input_binding = (
-            execution_options.input_binding if execution_options is not None else None
-        )
+        step_def = get_step_definition(fn)
         if (
-            requested_input_binding is None
-            and execution_options is not None
-            and execution_options.load_inputs is True
+            strict_binding is None
+            and binding is None
+            and invocation_inputs is None
+            and step_def is not None
+            and step_def.inputs is not None
+            and not callable(step_def.inputs)
         ):
+            invocation_inputs = step_def.inputs
+
+        has_path_annotated_params = bool(infer_path_annotated_parameters(fn))
+        requested_input_binding = (
+            execution_options.input_binding
+            if (
+                execution_options is not None
+                and execution_options.input_binding is not None
+            )
+            else (
+                step_def.input_binding
+                if (step_def is not None and isinstance(step_def.input_binding, str))
+                else None
+            )
+        )
+        explicit_load_inputs = (
+            execution_options.load_inputs
+            if (
+                execution_options is not None
+                and execution_options.load_inputs is not None
+            )
+            else (
+                step_def.load_inputs
+                if (step_def is not None and isinstance(step_def.load_inputs, bool))
+                else None
+            )
+        )
+        if requested_input_binding is None and explicit_load_inputs is True:
             requested_input_binding = "loaded"
-        if requested_input_binding in {"loaded", "paths"}:
+        if requested_input_binding in {"loaded", "paths"} or (
+            requested_input_binding is None
+            and explicit_load_inputs is None
+            and has_path_annotated_params
+        ):
             invocation_inputs = self._promote_inputs_for_binding(
                 invocation_inputs,
-                requested_input_binding,
+                requested_input_binding or "paths",
             )
 
         resolved_invocation = resolve_run_invocation(
@@ -1923,7 +1964,6 @@ class ScenarioContext:
         resolved_tags = resolved_invocation.tags
         resolved_facet = resolved_invocation.facet
         resolved_facet_index = resolved_invocation.facet_index
-        resolved_outputs = resolved_invocation.outputs
         resolved_output_paths = resolved_invocation.output_paths
         resolved_inputs = resolved_invocation.inputs
         resolved_input_keys = resolved_invocation.input_keys
@@ -1972,6 +2012,11 @@ class ScenarioContext:
                 raise ValueError(
                     "Resolved binding step contract does not match callable."
                 )
+            if (
+                resolved_invocation.requested_input_binding is None
+                and resolved_invocation.load_inputs is None
+            ):
+                resolved_input_binding = "paths"
             if resolved_input_binding != "paths":
                 raise ValueError(
                     "Resolved binding destinations require input_binding='paths'."
@@ -2031,12 +2076,16 @@ class ScenarioContext:
         )
 
         promoted_inputs = self._promote_inputs_for_binding(
-            resolved_inputs, resolved_input_binding
+            resolved_inputs,
+            resolved_input_binding
+            if resolved_input_binding != "none" or not has_path_annotated_params
+            else "paths",
         )
         resolved_inputs = self._resolve_inputs(
             promoted_inputs, resolved_input_keys, resolved_optional_input_keys
         )
         resolved_output_paths = self._resolve_output_paths(resolved_output_paths)
+        outputs_for_tracker = resolved_invocation.outputs_for_delegation
 
         resolved_cache_epoch = (
             cache_epoch
@@ -2044,7 +2093,7 @@ class ScenarioContext:
             else (
                 self.cache_epoch
                 if self.cache_epoch is not None
-                else getattr(self.tracker, "_cache_epoch", None)
+                else self.tracker._cache_epoch
             )
         )
 
@@ -2073,7 +2122,7 @@ class ScenarioContext:
             phase=phase,
             stage=stage,
             parent_run_id=parent_run_id,
-            outputs=resolved_outputs,
+            outputs=outputs_for_tracker,
             output_paths=resolved_output_paths,
             output_sets=resolved_invocation.output_sets,
             profile_file_schema=profile_file_schema,
@@ -2098,7 +2147,16 @@ class ScenarioContext:
                 run_completion_archive=effective_run_completion_archive,
             ),
             execution_options=ExecutionOptions(
-                input_binding=resolved_input_binding,
+                input_binding=(
+                    resolved_input_binding
+                    if strict_binding is not None
+                    else resolved_invocation.requested_input_binding
+                ),
+                load_inputs=(
+                    None
+                    if strict_binding is not None
+                    else resolved_invocation.load_inputs
+                ),
                 input_paths=(
                     strict_snapshot_paths
                     if strict_snapshot_paths is not None
@@ -2165,7 +2223,7 @@ class ScenarioContext:
         year: Optional[int] = None,
         iteration: Optional[int] = None,
         parent_run_id: Optional[str] = None,
-        outputs: Optional[List[str]] = None,
+        outputs: Optional[Union[Sequence[str], Mapping[str, OutputPathRef]]] = None,
         output_paths: Optional[Mapping[str, OutputPathRef]] = None,
         capture_dir: Optional[Path] = None,
         capture_pattern: str = "*",
@@ -2257,7 +2315,7 @@ class ScenarioContext:
         resolved_identity_inputs = resolved_invocation.identity_inputs
         resolved_tags = self._merge_step_tags(resolved_invocation.tags)
         resolved_facet = self._merge_step_facet(resolved_invocation.facet)
-        resolved_outputs = resolved_invocation.outputs
+        resolved_outputs = resolved_invocation.outputs_for_delegation
         resolved_output_paths = self._resolve_output_paths(
             resolved_invocation.output_paths
         )
