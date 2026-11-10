@@ -8,7 +8,7 @@ For the user-facing mental model, see [How Consist Works](architecture.md).
 
 ## The Hub-and-Spokes Data Model (The Artifact Triad)
 
-In user-facing code, an `Artifact` ties together three concepts: its **name** (`art.key`), its **fingerprint** (`art.identity`), and its **location** (`art.path` / `art.location`). Inside `provenance.duckdb`, Consist normalizes these three concerns into a **Hub-and-Spokes** schema (`consist.store.schema_v2.sql`):
+In user-facing code, an `Artifact` ties together three concepts: its **name** (`art.key`), its **fingerprint** (`art.identity` / `art.anchor`), and its **location** (`art.path` / `art.primary_location`). Inside `provenance.duckdb`, Consist normalizes these three concerns into a **Hub-and-Spokes** schema (`consist.store.schema_v2.sql`):
 
 ```mermaid
 flowchart TD
@@ -27,9 +27,9 @@ flowchart TD
 
 | User-facing concept | Public v2 API | Internal store representation |
 | :--- | :--- | :--- |
-| **Fingerprint** | `art.identity`, `art.digest()` | `content.anchor` (`VARCHAR` primary key, formatted `<scheme>:<value>`) + `content_digest(anchor, scheme, value, basis)` |
+| **Fingerprint** | `art.identity`, `art.anchor` | `content.anchor` (`VARCHAR` primary key, formatted `<scheme>:<hex>`) + `content_digest(anchor, scheme, value, basis)` |
 | **Name** | `art.key`, `inputs`/`outputs` keys | `run_binding.slot` (paired with `direction`, `ordinal`, `role`, `anchor`, and `artifact_id`) and `artifact.key` |
-| **Location** | `art.path`, `art.location` | `artifact_location` observations + `location_event` status transitions, queried via `artifact_location_current` and `locate_current(anchors)` |
+| **Location** | `art.path`, `art.primary_location`, `art.uri` | `artifact_location` observations + `location_event` status transitions, queried via `artifact_location_current` and `locate_current(anchors)` |
 | **Artifact** | `Artifact` | `artifact(id, key, driver, anchor, run_id, schema_id, meta, created_at)` |
 | **Run** | `Run` | `run(id, model_name, status, code_hash, config_hash, input_hash, signature, signature_scheme, cache_status, ...)` |
 
@@ -55,19 +55,19 @@ flowchart TD
 
 ## Digest Schemes & Multi-Digest Equivalence
 
-Consist represents every fingerprint via `Identity(kind, anchor_scheme, anchor_value, digests)` (`consist.primitives.identity`):
+Consist represents every fingerprint via `Identity(anchor, claims=())` (`consist.digest.Identity`):
 
 | Scheme | `Kind` | Description |
 | :--- | :--- | :--- |
 | `sha256:file` | `Kind.BYTES` | Full-file SHA-256 digest of a regular file on disk. |
-| `sha256:manifest-v1` | `Kind.TREE` / `Kind.BUNDLE` | Canonical structural manifest digest over a directory tree, Zarr store, or multi-file bundle (recording relative paths, entry types, sizes, and per-entry `sha256:file` digests under a recorded `FilterPolicy`). |
-| `ctd1:sha256` | `Kind.SEMANTIC` | Canonical Tabular Digest v1 over arrow/tabular schemas and row contents, allowing format-independent semantic equivalence between Parquet, CSV, and ingested DuckDB tables. |
-| `sha256:logical_matrix:v1` / `sha256:logical_matrices:v1` | `Kind.SEMANTIC` | Canonical digest for single or multi-table HDF5/OpenMatrix (`omx`) containers. |
+| `sha256:manifest-v1` | `Kind.CONTAINER` | Canonical structural manifest digest over a directory tree, Zarr store, or multi-file bundle (recording relative paths, entry types, sizes, and per-entry `sha256:file` digests under a recorded `FilterPolicy`). |
+| `ctd1:sha256` | `Kind.LOGICAL` | Canonical Tabular Digest v1 over arrow/tabular schemas and row contents, allowing format-independent semantic equivalence between Parquet, CSV, and ingested DuckDB tables. |
+| `sha256:logical_matrix:v1` / `sha256:logical_matrices:v1` | `Kind.LOGICAL` | Canonical digest for single or multi-table HDF5/OpenMatrix (`omx`) and Zarr matrix containers. |
 | `legacy-v1:unverified` | `Kind.HISTORICAL` | Assigned during `consist migrate` to Consist 0.4 artifacts whose original bytes were missing, overwritten, or skipped with `--quick`. |
 
 ### Historical Isolation and Promotion (`anchor_promotion`)
 
-`Kind.HISTORICAL` (`legacy-v1:unverified:<hash>`) is strictly isolated from cache-hit matching (`Identity.is_cache_eligible` is `False`). Historical artifacts participate in lineage traversal, hybrid views, and metadata queries, but `StoreLedger.find_cached_run` never matches a run whose inputs or outputs rely on unverified historical anchors.
+`Kind.HISTORICAL` (`legacy-v1:unverified:<hash>`) is strictly isolated from cache-hit matching (`Identity.verifiable` is `False`). Historical artifacts participate in lineage traversal, hybrid views, and metadata queries, but `StoreLedger.find_cached_run` never matches a run whose inputs or outputs rely on unverified historical anchors.
 
 When a user runs `consist promote <db_path> <target> --path <file>`, Consist hashes the restored file to obtain a verified `anchor`, inserts a mapping row into `anchor_promotion(historical_anchor, verified_anchor, basis, asserted_by, evidence, promoted_at)`, and records an active `artifact_location` observation so subsequent runs can reuse the artifact.
 
@@ -107,7 +107,7 @@ To avoid re-hashing gigabytes of unchanged data on every step while still catchi
 
 ### Fast `locate()` and the Racy-Stat Guard
 
-When Consist resolves a location via `locate()` or admits an existing path via `admit()`:
+When Consist resolves a location via `locate()` or observes an existing path via `observe()`:
 
 1. **Stat comparison**: Consist runs `os.stat()` (opening a pinned file descriptor where supported) and compares `(inode, size, mtime_ns, ctime_ns)` against the stored `FileStat` witness.
 2. **2-second racy-stat guard**: Filesystems can coalesce sub-second writes within the same timestamp tick as the original observation. If `abs(observed_at_ns - mtime_ns) < 2_000_000_000` (2 seconds), Consist does not trust the stat match alone and forces a full content re-hash before certifying the witness.
@@ -126,10 +126,10 @@ Every run maintains two persistence records:
 
 ### Schema Version Detection & v1 Tripwires
 
-When opening a database (`consist.store.detect.detect_store_schema`), Consist inspects `consist_schema.version`:
+When opening a database (`consist.store.detect.detect_schema`), Consist inspects `consist_schema.version`:
 
 - **v2 database (`version = 2`)**: Initializes `StoreLedger` and verifies all expected v2 tables and views.
-- **v1 database (`run` / `artifact` present without `consist_schema.version = 2`)**: Raises `DatabaseMigrationRequiredError` with instructions to run `consist migrate <db_path>`.
+- **v1 database (`run` / `artifact` present without `consist_schema.version = 2`)**: Raises `DatabaseMigrationRequired` with instructions to run `consist migrate <db_path>`.
 - **v1 Tripwire Views**: `init_v2_schema` installs empty read-only SQL views for all 12 legacy v1-only table names (`artifact_content`, `artifact_schema`, `config_facet`, etc.). Because `duckdb_engine` treats views as existing tables during `SQLModel.metadata.create_all()` and DuckDB rejects `INSERT` into views, an older Consist 0.3/0.4 process accidentally pointed at a v2 database fails fast at bind time without corrupting the v2 store.
 
 ### The 5-Stage `consist migrate` Pipeline

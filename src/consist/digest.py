@@ -1111,6 +1111,30 @@ def _format_shape(shape: Sequence[int]) -> str:
     return f"({','.join(str(d) for d in dims)})"
 
 
+@runtime_checkable
+class _HasAttrs(Protocol):
+    @property
+    def attrs(self) -> Any: ...
+
+
+@runtime_checkable
+class _HasShape(Protocol):
+    @property
+    def shape(self) -> Any: ...
+
+
+@runtime_checkable
+class _HasKeys(Protocol):
+    def keys(self) -> Any: ...
+    def __getitem__(self, key: Any) -> Any: ...
+    def __contains__(self, key: Any) -> bool: ...
+
+
+@runtime_checkable
+class _ToListable(Protocol):
+    def tolist(self) -> Any: ...
+
+
 def _stream_dataset_into_hasher(
     hasher: Any,
     name: str,
@@ -1138,7 +1162,11 @@ def _stream_dataset_into_hasher(
 
     if include_na_attribute:
         resolved_na = na_value
-        if resolved_na is None and hasattr(dataset, "attrs") and "NA" in dataset.attrs:
+        if (
+            resolved_na is None
+            and isinstance(dataset, _HasAttrs)
+            and "NA" in dataset.attrs
+        ):
             resolved_na = _decode_attr_value(dataset.attrs["NA"])
         if resolved_na is not None:
             _update_string(hasher, f"NA={resolved_na}")
@@ -1544,17 +1572,17 @@ def _compute_omx_logical_matrices_sha256_from_h5(
 
     data_container: Any = None
     matrix_names: list[str] = []
-    if data_group is not None and hasattr(data_group, "keys"):
+    if data_group is not None and isinstance(data_group, _HasKeys):
         data_container = data_group
         matrix_names = sorted(
-            str(k) for k in data_group.keys() if hasattr(data_group[k], "shape")
+            str(k) for k in data_group.keys() if isinstance(data_group[k], _HasShape)
         )
-    elif policy.allow_root_h5_datasets and hasattr(h5f, "keys"):
+    elif policy.allow_root_h5_datasets and isinstance(h5f, _HasKeys):
         data_container = h5f
         matrix_names = sorted(
             str(k)
             for k in h5f.keys()
-            if str(k).lower() != lookup_group_name and hasattr(h5f[k], "shape")
+            if str(k).lower() != lookup_group_name and isinstance(h5f[k], _HasShape)
         )
     else:
         raise ValueError("OMX file does not contain a /data group.")
@@ -1569,7 +1597,7 @@ def _compute_omx_logical_matrices_sha256_from_h5(
 
     if policy.lookup_policy == "single_int32_zone_number":
         raw_lookup: Any = None
-        if lookup_group is not None and hasattr(lookup_group, "keys"):
+        if lookup_group is not None and isinstance(lookup_group, _HasKeys):
             for lkey in _PRIMARY_LOOKUP_KEYS:
                 if lkey in lookup_group:
                     raw_lookup = lookup_group[lkey][...]
@@ -1581,11 +1609,11 @@ def _compute_omx_logical_matrices_sha256_from_h5(
 
         if (
             raw_lookup is None
-            and hasattr(h5f, "attrs")
+            and isinstance(h5f, _HasAttrs)
             and "original_zone_ids" in h5f.attrs
         ):
             raw_zones = h5f.attrs["original_zone_ids"]
-            if hasattr(raw_zones, "tolist"):
+            if isinstance(raw_zones, _ToListable):
                 raw_lookup = np.asarray(raw_zones.tolist())
             elif isinstance(raw_zones, (list, tuple)):
                 raw_lookup = np.asarray(raw_zones)
@@ -1608,9 +1636,11 @@ def _compute_omx_logical_matrices_sha256_from_h5(
         )
     else:
         has_lookup_entries = False
-        if lookup_group is not None and hasattr(lookup_group, "keys"):
+        if lookup_group is not None and isinstance(lookup_group, _HasKeys):
             sorted_lkeys = sorted(
-                str(k) for k in lookup_group.keys() if hasattr(lookup_group[k], "shape")
+                str(k)
+                for k in lookup_group.keys()
+                if isinstance(lookup_group[k], _HasShape)
             )
             for lkey in sorted_lkeys:
                 has_lookup_entries = True
@@ -1626,12 +1656,12 @@ def _compute_omx_logical_matrices_sha256_from_h5(
 
         if (
             not has_lookup_entries
-            and hasattr(h5f, "attrs")
+            and isinstance(h5f, _HasAttrs)
             and "original_zone_ids" in h5f.attrs
         ):
             raw_zones = h5f.attrs["original_zone_ids"]
             zone_arr = np.asarray(
-                raw_zones.tolist() if hasattr(raw_zones, "tolist") else raw_zones
+                raw_zones.tolist() if isinstance(raw_zones, _ToListable) else raw_zones
             )
             _stream_dataset_into_hasher(
                 hasher,
@@ -1738,7 +1768,7 @@ def _compute_zarr_logical_matrices_sha256_from_xarray(
     zone_count = int(first_da.shape[0]) if len(first_da.shape) >= 1 else 0
 
     hasher = hashlib.sha256()
-    attrs = dict(ds.attrs) if hasattr(ds, "attrs") else {}
+    attrs = dict(ds.attrs) if isinstance(ds, _HasAttrs) else {}
 
     if policy.lookup_policy == "single_int32_zone_number":
         raw_lookup: Any = None
@@ -1749,7 +1779,7 @@ def _compute_zarr_logical_matrices_sha256_from_xarray(
         if raw_lookup is None and "original_zone_ids" in attrs:
             raw_zones = attrs["original_zone_ids"]
             raw_lookup = np.asarray(
-                raw_zones.tolist() if hasattr(raw_zones, "tolist") else raw_zones
+                raw_zones.tolist() if isinstance(raw_zones, _ToListable) else raw_zones
             )
         if raw_lookup is None:
             for ckey in sorted(str(k) for k in ds.coords.keys()):
@@ -1787,7 +1817,7 @@ def _compute_zarr_logical_matrices_sha256_from_xarray(
         ):
             raw_zones = attrs["original_zone_ids"]
             zone_arr = np.asarray(
-                raw_zones.tolist() if hasattr(raw_zones, "tolist") else raw_zones
+                raw_zones.tolist() if isinstance(raw_zones, _ToListable) else raw_zones
             )
             _stream_dataset_into_hasher(
                 hasher,
@@ -1812,7 +1842,7 @@ def _compute_zarr_logical_matrices_sha256_from_xarray(
     for entry_name, da in virtual_entries:
         na_val = (
             _decode_attr_value(da.attrs["NA"])
-            if hasattr(da, "attrs") and "NA" in da.attrs
+            if isinstance(da, _HasAttrs) and "NA" in da.attrs
             else None
         )
         _stream_dataset_into_hasher(
@@ -1915,7 +1945,9 @@ class Agreement(Enum):
     """Outcome of comparing two identities under an expectation contract."""
 
     MATCH = "match"
+    AGREE = "match"
     MISMATCH = "mismatch"
+    DISAGREE = "mismatch"
     UNKNOWN = "unknown"
 
 
@@ -2263,20 +2295,60 @@ class Expectation:
         {Kind.BYTES, Kind.CONTAINER, Kind.LOGICAL, Kind.SEMANTIC, Kind.FILTERED}
     )
     pinned_schemes: frozenset[str] = frozenset()
+    digests: frozenset[Digest] = field(default=frozenset(), compare=False)
+    basis: tuple[tuple[str, str], ...] = field(default=(), compare=False)
 
     def __post_init__(self) -> None:
-        kinds = frozenset(self.accepts_kinds)
-        if any(not isinstance(k, Kind) for k in kinds) or Kind.HISTORICAL in kinds:
-            raise ValueError(
-                "Expectation accepts_kinds must be non-HISTORICAL Kind values"
+        raw_first = tuple(self.accepts_kinds or ())
+        if raw_first and all(isinstance(item, Digest) for item in raw_first):
+            extracted_digests = frozenset(raw_first)
+            non_hist = [d for d in extracted_digests if d.kind is not Kind.HISTORICAL]
+            kinds = (
+                frozenset(d.kind for d in non_hist)
+                if non_hist
+                else frozenset(
+                    {
+                        Kind.BYTES,
+                        Kind.CONTAINER,
+                        Kind.LOGICAL,
+                        Kind.SEMANTIC,
+                        Kind.FILTERED,
+                    }
+                )
             )
-        pinned = frozenset(
-            SchemeRegistry.get(s).name for s in (self.pinned_schemes or ())
-        )
-        if any(SchemeRegistry.is_historical(s) for s in pinned):
-            raise ValueError("Expectation cannot pin a Kind.HISTORICAL digest scheme")
+            pinned = frozenset(
+                SchemeRegistry.get(s).name
+                for s in (self.pinned_schemes or tuple(d.scheme for d in non_hist))
+            )
+            object.__setattr__(self, "digests", extracted_digests)
+        else:
+            kinds = frozenset(self.accepts_kinds)
+            if any(not isinstance(k, Kind) for k in kinds) or Kind.HISTORICAL in kinds:
+                raise ValueError(
+                    "Expectation accepts_kinds must be non-HISTORICAL Kind values"
+                )
+            pinned = frozenset(
+                SchemeRegistry.get(s).name for s in (self.pinned_schemes or ())
+            )
+            if any(SchemeRegistry.is_historical(s) for s in pinned):
+                raise ValueError(
+                    "Expectation cannot pin a Kind.HISTORICAL digest scheme"
+                )
+            object.__setattr__(
+                self,
+                "digests",
+                frozenset(
+                    d if isinstance(d, Digest) else Digest.parse(str(d))
+                    for d in (self.digests or ())
+                ),
+            )
         object.__setattr__(self, "accepts_kinds", kinds)
         object.__setattr__(self, "pinned_schemes", pinned)
+        object.__setattr__(
+            self,
+            "basis",
+            tuple((str(k), str(v)) for k, v in (self.basis or ())),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -2324,6 +2396,16 @@ class Verdict:
     def __post_init__(self) -> None:
         if not isinstance(self.needed, tuple):
             object.__setattr__(self, "needed", tuple(self.needed))
+
+    @property
+    def decided_by(self) -> str | None:
+        """Alias for `matched_scheme`."""
+        return self.matched_scheme
+
+    @property
+    def compute(self) -> tuple[str, ...]:
+        """Alias for `needed` schemes to compute."""
+        return self.needed
 
 
 def compare(

@@ -922,6 +922,7 @@ class StoreLedger:
         mount_instance_id: str | None = None,
         observed_at_ns: int | None = None,
         writer: str | None = None,
+        exclude_anchor_member: tuple[str, str | None] | None = None,
     ) -> list[uuid.UUID]:
         """Carry along active parent and container-child observations from `src_uri` to `dst_uri`."""
         ts_ns = time.time_ns() if observed_at_ns is None else int(observed_at_ns)
@@ -929,9 +930,12 @@ class StoreLedger:
 
         current_rows = [
             row
-            for row in self.query_location_current(site=site, include_evicted=False)
-            if str(row["uri"]) == src_uri
-            and str(row.get("status", "active")) == "active"
+            for row in self.query_location_current(
+                site=site,
+                uri=src_uri,
+                include_evicted=False,
+            )
+            if str(row.get("status", "active")) == "active"
         ]
         if not current_rows:
             return []
@@ -958,8 +962,14 @@ class StoreLedger:
         )
         new_obs_ids: list[uuid.UUID] = []
         for row in current_rows:
+            row_anchor_str = str(row["anchor"])
             row_member = str(row["member"]) if row.get("member") is not None else None
-            row_identity = self.get_identity(str(row["anchor"]))
+            if exclude_anchor_member is not None and (
+                row_anchor_str == exclude_anchor_member[0]
+                and row_member == exclude_anchor_member[1]
+            ):
+                continue
+            row_identity = self.get_identity(row_anchor_str)
             old_witness = row.get("witness")
             if row_member is None:
                 if dst_path is not None and Path(dst_path).is_dir():
@@ -1092,16 +1102,23 @@ class StoreLedger:
         *,
         anchors: set[str] | None = None,
         site: str | None = None,
+        uri: str | None = None,
         include_evicted: bool = True,
     ) -> list[dict[str, Any]]:
         """Merge DuckDB `artifact_location` + `location_event` with the in-memory overlay."""
+        where_parts: list[str] = []
+        where_params: list[Any] = []
         if site is not None:
-            cur = self._con.execute(
-                "SELECT * FROM artifact_location WHERE site = ?",
-                [site],
-            )
-        else:
-            cur = self._con.execute("SELECT * FROM artifact_location")
+            where_parts.append("site = ?")
+            where_params.append(site)
+        if uri is not None:
+            where_parts.append("uri = ?")
+            where_params.append(uri)
+        where_clause = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
+        cur = self._con.execute(
+            f"SELECT * FROM artifact_location{where_clause}",
+            where_params,
+        )
         db_obs = self._rows_to_location_dicts(cur.description, cur.fetchall())
         all_obs = db_obs + [dict(v) for v in self._overlay_observations.values()]
 
@@ -1156,6 +1173,8 @@ class StoreLedger:
                 continue
             if site is not None and str(obs["site"]) != site:
                 continue
+            if uri is not None and str(obs["uri"]) != uri:
+                continue
             ev_info = best_event_by_obs.get(obs["observation_id"])
             status = ev_info[1] if ev_info is not None else "active"
             tref = ev_info[2] if ev_info is not None else None
@@ -1179,6 +1198,7 @@ class StoreLedger:
         *,
         anchor: str | None = None,
         site: str | None = None,
+        uri: str | None = None,
         include_evicted: bool = True,
     ) -> list[dict[str, Any]]:
         clauses: list[str] = []
@@ -1188,6 +1208,9 @@ class StoreLedger:
         if site is not None:
             clauses.append("site = ?")
             params.append(site)
+        if uri is not None:
+            clauses.append("uri = ?")
+            params.append(uri)
         if not include_evicted:
             clauses.append("status != 'evicted' AND status != 'failed_transfer'")
 
@@ -1230,6 +1253,7 @@ class StoreLedger:
         *,
         anchor: Digest | str | None = None,
         site: str | None = None,
+        uri: str | None = None,
         include_evicted: bool = True,
     ) -> list[dict[str, Any]]:
         """Query the `artifact_location_current` view."""
@@ -1237,6 +1261,7 @@ class StoreLedger:
             return self._compute_location_current_with_overlay(
                 anchors={str(anchor)} if anchor is not None else None,
                 site=site,
+                uri=uri,
                 include_evicted=include_evicted,
             )
 
@@ -1245,6 +1270,7 @@ class StoreLedger:
             [],
             anchor=str(anchor) if anchor is not None else None,
             site=site,
+            uri=uri,
             include_evicted=include_evicted,
         )
 

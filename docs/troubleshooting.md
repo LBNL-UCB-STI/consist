@@ -46,9 +46,56 @@ export CONSIST_DB_LOCK_BASE_SLEEP_SECONDS=0.2
 export CONSIST_DB_LOCK_MAX_SLEEP_SECONDS=5.0
 ```
 
+### "DatabaseMigrationRequired: Consist 0.5 can't open this database yet"
+
+**Diagnosis:** You are opening a Consist `0.4.x` (`v1`) DuckDB provenance file
+with Consist `0.5` (`v2`). Consist `0.5` does not mutate `0.4.x` databases in
+place without an explicit migration step.
+
+**Fix:** Upgrade the database out-of-place with `consist migrate` (which keeps
+an automatic `provenance.v1-backup-<YYYY-MM-DD>.duckdb` backup):
+
+```bash
+consist migrate ./provenance.duckdb
+# Or for large archives where you want a fast metadata-only upgrade:
+consist migrate ./provenance.duckdb --quick
+```
+
+You can also opt into automatic migration on startup via
+`Tracker(..., auto_migrate=True)` or `export CONSIST_AUTO_MIGRATE=1`. See
+[Upgrading to Consist 0.5](migrating-to-0.5.md) for details.
+
+### "IncompatibleSchemaError" or DuckDB "Binder Error" when opening `provenance.duckdb` in an older environment
+
+**Diagnosis:** An older Python or Conda environment running `consist<0.5` is
+attempting to open a database that has already been migrated to Consist `0.5`
+(`schema_version >= 2`).
+
+- In `consist==0.4.2`, Consist raises `IncompatibleSchemaError` directly with
+  upgrade instructions.
+- In `consist<=0.4.1`, DuckDB blocks legacy table creation or writes against the
+  `0.5` schema and raises one of the following errors:
+  - `Binder Error: Failed to create foreign key: incompatible types between column "id" ("UUID") and column "artifact_id" ("VARCHAR")`
+  - `Binder Error: Table "run" does not have a column named "git_hash"`
+  - `Cannot insert into view "artifact_content"`
+
+**Fix:** Upgrade `consist` in that environment to `>=0.5.0` (`pip install -U consist`),
+or if you intentionally need to revert the database back to `0.4.x`, run
+`consist migrate undo ./provenance.duckdb` from your `0.5` environment.
+
 ---
 
 ## Run Invocation
+
+### "MissingOutputError: Declared output '...' was not written"
+
+**Diagnosis:** A step declared an output role in `outputs={"role": "path.parquet"}`
+(or `PendingOutput`), and the step function returned normally without creating
+that file or directory at the declared path.
+
+**Fix:** Verify that your step function writes to the injected `Path` parameter
+(for example `def step(cleaned: Path) -> None: df.to_parquet(cleaned)`) and does
+not write to a different working directory or filename.
 
 ### "unexpected keyword argument 'hash_inputs'"
 
@@ -136,22 +183,22 @@ keep a DuckDB connection open until closed.
 `consist.load_relation(...)` as a context manager. For intentional high fan-out,
 raise `CONSIST_RELATION_WARN_THRESHOLD`.
 
-### "Old DBs no longer load after the Relation-first refactor"
+### "Existing v0.4 database raises DatabaseMigrationRequired"
 
-**Diagnosis:** The artifact schema changed: `uri` became `container_uri`, child
-artifacts now use first-class `table_path`, `array_path`, and
-`parent_artifact_id` fields, and `meta["table_path"]` is no longer canonical.
+**Diagnosis:** Consist v0.5 uses the v2 provenance store schema (`StoreLedger`)
+and does not mutate legacy v0.4 databases in place automatically.
 
-**Fix:** Reset old local DBs and re-run workflows:
+**Fix:** Run the non-destructive migration CLI (which creates a backup before
+swapping) or rebuild from `consist.json` snapshots:
 
 ```bash
-rm ./provenance.duckdb
-rm ./test_db.duckdb
+consist migrate ./provenance.duckdb
 ```
 
-Then update code to use `artifact.container_uri`, `artifact.table_path`, and
-`artifact.parent_artifact_id`. Use `tracker.get_child_artifacts(...)` and
-`tracker.get_parent_artifact(...)` for container traversal.
+Update code that accessed legacy v0.4 attributes to use `artifact.uri`,
+`artifact.path`, `artifact.anchor`, and `artifact.meta` (which now contains 100%
+user metadata). See [Migrating to v0.5](migrating-to-0.5.md) for the full
+mapping.
 
 ### "Cache hit but output files are missing"
 
@@ -172,7 +219,7 @@ result = tracker.run(
 ```
 
 For a prior run, archive mirror, or restart workspace, use
-`tracker.hydrate_run_outputs(...)`; see
+`consist.stage(...)` or `tracker.hydrate_run_outputs(...)`; see
 [Historical Recovery](guides/historical-recovery.md).
 
 ### "I want to know why this run missed cache"
@@ -205,13 +252,11 @@ config type drift such as `0` versus `0.0`, changed input fingerprints, changed
 `run.meta["cache_miss_explanation"]`. For manual checks, compute the relevant
 code, config, and input hashes with `tracker.identity`.
 
-For `action-v2` runs, inspect
-`identity_summary["input_identity"]["bindings"][*]["evidence"]` to see
-whether a binding used verified content or a provenance fallback and why. If a
-run hit cache, `identity_summary["cache"]["source_run_id"]` identifies the
-earlier execution that supplied its outputs; compare that run's input links
-with the requested run's links when the same content came from a different
-producer occurrence.
+In Consist v0.5, a cached run is only eligible when all of its bound inputs and
+outputs carry verified digests (`artifact.identity.verifiable` is `True`).
+Historical runs migrated without surviving bytes on disk (`legacy-v1:unverified`)
+can be inspected for lineage but never produce false cache hits until promoted
+via `consist promote`.
 
 ### "How do I clear/reset cache?"
 
@@ -246,8 +291,9 @@ or pass `strict_mounts=False` to `run_container()`.
 **Diagnosis:** The URI scheme is unknown, the mount was not registered, or the
 artifact points at bytes that are no longer reachable from this machine.
 
-**Fix:** Register the mount, fix the URI scheme, or hydrate from a recovery root.
-For portable path rules, see [Mounts & Portability](mounts-and-portability.md).
+**Fix:** Register the `Mount` on your `Tracker` or `StoreLedger`, or pass
+`mounts={...}` to `consist.locate(...)` / `consist.stage(...)`. For portable
+path rules, see [Mounts & Portability](mounts-and-portability.md).
 
 ### "Working directory changed between runs"
 
@@ -255,8 +301,9 @@ For portable path rules, see [Mounts & Portability](mounts-and-portability.md).
 so the recorded provenance path no longer points at the same bytes.
 
 **Fix:** Prefer tracker-managed output paths, absolute mount-backed paths, or
-configured mount roots. For archived historical bytes, record
-`artifact.meta["recovery_roots"]` instead of depending on a mutable cwd.
+configured `Mount` roots. When moving outputs to long-term storage, use
+`consist.archive(artifact, dest_path, mode="move")` so the new location is
+recorded in the store instead of depending on a mutable working directory.
 
 ---
 

@@ -2,6 +2,8 @@
 
 Imagine you ran your model last week, tweaked a config file, and now the result has changed — but you can't tell which input or parameter actually moved the number. Or you re-ran a parameter sweep and watched 30 minutes of preprocessing repeat for inputs that hadn't changed. Consist exists to make both of those problems go away: it records exactly what code, config, and inputs went into each step, and skips re-execution when nothing relevant has changed.
 
+> **You give inputs and outputs *names*. Consist gives your function *paths* to read and write. Cache hits depend on *what the files contain*, not where they are.**
+
 Consist has one recommended onboarding path:
 
 1. `run(...)` for cacheable function steps
@@ -31,7 +33,8 @@ using an unsafe placeholder code version.
 ## Pattern 1: Cacheable Step (`run`)
 
 The same step can be expressed three ways. The recommended onboarding path is
-`input_binding="paths"` because it keeps the function boundary explicit.
+annotating input and output parameters with `: Path` and passing symmetric
+`inputs={...}` and `outputs={...}` dictionaries.
 
 === "Without Consist"
 
@@ -42,15 +45,14 @@ The same step can be expressed three ways. The recommended onboarding path is
     import pandas as pd
 
 
-    def summarize_values(data_path: Path) -> Path:
+    def summarize_values(data_path: Path, summary: Path) -> None:
         df = pd.read_csv(data_path)
-        out = Path("./summary.txt")
-        out.write_text(f"mean={df['value'].mean():.1f}\n", encoding="utf-8")
+        summary.write_text(f"mean={df['value'].mean():.1f}\n", encoding="utf-8")
         print(f"executed summarize_values on {data_path}")
-        return out
 
 
-    summary_path = summarize_values(Path("input.csv"))
+    summary_path = Path("./summary.txt")
+    summarize_values(Path("input.csv"), summary_path)
     print(summary_path.read_text().strip())
     ```
 
@@ -61,33 +63,30 @@ The same step can be expressed three ways. The recommended onboarding path is
     ``` python
     from pathlib import Path
     import pandas as pd
-    from consist import ExecutionOptions, Tracker
+    from consist import Tracker
 
     tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
 
 
-    def summarize_values(data_path: Path) -> dict[str, Path]:
+    def summarize_values(data_path: Path, summary: Path) -> None:
         df = pd.read_csv(data_path)
-        out = Path("./summary.txt")
-        out.write_text(f"mean={df['value'].mean():.1f}\n", encoding="utf-8")
+        summary.write_text(f"mean={df['value'].mean():.1f}\n", encoding="utf-8")
         print(f"executed summarize_values on {data_path}")
-        return {"summary": out}
 
 
     first = tracker.run(
         fn=summarize_values,
-        inputs={"data_path": Path("input.csv")},
-        outputs=["summary"],
-        execution_options=ExecutionOptions(input_binding="paths"),
+        inputs={"data_path": "input.csv"},
+        outputs={"summary": "summary.txt"},
     )
     second = tracker.run(
         fn=summarize_values,
-        inputs={"data_path": Path("input.csv")},
-        outputs=["summary"],
-        execution_options=ExecutionOptions(input_binding="paths"),
+        inputs={"data_path": "input.csv"},
+        outputs={"summary": "summary.txt"},
     )
 
     print(first.cache_hit, second.cache_hit)  # False, True
+    print(second.outputs["summary"].path.read_text(encoding="utf-8").strip())
     ```
 
 === "With Consist (Auto-Loaded Data)"
@@ -102,23 +101,21 @@ The same step can be expressed three ways. The recommended onboarding path is
     tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
 
 
-    def summarize_values(data: pd.DataFrame) -> dict[str, Path]:
-        out = Path("./summary.txt")
-        out.write_text(f"mean={data['value'].mean():.1f}\n", encoding="utf-8")
+    def summarize_values(data: pd.DataFrame, summary: Path) -> None:
+        summary.write_text(f"mean={data['value'].mean():.1f}\n", encoding="utf-8")
         print("executed summarize_values on loaded DataFrame")
-        return {"summary": out}
 
 
     first = tracker.run(
         fn=summarize_values,
         inputs={"data": Path("input.csv")},
-        outputs=["summary"],
+        outputs={"summary": "summary.txt"},
         execution_options=ExecutionOptions(input_binding="loaded"),
     )
     second = tracker.run(
         fn=summarize_values,
         inputs={"data": Path("input.csv")},
-        outputs=["summary"],
+        outputs={"summary": "summary.txt"},
         execution_options=ExecutionOptions(input_binding="loaded"),
     )
 
@@ -134,21 +131,25 @@ python quickstart_run.py
 ```
 
 On the second call (and on the first call's second `tracker.run`), `run(...)`
-returns a cache hit and skips execution.
+returns a cache hit and skips execution. For tabular outputs (such as Parquet or
+CSV), you can also load the result directly with `second.outputs["summary"].as_df()`.
 
-`input_binding="paths"` means your function receives local `Path` objects.
-`input_binding="loaded"` means Consist loads the artifact for you before calling
-the function. Use `"loaded"` when you want hydrated tables or objects; use
-`"paths"` when you want the callable to own its own I/O boundary.
+When input and output parameters are annotated with `: Path`, Consist passes
+local `Path` objects into your function automatically. Setting
+`input_binding="loaded"` tells Consist to load input artifacts into memory (for
+example as a `pd.DataFrame`) before calling the function, while still injecting
+any `: Path`-annotated output destinations.
 
-If a path-bound step needs an input at a specific local filename, request that
-staging directly in `ExecutionOptions`:
+If a path-bound step needs an input staged at a specific local filename, request
+that staging directly in `ExecutionOptions`:
 
 ``` python
+from consist import ExecutionOptions
+
 first = tracker.run(
     fn=summarize_values,
     inputs={"data_path": Path("input.csv")},
-    outputs=["summary"],
+    outputs={"summary": "summary.txt"},
     execution_options=ExecutionOptions(
         input_binding="paths",
         input_materialization="requested",
@@ -167,10 +168,6 @@ durable workspace outside `tracker.run_dir`, prefer configuring that directory
 as a mount root. For a one-off external destination, opt in on the tracker with
 `Tracker(..., allow_external_paths=True)` or set
 `CONSIST_ALLOW_EXTERNAL_PATHS=1`.
-
-The main Consist-specific onboarding cost in these examples is small but real:
-return `dict[str, Path]` instead of a bare `Path`, and declare
-`outputs=[...]` so the tracker knows which artifact key to log.
 
 ## Pattern 2: Always-Execute Step (`trace`)
 
@@ -195,9 +192,8 @@ import consist
 with tracker.scenario("demo_pipeline") as sc:
     step = sc.run(
         fn=summarize_values,
-        inputs={"data_path": Path("input.csv")},
-        outputs=["summary"],
-        execution_options=ExecutionOptions(input_binding="paths"),
+        inputs={"data_path": "input.csv"},
+        outputs={"summary": "summary.txt"},
     )
 
     with sc.trace(
@@ -213,5 +209,6 @@ with tracker.scenario("demo_pipeline") as sc:
 
 - **[Usage Guide](../usage-guide.md)** for choosing the right pattern for your real workflow
 - **[First Workflow](first-workflow.md)** for a larger two-step pipeline
+- **[Upgrading to 0.5](../migrating-to-0.5.md)** if you are upgrading an existing `0.4.x` project
 - **[API Essentials](../api/essentials.md)** for the recommended API surface
 - **[Building a Domain Tracker](../building-domain-tracker.md)** for reusable wrapper design

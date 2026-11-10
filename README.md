@@ -44,48 +44,63 @@ pip install "consist[ibis]"
 
 ## Quick Example
 
+> **You give inputs and outputs *names*. Consist gives your function *paths* to read and write. Cache hits depend on *what the files contain*, not where they are.**
+
 ```python
 from pathlib import Path
 
 import pandas as pd
 
-import consist
-from consist import ExecutionOptions, Tracker
+from consist import Tracker
 
 tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb")
 
 
-def clean_data(raw: Path, threshold: float = 0.5) -> dict[str, Path]:
+def clean_data(raw: Path, cleaned: Path, threshold: float = 0.5) -> None:
     df = pd.read_parquet(raw)
-    out = Path("./cleaned.parquet")
-    df[df["value"] > threshold].to_parquet(out)
-    return {"cleaned": out}
+    df[df["value"] > threshold].to_parquet(cleaned, index=False)
 
 
 first = tracker.run(
     fn=clean_data,
-    inputs={"raw": Path("raw.parquet")},
+    inputs={"raw": "raw.parquet"},
+    outputs={"cleaned": "cleaned.parquet"},
     config={"threshold": 0.5},
-    outputs=["cleaned"],
-    execution_options=ExecutionOptions(input_binding="paths"),
 )
 
 second = tracker.run(
     fn=clean_data,
-    inputs={"raw": Path("raw.parquet")},
+    inputs={"raw": "raw.parquet"},
+    outputs={"cleaned": "cleaned.parquet"},
     config={"threshold": 0.5},
-    outputs=["cleaned"],
-    execution_options=ExecutionOptions(input_binding="paths"),
 )
 
 print(first.cache_hit, second.cache_hit)  # False, True
-cleaned = consist.load_df(second.outputs["cleaned"])
+
+cleaned = second.outputs["cleaned"]
+print(cleaned.path)  # Path(".../cleaned.parquet")
+df = cleaned.as_df()  # loads the DataFrame directly
+
+
+# Chain into the next step by passing the artifact handle as an input:
+def summarize(cleaned: Path, summary: Path) -> None:
+    df = pd.read_parquet(cleaned)
+    df.describe().to_csv(summary)
+
+
+report = tracker.run(
+    fn=summarize,
+    inputs={"cleaned": first.outputs["cleaned"]},
+    outputs={"summary": "summary.csv"},
+)
 ```
 
-In this example, `input_binding="paths"` tells Consist to pass local `Path` objects
-into the callable instead of loading input files. Those same paths are still hashed
-and recorded for cache identity and lineage. For tools that need inputs copied to
-specific local filenames, see [Usage Guide](docs/usage-guide.md#path-staging-example).
+Because `raw`, `cleaned`, and `summary` are annotated with `: Path`, Consist
+automatically passes resolved local `Path` objects into your function, verifies
+that declared output files were written when the step finishes, and fingerprints
+every input and output for cache identity and lineage. For tools that need
+inputs staged to specific local filenames, see
+[Usage Guide](docs/usage-guide.md#path-staging-example).
 
 ### Tracking CLI Commands
 
@@ -111,6 +126,7 @@ consist exec \
 |:--|:--|
 | [Quickstart](docs/getting-started/quickstart.md) | First tracked run and cache hit |
 | [First Workflow](docs/getting-started/first-workflow.md) | Two-step pipeline with explicit artifact links |
+| [Upgrading to 0.5](docs/migrating-to-0.5.md) | Database migration (`consist migrate`) and 0.5 API updates |
 | [Usage Guide](docs/usage-guide.md) | Choosing between `run`, `trace`, and `scenario` |
 | [Caching & Hydration](docs/concepts/caching-and-hydration.md) | Cache identity, hit behavior, and output recovery concepts |
 | [Historical Recovery](docs/guides/historical-recovery.md) | Restoring archived outputs and staging inputs |
