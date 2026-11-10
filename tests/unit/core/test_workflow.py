@@ -734,17 +734,6 @@ def test_scenario_step_run_completion_archive_default_and_override(
         ):
             pass
 
-    with pytest.raises(
-        TypeError,
-        match="step_run_completion_archive must be a RunCompletionArchivePolicy",
-    ):
-        with consist.scenario(
-            "bad_noop_archive_scen",
-            enabled=False,
-            step_run_completion_archive="/tmp/not_policy",  # type: ignore[arg-type]
-        ):
-            pass
-
     def step_one(ctx) -> dict[str, Path]:
         p = ctx.run_dir / "step_one.csv"
         p.write_text("a\n1\n", encoding="utf-8")
@@ -944,8 +933,6 @@ def test_scenario_log_meta_persists_to_header_run_while_suspended(
 def test_scenario_log_meta_outside_active_scenario_raises_runtime_error(
     tracker: Tracker,
 ) -> None:
-    from types import MappingProxyType
-
     sc = tracker.scenario("sc_inactive")
 
     with pytest.raises(RuntimeError, match="Scenario not active"):
@@ -963,14 +950,6 @@ def test_scenario_log_meta_outside_active_scenario_raises_runtime_error(
 
     with pytest.raises(RuntimeError, match="Scenario not active"):
         sc.log_meta(stage="after_exit")
-
-    with consist.scenario("sc_noop", enabled=False) as noop_sc:
-        assert isinstance(noop_sc.meta, MappingProxyType)
-        assert dict(noop_sc.meta) == {}
-        with pytest.raises(TypeError):
-            noop_sc.meta["x"] = 1  # type: ignore[index]
-        assert noop_sc.log_meta(stage="noop") is None
-        assert dict(noop_sc.meta) == {}
 
 
 def test_scenario_positional_arguments_preserve_legacy_positions(

@@ -58,7 +58,6 @@ from consist.core.drivers import (
     _normalize_columns,
 )
 from consist.core.gtfs import GTFS_BUNDLE_SOURCE_KEY, GtfsCanonicalizationResult
-from consist.core.noop import NoopRunContext, NoopScenarioContext
 from consist.core.run_options import raise_legacy_policy_kwargs_error
 from consist.core.stores import get_hot_data_db_path
 from consist.core.views import _quote_ident, create_view_model
@@ -491,7 +490,6 @@ def require_runtime_kwargs(*names: str) -> Callable[[Callable[..., Any]], Callab
     return require_runtime_kwargs_decorator(*names)
 
 
-@contextmanager
 def scenario(
     name: str,
     tracker: Optional["Tracker"] = None,
@@ -523,8 +521,8 @@ def scenario(
         The Tracker instance to use for persistence. Defaults to the active
         global tracker.
     enabled : bool, default True
-        If False, returns a no-op context that executes functions without
-        recording provenance, preserving the Scenario API ergonomics for debugging.
+        Must be ``True``. Passing ``False`` raises ``ValueError``; use
+        ``Tracker(run_dir=..., db_path=None)`` for database-free execution.
     step_tags : Optional[list[str]], optional
         Default tags applied to child ``scenario.run(...)`` and
         ``scenario.trace(...)`` calls. These defaults do not apply to the
@@ -547,43 +545,30 @@ def scenario(
     ScenarioContext
         An active scenario context with an internal Coupler for artifact chaining.
     """
-    if not enabled:
-        yield NoopScenarioContext(
+    _require_enabled(enabled, "consist.scenario")
+
+    @contextmanager
+    def _scenario_cm():
+        tr = _resolve_tracker(tracker)
+        with tr.scenario(
             name,
             step_tags=step_tags,
             step_facet=step_facet,
             step_run_completion_archive=step_run_completion_archive,
             **kwargs,
+        ) as sc:
+            yield sc
+
+    return _scenario_cm()
+
+
+def _require_enabled(enabled: bool, api_name: str) -> None:
+    if not enabled:
+        raise ValueError(
+            f"{api_name} with enabled=False is no longer supported; NoopTracker and "
+            "noop mode were removed in Consist v0.5. Use Tracker(run_dir=..., "
+            "db_path=None) for database-free execution."
         )
-        return
-    tr = _resolve_tracker(tracker)
-    with tr.scenario(
-        name,
-        step_tags=step_tags,
-        step_facet=step_facet,
-        step_run_completion_archive=step_run_completion_archive,
-        **kwargs,
-    ) as sc:
-        yield sc
-
-
-@contextmanager
-def noop_scenario(name: str, **kwargs: Any):
-    """
-    Creates a scenario context that executes without provenance tracking.
-
-    This is useful for debugging or running simulations where you want the
-    ergonomics of the Consist scenario API (like the Coupler and RunResult)
-    but do not want to record any metadata or artifacts to the database.
-
-    Parameters
-    ----------
-    name : str
-        Name of the scenario (for display/logging purposes).
-    **kwargs : Any
-        Additional arguments forwarded to the noop context.
-    """
-    yield NoopScenarioContext(name, **kwargs)
 
 
 @contextmanager
@@ -2122,7 +2107,7 @@ def log_artifact(
     facet_index : bool, default False
         If True, flatten scalar facet values for fast artifact querying.
     enabled : bool, default True
-        If False, returns a noop artifact object without requiring an active run.
+        Must be ``True``. Passing ``False`` raises ``ValueError``.
     **meta : Any
         Additional key-value pairs to store in the artifact's flexible `meta` field.
         ``recovery_roots`` may be supplied here and will be normalized to an
@@ -2138,27 +2123,10 @@ def log_artifact(
     RuntimeError
         If called outside an active run context.
     ValueError
-        If `key` is not provided when `path` is a path-like (str/Path).
+        If `key` is not provided when `path` is a path-like (str/Path), or if
+        ``enabled=False`` is passed.
     """
-    if not enabled:
-        return NoopRunContext().log_artifact(
-            path=path,
-            key=key,
-            direction=direction,
-            schema=schema,
-            strict_schema=strict_schema,
-            driver=driver,
-            content_hash=content_hash,
-            force_hash_override=force_hash_override,
-            validate_content_hash=validate_content_hash,
-            reuse_if_unchanged=reuse_if_unchanged,
-            reuse_scope=reuse_scope,
-            parent_artifact_id=parent_artifact_id,
-            facet=facet,
-            facet_schema_version=facet_schema_version,
-            facet_index=facet_index,
-            **meta,
-        )
+    _require_enabled(enabled, "consist.log_artifact")
     return get_active_tracker().log_artifact(
         path=path,
         key=key,
@@ -2225,7 +2193,7 @@ def log_artifacts(
         Deprecated for outputs. ``any_uri`` is ignored for outputs; deduplication is
         governed by ``content_id`` instead. Input-side behavior is unaffected.
     enabled : bool, default True
-        If False, returns noop artifact objects without requiring an active run.
+        Must be ``True``. Passing ``False`` raises ``ValueError``.
     **shared_meta : Any
         Metadata key-value pairs applied to ALL logged artifacts.
 
@@ -2239,7 +2207,8 @@ def log_artifacts(
     RuntimeError
         If called outside an active run context.
     ValueError
-        If metadata_by_key contains keys not in outputs, or if any value is None.
+        If metadata_by_key contains keys not in outputs, if any value is None,
+        or if ``enabled=False`` is passed.
     TypeError
         If mapping keys are not strings.
 
@@ -2277,32 +2246,7 @@ def log_artifacts(
     #                  role="primary_unit", weight=1.0
     ```
     """
-    if not enabled:
-        ctx = NoopRunContext()
-        artifacts: Dict[str, ArtifactLike] = {}
-        per_key_meta = metadata_by_key or {}
-        for key, ref in outputs.items():
-            meta = dict(shared_meta)
-            meta.update(per_key_meta.get(key, {}))
-            facet = facets_by_key.get(key) if facets_by_key else None
-            facet_schema_version = (
-                facet_schema_versions_by_key.get(key)
-                if facet_schema_versions_by_key
-                else None
-            )
-            artifacts[str(key)] = ctx.log_artifact(
-                ref,
-                key=str(key),
-                direction=direction,
-                driver=driver,
-                facet=facet,
-                facet_schema_version=facet_schema_version,
-                facet_index=facet_index,
-                reuse_if_unchanged=reuse_if_unchanged,
-                reuse_scope=reuse_scope,
-                **meta,
-            )
-        return artifacts
+    _require_enabled(enabled, "consist.log_artifacts")
     return get_active_tracker().log_artifacts(
         outputs,
         direction=direction,
@@ -2365,7 +2309,7 @@ def log_input(
     facet_index : bool, default False
         Whether to index scalar facet fields for querying.
     enabled : bool, default True
-        If False, returns a dummy artifact object for disconnected execution.
+        Must be ``True``. Passing ``False`` raises ``ValueError``.
     **meta : Any
         Additional metadata fields to store with the artifact.
 
@@ -2374,6 +2318,7 @@ def log_input(
     ArtifactLike
         The logged artifact reference.
     """
+    _require_enabled(enabled, "consist.log_input")
     return log_artifact(
         path=path,
         key=key,
@@ -2447,7 +2392,7 @@ def log_output(
     facet_index : bool, default False
         Whether to index scalar facet fields for querying.
     enabled : bool, default True
-        If False, returns a dummy artifact object.
+        Must be ``True``. Passing ``False`` raises ``ValueError``.
     **meta : Any
         Additional metadata fields to store.
 
@@ -2456,9 +2401,10 @@ def log_output(
     ArtifactLike
         The logged artifact reference.
     """
+    _require_enabled(enabled, "consist.log_output")
     if artifact_kind not in {"file", "directory"}:
         raise ValueError("artifact_kind must be 'file' or 'directory'.")
-    if artifact_kind == "directory" and enabled:
+    if artifact_kind == "directory":
         return get_active_tracker().log_output(
             path,
             key=key,

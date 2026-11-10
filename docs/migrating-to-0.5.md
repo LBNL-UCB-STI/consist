@@ -141,6 +141,18 @@ prior_skims = coupler.previous("skims")
 all_iterations = coupler.history("skims")
 ```
 
+### Removal of `NoopTracker` and `enabled=False`
+
+`NoopTracker`, `NoopScenarioContext`, `NoopCoupler`, `LocalRef`, `NoopArtifact`, and `noop_scenario` have been removed in `0.5.0`. Passing `enabled=False` to `consist.scenario(...)`, `consist.create_tracker(...)`, or top-level logging helpers now raises `ValueError` immediately (`enabled=True` continues to work for backward compatibility, and `consist.create_tracker(...)` is deprecated in favor of instantiating `Tracker(...)` directly).
+
+For lightweight runs without a DuckDB database, instantiate a DB-less `Tracker`:
+
+```python
+from consist import Tracker
+
+tracker = Tracker(run_dir="./runs", db_path=None)
+```
+
 ---
 
 ## 4. Multi-Environment Safety

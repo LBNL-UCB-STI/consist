@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -8,13 +7,12 @@ import pandas as pd
 import pytest
 
 import consist
-from consist import CacheOptions, ExecutionOptions, LocalRef, Tracker, observe
+from consist import CacheOptions, ExecutionOptions, Tracker, observe
 from consist.artifact import (
     Artifact as V2Artifact,
     MissingOutputError,
 )
 from consist.core.coupler import Coupler
-from consist.core.noop import NoopCoupler
 from consist.core.resolved_binding import (
     ArtifactIdentity,
     ResolvedBindingBuilder,
@@ -129,36 +127,27 @@ def test_coupler_path_resolves_v2_artifact_with_tracker_mounts(tmp_path: Path) -
     assert coupler.path("skims") == target_file.resolve()
 
 
-def test_local_ref_and_noop_coupler_zero_io_and_ergonomics(tmp_path: Path) -> None:
+def test_standalone_coupler_supports_unmaterialized_paths_and_existing_files(
+    tmp_path: Path,
+) -> None:
     nonexistent = tmp_path / "does_not_exist.parquet"
-    ref = LocalRef(nonexistent, key="planned")
-    assert ref.path == nonexistent
-    assert ref.driver == "parquet"
-    assert os.fspath(ref) == str(nonexistent)
-    assert ref.get_path() == nonexistent
-    assert ref.as_path() == nonexistent
-    assert ref.locate() == nonexistent
-
-    with_meta = ref.with_meta(iteration=2)
-    assert with_meta.meta["iteration"] == 2
-    assert "iteration" not in ref.meta
-
     csv_path = tmp_path / "table.csv"
     csv_path.write_text("col1,col2\n10,20\n", encoding="utf-8")
-    csv_ref = LocalRef(csv_path, key="table")
-    df = csv_ref.as_df()
+
+    coupler = Coupler()
+    r1 = coupler.set_from_artifact("out", nonexistent)
+    assert r1 == nonexistent
+    assert coupler.path("out") == nonexistent
+
+    r2 = coupler.set("out", csv_path)
+    assert isinstance(r2, V2Artifact)
+    assert coupler.require("out") == r2
+    assert coupler.previous("out") == r1
+    assert coupler.history("out") == (r1, r2)
+    assert coupler.path("out") == csv_path.resolve()
+    df = r2.as_df()
     assert list(df.columns) == ["col1", "col2"]
     assert df.iloc[0]["col1"] == 10
-
-    noop_coupler = NoopCoupler()
-    r1 = noop_coupler.set("out", nonexistent)
-    r2 = noop_coupler.set("out", csv_path)
-    assert isinstance(r1, LocalRef)
-    assert isinstance(r2, LocalRef)
-    assert noop_coupler.require("out") == r2
-    assert noop_coupler.previous("out") == r1
-    assert noop_coupler.history("out") == (r1, r2)
-    assert noop_coupler.path("out") == csv_path
 
 
 def test_legacy_artifact_as_df_without_tracker(tmp_path: Path) -> None:
@@ -366,12 +355,13 @@ def test_parameter_path_type_hint_input_binding_inference(tmp_path: Path) -> Non
     assert issubclass(seen_override["lookup"], Path)
 
 
-def test_noop_scenario_supports_symmetric_outputs_and_path_type_hint_binding(
+def test_dbless_tracker_scenario_supports_symmetric_outputs_and_path_type_hint_binding(
     tmp_path: Path,
 ) -> None:
-    raw_csv = tmp_path / "noop_raw.csv"
+    tracker = Tracker(run_dir=tmp_path / "runs", db_path=None)
+    raw_csv = tmp_path / "dbless_raw.csv"
     raw_csv.write_text("a\n7\n", encoding="utf-8")
-    out_pq = tmp_path / "noop_out" / "result.parquet"
+    out_pq = tmp_path / "dbless_out" / "result.parquet"
 
     def step(raw: Path, cleaned: Path) -> None:
         assert isinstance(raw, Path)
@@ -380,17 +370,16 @@ def test_noop_scenario_supports_symmetric_outputs_and_path_type_hint_binding(
         df["b"] = df["a"] * 2
         df.to_parquet(cleaned)
 
-    with consist.scenario("noop_pr5", enabled=False) as sc:
+    with tracker.scenario("dbless_pr5") as sc:
         sc.coupler.set("raw", raw_csv)
         res = sc.run(
             fn=step,
             inputs={"raw": sc.coupler.require("raw")},
             outputs={"cleaned": out_pq},
         )
-        cleaned_ref = sc.coupler.require("cleaned")
-        assert isinstance(cleaned_ref, LocalRef)
-        assert cleaned_ref == res.outputs["cleaned"]
-        df = cleaned_ref.as_df()
+        cleaned_art = sc.coupler.require("cleaned")
+        assert cleaned_art == res.outputs["cleaned"]
+        df = cleaned_art.as_df()
         assert list(df["b"]) == [14]
 
 
