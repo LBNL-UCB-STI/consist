@@ -101,6 +101,7 @@ class StoreLedger:
         db_uid: str | None = None,
         instance_key: str | None = None,
         writer: str | None = None,
+        mounts: Sequence[Mount] | Mapping[str, Mount | Path | str] | None = None,
     ) -> None:
         raw_path = str(db_path).strip()
         self.db_path: Path | None = (
@@ -121,6 +122,18 @@ class StoreLedger:
         self._memoized_observations: dict[str, list[Observation]] = {}
         self._memoized_locations: dict[tuple[str, str, str], Any] = {}
         self.mounts: dict[str, Mount] = {}
+        if mounts is not None:
+            if isinstance(mounts, Mapping):
+                for name, val in mounts.items():
+                    key = str(name).strip().rstrip(":/")
+                    self.mounts[key] = (
+                        val
+                        if isinstance(val, Mount)
+                        else Mount(name=key, root=Path(val))
+                    )
+            else:
+                for m in mounts:
+                    self.mounts[m.name] = m
 
         target = ":memory:" if self.db_path is None else str(self.db_path)
         if self.read_only and self.db_path is not None and not self.db_path.exists():
@@ -550,11 +563,12 @@ class StoreLedger:
             meta_dict = {}
 
         hint_obs: list[Observation] = []
-        for cand_anchor in (
-            effective_identity.anchor,
-            verified_anchor_opt,
-            recorded_anchor_opt,
-        ):
+        cand_anchors = (
+            (verified_anchor_opt, effective_identity.anchor, recorded_anchor_opt)
+            if effective_identity.anchor.kind is Kind.HISTORICAL
+            else (effective_identity.anchor, verified_anchor_opt, recorded_anchor_opt)
+        )
+        for cand_anchor in cand_anchors:
             if cand_anchor is not None and len(hint_obs) < 4:
                 for obs in self.memoized_candidates(
                     cand_anchor,
@@ -1235,11 +1249,32 @@ class StoreLedger:
         )
 
 
+def open_v2_store(
+    db_path: Path | str,
+    *,
+    read_only: bool = False,
+    auto_migrate: bool | str | None = None,
+    mounts: Sequence[Mount] | Mapping[str, Mount | Path | str] | None = None,
+    site: str = "local",
+) -> StoreLedger:
+    """Open a v2 `StoreLedger`, running or refusing v1 migration according to `auto_migrate`."""
+    from consist.migrations.v1.migrator import open_v2_store as _open_v2_store
+
+    return _open_v2_store(
+        db_path,
+        read_only=read_only,
+        auto_migrate=auto_migrate,
+        mounts=mounts,
+        site=site,
+    )
+
+
 __all__ = [
     "LOCATION_STATUS_RANKS",
     "LocationStatus",
     "StoreLedger",
     "deserialize_witness_json",
+    "open_v2_store",
     "resolve_status_rank",
     "serialize_witness_json",
 ]

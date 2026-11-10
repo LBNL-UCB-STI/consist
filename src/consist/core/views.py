@@ -937,9 +937,10 @@ class ViewFactory:
             except FileNotFoundError:
                 return None
 
-        primary_path = Path(self.tracker.resolve_uri(record.artifact.container_uri))
-        if primary_path.exists():
-            return primary_path
+        if record.artifact.container_uri:
+            primary_path = Path(self.tracker.resolve_uri(record.artifact.container_uri))
+            if primary_path.exists():
+                return primary_path
 
         if record.artifact.abs_path:
             abs_candidate = Path(record.artifact.abs_path)
@@ -1149,6 +1150,75 @@ class ViewFactory:
             Returns `None` if no cold data artifacts are found or eligible.
         """
         drivers = driver_filter or ["parquet", "csv"]
+        art_cols = self._table_columns("main", "artifact")
+        if "anchor" in art_cols:
+            import json
+            import uuid
+
+            with self.tracker.engine.connect() as conn:
+                rows = conn.execute(
+                    text(
+                        "SELECT a.id, a.key, a.driver, a.anchor, a.run_id, a.meta, "
+                        "r.id AS r_id, r.model_name, r.status, r.year, r.iteration, r.parent_run_id, "
+                        "loc.uri "
+                        "FROM main.artifact a "
+                        "JOIN main.run r ON a.run_id = r.id "
+                        "LEFT JOIN main.anchor_promotion ap "
+                        "ON ap.historical_anchor = a.anchor "
+                        "LEFT JOIN main.artifact_location_current loc "
+                        "ON loc.anchor = COALESCE(ap.verified_anchor, a.anchor) AND loc.status = 'active' "
+                        "WHERE a.key = :concept_key "
+                        "ORDER BY loc.observed_at_ns DESC NULLS LAST"
+                    ),
+                    {"concept_key": concept_key},
+                ).fetchall()
+            v2_records: List[GroupedViewRecord] = []
+            seen_ids: set[str] = set()
+            for row in rows:
+                art_id_str = str(row[0])
+                if art_id_str in seen_ids:
+                    continue
+                drv = str(row[2] or "")
+                if drv not in drivers:
+                    continue
+                seen_ids.add(art_id_str)
+                raw_meta = row[5]
+                meta_dict = (
+                    json.loads(raw_meta)
+                    if isinstance(raw_meta, str) and raw_meta
+                    else (dict(raw_meta) if isinstance(raw_meta, dict) else {})
+                )
+                art_obj = Artifact(
+                    id=uuid.UUID(art_id_str),
+                    key=str(row[1]),
+                    container_uri=str(row[12] or ""),
+                    driver=drv,
+                    hash=str(row[3]),
+                    run_id=str(row[4]) if row[4] is not None else None,
+                    meta=meta_dict,
+                )
+                run_obj = Run(
+                    id=str(row[6]),
+                    model_name=str(row[7] or "unknown"),
+                    status=str(row[8] or "completed"),
+                    year=int(row[9]) if row[9] is not None else None,
+                    iteration=int(row[10]) if row[10] is not None else None,
+                    parent_run_id=str(row[11]) if row[11] is not None else None,
+                    config_hash=None,
+                    git_hash=None,
+                )
+                v2_records.append(
+                    GroupedViewRecord(artifact=art_obj, run=run_obj, facet_values={})
+                )
+            if not v2_records:
+                return None
+            return self._generate_grouped_cold_query_optimized(
+                records=v2_records,
+                facets=[],
+                facet_casts={},
+                include_system_columns=True,
+                missing_files="warn",
+            )
 
         with Session(self.tracker.engine) as session:
             # Query Artifacts + Join Run to get Year/Iteration info

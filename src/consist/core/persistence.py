@@ -66,7 +66,11 @@ from consist.models.run import (
     resolve_canonical_run_meta_field,
 )
 from consist.models.run_config_kv import RunConfigKV
-from consist.store.detect import ConsistError, DatabaseMigrationRequired
+from consist.store.detect import (
+    ConsistError,
+    DatabaseMigrationRequired,
+    IncompatibleSchemaError,
+)
 
 if TYPE_CHECKING:
     from consist.models.artifact import Artifact
@@ -107,10 +111,6 @@ def _coerce_run_tags(run_tags: Any) -> Any:
         except ValueError:
             return run_tags
     return run_tags
-
-
-class IncompatibleSchemaError(ConsistError):
-    """Raised when a Consist database uses a newer schema version than supported."""
 
 
 _V05_NOTICE_EMITTED_DBS: set[str] = set()
@@ -402,6 +402,8 @@ class DatabaseManager:
         lock_max_sleep_seconds: float = 2.0,
         skip_schema_init: bool = False,
         read_only: bool = False,
+        auto_migrate: bool | Literal["quick", "full", "off"] | str | None = None,
+        mounts: Optional[Mapping[str, Any]] = None,
     ):
         self.db_path = db_path
         self._lock_retries = max(1, int(lock_retries))
@@ -409,10 +411,39 @@ class DatabaseManager:
         self._lock_max_sleep_seconds = max(0.0, float(lock_max_sleep_seconds))
         self._skip_schema_init = skip_schema_init or read_only
         self._read_only = read_only
+        self._is_v2_migrated = False
         if read_only and db_path != ":memory:" and not Path(db_path).exists():
             raise FileNotFoundError(
                 f"Database file does not exist for read-only access: {db_path}"
             )
+        if (
+            (auto_migrate is not None or "CONSIST_AUTO_MIGRATE" in os.environ)
+            and db_path != ":memory:"
+            and Path(db_path).exists()
+            and Path(db_path).stat().st_size > 0
+        ):
+            from consist.store.detect import (
+                SchemaState,
+                _resolve_auto_migrate,
+                detect_schema,
+                inspect_v1_summary,
+            )
+
+            state = detect_schema(db_path)
+            if state is SchemaState.V1:
+                mode = _resolve_auto_migrate(auto_migrate)
+                if mode == "off" or read_only:
+                    raise inspect_v1_summary(db_path)
+                from consist.migrations.v1.migrator import migrate_v1_to_v2
+
+                migrate_v1_to_v2(
+                    db_path,
+                    quick=(mode == "quick"),
+                    mounts=mounts,
+                )
+                self._is_v2_migrated = True
+            elif state is SchemaState.V2:
+                self._is_v2_migrated = True
         # Using NullPool ensures the file lock is released when the session closes
         connect_args = {"read_only": True} if read_only else {}
         self.engine = create_engine(
@@ -522,6 +553,8 @@ class DatabaseManager:
 
     def _init_schema(self):
         """Creates tables if they don't exist, wrapped in retry logic."""
+        if self._is_v2_migrated:
+            return
         db_preexisted = (
             self.db_path != ":memory:"
             and Path(self.db_path).exists()

@@ -262,6 +262,7 @@ class Tracker:
         openlineage_namespace: Optional[str] = None,
         db_skip_schema_init: bool = False,
         local_snapshot: bool | Path | str = False,
+        auto_migrate: Optional[bool | Literal["quick", "full", "off"] | str] = None,
     ):
         """
         Orchestrate provenance tracking and intelligent caching for simulation workflows.
@@ -447,6 +448,8 @@ class Tracker:
                     lock_max_sleep_seconds=self._db_lock_max_sleep_seconds,
                     read_only=(self.access_mode == "read_only"),
                     skip_schema_init=db_skip_schema_init,
+                    auto_migrate=auto_migrate,
+                    mounts=self.mounts,
                 )
                 self.metadata_store = MetadataStore(db=metadata_db)
                 self.hot_data_store = HotDataStore(
