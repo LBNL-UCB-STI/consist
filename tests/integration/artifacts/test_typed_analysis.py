@@ -1,26 +1,24 @@
 """
-Consist "Typed Analysis" Workflow Stress Tests
+Consist "Typed Analysis" Workflow Integration Tests
 
-This module contains stress tests for Consist's "typed analysis" workflow.
-This workflow leverages `SQLModel` for schema definition, and `dlt` for
-strict ingestion. It demonstrates how Consist can enforce data contracts
-and enable Pythonic, type-safe querying of large datasets via SQLAlchemy
-expressions, effectively bridging the gap between Python data science
-and SQL analytics.
+This module validates Consist's "typed analysis" workflow. This workflow
+leverages `SQLModel` / `Pydantic` for schema and result-row definitions, and
+`dlt` for strict ingestion. It demonstrates how Consist enforces data contracts
+on ingest and enables type-safe querying of analytical views via `StoreLedger`
+and `tracker.query_rows(..., model=...)`.
 
-These tests validate the end-to-end process of defining a schema,
-ingesting data according to that schema, and then querying the data
-using Python objects rather than raw SQL strings, all while handling
-large volumes of data efficiently.
+These tests validate the end-to-end process of defining a schema, ingesting data
+according to that schema, and hydrating typed Python row models directly from
+parameterized DuckDB SQL queries.
 """
 
 import logging
+import os
 from typing import Optional
 
 import numpy as np
 import pandas as pd
 from pydantic import BaseModel
-import pytest
 from sqlmodel import Field, SQLModel
 
 import consist
@@ -28,7 +26,7 @@ from consist.core.tracker import Tracker
 
 
 # 1. Define the Schema (The Contract)
-# We set schema="global_tables" so SQLAlchemy knows where to find it in DuckDB
+# We set schema="global_tables" so dlt/Consist maps it to global_tables in DuckDB
 class CensusRecord(SQLModel, table=True):
     """
     SQLModel class representing a strict schema for census records.
@@ -71,7 +69,6 @@ class CensusModeSummary(BaseModel):
     avg_income: float
 
 
-@pytest.mark.heavy
 def test_typed_analysis_workflow(tmp_path):
     """
     Tests an end-to-end "typed analysis" workflow using Consist, SQLModel/Pydantic, and `dlt`'s
@@ -87,13 +84,14 @@ def test_typed_analysis_workflow(tmp_path):
         # 1. GENERATE & INGEST (With Strict Schema)
         # =========================================================================
         logging.info("\n[Step 1] Generating data...")
-        N = 100_000
+        N = int(os.getenv("CONSIST_STRESS_ROWS", "5000"))
+        rng = np.random.default_rng(42)
         df = pd.DataFrame(
             {
                 "person_id": np.arange(N),
-                "age": np.random.randint(18, 90, size=N),
-                "income": np.random.normal(60000, 20000, size=N),
-                "mode": np.random.choice(["car", "transit", "walk"], size=N),
+                "age": rng.integers(18, 90, size=N),
+                "income": rng.normal(60000, 20000, size=N),
+                "mode": rng.choice(["car", "transit", "walk"], size=N),
                 "city": "San Francisco",
             }
         )

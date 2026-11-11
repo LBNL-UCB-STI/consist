@@ -2,14 +2,128 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
-from typing import Any, Dict, Iterable, Tuple, TypedDict, cast
+import sys
+from typing import Any, Dict, Iterable, Sequence, Tuple, TypedDict, cast
 from uuid import UUID, uuid4
+
+import pyarrow as pa
 
 from consist.digest import Digest, Identity
 from consist.location import Location, Observation
 from consist.store.ledger import StoreLedger
 
 UTC = timezone.utc
+
+_SEED_RUN_SCHEMA = pa.schema(
+    [
+        ("id", pa.string()),
+        ("model_name", pa.string()),
+        ("parent_run_id", pa.string()),
+        ("status", pa.string()),
+        ("year", pa.int32()),
+        ("iteration", pa.int32()),
+        ("code_hash", pa.string()),
+        ("git_hash", pa.string()),
+        ("config_hash", pa.string()),
+        ("input_hash", pa.string()),
+        ("signature", pa.string()),
+        ("signature_scheme", pa.string()),
+        ("cache_status", pa.string()),
+        ("tags", pa.string()),
+        ("meta", pa.string()),
+        ("started_at", pa.timestamp("us", tz="UTC")),
+        ("ended_at", pa.timestamp("us", tz="UTC")),
+        ("created_at", pa.timestamp("us", tz="UTC")),
+        ("updated_at", pa.timestamp("us", tz="UTC")),
+    ]
+)
+
+_SEED_CONTENT_SCHEMA = pa.schema(
+    [
+        ("anchor", pa.string()),
+        ("repr_kind", pa.string()),
+        ("created_at", pa.timestamp("us", tz="UTC")),
+    ]
+)
+
+_SEED_DIGEST_SCHEMA = pa.schema(
+    [
+        ("anchor", pa.string()),
+        ("scheme", pa.string()),
+        ("value", pa.string()),
+        ("basis", pa.string()),
+        ("computed_at", pa.timestamp("us", tz="UTC")),
+    ]
+)
+
+_SEED_ARTIFACT_SCHEMA = pa.schema(
+    [
+        ("id", pa.string()),
+        ("key", pa.string()),
+        ("driver", pa.string()),
+        ("anchor", pa.string()),
+        ("run_id", pa.string()),
+        ("meta", pa.string()),
+        ("created_at", pa.timestamp("us", tz="UTC")),
+    ]
+)
+
+_SEED_LOCATION_SCHEMA = pa.schema(
+    [
+        ("observation_id", pa.string()),
+        ("anchor", pa.string()),
+        ("uri", pa.string()),
+        ("access_driver", pa.string()),
+        ("basis", pa.string()),
+        ("site", pa.string()),
+        ("observed_at_ns", pa.int64()),
+        ("writer", pa.string()),
+    ]
+)
+
+_SEED_BINDING_SCHEMA = pa.schema(
+    [
+        ("run_id", pa.string()),
+        ("direction", pa.string()),
+        ("occurrence_index", pa.int32()),
+        ("slot", pa.string()),
+        ("ordinal", pa.int32()),
+        ("artifact_id", pa.string()),
+        ("role", pa.string()),
+        ("anchor", pa.string()),
+    ]
+)
+
+
+def _rows_to_arrow_table(
+    rows: Sequence[tuple[Any, ...]],
+    schema: pa.Schema,
+) -> pa.Table:
+    cols = list(zip(*rows))
+    pydict: dict[str, Any] = {
+        field.name: pa.array(cols[idx], type=field.type)
+        for idx, field in enumerate(schema)
+    }
+    return pa.Table.from_pydict(pydict, schema=schema)
+
+
+def _register_and_insert(
+    cur: Any,
+    view_name: str,
+    table: pa.Table,
+    sql: str,
+) -> None:
+    cur.register(view_name, table)
+    try:
+        cur.execute(sql)
+    finally:
+        if sys.exc_info()[0] is not None:
+            try:
+                cur.unregister(view_name)
+            except Exception:
+                pass
+        else:
+            cur.unregister(view_name)
 
 
 def _chunked(iterable: Iterable[Any], size: int):
@@ -43,55 +157,86 @@ def _flush_seed_batch(
     location_rows: list[tuple[Any, ...]],
     binding_rows: list[tuple[Any, ...]],
 ) -> None:
-    if not run_rows and not artifact_rows and not binding_rows:
+    if not any(
+        (
+            run_rows,
+            content_rows,
+            digest_rows,
+            artifact_rows,
+            location_rows,
+            binding_rows,
+        )
+    ):
         return
     with ledger.transaction() as cur:
         if run_rows:
-            cur.executemany(
+            _register_and_insert(
+                cur,
+                "_seed_runs",
+                _rows_to_arrow_table(run_rows, _SEED_RUN_SCHEMA),
                 "INSERT INTO main.run ("
                 "id, model_name, parent_run_id, status, year, iteration, "
                 "code_hash, git_hash, config_hash, input_hash, signature, "
                 "signature_scheme, cache_status, tags, meta, "
                 "started_at, ended_at, created_at, updated_at"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                run_rows,
+                ") SELECT "
+                "id, model_name, parent_run_id, status, year, iteration, "
+                "code_hash, git_hash, config_hash, input_hash, signature, "
+                "signature_scheme, cache_status, CAST(tags AS JSON), CAST(meta AS JSON), "
+                "started_at, ended_at, created_at, updated_at "
+                "FROM _seed_runs",
             )
         if content_rows:
-            cur.executemany(
+            _register_and_insert(
+                cur,
+                "_seed_content",
+                _rows_to_arrow_table(content_rows, _SEED_CONTENT_SCHEMA),
                 "INSERT INTO main.content (anchor, repr_kind, created_at) "
-                "VALUES (?, ?, ?) ON CONFLICT (anchor) DO NOTHING",
-                content_rows,
+                "SELECT anchor, repr_kind, created_at FROM _seed_content "
+                "ON CONFLICT (anchor) DO NOTHING",
             )
         if digest_rows:
-            cur.executemany(
+            _register_and_insert(
+                cur,
+                "_seed_digest",
+                _rows_to_arrow_table(digest_rows, _SEED_DIGEST_SCHEMA),
                 "INSERT INTO main.content_digest "
                 "(anchor, scheme, value, basis, computed_at) "
-                "VALUES (?, ?, ?, ?, ?) ON CONFLICT (anchor, scheme) DO NOTHING",
-                digest_rows,
+                "SELECT anchor, scheme, value, basis, computed_at FROM _seed_digest "
+                "ON CONFLICT (anchor, scheme) DO NOTHING",
             )
         if artifact_rows:
-            cur.executemany(
+            _register_and_insert(
+                cur,
+                "_seed_artifact",
+                _rows_to_arrow_table(artifact_rows, _SEED_ARTIFACT_SCHEMA),
                 "INSERT INTO main.artifact "
                 "(id, key, driver, anchor, run_id, meta, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                artifact_rows,
+                "SELECT CAST(id AS UUID), key, driver, anchor, run_id, "
+                "CAST(meta AS JSON), created_at FROM _seed_artifact",
             )
         if location_rows:
-            cur.executemany(
+            _register_and_insert(
+                cur,
+                "_seed_location",
+                _rows_to_arrow_table(location_rows, _SEED_LOCATION_SCHEMA),
                 "INSERT INTO main.artifact_location ("
                 "observation_id, anchor, uri, access_driver, basis, site, "
                 "observed_at_ns, writer"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                location_rows,
+                ") SELECT CAST(observation_id AS UUID), anchor, uri, access_driver, "
+                "basis, site, observed_at_ns, writer FROM _seed_location",
             )
         if binding_rows:
-            cur.executemany(
+            _register_and_insert(
+                cur,
+                "_seed_binding",
+                _rows_to_arrow_table(binding_rows, _SEED_BINDING_SCHEMA),
                 "INSERT INTO main.run_binding ("
                 "run_id, direction, occurrence_index, slot, ordinal, "
                 "artifact_id, role, anchor"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                ") SELECT run_id, direction, occurrence_index, slot, ordinal, "
+                "CAST(artifact_id AS UUID), role, anchor FROM _seed_binding "
                 "ON CONFLICT (run_id, direction, slot, ordinal) DO NOTHING",
-                binding_rows,
             )
     run_rows.clear()
     content_rows.clear()
@@ -130,20 +275,30 @@ def _seed_base_dataset(
     location_rows: list[tuple[Any, ...]] = []
     binding_rows: list[tuple[Any, ...]] = []
 
+    meta_west = json.dumps({"region": "west"}, separators=(",", ":"))
+    meta_east = json.dumps({"region": "east"}, separators=(",", ":"))
+    tags_json_cache: dict[tuple[bool, bool, bool], str] = {}
+    for has_50k in (False, True):
+        for has_10k in (False, True):
+            for is_tagged in (False, True):
+                t_list = ["scale_100k"]
+                if has_50k:
+                    t_list.append("scale_50k")
+                if has_10k:
+                    t_list.append("scale_10k")
+                if is_tagged:
+                    t_list.append("tagged")
+                tags_json_cache[(has_50k, has_10k, is_tagged)] = json.dumps(
+                    t_list, separators=(",", ":")
+                )
+
     for i in range(total_runs):
         run_id = f"run_{i:07d}"
         scenario_id = f"scenario_{i // runs_per_scenario:05d}"
         model_name = f"model_{i % 5}"
 
-        tags = ["scale_100k"]
-        if i < size_50k:
-            tags.append("scale_50k")
-        if i < size_10k:
-            tags.append("scale_10k")
-        if i % 7 == 0:
-            tags.append("tagged")
-
-        meta = {"region": "west"} if i % 10 == 0 else {"region": "east"}
+        tags_json = tags_json_cache[(i < size_50k, i < size_10k, i % 7 == 0)]
+        meta_json = meta_west if i % 10 == 0 else meta_east
         cfg_hash = f"cfg_{i % 200}"
         in_hash = f"in_{i % 500}"
         git_hash = f"git_{i % 3}"
@@ -164,8 +319,8 @@ def _seed_base_dataset(
                 sig_hash,
                 "sig-v2",
                 "live",
-                json.dumps(tags, separators=(",", ":")),
-                json.dumps(meta, separators=(",", ":")),
+                tags_json,
+                meta_json,
                 base_time,
                 base_time,
                 base_time,
@@ -173,7 +328,7 @@ def _seed_base_dataset(
             )
         )
 
-        art_id = uuid4()
+        art_id = str(uuid4())
         art_key = f"artifact_{i}"
         hex_digest = f"{i + 1:064x}"
         anchor = f"sha256:file:{hex_digest}"
@@ -186,7 +341,7 @@ def _seed_base_dataset(
         )
         location_rows.append(
             (
-                uuid4(),
+                str(uuid4()),
                 anchor,
                 uri,
                 "parquet",
@@ -320,6 +475,7 @@ def _seed_wide_lineage(ledger: StoreLedger, *, input_count: int) -> UUID:
     run_id = "wide_run"
 
     out_id = uuid4()
+    out_id_str = str(out_id)
     out_hex = f"{20_000_000:064x}"
     out_anchor = f"sha256:file:{out_hex}"
 
@@ -328,11 +484,11 @@ def _seed_wide_lineage(ledger: StoreLedger, *, input_count: int) -> UUID:
         (out_anchor, "sha256:file", out_hex, "computed", base_time)
     ]
     artifact_rows: list[tuple[Any, ...]] = [
-        (out_id, "wide_output", "parquet", out_anchor, run_id, "{}", base_time)
+        (out_id_str, "wide_output", "parquet", out_anchor, run_id, "{}", base_time)
     ]
     location_rows: list[tuple[Any, ...]] = [
         (
-            uuid4(),
+            str(uuid4()),
             out_anchor,
             "outputs://wide_output.parquet",
             "parquet",
@@ -343,11 +499,11 @@ def _seed_wide_lineage(ledger: StoreLedger, *, input_count: int) -> UUID:
         )
     ]
     binding_rows: list[tuple[Any, ...]] = [
-        (run_id, "output", 0, "wide_output", 0, out_id, "wide_output", out_anchor)
+        (run_id, "output", 0, "wide_output", 0, out_id_str, "wide_output", out_anchor)
     ]
 
     for i in range(input_count):
-        in_id = uuid4()
+        in_id = str(uuid4())
         in_key = f"wide_input_{i:03d}"
         in_hex = f"{20_000_001 + i:064x}"
         in_anchor = f"sha256:file:{in_hex}"
@@ -358,7 +514,7 @@ def _seed_wide_lineage(ledger: StoreLedger, *, input_count: int) -> UUID:
         )
         location_rows.append(
             (
-                uuid4(),
+                str(uuid4()),
                 in_anchor,
                 f"inputs://wide_input_{i:03d}.parquet",
                 "parquet",

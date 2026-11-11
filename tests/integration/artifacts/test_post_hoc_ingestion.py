@@ -1,7 +1,5 @@
-# tests/stress/test_post_hoc_ingestion.py
-
 """
-Consist Post-Hoc (Offline) Ingestion Stress Tests
+Consist Post-Hoc (Offline) Ingestion Integration Tests
 
 This module contains stress tests for Consist's "post-hoc" or "offline" ingestion
 capabilities, which are particularly relevant for High-Performance Computing (HPC)
@@ -16,21 +14,20 @@ computation from data materialization.
 
 import json
 import logging
+import os
 
 import numpy as np
 import pandas as pd
 from pydantic import TypeAdapter
-import pytest
 
 import consist
 from consist.artifact import Artifact
 from consist.core.tracker import Tracker
 from consist.models.run import Run
 
-N_ROWS = 1_000_000
+N_ROWS = int(os.getenv("CONSIST_STRESS_ROWS", "5000"))
 
 
-@pytest.mark.heavy
 def test_offline_ingestion(tmp_path):
     """
     Tests Consist's "post-hoc" or "offline" ingestion workflow, simulating an HPC scenario.

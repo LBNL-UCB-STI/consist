@@ -28,7 +28,6 @@ import pandas as pd
 from consist.artifact import Artifact
 from consist.core.db_runtime import DB_CALL_PROFILER, DatabaseRuntimeOps
 from consist.core.db_snapshot import DatabaseSnapshotOps, snapshot_sidecar_path
-from consist.core.facet_common import flatten_facet_values
 from consist.core.provenance_writer import ProvenanceWriter as ProvenanceWriter
 from consist.digest import Digest
 from consist.location import DirTreeStat, MemberOf, Mount
@@ -497,157 +496,30 @@ class DatabaseManager:
     ) -> List[Run]:
         effective_parent = parent_run_id if parent_run_id is not None else parent_id
 
-        def _query() -> List[Run]:
-            clauses: list[str] = []
-            params: list[Any] = []
-
-            if status is not None:
-                clauses.append("r.status = ?")
-                params.append(status)
-            if model is not None:
-                clauses.append("r.model_name = ?")
-                params.append(model)
-            if year is not None:
-                clauses.append("r.year = ?")
-                params.append(int(year))
-            if iteration is not None:
-                clauses.append("r.iteration = ?")
-                params.append(int(iteration))
-            if stage is not None:
-                clauses.append("r.stage = ?")
-                params.append(stage)
-            if phase is not None:
-                clauses.append("r.phase = ?")
-                params.append(phase)
-            if effective_parent is not None:
-                clauses.append("r.parent_run_id = ?")
-                params.append(effective_parent)
-            if signature is not None:
-                clauses.append("r.signature = ?")
-                params.append(signature)
-            if cache_status is not None:
-                clauses.append("r.cache_status = ?")
-                params.append(cache_status)
-            if name is not None:
-                clauses.append("r.description = ?")
-                params.append(name)
-            if run_scope and run_scope.strip():
-                scope = run_scope.strip()
-                scope_prefix = f"{scope}__"
-                scope_pattern = f"{_escape_like_literal(scope_prefix)}%"
-                clauses.append(
-                    "("
-                    "r.id = ? "
-                    f"OR r.id LIKE ? ESCAPE '{LIKE_ESCAPE_CHAR}' "
-                    "OR r.description = ? "
-                    f"OR r.description LIKE ? ESCAPE '{LIKE_ESCAPE_CHAR}'"
-                    ")"
-                )
-                params.extend([scope, scope_pattern, scope, scope_pattern])
-
-            if facet:
-                for predicate in flatten_facet_values(
-                    facet_dict=FrozenMeta(facet).to_dict(),
-                    include_json_leaves=True,
-                ):
-                    ns_clause = " AND kv.namespace = ?" if model is not None else ""
-                    ns_params = [model] if model is not None else []
-                    if predicate.value_type == "null":
-                        clauses.append(
-                            "EXISTS (SELECT 1 FROM main.run_config_kv kv "
-                            f"WHERE kv.run_id = r.id AND kv.key = ?{ns_clause} "
-                            "AND kv.value_type = 'null')"
-                        )
-                        params.extend([predicate.key_path, *ns_params])
-                    elif predicate.value_type == "bool":
-                        clauses.append(
-                            "EXISTS (SELECT 1 FROM main.run_config_kv kv "
-                            f"WHERE kv.run_id = r.id AND kv.key = ?{ns_clause} "
-                            "AND kv.value_type = 'bool' AND kv.value_bool = ?)"
-                        )
-                        params.extend(
-                            [predicate.key_path, *ns_params, predicate.value_bool]
-                        )
-                    elif predicate.value_type in ("int", "float"):
-                        clauses.append(
-                            "EXISTS (SELECT 1 FROM main.run_config_kv kv "
-                            f"WHERE kv.run_id = r.id AND kv.key = ?{ns_clause} "
-                            "AND kv.value_type IN ('int', 'float') AND kv.value_num = ?)"
-                        )
-                        params.extend(
-                            [
-                                predicate.key_path,
-                                *ns_params,
-                                float(predicate.value_num or 0.0),
-                            ]
-                        )
-                    elif predicate.value_type == "str":
-                        clauses.append(
-                            "EXISTS (SELECT 1 FROM main.run_config_kv kv "
-                            f"WHERE kv.run_id = r.id AND kv.key = ?{ns_clause} "
-                            "AND kv.value_type = 'str' AND kv.value_str = ?)"
-                        )
-                        params.extend(
-                            [predicate.key_path, *ns_params, predicate.value_str]
-                        )
-                    else:
-                        clauses.append(
-                            "EXISTS (SELECT 1 FROM main.run_config_kv kv "
-                            f"WHERE kv.run_id = r.id AND kv.key = ?{ns_clause} "
-                            "AND kv.value_type = 'json' "
-                            "AND kv.value_json = CAST(? AS JSON))"
-                        )
-                        params.extend(
-                            [
-                                predicate.key_path,
-                                *ns_params,
-                                json.dumps(
-                                    predicate.value_json,
-                                    sort_keys=True,
-                                    separators=(",", ":"),
-                                ),
-                            ]
-                        )
-
-            where_sql = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-            sql = (
-                f"SELECT {StoreLedger._RUN_SELECT_COLUMNS} FROM main.run r"
-                f"{where_sql} "
-                "ORDER BY COALESCE(r.ended_at, r.started_at, r.created_at) DESC, "
-                "r.created_at DESC, r.id DESC"
-            )
-            start_idx = max(0, int(offset))
-            push_pagination = not tags and not metadata
-            if push_pagination:
-                if limit is not None:
-                    sql += " LIMIT ? OFFSET ?"
-                    params.extend([max(0, int(limit)), start_idx])
-                elif start_idx > 0:
-                    sql += " OFFSET ?"
-                    params.append(start_idx)
-
-            with self.ledger.exec_cursor() as cur:
-                rows = cur.execute(sql, params).fetchall()
-
-            runs = [StoreLedger._hydrate_run_row(row) for row in rows]
-            if push_pagination:
-                return runs
-
-            if tags:
-                req_tags = set(tags)
-                runs = [rn for rn in runs if req_tags.issubset(rn.tags)]
-            if metadata:
-                runs = [
-                    rn
-                    for rn in runs
-                    if all(rn.meta.get(mk) == mv for mk, mv in metadata.items())
-                ]
-            if limit is None:
-                return runs[start_idx:]
-            return runs[start_idx : start_idx + max(0, int(limit))]
-
         try:
-            return self.execute_with_retry(_query, operation_name="find_runs")
+            return self.execute_with_retry(
+                lambda: self.ledger._query_runs(
+                    model=model,
+                    status=status,
+                    year=year,
+                    iteration=iteration,
+                    stage=stage,
+                    phase=phase,
+                    parent_run_id=effective_parent,
+                    signature=signature,
+                    cache_status=cache_status,
+                    name=name,
+                    run_scope=run_scope,
+                    tags=tags,
+                    facet=facet,
+                    metadata=metadata,
+                    limit=limit,
+                    offset=offset,
+                    scope_facet_to_model=True,
+                    lifecycle_order=True,
+                ),
+                operation_name="find_runs",
+            )
         except Exception as exc:
             if raise_on_error:
                 raise

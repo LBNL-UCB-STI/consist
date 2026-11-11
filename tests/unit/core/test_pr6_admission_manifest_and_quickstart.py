@@ -14,16 +14,11 @@ import pytest
 import zarr
 
 from consist import (
-    HydratedAdmittedInput,
     Tracker,
     archive,
-    ensure_digest,
     evict,
-    hydrate_admitted_input,
     locate,
     observe,
-    promote_historical_artifact,
-    seal,
 )
 from consist.store.manifest import (
     export_run_manifest,
@@ -35,8 +30,10 @@ from consist.store.manifest import (
 from consist.admission import (
     AdmissionIdentity,
     DeclaredDigestExpectation,
+    HydratedAdmittedInput,
     PriorRunExpectation,
     check_artifact_identity,
+    hydrate_admitted_input,
 )
 from consist.core.views import ViewFactory
 from consist.digest import (
@@ -47,8 +44,9 @@ from consist.digest import (
     compute_logical_matrices_sha256,
     file_sha256,
 )
-from consist.engine import PendingOutput
+from consist.engine import PendingOutput, ensure_digest, seal
 from consist.location import Mount, SiteContext
+from consist.migrations import promote_historical_artifact
 from consist.migrations.v1.fasthash import stat_v1_fast_file_hash
 from consist.migrations.v1.migrator import migrate_v1_to_v2
 from consist.store.detect import ConsistError

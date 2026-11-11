@@ -45,9 +45,12 @@ METRIC_DESCRIPTIONS = {
     "find_runs.scale_10k": "find_runs(tag=scale_10k) over ~10k runs.",
     "find_runs.scale_50k": "find_runs(tag=scale_50k) over ~50k runs.",
     "find_runs.scale_100k": "find_runs(tag=scale_100k) over ~100k runs.",
+    "find_runs.tags_limit_100": "find_runs(tags=['scale_100k'], limit=100) paginated SQL pushdown.",
     "find_runs.tags+model+status": "find_runs with tags + model + status filters.",
     "find_runs.parent_id": "find_runs filtering by parent_run_id (scenario).",
-    "find_runs.metadata": "find_runs with JSON metadata filter (client-side).",
+    "find_runs.metadata": "find_runs with JSON metadata filter (SQL pushdown).",
+    "find_runs.metadata_limit_100": "find_runs(metadata={'region': 'west'}, limit=100) paginated SQL pushdown.",
+    "find_runs.facet_kv": "find_runs(model='diff_model', facet={'param_0000': 0.0}, limit=10) via run_config_kv.",
     "cache.find_matching_run": "cache lookup using config/input/git hashes.",
     "lineage.deep": "get_artifact_lineage on deep dependency chain.",
     "lineage.wide": "get_artifact_lineage on wide dependency graph.",
@@ -188,6 +191,11 @@ def test_large_db_scale_queries(tmp_path):
         )
     assert len(runs_100k) == scale_sizes["scale_100k"]
 
+    expected_tags_limit_100 = min(100, scale_sizes["scale_100k"])
+    with _timed("find_runs.tags_limit_100", metrics):
+        runs_tags_100 = tracker.find_runs(tags=["scale_100k"], limit=100)
+    assert len(runs_tags_100) == expected_tags_limit_100
+
     with _timed("find_runs.tags+model+status", metrics):
         filtered = tracker.find_runs(
             tags=["scale_100k", "tagged"],
@@ -210,6 +218,17 @@ def test_large_db_scale_queries(tmp_path):
             metadata={"region": "west"}, limit=scale_sizes["scale_100k"]
         )
     assert meta_runs
+
+    expected_west_limit_100 = min(100, (total_runs + 9) // 10)
+    with _timed("find_runs.metadata_limit_100", metrics):
+        meta_runs_100 = tracker.find_runs(metadata={"region": "west"}, limit=100)
+    assert len(meta_runs_100) == expected_west_limit_100
+
+    with _timed("find_runs.facet_kv", metrics):
+        facet_runs = tracker.find_runs(
+            model="diff_model", facet={"param_0000": 0.0}, limit=10
+        )
+    assert len(facet_runs) >= 1
 
     with _timed("cache.find_matching_run", metrics):
         cached = tracker.find_matching_run(*cache_tuple)

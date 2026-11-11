@@ -3,15 +3,15 @@ import uuid
 
 import pytest
 
-from consist import (
+from consist import OutputSet
+from consist.api import StringCapture as ApiStringCapture
+from consist.types import (
     EnumCapture,
     FilenameCapture,
     FilenamePattern,
     IntCapture,
-    OutputSet,
     StringCapture,
 )
-from consist.api import StringCapture as ApiStringCapture
 from consist.core.output_sets import (
     build_output_set_manifest,
     discover_output_set_members,
@@ -514,6 +514,10 @@ def test_filename_pattern_extracts_enum_facets(tmp_path: Path) -> None:
 
 def test_string_capture_public_imports() -> None:
     assert StringCapture is ApiStringCapture
+    with pytest.deprecated_call():
+        from consist import StringCapture as TopLevelStringCapture
+
+        assert TopLevelStringCapture is ApiStringCapture
     capture = StringCapture(name="event_type", wildcard=1)
     assert isinstance(capture, FilenameCapture.__args__)
 

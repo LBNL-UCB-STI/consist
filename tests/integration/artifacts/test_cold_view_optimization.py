@@ -12,14 +12,12 @@ query and integrate large volumes of data residing solely on disk.
 """
 
 import logging
-import pytest
 import pandas as pd
 import numpy as np
 import consist
 from consist.core.tracker import Tracker
 
 
-@pytest.mark.heavy
 def test_cold_vectorized_view(tmp_path):
     """
     Tests the vectorized "cold view" creation and querying for a large number of

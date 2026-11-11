@@ -297,7 +297,7 @@ def test_comparative_analysis_benchmark(tmp_path: Path):
         # =========================================================================
         # VERIFICATION
         # =========================================================================
-        # Ensure they got similar results
+        # Ensure numerical parity across Pandas, Polars (if installed), and Consist
         logging.info("\n[Verification]")
         logging.info(f"Pandas Rows: {len(res_pandas)}")
         if pl:
@@ -305,5 +305,34 @@ def test_comparative_analysis_benchmark(tmp_path: Path):
         logging.info(f"Consist Rows: {len(res_consist)}")
 
         assert len(res_consist) == 2
+        consist_by_run = res_consist.set_index("consist_run_id")
+        assert set(consist_by_run.index) == {"run_a", "run_b"}
+        assert consist_by_run.loc["run_a", "avg_val"] == pytest.approx(
+            res_pandas.loc["run_a", "val"], abs=1e-5
+        )
+        assert consist_by_run.loc["run_b", "avg_val"] == pytest.approx(
+            res_pandas.loc["run_b", "val"], abs=1e-5
+        )
+        assert pd.isna(consist_by_run.loc["run_a", "avg_subsidy"])
+        assert consist_by_run.loc["run_b", "avg_subsidy"] == pytest.approx(
+            res_pandas.loc["run_b", "subsidy"], abs=1e-5
+        )
+
+        if pl:
+            assert len(res_polars) == 2
+            polars_by_run = {row["run_id"]: row for row in res_polars.to_dicts()}
+            assert set(polars_by_run) == {"run_a", "run_b"}
+            assert polars_by_run["run_a"]["val"] == pytest.approx(
+                res_pandas.loc["run_a", "val"], abs=1e-5
+            )
+            assert polars_by_run["run_b"]["val"] == pytest.approx(
+                res_pandas.loc["run_b", "val"], abs=1e-5
+            )
+            assert polars_by_run["run_a"]["subsidy"] is None or pd.isna(
+                polars_by_run["run_a"]["subsidy"]
+            )
+            assert polars_by_run["run_b"]["subsidy"] == pytest.approx(
+                res_pandas.loc["run_b", "subsidy"], abs=1e-5
+            )
     finally:
         tracker.close()

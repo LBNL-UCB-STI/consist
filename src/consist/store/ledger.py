@@ -10,6 +10,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
+import math
 import os
 from pathlib import Path
 import socket
@@ -1712,7 +1713,9 @@ class StoreLedger:
         now = created_at if created_at is not None else datetime.now(timezone.utc)
         eff_updated = updated_at if updated_at is not None else (ended_at or now)
         tags_json = (
-            json.dumps(list(tags), separators=(",", ":")) if tags is not None else None
+            json.dumps([str(t) for t in tags], separators=(",", ":"))
+            if tags is not None
+            else None
         )
         meta_payload = FrozenMeta(meta or {}).to_dict()
         eff_stage = (
@@ -1945,7 +1948,115 @@ class StoreLedger:
             return None
         return self._hydrate_run_row(row)
 
-    def find_runs(
+    _LIKE_ESCAPE_CHAR: str = "!"
+
+    @staticmethod
+    def _escape_like_literal(
+        value: str, *, escape_char: str = _LIKE_ESCAPE_CHAR
+    ) -> str:
+        return (
+            value.replace(escape_char, escape_char + escape_char)
+            .replace("%", escape_char + "%")
+            .replace("_", escape_char + "_")
+        )
+
+    @staticmethod
+    def append_run_tag_and_metadata_clauses(
+        clauses: list[str],
+        params: list[Any],
+        *,
+        tags: Sequence[str] | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        table_alias: str = "r",
+    ) -> bool:
+        """Append DuckDB SQL predicates for `Run.tags` and `Run.meta` filters.
+
+        Returns `True` when hydrated candidate rows still require client-side
+        `rn.meta.get(mk) == mv` post-filtering (for non-scalar metadata values
+        or numeric magnitudes `>= 2^53`).
+        """
+        if not table_alias.isidentifier():
+            raise ValueError(f"Invalid SQL table alias: {table_alias!r}")
+
+        if tags:
+            req_tags = list(dict.fromkeys(str(t) for t in tags))
+            if req_tags:
+                clauses.append(
+                    f"CASE WHEN {table_alias}.tags IS NOT NULL "
+                    f"AND json_type({table_alias}.tags) = 'ARRAY' "
+                    f"THEN COALESCE(list_has_all(TRY_CAST({table_alias}.tags AS VARCHAR[]), ?), FALSE) "
+                    "ELSE FALSE END"
+                )
+                params.append(req_tags)
+
+        needs_client_metadata_filter = False
+        if metadata:
+            if any(
+                isinstance(mk, str) and mv is not None for mk, mv in metadata.items()
+            ):
+                clauses.append(
+                    f"({table_alias}.meta IS NOT NULL "
+                    f"AND json_type({table_alias}.meta) = 'OBJECT')"
+                )
+
+            for mk, mv in metadata.items():
+                if not isinstance(mk, str):
+                    clauses.append("1 = 1" if mv is None else "1 = 0")
+                    continue
+
+                # RFC 6901 JSON Pointer avoids JSONPath wildcards ('*'), empty-key
+                # syntax errors, and escape ambiguity for dots/quotes/$/slashes.
+                ptr = "/" + mk.replace("~", "~0").replace("/", "~1")
+                if mv is None:
+                    clauses.append(
+                        f"({table_alias}.meta IS NULL "
+                        f"OR json_type({table_alias}.meta) != 'OBJECT' "
+                        f"OR COALESCE(json_type({table_alias}.meta, ?), 'NULL') = 'NULL')"
+                    )
+                    params.append(ptr)
+                elif isinstance(mv, bool):
+                    clauses.append(
+                        f"(json_type({table_alias}.meta, ?) = 'BOOLEAN' "
+                        f"AND TRY_CAST(json_extract({table_alias}.meta, ?) AS BOOLEAN) = ?)"
+                    )
+                    params.extend([ptr, ptr, mv])
+                elif isinstance(mv, (int, float)):
+                    if isinstance(mv, float) and not math.isfinite(mv):
+                        clauses.append("1 = 0")
+                    elif abs(mv) < (1 << 53):
+                        clauses.append(
+                            f"(json_type({table_alias}.meta, ?) IN ('BIGINT', 'UBIGINT', 'DOUBLE') "
+                            f"AND TRY_CAST(json_extract({table_alias}.meta, ?) AS DOUBLE) = ?)"
+                        )
+                        params.extend([ptr, ptr, float(mv)])
+                    else:
+                        needs_client_metadata_filter = True
+                        clauses.append(
+                            f"json_type({table_alias}.meta, ?) IN ('BIGINT', 'UBIGINT', 'DOUBLE')"
+                        )
+                        params.append(ptr)
+                elif isinstance(mv, str):
+                    clauses.append(
+                        f"(json_type({table_alias}.meta, ?) = 'VARCHAR' "
+                        f"AND json_extract_string({table_alias}.meta, ?) = ?)"
+                    )
+                    params.extend([ptr, ptr, mv])
+                elif isinstance(mv, Mapping):
+                    needs_client_metadata_filter = True
+                    clauses.append(f"json_type({table_alias}.meta, ?) = 'OBJECT'")
+                    params.append(ptr)
+                elif isinstance(mv, Sequence) and not isinstance(
+                    mv, (str, bytes, bytearray)
+                ):
+                    needs_client_metadata_filter = True
+                    clauses.append(f"json_type({table_alias}.meta, ?) = 'ARRAY'")
+                    params.append(ptr)
+                else:
+                    needs_client_metadata_filter = True
+
+        return needs_client_metadata_filter
+
+    def _query_runs(
         self,
         *,
         model: str | None = None,
@@ -1957,13 +2068,16 @@ class StoreLedger:
         parent_run_id: str | None = None,
         signature: str | None = None,
         cache_status: str | None = None,
+        name: str | None = None,
+        run_scope: str | None = None,
         tags: Sequence[str] | None = None,
         facet: Mapping[str, Any] | None = None,
         metadata: Mapping[str, Any] | None = None,
         limit: int | None = 100,
         offset: int = 0,
+        scope_facet_to_model: bool = False,
+        lifecycle_order: bool = False,
     ) -> list[Run]:
-        """Query `main.run` with optional lifecycle, context, tag, and facet filters."""
         clauses: list[str] = []
         params: list[Any] = []
         if model is not None:
@@ -1993,8 +2107,32 @@ class StoreLedger:
         if cache_status is not None:
             clauses.append("r.cache_status = ?")
             params.append(cache_status)
+        if name is not None:
+            clauses.append("r.description = ?")
+            params.append(name)
+        if run_scope and run_scope.strip():
+            scope = run_scope.strip()
+            scope_prefix = f"{scope}__"
+            scope_pattern = f"{self._escape_like_literal(scope_prefix)}%"
+            clauses.append(
+                "("
+                "r.id = ? "
+                f"OR r.id LIKE ? ESCAPE '{self._LIKE_ESCAPE_CHAR}' "
+                "OR r.description = ? "
+                f"OR r.description LIKE ? ESCAPE '{self._LIKE_ESCAPE_CHAR}'"
+                ")"
+            )
+            params.extend([scope, scope_pattern, scope, scope_pattern])
 
         if facet:
+            ns_clause = (
+                " AND kv.namespace = ?"
+                if scope_facet_to_model and model is not None
+                else ""
+            )
+            ns_params: list[Any] = (
+                [model] if scope_facet_to_model and model is not None else []
+            )
 
             def _add_facet_clause(
                 key_path: str,
@@ -2004,35 +2142,36 @@ class StoreLedger:
             ) -> None:
                 if alt_escaped_key is not None and alt_escaped_key != key_path:
                     key_pred = "(kv.key = ? OR kv.key = ?)"
-                    key_params: list[Any] = [key_path, alt_escaped_key]
+                    key_params: list[Any] = [key_path, alt_escaped_key, *ns_params]
                 else:
                     key_pred = "kv.key = ?"
-                    key_params = [key_path]
+                    key_params = [key_path, *ns_params]
 
                 if isinstance(val, bool):
                     clauses.append(
                         "EXISTS (SELECT 1 FROM main.run_config_kv kv "
-                        f"WHERE kv.run_id = r.id AND {key_pred} "
+                        f"WHERE kv.run_id = r.id AND {key_pred}{ns_clause} "
                         "AND kv.value_type = 'bool' AND kv.value_bool = ?)"
                     )
                     params.extend([*key_params, val])
                 elif isinstance(val, (int, float)):
                     clauses.append(
                         "EXISTS (SELECT 1 FROM main.run_config_kv kv "
-                        f"WHERE kv.run_id = r.id AND {key_pred} "
+                        f"WHERE kv.run_id = r.id AND {key_pred}{ns_clause} "
                         "AND kv.value_type IN ('int', 'float') AND kv.value_num = ?)"
                     )
                     params.extend([*key_params, float(val)])
                 elif val is None:
                     clauses.append(
                         "EXISTS (SELECT 1 FROM main.run_config_kv kv "
-                        f"WHERE kv.run_id = r.id AND {key_pred} AND kv.value_type = 'null')"
+                        f"WHERE kv.run_id = r.id AND {key_pred}{ns_clause} "
+                        "AND kv.value_type = 'null')"
                     )
                     params.extend(key_params)
                 elif isinstance(val, str):
                     clauses.append(
                         "EXISTS (SELECT 1 FROM main.run_config_kv kv "
-                        f"WHERE kv.run_id = r.id AND {key_pred} "
+                        f"WHERE kv.run_id = r.id AND {key_pred}{ns_clause} "
                         "AND kv.value_type = 'str' AND kv.value_str = ?)"
                     )
                     params.extend([*key_params, val])
@@ -2040,7 +2179,7 @@ class StoreLedger:
                     unfrozen = FrozenMeta({"v": val}).to_dict()["v"]
                     clauses.append(
                         "EXISTS (SELECT 1 FROM main.run_config_kv kv "
-                        f"WHERE kv.run_id = r.id AND {key_pred} "
+                        f"WHERE kv.run_id = r.id AND {key_pred}{ns_clause} "
                         "AND kv.value_type = 'json' AND kv.value_json = CAST(? AS JSON))"
                     )
                     params.extend(
@@ -2050,39 +2189,69 @@ class StoreLedger:
                         ]
                     )
 
-            for f_key, f_val in facet.items():
-                key_str = str(f_key)
-                escaped_seg = key_str.replace("\\", "\\\\").replace(".", "\\.")
-                if isinstance(f_val, Mapping):
-                    for sr in flatten_facet_values(
-                        facet_dict=FrozenMeta(f_val).to_dict(),
-                        include_json_leaves=True,
-                    ):
-                        full_key = (
-                            f"{escaped_seg}.{sr.key_path}"
-                            if escaped_seg
-                            else sr.key_path
-                        )
-                        if sr.value_type == "null":
-                            _add_facet_clause(full_key, None)
-                        elif sr.value_type == "bool":
-                            _add_facet_clause(full_key, sr.value_bool)
-                        elif sr.value_type in ("int", "float"):
-                            _add_facet_clause(full_key, sr.value_num)
-                        elif sr.value_type == "str":
-                            _add_facet_clause(full_key, sr.value_str)
-                        else:
-                            _add_facet_clause(full_key, sr.value_json)
-                else:
-                    _add_facet_clause(key_str, f_val, alt_escaped_key=escaped_seg)
+            if scope_facet_to_model:
+                for sr in flatten_facet_values(
+                    facet_dict=FrozenMeta(facet).to_dict(),
+                    include_json_leaves=True,
+                ):
+                    if sr.value_type == "null":
+                        _add_facet_clause(sr.key_path, None)
+                    elif sr.value_type == "bool":
+                        _add_facet_clause(sr.key_path, sr.value_bool)
+                    elif sr.value_type in ("int", "float"):
+                        _add_facet_clause(sr.key_path, float(sr.value_num or 0.0))
+                    elif sr.value_type == "str":
+                        _add_facet_clause(sr.key_path, sr.value_str)
+                    else:
+                        _add_facet_clause(sr.key_path, sr.value_json)
+            else:
+                for f_key, f_val in facet.items():
+                    key_str = str(f_key)
+                    escaped_seg = key_str.replace("\\", "\\\\").replace(".", "\\.")
+                    if isinstance(f_val, Mapping):
+                        for sr in flatten_facet_values(
+                            facet_dict=FrozenMeta(f_val).to_dict(),
+                            include_json_leaves=True,
+                        ):
+                            full_key = (
+                                f"{escaped_seg}.{sr.key_path}"
+                                if escaped_seg
+                                else sr.key_path
+                            )
+                            if sr.value_type == "null":
+                                _add_facet_clause(full_key, None)
+                            elif sr.value_type == "bool":
+                                _add_facet_clause(full_key, sr.value_bool)
+                            elif sr.value_type in ("int", "float"):
+                                _add_facet_clause(full_key, sr.value_num)
+                            elif sr.value_type == "str":
+                                _add_facet_clause(full_key, sr.value_str)
+                            else:
+                                _add_facet_clause(full_key, sr.value_json)
+                    else:
+                        _add_facet_clause(key_str, f_val, alt_escaped_key=escaped_seg)
+
+        needs_client_metadata_filter = self.append_run_tag_and_metadata_clauses(
+            clauses,
+            params,
+            tags=tags,
+            metadata=metadata,
+            table_alias="r",
+        )
 
         where_sql = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        order_by = (
+            "COALESCE(r.ended_at, r.started_at, r.created_at) DESC, "
+            "r.created_at DESC, r.id DESC"
+            if lifecycle_order
+            else "r.created_at DESC, r.id DESC"
+        )
         sql = (
             f"SELECT {self._RUN_SELECT_COLUMNS} FROM main.run r"
-            f"{where_sql} ORDER BY r.created_at DESC, r.id DESC"
+            f"{where_sql} ORDER BY {order_by}"
         )
         start_idx = max(0, int(offset))
-        push_pagination = not tags and not metadata
+        push_pagination = not needs_client_metadata_filter
         if push_pagination:
             if limit is not None:
                 sql += " LIMIT ? OFFSET ?"
@@ -2097,9 +2266,6 @@ class StoreLedger:
         runs = [self._hydrate_run_row(row) for row in rows]
         if push_pagination:
             return runs
-        if tags:
-            req_tags = set(tags)
-            runs = [rn for rn in runs if req_tags.issubset(rn.tags)]
         if metadata:
             runs = [
                 rn
@@ -2109,6 +2275,42 @@ class StoreLedger:
         if limit is None:
             return runs[start_idx:]
         return runs[start_idx : start_idx + max(0, int(limit))]
+
+    def find_runs(
+        self,
+        *,
+        model: str | None = None,
+        status: str | None = None,
+        year: int | None = None,
+        iteration: int | None = None,
+        stage: str | None = None,
+        phase: str | None = None,
+        parent_run_id: str | None = None,
+        signature: str | None = None,
+        cache_status: str | None = None,
+        tags: Sequence[str] | None = None,
+        facet: Mapping[str, Any] | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        limit: int | None = 100,
+        offset: int = 0,
+    ) -> list[Run]:
+        """Query `main.run` with optional lifecycle, context, tag, and facet filters."""
+        return self._query_runs(
+            model=model,
+            status=status,
+            year=year,
+            iteration=iteration,
+            stage=stage,
+            phase=phase,
+            parent_run_id=parent_run_id,
+            signature=signature,
+            cache_status=cache_status,
+            tags=tags,
+            facet=facet,
+            metadata=metadata,
+            limit=limit,
+            offset=offset,
+        )
 
     def find_cached_run(
         self,
