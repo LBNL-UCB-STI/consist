@@ -6,13 +6,12 @@ from typing import (
     Callable,
     Mapping,
     Optional,
-    Protocol,
     Sequence,
     TYPE_CHECKING,
     TypeVar,
     Union,
-    runtime_checkable,
 )
+from typing_extensions import Protocol, runtime_checkable
 
 from consist.types import (
     ArtifactRef,

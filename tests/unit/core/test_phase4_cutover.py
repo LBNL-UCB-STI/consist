@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import gc
 import json
 import os
 from pathlib import Path
 from unittest.mock import patch
 import uuid
 
+import click
 import duckdb
 import pandas as pd
 from pydantic import BaseModel
@@ -14,6 +16,7 @@ import pytest
 from typer.testing import CliRunner
 
 import consist
+from consist.api import active_relation_count
 from consist.artifact import Artifact
 from consist.cli import ConsistShell, app, get_tracker
 from consist.core.lineage import LineageService
@@ -396,7 +399,7 @@ def test_cli_read_only_migration_error_lock_pid_and_promote_run(
 
     res_v1 = runner.invoke(app, ["runs", "--db-path", str(v1_db)])
     assert res_v1.exit_code != 0
-    assert "consist migrate" in res_v1.output
+    assert "consist migrate" in click.unstyle(res_v1.output)
 
     # 2. DuckDB lock conflict -> extracts PID and mentions consist.json + snapshot_db
     v2_db = tmp_path / "locked_v2.duckdb"
@@ -409,15 +412,44 @@ def test_cli_read_only_migration_error_lock_pid_and_promote_run(
     with patch("consist.cli.Tracker", side_effect=fake_lock_err):
         res_lock = runner.invoke(app, ["runs", "--db-path", str(v2_db)])
     assert res_lock.exit_code != 0
-    assert "98765" in res_lock.output
-    assert "consist.json" in res_lock.output
-    assert "snapshot_db" in res_lock.output
+    lock_out = click.unstyle(res_lock.output)
+    assert "98765" in lock_out
+    assert "consist.json" in lock_out
+    assert "snapshot_db" in lock_out
 
-    # 3. Quick-migrate v1_db -> promote <run-id> via CLI -> run becomes cache_status='live'
-    migrate_v1_to_v2(v1_db, quick=True)
+    # 3. CLI migrate (dry-run, quick, undo, already_v2, error) -> promote -> exec --dry-run
+    res_mig_missing = runner.invoke(app, ["migrate", str(tmp_path / "missing.duckdb")])
+    assert res_mig_missing.exit_code != 0
+    assert "Migration Error:" in click.unstyle(res_mig_missing.output)
+
+    res_dry = runner.invoke(app, ["migrate", str(v1_db), "--dry-run"])
+    assert res_dry.exit_code == 0, res_dry.output
+    assert "DRY RUN" in click.unstyle(res_dry.output)
+
+    res_quick = runner.invoke(app, ["migrate", str(v1_db), "--quick"])
+    assert res_quick.exit_code == 0, res_quick.output
+    assert "QUICK MIGRATION" in click.unstyle(res_quick.output)
+
+    res_undo = runner.invoke(app, ["migrate", "undo", str(v1_db)])
+    assert res_undo.exit_code == 0, res_undo.output
+    assert "Restored v1 database" in click.unstyle(res_undo.output)
+
+    res_quick_again = runner.invoke(app, ["migrate", str(v1_db), "--quick"])
+    assert res_quick_again.exit_code == 0, res_quick_again.output
+
+    res_already = runner.invoke(app, ["migrate", str(v1_db)])
+    assert res_already.exit_code == 0, res_already.output
+    assert "already on Consist v2 schema" in " ".join(
+        click.unstyle(res_already.output).split()
+    )
+
     res_runs = runner.invoke(app, ["runs", "--db-path", str(v1_db)])
     assert res_runs.exit_code == 0
-    assert "hist_run_1" in res_runs.output
+    assert "hist_run_1" in click.unstyle(res_runs.output)
+
+    res_promo_err = runner.invoke(app, ["promote", str(v1_db), "nonexistent_target"])
+    assert res_promo_err.exit_code != 0
+    assert "Promotion Error:" in click.unstyle(res_promo_err.output)
 
     res_promo = runner.invoke(
         app,
@@ -431,6 +463,34 @@ def test_cli_read_only_migration_error_lock_pid_and_promote_run(
         ).fetchone()
     assert row == ("sig-v2", "live")
     assert isinstance(consist.Artifact, type) and consist.Artifact is Artifact
+
+    sugg_file = tmp_path / "suggested_arg.txt"
+    sugg_file.write_text("arg", encoding="utf-8")
+    res_exec_dry = runner.invoke(
+        app,
+        [
+            "exec",
+            "--dry-run",
+            "--db-path",
+            str(v1_db),
+            "--run-dir",
+            str(tmp_path / "r"),
+            "--outputs-dir",
+            str(tmp_path / "out_dir"),
+            "-i",
+            f"trips={cold_file}",
+            "-o",
+            f"out={tmp_path / 'out.parquet'}",
+            "--",
+            "python",
+            str(sugg_file),
+        ],
+    )
+    assert res_exec_dry.exit_code == 0, res_exec_dry.output
+    exec_dry_out = click.unstyle(res_exec_dry.output)
+    assert "Consist Exec Plan (Dry Run)" in exec_dry_out
+    assert "Declared Inputs" in exec_dry_out
+    assert "Declared Outputs" in exec_dry_out
 
 
 def test_a1_readonly_export_and_nested_tx_guard(tmp_path: Path) -> None:
@@ -925,12 +985,14 @@ def test_a8_shell_readonly_mutating_passthrough_and_preview_no_relation_leak(
         writer.close()
 
     # CLI preview closes relation connection
+    gc.collect()
+    baseline_relations = active_relation_count()
     runner = CliRunner()
     prev_res = runner.invoke(
         app, ["preview", str(art.id), "--db-path", str(db_path), "--rows", "1"]
     )
     assert prev_res.exit_code == 0, prev_res.output
-    assert consist.active_relation_count() == 0
+    assert active_relation_count() == baseline_relations
 
     # ConsistShell opens read_only=True, temporarily releases lock for mutating CLI subcommands,
     # and cleans up relation connections on preview / schema-profile
@@ -943,10 +1005,10 @@ def test_a8_shell_readonly_mutating_passthrough_and_preview_no_relation_leak(
         assert shell.tracker.ledger is not None
 
         shell.onecmd(f"preview {art.id} --rows 1")
-        assert consist.active_relation_count() == 0
+        assert active_relation_count() == baseline_relations
 
         shell.onecmd(f"schema-profile {art.id}")
-        assert consist.active_relation_count() == 0
+        assert active_relation_count() == baseline_relations
     finally:
         shell.tracker.close()
 
@@ -1013,7 +1075,7 @@ def test_a10_merge_skip_scopes_schema_ids_and_migrate_undo_missing_arg(
     runner = CliRunner()
     undo_res = runner.invoke(app, ["migrate", "undo"])
     assert undo_res.exit_code != 0
-    assert "Missing '<db_path>'" in undo_res.output
+    assert "Missing '<db_path>'" in click.unstyle(undo_res.output)
 
     # 2. `DatabaseMaintenance.merge(..., conflict="skip")` does not copy schemas of skipped runs
     main_db = tmp_path / "main_a10.duckdb"

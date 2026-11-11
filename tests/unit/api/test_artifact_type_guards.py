@@ -15,6 +15,7 @@ from consist.api import (
     is_tabular_artifact,
     is_zarr_artifact,
 )
+from consist.protocols import ArtifactLike as NarrowArtifactLike
 from tests.helpers.artifact_factory import make_artifact
 
 
@@ -173,9 +174,25 @@ class TestRuntimeCheckable:
     """Test runtime-checkable protocol support."""
 
     def test_artifact_isinstance_artifactlike(self) -> None:
-        """Verify Artifact instances pass isinstance checks for ArtifactLike."""
+        """Verify unbacked Artifact instances pass isinstance without invoking .path."""
         art = _artifact("parquet")
         assert isinstance(art, ArtifactLike)
+        assert isinstance(art, NarrowArtifactLike)
+
+        class _RaisingPathArtifact:
+            @property
+            def path(self) -> object:
+                raise FileNotFoundError("should not be evaluated by isinstance")
+
+            @property
+            def primary_location(self) -> None:
+                return None
+
+            @property
+            def member(self) -> None:
+                return None
+
+        assert isinstance(_RaisingPathArtifact(), NarrowArtifactLike)
 
 
 def test_load_from_disk_uses_read_parquet_for_geoparquet(

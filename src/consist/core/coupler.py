@@ -13,10 +13,9 @@ from typing import (
     Mapping,
     MutableMapping,
     Optional,
-    Protocol,
     TYPE_CHECKING,
-    runtime_checkable,
 )
+from typing_extensions import Protocol, runtime_checkable
 from urllib.parse import unquote, urlparse
 import uuid
 import warnings

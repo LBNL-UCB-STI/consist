@@ -19,7 +19,6 @@ from typing import (
     List,
     Mapping,
     Optional,
-    Protocol,
     Sequence,
     TYPE_CHECKING,
     Type,
@@ -28,8 +27,8 @@ from typing import (
     Union,
     cast,
     overload,
-    runtime_checkable,
 )
+from typing_extensions import Protocol, runtime_checkable
 import weakref
 
 import pandas as pd

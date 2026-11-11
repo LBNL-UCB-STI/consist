@@ -17,7 +17,8 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, cast
+from typing_extensions import Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
