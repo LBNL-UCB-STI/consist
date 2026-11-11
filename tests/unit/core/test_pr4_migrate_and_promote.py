@@ -539,6 +539,7 @@ def test_pass_through_artifact_link_parity_and_hybrid_view_on_migrated_v2_db(
     )
     vf = ViewFactory(tracker)
     assert vf.create_hybrid_view("v_trips_hybrid", "trips") is True
+    tracker.close()
     with duckdb.connect(str(db_path), read_only=True) as con:
         rows = con.execute(
             "SELECT trip_id, dist, consist_run_id FROM v_trips_hybrid ORDER BY trip_id"
@@ -1048,6 +1049,7 @@ def test_promote_conflict_raises_and_view_factory_resolves_promoted_cold_artifac
     )
     vf = ViewFactory(tracker)
     assert vf.create_hybrid_view("v_trips_promoted", "trips") is True
+    tracker.close()
     with duckdb.connect(str(db_path), read_only=True) as con:
         rows = con.execute(
             "SELECT trip_id, dist, consist_run_id FROM v_trips_promoted ORDER BY trip_id"

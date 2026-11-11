@@ -20,7 +20,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
-from sqlmodel import col, select
 
 from consist.artifact import Artifact
 from consist.core.logical_array_identity import (
@@ -30,7 +29,6 @@ from consist.core.logical_array_identity import (
     compute_zarr_logical_matrices_sha256,
     normalize_logical_matrices_identity,
 )
-from consist.core.persistence import DatabaseManager
 from consist.digest import (
     Agreement,
     Contract,
@@ -57,7 +55,6 @@ from consist.location import (
     lookup_live_ledger_by_path,
 )
 from consist.meta import strip_system_meta
-from consist.models.run import Run, RunArtifactLink
 from consist.store.detect import ConsistError, SchemaState, detect_schema
 from consist.store.ledger import StoreLedger
 
@@ -1339,6 +1336,18 @@ def compare_path_to_identity(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _V1ExpectedArtifact:
+    id: uuid.UUID
+    key: str
+    driver: str
+    container_uri: str
+    hash: str | None
+    run_id: str | None
+    meta: Mapping[str, Any]
+    abs_path: str | None = None
+
+
 def _query_expected_artifact_v2_ledger(
     ledger: StoreLedger,
     *,
@@ -1346,68 +1355,68 @@ def _query_expected_artifact_v2_ledger(
     artifact_key: str,
     expected_direction: Literal["input", "output", "any"] = "any",
 ) -> tuple[Artifact | None, str | None, str | None]:
-    con = ledger.connection
-    run_row = con.execute(
-        "SELECT status FROM run WHERE id = ?",
-        [expected_run_id],
-    ).fetchone()
-    if run_row is None:
-        return (None, "expected_prior_run_absent", None)
-    if str(run_row[0]) != "completed":
-        return (None, "expected_prior_run_not_completed", None)
+    with ledger.exec_cursor() as con:
+        run_row = con.execute(
+            "SELECT status FROM main.run WHERE id = ?",
+            [expected_run_id],
+        ).fetchone()
+        if run_row is None:
+            return (None, "expected_prior_run_absent", None)
+        if str(run_row[0]) != "completed":
+            return (None, "expected_prior_run_not_completed", None)
 
-    role_prefix = (
-        f"expected_{expected_direction}_role"
-        if expected_direction in ("input", "output")
-        else "expected_role"
-    )
-    dir_clause = (
-        "AND rb.direction = 'output' "
-        if expected_direction == "output"
-        else (
-            "AND rb.direction IN ('input', 'depends_on') "
-            if expected_direction == "input"
-            else ""
+        role_prefix = (
+            f"expected_{expected_direction}_role"
+            if expected_direction in ("input", "output")
+            else "expected_role"
         )
-    )
-    rows = con.execute(
-        f"SELECT DISTINCT a.id "
-        f"FROM run_binding rb "
-        f"JOIN artifact a ON a.id = rb.artifact_id "
-        f"WHERE rb.run_id = ? {dir_clause}"
-        f"AND (a.key = ? OR rb.slot = ?) "
-        f"ORDER BY a.id",
-        [expected_run_id, artifact_key, artifact_key],
-    ).fetchall()
+        dir_clause = (
+            "AND rb.direction = 'output' "
+            if expected_direction == "output"
+            else (
+                "AND rb.direction IN ('input', 'depends_on') "
+                if expected_direction == "input"
+                else ""
+            )
+        )
+        rows = con.execute(
+            f"SELECT DISTINCT a.id "
+            f"FROM main.run_binding rb "
+            f"JOIN main.artifact a ON a.id = rb.artifact_id "
+            f"WHERE rb.run_id = ? {dir_clause}"
+            f"AND (a.key = ? OR rb.slot = ?) "
+            f"ORDER BY a.id",
+            [expected_run_id, artifact_key, artifact_key],
+        ).fetchall()
 
-    if not rows:
-        return (None, f"{role_prefix}_absent", None)
+        if not rows:
+            return (None, f"{role_prefix}_absent", None)
 
-    if len(rows) != 1:
-        return (None, f"{role_prefix}_ambiguous", None)
+        if len(rows) != 1:
+            return (None, f"{role_prefix}_ambiguous", None)
 
-    v2_art = ledger.load_artifact(rows[0][0], include_locations=False)
-    if v2_art is None:
-        return (None, f"{role_prefix}_absent", None)
-    v2_art = replace(v2_art, meta=strip_system_meta(v2_art.meta))
+        v2_art = ledger.load_artifact(rows[0][0], include_locations=False)
+        if v2_art is None:
+            return (None, f"{role_prefix}_absent", None)
+        v2_art = replace(v2_art, meta=strip_system_meta(v2_art.meta))
 
-    historical_v1_hash: str | None = None
-    if not v2_art.identity.verifiable:
-        historical_v1_hash = v2_art.anchor.hex
-        try:
-            audit_row = con.execute(
-                "SELECT v1_row_json FROM artifact_migration_audit WHERE artifact_id = ?",
-                [v2_art.id],
-            ).fetchone()
-            if audit_row is not None and isinstance(audit_row[0], str):
-                parsed_v1 = json.loads(audit_row[0])
-                if isinstance(parsed_v1, Mapping) and isinstance(
-                    parsed_v1.get("hash"), str
-                ):
-                    historical_v1_hash = parsed_v1["hash"]
-        except Exception:
-            pass
-    return (v2_art, None, historical_v1_hash)
+        historical_v1_hash: str | None = None
+        if not v2_art.identity.verifiable:
+            historical_v1_hash = v2_art.anchor.hex
+            try:
+                audit_row = con.execute(
+                    "SELECT v1_row_json FROM main.artifact_migration_audit WHERE artifact_id = ?",
+                    [v2_art.id],
+                ).fetchone()
+                if audit_row is not None and isinstance(audit_row[0], str):
+                    parsed_v1 = json.loads(audit_row[0])
+                    if isinstance(parsed_v1, Mapping) and isinstance(
+                        parsed_v1.get("hash"), str
+                    ):
+                        historical_v1_hash = parsed_v1["hash"]
+            except Exception:
+                pass
+        return (v2_art, None, historical_v1_hash)
 
 
 def _expected_artifact_v2(
@@ -1440,53 +1449,83 @@ def _expected_artifact_v2(
         )
 
 
-def _expected_artifact(
-    database: DatabaseManager,
+def _expected_artifact_v1_db(
+    db_file: Path,
     *,
     expected_run_id: str,
     artifact_key: str,
     expected_direction: Literal["input", "output", "any"] = "any",
 ) -> tuple[_LegacyArtifactLike | None, str | None]:
-    """
-    Resolve one exact expected artifact without key-collapsing history helpers.
-    """
-    from consist.models.artifact import Artifact as LegacyArtifact
+    """Resolve one exact expected artifact from a read-only Schema v1 DuckDB file."""
+    import duckdb
 
-    with database.session_scope() as session:
-        run = session.get(Run, expected_run_id)
-        if run is None:
+    with duckdb.connect(str(db_file), read_only=True) as con:
+        run_row = con.execute(
+            "SELECT status FROM main.run WHERE id = ?",
+            [expected_run_id],
+        ).fetchone()
+        if run_row is None:
             return None, "expected_prior_run_absent"
-        if run.status != "completed":
+        if str(run_row[0]) != "completed":
             return None, "expected_prior_run_not_completed"
-        statement = (
-            select(LegacyArtifact)
-            .join(
-                RunArtifactLink,
-                LegacyArtifact.id == RunArtifactLink.artifact_id,  # ty: ignore[invalid-argument-type]
-            )
-            .where(RunArtifactLink.run_id == expected_run_id)
-            .where(LegacyArtifact.key == artifact_key)
-        )
-        if expected_direction in ("input", "output"):
-            statement = statement.where(RunArtifactLink.direction == expected_direction)
-        statement = statement.order_by(col(LegacyArtifact.id))
-        matches = list(session.exec(statement).all())
 
-    if not matches:
+        dir_sql = (
+            "AND ral.direction = ? "
+            if expected_direction in ("input", "output")
+            else ""
+        )
+        params: list[Any] = [expected_run_id]
+        if expected_direction in ("input", "output"):
+            params.append(expected_direction)
+        params.append(artifact_key)
+
+        rows = con.execute(
+            "SELECT a.id, a.key, a.driver, a.container_uri, a.hash, a.run_id, a.meta "
+            "FROM main.artifact a "
+            "JOIN main.run_artifact_link ral ON a.id = ral.artifact_id "
+            f"WHERE ral.run_id = ? {dir_sql}AND a.key = ? "
+            "ORDER BY a.id",
+            params,
+        ).fetchall()
+
+    if not rows:
         if expected_direction == "output":
             return None, "expected_output_role_absent"
         if expected_direction == "input":
             return None, "expected_input_role_absent"
         return None, "expected_role_absent"
 
-    if len(matches) != 1:
+    if len(rows) != 1:
         if expected_direction == "output":
             return None, "expected_output_role_ambiguous"
         if expected_direction == "input":
             return None, "expected_input_role_ambiguous"
         return None, "expected_role_ambiguous"
 
-    return matches[0], None
+    raw_id, raw_key, raw_driver, raw_uri, raw_hash, raw_run_id, raw_meta = rows[0]
+    parsed_meta: Mapping[str, Any] = {}
+    if isinstance(raw_meta, Mapping):
+        parsed_meta = raw_meta
+    elif isinstance(raw_meta, str) and raw_meta:
+        try:
+            loaded_meta = json.loads(raw_meta)
+            if isinstance(loaded_meta, Mapping):
+                parsed_meta = loaded_meta
+        except ValueError:
+            parsed_meta = {}
+
+    return (
+        _V1ExpectedArtifact(
+            id=raw_id if isinstance(raw_id, uuid.UUID) else uuid.UUID(str(raw_id)),
+            key=str(raw_key or ""),
+            driver=str(raw_driver or "file"),
+            container_uri=str(raw_uri or ""),
+            hash=str(raw_hash) if raw_hash is not None else None,
+            run_id=str(raw_run_id) if raw_run_id is not None else None,
+            meta=parsed_meta,
+        ),
+        None,
+    )
 
 
 def _paths_are_same(candidate: Path, expected: Path) -> bool:
@@ -1670,93 +1709,50 @@ def _check_artifact_identity_impl(
         else None
     )
 
-    target_db_file: Path | None = None
-    if source_tracker_db is not None:
-        target_db_file = Path(source_tracker_db).expanduser()
-    elif tracker is not None and tracker.db_path is not None:
-        target_db_file = Path(tracker.db_path).expanduser()
-
-    is_v2_db = False
-    live_ledger: StoreLedger | None = None
-    if target_db_file is not None and target_db_file.is_file():
-        found_live = lookup_live_ledger_by_path(target_db_file)
-        if isinstance(found_live, StoreLedger) and not found_live._closed:
-            live_ledger = found_live
-            is_v2_db = True
-        else:
-            try:
-                is_v2_db = detect_schema(target_db_file) is SchemaState.V2
-            except Exception:
-                is_v2_db = False
-
     artifact: Artifact | _LegacyArtifactLike | None = None
     expected_error: str | None = None
     v2_historical_hash: str | None = None
-
-    if is_v2_db and target_db_file is not None:
-        try:
-            artifact, expected_error, v2_historical_hash = _expected_artifact_v2(
-                target_db_file,
+    if source_tracker_db is None:
+        assert tracker is not None and tracker.db is not None
+        artifact, expected_error, v2_historical_hash = (
+            _query_expected_artifact_v2_ledger(
+                tracker.db.ledger,
                 expected_run_id=expected_run_id,
                 artifact_key=artifact_key,
                 expected_direction=expected_direction,
-                live_ledger=live_ledger,
             )
-        except Exception as exc:
-            if source_tracker_db is not None:
-                return _report(
-                    outcome="unverified",
-                    execution_path=candidate,
-                    physical_target_path=physical_target_path,
-                    expected_run_id=expected_run_id,
-                    artifact_key=artifact_key,
-                    input_role=role,
-                    observed_artifact_id=observed_file_id_str,
-                    observations=("source_tracker_db_unreadable",),
-                    reason=f"Failed to read source tracker database '{source_tracker_db}': {exc}",
-                    expected_direction=expected_direction,
-                    source_tracker_db=source_db_str,
-                )
-            raise
+        )
     else:
-        owns_db = False
-        db: DatabaseManager | None = None
-        if source_tracker_db is not None:
-            try:
-                db = DatabaseManager(
-                    str(source_db_file),
-                    skip_schema_init=True,
-                    read_only=True,
-                )
-                owns_db = True
-            except Exception as exc:
-                return _report(
-                    outcome="unverified",
-                    execution_path=candidate,
-                    physical_target_path=physical_target_path,
-                    expected_run_id=expected_run_id,
-                    artifact_key=artifact_key,
-                    input_role=role,
-                    observed_artifact_id=observed_file_id_str,
-                    observations=("source_tracker_db_unreadable",),
-                    reason=f"Failed to open source tracker database '{source_tracker_db}': {exc}",
-                    expected_direction=expected_direction,
-                    source_tracker_db=source_db_str,
-                )
-        else:
-            assert tracker is not None and tracker.db is not None
-            db = tracker.db
-
+        source_db_file = Path(source_tracker_db).expanduser()
+        live_ledger = lookup_live_ledger_by_path(source_db_file)
         try:
-            try:
-                artifact, expected_error = _expected_artifact(
-                    db,
+            if isinstance(live_ledger, StoreLedger) and not live_ledger._closed:
+                artifact, expected_error, v2_historical_hash = _expected_artifact_v2(
+                    source_db_file,
                     expected_run_id=expected_run_id,
                     artifact_key=artifact_key,
                     expected_direction=expected_direction,
+                    live_ledger=live_ledger,
                 )
-            except Exception as exc:
-                if owns_db:
+            else:
+                schema_state = detect_schema(source_db_file)
+                if schema_state is SchemaState.V2:
+                    artifact, expected_error, v2_historical_hash = (
+                        _expected_artifact_v2(
+                            source_db_file,
+                            expected_run_id=expected_run_id,
+                            artifact_key=artifact_key,
+                            expected_direction=expected_direction,
+                        )
+                    )
+                elif schema_state is SchemaState.V1:
+                    artifact, expected_error = _expected_artifact_v1_db(
+                        source_db_file,
+                        expected_run_id=expected_run_id,
+                        artifact_key=artifact_key,
+                        expected_direction=expected_direction,
+                    )
+                else:
                     return _report(
                         outcome="unverified",
                         execution_path=candidate,
@@ -1766,14 +1762,27 @@ def _check_artifact_identity_impl(
                         input_role=role,
                         observed_artifact_id=observed_file_id_str,
                         observations=("source_tracker_db_unreadable",),
-                        reason=f"Failed to read source tracker database '{source_tracker_db}': {exc}",
+                        reason=(
+                            f"Source tracker database '{source_tracker_db}' does not contain a "
+                            f"readable Consist schema (state={schema_state.value})."
+                        ),
                         expected_direction=expected_direction,
                         source_tracker_db=source_db_str,
                     )
-                raise
-        finally:
-            if owns_db and db is not None:
-                db.engine.dispose()
+        except Exception as exc:
+            return _report(
+                outcome="unverified",
+                execution_path=candidate,
+                physical_target_path=physical_target_path,
+                expected_run_id=expected_run_id,
+                artifact_key=artifact_key,
+                input_role=role,
+                observed_artifact_id=observed_file_id_str,
+                observations=("source_tracker_db_unreadable",),
+                reason=f"Failed to read source tracker database '{source_tracker_db}': {exc}",
+                expected_direction=expected_direction,
+                source_tracker_db=source_db_str,
+            )
 
     if expected_error is not None:
         return _report(

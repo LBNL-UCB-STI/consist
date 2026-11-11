@@ -15,6 +15,8 @@ from typing import (
     get_origin,
 )
 
+import sqlalchemy as sa
+
 from consist.artifact import Artifact
 from consist.core.stores import get_hot_data_ledger
 from consist.digest import canonical_json_sha256
@@ -168,7 +170,7 @@ def _resolve_fk_target(field_info: Any) -> Optional[str]:
         sa_column = None
     if sa_column is None:
         return None
-    fk_set = sa_column.foreign_keys if hasattr_sa_foreign_keys(sa_column) else None
+    fk_set = sa_column.foreign_keys if isinstance(sa_column, sa.Column) else None
     if not fk_set:
         return None
     for fk in fk_set:
@@ -179,14 +181,6 @@ def _resolve_fk_target(field_info: Any) -> Optional[str]:
         except AttributeError:
             pass
     return None
-
-
-def hasattr_sa_foreign_keys(sa_column: Any) -> bool:
-    try:
-        _ = sa_column.foreign_keys
-        return True
-    except AttributeError:
-        return False
 
 
 class ArtifactSchemaManager:

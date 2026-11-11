@@ -6,11 +6,8 @@ from pathlib import Path
 import re
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-import duckdb
-
-from consist.core.persistence import DatabaseManager
-
 if TYPE_CHECKING:
+    from consist.core.persistence import DatabaseManager
     from consist.core.tracker import Tracker
     from consist.store.ledger import StoreLedger
 
@@ -100,6 +97,8 @@ class HotDataStore:
             return False
         if not _is_safe_identifier(table_name):
             return False
+
+        import duckdb
 
         table_ref = f"{_quote_ident('global_tables')}.{_quote_ident(table_name)}"
         try:

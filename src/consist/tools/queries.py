@@ -1,87 +1,126 @@
 """
-Reusable database queries for inspecting Consist provenance data.
+Reusable database queries for inspecting Consist provenance data over `StoreLedger`.
 """
 
-from typing import Dict, Iterable, List, Optional
-from sqlmodel import Session, select, func, col
+from __future__ import annotations
+
+from typing import Any, Dict, Iterable, List, Optional, TYPE_CHECKING
+
 import duckdb
 import pandas as pd
 
-from consist.core.run_ordering import recent_run_order_by
-from consist.models.run import Run
-from consist.models.artifact import Artifact
-from consist.core.tracker import Tracker
 import consist
+from consist.core.persistence import DatabaseManager, _RUN_COLUMNS_SQL, _hydrate_run_row
+from consist.core.run_ordering import recent_run_order_by_sql
+from consist.models.run import Run
+from consist.store.ledger import StoreLedger
+
+if TYPE_CHECKING:
+    from consist.core.tracker import Tracker
+
+
+def _resolve_ledger(
+    source: "Tracker | DatabaseManager | StoreLedger",
+) -> StoreLedger:
+    if isinstance(source, StoreLedger):
+        return source
+    if isinstance(source, DatabaseManager):
+        return source.ledger
+    ledger = source.ledger
+    if ledger is None:
+        raise RuntimeError("Database connection required.")
+    return ledger
 
 
 def get_runs(
-    session: Session,
+    source: "Tracker | DatabaseManager | StoreLedger",
     limit: int = 10,
     model_name: Optional[str] = None,
     tags: Optional[List[str]] = None,
     status: Optional[str] = None,
     run_ids: Optional[Iterable[str]] = None,
 ) -> List[Run]:
-    """Fetches a list of runs with optional filters."""
-    statement = select(Run).order_by(*recent_run_order_by())
+    """Fetch a list of runs with optional filters from `StoreLedger`."""
+    ledger = _resolve_ledger(source)
+    where_parts: list[str] = []
+    params: list[Any] = []
 
     if run_ids is not None:
         id_list = list(run_ids)
         if not id_list:
             return []
-        statement = statement.where(col(Run.id).in_(id_list))
+        where_parts.append("r.id IN (SELECT UNNEST(?))")
+        params.append(id_list)
     if model_name:
-        statement = statement.where(Run.model_name == model_name)
+        where_parts.append("r.model_name = ?")
+        params.append(model_name)
     if status:
-        statement = statement.where(Run.status == status)
+        where_parts.append("r.status = ?")
+        params.append(status)
     if tags:
-        # This is a simple "contains all" search for tags
         for tag in tags:
-            # SQLModel doesn't have a clean way to query JSON arrays on all backends,
-            # so we use a LIKE query as a good-enough solution for DuckDB.
-            statement = statement.where(col(Run.tags).like(f'%"{tag}"%'))
+            where_parts.append(
+                "json_contains(COALESCE(r.tags, '[]'::JSON), to_json(?))"
+            )
+            params.append(tag)
 
-    return list(session.exec(statement.limit(limit)).all())
+    sql = f"SELECT {_RUN_COLUMNS_SQL} FROM main.run r"
+    if where_parts:
+        sql += " WHERE " + " AND ".join(where_parts)
+    sql += f" ORDER BY {recent_run_order_by_sql('r')} LIMIT ?"
+    params.append(int(limit))
+
+    with ledger.exec_cursor() as cur:
+        rows = cur.execute(sql, params).fetchall()
+    return [_hydrate_run_row(row) for row in rows]
 
 
-def get_summary(session: Session) -> Dict[str, object]:
-    """Returns a high-level summary of the database."""
-    total_runs = session.exec(select(func.count(col(Run.id)))).one()
-    completed_runs = session.exec(
-        select(func.count(col(Run.id))).where(Run.status == "completed")
-    ).one()
-    failed_runs = session.exec(
-        select(func.count(col(Run.id))).where(Run.status == "failed")
-    ).one()
-    total_artifacts = session.exec(select(func.count(col(Artifact.id)))).one()
+def get_summary(
+    source: "Tracker | DatabaseManager | StoreLedger",
+) -> Dict[str, Any]:
+    """Return a high-level summary of the Schema v2 provenance database."""
+    ledger = _resolve_ledger(source)
+    with ledger.exec_cursor() as cur:
+        counts_row = cur.execute(
+            "SELECT "
+            "COUNT(*), "
+            "COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0), "
+            "COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0), "
+            "MIN(created_at), "
+            "MAX(created_at) "
+            "FROM main.run"
+        ).fetchone()
+        art_row = cur.execute("SELECT COUNT(*) FROM main.artifact").fetchone()
+        models_rows = cur.execute(
+            "SELECT model_name, COUNT(*) FROM main.run "
+            "GROUP BY model_name ORDER BY model_name ASC"
+        ).fetchall()
 
-    models_stmt = select(Run.model_name, func.count(col(Run.id))).group_by(
-        Run.model_name
-    )
-    models_dist = session.exec(models_stmt).all()
-
-    first_run_date = session.exec(select(func.min(Run.created_at))).one()
-    last_run_date = session.exec(select(func.max(Run.created_at))).one()
+    total_runs = int(counts_row[0]) if counts_row is not None else 0
+    completed_runs = int(counts_row[1]) if counts_row is not None else 0
+    failed_runs = int(counts_row[2]) if counts_row is not None else 0
+    first_run_date = counts_row[3] if counts_row is not None else None
+    last_run_date = counts_row[4] if counts_row is not None else None
+    total_artifacts = int(art_row[0]) if art_row is not None else 0
 
     return {
         "total_runs": total_runs,
         "completed_runs": completed_runs,
         "failed_runs": failed_runs,
         "total_artifacts": total_artifacts,
-        "models_distribution": models_dist,
+        "models_distribution": [(str(m), int(c)) for m, c in models_rows],
         "first_run_at": first_run_date,
         "last_run_at": last_run_date,
     }
 
 
 def get_artifact_preview(
-    tracker: Tracker, artifact_key: str, limit: int = 5
+    tracker: "Tracker", artifact_key: str, limit: int = 5
 ) -> Optional[pd.DataFrame]:
     """
     Loads an artifact and returns the first few rows as a pandas DataFrame.
     Returns None if the artifact is not found or not a tabular format.
     """
-    # Find the artifact by key or ID
     artifact = tracker.get_artifact(artifact_key)
     if not artifact:
         return None
@@ -95,17 +134,15 @@ def get_artifact_preview(
         if isinstance(data, duckdb.DuckDBPyRelation):
             return consist.to_df(data)
     except FileNotFoundError:
-        # Propagate so CLI can give a precise message
         raise
     except Exception:
-        # Could fail if file is missing, etc.
         return None
 
     return None
 
 
 def find_artifacts_by_params(
-    tracker: Tracker,
+    tracker: "Tracker",
     *,
     params: Optional[Iterable[str]] = None,
     namespace: Optional[str] = None,
@@ -115,28 +152,6 @@ def find_artifacts_by_params(
 ) -> List[Dict[str, object]]:
     """
     Query artifacts by indexed facet predicates and optional prefix filters.
-
-    Parameters
-    ----------
-    tracker : Tracker
-        Active tracker with a configured database.
-    params : Optional[Iterable[str]], optional
-        Predicate expressions of the form ``key=value``, ``key>=value``,
-        or ``key<=value``. A dotted prefix can be used as namespace
-        (e.g., ``beam.phys_sim_iteration=2``).
-    namespace : Optional[str], optional
-        Default namespace filter when predicates do not specify one.
-    key_prefix : Optional[str], optional
-        Prefix filter on ``artifact.key``.
-    artifact_family_prefix : Optional[str], optional
-        Prefix filter on indexed ``artifact_family`` facet values.
-    limit : int, default 100
-        Maximum number of results.
-
-    Returns
-    -------
-    List[Dict[str, object]]
-        Result rows containing artifact metadata and persisted facet metadata.
     """
     artifacts = tracker.find_artifacts_by_params(
         params=list(params or []),
@@ -148,19 +163,28 @@ def find_artifacts_by_params(
 
     rows: List[Dict[str, object]] = []
     for artifact in artifacts:
-        meta = artifact.meta or {}
+        meta = dict(artifact.meta) if artifact.meta else {}
+        primary_loc = artifact.primary_location
+        uri = primary_loc.uri if primary_loc is not None else ""
         rows.append(
             {
                 "artifact": artifact,
                 "id": artifact.id,
                 "key": artifact.key,
-                "container_uri": artifact.container_uri,
+                "container_uri": uri,
                 "driver": artifact.driver,
                 "run_id": artifact.run_id,
-                "facet_id": meta.get("artifact_facet_id"),
-                "facet_namespace": meta.get("artifact_facet_namespace"),
-                "facet_schema": meta.get("artifact_facet_schema"),
-                "facet_schema_version": meta.get("artifact_facet_schema_version"),
+                "facet_id": meta.get("artifact_facet_id") or meta.get("facet_id"),
+                "facet_namespace": (
+                    meta.get("facet_namespace") or meta.get("artifact_facet_namespace")
+                ),
+                "facet_schema": (
+                    meta.get("facet_schema") or meta.get("artifact_facet_schema")
+                ),
+                "facet_schema_version": (
+                    meta.get("facet_schema_version")
+                    or meta.get("artifact_facet_schema_version")
+                ),
                 "meta": meta,
             }
         )

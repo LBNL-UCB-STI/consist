@@ -30,8 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from sqlmodel import Session, select
-
+from consist.artifact import Artifact
 from consist.core.materialize import materialize_artifacts
 from consist.core.tracker import Tracker
 from consist.integrations.containers.backends import DockerBackend, SingularityBackend
@@ -39,8 +38,6 @@ from consist.integrations.containers.models import (
     ContainerDefinition,
     _hash_environment,
 )
-from consist.models.artifact import Artifact
-from consist.models.run import RunArtifactLink
 from consist.types import ArtifactRef
 
 logger = logging.getLogger(__name__)
@@ -76,6 +73,17 @@ def _resolve_image_digest(backend, image: str, pull_latest: bool) -> str:
     return image
 
 
+def _artifact_uri(artifact: Artifact) -> str:
+    primary = artifact.primary_location
+    return primary.uri if primary is not None else ""
+
+
+def _virtualize_if_host_path(tracker: Tracker, path_or_uri: str) -> str:
+    if "://" in path_or_uri or path_or_uri.startswith("./"):
+        return path_or_uri
+    return tracker.fs.virtualize_path(path_or_uri)
+
+
 def _hash_inputs(tracker: Tracker, items: Sequence[ArtifactRef]) -> List[str]:
     """Return deterministic hashes for container inputs."""
     hashes: List[str] = []
@@ -91,13 +99,16 @@ def _hash_inputs(tracker: Tracker, items: Sequence[ArtifactRef]) -> List[str]:
             # fingerprint, not a tracker-local ``content_id``.
             if item.hash:
                 sig_parts.append(f"hash:{item.hash}")
+            elif item.identity.verifiable:
+                sig_parts.append(f"anchor:{item.identity.anchor}")
             if not sig_parts:
+                raw_uri = _artifact_uri(item)
                 try:
-                    abs_path = Path(tracker.resolve_uri(item.container_uri))
+                    abs_path = Path(tracker.resolve_uri(raw_uri))
                     file_hash = tracker.identity.compute_file_checksum(abs_path)
                     sig_parts.append(f"file:{file_hash}")
                 except Exception:
-                    sig_parts.append(f"uri:{item.container_uri}")
+                    sig_parts.append(f"uri:{raw_uri}")
             hashes.append("|".join(sig_parts))
         else:
             p = Path(item).resolve()
@@ -218,10 +229,7 @@ def _validate_host_path(
 def _ensure_output_within_run_dir(
     path: Path, tracker: Tracker, *, strict_mounts: bool
 ) -> None:
-    try:
-        allow_external = bool(tracker.allow_external_paths)
-    except AttributeError:
-        allow_external = False
+    allow_external = bool(tracker.allow_external_paths)
     if allow_external or (not strict_mounts):
         return
     base_dir = tracker.run_dir.resolve()
@@ -279,10 +287,14 @@ def _reuse_or_execute_container(
     run_id: str,
     execute_fn,
     output_key_map: Optional[Dict[str, str]] = None,
+    output_targets: Optional[Sequence[tuple[str, str]]] = None,
 ):
     """Cache-aware wrapper. Executes execute_fn on miss; reuses artifacts on hit."""
     signature = _container_signature(defn, inputs, tracker)
-    requested_outputs = defn.declared_outputs or []
+    raw_requested_outputs = defn.declared_outputs or []
+    virtualized_requested_outputs = [
+        _virtualize_if_host_path(tracker, p) for p in raw_requested_outputs
+    ]
 
     cached = tracker.db.find_run_by_signature(signature) if tracker.db else None
 
@@ -290,46 +302,54 @@ def _reuse_or_execute_container(
         logger.debug(
             "[container.cache] signature match run=%s requested_outputs=%s",
             cached.id,
-            requested_outputs,
+            virtualized_requested_outputs,
         )
         cached_outputs = (cached.meta or {}).get("declared_outputs", [])
         if not cached_outputs:
             # If older run lacks declared outputs metadata, assume coverage to avoid false misses
-            cached_outputs = requested_outputs
+            cached_outputs = virtualized_requested_outputs
         logger.debug(
             "[container.cache] cached_outputs=%s requested=%s",
             cached_outputs,
-            requested_outputs,
+            virtualized_requested_outputs,
         )
-        normalized_requested = {
-            tracker.fs.virtualize_path(p) for p in requested_outputs
+        normalized_requested = set(virtualized_requested_outputs)
+        normalized_cached = {
+            _virtualize_if_host_path(tracker, str(p)) for p in cached_outputs
         }
-        normalized_cached = {tracker.fs.virtualize_path(p) for p in cached_outputs}
         if normalized_requested.issubset(normalized_cached):
             logger.info(f"✅ [Consist] Container cache hit: {run_id} -> {cached.id}")
+            cached_items = tracker.get_artifacts_for_run(cached.id)
             # Re-link cached artifacts to current run for provenance (inputs + outputs).
-            if tracker.db and tracker.engine:
-                with Session(tracker.engine) as session:
-                    links = session.exec(
-                        select(RunArtifactLink).where(
-                            RunArtifactLink.run_id == cached.id
-                        )
-                    ).all()
-                for link in links:
+            if tracker.db is not None:
+                for in_slot, in_art in cached_items.inputs.items():
                     tracker.db.link_artifact_to_run(
-                        artifact_id=link.artifact_id,
+                        artifact_id=in_art.id,
                         run_id=run_id,
-                        direction=link.direction,
+                        direction="input",
+                        slot=in_slot,
+                    )
+                for out_slot, out_art in cached_items.outputs.items():
+                    tracker.db.link_artifact_to_run(
+                        artifact_id=out_art.id,
+                        run_id=run_id,
+                        direction="output",
+                        slot=out_slot,
                     )
 
             # Materialize requested outputs onto the host so callers see expected files.
             # This is copy-only physical materialization (bytes-on-disk), not DB reconstruction.
-            cached_items = tracker.get_artifacts_for_run(cached.id)
             output_arts = list(cached_items.outputs.values())
             items: list[tuple[Artifact, Path]] = []
 
-            for host_out in requested_outputs:
-                if "://" in host_out:
+            target_pairs: list[tuple[Optional[str], str]] = (
+                [(key, host_out) for key, host_out in output_targets]
+                if output_targets is not None
+                else [(None, out_ref) for out_ref in raw_requested_outputs]
+            )
+
+            for explicit_key, host_out in target_pairs:
+                if "://" in host_out or host_out.startswith("./"):
                     target = Path(tracker.resolve_uri(host_out)).resolve()
                 else:
                     target = Path(host_out).resolve()
@@ -337,8 +357,12 @@ def _reuse_or_execute_container(
                     (
                         a
                         for a in output_arts
-                        if a.key == target.name
-                        or Path(a.container_uri).name == target.name
+                        if (explicit_key is not None and a.key == explicit_key)
+                        or a.key == target.name
+                        or (
+                            _artifact_uri(a)
+                            and Path(_artifact_uri(a)).name == target.name
+                        )
                         or (
                             output_key_map
                             and (
@@ -368,7 +392,7 @@ def _reuse_or_execute_container(
                 {
                     "cache_hit": True,
                     "cache_source": cached.id,
-                    "declared_outputs": requested_outputs,
+                    "declared_outputs": virtualized_requested_outputs,
                     "materialized_outputs": materialized,
                 },
             )
@@ -378,12 +402,12 @@ def _reuse_or_execute_container(
             if current_consist is not None:
                 run_obj = current_consist.run
                 run_obj.signature = signature
-                meta = run_obj.meta or {}
+                meta = dict(run_obj.meta or {})
                 meta.update(
                     {
                         "cache_hit": True,
                         "cache_source": cached.id,
-                        "declared_outputs": requested_outputs,
+                        "declared_outputs": virtualized_requested_outputs,
                         "materialized_outputs": materialized,
                     }
                 )
@@ -399,7 +423,7 @@ def _reuse_or_execute_container(
             run_id,
             {
                 "cache_hit": False,
-                "declared_outputs": requested_outputs,
+                "declared_outputs": virtualized_requested_outputs,
                 "signature": signature,
             },
         )
@@ -409,11 +433,11 @@ def _reuse_or_execute_container(
     if current_consist is not None:
         run_obj = current_consist.run
         run_obj.signature = signature
-        meta = run_obj.meta or {}
+        meta = dict(run_obj.meta or {})
         meta.update(
             {
                 "cache_hit": False,
-                "declared_outputs": requested_outputs,
+                "declared_outputs": virtualized_requested_outputs,
                 "signature": signature,
             }
         )
@@ -580,7 +604,19 @@ def run_container(
             )
             output_specs.append((Path(output_path).name, str(validated_host)))
 
-    outputs_str = [p for _, p in output_specs]
+    virtualized_outputs = [tracker.fs.virtualize_path(p) for _, p in output_specs]
+    declared_output_specs: List[tuple[str, str, Optional[str]]] = []
+    for output_key, host_out in output_specs:
+        per_out_kwargs = output_log_kwargs.get(output_key, {})
+        raw_driver = (
+            per_out_kwargs.get("driver")
+            if isinstance(per_out_kwargs, Mapping)
+            else None
+        )
+        driver_str = str(raw_driver) if raw_driver is not None else None
+        declared_output_specs.append(
+            (output_key, tracker.fs.virtualize_path(host_out), driver_str)
+        )
 
     virtualized_volumes: Dict[str, str] = {
         tracker.fs.virtualize_path(host_path): container_path
@@ -616,7 +652,8 @@ def run_container(
         working_dir=working_dir,
         volumes=virtualized_volumes,
         volume_modes=virtualized_volume_modes,
-        declared_outputs=outputs_str,
+        declared_outputs=virtualized_outputs,
+        declared_output_specs=declared_output_specs,
         extra_args={},
     )
 
@@ -660,16 +697,12 @@ def run_container(
             if path_obj.exists():
                 log_kwargs = dict(output_log_kwargs.get(output_key, {}))
                 # Log artifact (Consist handles auto-detecting file vs dir)
-                logged = active_tracker.log_artifact(
+                active_tracker.log_artifact(
                     path_obj,
                     key=output_key or path_obj.name,
                     direction="output",
                     **log_kwargs,
                 )
-                try:
-                    object.__setattr__(logged, "_abs_path", str(path_obj))
-                except Exception:
-                    continue
             else:
                 logger.warning(f"⚠️ [Consist] Expected output not found: {host_out}")
 
@@ -682,7 +715,7 @@ def run_container(
         Prefer in-memory state when the run is still active because DB writes may
         not have flushed yet inside the context manager.
         """
-        run_meta = {}
+        run_meta: Mapping[str, Any] = {}
         if (
             active_tracker.current_consist
             and active_tracker.current_consist.run.id == run_identifier
@@ -692,9 +725,17 @@ def run_container(
             run_obj = active_tracker.get_run(run_identifier)
             run_meta = run_obj.meta if run_obj else {}
 
-        cache_hit = (run_meta or {}).get("cache_hit", False)
+        cache_hit = bool((run_meta or {}).get("cache_hit", False))
         cache_source = (run_meta or {}).get("cache_source")
-        artifacts = active_tracker.get_artifacts_for_run(run_identifier).outputs
+        if active_tracker.db is not None:
+            artifacts = active_tracker.get_artifacts_for_run(run_identifier).outputs
+        elif (
+            active_tracker.current_consist is not None
+            and active_tracker.current_consist.run.id == run_identifier
+        ):
+            artifacts = {art.key: art for art in active_tracker.current_consist.outputs}
+        else:
+            artifacts = {}
         return ContainerResult(
             artifacts=artifacts,
             cache_hit=cache_hit,
@@ -762,6 +803,7 @@ def run_container(
             run_id=tracker.current_consist.run.id,
             execute_fn=lambda: _execute_backend_and_log_outputs(tracker),
             output_key_map=output_key_map,
+            output_targets=output_specs,
         )
         return _collect_result(tracker, tracker.current_consist.run.id)
 
@@ -804,6 +846,7 @@ def run_container(
             run_id=run_id,
             execute_fn=lambda: _execute_backend_and_log_outputs(t),
             output_key_map=output_key_map,
+            output_targets=output_specs,
         )
 
         return _collect_result(tracker, run_id)

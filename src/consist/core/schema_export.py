@@ -14,6 +14,7 @@ from consist.models.artifact_schema import (
 
 if TYPE_CHECKING:
     from consist.core.persistence import DatabaseManager
+    from consist.store.ledger import StoreLedger
 
 DEFAULT_SYSTEM_COLUMN_PREFIXES: tuple[str, ...] = ("consist_", "_dlt_")
 
@@ -322,7 +323,7 @@ def render_sqlmodel_stub(
     schema: ArtifactSchema,
     fields: list[ArtifactSchemaField],
     relations: Optional[Iterable[ArtifactSchemaRelation]] = None,
-    db: Optional["DatabaseManager"] = None,
+    db: Optional["DatabaseManager | StoreLedger"] = None,
     table_name: Optional[str] = None,
     class_name: Optional[str] = None,
     abstract: bool = True,
@@ -347,7 +348,26 @@ def render_sqlmodel_stub(
     )
 
     if relations is None and db is not None:
-        relations = db.get_artifact_schema_relations(schema_id=schema.id)
+        from consist.core.persistence import DatabaseManager
+
+        ledger = db.ledger if isinstance(db, DatabaseManager) else db
+        with ledger.exec_cursor() as cur:
+            rel_rows = cur.execute(
+                "SELECT schema_id, from_field, to_table, to_field, relationship_type, cardinality "
+                "FROM main.artifact_schema_relation WHERE schema_id = ? ORDER BY from_field ASC",
+                [schema.id],
+            ).fetchall()
+        relations = [
+            ArtifactSchemaRelation(
+                schema_id=str(r[0]),
+                from_field=str(r[1]),
+                to_table=str(r[2]),
+                to_field=str(r[3]),
+                relationship_type=str(r[4]),
+                cardinality=str(r[5]) if r[5] is not None else None,
+            )
+            for r in rel_rows
+        ]
     relation_lookup: dict[str, str] = {}
     if relations:
         for rel in relations:

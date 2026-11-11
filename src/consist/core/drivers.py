@@ -19,15 +19,18 @@ from typing import (
     Optional,
     Protocol,
     Sequence,
+    TYPE_CHECKING,
     Tuple,
     TypeVar,
 )
 
-import duckdb
 from pydantic import BaseModel
 
 from consist.core.gtfs import discover_gtfs_members, load_gtfs_member_relation
 from consist.core.logical_array_identity import open_h5py_read_only
+
+if TYPE_CHECKING:
+    import duckdb
 
 
 class TableInfo(BaseModel):
@@ -244,6 +247,8 @@ class ParquetDriver:
             if columns
             else f"SELECT * FROM read_parquet('{path}')"
         )
+        import duckdb
+
         try:
             return conn.sql(query)
         except (OSError, duckdb.IOException) as exc:
@@ -521,7 +526,7 @@ class OpenMatrixArrayDriver:
         with open_h5py_read_only(container_uri, h5py_module=h5py) as f:
             data_vars: Dict[str, Tuple[Tuple[str, str], Any]] = {}
             for name, obj in f.items():
-                if hasattr(obj, "shape"):
+                if isinstance(obj, h5py.Dataset):
                     data_vars[name] = (("row", "col"), obj[()])
             return xr_module.Dataset(data_vars=data_vars)
 

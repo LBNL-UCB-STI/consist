@@ -509,6 +509,72 @@ class Artifact:
         with _bound_tracker_lock:
             return _bound_trackers.get(self.id)
 
+    @property
+    def tracker(self) -> Any | None:
+        """Return a bound or context-active `Tracker`, if available."""
+        bound = self.resolve_bound_tracker()
+        if bound is not None:
+            return bound
+        try:
+            from consist.core.context import get_active_tracker, get_default_tracker
+
+            try:
+                return get_active_tracker()
+            except RuntimeError:
+                return get_default_tracker()
+        except Exception:
+            return None
+
+    def ensure_local_path(
+        self,
+        *,
+        tracker: Any = None,
+        target_root: Path | str | None = None,
+        source_root: Path | str | None = None,
+        on_missing: Literal["warn", "raise"] = "warn",
+    ) -> Path | None:
+        """Ensure this artifact exists on the local filesystem and return its `Path`."""
+        resolved_tracker = tracker if tracker is not None else self.tracker
+        if target_root is None:
+            candidate = self.locate(
+                mounts=self._effective_tracker_mounts(resolved_tracker)
+            )
+            if candidate is not None and candidate.exists():
+                return candidate
+
+        if resolved_tracker is None:
+            msg = (
+                f"[Consist] Cannot materialize artifact {self.key!r}: "
+                "no Tracker is attached or active in context."
+            )
+            if on_missing == "raise":
+                raise FileNotFoundError(msg)
+            import logging
+
+            logging.warning(msg)
+            return None
+
+        resolved_target_root: Path | str = (
+            target_root if target_root is not None else resolved_tracker.run_dir
+        )
+        result = resolved_tracker.materialize_artifact(
+            self,
+            target_root=resolved_target_root,
+            source_root=source_root,
+            preserve_existing=True,
+            on_missing=on_missing,
+            allow_external_paths=True if target_root is not None else None,
+        )
+        if result.path is not None and result.path.exists():
+            return result.path
+
+        if on_missing == "raise":
+            raise FileNotFoundError(
+                f"[Consist] Cannot materialize artifact {self.key!r}: "
+                f"status={result.status}."
+            )
+        return None
+
     def _effective_tracker_mounts(
         self, explicit_tracker: Any = None
     ) -> Mapping[str, Any] | None:

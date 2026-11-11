@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Optional, Union
 import uuid
 import warnings
 
-from sqlmodel import SQLModel
+from pydantic import BaseModel
 
 from consist.artifact import Artifact
 from consist.core.stores import get_hot_data_db_path, get_hot_data_ledger
@@ -264,7 +264,7 @@ def ingest_artifact(
     tracker: Tracker,
     artifact: Artifact,
     data: Optional[Union[Iterable[dict[str, Any]], Any]],
-    schema: Optional[type[SQLModel]],
+    schema: Optional[type[BaseModel]],
     run: Optional[Run],
     profile_schema: bool,
 ) -> Artifact:

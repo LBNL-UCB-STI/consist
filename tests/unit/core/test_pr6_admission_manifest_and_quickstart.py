@@ -462,8 +462,9 @@ def test_decision_d3_quick_migration_historical_run_promote_and_view_factory(
     try:
         vf = ViewFactory(tracker_v2)
         vf.create_hybrid_view("v_households", "households")
-        with tracker_v2.engine.connect() as conn:
-            rows = conn.exec_driver_sql(
+        assert tracker_v2.db is not None
+        with tracker_v2.db.ledger.exec_cursor() as cur:
+            rows = cur.execute(
                 "SELECT hh_id, income FROM v_households ORDER BY hh_id"
             ).fetchall()
         assert [(int(r[0]), int(r[1])) for r in rows] == [

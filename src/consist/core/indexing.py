@@ -37,8 +37,8 @@ class FacetIndex:
     """
     Index `Tracker.find_runs(..., index_by=...)` results by a persisted facet value.
 
-    The facet must be indexed to `RunConfigKV` (default when `facet_index=True`) and
-    requires a DB-backed tracker.
+    The facet must be indexed in `main.run_config_kv` (`run.facet_kv`, default when
+    `facet_index=True`) and requires a `StoreLedger`-backed tracker.
     """
 
     key: str

@@ -43,6 +43,7 @@ class ContainerDefinition(BaseModel):
     volumes: Dict[str, str] = {}
     volume_modes: Dict[str, Literal["ro", "rw"]] = {}
     declared_outputs: Optional[List[str]] = None
+    declared_output_specs: Optional[List[tuple[str, str, Optional[str]]]] = None
 
     # Extra args that might affect execution (e.g. resource limits)
     extra_args: Dict[str, Any] = {}
@@ -62,7 +63,7 @@ class ContainerDefinition(BaseModel):
             container, stripped of any `None` values, ready for hashing.
         """
         # Deterministic representation for hashing
-        cfg = {
+        cfg: Dict[str, Any] = {
             "image_digest": self.image_digest,
             "command": tuple(self.command or ()),
             "environment_hash": _hash_environment(self.environment or {}),
@@ -73,6 +74,21 @@ class ContainerDefinition(BaseModel):
         }
         if self.volume_modes:
             cfg["volume_modes"] = tuple(sorted(self.volume_modes.items()))
+        if self.declared_output_specs:
+            cfg["declared_outputs"] = tuple(
+                sorted(
+                    (
+                        str(key),
+                        str(virtualized_uri),
+                        None if driver is None else str(driver),
+                    )
+                    for key, virtualized_uri, driver in self.declared_output_specs
+                )
+            )
+        elif self.declared_outputs:
+            cfg["declared_outputs"] = tuple(
+                sorted((str(uri), str(uri), None) for uri in self.declared_outputs)
+            )
         return cfg
 
 

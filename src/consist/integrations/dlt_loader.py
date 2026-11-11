@@ -37,8 +37,8 @@ import uuid
 
 import duckdb
 import pandas as pd
+from pydantic import BaseModel
 from sqlalchemy import JSON, inspect as sa_inspect
-from sqlmodel import SQLModel
 
 from consist.artifact import Artifact
 from consist.core.gtfs import load_gtfs_member_df
@@ -400,7 +400,7 @@ def _handle_csv_path(path: str, ctx: Dict[str, Any]) -> Tuple[Any, bool]:
     raise ImportError(f"Pandas required for CSV: {path}")
 
 
-def _schema_model_table_name(schema_model: Optional[Type[SQLModel]]) -> Optional[str]:
+def _schema_model_table_name(schema_model: Optional[Type[BaseModel]]) -> Optional[str]:
     if schema_model is None:
         return None
     for cls in schema_model.__mro__:
@@ -411,7 +411,7 @@ def _schema_model_table_name(schema_model: Optional[Type[SQLModel]]) -> Optional
     return None
 
 
-def _is_additive_schema_model(schema_model: Optional[Type[SQLModel]]) -> bool:
+def _is_additive_schema_model(schema_model: Optional[Type[BaseModel]]) -> bool:
     if schema_model is None:
         return False
     for cls in schema_model.__mro__:
@@ -432,7 +432,7 @@ def ingest_artifact(
     run_context: Run,
     db_path: str | os.PathLike[str] | None = None,
     data_iterable: Optional[Union[Iterable[Any], str, Path, pd.DataFrame]] = None,
-    schema_model: Optional[Type[SQLModel]] = None,
+    schema_model: Optional[Type[BaseModel]] = None,
     lock_retries: int = 20,
     lock_base_sleep_seconds: float = 0.1,
     lock_max_sleep_seconds: float = 2.0,
@@ -674,7 +674,7 @@ def ingest_artifact(
     return info, real_table_name
 
 
-def _sqlmodel_to_dlt_columns(model: Type[SQLModel]) -> Dict[str, Dict[str, Any]]:
+def _sqlmodel_to_dlt_columns(model: Type[BaseModel]) -> Dict[str, Dict[str, Any]]:
     """Convert a SQLModel class definition into a ``dlt`` columns dictionary."""
 
     def _normalize_types(annotation: Any) -> set[Any]:

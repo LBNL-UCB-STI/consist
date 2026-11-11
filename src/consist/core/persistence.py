@@ -131,6 +131,27 @@ def _kv_row_python_value(
     return value_json
 
 
+_RUN_COLUMNS_SQL: str = (
+    "r.id, r.model_name, r.description, r.year, r.iteration, r.stage, r.phase, "
+    "r.parent_run_id, r.status, r.code_hash, r.git_hash, r.config_hash, "
+    "r.input_hash, r.signature, r.signature_scheme, r.cache_status, r.tags, "
+    "r.meta, r.started_at, r.ended_at, r.created_at, r.updated_at"
+)
+_hydrate_run_row = StoreLedger._hydrate_run_row
+
+
+@dataclass(frozen=True)
+class ConfigFacetRecord:
+    """Read-only DTO representing a config facet stored in ``main.run.meta``."""
+
+    id: str
+    namespace: str
+    schema_name: str
+    schema_version: Optional[str]
+    facet_json: Dict[str, Any]
+    created_at: datetime
+
+
 @dataclass(frozen=True)
 class ArtifactSchemaSelection:
     schema_id: str
@@ -1691,6 +1712,117 @@ class DatabaseManager:
     # Facet KV Read Views
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _row_to_config_facet_record(
+        row: tuple[Any, ...],
+    ) -> Optional[ConfigFacetRecord]:
+        raw_meta, raw_model_name, raw_created_at = row
+        parsed = (
+            json.loads(raw_meta) if isinstance(raw_meta, str) and raw_meta else raw_meta
+        )
+        if not isinstance(parsed, Mapping):
+            return None
+        raw_facet = parsed.get("facet")
+        if not isinstance(raw_facet, Mapping):
+            return None
+        fid = str(parsed.get("config_facet_id") or "")
+        if not fid:
+            return None
+        namespace = str(
+            parsed.get("config_facet_namespace")
+            or parsed.get("facet_namespace")
+            or raw_model_name
+            or ""
+        )
+        schema_name = str(
+            parsed.get("config_facet_schema_name")
+            or parsed.get("config_facet_schema")
+            or "dict"
+        )
+        raw_ver = parsed.get("config_facet_schema_version")
+        if raw_ver is None:
+            raw_ver = parsed.get("facet_schema_version")
+        schema_version = str(raw_ver) if raw_ver is not None else None
+        created_at = (
+            raw_created_at
+            if isinstance(raw_created_at, datetime)
+            else datetime.now(timezone.utc)
+        )
+        return ConfigFacetRecord(
+            id=fid,
+            namespace=namespace,
+            schema_name=schema_name,
+            schema_version=schema_version,
+            facet_json=dict(raw_facet),
+            created_at=created_at,
+        )
+
+    def get_config_facet(self, facet_id: str) -> Optional[ConfigFacetRecord]:
+        if not facet_id:
+            return None
+        try:
+            with self.ledger.exec_cursor() as cur:
+                row = cur.execute(
+                    "SELECT meta, model_name, created_at FROM main.run "
+                    "WHERE json_extract_string(meta, '$.config_facet_id') = ? "
+                    "ORDER BY created_at DESC LIMIT 1",
+                    [facet_id],
+                ).fetchone()
+            if row is None:
+                return None
+            return self._row_to_config_facet_record(row)
+        except Exception:
+            return None
+
+    def get_config_facets(
+        self,
+        *,
+        namespace: Optional[str] = None,
+        schema_name: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[ConfigFacetRecord]:
+        clauses = ["json_extract_string(meta, '$.config_facet_id') IS NOT NULL"]
+        params: list[Any] = []
+        if namespace is not None:
+            clauses.append(
+                "COALESCE("
+                "json_extract_string(meta, '$.config_facet_namespace'), "
+                "json_extract_string(meta, '$.facet_namespace'), "
+                "model_name"
+                ") = ?"
+            )
+            params.append(namespace)
+        if schema_name is not None:
+            clauses.append(
+                "COALESCE("
+                "json_extract_string(meta, '$.config_facet_schema_name'), "
+                "json_extract_string(meta, '$.config_facet_schema'), "
+                "'dict'"
+                ") = ?"
+            )
+            params.append(schema_name)
+        sql = (
+            "SELECT meta, model_name, created_at FROM main.run "
+            f"WHERE {' AND '.join(clauses)} "
+            "ORDER BY created_at DESC"
+        )
+        try:
+            with self.ledger.exec_cursor() as cur:
+                rows = cur.execute(sql, params).fetchall()
+            seen: set[str] = set()
+            out: List[ConfigFacetRecord] = []
+            max_items = max(0, int(limit))
+            for r in rows:
+                if len(out) >= max_items:
+                    break
+                rec = self._row_to_config_facet_record(r)
+                if rec is not None and rec.id not in seen:
+                    seen.add(rec.id)
+                    out.append(rec)
+            return out
+        except Exception:
+            return []
+
     def get_run_config_kv(
         self,
         run_id: str,
@@ -2560,12 +2692,12 @@ class DatabaseManager:
         year: Optional[int] = None,
         iteration: Optional[int] = None,
         limit: int = 1_000_000,
-    ) -> List[Tuple[Artifact, Run]]:
+    ) -> List[Tuple[Artifact, Optional[Run]]]:
         if schema_id is None and not schema_ids:
             raise ValueError("Provide schema_id or schema_ids for grouped view lookup.")
         resolved_predicates = predicates or []
 
-        def _query() -> List[Tuple[Artifact, Run]]:
+        def _query() -> List[Tuple[Artifact, Optional[Run]]]:
             base_ids = list(schema_ids or [])
             if schema_id is not None:
                 base_ids.append(schema_id)
@@ -2638,7 +2770,7 @@ class DatabaseManager:
                 "a.parent_artifact_id, a.schema_id, a.meta, a.created_at, "
                 f"{run_cols} "
                 "FROM main.artifact a "
-                "JOIN main.run r ON a.run_id = r.id "
+                "LEFT JOIN main.run r ON a.run_id = r.id "
                 f"WHERE {' AND '.join(clauses)} "
                 "ORDER BY a.created_at ASC, a.id ASC LIMIT ?"
             )
@@ -2651,7 +2783,10 @@ class DatabaseManager:
             art_rows = [row[:9] for row in rows]
             run_rows = [row[9:] for row in rows]
             hydrated_arts = self.ledger._hydrate_artifact_rows(art_rows)
-            hydrated_runs = [StoreLedger._hydrate_run_row(r) for r in run_rows]
+            hydrated_runs = [
+                StoreLedger._hydrate_run_row(r) if r[0] is not None else None
+                for r in run_rows
+            ]
             return list(zip(hydrated_arts, hydrated_runs))
 
         try:

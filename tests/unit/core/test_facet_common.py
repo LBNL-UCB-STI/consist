@@ -8,16 +8,11 @@ from consist.core.facet_common import (
     infer_schema_name_from_facet,
     normalize_facet_like,
 )
-from consist.core.identity import IdentityManager
 
 
 class _FacetModel(BaseModel):
     alpha: int
     nested: dict[str, object]
-
-
-def _identity() -> IdentityManager:
-    return IdentityManager(project_root=".", hashing_strategy="full")
 
 
 def test_infer_schema_name_from_facet_prefers_pydantic() -> None:
@@ -27,23 +22,19 @@ def test_infer_schema_name_from_facet_prefers_pydantic() -> None:
 
 
 def test_normalize_facet_like_supports_pydantic_and_mapping() -> None:
-    identity = _identity()
     model = _FacetModel(alpha=1, nested={"flag": True})
-    assert normalize_facet_like(identity=identity, facet=model) == {
+    assert normalize_facet_like(facet=model) == {
         "alpha": 1,
         "nested": {"flag": True},
     }
-    assert normalize_facet_like(identity=identity, facet={"alpha": 1}) == {"alpha": 1}
+    assert normalize_facet_like(facet={"alpha": 1}) == {"alpha": 1}
 
 
 def test_canonical_facet_json_and_id_is_order_stable() -> None:
-    identity = _identity()
     _, id_a = canonical_facet_json_and_id(
-        identity=identity,
         facet_dict={"b": 2, "a": 1},
     )
     _, id_b = canonical_facet_json_and_id(
-        identity=identity,
         facet_dict={"a": 1, "b": 2},
     )
     assert id_a == id_b

@@ -11,13 +11,13 @@ from consist.core.facet_common import (
     infer_schema_name_from_facet,
     normalize_facet_like,
 )
-from consist.core.persistence import DatabaseManager
 from consist.models.run import Run
 from consist.models.run_config_kv import RunConfigKV
 from consist.types import FacetLike, HasConsistFacet
 
 if TYPE_CHECKING:
     from consist.core.identity import IdentityManager
+    from consist.core.persistence import DatabaseManager
 
 
 class ConfigFacetManager:

@@ -11,12 +11,12 @@ from consist.core.facet_common import (
     infer_schema_name_from_facet,
     normalize_facet_like,
 )
-from consist.core.persistence import DatabaseManager
 from consist.models.artifact_kv import ArtifactKV
 from consist.types import FacetLike
 
 if TYPE_CHECKING:
     from consist.core.identity import IdentityManager
+    from consist.core.persistence import DatabaseManager
 
 
 @dataclass(frozen=True)

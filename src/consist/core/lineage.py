@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 import uuid
-from typing import Any, Callable, Dict, Iterable, Optional, TYPE_CHECKING, Set, Union
+from typing import Any, Callable, Dict, Iterable, Optional, Set, TYPE_CHECKING, Union
 
 if TYPE_CHECKING:
     from rich.tree import Tree as RichTree
@@ -7,8 +9,8 @@ else:  # pragma: no cover - type-only import fallback
     RichTree = Any
 
 try:
-    from rich.tree import Tree as _RichTreeClass
     from rich import print as _rich_print
+    from rich.tree import Tree as _RichTreeClass
 
     RichTreeClass: Any = _RichTreeClass
     rich_print: Callable[..., None] = _rich_print
@@ -25,13 +27,36 @@ except ImportError:  # pragma: no cover - rich is optional at runtime
 rprint: Callable[..., None] = rich_print
 
 if TYPE_CHECKING:
+    from consist.artifact import Artifact
     from consist.core.tracker import Tracker
-    from consist.models.artifact import Artifact
     from consist.models.run import Run, RunArtifacts
 
 
+def _resolve_producing_run_id(tracker: Tracker, artifact: Artifact) -> Optional[str]:
+    if artifact.run_id:
+        return artifact.run_id
+    ledger = tracker.ledger
+    if ledger is None:
+        return None
+    with ledger.exec_cursor() as cur:
+        row = cur.execute(
+            """
+            SELECT run_id
+            FROM main.run_binding
+            WHERE artifact_id = ? AND direction = 'output'
+            ORDER BY run_id
+            LIMIT 1
+            """,
+            [artifact.id],
+        ).fetchone()
+    if row is None or row[0] is None:
+        return None
+    run_id = str(row[0]).strip()
+    return run_id or None
+
+
 def build_lineage_tree(
-    tracker: "Tracker",
+    tracker: Tracker,
     artifact_key_or_id: Union[str, uuid.UUID],
     *,
     max_depth: Optional[int] = None,
@@ -55,24 +80,33 @@ def build_lineage_tree(
         Lineage tree rooted at the requested artifact, or None if lineage
         cannot be resolved (e.g., no DB configured or artifact missing).
     """
-    if not tracker.engine:
+    if tracker.ledger is None:
         return None
 
     start_artifact = tracker.get_artifact(key_or_id=artifact_key_or_id)
     if not start_artifact:
         return None
 
-    run_cache: Dict[str, Optional["Run"]] = {}
-    run_artifacts_cache: Dict[str, "RunArtifacts"] = {}
+    run_cache: Dict[str, Optional[Run]] = {}
+    run_artifacts_cache: Dict[str, RunArtifacts] = {}
     lineage_cache: Dict[tuple[str, Optional[int]], Dict[str, Any]] = {}
+    producer_id_cache: Dict[uuid.UUID, Optional[str]] = {}
+
+    def _get_producer_id(artifact: Artifact) -> Optional[str]:
+        if artifact.id not in producer_id_cache:
+            producer_id_cache[artifact.id] = _resolve_producing_run_id(
+                tracker, artifact
+            )
+        return producer_id_cache[artifact.id]
 
     def _trace(
-        artifact: "Artifact", visited_runs: Set[str], depth: int
+        artifact: Artifact, visited_runs: Set[str], depth: int
     ) -> Dict[str, Any]:
         lineage_node: Dict[str, Any] = {"artifact": artifact, "producing_run": None}
+        producing_run_id = _get_producer_id(artifact)
 
         if max_depth is not None and depth >= max_depth:
-            if artifact.run_id:
+            if producing_run_id:
                 lineage_node["truncated_by_depth"] = True
             return lineage_node
 
@@ -84,7 +118,6 @@ def build_lineage_tree(
         if cached is not None:
             return cached
 
-        producing_run_id = artifact.run_id
         if not producing_run_id or producing_run_id in visited_runs:
             return lineage_node
 
@@ -138,7 +171,7 @@ def format_lineage_tree(
     if lineage is None:
         return ""
 
-    def _artifact_label(artifact: "Artifact") -> str:
+    def _artifact_label(artifact: Artifact) -> str:
         key = artifact.key
         driver = artifact.driver
         if key and driver:
@@ -147,7 +180,7 @@ def format_lineage_tree(
             return key
         return str(artifact.id)
 
-    def _run_label(run: "Run") -> str:
+    def _run_label(run: Run) -> str:
         model = run.model_name
         run_id = run.id
         if model and run_id:
@@ -181,7 +214,7 @@ def format_lineage_tree(
 
 
 def print_lineage(
-    tracker: "Tracker",
+    tracker: Tracker,
     artifact_key_or_id: Union[str, uuid.UUID],
     *,
     max_depth: Optional[int] = None,
@@ -204,7 +237,7 @@ def print_lineage(
             print(formatted)
         return
 
-    def _add_node(parent: "RichTree", node: Dict[str, Any]) -> None:
+    def _add_node(parent: RichTree, node: Dict[str, Any]) -> None:
         artifact = node.get("artifact")
         if artifact is None:
             return
@@ -253,7 +286,7 @@ class LineageService:
     Helper for lineage tree retrieval and formatting.
     """
 
-    def __init__(self, tracker: "Tracker") -> None:
+    def __init__(self, tracker: Tracker) -> None:
         self._tracker = tracker
 
     def get_lineage(

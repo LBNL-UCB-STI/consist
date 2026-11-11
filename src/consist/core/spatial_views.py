@@ -7,25 +7,23 @@ Provides a lightweight view for querying spatial metadata ingested by Consist.
 from __future__ import annotations
 
 import logging
-import re
 from numbers import Integral
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import pandas as pd
-from sqlalchemy import text
+
+from consist.core.views import (
+    _SAFE_IDENTIFIER_RE as _SAFE_IDENTIFIER_RE,
+    _quote_ident,
+    _validate_identifier,
+)
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
 
-_SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
 
 def _validate_concept_key(concept_key: str) -> None:
-    if not _SAFE_IDENTIFIER_RE.fullmatch(concept_key):
-        raise ValueError(
-            "Invalid concept_key. Only letters, numbers, and underscores are allowed, "
-            "and the key must not start with a number."
-        )
+    _validate_identifier(concept_key, label="concept_key")
 
 
 class SpatialMetadataView:
@@ -47,44 +45,36 @@ class SpatialMetadataView:
     ) -> pd.DataFrame:
         """
         Return spatial metadata rows for the given artifact key.
-
-        Parameters
-        ----------
-        concept_key : str
-            The semantic key identifying the spatial artifact.
-        run_ids : Optional[List[str]], optional
-            Optional list of run IDs to include.
-        year : Optional[int], optional
-            Optional year filter.
         """
-        # TODO(metadata-hot-store): This metadata query still depends on the
-        # single-store compatibility engine because it joins metadata tables and
-        # `global_tables.*` in one query. Keep it deferred until cross-store
-        # query surfaces are redesigned intentionally.
-        if not self.tracker.engine:
+        ledger = self.tracker.ledger
+        if ledger is None:
             raise RuntimeError("Database connection required.")
         _validate_concept_key(concept_key)
+        q_base = f"global_tables.{_quote_ident(concept_key)}"
+        q_bounds = f"global_tables.{_quote_ident(f'{concept_key}__bounds')}"
+        q_geom = f"global_tables.{_quote_ident(f'{concept_key}__geometry_types')}"
+        q_cols = f"global_tables.{_quote_ident(f'{concept_key}__column_names')}"
 
         query = f"""
             WITH bounds AS (
                 SELECT
                     _dlt_parent_id,
                     list(value ORDER BY _dlt_list_idx) AS bounds
-                FROM global_tables.{concept_key}__bounds
+                FROM {q_bounds}
                 GROUP BY _dlt_parent_id
             ),
             geometry_types AS (
                 SELECT
                     _dlt_parent_id,
                     list(value ORDER BY _dlt_list_idx) AS geometry_types
-                FROM global_tables.{concept_key}__geometry_types
+                FROM {q_geom}
                 GROUP BY _dlt_parent_id
             ),
             column_names AS (
                 SELECT
                     _dlt_parent_id,
                     list(value ORDER BY _dlt_list_idx) AS column_names
-                FROM global_tables.{concept_key}__column_names
+                FROM {q_cols}
                 GROUP BY _dlt_parent_id
             )
             SELECT
@@ -94,32 +84,30 @@ class SpatialMetadataView:
                 gt.geometry_types,
                 sm.geometry_column,
                 cn.column_names,
-                ANY_VALUE(COALESCE(r.id, a.run_id)) as run_id,
+                ANY_VALUE(COALESCE(r.id, a.run_id)) AS run_id,
                 r.year,
                 r.iteration
-            FROM global_tables.{concept_key} sm
+            FROM {q_base} sm
             LEFT JOIN bounds b
                 ON b._dlt_parent_id = sm._dlt_id
             LEFT JOIN geometry_types gt
                 ON gt._dlt_parent_id = sm._dlt_id
             LEFT JOIN column_names cn
                 ON cn._dlt_parent_id = sm._dlt_id
-            JOIN artifact a ON sm.consist_artifact_id = CAST(a.id AS TEXT)
-            LEFT JOIN run r ON a.run_id = r.id
+            JOIN main.artifact a ON TRY_CAST(sm.consist_artifact_id AS UUID) = a.id
+            LEFT JOIN main.run r ON a.run_id = r.id
             WHERE TRUE
         """
 
-        params: Dict[str, str | int] = {}
+        params: list[Any] = []
 
         if run_ids:
-            placeholders = ",".join([f":{i}" for i in range(len(run_ids))])
-            query += f" AND r.id IN ({placeholders})"
-            for i, rid in enumerate(run_ids):
-                params[str(i)] = rid
+            query += " AND COALESCE(r.id, a.run_id) IN (SELECT UNNEST(?))"
+            params.append(list(run_ids))
 
         if year is not None:
-            query += " AND r.year = :year"
-            params["year"] = year
+            query += " AND r.year = ?"
+            params.append(int(year))
 
         query += """
             GROUP BY
@@ -137,7 +125,7 @@ class SpatialMetadataView:
         """
 
         try:
-            return pd.read_sql(text(query), self.tracker.engine, params=params)
+            return ledger.query_df(query, params)
         except Exception as e:
             logging.warning(
                 "[Consist] Failed to query spatial metadata for %s: %s",

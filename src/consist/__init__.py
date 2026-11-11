@@ -34,6 +34,8 @@ if TYPE_CHECKING:
         hydrate_admitted_input,
     )
     from consist.artifact import (
+        ArchivedOutputs,
+        Artifact,
         HintLedger,
         MissingOutputError,
     )
@@ -79,7 +81,6 @@ if TYPE_CHECKING:
         current_consist,
         current_run,
         current_tracker,
-        db_session,
         define_step,
         diff_coupler_snapshots,
         ensure_local_path,
@@ -118,6 +119,8 @@ if TYPE_CHECKING:
         output_dir,
         output_path,
         pivot_facets,
+        query_df,
+        query_rows,
         ref,
         refs,
         register_artifact_facet_parser,
@@ -128,7 +131,6 @@ if TYPE_CHECKING:
         resolve_canonical_run_id,
         resolve_run_output_paths,
         run,
-        run_query,
         run_set,
         scenario,
         set_artifact_recovery_roots,
@@ -190,6 +192,9 @@ if TYPE_CHECKING:
         DatabaseMigrationRequired,
         IncompatibleSchemaError,
     )
+    from consist.core.queries import (
+        ParameterizedSQL,
+    )
     from consist.core.resolved_binding import (
         AdmissionEvidence,
         ArtifactIdentity,
@@ -209,10 +214,6 @@ if TYPE_CHECKING:
     from consist.core.workflow import (
         RestoredCouplerSnapshotResult,
         StepIdentity,
-    )
-    from consist.models.artifact import (
-        ArchivedOutputs,
-        Artifact,
     )
     from consist.models.run import (
         CouplerSnapshotPhase,
@@ -257,13 +258,13 @@ if TYPE_CHECKING:
 _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "AdmissionEvidence": ("consist.core.resolved_binding", "AdmissionEvidence"),
     "AlignedPair": ("consist.runset", "AlignedPair"),
-    "ArchivedOutputs": ("consist.models.artifact", "ArchivedOutputs"),
+    "ArchivedOutputs": ("consist.artifact", "ArchivedOutputs"),
     "ArchivedRunOutputFile": ("consist.core.materialize", "ArchivedRunOutputFile"),
     "ArchivedRunOutputFilesReport": (
         "consist.core.materialize",
         "ArchivedRunOutputFilesReport",
     ),
-    "Artifact": ("consist.models.artifact", "Artifact"),
+    "Artifact": ("consist.artifact", "Artifact"),
     "ArtifactClassification": (
         "consist.migrations",
         "ArtifactClassification",
@@ -337,6 +338,7 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "OutputPathRef": ("consist.types", "OutputPathRef"),
     "OutputPolicyOptions": ("consist.types", "OutputPolicyOptions"),
     "OutputSet": ("consist.types", "OutputSet"),
+    "ParameterizedSQL": ("consist.core.queries", "ParameterizedSQL"),
     "PendingOutput": ("consist.engine", "PendingOutput"),
     "PythonCallableTarget": ("consist.core.orchestration", "PythonCallableTarget"),
     "RelationConnectionLeakWarning": ("consist.api", "RelationConnectionLeakWarning"),
@@ -395,7 +397,6 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "current_consist": ("consist.api", "current_consist"),
     "current_run": ("consist.api", "current_run"),
     "current_tracker": ("consist.api", "current_tracker"),
-    "db_session": ("consist.api", "db_session"),
     "define_step": ("consist.api", "define_step"),
     "diff_coupler_snapshots": ("consist.api", "diff_coupler_snapshots"),
     "ensure_digest": ("consist.engine", "ensure_digest"),
@@ -452,6 +453,8 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
         "consist.migrations",
         "promote_historical_artifact",
     ),
+    "query_df": ("consist.api", "query_df"),
+    "query_rows": ("consist.api", "query_rows"),
     "ref": ("consist.api", "ref"),
     "refs": ("consist.api", "refs"),
     "register_artifact_facet_parser": ("consist.api", "register_artifact_facet_parser"),
@@ -471,7 +474,6 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "resolve_step_contract": ("consist.core.step_contracts", "resolve_step_contract"),
     "resolve_uri_to_path": ("consist.engine", "resolve_uri_to_path"),
     "run": ("consist.api", "run"),
-    "run_query": ("consist.api", "run_query"),
     "run_set": ("consist.api", "run_set"),
     "scenario": ("consist.api", "scenario"),
     "seal": ("consist.engine", "seal"),
@@ -652,6 +654,7 @@ __all__ = [
     "OutputPathRef",
     "OutputPolicyOptions",
     "OutputSet",
+    "ParameterizedSQL",
     "PendingOutput",
     "PythonCallableTarget",
     "RelationConnectionLeakWarning",
@@ -695,7 +698,6 @@ __all__ = [
     "current_consist",
     "current_run",
     "current_tracker",
-    "db_session",
     "define_step",
     "diff_coupler_snapshots",
     "ensure_digest",
@@ -746,6 +748,8 @@ __all__ = [
     "pivot_facets",
     "plan_migration",
     "promote_historical_artifact",
+    "query_df",
+    "query_rows",
     "ref",
     "refs",
     "register_artifact_facet_parser",
@@ -759,7 +763,6 @@ __all__ = [
     "resolve_step_contract",
     "resolve_uri_to_path",
     "run",
-    "run_query",
     "run_set",
     "scenario",
     "seal",

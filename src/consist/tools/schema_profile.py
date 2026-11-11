@@ -1,41 +1,29 @@
 from __future__ import annotations
 
 import json
-import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Literal
 
-import duckdb
-from sqlalchemy import text
-from sqlalchemy.engine import Engine
-
 from consist.core.drivers import TableInfo, TABLE_DRIVERS
+from consist.core.views import (
+    _SAFE_IDENTIFIER_RE as _SAFE_IDENTIFIER_RE,
+    _quote_ident,
+    _validate_identifier,
+)
 from consist.digest import canonical_json_sha256
 
 if TYPE_CHECKING:
+    import duckdb
     from consist.core.identity import IdentityManager
+    from consist.store.ledger import StoreLedger
 
 PROFILE_VERSION = 1
 
 MAX_SCHEMA_JSON_BYTES = 65_536
 MAX_INLINE_PROFILE_BYTES = 16_384
 MAX_FIELDS = 2_000
-_SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-
-def _validate_identifier(identifier: str, *, label: str) -> str:
-    if not _SAFE_IDENTIFIER_RE.fullmatch(identifier):
-        raise ValueError(
-            f"Invalid {label}. Only letters, numbers, and underscores are allowed, "
-            "and the identifier must not start with a number."
-        )
-    return identifier
-
-
-def _quote_ident(identifier: str) -> str:
-    return '"' + identifier.replace('"', '""') + '"'
 
 
 def _normalize_index_name(name: Any, level: int) -> str:
@@ -150,7 +138,7 @@ def _json_size_bytes(obj: Any) -> int:
 
 def profile_duckdb_table(
     *,
-    engine: Engine,
+    ledger: "StoreLedger | duckdb.DuckDBPyConnection",
     table_schema: str,
     table_name: str,
     identity: Optional[IdentityManager] = None,
@@ -164,22 +152,20 @@ def profile_duckdb_table(
     not just file-side dtypes.
     """
     del identity
-    sql = text(
-        """
-        SELECT
-            column_name,
-            data_type,
-            is_nullable,
-            ordinal_position
-        FROM information_schema.columns
-        WHERE table_schema = :schema AND table_name = :table
-        ORDER BY ordinal_position
-        """
+    from consist.store.ledger import StoreLedger
+
+    sql = (
+        "SELECT column_name, data_type, is_nullable, ordinal_position "
+        "FROM information_schema.columns "
+        "WHERE table_catalog = current_database() "
+        "AND table_schema = ? AND table_name = ? "
+        "ORDER BY ordinal_position"
     )
-    with engine.connect() as conn:
-        rows = conn.execute(
-            sql, {"schema": table_schema, "table": table_name}
-        ).fetchall()
+    if isinstance(ledger, StoreLedger):
+        with ledger.exec_cursor() as cur:
+            rows = cur.execute(sql, [table_schema, table_name]).fetchall()
+    else:
+        rows = ledger.execute(sql, [table_schema, table_name]).fetchall()
 
     fields: List[SchemaFieldProfile] = []
     for col_name, data_type, is_nullable, _ordinal in rows:
@@ -281,45 +267,50 @@ def profile_file_schema(
         Schema profile payload including per-field rows and summary metadata.
     """
     del identity
+    import duckdb
+
     conn = duckdb.connect()
-    relation = None
-    if driver == "h5_table":
-        if not table_path:
-            raise ValueError("table_path is required for h5_table profiling.")
-        # reason: pandas is only needed for HDF5 hydration, so keep the dependency local.
-        import pandas as pd
+    try:
+        relation = None
+        if driver == "h5_table":
+            if not table_path:
+                raise ValueError("table_path is required for h5_table profiling.")
+            # reason: pandas is only needed for HDF5 hydration, so keep the dependency local.
+            import pandas as pd
 
-        if sample_rows is not None:
-            df = pd.read_hdf(path, key=table_path, stop=sample_rows)
+            if sample_rows is not None:
+                df = pd.read_hdf(path, key=table_path, stop=sample_rows)
+            else:
+                df = pd.read_hdf(path, key=table_path)
+            if isinstance(df, pd.Series):
+                df = df.to_frame()
+            if not isinstance(df.index, pd.RangeIndex) or df.index.name is not None:
+                df = df.reset_index()
+            for col in df.columns:
+                if isinstance(df[col].dtype, pd.StringDtype):
+                    df[col] = df[col].astype("object")
+            relation = conn.from_df(df)
         else:
-            df = pd.read_hdf(path, key=table_path)
-        if isinstance(df, pd.Series):
-            df = df.to_frame()
-        if not isinstance(df.index, pd.RangeIndex) or df.index.name is not None:
-            df = df.reset_index()
-        for col in df.columns:
-            if isinstance(df[col].dtype, pd.StringDtype):
-                df[col] = df[col].astype("object")
-        relation = conn.from_df(df)
-    else:
-        info = TableInfo(
-            role=Path(path).stem,
-            table_path=table_path,
-            container_uri=path,
-            driver=driver,
-            schema_id=None,
-        )
-        relation = TABLE_DRIVERS.get(driver).load(info, conn)
-        if sample_rows is not None:
-            relation = relation.limit(sample_rows)
+            info = TableInfo(
+                role=Path(path).stem,
+                table_path=table_path,
+                container_uri=path,
+                driver=driver,
+                schema_id=None,
+            )
+            relation = TABLE_DRIVERS.get(driver).load(info, conn)
+            if sample_rows is not None:
+                relation = relation.limit(sample_rows)
 
-    if view_name is None:
-        view_name = f"consist_tmp_schema_{uuid.uuid4().hex}"
-    fields = _describe_relation(
-        conn,
-        relation,
-        view_name,
-    )
+        if view_name is None:
+            view_name = f"consist_tmp_schema_{uuid.uuid4().hex}"
+        fields = _describe_relation(
+            conn,
+            relation,
+            view_name,
+        )
+    finally:
+        conn.close()
     if driver == "parquet":
         index_names, index_types = _parquet_index_info(path)
         if index_names:

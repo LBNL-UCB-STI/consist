@@ -94,12 +94,7 @@ from consist.core.gtfs import (
 from consist.digest import normalize_json
 from consist.core.indexing import IndexBySpec
 from consist.artifact import ArchivedOutputs, Artifact
-from consist.core.persistence import (
-    ArtifactSchemaSelection,
-    DatabaseManager,
-    ProvenanceWriter,
-    SchemaProfileSource,
-)
+from consist.core.provenance_writer import ProvenanceWriter
 from consist.core.views import ViewFactory
 from consist.core.ingestion import ingest_artifact
 from consist.core.lineage import LineageService
@@ -160,6 +155,11 @@ if TYPE_CHECKING:
         MaterializationResult,
         StagedInput,
         StagedInputsResult,
+    )
+    from consist.core.persistence import (
+        ArtifactSchemaSelection,
+        DatabaseManager,
+        SchemaProfileSource,
     )
     from consist.core.step_context import StepContext
     from consist.runset import RunSet
@@ -435,7 +435,7 @@ class Tracker:
 
         self.metadata_store: MetadataStore | None = None
         self.hot_data_store: HotDataStore | None = None
-        self._compat_db: DatabaseManager | None = None
+        self._compat_db: "DatabaseManager | None" = None
         self._compat_db_path: str | None = effective_db_path
 
         self.identity = IdentityManager(
@@ -457,6 +457,8 @@ class Tracker:
         self.db_skip_schema_init = db_skip_schema_init
 
         if effective_db_path:
+            from consist.core.persistence import DatabaseManager
+
             try:
                 ledger_mounts: dict[str, str | Path] = {
                     "workspace": self.run_dir,
@@ -586,7 +588,7 @@ class Tracker:
                 def _schema_resolver(
                     artifact: Artifact,
                     *,
-                    _db: DatabaseManager = db,
+                    _db: "DatabaseManager" = db,
                 ) -> Optional[tuple[ArtifactSchema, List[ArtifactSchemaField]]]:
                     return _db.get_artifact_schema_for_artifact(artifact_id=artifact.id)
 
@@ -618,7 +620,7 @@ class Tracker:
             self._lifecycle = None
 
     @property
-    def db(self) -> DatabaseManager | None:
+    def db(self) -> "DatabaseManager | None":
         """
         Compatibility accessor for the metadata ``DatabaseManager``.
 
@@ -630,7 +632,7 @@ class Tracker:
         return self._compat_attr("_compat_db")
 
     @db.setter
-    def db(self, value: DatabaseManager | None) -> None:
+    def db(self, value: "DatabaseManager | None") -> None:
         metadata_store = self._compat_attr("metadata_store")
         if metadata_store is not None:
             if value is metadata_store.db:
@@ -720,6 +722,68 @@ class Tracker:
         if db is None:
             raise RuntimeError("Database connection required.")
         return db.query_rows(sql, params, model=model)
+
+    def config_run_query(
+        self,
+        table: Type[BaseModel] | str,
+        *,
+        link_table: Type[BaseModel] | str,
+        table_name: Optional[str] = None,
+        columns: Optional[Iterable[Any]] = None,
+        where: Optional[Any] = None,
+        join_on: Optional[Iterable[str]] = None,
+    ):
+        """Build a parameterized DuckDB SQL query joining a config cache table to its run-link table."""
+        return self.queries.config_run_query(
+            table,
+            link_table=link_table,
+            table_name=table_name,
+            columns=columns,
+            where=where,
+            join_on=join_on,
+        )
+
+    def config_run_rows(
+        self,
+        table: Type[BaseModel] | str,
+        *,
+        link_table: Type[BaseModel] | str,
+        table_name: Optional[str] = None,
+        columns: Optional[Iterable[Any]] = None,
+        where: Optional[Any] = None,
+        join_on: Optional[Iterable[str]] = None,
+    ) -> list[Any]:
+        """Execute a config-to-run join query on the tracker's ``StoreLedger`` and return hydrated rows."""
+        return self.queries.config_run_rows(
+            table,
+            link_table=link_table,
+            table_name=table_name,
+            columns=columns,
+            where=where,
+            join_on=join_on,
+        )
+
+    def pivot_facets(
+        self,
+        *,
+        namespace: Optional[str] = None,
+        keys: Iterable[str],
+        value_column: str = "value_num",
+        value_columns: Optional[Mapping[str, str]] = None,
+        label_prefix: str = "",
+        label_map: Optional[Mapping[str, str]] = None,
+        run_id_label: str = "run_id",
+    ):
+        """Build a parameterized DuckDB SQL query pivoting ``main.run_config_kv`` keys into columns."""
+        return self.queries.pivot_facets(
+            namespace=namespace,
+            keys=keys,
+            value_column=value_column,
+            value_columns=value_columns,
+            label_prefix=label_prefix,
+            label_map=label_map,
+            run_id_label=run_id_label,
+        )
 
     @property
     def registered_schemas(self) -> Mapping[str, Type[SQLModel]]:
@@ -994,7 +1058,7 @@ class Tracker:
         abstract: bool = True,
         include_system_cols: bool = False,
         include_stats_comments: bool = True,
-        prefer_source: Optional[SchemaProfileSource] = None,
+        prefer_source: Optional["SchemaProfileSource"] = None,
     ) -> str:
         """
         Export a captured artifact schema as a SQLModel stub for manual editing.
@@ -3604,7 +3668,7 @@ class Tracker:
         self,
         artifact: Artifact,
         data: Optional[Union[Iterable[Dict[str, Any]], Any]] = None,
-        schema: Optional[Type[SQLModel]] = None,
+        schema: Optional[Type[BaseModel]] = None,
         run: Optional[Run] = None,
         profile_schema: bool = True,
     ) -> Any:
@@ -4678,9 +4742,9 @@ class Tracker:
         self,
         *,
         artifact_id: Union[str, uuid.UUID],
-        source: Optional[SchemaProfileSource] = None,
+        source: Optional["SchemaProfileSource"] = None,
         strict_source: bool = False,
-    ) -> Optional[ArtifactSchemaSelection]:
+    ) -> Optional["ArtifactSchemaSelection"]:
         return self._artifact_queries.select_artifact_schema_for_artifact(
             artifact_id=artifact_id,
             source=source,

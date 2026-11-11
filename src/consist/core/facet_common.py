@@ -2,15 +2,12 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel
 
 from consist.digest import canonical_json_str, normalize_json
 from consist.types import FacetLike
-
-if TYPE_CHECKING:
-    from consist.core.identity import IdentityManager
 
 
 @dataclass(frozen=True)
@@ -35,10 +32,8 @@ def infer_schema_name_from_facet(
 def normalize_facet_like(
     *,
     facet: FacetLike,
-    identity: Optional[IdentityManager] = None,
 ) -> Dict[str, Any]:
     """Normalize a facet payload (Pydantic model or mapping) to JSON-safe dict."""
-    del identity
     if isinstance(facet, BaseModel):
         return normalize_json(facet.model_dump(mode="json"))
     return normalize_json(facet)
@@ -47,10 +42,8 @@ def normalize_facet_like(
 def canonical_facet_json_and_id(
     *,
     facet_dict: Dict[str, Any],
-    identity: Optional[IdentityManager] = None,
 ) -> tuple[str, str]:
     """Return canonical facet JSON and stable SHA256 facet id."""
-    del identity
     canonical = canonical_json_str(facet_dict)
     facet_id = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return canonical, facet_id

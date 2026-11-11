@@ -301,7 +301,7 @@ def _default_consist_version() -> str:
 def install_v1_tripwires(con: duckdb.DuckDBPyConnection) -> None:
     """Install empty tripwire SQL views for every v1-only table name.
 
-    Because `duckdb_engine`'s `inspect(engine).has_table()` returns `True` for SQL
+    Because SQLAlchemy's `inspect(engine).has_table()` returns `True` for SQL
     views and DuckDB rejects `INSERT` into views, any unpatched `v0.3`/`v0.4`
     process skips `CREATE TABLE` during `SQLModel.metadata.create_all()` and fails
     at bind time before mutating the database.

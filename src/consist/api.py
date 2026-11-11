@@ -28,16 +28,17 @@ from typing import (
     Union,
     cast,
     overload,
+    runtime_checkable,
 )
 import weakref
 
 import pandas as pd
-import duckdb
-from sqlalchemy import and_, case, func, select as sa_select, Subquery
-from sqlalchemy.sql import Executable
-from sqlmodel import SQLModel, Session, col, select
+from pydantic import BaseModel
+from sqlmodel import SQLModel
 
 # Internal imports
+from consist.artifact import Artifact, ArchivedOutputs
+from consist.engine import resolve_uri_to_path
 from consist.core.context import (
     get_active_tracker,
     get_default_tracker,
@@ -58,16 +59,22 @@ from consist.core.drivers import (
     _normalize_columns,
 )
 from consist.core.gtfs import GTFS_BUNDLE_SOURCE_KEY, GtfsCanonicalizationResult
+from consist.core.queries import (
+    ParameterizedSQL,
+    build_config_run_query,
+    build_pivot_facets,
+    execute_config_run_rows,
+)
 from consist.core.run_options import raise_legacy_policy_kwargs_error
 from consist.core.stores import get_hot_data_db_path
-from consist.core.views import _quote_ident, create_view_model
+from consist.core.views import _quote_ident
 from consist.core.workflow import OutputCapture, RunContext
 from consist.integrations.ibis import (
     ibis_grouped_view as _ibis_grouped_view,
     ibis_connection as _ibis_connection,
     ibis_view as _ibis_view,
 )
-from consist.models.artifact import Artifact, ArchivedOutputs, get_tracker_ref
+from consist.location import lookup_live_ledger, lookup_live_ledger_by_path
 from consist.models.run import (
     ConsistRecord,
     CouplerSnapshotPhase,
@@ -76,8 +83,8 @@ from consist.models.run import (
     resolve_run_result_output,
 )
 from consist.models.run_config_kv import RunConfigKV
-from consist.core.tracker import Tracker
-from consist.protocols import ArtifactRecordLike
+from consist.core.tracker import DeprecatedViewsError, Tracker
+from consist.protocols import ArtifactRecordLike, ParameterizedSQLProtocol
 from consist.types import (
     ArtifactRef,
     CacheOptions,
@@ -97,6 +104,7 @@ from consist.types import (
 )
 
 if TYPE_CHECKING:
+    import duckdb
     from consist.core.command_exec import CommandExecutionResult
     from consist.core.config_canonicalization import ConfigAdapter
     from consist.core.materialize import (
@@ -158,7 +166,7 @@ class OpenMatrixFileLike(Protocol):
 
 
 LoadResult = Union[
-    duckdb.DuckDBPyRelation,
+    "duckdb.DuckDBPyRelation",
     pd.DataFrame,
     pd.Series,
     GeoDataFrameType,
@@ -235,50 +243,16 @@ class SpatialArtifact(ArtifactLike, Protocol):
 
 def view(model: Type[T], name: Optional[str] = None) -> Type[T]:
     """
-    Create a SQLModel class backed by a Consist hybrid view.
-
-    This is a convenience wrapper around the view factory that lets you define
-    a SQLModel schema for a concept (e.g., a canonicalized config table, an
-    ingested dataset, or a computed artifact view) and then query it as a normal
-    SQLModel table. The returned class is a dynamic subclass with `table=True`
-    that points at a database view, so you can use it in `sqlmodel.Session`
-    queries without creating a physical table.
-
-    If you need explicit control over view naming or want to create multiple
-    named views for the same concept, use `Tracker.create_view(...)` or
-    `Tracker.view(...)` directly.
-
-    Parameters
-    ----------
-    model : Type[T]
-        Base SQLModel describing the schema (columns and types).
-    name : Optional[str], optional
-        Optional override for the generated view name (defaults to the model's
-        table name).
-
-    Returns
-    -------
-    Type[T]
-        SQLModel subclass with ``table=True`` pointing at the hybrid view.
-
-    Examples
-    --------
-    ```python
-    from sqlmodel import Session, select
-    from consist import view
-    from consist.models.activitysim import ActivitySimConstantsCache
-
-    # Create a dynamic view class for querying constants
-    ConstantsView = view(ActivitySimConstantsCache)
-
-    with Session(tracker.engine) as session:
-        rows = session.exec(
-            select(ConstantsView)
-            .where(ConstantsView.key == "sample_rate")
-        ).all()
-    ```
+    Deprecated stub for legacy SQLModel ORM view creation.
     """
-    return create_view_model(model, name)
+    _ = (model, name)
+    msg = (
+        "consist.view(...) and SQLModel ORM hybrid views were removed in Consist v0.5.0. "
+        "Use tracker.create_view(view_name, concept_key) with consist.query_df(...) / "
+        "consist.query_rows(..., model=...), or consist.ibis_view(tracker, model=...) instead."
+    )
+    warnings.warn(msg, DeprecationWarning, stacklevel=2)
+    raise DeprecatedViewsError(msg)
 
 
 def ibis_connection(
@@ -2606,19 +2580,16 @@ def log_dataframe(
 
 def register_views(*models: Type[SQLModel]) -> Dict[str, Type[SQLModel]]:
     """
-    Register hybrid view models for the active tracker.
-
-    Parameters
-    ----------
-    *models : Type[SQLModel]
-        SQLModel classes describing the schema of hybrid views.
-
-    Returns
-    -------
-    Dict[str, Type[SQLModel]]
-        Mapping from model class name to the generated view model.
+    Deprecated stub for legacy bulk SQLModel ORM view registration.
     """
-    return {m.__name__: create_view_model(m) for m in models}
+    _ = models
+    msg = (
+        "consist.register_views(...) was removed in Consist v0.5.0. "
+        "Use tracker.create_view(view_name, concept_key) with consist.query_df(...) / "
+        "consist.query_rows(..., model=...), or consist.ibis_view(tracker, model=...) instead."
+    )
+    warnings.warn(msg, DeprecationWarning, stacklevel=2)
+    raise DeprecatedViewsError(msg)
 
 
 def find_run(tracker: Optional["Tracker"] = None, **filters: Any) -> Optional[Run]:
@@ -2762,67 +2733,83 @@ def run_set(
     return tr.run_set(label=label, **filters)
 
 
-@contextmanager
-def db_session(tracker: Optional["Tracker"] = None) -> Iterator[Session]:
+_QueryModelT = TypeVar("_QueryModelT")
+
+
+def query_df(
+    sql: str | ParameterizedSQLProtocol,
+    params: Sequence[Any] | Mapping[str, Any] | None = None,
+    *,
+    tracker: Optional["Tracker"] = None,
+) -> pd.DataFrame:
     """
-    Provide a SQLModel ``Session`` connected to the tracker's database.
+    Execute a read-only SQL query against the tracker's ``StoreLedger`` and return a DataFrame.
 
     Parameters
     ----------
+    sql : str | ParameterizedSQL
+        Read-only DuckDB SQL query string or ``ParameterizedSQL`` query object.
+    params : Sequence[Any] | Mapping[str, Any] | None, optional
+        Positional or named bound SQL parameters when ``sql`` is a string.
     tracker : Optional[Tracker], optional
-        Tracker instance supplying the engine; defaults to active tracker.
-
-    Yields
-    ------
-    Session
-        SQLModel session bound to the tracker engine.
-    """
-    tr = tracker or current_tracker()
-    with Session(tr.engine) as session:
-        yield session
-
-
-def run_query(query: Executable, tracker: Optional["Tracker"] = None) -> list:
-    """
-    Execute a SQLModel/SQLAlchemy query via the tracker engine.
-
-    Parameters
-    ----------
-    query : Executable
-        Query object (``select``, etc.).
-    tracker : Optional[Tracker], optional
-        Tracker instance supplying the engine; defaults to the active tracker.
+        Tracker instance supplying the ``StoreLedger``; defaults to the active tracker.
 
     Returns
     -------
-    list
-        Results of the executed query.
+    pandas.DataFrame
+        Query results as a DataFrame.
     """
     tr = tracker or current_tracker()
-    with Session(tr.engine) as session:
-        return session.exec(cast(Any, query)).all()
+    return tr.query_df(sql, params)
+
+
+def query_rows(
+    sql: str | ParameterizedSQLProtocol,
+    params: Sequence[Any] | Mapping[str, Any] | None = None,
+    *,
+    model: Type[_QueryModelT],
+    tracker: Optional["Tracker"] = None,
+) -> list[_QueryModelT]:
+    """
+    Execute a read-only SQL query against the tracker's ``StoreLedger`` and hydrate rows into ``model``.
+
+    Parameters
+    ----------
+    sql : str | ParameterizedSQL
+        Read-only DuckDB SQL query string or ``ParameterizedSQL`` query object.
+    params : Sequence[Any] | Mapping[str, Any] | None, optional
+        Positional or named bound SQL parameters when ``sql`` is a string.
+    model : Type[_QueryModelT]
+        Pydantic/SQLModel class, dataclass, or scalar type to validate each row into.
+    tracker : Optional[Tracker], optional
+        Tracker instance supplying the ``StoreLedger``; defaults to the active tracker.
+
+    Returns
+    -------
+    list[_QueryModelT]
+        Hydrated row instances.
+    """
+    tr = tracker or current_tracker()
+    return tr.query_rows(sql, params, model=model)
 
 
 def config_run_query(
-    table: Type[SQLModel],
+    table: Type[BaseModel] | str,
     *,
-    link_table: Type[SQLModel],
+    link_table: Type[BaseModel] | str,
     table_name: Optional[str] = None,
     columns: Optional[Iterable[Any]] = None,
     where: Optional[Union[Iterable[Any], Any]] = None,
     join_on: Optional[Iterable[str]] = None,
-) -> Executable:
+) -> ParameterizedSQL:
     """
-    Build a query joining a config cache table to its run-link table.
-
-    This is a convenience helper for config adapter tables that are deduplicated
-    by content hash and linked to runs via a separate link table.
+    Build a parameterized DuckDB SQL query joining a config cache table to its run-link table.
 
     Parameters
     ----------
-    table : Type[SQLModel]
-        Config cache table to query (e.g., ActivitySimCoefficientsCache).
-    link_table : Type[SQLModel]
+    table : Type[BaseModel] | str
+        Config cache table to query (e.g., ActivitySimCoefficientsCache or table name).
+    link_table : Type[BaseModel] | str
         Link table storing run_id/content_hash (e.g., ActivitySimConfigIngestRunLink).
     table_name : Optional[str], optional
         Optional filter for link_table.table_name. Defaults to table.__tablename__
@@ -2830,126 +2817,16 @@ def config_run_query(
     columns : Optional[Iterable[Any]], optional
         Columns to select. Defaults to (link_table.run_id, table).
     where : Optional[Union[Iterable[Any], Any]], optional
-        Optional filter clauses to apply to the query.
+        Optional filter clauses (mapping predicates, ParameterizedSQL, or (sql, params) tuples).
     join_on : Optional[Iterable[str]], optional
         Column names to join on. Defaults to content_hash and file_name when available.
 
     Returns
     -------
-    Executable
-        SQL query joining the config table to runs.
+    ParameterizedSQL
+        Parameterized read-only DuckDB SQL query joining the config table to runs.
     """
-    if columns is None:
-        run_id_column = getattr(link_table, "run_id", None)
-        if run_id_column is None:
-            raise ValueError(
-                "config_run_query requires link_table to have a run_id column "
-                "when columns is not specified."
-            )
-        columns_list = [run_id_column, table]
-    else:
-        if isinstance(columns, (list, tuple, set)):
-            columns_list = list(columns)
-        else:
-            columns_list = [columns]
-        if not columns_list:
-            raise ValueError("config_run_query requires at least one column.")
-
-    if join_on is None:
-        join_on = ["content_hash"]
-        if (
-            getattr(table, "file_name", None) is not None
-            and getattr(link_table, "file_name", None) is not None
-        ):
-            join_on.append("file_name")
-    else:
-        join_on = list(join_on)
-        if not join_on:
-            raise ValueError("config_run_query join_on requires at least one column.")
-
-    join_clauses = []
-    for column in join_on:
-        table_column = getattr(table, column, None)
-        link_column = getattr(link_table, column, None)
-        if table_column is None or link_column is None:
-            raise ValueError(
-                f"config_run_query join_on column {column!r} must exist on table and link_table."
-            )
-        join_clauses.append(table_column == link_column)
-
-    stmt = (
-        sa_select(*cast(tuple[Any, ...], tuple(columns_list)))
-        .select_from(table)
-        .join(link_table, and_(*join_clauses))
-    )
-
-    resolved_table_name = table_name
-    if (
-        resolved_table_name is None
-        and getattr(link_table, "table_name", None) is not None
-    ):
-        resolved_table_name = (
-            getattr(table, "__tablename__", None) or table.__name__.lower()
-        )
-    if resolved_table_name is not None:
-        table_name_column = getattr(link_table, "table_name", None)
-        if table_name_column is None:
-            raise ValueError(
-                "config_run_query table_name provided but link_table has no table_name column."
-            )
-        stmt = stmt.where(table_name_column == resolved_table_name)
-
-    if where is not None:
-        if isinstance(where, (list, tuple, set)):
-            clauses = list(where)
-        else:
-            clauses = [where]
-        for clause in clauses:
-            stmt = stmt.where(cast(Any, clause))
-
-    return stmt
-
-
-def config_run_rows(
-    table: Type[SQLModel],
-    *,
-    link_table: Type[SQLModel],
-    table_name: Optional[str] = None,
-    columns: Optional[Iterable[Any]] = None,
-    where: Optional[Union[Iterable[Any], Any]] = None,
-    join_on: Optional[Iterable[str]] = None,
-    tracker: Optional["Tracker"] = None,
-) -> list:
-    """
-    Execute a config-to-run join query and return the results as a list of rows.
-
-    This is a high-level wrapper around `config_run_query` and `run_query`. It is
-    frequently used by integration adapters (like ActivitySim or BEAM) to retrieve
-    configuration parameters that were active during a specific run.
-
-    Parameters
-    ----------
-    table : Type[SQLModel]
-        The configuration cache table to query.
-    link_table : Type[SQLModel]
-        The table that links configuration entries to specific run IDs.
-    table_name : Optional[str]
-        Optional filter for the link table's `table_name` column.
-    columns : Optional[Iterable]
-        Specific columns to select. Defaults to the run ID and the config record.
-    where : Optional[Clause]
-        Additional SQLAlchemy filter clauses.
-    join_on : Optional[Iterable[str]]
-        Column names to join on (e.g. `["content_hash"]`).
-    tracker : Optional[Tracker]
-        The tracker to use for database access.
-
-    Returns
-    -------
-    list
-        The results of the query.
-    """
-    query = config_run_query(
+    return build_config_run_query(
         table,
         link_table=link_table,
         table_name=table_name,
@@ -2957,7 +2834,55 @@ def config_run_rows(
         where=where,
         join_on=join_on,
     )
-    return run_query(query, tracker=tracker)
+
+
+def config_run_rows(
+    table: Type[BaseModel] | str,
+    *,
+    link_table: Type[BaseModel] | str,
+    table_name: Optional[str] = None,
+    columns: Optional[Iterable[Any]] = None,
+    where: Optional[Union[Iterable[Any], Any]] = None,
+    join_on: Optional[Iterable[str]] = None,
+    tracker: Optional["Tracker"] = None,
+) -> list[Any]:
+    """
+    Execute a config-to-run join query and return the results as a list of rows.
+
+    Parameters
+    ----------
+    table : Type[BaseModel] | str
+        The configuration cache table to query.
+    link_table : Type[BaseModel] | str
+        The table that links configuration entries to specific run IDs.
+    table_name : Optional[str]
+        Optional filter for the link table's `table_name` column.
+    columns : Optional[Iterable]
+        Specific columns to select. Defaults to ``(run_id, ModelClass)``.
+    where : Optional[Any]
+        Optional filter predicates (mapping, ParameterizedSQL, or ``(sql, params)`` tuple).
+    join_on : Optional[Iterable[str]]
+        Column names to join on (e.g. ``["content_hash"]``).
+    tracker : Optional[Tracker]
+        The tracker to use for database access.
+
+    Returns
+    -------
+    list[Any]
+        The hydrated results of the query.
+    """
+    tr = tracker or current_tracker()
+    if tr.ledger is None:
+        raise RuntimeError("Database connection required.")
+    return execute_config_run_rows(
+        tr.ledger,
+        table,
+        link_table=link_table,
+        table_name=table_name,
+        columns=columns,
+        where=where,
+        join_on=join_on,
+    )
 
 
 def pivot_facets(
@@ -2969,13 +2894,10 @@ def pivot_facets(
     label_prefix: str = "",
     label_map: Optional[Mapping[str, str]] = None,
     run_id_label: str = "run_id",
-    table: Type[RunConfigKV] = RunConfigKV,
-) -> Subquery:
+    table: Type[RunConfigKV] | str = RunConfigKV,
+) -> ParameterizedSQL:
     """
-    Build a pivoted facet subquery keyed by run_id.
-
-    This is a convenience helper for turning flattened config facets
-    (``run_config_kv``) into a wide table suitable for joins.
+    Build a parameterized DuckDB SQL query pivoting flattened config facets keyed by run_id.
 
     Parameters
     ----------
@@ -2986,7 +2908,7 @@ def pivot_facets(
         Facet keys to pivot into columns.
     value_column : str, default "value_num"
         Default value column to read from. Must be one of:
-        ``value_num``, ``value_str``, ``value_bool``, ``value_json``.
+        ``value_num``, ``value_str``, ``value_bool``, ``value_json``, ``auto``.
     value_columns : Optional[Mapping[str, str]], optional
         Optional per-key override of ``value_column``.
     label_prefix : str, default ""
@@ -2994,50 +2916,25 @@ def pivot_facets(
     label_map : Optional[Mapping[str, str]], optional
         Optional per-key label overrides.
     run_id_label : str, default "run_id"
-        Label to use for the run id column in the returned subquery.
-    table : Type[RunConfigKV], default RunConfigKV
-        Table/model providing the facet KV rows.
+        Label to use for the run id column in the returned query.
+    table : Type[RunConfigKV] | str, default RunConfigKV
+        View/table providing the facet KV rows (defaults to ``main.run_config_kv``).
 
     Returns
     -------
-    Any
-        A SQLAlchemy subquery with columns: ``run_id`` and one column per key.
+    ParameterizedSQL
+        Parameterized DuckDB SQL query with ``run_id`` and one column per key.
     """
-    keys_list = list(dict.fromkeys(keys))
-    if not keys_list:
-        raise ValueError("pivot_facets requires at least one key")
-
-    valid_columns = {"value_num", "value_str", "value_bool", "value_json"}
-    if value_column not in valid_columns:
-        raise ValueError(
-            f"pivot_facets value_column must be one of {sorted(valid_columns)}"
-        )
-
-    value_columns = value_columns or {}
-    label_map = label_map or {}
-
-    select_columns = [col(table.run_id).label(run_id_label)]
-    for key in keys_list:
-        column_name = value_columns.get(key, value_column)
-        if column_name not in valid_columns:
-            raise ValueError(
-                f"pivot_facets value_columns[{key!r}] must be one of {sorted(valid_columns)}"
-            )
-        value_col = col(getattr(table, column_name))
-        label = label_map.get(key, f"{label_prefix}{key}")
-        select_columns.append(
-            func.max(case((col(table.key) == key, value_col), else_=None)).label(label)
-        )
-
-    stmt = (
-        select(*select_columns)
-        .where(col(table.key).in_(keys_list))
-        .group_by(col(table.run_id))
+    return build_pivot_facets(
+        namespace=namespace,
+        keys=keys,
+        value_column=value_column,
+        value_columns=value_columns,
+        label_prefix=label_prefix,
+        label_map=label_map,
+        run_id_label=run_id_label,
+        table=table,
     )
-    if namespace is not None:
-        stmt = stmt.where(table.namespace == namespace)
-
-    return stmt.subquery()
 
 
 @contextmanager
@@ -3318,7 +3215,7 @@ def load(
     db_fallback: str = "inputs-only",
     columns: Optional[Sequence[str]] = None,
     **kwargs: Any,
-) -> duckdb.DuckDBPyRelation: ...
+) -> "duckdb.DuckDBPyRelation": ...
 
 
 @overload
@@ -3329,7 +3226,7 @@ def load(
     db_fallback: str = "inputs-only",
     columns: Optional[Sequence[str]] = None,
     **kwargs: Any,
-) -> duckdb.DuckDBPyRelation: ...
+) -> "duckdb.DuckDBPyRelation": ...
 
 
 @overload
@@ -3340,7 +3237,33 @@ def load(
     db_fallback: str = "inputs-only",
     columns: Optional[Sequence[str]] = None,
     **kwargs: Any,
-) -> duckdb.DuckDBPyRelation: ...
+) -> "duckdb.DuckDBPyRelation": ...
+
+
+@runtime_checkable
+class _TrackerLedgerProtocol(Protocol):
+    @property
+    def ledger(self) -> Any: ...
+
+
+@runtime_checkable
+class _DuckDBRelationLike(Protocol):
+    def df(self) -> pd.DataFrame: ...
+
+
+def _artifact_primary_uri(artifact: ArtifactLike) -> str:
+    loc = artifact.primary_location
+    return loc.uri if loc is not None else ""
+
+
+def _safe_existing_artifact_path(artifact: ArtifactLike) -> Optional[str]:
+    try:
+        cand = artifact.path
+    except Exception:
+        return None
+    if cand and Path(cand).exists():
+        return str(cand)
+    return None
 
 
 @overload
@@ -3397,8 +3320,8 @@ def load(
 
         - "inputs-only": allow DB fallback only if the artifact is declared as an input
           to the current active run AND the current run is not a cache hit.
-        - "always": allow DB fallback whenever `artifact.meta["is_ingested"]` is true and
-          a tracker with a DB connection is available.
+        - "always": allow DB fallback whenever `artifact.is_ingested` / `artifact.meta["is_ingested"]`
+          is true and a tracker with a DB connection is available.
         - "never": disable DB fallback entirely.
     **kwargs : Any
         Additional keyword arguments to pass to the underlying data loader function
@@ -3422,11 +3345,9 @@ def load(
     """
 
     # 1. Resolve Tracker
-    explicit_tracker = tracker is not None
     attached_tracker: Optional[Tracker] = None
-    tracker_ref = get_tracker_ref(artifact)
-    if tracker_ref:
-        ref_candidate = tracker_ref()
+    if isinstance(artifact, Artifact):
+        ref_candidate = artifact.resolve_bound_tracker()
         if isinstance(ref_candidate, Tracker):
             attached_tracker = ref_candidate
 
@@ -3439,36 +3360,62 @@ def load(
     if tracker is None and attached_tracker is not None:
         tracker = attached_tracker
 
-    if tracker is None:
-        # If we have a resolved path available, allow direct disk loading without a tracker.
-        if artifact.path and Path(artifact.path).exists():
-            pass
-        else:
-            raise RuntimeError(
-                "consist.load() requires a Tracker instance to resolve paths or access the database. "
-                "Pass it explicitly: consist.load(art, tracker=my_tracker)"
-            )
-
     # 2. Determine Physical Path
-    # If we have a tracker, use it to resolve unless a materialized runtime abs_path
-    # on the attached tracker is already present on disk.
-    if tracker:
-        if (
-            (not explicit_tracker or tracker is attached_tracker)
-            and artifact.abs_path
-            and Path(artifact.abs_path).exists()
-        ):
-            path = artifact.abs_path
+    path: str = ""
+    if isinstance(artifact, Artifact):
+        explicit_ledger = (
+            tracker.ledger if isinstance(tracker, _TrackerLedgerProtocol) else None
+        )
+        located = artifact.locate(
+            ledger=explicit_ledger,
+            mounts=artifact._effective_tracker_mounts(tracker),
+            verify_on_stale=(artifact.driver != "artifact_set"),
+        )
+        if located is not None and located.exists():
+            path = str(located)
+        elif tracker is not None:
+            raw_uri = _artifact_primary_uri(artifact)
+            path = tracker.resolve_uri(raw_uri) if raw_uri else ""
         else:
-            path = tracker.resolve_uri(artifact.container_uri)
-            if (
-                not Path(path).exists()
-                and artifact.abs_path
-                and Path(artifact.abs_path).exists()
-            ):
-                path = artifact.abs_path
+            origin_ledger = explicit_ledger or lookup_live_ledger(artifact.origin)
+            raw_uri = _artifact_primary_uri(artifact)
+            origin_mounts = (
+                origin_ledger.mounts
+                if origin_ledger is not None and "mounts" in dir(origin_ledger)
+                else None
+            )
+            resolved_cand: Optional[Path] = None
+            if raw_uri and not raw_uri.startswith("db://"):
+                try:
+                    resolved_cand, _ = resolve_uri_to_path(raw_uri, origin_mounts)
+                except Exception:
+                    resolved_cand = None
+            if resolved_cand is not None:
+                path = str(resolved_cand)
+            elif artifact.is_ingested:
+                path = raw_uri or ""
+            else:
+                raise RuntimeError(
+                    "consist.load() requires a Tracker instance to resolve paths or access the database. "
+                    "Pass it explicitly: consist.load(art, tracker=my_tracker)"
+                )
     else:
-        path = artifact.path
+        if tracker is None:
+            existing_path = _safe_existing_artifact_path(artifact)
+            if existing_path is not None:
+                path = existing_path
+            else:
+                raise RuntimeError(
+                    "consist.load() requires a Tracker instance to resolve paths or access the database. "
+                    "Pass it explicitly: consist.load(art, tracker=my_tracker)"
+                )
+        else:
+            raw_uri = _artifact_primary_uri(artifact)
+            path = tracker.resolve_uri(raw_uri) if raw_uri else ""
+            if not (path and Path(path).exists()):
+                existing_path = _safe_existing_artifact_path(artifact)
+                if existing_path is not None:
+                    path = existing_path
 
     # Only pass caller-provided kwargs to the loader; artifact.meta can contain
     # flags (e.g., schema_name) not accepted by pandas/xarray readers.
@@ -3477,25 +3424,32 @@ def load(
         load_kwargs["columns"] = columns
 
     # Driver-specific hints from metadata
+    member = artifact.member
     if (
         artifact.driver in DriverType.table_path_drivers()
         and "table_path" not in load_kwargs
+        and member
     ):
-        table_path = artifact.table_path
-        if table_path:
-            load_kwargs["table_path"] = table_path
+        load_kwargs["table_path"] = member
     if artifact.driver in DriverType.array_drivers():
-        if "array_path" not in load_kwargs:
-            array_path = artifact.array_path
-            if array_path:
-                load_kwargs["array_path"] = array_path
+        if "array_path" not in load_kwargs and member:
+            load_kwargs["array_path"] = member
 
     # 3. Try Disk Load (Priority 1)
-    if Path(path).exists():
+    if path and Path(path).exists():
         return _load_from_disk(str(path), artifact.driver, **load_kwargs)
 
     # 4. Try Database Load (Priority 2 - Ghost Mode)
-    if artifact.meta.get("is_ingested", False):
+    explicit_ledger_for_hot = (
+        tracker.ledger if isinstance(tracker, _TrackerLedgerProtocol) else None
+    )
+    has_hot_observation = (
+        artifact._active_hot_table_name(explicit_ledger_for_hot)[0] is not None
+        if isinstance(artifact, Artifact)
+        else False
+    )
+    is_ingested = has_hot_observation or bool(artifact.meta.get("is_ingested", False))
+    if is_ingested:
         if db_fallback not in {"inputs-only", "always", "never"}:
             raise ValueError(
                 f"Invalid db_fallback={db_fallback!r}. Expected 'inputs-only', 'always', or 'never'."
@@ -3535,8 +3489,10 @@ def load(
                     f" - Database: Ingested, but current run is a cache hit\n"
                     f"Hint: pass db_fallback='always' if you explicitly want DB recovery here."
                 )
+            target_uri = _artifact_primary_uri(artifact)
             is_declared_input = any(
-                (a.id == artifact.id) or (a.container_uri == artifact.container_uri)
+                (a.id == artifact.id)
+                or (bool(target_uri) and _artifact_primary_uri(a) == target_uri)
                 for a in tracker.current_consist.inputs
             )
             if not is_declared_input:
@@ -3547,7 +3503,10 @@ def load(
                     f"Hint: add it to inputs=[...] when starting the run, or pass db_fallback='always'."
                 )
 
-        if not tracker or get_hot_data_db_path(tracker) is None:
+        has_db_backing = (
+            isinstance(tracker, _TrackerLedgerProtocol) and tracker.ledger is not None
+        ) or (tracker is not None and get_hot_data_db_path(tracker) is not None)
+        if not tracker or not has_db_backing:
             raise RuntimeError(
                 f"Artifact {artifact.key} is missing from disk, but marked as ingested. Provide a tracker with a DB connection to load it."
             )
@@ -3594,6 +3553,8 @@ def _load_from_disk(path: str, driver: str, **kwargs: Any) -> LoadResult:
         for 'h5_table' driver) is missing.
     """
     if driver in DriverType.tabular_drivers():
+        import duckdb
+
         conn = duckdb.connect()
         load_kwargs = dict(kwargs)
         table_path = load_kwargs.pop("table_path", None)
@@ -3651,48 +3612,67 @@ def _load_from_disk(path: str, driver: str, **kwargs: Any) -> LoadResult:
 
 def _load_from_db(
     artifact: ArtifactLike, tracker: "Tracker", **kwargs: Any
-) -> duckdb.DuckDBPyRelation:
+) -> "duckdb.DuckDBPyRelation":
     """
     Recovers data for an artifact from the Consist DuckDB database as a Relation.
     """
+    ledger: Any = (
+        tracker.ledger
+        if isinstance(tracker, _TrackerLedgerProtocol) and tracker.ledger is not None
+        else None
+    )
+    if ledger is None and isinstance(artifact, Artifact):
+        ledger = lookup_live_ledger(artifact.origin)
     hot_data_db_path = get_hot_data_db_path(tracker)
-    if not hot_data_db_path:
-        raise RuntimeError("Tracker has no DuckDB path configured.")
-    table_name = artifact.meta.get("dlt_table_name") or artifact.key
+    if ledger is None and hot_data_db_path:
+        ledger = lookup_live_ledger_by_path(Path(hot_data_db_path))
+
+    table_name: Optional[str] = None
+    if isinstance(artifact, Artifact):
+        table_name, _ = artifact._active_hot_table_name(ledger)
+    if not table_name:
+        raw_meta_table = artifact.meta.get("dlt_table_name") or artifact.key
+        table_name = raw_meta_table if isinstance(raw_meta_table, str) else None
     if not isinstance(table_name, str) or not table_name:
         raise RuntimeError(f"Invalid table name for DuckDB load: {table_name!r}")
+
+    if ledger is not None:
+        with ledger._lock:
+            conn = ledger.connection.cursor()
+    elif hot_data_db_path:
+        import duckdb
+
+        conn = duckdb.connect(hot_data_db_path, read_only=True)
+    else:
+        raise RuntimeError("Tracker has no StoreLedger or DuckDB path configured.")
+
     artifact_id = str(artifact.id).replace("'", "''")
-    conn = duckdb.connect(hot_data_db_path, read_only=True)
     quoted_table = _quote_ident(table_name)
     columns = _normalize_columns(kwargs.get("columns"))
     select_sql = ", ".join(_quote_ident(col) for col in columns) if columns else "*"
-    relation = conn.sql(
-        f"SELECT {select_sql} FROM global_tables.{quoted_table} "
-        f"WHERE consist_artifact_id = '{artifact_id}'"
-    )
-    nrows = kwargs.get("nrows")
-    if nrows is not None:
-        relation = relation.limit(int(nrows))
-    # Keep the connection alive for downstream relation materialization.
+    try:
+        relation = conn.sql(
+            f"SELECT {select_sql} FROM global_tables.{quoted_table} "
+            f"WHERE consist_artifact_id = '{artifact_id}'"
+        )
+        nrows = kwargs.get("nrows")
+        if nrows is not None:
+            relation = relation.limit(int(nrows))
+    except Exception:
+        conn.close()
+        raise
+    # Keep the cloned cursor/connection alive for downstream relation materialization.
     _RELATION_CONNECTIONS[relation] = conn
     _maybe_warn_relation_leaks()
     return relation
 
 
-def _close_relation_connection(relation: duckdb.DuckDBPyRelation) -> None:
+def _close_relation_connection(relation: "duckdb.DuckDBPyRelation") -> None:
     _RELATION_PARQUET_FALLBACKS.pop(relation, None)
     conn = _RELATION_CONNECTIONS.pop(relation, None)
     if conn is None:
-        conn = getattr(relation, "_consist_conn", None)
-        if conn is None:
-            return
-    try:
-        conn.close()
-    finally:
-        try:
-            delattr(relation, "_consist_conn")
-        except Exception:
-            pass
+        return
+    conn.close()
 
 
 _RELATION_CONNECTIONS: "weakref.WeakKeyDictionary[duckdb.DuckDBPyRelation, duckdb.DuckDBPyConnection]" = weakref.WeakKeyDictionary()
@@ -3734,7 +3714,7 @@ def _maybe_warn_relation_leaks() -> None:
     warnings.warn(message % count, RelationConnectionLeakWarning, stacklevel=2)
 
 
-def to_df(relation: duckdb.DuckDBPyRelation, *, close: bool = True) -> pd.DataFrame:
+def to_df(relation: "duckdb.DuckDBPyRelation", *, close: bool = True) -> pd.DataFrame:
     """
     Convert a DuckDB Relation to a pandas DataFrame.
 
@@ -3746,7 +3726,9 @@ def to_df(relation: duckdb.DuckDBPyRelation, *, close: bool = True) -> pd.DataFr
         Whether to close the underlying DuckDB connection after materialization.
         Use `close=False` if you plan to continue using the relation.
     """
-    if not hasattr(relation, "df"):
+    import duckdb
+
+    if not isinstance(relation, (duckdb.DuckDBPyRelation, _DuckDBRelationLike)):
         raise TypeError("to_df expects a DuckDB Relation.")
     parquet_fallback = _RELATION_PARQUET_FALLBACKS.get(relation)
     try:
@@ -3789,6 +3771,8 @@ def load_df(
     **kwargs : Any
         Additional loader options.
     """
+    import duckdb
+
     result = load(
         artifact,
         tracker=tracker,
@@ -3816,11 +3800,13 @@ def load_relation(
     db_fallback: str = "inputs-only",
     columns: Optional[Sequence[str]] = None,
     **kwargs: Any,
-) -> Iterator[duckdb.DuckDBPyRelation]:
+) -> Iterator["duckdb.DuckDBPyRelation"]:
     """
     Context manager that yields a DuckDB Relation and ensures the underlying
     connection is closed on exit.
     """
+    import duckdb
+
     result = load(
         artifact,
         tracker=tracker,

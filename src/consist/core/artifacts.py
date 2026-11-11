@@ -5,7 +5,6 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import hashlib
 import logging
-import os
 from pathlib import Path
 import re
 import time
@@ -833,43 +832,6 @@ class ArtifactManager:
                 hints=tuple(eff_hints),
             )
             return rebuilt.bind_tracker(self.tracker)
-
-        if not isinstance(path, (Artifact, str, Path, os.PathLike)):
-            from consist.models.artifact import Artifact as _LegacyModelArtifact
-
-            if isinstance(path, _LegacyModelArtifact):
-                legacy_path = path.abs_path or self.tracker.resolve_uri(
-                    path.container_uri
-                )
-                legacy_meta = {**dict(path.meta or {}), **meta}
-                return self.create_artifact(
-                    legacy_path,
-                    run_id=run_id if run_id is not None else path.run_id,
-                    key=key if key is not None else path.key,
-                    direction=direction,
-                    schema=schema,
-                    driver=driver if driver is not None else path.driver,
-                    table_path=table_path
-                    if table_path is not None
-                    else path.table_path,
-                    array_path=array_path
-                    if array_path is not None
-                    else path.array_path,
-                    content_hash=content_hash
-                    if content_hash is not None
-                    else path.hash,
-                    force_hash_override=force_hash_override,
-                    validate_content_hash=validate_content_hash,
-                    reuse_if_unchanged=reuse_if_unchanged,
-                    reuse_scope=reuse_scope,
-                    parent_artifact_id=(
-                        parent_artifact_id
-                        if parent_artifact_id is not None
-                        else path.parent_artifact_id
-                    ),
-                    strict_schema=strict_schema,
-                    **legacy_meta,
-                )
 
         if isinstance(path, Artifact):
             source_artifact = path

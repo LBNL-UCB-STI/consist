@@ -20,7 +20,7 @@ from typing import (
     runtime_checkable,
 )
 
-from sqlmodel import SQLModel
+from pydantic import BaseModel
 
 from consist.core.identity import IdentityManager
 from consist.digest import canonical_json_sha256
@@ -465,7 +465,7 @@ class IngestSpec:
     """
 
     table_name: str
-    schema: type[SQLModel]
+    schema: type[BaseModel]
     rows: Optional[RowSource]
     source_path: Optional[Path] = None
     source: Optional[str] = None
