@@ -14,16 +14,18 @@ attributing provenance back to the original computation run. This decouples
 computation from data materialization.
 """
 
-import logging
-import pytest
-import pandas as pd
-import numpy as np
 import json
+import logging
+
+import numpy as np
+import pandas as pd
+from pydantic import TypeAdapter
+import pytest
+
 import consist
+from consist.artifact import Artifact
 from consist.core.tracker import Tracker
 from consist.models.run import Run
-from consist.models.artifact import Artifact
-from sqlmodel import text
 
 N_ROWS = 1_000_000
 
@@ -71,76 +73,76 @@ def test_offline_ingestion(tmp_path):
     # Setup Tracker (No DB needed for the simulation phase technically,
     # but we pass it just to init the object)
     tracker = Tracker(run_dir=run_dir, db_path=db_path)
-    tracker.identity.hashing_strategy = "fast"
+    try:
+        tracker.identity.hashing_strategy = "fast"
 
-    # =========================================================================
-    # PHASE 1: The "HPC Simulation" (No DB Writes)
-    # =========================================================================
-    logging.info("\n[Phase 1] Simulation running (Writing Parquet + JSON only)...")
+        # =========================================================================
+        # PHASE 1: The "HPC Simulation" (No DB Writes)
+        # =========================================================================
+        logging.info("\n[Phase 1] Simulation running (Writing Parquet + JSON only)...")
 
-    df_sim = pd.DataFrame({"id": np.arange(N_ROWS), "val": np.random.rand(N_ROWS)})
+        df_sim = pd.DataFrame({"id": np.arange(N_ROWS), "val": np.random.rand(N_ROWS)})
 
-    # Run creates artifacts but DOES NOT ingest
-    with tracker.start_run("run_hpc_01", model="weather_sim"):
-        path = run_dir / "sim_output.parquet"
-        df_sim.to_parquet(path)
+        # Run creates artifacts but DOES NOT ingest
+        with tracker.start_run("run_hpc_01", model="weather_sim"):
+            path = run_dir / "sim_output.parquet"
+            df_sim.to_parquet(path)
 
-        # Log it so it appears in consist.json
-        consist.log_artifact(str(path), key="weather_data")
+            # Log it so it appears in consist.json
+            consist.log_artifact(str(path), key="weather_data")
 
-    # Verify: JSON exists, DB is empty (conceptually)
-    json_path = run_dir / "consist.json"
-    assert json_path.exists()
+        # Verify: JSON exists, DB is empty (conceptually)
+        json_path = run_dir / "consist.json"
+        assert json_path.exists()
 
-    # =========================================================================
-    # PHASE 2: The "Nightly Ingestor" (Post-Hoc)
-    # =========================================================================
-    logging.info("[Phase 2] Reading JSON and Backfilling Database...")
+        # =========================================================================
+        # PHASE 2: The "Nightly Ingestor" (Post-Hoc)
+        # =========================================================================
+        logging.info("[Phase 2] Reading JSON and Backfilling Database...")
 
-    # 1. Load the JSON Metadata
-    with open(json_path, "r") as f:
-        run_log = json.load(f)
+        # 1. Load the JSON Metadata
+        with open(json_path, "r") as f:
+            run_log = json.load(f)
 
-    # 2. Reconstruct Objects (Pydantic/SQLModel makes this easy)
-    # We parse the 'run' dictionary back into a Run object
-    restored_run = Run.model_validate(run_log["run"])
+        # 2. Reconstruct Objects
+        restored_run = Run.model_validate(run_log["run"])
 
-    # We find the artifact we want to ingest
-    # (In a real script, you'd loop through outputs)
-    target_output_data = run_log["outputs"][0]
-    restored_artifact = Artifact.model_validate(target_output_data)
+        # We find the artifact we want to ingest
+        target_output_data = run_log["outputs"][0]
+        restored_artifact = TypeAdapter(Artifact).validate_python(target_output_data)
+        assert restored_artifact.primary_location is not None
 
-    # 3. Load the physical data
-    # We need to resolve the path. Since the JSON has the 'container_uri',
-    # we use the tracker to resolve it back to absolute path.
-    abs_path = tracker.resolve_uri(restored_artifact.container_uri)
-    logging.info(f"   -> Loading data from {abs_path}")
-    df_to_load = pd.read_parquet(abs_path)
+        # 3. Load the physical data
+        abs_path = tracker.resolve_uri(restored_artifact.primary_location.uri)
+        logging.info(f"   -> Loading data from {abs_path}")
+        df_to_load = pd.read_parquet(abs_path)
 
-    # 4. PERFORM OFFLINE INGESTION
-    # We pass the 'restored_run' explicitly.
-    # This tags the data with 'run_hpc_01' even though that run is finished.
-    tracker.ingest(
-        artifact=restored_artifact,
-        data=df_to_load,
-        run=restored_run,  # <--- THE MAGIC
-    )
+        # 4. PERFORM OFFLINE INGESTION
+        tracker.ingest(
+            artifact=restored_artifact,
+            data=df_to_load,
+            run=restored_run,
+        )
 
-    # =========================================================================
-    # PHASE 3: Verification
-    # =========================================================================
-    logging.info("[Phase 3] Verifying Data Provenance...")
+        # =========================================================================
+        # PHASE 3: Verification
+        # =========================================================================
+        logging.info("[Phase 3] Verifying Data Provenance...")
 
-    # Create view using the restored artifact key
-    tracker.create_view("v_weather", "weather_data")
+        # Create view using the restored artifact key
+        tracker.create_view("v_weather", "weather_data")
 
-    with tracker.engine.connect() as conn:
-        # Check that 'consist_run_id' matches the original HPC run
-        query = text("SELECT consist_run_id, COUNT(*) FROM v_weather GROUP BY 1")
-        row = conn.execute(query).fetchone()
+        df_res = tracker.query_df(
+            "SELECT consist_run_id, COUNT(*) AS cnt FROM v_weather GROUP BY 1"
+        )
+        assert len(df_res) == 1
+        row_run_id = str(df_res["consist_run_id"].iloc[0])
+        row_cnt = int(df_res["cnt"].iloc[0])
 
-        logging.info(f"   -> Found data for Run ID: {row[0]}")
-        logging.info(f"   -> Row Count: {row[1]}")
+        logging.info(f"   -> Found data for Run ID: {row_run_id}")
+        logging.info(f"   -> Row Count: {row_cnt}")
 
-        assert row[0] == "run_hpc_01"
-        assert row[1] == N_ROWS
+        assert row_run_id == "run_hpc_01"
+        assert row_cnt == N_ROWS
+    finally:
+        tracker.close()

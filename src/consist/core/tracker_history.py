@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 import itertools
 import os
 from pathlib import Path
@@ -232,13 +233,13 @@ class TrackerHistoryService(_TrackerServiceBase):
 
         matching: list[Artifact] = []
         for artifact in input_artifacts:
-            meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+            meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
             if meta.get("config_role") == role:
                 matching.append(artifact)
 
         run = self.get_run(run_id)
         run_adapter: str | None = None
-        if run is not None and isinstance(run.meta, dict):
+        if run is not None and isinstance(run.meta, Mapping):
             candidate = run.meta.get("config_adapter")
             if isinstance(candidate, str) and candidate:
                 run_adapter = candidate
@@ -249,7 +250,7 @@ class TrackerHistoryService(_TrackerServiceBase):
             else:
                 filtered: list[Artifact] = []
                 for artifact in matching:
-                    meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+                    meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
                     artifact_adapters: list[str] = []
                     for key in ("config_adapter", "adapter"):
                         value = meta.get(key)

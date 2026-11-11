@@ -34,9 +34,7 @@ def test_capture_outputs_recursive_pattern_filters(tracker, tmp_path: Path) -> N
             ignored.write_text("ignore", encoding="utf-8")
 
         captured_keys = {art.key for art in capture.artifacts}
-        captured_paths = {
-            Path(art.abs_path or art.container_uri).name for art in capture.artifacts
-        }
+        captured_paths = {art.as_path(tracker).name for art in capture.artifacts}
 
     assert "nested" in captured_keys
     assert "nested.csv" in captured_paths

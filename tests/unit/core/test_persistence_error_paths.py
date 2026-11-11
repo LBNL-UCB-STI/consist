@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from types import SimpleNamespace
 
+import duckdb
 import pytest
-from sqlalchemy.exc import DatabaseError, OperationalError
 
-from consist.core.db_runtime import DatabaseRuntimeOps
-from consist.core.persistence import (
-    DatabaseManager,
-    ProvenanceWriter,
-    _is_retryable_db_error,
-    load_json_safe,
+from consist.core.db_runtime import DatabaseRuntimeOps, is_retryable_db_error
+from consist.core.persistence import DatabaseManager, ProvenanceWriter
+from consist.core.stores import HotDataStore, MetadataStore
+from consist.models.artifact_schema import (
+    ArtifactSchema,
+    ArtifactSchemaField,
+    ArtifactSchemaRelation,
 )
 
 
@@ -24,6 +24,8 @@ from consist.core.persistence import (
         ("connection is already open", True),
         ("another connection has the file", True),
         ("another process holds the lock", True),
+        ("IO Error: database does not exist", False),
+        ("IO Error: no such file or directory", False),
         ("constraint violation", False),
         ("syntax error near SELECT", False),
     ],
@@ -31,43 +33,47 @@ from consist.core.persistence import (
 def test_is_retryable_db_error_matches_known_markers(
     message: str, expected: bool
 ) -> None:
-    assert _is_retryable_db_error(message) is expected
+    assert is_retryable_db_error(message) is expected
 
 
-def test_load_json_safe_raises_value_error_for_invalid_json() -> None:
-    with pytest.raises(ValueError, match="Invalid JSON"):
-        load_json_safe("{not-valid-json")
+def test_query_df_rejects_non_select_and_multi_statement_sql() -> None:
+    db = DatabaseManager(":memory:")
+    try:
+        with pytest.raises(ValueError, match="non-empty SELECT"):
+            db.query_df("   ")
+
+        with pytest.raises(ValueError, match="single read-only SELECT"):
+            db.query_df("DELETE FROM main.run")
+
+        with pytest.raises(ValueError, match="single read-only SELECT"):
+            db.query_df("SELECT 1; DROP TABLE main.run;")
+    finally:
+        db.close()
 
 
-def test_load_json_safe_raises_value_error_for_excessive_nesting_depth() -> None:
-    deeply_nested = "[" * 51 + "0" + "]" * 51
-    with pytest.raises(ValueError, match="JSON nesting depth exceeds limit"):
-        load_json_safe(deeply_nested)
-
-
-def test_table_has_column_returns_false_for_unsafe_table_name() -> None:
-    db = DatabaseManager.__new__(DatabaseManager)
-    db.engine = object()
-
-    assert (
-        db._table_has_column(table_name="run; DROP TABLE run;", column_name="id")
-        is False
-    )
+def test_hot_data_store_rejects_unsafe_table_name() -> None:
+    db = DatabaseManager(":memory:")
+    try:
+        meta_store = MetadataStore(db=db)
+        hot_store = HotDataStore(db_path=":memory:", metadata_store=meta_store)
+        assert hot_store.ingest_cache_hit("run; DROP TABLE run;", "abc123") is False
+    finally:
+        db.close()
 
 
 def _build_retry_only_db() -> DatabaseManager:
     db = DatabaseManager.__new__(DatabaseManager)
     db._runtime_ops = DatabaseRuntimeOps(db)
-    return db
-
-
-def test_execute_with_retry_retries_retryable_operational_error_then_succeeds(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    db = _build_retry_only_db()
     db._lock_retries = 5
     db._lock_base_sleep_seconds = 0.01
     db._lock_max_sleep_seconds = 0.05
+    return db
+
+
+def test_execute_with_retry_retries_retryable_duckdb_error_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _build_retry_only_db()
 
     calls: list[int] = []
     sleeps: list[float] = []
@@ -75,11 +81,7 @@ def test_execute_with_retry_retries_retryable_operational_error_then_succeeds(
     def flaky() -> str:
         calls.append(1)
         if len(calls) < 3:
-            raise OperationalError(
-                "SELECT 1",
-                {},
-                Exception("IO Error: conflicting lock from another process"),
-            )
+            raise duckdb.IOException("IO Error: conflicting lock from another process")
         return "ok"
 
     monkeypatch.setattr("consist.core.db_runtime.random.uniform", lambda _a, _b: 0.0)
@@ -93,110 +95,136 @@ def test_execute_with_retry_retries_retryable_operational_error_then_succeeds(
     assert len(sleeps) == 2
 
 
-def test_execute_with_retry_does_not_retry_non_retryable_db_error() -> None:
+def test_execute_with_retry_does_not_retry_non_retryable_duckdb_error() -> None:
     db = _build_retry_only_db()
     calls: list[int] = []
 
     def fail_fast() -> None:
         calls.append(1)
-        raise DatabaseError("INSERT", {}, Exception("constraint violation"))
+        raise duckdb.ConstraintException("Constraint Error: constraint violation")
 
-    with pytest.raises(DatabaseError):
+    with pytest.raises(duckdb.ConstraintException):
         db.execute_with_retry(fail_fast, retries=3)
 
     assert len(calls) == 1
 
 
-def test_apply_physical_fks_quotes_valid_identifiers() -> None:
-    db = DatabaseManager.__new__(DatabaseManager)
+def test_apply_physical_fks_quotes_valid_identifiers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = DatabaseManager(":memory:")
+    try:
+        with db.ledger.exec_cursor() as cur:
+            cur.execute("CREATE SCHEMA IF NOT EXISTS global_tables")
+            cur.execute("CREATE TABLE global_tables.parents (id INTEGER PRIMARY KEY)")
+            cur.execute("CREATE TABLE global_tables.children (parent_id INTEGER)")
 
-    rel = SimpleNamespace(from_field="parent_id", to_table="parents", to_field="id")
-    schema = SimpleNamespace(
-        summary_json={"table_schema": "global_tables", "table_name": "children"}
-    )
+        db.persist_artifact_schema(
+            ArtifactSchema(
+                id="schema_children",
+                profile_version=1,
+                summary_json={
+                    "table_schema": "global_tables",
+                    "table_name": "children",
+                },
+            ),
+            fields=[
+                ArtifactSchemaField(
+                    schema_id="schema_children",
+                    ordinal_position=1,
+                    name="parent_id",
+                    logical_type="INTEGER",
+                )
+            ],
+            relations=[
+                ArtifactSchemaRelation(
+                    schema_id="schema_children",
+                    from_field="parent_id",
+                    to_table="parents",
+                    to_field="id",
+                )
+            ],
+        )
 
-    class _Result:
-        @staticmethod
-        def all():
-            return [(rel, schema)]
+        alter_statements: list[str] = []
+        original_exec_cursor = db.ledger.exec_cursor
 
-    class _Session:
-        @staticmethod
-        def exec(_statement):
-            return _Result()
+        class _CursorProxy:
+            def __init__(self, inner: duckdb.DuckDBPyConnection) -> None:
+                self._inner = inner
 
-    @contextmanager
-    def fake_session_scope():
-        yield _Session()
+            def execute(self, sql: str, parameters: object = None):
+                if sql.lstrip().upper().startswith("ALTER TABLE"):
+                    alter_statements.append(sql)
+                    return self._inner
+                if parameters is None:
+                    return self._inner.execute(sql)
+                return self._inner.execute(sql, parameters)
 
-    statements: list[str] = []
-
-    class _Conn:
-        def exec_driver_sql(self, statement: str) -> None:
-            statements.append(statement)
-
-    class _Engine:
         @contextmanager
-        def begin(self):
-            yield _Conn()
+        def intercepting_exec_cursor():
+            with original_exec_cursor() as real_cur:
+                yield _CursorProxy(real_cur)
 
-    db.session_scope = fake_session_scope
-    db.engine = _Engine()
-    db.execute_with_retry = lambda func, operation_name=None: func()
+        monkeypatch.setattr(db.ledger, "exec_cursor", intercepting_exec_cursor)
 
-    applied = db.apply_physical_fks()
+        applied = db.apply_physical_fks()
 
-    assert applied == 1
-    assert len(statements) == 1
-    assert statements[0].startswith('ALTER TABLE "global_tables"."children"')
-    assert 'ADD CONSTRAINT "fk_global_tables_children_parent_id"' in statements[0]
-    assert 'FOREIGN KEY ("parent_id")' in statements[0]
-    assert 'REFERENCES "parents"("id")' in statements[0]
+        assert applied == [
+            "global_tables.children(parent_id) -> global_tables.parents(id)"
+        ]
+        assert len(alter_statements) == 1
+        assert alter_statements[0] == (
+            'ALTER TABLE "global_tables"."children" '
+            'ADD FOREIGN KEY ("parent_id") '
+            'REFERENCES "global_tables"."parents"("id")'
+        )
+    finally:
+        db.close()
 
 
-def test_apply_physical_fks_skips_invalid_identifiers() -> None:
-    db = DatabaseManager.__new__(DatabaseManager)
+def test_apply_physical_fks_skips_unmatched_or_unsafe_table_targets() -> None:
+    db = DatabaseManager(":memory:")
+    try:
+        with db.ledger.exec_cursor() as cur:
+            cur.execute("CREATE SCHEMA IF NOT EXISTS global_tables")
+            cur.execute("CREATE TABLE global_tables.children (parent_id INTEGER)")
 
-    rel = SimpleNamespace(
-        from_field="parent_id",
-        to_table="parents;DROP TABLE run;--",
-        to_field="id",
-    )
-    schema = SimpleNamespace(summary_json={"table_name": "children"})
+        db.persist_artifact_schema(
+            ArtifactSchema(
+                id="schema_unsafe_fk",
+                profile_version=1,
+                summary_json={"table_name": "children"},
+            ),
+            fields=[
+                ArtifactSchemaField(
+                    schema_id="schema_unsafe_fk",
+                    ordinal_position=1,
+                    name="parent_id",
+                    logical_type="INTEGER",
+                )
+            ],
+            relations=[
+                ArtifactSchemaRelation(
+                    schema_id="schema_unsafe_fk",
+                    from_field="parent_id",
+                    to_table="parents;DROP TABLE run;--",
+                    to_field="id",
+                )
+            ],
+        )
 
-    class _Result:
-        @staticmethod
-        def all():
-            return [(rel, schema)]
+        applied = db.apply_physical_fks()
+        assert applied == []
 
-    class _Session:
-        @staticmethod
-        def exec(_statement):
-            return _Result()
-
-    @contextmanager
-    def fake_session_scope():
-        yield _Session()
-
-    statements: list[str] = []
-
-    class _Conn:
-        def exec_driver_sql(self, statement: str) -> None:
-            statements.append(statement)
-
-    class _Engine:
-        @contextmanager
-        def begin(self):
-            yield _Conn()
-
-    db.session_scope = fake_session_scope
-    db.engine = _Engine()
-    db.execute_with_retry = lambda func, operation_name=None: func()
-
-    applied = db.apply_physical_fks()
-
-    assert applied == 0
-    assert statements == []
+        with db.ledger.exec_cursor() as cur:
+            run_table_exists = cur.execute(
+                "SELECT COUNT(*) FROM duckdb_tables() "
+                "WHERE schema_name = 'main' AND table_name = 'run'"
+            ).fetchone()
+        assert run_table_exists == (1,)
+    finally:
+        db.close()
 
 
 def test_write_record_json_does_not_use_predictable_tmp_targets(tracker) -> None:

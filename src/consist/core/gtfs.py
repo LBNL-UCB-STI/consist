@@ -250,7 +250,7 @@ def _coerce_gtfs_member_types(df: pd.DataFrame, member_name: str) -> pd.DataFram
     for field_name, field_info in schema_model.model_fields.items():
         if field_name == "feed_key" or field_name not in frame.columns:
             continue
-        annotation = _unwrap_optional(getattr(field_info, "annotation", None))
+        annotation = _unwrap_optional(field_info.annotation)
         if annotation is int:
             frame[field_name] = pd.to_numeric(
                 frame[field_name], errors="coerce"

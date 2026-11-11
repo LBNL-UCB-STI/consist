@@ -23,9 +23,10 @@ from consist.core.admission import (
     check_artifact_identity,
     check_prior_run_expectation,
 )
+from consist.artifact import Artifact
 from consist.core.tracker import Tracker
-from consist.models.artifact import Artifact
-from consist.models.run import RunArtifactLink
+from consist.digest import Digest, Identity
+from tests.helpers.artifact_factory import make_artifact
 
 
 FULL_FILE_SHA256 = {
@@ -47,10 +48,9 @@ def _complete_run(tracker: Tracker, run_id: str, *, status: str = "completed") -
     if status != "completed":
         run = tracker.get_run(run_id)
         assert run is not None
+        assert tracker.db is not None
         run.status = status
-        with tracker.db.session_scope() as session:
-            session.add(run)
-            session.commit()
+        tracker.db.sync_run(run)
 
 
 def _record_artifact(
@@ -63,19 +63,24 @@ def _record_artifact(
     semantics: dict[str, object] | None,
     direction: str = "input",
 ) -> Artifact:
-    artifact = Artifact(
+    assert tracker.db is not None
+    if semantics == FULL_FILE_SHA256 and digest is not None:
+        identity = Identity(
+            anchor=Digest("sha256:file", digest),
+            claims=(Digest("sha256:file", digest),),
+        )
+    else:
+        identity = Identity(
+            anchor=Digest("legacy-v1:unverified", digest or ("0" * 64)),
+        )
+    artifact = make_artifact(
         key=key,
         container_uri=f"test://{source_path.name}",
         driver="other",
-        hash=digest,
-        meta={} if semantics is None else {"hash_semantics": semantics},
+        identity=identity,
+        origin=tracker.ledger.ref,
     )
-    with tracker.db.session_scope() as session:
-        session.add(artifact)
-        session.add(
-            RunArtifactLink(run_id=run_id, artifact_id=artifact.id, direction=direction)
-        )
-        session.commit()
+    tracker.db.sync_artifact(artifact, run_id=run_id, direction=direction)
     return artifact
 
 
@@ -599,10 +604,8 @@ def test_cross_tracker_admission_from_external_db(tmp_path: Path) -> None:
         assert report.expected_direction == "output"
         assert report.observations == ("matched",)
     finally:
-        if producer.engine:
-            producer.engine.dispose()
-        if consumer.engine:
-            consumer.engine.dispose()
+        producer.close()
+        consumer.close()
 
 
 def test_cross_tracker_admission_without_tracker_instance(tmp_path: Path) -> None:
@@ -635,8 +638,7 @@ def test_cross_tracker_admission_without_tracker_instance(tmp_path: Path) -> Non
         assert report.outcome == "verified"
         assert report.source_tracker_db == str(producer_db.resolve())
     finally:
-        if producer.engine:
-            producer.engine.dispose()
+        producer.close()
 
 
 def test_source_tracker_db_precedence_over_missing_candidate(tmp_path: Path) -> None:
@@ -680,8 +682,7 @@ def test_source_tracker_db_run_absent(tmp_path: Path) -> None:
         assert report.outcome == "unverified"
         assert report.observations == ("expected_prior_run_absent",)
     finally:
-        if producer.engine:
-            producer.engine.dispose()
+        producer.close()
 
 
 def test_source_tracker_db_run_not_completed(tmp_path: Path) -> None:
@@ -704,8 +705,7 @@ def test_source_tracker_db_run_not_completed(tmp_path: Path) -> None:
         assert report.outcome == "unverified"
         assert report.observations == ("expected_prior_run_not_completed",)
     finally:
-        if producer.engine:
-            producer.engine.dispose()
+        producer.close()
 
 
 def test_no_database_available_raises_runtime_error(tmp_path: Path) -> None:
@@ -990,7 +990,7 @@ def test_canonical_json_with_cross_tracker_and_direction(tmp_path: Path) -> None
         direction="output",
     )
     assert tracker.db is not None
-    tracker.db.engine.dispose()
+    tracker.close()
 
     report = check_artifact_identity(
         execution_path=file,
@@ -1105,7 +1105,7 @@ def test_source_tracker_db_read_only_filesystem_permissions(tmp_path: Path) -> N
         direction="output",
     )
     assert tracker.db is not None
-    tracker.db.engine.dispose()
+    tracker.close()
 
     os.chmod(db_path, 0o400)
     try:
@@ -1141,7 +1141,8 @@ def test_source_tracker_db_corrupt_or_invalid_file(tmp_path: Path) -> None:
     assert "source_tracker_db_unreadable" in report.observations
     assert report.reason is not None
     assert (
-        "Failed to open source tracker database" in report.reason
+        "does not contain a readable Consist schema (state=unreadable)" in report.reason
+        or "Failed to open source tracker database" in report.reason
         or "Failed to read source tracker database" in report.reason
     )
 

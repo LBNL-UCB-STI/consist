@@ -29,13 +29,30 @@ consist db doctor --db-path ./provenance.duckdb
 Then take one action at a time: `consist db purge --dry-run`, `consist db merge`,
 `consist db rebuild`, and finally `consist db compact`.
 
-### "Database locked"
+### "Database locked" / "Conflicting lock is held in ... (PID ...)"
 
-**Diagnosis:** DuckDB allows only one writer at a time. Concurrent Consist
-processes can collide during run, artifact, or dlt sync writes.
+**Diagnosis:** Consist `0.5` uses a single-connection `StoreLedger` per `Tracker`.
+Within a single Python process, `StoreLedger` serializes multi-threaded reads,
+writes, `dlt` ingestion, and `ibis` / `query_df` cursors automatically without
+lock contention. Across **separate OS processes**, however, DuckDB enforces an
+exclusive single-writer file lock: while a simulation `Tracker` holds a writable
+connection open on `provenance.duckdb`, another OS process (even a read-only CLI
+command) cannot open that same `.duckdb` file until the writer closes its
+`Tracker` (`tracker.close()`). (Multiple read-only CLI processes can inspect an
+idle database concurrently because read-only CLI commands open
+`StoreLedger(..., read_only=True)`.)
 
-**Fix:** Prefer sequential writes or separate DB files per process. On shared HPC
-filesystems, tune retries before redesigning the workflow:
+**Fix:**
+- **Inspecting a live run from another terminal:** Read the per-run
+  `<run_dir>/consist.json` debug snapshot directly, or call
+  `tracker.snapshot_db(out_path)` inside your Python workflow to export a
+  consistent point-in-time `.duckdb` copy that external CLI commands can query
+  freely.
+- **Multi-process / multi-node HPC sweeps:** Run workers with
+  `Tracker(run_dir=..., db_path=None)` + `consist.store.manifest.export_run_manifest`
+  and reconstruct into the central store via `rebuild_store_from_manifests`, or
+  write per-worker shard databases and merge on completion with `consist db merge`.
+- **Short transient lock contention:** Tune lock retry environment variables:
 
 ```bash
 export CONSIST_DLT_LOCK_RETRIES=40

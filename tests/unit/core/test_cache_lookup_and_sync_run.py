@@ -1,9 +1,9 @@
 import logging
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 
 from consist.core.persistence import DatabaseManager
-from consist.models.run import Run
+from consist.models.run import Run, RunBindingInvocation
 
 
 def test_tracker_find_matching_run_prefers_signature(tracker, monkeypatch):
@@ -64,89 +64,102 @@ def test_begin_run_reuse_cache_checks_signature_lookup_first(tracker, monkeypatc
     assert len(legacy_calls) == 1
 
 
-def test_db_sync_run_skips_readback_when_not_debug(tmp_path, monkeypatch):
-    db = DatabaseManager(str(tmp_path / "sync_run_no_debug.db"))
-    now = datetime(2025, 1, 1, 12, 0)
-    run = Run(
-        id="sync_run_no_debug",
-        model_name="model",
-        status="completed",
-        config_hash=None,
-        git_hash=None,
-        created_at=now,
-        started_at=now,
-        ended_at=now,
-    )
-
-    original_scope = db.session_scope
-    get_calls = 0
-
-    @contextmanager
-    def counting_scope():
-        with original_scope() as session:
-            original_get = session.get
-
-            def counting_get(model, ident, *args, **kwargs):
-                nonlocal get_calls
-                if model is Run and ident == "sync_run_no_debug":
-                    get_calls += 1
-                return original_get(model, ident, *args, **kwargs)
-
-            monkeypatch.setattr(session, "get", counting_get)
-            yield session
-
-    monkeypatch.setattr(db, "session_scope", counting_scope)
-
-    logger = logging.getLogger()
-    original_level = logger.level
-    logger.setLevel(logging.INFO)
+def test_db_sync_run_upserts_without_readback_across_log_levels(tmp_path, monkeypatch):
+    db = DatabaseManager(str(tmp_path / "sync_run_v2.duckdb"))
     try:
-        db.sync_run(run)
+        now = datetime(2025, 1, 1, 12, 0, tzinfo=timezone.utc)
+        run = Run(
+            id="sync_run_v2",
+            model_name="model",
+            status="running",
+            config_hash="cfg_1",
+            git_hash="git_1",
+            created_at=now,
+            started_at=now,
+        )
+
+        original_get_run = db.ledger.get_run
+        original_tx = db.ledger.transaction
+        get_run_calls = 0
+        tx_calls = 0
+
+        def counting_get_run(run_id: str):
+            nonlocal get_run_calls
+            get_run_calls += 1
+            return original_get_run(run_id)
+
+        @contextmanager
+        def counting_tx():
+            nonlocal tx_calls
+            tx_calls += 1
+            with original_tx() as cur:
+                yield cur
+
+        monkeypatch.setattr(db.ledger, "get_run", counting_get_run)
+        monkeypatch.setattr(db.ledger, "transaction", counting_tx)
+
+        logger = logging.getLogger()
+        original_level = logger.level
+        try:
+            logger.setLevel(logging.INFO)
+            db.sync_run(run, require_success=True)
+
+            completed = run.model_copy(
+                update={
+                    "status": "completed",
+                    "signature": "sig_v2",
+                    "ended_at": datetime(2025, 1, 1, 12, 5, tzinfo=timezone.utc),
+                }
+            )
+            logger.setLevel(logging.DEBUG)
+            db.sync_run(completed, require_success=True)
+        finally:
+            logger.setLevel(original_level)
+
+        assert get_run_calls == 0
+        assert tx_calls == 2
+
+        persisted = original_get_run("sync_run_v2")
+        assert persisted is not None
+        assert persisted.status == "completed"
+        assert persisted.signature == "sig_v2"
+        assert persisted.config_hash == "cfg_1"
     finally:
-        logger.setLevel(original_level)
-
-    assert get_calls == 0
+        db.close()
 
 
-def test_db_sync_run_keeps_readback_when_debug(tmp_path, monkeypatch):
-    db = DatabaseManager(str(tmp_path / "sync_run_debug.db"))
-    now = datetime(2025, 1, 1, 12, 0)
-    run = Run(
-        id="sync_run_debug",
-        model_name="model",
-        status="completed",
-        config_hash=None,
-        git_hash=None,
-        created_at=now,
-        started_at=now,
-        ended_at=now,
-    )
-
-    original_scope = db.session_scope
-    get_calls = 0
-
-    @contextmanager
-    def counting_scope():
-        with original_scope() as session:
-            original_get = session.get
-
-            def counting_get(model, ident, *args, **kwargs):
-                nonlocal get_calls
-                if model is Run and ident == "sync_run_debug":
-                    get_calls += 1
-                return original_get(model, ident, *args, **kwargs)
-
-            monkeypatch.setattr(session, "get", counting_get)
-            yield session
-
-    monkeypatch.setattr(db, "session_scope", counting_scope)
-
-    logger = logging.getLogger()
-    original_level = logger.level
-    logger.setLevel(logging.DEBUG)
+def test_db_sync_run_normalizes_meta_and_records_binding_invocation(tmp_path):
+    db = DatabaseManager(str(tmp_path / "sync_run_invocation.duckdb"))
     try:
-        db.sync_run(run)
-    finally:
-        logger.setLevel(original_level)
+        now = datetime(2025, 1, 1, 12, 0, tzinfo=timezone.utc)
+        run = Run(
+            id="sync_run_inv",
+            model_name="model",
+            status="completed",
+            config_hash="cfg",
+            git_hash="git",
+            meta={"stage": "skim", "phase": "post"},
+            created_at=now,
+            started_at=now,
+            ended_at=now,
+        )
+        inv = RunBindingInvocation(
+            requested_run_id="sync_run_inv",
+            execution_run_id="sync_run_inv",
+            cache_outcome="miss",
+            binding_json='{"k":"v"}',
+            created_at=now,
+        )
+        db.sync_run(run, binding_invocation=inv, require_success=True)
 
-    assert get_calls == 1
+        persisted = db.get_run("sync_run_inv")
+        assert persisted is not None
+        assert persisted.stage == "skim"
+        assert persisted.phase == "post"
+
+        fetched_inv = db.get_binding_invocation(inv.id)
+        assert fetched_inv is not None
+        assert fetched_inv.execution_run_id == "sync_run_inv"
+        assert fetched_inv.cache_outcome == "miss"
+    finally:
+        db.close()

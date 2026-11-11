@@ -16,7 +16,7 @@ from consist.core.drivers import H5TableDriver, ParquetDriver, TableInfo
 from consist.core.logical_array_identity import open_h5py_read_only
 from consist.core.tracker import Tracker
 from consist.core.tracker_config import TrackerConfig
-from consist.models.artifact import Artifact
+from tests.helpers.artifact_factory import make_artifact
 
 
 def test_import_consist_defers_optional_heavy_dependencies() -> None:
@@ -160,7 +160,7 @@ def test_read_only_tracker_opens_db_read_only_and_skips_view_ddl(
         schemas=[DummySchema],
     ) as reader:
         assert reader.db is not None
-        assert reader.db._read_only is True
+        assert reader.db.read_only is True
         assert view_called is False
         run = reader.get_run("seed_run")
         assert run is not None
@@ -451,7 +451,7 @@ def test_to_df_enodata_fallback_when_materialization_raises(
 ) -> None:
     pq_path = tmp_path / "lazy_enodata.parquet"
     pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]}).to_parquet(pq_path, index=False)
-    artifact = Artifact(key="lazy", container_uri=str(pq_path), driver="parquet")
+    artifact = make_artifact(key="lazy", container_uri=str(pq_path), driver="parquet")
 
     rel = consist.load(artifact, columns=["b"], nrows=2)
     assert isinstance(rel, duckdb.DuckDBPyRelation)

@@ -173,9 +173,7 @@ def test_prepare_config_rejects_snapshot_member_outside_parent_artifact_keys(
 ) -> None:
     source = tmp_path / "input.csv"
     source.write_text("id\n1\n", encoding="utf-8")
-    member_type = getattr(
-        config_canonicalization, "CanonicalizationArtifactMember", None
-    )
+    member_type = config_canonicalization.CanonicalizationArtifactMember
     assert member_type is not None
 
     class Adapter(_BundleTrackerProbeAdapter):

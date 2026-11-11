@@ -771,6 +771,9 @@ class ArtifactManager:
                                 witness=_capture_witness(path_obj, member=eff_member),
                                 basis=new_basis,
                                 site=self._site_name(),
+                                observed_at_ns=1
+                                if not eff_identity.verifiable
+                                else time.time_ns(),
                             )
                             eff_hints = [obs]
 
@@ -918,6 +921,11 @@ class ArtifactManager:
         resolved_abs_path = str(path_obj)
         mounts_map = self._effective_mounts()
         container_uri, matched_mount = _engine_virtualize_path(path_obj, mounts_map)
+        if matched_mount is None and self.tracker.run_dir:
+            run_dir_resolved = Path(self.tracker.run_dir).expanduser().resolve()
+            if path_obj.is_relative_to(run_dir_resolved):
+                rel_run = path_obj.relative_to(run_dir_resolved).as_posix()
+                container_uri = "." if not rel_run else f"./{rel_run}"
 
         if matched_mount is not None and matched_mount.name != "workspace":
             mount_scheme = matched_mount.name

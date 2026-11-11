@@ -68,7 +68,7 @@ def test_openmatrix_metadata_ingestion(tracker: Tracker):
     4. No raw matrix data is ingested (metadata-only strategy)
     5. Run ID propagation works
     """
-    if not tracker.engine:
+    if not tracker.ledger:
         pytest.skip("Database not configured")
 
     # 1. Create an OpenMatrix file
@@ -98,26 +98,28 @@ def test_openmatrix_metadata_ingestion(tracker: Tracker):
         tracker.ingest(artifact)
 
         # 4. Query the openmatrix_catalog table
-        from sqlalchemy import text
-
-        result = tracker.run_query(
-            text(
-                "SELECT matrix_name, n_rows, n_cols FROM global_tables.network_matrices "
-                "WHERE consist_run_id = :run_id"
-            ).bindparams(run_id=artifact.run_id)
+        result_df = tracker.query_df(
+            "SELECT matrix_name, n_rows, n_cols FROM global_tables.network_matrices "
+            "WHERE consist_run_id = ?",
+            [artifact.run_id],
         )
 
         # 5. Verify metadata was ingested
-        assert len(result) > 0, "Metadata should be ingested"
+        assert len(result_df) > 0, "Metadata should be ingested"
 
         # Extract matrix names
-        matrix_names = [row[0] for row in result]
+        matrix_names = result_df["matrix_name"].tolist()
         assert "time_period_1" in matrix_names
         assert "time_period_2" in matrix_names
         assert "distance" in matrix_names
 
         # Verify shapes are stored
-        row_shapes = {(row[1], row[2]) for row in result}
+        row_shapes = {
+            (int(r), int(c))
+            for r, c in result_df[["n_rows", "n_cols"]].itertuples(
+                index=False, name=None
+            )
+        }
         assert row_shapes == {(50, 50)}, "All matrices should be 50x50"
 
 

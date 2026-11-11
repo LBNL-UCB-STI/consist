@@ -14,45 +14,45 @@ class _Result:
         return self._row
 
 
-class _Connection:
+class _Cursor:
     def __init__(self, result_row):
         self.result_row = result_row
-        self.calls: list[tuple[str, tuple[str, ...]]] = []
+        self.calls: list[tuple[str, list[str]]] = []
 
-    def exec_driver_sql(self, statement: str, params: tuple[str, ...]) -> _Result:
+    def execute(self, statement: str, params: list[str]) -> _Result:
         self.calls.append((statement, params))
         return _Result(self.result_row)
 
 
-class _Engine:
-    def __init__(self, connection: _Connection):
-        self.connection = connection
+class _Ledger:
+    def __init__(self, cursor: _Cursor):
+        self.cursor = cursor
 
     @contextmanager
-    def begin(self):
-        yield self.connection
+    def exec_cursor(self):
+        yield self.cursor
 
 
 def test_ingest_cache_hit_quotes_table_name() -> None:
     tracker = Tracker.__new__(Tracker)
-    connection = _Connection(result_row=(1,))
-    tracker.db = SimpleNamespace(engine=_Engine(connection))
+    cursor = _Cursor(result_row=(1,))
+    tracker.db = SimpleNamespace(ledger=_Ledger(cursor))
 
     result = tracker._ingest_cache_hit("safe_table", "abc123")
 
     assert result is True
-    assert len(connection.calls) == 1
-    statement, params = connection.calls[0]
+    assert len(cursor.calls) == 1
+    statement, params = cursor.calls[0]
     assert statement.startswith('SELECT 1 FROM "global_tables"."safe_table"')
-    assert params == ("abc123",)
+    assert params == ["abc123"]
 
 
 def test_ingest_cache_hit_rejects_unsafe_table_name_before_sql() -> None:
     tracker = Tracker.__new__(Tracker)
-    connection = _Connection(result_row=(1,))
-    tracker.db = SimpleNamespace(engine=_Engine(connection))
+    cursor = _Cursor(result_row=(1,))
+    tracker.db = SimpleNamespace(ledger=_Ledger(cursor))
 
     result = tracker._ingest_cache_hit("safe_table;DROP TABLE run;--", "abc123")
 
     assert result is False
-    assert connection.calls == []
+    assert cursor.calls == []

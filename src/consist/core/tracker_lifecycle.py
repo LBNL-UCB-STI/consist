@@ -634,6 +634,7 @@ class RunLifecycleCoordinator:
                     ),
                     schema_version=schema_version,
                     index_kv=facet_index,
+                    sync_db=False,
                 )
 
         current_consist = tracker.current_consist
@@ -644,16 +645,29 @@ class RunLifecycleCoordinator:
             if inputs:
                 known_latest_by_index: Dict[int, Optional[Artifact]] = {}
                 if tracker.db:
+                    from consist.engine import (
+                        virtualize_path as _engine_virtualize_path,
+                    )
+
+                    mounts_map = tracker.artifacts._effective_mounts()
                     lookup_by_index: Dict[
                         int, tuple[str, Optional[str], Optional[str], Optional[str]]
                     ] = {}
                     for index, item in enumerate(inputs):
                         if isinstance(item, Artifact):
                             continue
-                        path_item = Path(item)
+                        path_item = Path(item).expanduser().resolve()
+                        v_uri, matched_m = _engine_virtualize_path(
+                            path_item, mounts_map
+                        )
+                        if matched_m is None and tracker.run_dir:
+                            rd_res = Path(tracker.run_dir).expanduser().resolve()
+                            if path_item.is_relative_to(rd_res):
+                                rel_p = path_item.relative_to(rd_res).as_posix()
+                                v_uri = "." if not rel_p else f"./{rel_p}"
                         lookup = (
-                            tracker.fs.virtualize_path(str(path_item.resolve())),
-                            _infer_driver_from_path(path_item),
+                            v_uri,
+                            _infer_driver_from_path(Path(item)),
                             None,
                             None,
                         )

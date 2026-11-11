@@ -18,18 +18,22 @@ from consist.core.materialize import (
     materialize_artifact,
     materialize_planned_outputs,
 )
-from consist.models.artifact import Artifact
+from consist.artifact import Artifact as ArtifactType
 from consist.models.run import Run
+from tests.helpers.artifact_factory import make_artifact as Artifact
 
 
 class StubDb:
     def __init__(
-        self, *, outputs_by_run: dict[str, list[Artifact]], runs: dict[str, Run]
+        self,
+        *,
+        outputs_by_run: dict[str, list[ArtifactType]],
+        runs: dict[str, Run],
     ):
         self.outputs_by_run = outputs_by_run
         self.runs = runs
 
-    def get_output_artifacts_for_run(self, run_id: str) -> list[Artifact]:
+    def get_output_artifacts_for_run(self, run_id: str) -> list[ArtifactType]:
         return list(self.outputs_by_run.get(run_id, []))
 
     def get_run(self, run_id: str) -> Run | None:
@@ -57,7 +61,7 @@ def _artifact(
     driver: str = "csv",
     hash_value: str | None = None,
     meta: dict | None = None,
-) -> Artifact:
+) -> ArtifactType:
     return Artifact(
         id=uuid.uuid4(),
         key=key,
@@ -72,7 +76,7 @@ def _artifact(
 def _stub_tracker(
     *,
     run_dir: Path,
-    outputs_by_run: dict[str, list[Artifact]],
+    outputs_by_run: dict[str, list[ArtifactType]],
     runs: dict[str, Run],
     mounts: dict[str, str] | None = None,
 ):
@@ -1337,10 +1341,10 @@ def test_materialize_run_outputs_db_fallback_handles_attached_catalog_with_same_
     output_path.unlink()
 
     attached_db = run_dir / "attached_other.duckdb"
-    with tracker.engine.begin() as conn:
-        conn.exec_driver_sql(f"ATTACH '{attached_db}' AS attached_other")
-        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS attached_other.global_tables")
-        conn.exec_driver_sql(
+    with tracker.ledger.exec_cursor() as cur:
+        cur.execute(f"ATTACH '{attached_db}' AS attached_other")
+        cur.execute("CREATE SCHEMA IF NOT EXISTS attached_other.global_tables")
+        cur.execute(
             'CREATE TABLE attached_other.global_tables."table" '
             "(consist_artifact_id VARCHAR, value BIGINT, extra_col VARCHAR)"
         )
@@ -1352,8 +1356,8 @@ def test_materialize_run_outputs_db_fallback_handles_attached_catalog_with_same_
             db_fallback="if_ingested",
         )
     finally:
-        with tracker.engine.begin() as conn:
-            conn.exec_driver_sql("DETACH DATABASE IF EXISTS attached_other")
+        with tracker.ledger.exec_cursor() as cur:
+            cur.execute("DETACH DATABASE IF EXISTS attached_other")
 
     restored_path = run_dir / "restored_attached" / "outputs" / "table.csv"
     assert result.materialized_from_db == {"table": str(restored_path.resolve())}
@@ -1404,10 +1408,8 @@ def test_materialize_run_outputs_db_fallback_empty_export_is_missing_source(
     tracker.ingest(artifact)
     output_path.unlink()
 
-    monkeypatch.setattr(
-        "consist.core.materialize.pd.read_sql",
-        lambda *_args, **_kwargs: pd.DataFrame(),
-    )
+    with tracker.ledger.exec_cursor() as cur:
+        cur.execute('DELETE FROM "global_tables"."empty"')
 
     result = tracker.materialize_run_outputs(
         "producer_empty",
@@ -1567,7 +1569,7 @@ def test_hydrate_run_outputs_preserves_unhashed_artifacts(tmp_path: Path) -> Non
     result = hydrated["table"]
     assert result.status == "materialized_from_filesystem"
     assert result.resolvable is True
-    assert result.artifact.hash is None
+    assert result.artifact.hash == f"legacy-v1:unverified:{'0' * 64}"
 
 
 def test_hydrate_run_outputs_warn_mode_returns_mixed_keyed_statuses(
@@ -1649,7 +1651,7 @@ def test_hydrate_run_outputs_to_destinations_restores_unrelated_file_and_directo
     assert hydrated["summary"].artifact.as_path() == summary_destination.resolve()
     assert summary_destination.read_text(encoding="utf-8") == "value\n1\n"
     assert hydrated["tables"].path == tables_destination.resolve()
-    assert hydrated["tables"].status == "materialized_from_filesystem"
+    assert hydrated["tables"].status == "materialized_directory_from_filesystem"
     assert (tables_destination / "part.csv").read_text(encoding="utf-8") == "value\n2\n"
 
 

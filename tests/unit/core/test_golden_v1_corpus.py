@@ -21,8 +21,8 @@ from consist.digest import (
     compute_manifest_v1_digest,
     digest_table,
 )
-from consist.models.artifact import Artifact
 from consist.models.run import ConsistRecord
+from tests.helpers.artifact_factory import make_artifact
 
 
 def _sample_golden_step(x: int) -> int:
@@ -65,13 +65,13 @@ def test_golden_v1_identity_manager_signatures() -> None:
         == "1fc6213a4fc7b4b2f1bc4f46325cc11b6a3626bdb450984160839decc14e466e"  # pragma: allowlist secret
     )
 
-    art_managed = Artifact(
+    art_managed = make_artifact(
         id=uuid.UUID("11111111-1111-1111-1111-111111111111"),
         key="households",
         container_uri="workspace://households.parquet",
         driver="parquet",
         run_id="producer_run_1",
-        hash="a" * 64,
+        hash=f"sha256:file:{'a' * 64}",
         meta={
             "hash_semantics": {
                 "version": 1,
@@ -82,14 +82,14 @@ def test_golden_v1_identity_manager_signatures() -> None:
             }
         },
     )
-    art_table = Artifact(
+    art_table = make_artifact(
         id=uuid.UUID("22222222-2222-2222-2222-222222222222"),
         key="persons",
         container_uri="workspace://pipeline.h5",
         table_path="/persons",
         driver="h5_table",
         run_id="producer_run_2",
-        hash="b" * 64,
+        hash=f"legacy-v1:unverified:{'b' * 64}",
     )
 
     sig_lookup = {"producer_run_1": "c" * 64, "producer_run_2": None}.get
@@ -277,6 +277,7 @@ def test_golden_ctd1_duckdb_vs_parquet_and_arrow_parity(tmp_path: Path) -> None:
             schema=GoldenTrip,
         )
 
+    tracker.close()
     with duckdb.connect(str(tmp_path / "provenance.duckdb"), read_only=True) as con:
         rel = con.sql(
             "SELECT id, mode, weight FROM global_tables.golden_trips "
@@ -431,7 +432,7 @@ def test_golden_sig_v2_and_v1_db_builder_corpus_parity(tmp_path: Path) -> None:
     in_hash_b, sig_b = compute_sig_v2("code_sha_v2", "cfg_sha_v2", slots_b)
     assert (in_hash_a, sig_a) == (in_hash_b, sig_b)
 
-    # Pure-DuckDB v1 corpus built via v1_db_builder (no duckdb-engine)
+    # Pure-DuckDB v1 corpus built via v1_db_builder without SQLAlchemy engine
     v1_db = tmp_path / "golden_builder_v1.duckdb"
     sample_parquet = tmp_path / "zones.parquet"
     pd.DataFrame({"zone_id": [1, 2], "area": [10.5, 20.0]}).to_parquet(

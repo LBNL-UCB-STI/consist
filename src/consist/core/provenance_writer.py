@@ -241,7 +241,12 @@ class ProvenanceWriter:
             ordinal,
             facet_index,
         ) in artifacts_with_direction:
-            if slot is None and role is None and ordinal == 0 and facet_index is None:
+            if (
+                slot is None
+                and role is None
+                and ordinal == 0
+                and facet_index in (None, True)
+            ):
                 grouped_simple.setdefault(direction, []).append(artifact)
             else:
                 custom_entries.append(

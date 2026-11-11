@@ -3,25 +3,24 @@
 from __future__ import annotations
 
 import pytest
-from consist import (
-    is_dataframe_artifact,
-    is_tabular_artifact,
-    is_json_artifact,
-    is_zarr_artifact,
-    is_hdf_artifact,
-    is_spatial_artifact,
-    DriverType,
-)
 import consist.api as api
-from consist.models.artifact import Artifact
+from consist.artifact import Artifact
 from consist.api import (
     ArtifactLike,
+    DriverType,
+    is_dataframe_artifact,
+    is_hdf_artifact,
+    is_json_artifact,
+    is_spatial_artifact,
+    is_tabular_artifact,
+    is_zarr_artifact,
 )
+from tests.helpers.artifact_factory import make_artifact
 
 
 def _artifact(driver: str) -> Artifact:
     """Create a test artifact with the given driver."""
-    return Artifact(
+    return make_artifact(
         key="test",
         container_uri="workspace://test.txt",
         driver=driver,

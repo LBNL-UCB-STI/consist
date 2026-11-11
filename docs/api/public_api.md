@@ -1,8 +1,22 @@
-# Public API (v0.1)
+# Public API (v0.5)
 
-This page defines Consist's **public API** for the `0.1.x` series. Items listed as
-*Advanced* are still public but are primarily targeted at advanced users and may be
-more verbose, lower-level, or easier to misuse.
+This page defines Consist's **public API** for the `0.5.x` series. Top-level
+`consist.__all__` curates 58 core workflow symbols (`Tracker`, `Artifact`,
+`Run`, `RunResult`, `RunArtifacts`, `ScenarioContext`, `Coupler`, `OutputSet`,
+`OutputArtifactSpec`, `ArchivedOutputs`, `RunCompletionArchivePolicy`,
+`ExecutionOptions`, `OutputPolicyOptions`, `CacheOptions`, `IdentityInputs`,
+`Mount`, `SiteContext`, `ParameterizedSQL`, `run`, `trace`, `start_run`,
+`scenario`, `define_step`, `ref`, `refs`, `output_path`, `output_dir`, `exec`,
+`use_tracker`, `load`, `load_df`, `ingest`, `log_artifact`, `log_artifacts`,
+`log_input`, `log_output`, `log_dataframe`, `log_meta`, `observe`, `locate`,
+`stage`, `archive`, `evict`, `archive_artifact`, `archive_run_outputs`,
+`archive_current_run_outputs`, `query_df`, `query_rows`, `find_runs`,
+`find_run`, `run_set`, `RunSet`, `pivot_facets`, `config_run_query`,
+`config_run_rows`, `ConsistError`, `DatabaseMigrationRequired`,
+`IncompatibleSchemaError`), while specialized domain modules live under
+`consist.digest`, `consist.location`, `consist.meta`, `consist.admission`,
+`consist.gtfs`, `consist.store` (`consist.store.manifest`), and
+`consist.migrations`.
 
 For tiered guidance:
 
@@ -67,9 +81,10 @@ submodules:
 - **`consist.gtfs`**: Transit feed schemas, snapshots, and pure member discovery.
 
 Top-level exports for symbols in these domain submodules are retained as deprecated
-aliases for backward compatibility, emitting `FutureWarning` on access, and will be
+aliases for backward compatibility, emitting `DeprecationWarning` on access, and will be
 phased out in a future release. Prefer direct submodule imports (e.g.,
-`from consist.digest import digest_file` or `from consist.admission import PriorRunExpectation`).
+`from consist.digest import digest_file`, `from consist.admission import PriorRunExpectation`,
+or `from consist.store.manifest import RunManifest, rebuild_store_from_manifests`).
 
 Consist deprecates top-level helpers when they are only duplicate
 tracker-owning execution entry points:
@@ -335,13 +350,14 @@ These models are returned by, or support, `ScenarioContext.map_runs(...)`:
 
 ### Querying and views
 
-- [`consist.view`](api_helpers.md#consist.api.view)
-- [`consist.register_views`](api_helpers.md#consist.api.register_views)
+- [`consist.query_df`](api_helpers.md#consist.api.query_df) / [`Tracker.query_df(...)`](tracker.md#consist.core.tracker.Tracker.query_df)
+- [`consist.query_rows`](api_helpers.md#consist.api.query_rows) / [`Tracker.query_rows(...)`](tracker.md#consist.core.tracker.Tracker.query_rows)
+- `consist.ParameterizedSQL`
 - [`consist.find_run`](api_helpers.md#consist.api.find_run)
 - [`consist.find_runs`](api_helpers.md#consist.api.find_runs)
-- [`consist.find_latest_run`](api_helpers.md#consist.api.find_latest_run)
-- [`consist.find_matching_run`](api_helpers.md#consist.api.find_matching_run)
-- [`consist.find_matching_runs`](api_helpers.md#consist.api.find_matching_runs)
+- [`consist.api.find_latest_run`](api_helpers.md#consist.api.find_latest_run)
+- [`consist.api.find_matching_run`](api_helpers.md#consist.api.find_matching_run)
+- [`consist.api.find_matching_runs`](api_helpers.md#consist.api.find_matching_runs)
 - [`consist.run_set`](api_helpers.md#consist.api.run_set)
 - [`Tracker.run_set(...)`](tracker.md#consist.core.tracker.Tracker.run_set)
 - [`RunSet`](runset.md#consist.runset.RunSet) and [`AlignedPair`](runset.md#consist.runset.AlignedPair)
@@ -352,14 +368,13 @@ These models are returned by, or support, `ScenarioContext.map_runs(...)`:
 - [`Tracker.get_child_artifacts(...)`](tracker.md#consist.core.tracker.Tracker.get_child_artifacts) / [`Tracker.get_parent_artifact(...)`](tracker.md#consist.core.tracker.Tracker.get_parent_artifact)
 - [`Tracker.get_run_inputs(...)`](tracker.md#consist.core.tracker.Tracker.get_run_inputs) / [`Tracker.get_run_outputs(...)`](tracker.md#consist.core.tracker.Tracker.get_run_outputs)
 - [`Tracker.get_run_config(...)`](tracker.md#consist.core.tracker.Tracker.get_run_config) / [`Tracker.get_config_bundle(...)`](tracker.md#consist.core.tracker.Tracker.get_config_bundle)
-- [`consist.resolve_canonical_run_id`](api_helpers.md#consist.api.resolve_canonical_run_id) / [`Tracker.resolve_canonical_run_id(...)`](tracker.md#consist.core.tracker.Tracker.resolve_canonical_run_id)
-- [`consist.get_run_result`](api_helpers.md#consist.api.get_run_result) / [`Tracker.get_run_result(...)`](tracker.md#consist.core.tracker.Tracker.get_run_result)
+- [`consist.api.resolve_canonical_run_id`](api_helpers.md#consist.api.resolve_canonical_run_id) / [`Tracker.resolve_canonical_run_id(...)`](tracker.md#consist.core.tracker.Tracker.resolve_canonical_run_id)
+- [`consist.api.get_run_result`](api_helpers.md#consist.api.get_run_result) / [`Tracker.get_run_result(...)`](tracker.md#consist.core.tracker.Tracker.get_run_result)
 - [`Tracker.print_lineage(...)`](tracker.md#consist.core.tracker.Tracker.print_lineage)
-- [`consist.run_query`](api_helpers.md#consist.api.run_query)
-- [`consist.db_session`](api_helpers.md#consist.api.db_session)
+- [`consist.config_run_query`](api_helpers.md#consist.api.config_run_query) / [`consist.config_run_rows`](api_helpers.md#consist.api.config_run_rows)
 - [`consist.pivot_facets`](api_helpers.md#consist.api.pivot_facets)
-- Indexing helpers: [`consist.index_by_field`](indexing.md#consist.core.indexing.index_by_field), [`consist.index_by_facet`](indexing.md#consist.core.indexing.index_by_facet), plus [`RunFieldIndex`](indexing.md#consist.core.indexing.RunFieldIndex) / [`FacetIndex`](indexing.md#consist.core.indexing.FacetIndex)
-- Views registry: `tracker.views` ([`ViewRegistry`](views.md#view-registry))
+- Indexing helpers: [`consist.core.indexing.index_by_field`](indexing.md#consist.core.indexing.index_by_field), [`consist.core.indexing.index_by_facet`](indexing.md#consist.core.indexing.index_by_facet), plus [`RunFieldIndex`](indexing.md#consist.core.indexing.RunFieldIndex) / [`FacetIndex`](indexing.md#consist.core.indexing.FacetIndex)
+- Views factory: [`Tracker.create_view(...)`](tracker.md#consist.core.tracker.Tracker.create_view), [`Tracker.create_grouped_view(...)`](tracker.md#consist.core.tracker.Tracker.create_grouped_view), [`ViewFactory`](views.md#view-factory) (`consist.view` and `consist.register_views` are retained as deprecation-error stubs)
 - Matrix utilities: [`Tracker.load_matrix(...)`](tracker.md#consist.core.tracker.Tracker.load_matrix), [`MatrixViewFactory`](matrix.md#matrix-views)
 - Schema export: [`Tracker.export_schema_sqlmodel(...)`](tracker.md#consist.core.tracker.Tracker.export_schema_sqlmodel)
 
@@ -406,7 +421,7 @@ to Consist, start with the **Core** and **Logging/Loading** groups and reach for
 
 #### Views and matrices
 
-- `view`, `create_view`, `load_matrix`, `export_schema_sqlmodel`
+- `create_view`, `create_grouped_view`, `load_matrix`, `export_schema_sqlmodel`
 - `netcdf_metadata`, `openmatrix_metadata`, `spatial_metadata`
 
 #### Config canonicalization
@@ -433,8 +448,8 @@ normal artifact logging: `description`, `facet`, `facet_schema_version`, and
 
 These methods are still public, but are more low-level or easier to misuse.
 
-- `engine`, `set_run_subdir_fn`, `run_artifact_dir`, `resolve_uri`
-- `run_query`, `get_run_record`, `resolve_historical_path`, `load_input_bundle`
+- `ledger`, `db`, `set_run_subdir_fn`, `run_artifact_dir`, `resolve_uri`
+- `query_df`, `query_rows`, `get_run_record`, `resolve_historical_path`, `load_input_bundle`
 - `get_artifact_by_uri`, `get_run_artifact`, `load_run_output`, `find_matching_run`
 - `on_run_start`, `on_run_complete`, `on_run_failed`
 

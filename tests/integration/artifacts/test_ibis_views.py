@@ -97,7 +97,7 @@ def test_ibis_view_queries_hot_rows_and_keeps_tracker_usable(
             schema=Person,
         )
 
-    tracker.view(Person)
+    ibis_view(tracker, model=Person)
 
     backend = ibis_connection(tracker)
     table = backend.table("v_ibis_person")
@@ -107,16 +107,20 @@ def test_ibis_view_queries_hot_rows_and_keeps_tracker_usable(
 
     backend.disconnect()
 
-    with tracker.engine.connect() as conn:
-        count = conn.exec_driver_sql("SELECT COUNT(*) FROM v_ibis_person").scalar_one()
-    assert count == 1
+    count_df = tracker.query_df("SELECT COUNT(*) AS cnt FROM v_ibis_person")
+    assert int(count_df.iloc[0]["cnt"]) == 1
 
 
 def test_ibis_connection_reports_open_duckdb_conflict(tmp_path: Path) -> None:
-    tracker = _make_tracker(tmp_path)
+    from consist.store.detect import ConsistError
 
-    with tracker.engine.connect():
-        with pytest.raises(RuntimeError, match="Close the active SQLAlchemy session"):
+    tracker = _make_tracker(tmp_path)
+    assert tracker.ledger is not None
+
+    with tracker.ledger.transaction():
+        with pytest.raises(
+            ConsistError, match="Cannot allocate an independent cursor\\(\\)"
+        ):
             ibis_connection(tracker)
 
 
@@ -193,11 +197,8 @@ def test_ibis_grouped_view_queries_cold_artifacts_and_keeps_tracker_usable(
         assert df["consist_year"].tolist() == [2018, 2018]
         assert df["facet_beam_sub_iteration"].tolist() == [1, 2]
 
-    with tracker.engine.connect() as conn:
-        count = conn.exec_driver_sql(
-            "SELECT COUNT(*) FROM v_linkstats_all"
-        ).scalar_one()
-    assert count == 2
+    count_df = tracker.query_df("SELECT COUNT(*) AS cnt FROM v_linkstats_all")
+    assert int(count_df.iloc[0]["cnt"]) == 2
 
 
 def test_ibis_grouped_view_queries_profiled_dataframe_outputs_from_tracker_run(
@@ -231,8 +232,8 @@ def test_ibis_grouped_view_queries_profiled_dataframe_outputs_from_tracker_run(
     )
 
     artifact_a = result_a.outputs["sweep"]
-    assert artifact_a.meta.get("schema_id") is not None
-    assert result_b.outputs["sweep"].meta.get("schema_id") is not None
+    assert artifact_a.schema_id is not None
+    assert result_b.outputs["sweep"].schema_id is not None
 
     with ibis_grouped_view(
         tracker,
@@ -286,9 +287,8 @@ def test_ibis_grouped_view_queries_hot_rows_and_keeps_tracker_usable(
         assert df["person_id"].tolist() == [1]
         assert df["facet_home_zone_id"].tolist() == [99]
 
-    with tracker.engine.connect() as conn:
-        count = conn.exec_driver_sql("SELECT COUNT(*) FROM v_people").scalar_one()
-    assert count == 1
+    count_df = tracker.query_df("SELECT COUNT(*) AS cnt FROM v_people")
+    assert int(count_df.iloc[0]["cnt"]) == 1
 
 
 def test_ibis_grouped_view_attaches_run_facets_when_artifact_facets_are_absent(

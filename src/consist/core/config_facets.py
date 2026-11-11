@@ -121,6 +121,7 @@ class ConfigFacetManager:
         index_kv: bool,
         max_facet_bytes: int = 16_384,
         max_kv_rows: int = 500,
+        sync_db: bool = True,
     ) -> None:
         """
         Persist facet JSON onto ``run.meta`` and index into ``StoreLedger`` (``run.facet_kv``).
@@ -187,7 +188,7 @@ class ConfigFacetManager:
         else:
             run.meta.pop("config_facet_index", None)
 
-        if self._db is not None:
+        if sync_db and self._db is not None:
             self._db.sync_run(run)
 
     def flatten_facet_to_kv_rows(

@@ -102,4 +102,7 @@ def test_container_cache_reuse_and_miss_for_new_outputs(
 
     run3 = tracker.get_run("container_run_3")
     assert run3.meta.get("cache_hit") is False
-    assert run3.meta.get("declared_outputs") == [str(base_out), str(extra_out)]
+    assert run3.meta.get("declared_outputs") == [
+        tracker.fs.virtualize_path(str(base_out)),
+        tracker.fs.virtualize_path(str(extra_out)),
+    ]

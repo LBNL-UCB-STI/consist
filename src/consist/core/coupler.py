@@ -475,7 +475,13 @@ class Coupler:
                         persisted_cached = self._persist_or_bind(cached)
                         self._stat_cache[cache_key] = persisted_cached
                         return persisted_cached
-                    rekeyed = replace(cached, id=uuid.uuid4(), key=key, origin=None)
+                    rekeyed = replace(
+                        cached,
+                        id=uuid.uuid4(),
+                        key=key,
+                        origin=None,
+                        _tracker_ref=None,
+                    )
                     return self._persist_or_bind(rekeyed)
                 observed = observe(
                     resolved_path,
@@ -769,6 +775,10 @@ class Coupler:
                         self.tracker, _UriResolverProtocol
                     ):
                         return Path(self.tracker.resolve_uri(prim.uri))
+                    if self.tracker is None:
+                        raise RuntimeError(
+                            f"Cannot resolve URI {prim.uri!r}: no tracker is attached to Coupler."
+                        )
                 else:
                     return Path(prim.uri)
             return artifact.path

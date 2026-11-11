@@ -1,11 +1,12 @@
 import uuid
 
+from consist.artifact import Artifact
 from consist.core.container_policy import (
     apply_container_policy_meta,
     normalize_container_policy,
     validate_recovery_registration_policy,
 )
-from consist.models.artifact import Artifact
+from tests.helpers.artifact_factory import make_artifact
 
 
 def _artifact(
@@ -15,7 +16,7 @@ def _artifact(
     meta: dict | None = None,
     parent_artifact_id: uuid.UUID | None = None,
 ) -> Artifact:
-    return Artifact(
+    return make_artifact(
         key=key,
         container_uri=f"outputs://{key}",
         driver=driver,

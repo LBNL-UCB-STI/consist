@@ -855,7 +855,7 @@ def test_scenario_log_meta_persists_to_header_run_while_suspended(
         sc._header_record.run.meta = None
         assert isinstance(sc.meta, MappingProxyType)
         assert dict(sc.meta) == {}
-        assert sc._header_record.run.meta is None
+        assert sc._header_record.run.meta == {}
         with pytest.raises(TypeError):
             sc.meta["illegal"] = "value"  # type: ignore[index]
 
@@ -1179,9 +1179,9 @@ def test_set_output_meta_reserved_keys_trace_demotion_and_post_call_preservation
     def step_post_meta(ctx) -> None:
         p = ctx.run_dir / "post.csv"
         p.write_text("id\n2\n", encoding="utf-8")
-        logged = tracker.log_output(p, key="post", initial="drop_me")
+        tracker.log_output(p, key="post", initial="drop_me")
         ctx.set_output_meta("post", {"replaced": True}, merge=False)
-        logged.meta["after_replace"] = "keep_me"
+        ctx.set_output_meta("post", {"after_replace": "keep_me"})
 
     res_post = tracker.run(
         fn=step_post_meta,

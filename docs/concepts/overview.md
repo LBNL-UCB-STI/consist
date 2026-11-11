@@ -9,10 +9,11 @@ This section establishes the mental model for Consist before covering API detail
 
 ## Core Abstractions
 
-**Artifact**: A file with provenance metadata: path, format, canonical
-fingerprint, producing run, and ingestion status. Fingerprint
-semantics follow the active hashing strategy, so under `fast` hashing the value
-may be metadata-based rather than a strict byte-content digest.
+**Artifact**: An immutable handle (`consist.Artifact`) tying together a logical
+key, format driver, cryptographic content digest (`Identity` over file bytes,
+directory manifests, tabular `ctd1` rows, or logical matrices), site-scoped
+locations paired with stat witnesses (`FileStat` / `DirTreeStat`) for fast
+freshness checks without re-hashing unchanged bytes, and frozen JSON metadata.
 
 **Run**: A single execution with tracked inputs, configuration, outputs, status, and timing. Each run has a signature computed from code, config, and inputs that enables cache reuse.
 
@@ -94,7 +95,7 @@ For a full term index, see the [Glossary](../glossary.md).
 
 ## How Inputs and Outputs Are Treated
 
-**Inputs** are files or values that influence computation. File inputs are hashed by content or metadata depending on the hashing strategy (`full` vs `fast`).
+**Inputs** are files or values that influence computation. File and directory inputs are identified by cryptographic content digests (`sha256:file`, `sha256:manifest-v1`, `ctd1:sha256`, or logical matrix digests) paired with stat witnesses (`FileStat` / `DirTreeStat`, including a 2-second racy-timestamp guard) so unchanged inputs skip redundant re-hashing while any content modification is caught reliably.
 
 **Outputs** are named artifacts declared via `outputs={"key": "filename"}` (where
 Consist injects `: Path` output parameters into your function), or via
@@ -142,7 +143,7 @@ Use `ArtifactSpec` when a declared output also needs schema, driver, facet, or
 file-profiling metadata:
 
 ``` python
-from consist import ArtifactSpec
+from consist.types import ArtifactSpec
 
 result = tracker.run(
     fn=run_legacy_model,
@@ -195,7 +196,8 @@ capture binds to a numbered wildcard explicitly, so the filename layout stays
 fail-closed and discovery-only patterns remain unchanged:
 
 ``` python
-from consist import EnumCapture, FilenamePattern, IntCapture, OutputSet, StringCapture
+from consist import OutputSet
+from consist.types import EnumCapture, FilenamePattern, IntCapture, StringCapture
 
 yearly = OutputSet(
     root="annual",

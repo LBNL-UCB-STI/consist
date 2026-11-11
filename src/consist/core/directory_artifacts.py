@@ -32,7 +32,9 @@ def build_directory_manifest(root: Path) -> dict[str, Any]:
     ones, and every regular file is represented by a normalized relative path.
     Symlinks and non-regular filesystem entries are rejected.
     """
-    return build_manifest_v1(root)
+    root_path = Path(root).expanduser().absolute()
+    _reject_symlink_components(root_path, label="directory root")
+    return build_manifest_v1(root_path)
 
 
 def build_shapefile_bundle_manifest(shapefile: Path) -> dict[str, Any]:

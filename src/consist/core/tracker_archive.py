@@ -146,7 +146,10 @@ class TrackerArchiveService(_TrackerServiceBase):
     _active_archive_replace_backup: tuple[Path, Path] | None = None
 
     def _local_path_str(self, artifact: Artifact) -> str | None:
-        located = artifact.locate(mounts=self.mounts, verify_on_stale=False)
+        try:
+            located = artifact.locate(mounts=self.mounts, verify_on_stale=False)
+        except ValueError:
+            return None
         return str(located) if located is not None else None
 
     def _with_local_path_hint(
@@ -219,8 +222,28 @@ class TrackerArchiveService(_TrackerServiceBase):
             else "local"
         )
 
-        for root_str in roots:
-            dest = (Path(root_str).expanduser().resolve() / relative_path).resolve()
+        existing_non_derived_ts = [
+            int(row["observed_at_ns"])
+            for row in self.db.ledger.locate_current(
+                [artifact.identity.anchor],
+                include_evicted=False,
+            )
+            if str(row.get("basis") or "") != "derived"
+            and int(row.get("observed_at_ns") or 0) > 0
+        ]
+        min_primary_ts = (
+            min(existing_non_derived_ts) if existing_non_derived_ts else None
+        )
+
+        for idx, root_str in enumerate(roots):
+            dest_root = (
+                Path(root_str).expanduser().resolve() / relative_path
+            ).resolve()
+            dest = (
+                Path(resolve_artifact_entry_path(artifact, dest_root)).resolve()
+                if _is_file_bundle_artifact(artifact)
+                else dest_root
+            )
             if not dest.exists():
                 continue
             dst_uri, matched_mount = virtualize_path(dest, mounts=norm_mounts)
@@ -234,7 +257,11 @@ class TrackerArchiveService(_TrackerServiceBase):
                 if matched_mount is not None
                 else None
             )
-            ts_ns = time.time_ns()
+            ts_ns = (
+                max(1, min_primary_ts - idx - 1)
+                if min_primary_ts is not None
+                else time.time_ns()
+            )
             try:
                 copied_ids: list[uuid.UUID] = []
                 if src_uri:
@@ -522,12 +549,18 @@ class TrackerArchiveService(_TrackerServiceBase):
             current_meta = dict(artifact.meta)
             current_meta.pop("recovery_roots", None)
             updated_db = self.db.update_artifact_meta(
-                artifact, current_meta, merge=False, raise_on_error=True
+                artifact,
+                current_meta,
+                merge=False,
+                preserve_system_keys=False,
+                raise_on_error=True,
             )
             result = (
                 updated_db
                 if updated_db is not None
-                else artifact.with_meta(current_meta, merge=False)
+                else artifact.with_meta(
+                    current_meta, merge=False, preserve_system_keys=False
+                )
             )
             result.bind_tracker(self.tracker)
             if result.id is not None:
@@ -2021,6 +2054,7 @@ class TrackerArchiveService(_TrackerServiceBase):
                     orig_art.id,
                     next_meta,
                     merge=False,
+                    preserve_system_keys=False,
                 )
                 normalized_roots = next_meta.get("recovery_roots")
                 if isinstance(normalized_roots, list) and normalized_roots:

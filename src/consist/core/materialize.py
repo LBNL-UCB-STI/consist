@@ -761,20 +761,28 @@ def _artifact_uri(artifact: Artifact) -> str:
 
 
 def _is_artifact_ingested(artifact: Artifact) -> bool:
-    if artifact.is_ingested:
+    if isinstance(artifact, Artifact) and artifact.is_ingested:
         return True
     meta = artifact.meta if isinstance(artifact.meta, MappingABC) else {}
     return bool(meta.get("is_ingested", False))
 
 
 def _raw_artifact_hex(artifact: Artifact) -> str | None:
+    if not isinstance(artifact, Artifact):
+        raw_hash = artifact.hash
+        return (
+            raw_hash.rsplit(":", 1)[-1].lower()
+            if isinstance(raw_hash, str) and raw_hash
+            else None
+        )
     if not artifact.identity.verifiable:
         return None
     if _is_directory_artifact(artifact) or _is_file_bundle_artifact(artifact):
         manifest_digest = artifact.identity.get(
             "sha256:manifest-v1"
         ) or artifact.identity.get("sha256:dir_manifest")
-        return manifest_digest.hex if manifest_digest is not None else None
+        if manifest_digest is not None:
+            return manifest_digest.hex
     file_digest = artifact.identity.get("sha256:file")
     return file_digest.hex if file_digest is not None else None
 
@@ -809,26 +817,41 @@ def _detach_artifact_for_hydration(
 ) -> Artifact:
     base_artifact = artifact
     if _is_directory_artifact(artifact) and "directory_manifest" not in artifact.meta:
-        manifest = get_validated_directory_manifest(artifact)
+        try:
+            manifest = get_validated_directory_manifest(artifact)
+        except ValueError:
+            manifest = None
         if manifest is not None:
             base_artifact = artifact.with_meta({"directory_manifest": manifest})
     if hydrated_path is None:
-        return replace(base_artifact, origin=None)
+        return replace(base_artifact, origin=None, _tracker_ref=None)
     entry_path = Path(
         resolve_artifact_entry_path(base_artifact, hydrated_path)
     ).resolve()
+    first_uri, _ = base_artifact._first_candidate_location()
+    detached_member = (
+        None
+        if first_uri is not None and first_uri.startswith("db://")
+        else base_artifact.member
+    )
     obs = Observation(
-        location=Location(uri=entry_path.as_uri(), member=base_artifact.member),
+        location=Location(uri=entry_path.as_uri(), member=detached_member),
         identity=base_artifact.identity,
         access_driver=base_artifact.driver,
-        witness=_capture_detached_witness(entry_path, member=base_artifact.member),
+        witness=_capture_detached_witness(entry_path, member=detached_member),
+        observed_at_ns=time.time_ns(),
         basis="derived",
     )
     deduped_hints = (
-        *(h for h in base_artifact.hints if h.place_key != obs.place_key),
         obs,
+        *(h for h in base_artifact.hints if h.place_key != obs.place_key),
     )
-    return replace(base_artifact, origin=None, hints=deduped_hints)
+    return replace(
+        base_artifact,
+        origin=None,
+        hints=deduped_hints,
+        _tracker_ref=None,
+    )
 
 
 def _make_hydrated_output(
@@ -1260,7 +1283,7 @@ def _get_artifact_owning_run(
 
 def _output_set_hydration_kind(tracker: "Tracker", artifact: Artifact) -> str | None:
     """Return the persisted OutputSet role when Slice 1 must reject it."""
-    artifact_meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+    artifact_meta = artifact.meta if isinstance(artifact.meta, MappingABC) else {}
     if artifact.driver == "artifact_set" or artifact_meta.get("artifact_set") is True:
         return "parent"
     if artifact_meta.get("output_set_manifest") is True:
@@ -1272,7 +1295,9 @@ def _output_set_hydration_kind(tracker: "Tracker", artifact: Artifact) -> str | 
 
     parent = tracker.get_parent_artifact(artifact)
     parent_meta = (
-        parent.meta if parent is not None and isinstance(parent.meta, dict) else {}
+        parent.meta
+        if parent is not None and isinstance(parent.meta, MappingABC)
+        else {}
     )
     if parent is not None and (
         parent.driver == "artifact_set" or parent_meta.get("artifact_set") is True
@@ -1327,11 +1352,11 @@ def _derive_remappable_relative_path(
                 pass
         if inferred is None:
             owning_run = _get_artifact_run(tracker, artifact=artifact)
-            if owning_run is not None and isinstance(owning_run.meta, dict):
+            if owning_run is not None and isinstance(owning_run.meta, MappingABC):
                 run_mounts = owning_run.meta.get("mounts")
                 phys_run_dir = owning_run.meta.get("_physical_run_dir")
                 if (
-                    isinstance(run_mounts, dict)
+                    isinstance(run_mounts, MappingABC)
                     and scheme in run_mounts
                     and phys_run_dir
                 ):
@@ -1382,8 +1407,8 @@ def _derive_historical_root(
     Path | None
         Historical root, or ``None`` when no remappable root is recorded.
     """
-    meta = run.meta if (run is not None and isinstance(run.meta, dict)) else {}
-    artifact_meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+    meta = run.meta if (run is not None and isinstance(run.meta, MappingABC)) else {}
+    artifact_meta = artifact.meta if isinstance(artifact.meta, MappingABC) else {}
 
     return tracker.fs.get_historical_root(
         _artifact_uri(artifact),
@@ -1416,7 +1441,7 @@ def _artifact_recovery_roots(
     tuple[Path, ...]
         Normalized recovery roots in metadata order.
     """
-    artifact_meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+    artifact_meta = artifact.meta if isinstance(artifact.meta, MappingABC) else {}
     raw_roots: list[str] = list(
         tracker.fs.normalize_recovery_roots(
             artifact_meta.get("recovery_roots"), resolve=not preserve_raw_paths
@@ -1429,6 +1454,32 @@ def _artifact_recovery_roots(
             ):
                 if norm not in raw_roots:
                     raw_roots.append(norm)
+        if "recovery_roots" not in artifact_meta and artifact.id is not None:
+            try:
+                db = tracker.db
+            except AttributeError:
+                db = None
+            if db is not None:
+                try:
+                    persisted = db.get_artifact(artifact.id)
+                except Exception:
+                    persisted = None
+                if persisted is not None:
+                    persisted_meta = (
+                        persisted.meta if isinstance(persisted.meta, MappingABC) else {}
+                    )
+                    for norm in tracker.fs.normalize_recovery_roots(
+                        persisted_meta.get("recovery_roots"),
+                        resolve=not preserve_raw_paths,
+                    ):
+                        if norm not in raw_roots:
+                            raw_roots.append(norm)
+                    for derived_root in persisted.recovery_roots:
+                        for norm in tracker.fs.normalize_recovery_roots(
+                            [derived_root], resolve=not preserve_raw_paths
+                        ):
+                            if norm not in raw_roots:
+                                raw_roots.append(norm)
     return tuple(Path(root) for root in raw_roots)
 
 
@@ -1554,12 +1605,21 @@ def find_existing_recovery_source_path(
 
     if source_root is None and isinstance(artifact, Artifact):
         combined_mounts: dict[str, Any] = {}
-        if tracker.run_dir:
-            combined_mounts["workspace"] = tracker.run_dir
-        if tracker.archive_mounts:
-            combined_mounts.update(tracker.archive_mounts)
-        if tracker.fs.mounts:
-            combined_mounts.update(tracker.fs.mounts)
+        try:
+            if tracker.run_dir:
+                combined_mounts["workspace"] = tracker.run_dir
+        except AttributeError:
+            pass
+        try:
+            if tracker.archive_mounts:
+                combined_mounts.update(tracker.archive_mounts)
+        except AttributeError:
+            pass
+        try:
+            if tracker.fs.mounts:
+                combined_mounts.update(tracker.fs.mounts)
+        except AttributeError:
+            pass
         located = artifact.locate(
             mounts=combined_mounts or None,
             verify_on_stale=False,
@@ -1591,34 +1651,44 @@ def _direct_artifact_source_path(
     relative_path: Path,
     allow_tracker_uri: bool,
 ) -> Path | None:
-    if isinstance(artifact, Artifact):
-        located = artifact.locate(
-            mounts=tracker.fs.mounts,
-            verify_on_stale=False,
-        )
-        if located is not None and located.exists():
-            return located
-
-    if not allow_tracker_uri:
-        return None
-
     uri = _artifact_uri(artifact)
-    if not uri or uri.startswith("db://"):
-        return None
-    if uri.startswith("workspace://") or uri.startswith("./"):
-        candidate = Path(tracker.run_dir) / relative_path
-        if candidate.exists():
-            return candidate
+    if allow_tracker_uri and uri and not uri.startswith("db://"):
+        if uri.startswith("workspace://") or uri.startswith("./"):
+            candidate = Path(tracker.run_dir) / relative_path
+            if candidate.exists():
+                return candidate
 
-    if "://" in uri:
-        scheme, raw_rel_path = uri.split("://", 1)
-        mounts = tracker.fs.mounts
-        if scheme in mounts:
-            unprefixed_rel = tracker.fs.normalize_remappable_relative_path(raw_rel_path)
-            if unprefixed_rel is not None:
-                candidate = Path(mounts[scheme]) / unprefixed_rel
-                if candidate.exists():
-                    return candidate
+        if "://" in uri:
+            scheme, raw_rel_path = uri.split("://", 1)
+            mounts = tracker.fs.mounts
+            if scheme in mounts:
+                unprefixed_rel = tracker.fs.normalize_remappable_relative_path(
+                    raw_rel_path
+                )
+                if unprefixed_rel is not None:
+                    candidate = Path(mounts[scheme]) / unprefixed_rel
+                    if candidate.exists():
+                        return candidate
+
+    if isinstance(artifact, Artifact):
+        can_locate_directly = (
+            allow_tracker_uri
+            or artifact.origin is not None
+            or uri.startswith("file://")
+        )
+        if can_locate_directly:
+            combined_mounts: dict[str, Any] = dict(tracker.fs.mounts or {})
+            if allow_tracker_uri and tracker.run_dir:
+                combined_mounts.setdefault("workspace", tracker.run_dir)
+            located = artifact.locate(
+                mounts=combined_mounts or None,
+                verify_on_stale=False,
+            )
+            if located is not None and located.exists():
+                return located
+
+    if not allow_tracker_uri or not uri or uri.startswith("db://"):
+        return None
 
     try:
         candidate = Path(tracker.resolve_uri(uri)).resolve()
@@ -1949,7 +2019,7 @@ def materialize_artifact(
                     resolvable=False,
                 )
             if should_validate:
-                meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+                meta = artifact.meta if isinstance(artifact.meta, MappingABC) else {}
                 entry = file_bundle_entry_name(artifact, fallback=destination.name)
                 assert entry is not None
                 manifest = meta.get("file_bundle_manifest") or meta.get(
@@ -2025,7 +2095,23 @@ def materialize_artifact(
                     message=f"Destination {destination} exists but is not a directory.",
                     resolvable=False,
                 )
-            manifest = get_validated_directory_manifest(artifact)
+            try:
+                manifest = get_validated_directory_manifest(artifact)
+            except ValueError as exc:
+                if should_validate:
+                    return _make_materialized_artifact(
+                        artifact,
+                        status="hash_mismatch",
+                        path=None,
+                        source_path=source_path,
+                        target_path=destination,
+                        message=(
+                            f"Directory validation failed for artifact "
+                            f"{artifact.key!r}: {exc}"
+                        ),
+                        resolvable=False,
+                    )
+                manifest = None
             needs_partial_completion = False
             if should_validate:
                 if manifest is not None:
@@ -2176,7 +2262,7 @@ def materialize_artifact(
         )
 
     if _is_file_bundle_artifact(artifact):
-        meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+        meta = artifact.meta if isinstance(artifact.meta, MappingABC) else {}
         entry = file_bundle_entry_name(artifact, fallback=destination.name)
         assert entry is not None
 
@@ -2357,7 +2443,23 @@ def materialize_artifact(
                 resolvable=False,
             )
 
-        manifest = get_validated_directory_manifest(artifact)
+        try:
+            manifest = get_validated_directory_manifest(artifact)
+        except ValueError as exc:
+            if should_validate:
+                return _make_materialized_artifact(
+                    artifact,
+                    status="hash_mismatch",
+                    path=None,
+                    source_path=source_path,
+                    target_path=destination,
+                    message=(
+                        f"Directory validation failed for artifact "
+                        f"{artifact.key!r}: {exc}"
+                    ),
+                    resolvable=False,
+                )
+            manifest = None
 
         if should_validate:
             if manifest:
@@ -2428,7 +2530,8 @@ def materialize_artifact(
                 preserve_existing
                 and destination.exists()
                 and isinstance(manifest, Mapping)
-                and isinstance(manifest.get("entries"), list)
+                and isinstance(manifest.get("entries"), Sequence)
+                and not isinstance(manifest.get("entries"), (str, bytes))
             ):
                 materialized_any = False
                 for entry in manifest["entries"]:
@@ -3809,6 +3912,18 @@ def materialize_artifacts(
             logging.warning(msg)
             continue
 
+        if not source_path.exists() and artifact.run_id:
+            owning_run = _get_artifact_run(tracker, artifact=artifact)
+            if owning_run is not None:
+                try:
+                    hist_path = Path(
+                        tracker.resolve_historical_path(artifact, owning_run)
+                    ).resolve()
+                    if hist_path.exists():
+                        source_path = hist_path
+                except (OSError, ValueError):
+                    pass
+
         if not source_path.exists():
             msg = (
                 f"[Consist] Cannot materialize cached output {artifact.key!r}: "
@@ -4155,8 +4270,9 @@ def materialize_ingested_artifact_from_db(
         raise ValueError("Artifact table name is missing; cannot reconstruct from DB.")
 
     hot_table: str | None = None
+    v1_run_scoped = False
     if isinstance(artifact, Artifact):
-        hot_table, _ = artifact._active_hot_table_name(hot_ledger)
+        hot_table, _, v1_run_scoped = artifact._active_hot_table_info(hot_ledger)
 
     table_name = hot_table or raw_meta_table or artifact.key
     if (
@@ -4167,17 +4283,31 @@ def materialize_ingested_artifact_from_db(
         raise ValueError("Artifact table name is missing; cannot reconstruct from DB.")
 
     column_names = _load_global_table_columns(table_name, hot_ledger)
-    if "consist_artifact_id" not in column_names:
-        raise RuntimeError(
-            f"Table 'global_tables.{table_name}' is missing consist_artifact_id."
-        )
-
     quoted_cols = ", ".join(_quote_sql_ident(col) for col in column_names)
+    if v1_run_scoped and artifact.run_id is not None:
+        if "consist_run_id" not in column_names:
+            raise RuntimeError(
+                f"Table 'global_tables.{table_name}' is missing consist_run_id."
+            )
+        where_sql = (
+            'WHERE "consist_artifact_id" IS NULL AND CAST("consist_run_id" AS VARCHAR) = ?'
+            if "consist_artifact_id" in column_names
+            else 'WHERE CAST("consist_run_id" AS VARCHAR) = ?'
+        )
+        query_params = [str(artifact.run_id)]
+    else:
+        if "consist_artifact_id" not in column_names:
+            raise RuntimeError(
+                f"Table 'global_tables.{table_name}' is missing consist_artifact_id."
+            )
+        where_sql = 'WHERE CAST("consist_artifact_id" AS VARCHAR) = ?'
+        query_params = [str(artifact.id)]
+
     sql = (
         f'SELECT {quoted_cols} FROM "global_tables".{_quote_sql_ident(table_name)} '
-        f'WHERE "consist_artifact_id" = ?'
+        f"{where_sql}"
     )
-    df = hot_ledger.query_df(sql, [str(artifact.id)])
+    df = hot_ledger.query_df(sql, query_params)
     if df.empty:
         raise FileNotFoundError(
             f"No ingested rows found for artifact {artifact.key!r} ({artifact.id})."

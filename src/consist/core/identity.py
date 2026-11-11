@@ -643,8 +643,20 @@ class IdentityManager:
                 sig_parts.append(f"sig:{producer_signature}")
             else:
                 sig_parts.append(f"run:{artifact.run_id}")
-            if artifact.hash:
-                sig_parts.append(f"hash:{artifact.hash}")
+            if isinstance(artifact, Artifact):
+                anchor = artifact.identity.anchor
+                legacy_hash: str | None = (
+                    None
+                    if (
+                        anchor.scheme == "legacy-v1:unverified"
+                        and anchor.hex == "0" * 64
+                    )
+                    else anchor.hex
+                )
+            else:
+                legacy_hash = artifact.hash
+            if legacy_hash:
+                sig_parts.append(f"hash:{legacy_hash}")
             return "|".join(sig_parts)
 
         if not path_resolver:

@@ -1,14 +1,17 @@
 import logging
 from pathlib import Path
-import pandas as pd
-import numpy as np
 from unittest.mock import patch
-from sqlmodel import SQLModel, Field, select, func
 
+import numpy as np
+import pandas as pd
+from sqlmodel import Field, SQLModel
+
+import consist
+from consist.api import to_df
+from consist.artifact import Artifact
 from consist.core.tracker import Tracker
 from consist.models.run import Run
 from consist.types import CacheOptions, ExecutionOptions
-import consist
 
 
 # --- 1. Domain Models ---
@@ -48,6 +51,7 @@ def run_simulation_scenario(
     base_trips_by_year=None,
     advance_delta_by_year=None,
     validate_cached_outputs: str = "lazy",
+    container_subdir: str | None = None,
 ):
     rng = np.random.default_rng(42)
     n_hh = 100
@@ -55,7 +59,11 @@ def run_simulation_scenario(
 
     base_trips_by_year = base_trips_by_year or {}
     advance_delta_by_year = advance_delta_by_year or {}
-    container_out_root = (tracker.run_dir / "container_out").resolve()
+    container_out_root = (
+        (tracker.run_dir / "container_out" / container_subdir).resolve()
+        if container_subdir
+        else (tracker.run_dir / "container_out").resolve()
+    )
     # Example "external config bundle" that should affect identity but not be stored in DB.
     external_cfg_dir = (
         tracker.run_dir / "external_configs" / "generate_trips"
@@ -76,7 +84,7 @@ def run_simulation_scenario(
         def __init__(
             self,
             tracker: Tracker,
-            source_artifact: "consist.Artifact",
+            source_artifact: Artifact,
             base_trips: int,
             output_path: Path,
         ):
@@ -242,91 +250,106 @@ def test_pilates_header_pattern(tmp_path: Path):
     run_dir = tmp_path / "runs"
     db_path = str(tmp_path / "provenance.duckdb")
     tracker = make_tracker(run_dir, db_path)
-    tracker.identity.hashing_strategy = "fast"
+    try:
+        tracker.identity.hashing_strategy = "fast"
 
-    years = [2020, 2030]
-    run_simulation_scenario(tracker, "baseline", 10, years, "cold")
-    run_simulation_scenario(tracker, "high_gas", 5, years, "hot")
-
-    # Generate Dynamic View Models
-    VPerson = tracker.views.Person
-    VHousehold = tracker.views.Household
-
-    # Q1: Comparing Scenarios
-    logging.info("\n--- Query 1: Scenario Comparison ---")
-    query = (
-        select(
-            VPerson.consist_scenario_id.label("scenario_id"),
-            VPerson.consist_year,
-            func.avg(VPerson.number_of_trips).label("avg_trips"),
+        years = [2020, 2030]
+        run_simulation_scenario(
+            tracker, "baseline", 10, years, "cold", container_subdir="baseline"
         )
-        .select_from(VPerson)
-        .where(VPerson.consist_scenario_id.in_(["baseline", "high_gas"]))
-        .where(VPerson.consist_year.is_not(None))
-        .group_by(VPerson.consist_scenario_id, VPerson.consist_year)
-        .order_by("scenario_id", "consist_year")
-    )
-    results = consist.run_query(query, tracker=tracker)
-    for r in results:
-        logging.info(f"{r.scenario_id:<20} {r.consist_year}: {r.avg_trips:.2f}")
-
-    assert len(results) == 4
-
-    # Validation Logic
-    res_map = {(r.scenario_id, r.consist_year): r.avg_trips for r in results}
-    assert res_map[("high_gas", 2030)] < res_map[("baseline", 2030)]
-
-    # Verify artifact metadata inherited step year/tags
-    run_2020 = tracker.find_run(parent_id="baseline", year=2020, model="generate_trips")
-    art_2020 = tracker.get_run_outputs(run_2020.id).get("persons")
-    assert art_2020 is not None
-    assert art_2020.meta.get("year") == 2020
-    assert "simulation" in (art_2020.meta.get("tags") or [])
-
-    # Q2: Complex Join
-    logging.info("\n--- Query 2: Trips by Region ---")
-    query = (
-        select(
-            VPerson.consist_scenario_id.label("scenario"),
-            VHousehold.region,
-            VPerson.consist_year,
-            func.sum(VPerson.number_of_trips).label("total_trips"),
+        run_simulation_scenario(
+            tracker, "high_gas", 5, years, "hot", container_subdir="high_gas"
         )
-        .select_from(VPerson)
-        .join(VHousehold, VPerson.household_id == VHousehold.household_id)
-        # Ensure we are joining data from same scenario context
-        .where(VPerson.consist_scenario_id == VHousehold.consist_scenario_id)
-        .group_by(VPerson.consist_scenario_id, VHousehold.region, VPerson.consist_year)
-        .order_by("scenario", VHousehold.region, VPerson.consist_year)
-    )
 
-    results = consist.run_query(query, tracker=tracker)
-    assert len(results) > 0
+        # Create Hybrid Views
+        tracker.create_view("v_persons", "persons")
+        tracker.create_view("v_households", "households")
 
-    # Q3: Helper Method Usage
-    # We want the generate_trips run from 2030 specifically
-    target_run = tracker.find_run(
-        parent_id="baseline", year=2030, model="generate_trips"
-    )
-    assert target_run.year == 2030
-    assert target_run.model_name == "generate_trips"
-    # Container metadata should be attached to the step run (nested mode)
-    assert "declared_outputs" in (target_run.meta or {})
-    assert target_run.signature is not None
+        # Q1: Comparing Scenarios
+        logging.info("\n--- Query 1: Scenario Comparison ---")
+        q1_df = tracker.query_df(
+            """
+            SELECT
+                consist_scenario_id AS scenario_id,
+                consist_year,
+                AVG(number_of_trips) AS avg_trips
+            FROM v_persons
+            WHERE consist_scenario_id IN ('baseline', 'high_gas')
+              AND consist_year IS NOT NULL
+            GROUP BY consist_scenario_id, consist_year
+            ORDER BY scenario_id, consist_year
+            """
+        )
+        for _, r in q1_df.iterrows():
+            logging.info(
+                f"{r['scenario_id']:<20} {int(r['consist_year'])}: {float(r['avg_trips']):.2f}"
+            )
 
-    # Indexing example
-    # Get all runs for baseline, indexed by year
-    # (Note: init/pop_synth has year=None, so it keys to None)
-    runs_by_year = tracker.find_runs(
-        parent_id="baseline", model="generate_trips", index_by="year"
-    )
-    assert 2020 in runs_by_year
-    assert 2030 in runs_by_year
-    assert runs_by_year[2030].id == target_run.id
+        assert len(q1_df) == 4
 
-    # Q4: Snapshot Retrieval
-    df = consist.to_df(tracker.load_run_output(target_run.id, "persons"))
-    assert len(df) == 300
+        # Validation Logic
+        res_map = {
+            (str(r["scenario_id"]), int(r["consist_year"])): float(r["avg_trips"])
+            for _, r in q1_df.iterrows()
+        }
+        assert res_map[("high_gas", 2030)] < res_map[("baseline", 2030)]
+
+        # Verify artifact metadata inherited step year/tags
+        run_2020 = tracker.find_run(
+            parent_id="baseline", year=2020, model="generate_trips"
+        )
+        assert run_2020 is not None
+        art_2020 = tracker.get_run_outputs(run_2020.id).get("persons")
+        assert art_2020 is not None
+        assert art_2020.meta.get("year") == 2020
+        assert "simulation" in (art_2020.meta.get("tags") or [])
+
+        # Q2: Complex Join
+        logging.info("\n--- Query 2: Trips by Region ---")
+        q2_df = tracker.query_df(
+            """
+            SELECT
+                p.consist_scenario_id AS scenario,
+                h.region,
+                p.consist_year,
+                SUM(p.number_of_trips) AS total_trips
+            FROM v_persons p
+            JOIN v_households h
+              ON p.household_id = h.household_id
+             AND p.consist_scenario_id = h.consist_scenario_id
+            GROUP BY p.consist_scenario_id, h.region, p.consist_year
+            ORDER BY scenario, h.region, p.consist_year
+            """
+        )
+        assert len(q2_df) > 0
+
+        # Q3: Helper Method Usage
+        # We want the generate_trips run from 2030 specifically
+        target_run = tracker.find_run(
+            parent_id="baseline", year=2030, model="generate_trips"
+        )
+        assert target_run is not None
+        assert target_run.year == 2030
+        assert target_run.model_name == "generate_trips"
+        # Container metadata should be attached to the step run (nested mode)
+        assert "declared_outputs" in (target_run.meta or {})
+        assert target_run.signature is not None
+
+        # Indexing example
+        # Get all runs for baseline, indexed by year
+        # (Note: init/pop_synth has year=None, so it keys to None)
+        runs_by_year = tracker.find_runs(
+            parent_id="baseline", model="generate_trips", index_by="year"
+        )
+        assert 2020 in runs_by_year
+        assert 2030 in runs_by_year
+        assert runs_by_year[2030].id == target_run.id
+
+        # Q4: Snapshot Retrieval
+        df = to_df(tracker.load_run_output(target_run.id, "persons"))
+        assert len(df) == 300
+    finally:
+        tracker.close()
 
 
 def test_pilates_header_pattern_api(tmp_path: Path):
@@ -336,68 +359,79 @@ def test_pilates_header_pattern_api(tmp_path: Path):
     run_dir = tmp_path / "runs_api"
     db_path = str(tmp_path / "provenance_api.duckdb")
     tracker = Tracker(run_dir=run_dir, db_path=db_path, schemas=[Household, Person])
-    tracker.identity.hashing_strategy = "fast"
+    try:
+        tracker.identity.hashing_strategy = "fast"
 
-    years = [2025, 2035]
-    scenarios = [("baseline_api", 10, "cold"), ("high_gas_api", 5, "hot")]
+        years = [2025, 2035]
+        scenarios = [("baseline_api", 10, "cold"), ("high_gas_api", 5, "hot")]
 
-    rng = np.random.default_rng(7)
-    n_hh = 60
-    n_per = 200
+        rng = np.random.default_rng(7)
+        n_hh = 60
+        n_per = 200
 
-    for name, base_trips, mode in scenarios:
-        with consist.scenario(
-            name,
-            tracker=tracker,
-            model="pilates_orchestrator",
-            tags=["scenario_header"],
-        ) as sc:
-            with sc.trace(name="pop_synth", run_id=f"{name}_init", tags=["init"]) as t:
-                df_hh = pd.DataFrame(
-                    {
-                        "household_id": np.arange(n_hh),
-                        "region": rng.choice(["North", "South", "East"], size=n_hh),
-                        "income_segment": rng.choice(["Low", "Med", "High"], size=n_hh),
-                    }
-                )
-                t.log_dataframe(df_hh, key="households", schema=Household)
-
-            for year in years:
+        for name, base_trips, mode in scenarios:
+            with consist.scenario(
+                name,
+                tracker=tracker,
+                model="pilates_orchestrator",
+                tags=["scenario_header"],
+            ) as sc:
                 with sc.trace(
-                    name="travel_demand",
-                    run_id=f"{name}_{year}",
-                    year=year,
-                    tags=["simulation"],
+                    name="pop_synth", run_id=f"{name}_init", tags=["init"]
                 ) as t:
-                    trips = rng.poisson(lam=base_trips, size=n_per)
-                    df_per = pd.DataFrame(
+                    df_hh = pd.DataFrame(
                         {
-                            "person_id": np.arange(n_per),
-                            "household_id": rng.integers(0, n_hh, size=n_per),
-                            "age": rng.integers(18, 80, size=n_per),
-                            "number_of_trips": trips,
+                            "household_id": np.arange(n_hh),
+                            "region": rng.choice(["North", "South", "East"], size=n_hh),
+                            "income_segment": rng.choice(
+                                ["Low", "Med", "High"], size=n_hh
+                            ),
                         }
                     )
-                    t.log_dataframe(
-                        df_per, key="persons", schema=Person, direction="output"
-                    )
+                    t.log_dataframe(df_hh, key="households", schema=Household)
 
-    target_run = consist.find_run(tracker=tracker, parent_id="baseline_api", year=2035)
-    assert target_run is not None
-    assert target_run.year == 2035
-    assert target_run.model_name == "travel_demand"
+                for year in years:
+                    with sc.trace(
+                        name="travel_demand",
+                        run_id=f"{name}_{year}",
+                        year=year,
+                        tags=["simulation"],
+                    ) as t:
+                        trips = rng.poisson(lam=base_trips, size=n_per)
+                        df_per = pd.DataFrame(
+                            {
+                                "person_id": np.arange(n_per),
+                                "household_id": rng.integers(0, n_hh, size=n_per),
+                                "age": rng.integers(18, 80, size=n_per),
+                                "number_of_trips": trips,
+                            }
+                        )
+                        t.log_dataframe(
+                            df_per, key="persons", schema=Person, direction="output"
+                        )
 
-    runs_by_year = consist.find_runs(
-        tracker=tracker, parent_id="baseline_api", index_by="year"
-    )
-    assert runs_by_year[2035].id == target_run.id
+        target_run = consist.find_run(
+            tracker=tracker, parent_id="baseline_api", year=2035
+        )
+        assert target_run is not None
+        assert target_run.year == 2035
+        assert target_run.model_name == "travel_demand"
 
-    df = consist.to_df(tracker.load_run_output(target_run.id, "persons"))
-    assert len(df) == n_per
+        runs_by_year = consist.find_runs(
+            tracker=tracker, parent_id="baseline_api", index_by="year"
+        )
+        assert runs_by_year[2035].id == target_run.id
+
+        df = to_df(tracker.load_run_output(target_run.id, "persons"))
+        assert len(df) == n_per
+    finally:
+        tracker.close()
 
 
 def _get_step_run(tracker: Tracker, parent: str, year: int, model: str) -> Run:
-    return tracker.find_run(parent_id=parent, year=year, model=model)
+    run = tracker.find_run(parent_id=parent, year=year, model=model)
+    assert run is not None
+    return run
 
 
 def test_pilates_caching_scenarios(tmp_path):
@@ -412,63 +446,68 @@ def test_pilates_caching_scenarios(tmp_path):
     run_dir = tmp_path / "runs_cache"
     db_path = str(tmp_path / "provenance_cache.duckdb")
     tracker = make_tracker(run_dir, db_path)
-    # Use content-based hashing for stable cache keys across scenarios
-    tracker.identity.hashing_strategy = "full"
+    try:
+        # Use content-based hashing for stable cache keys across scenarios
+        tracker.identity.hashing_strategy = "full"
 
-    years = [2020, 2030]
+        years = [2020, 2030]
 
-    with patch.object(
-        tracker.identity, "get_code_version", return_value="stable_git_hash"
-    ):
-        # A: baseline
-        run_simulation_scenario(tracker, "A", 10, years, "cold")
-        # B: different inputs/base_trips -> no hits relative to A
-        run_simulation_scenario(tracker, "B", 15, years, "cold")
-        # C: same as A but different name -> should reuse A’s work
-        run_simulation_scenario(tracker, "C", 10, years, "cold")
-        # D: same as A, but advance delta changes only in 2030
-        run_simulation_scenario(
-            tracker,
-            "D",
-            10,
-            years,
-            "cold",
-            advance_delta_by_year={2030: 2},
-        )
-        # E: same as A, but trips intensity changes only in 2030
-        run_simulation_scenario(
-            tracker,
-            "E",
-            10,
-            years,
-            "cold",
-            base_trips_by_year={2030: 20},
-        )
+        with patch.object(
+            tracker.identity, "get_code_version", return_value="stable_git_hash"
+        ):
+            # A: baseline
+            run_simulation_scenario(tracker, "A", 10, years, "cold")
+            # C: same as A but different name -> should reuse A’s work
+            run_simulation_scenario(tracker, "C", 10, years, "cold")
+            # D: same as A, but advance delta changes only in 2030
+            run_simulation_scenario(
+                tracker,
+                "D",
+                10,
+                years,
+                "cold",
+                advance_delta_by_year={2030: 2},
+            )
+            # E: same as A, but trips intensity changes only in 2030
+            run_simulation_scenario(
+                tracker,
+                "E",
+                10,
+                years,
+                "cold",
+                base_trips_by_year={2030: 20},
+            )
+            # B: different inputs/base_trips -> no hits relative to A.
+            # Run after C/D/E because scenarios share `container_out/{year}/persons.parquet`
+            # and v0.5 content-addressed locations detect if B overwrites A's 2020 file on disk.
+            run_simulation_scenario(tracker, "B", 15, years, "cold")
 
-    # Helpers to inspect cache flags
-    def cache_hit(parent, year, model):
-        run = _get_step_run(tracker, parent=parent, year=year, model=model)
-        return (run.meta or {}).get("cache_hit", False)
+        # Helpers to inspect cache flags
+        def cache_hit(parent, year, model):
+            run = _get_step_run(tracker, parent=parent, year=year, model=model)
+            return (run.meta or {}).get("cache_hit", False)
 
-    # A: no cache metadata expected (first executions)
-    assert cache_hit("A", 2020, "advance_people") is False
-    assert cache_hit("A", 2020, "generate_trips") is False
+        # A: no cache metadata expected (first executions)
+        assert cache_hit("A", 2020, "advance_people") is False
+        assert cache_hit("A", 2020, "generate_trips") is False
 
-    # B: different inputs -> also cold
-    assert cache_hit("B", 2020, "advance_people") is False
-    assert cache_hit("B", 2020, "generate_trips") is False
+        # B: different inputs -> also cold
+        assert cache_hit("B", 2020, "advance_people") is False
+        assert cache_hit("B", 2020, "generate_trips") is False
 
-    # C: identical to A -> expect container hits
-    assert cache_hit("C", 2020, "generate_trips") is True
-    assert cache_hit("C", 2030, "generate_trips") is True
+        # C: identical to A -> expect container hits
+        assert cache_hit("C", 2020, "generate_trips") is True
+        assert cache_hit("C", 2030, "generate_trips") is True
 
-    # D: diverges at advance in 2030 -> first year hit, second miss
-    assert cache_hit("D", 2020, "generate_trips") is True
-    assert cache_hit("D", 2030, "generate_trips") is False
+        # D: diverges at advance in 2030 -> first year hit, second miss
+        assert cache_hit("D", 2020, "generate_trips") is True
+        assert cache_hit("D", 2030, "generate_trips") is False
 
-    # E: diverges at trips only in 2030 -> first year hit, 2030 miss
-    assert cache_hit("E", 2020, "generate_trips") is True
-    assert cache_hit("E", 2030, "generate_trips") is False
+        # E: diverges at trips only in 2030 -> first year hit, 2030 miss
+        assert cache_hit("E", 2020, "generate_trips") is True
+        assert cache_hit("E", 2030, "generate_trips") is False
+    finally:
+        tracker.close()
 
 
 def test_pilates_cache_hydrates_across_run_dirs(tmp_path):
@@ -478,42 +517,51 @@ def test_pilates_cache_hydrates_across_run_dirs(tmp_path):
 
     # First tracker writes the baseline scenario
     tracker1 = make_tracker(tmp_path / "runs_a", db_path)
-    tracker1.identity.hashing_strategy = "full"
-    with patch.object(
-        tracker1.identity, "get_code_version", return_value="stable_git_hash"
-    ):
-        run_simulation_scenario(
-            tracker1,
-            "baseline_a",
-            10,
-            years,
-            "cold",
-            validate_cached_outputs="eager",
-        )
+    try:
+        tracker1.identity.hashing_strategy = "full"
+        with patch.object(
+            tracker1.identity, "get_code_version", return_value="stable_git_hash"
+        ):
+            run_simulation_scenario(
+                tracker1,
+                "baseline_a",
+                10,
+                years,
+                "cold",
+                validate_cached_outputs="eager",
+            )
+    finally:
+        tracker1.close()
 
     # Second tracker in a new run_dir replays the same work and should hydrate
     tracker2 = make_tracker(tmp_path / "runs_b", db_path)
-    tracker2.identity.hashing_strategy = "full"
-    with patch.object(
-        tracker2.identity, "get_code_version", return_value="stable_git_hash"
-    ):
-        run_simulation_scenario(
-            tracker2,
-            "baseline_replay",
-            10,
-            years,
-            "cold",
-            validate_cached_outputs="eager",
+    try:
+        tracker2.identity.hashing_strategy = "full"
+        with patch.object(
+            tracker2.identity, "get_code_version", return_value="stable_git_hash"
+        ):
+            run_simulation_scenario(
+                tracker2,
+                "baseline_replay",
+                10,
+                years,
+                "cold",
+                validate_cached_outputs="eager",
+            )
+
+        out_path = tracker2.run_dir / "container_out" / "2020" / "persons.parquet"
+        assert out_path.exists(), (
+            "Cache reuse should materialize output in the new run_dir"
         )
 
-    out_path = tracker2.run_dir / "container_out" / "2020" / "persons.parquet"
-    assert out_path.exists(), "Cache reuse should materialize output in the new run_dir"
-
-    replay_run = tracker2.find_run(
-        parent_id="baseline_replay", year=2020, model="generate_trips"
-    )
-    # Depending on validation, this may run or hydrate; either way we expect outputs present.
-    assert "declared_outputs" in (replay_run.meta or {})
+        replay_run = tracker2.find_run(
+            parent_id="baseline_replay", year=2020, model="generate_trips"
+        )
+        assert replay_run is not None
+        # Depending on validation, this may run or hydrate; either way we expect outputs present.
+        assert "declared_outputs" in (replay_run.meta or {})
+    finally:
+        tracker2.close()
 
 
 def test_pilates_cache_miss_on_code_change(tmp_path):
@@ -525,16 +573,24 @@ def test_pilates_cache_miss_on_code_change(tmp_path):
     years = [2020]
 
     tracker = make_tracker(tmp_path / "runs_code", db_path)
-    tracker.identity.hashing_strategy = "full"
+    try:
+        tracker.identity.hashing_strategy = "full"
 
-    with patch.object(tracker.identity, "get_code_version", return_value="git_sha_1"):
-        run_simulation_scenario(tracker, "code_v1", 10, years, "cold")
+        with patch.object(
+            tracker.identity, "get_code_version", return_value="git_sha_1"
+        ):
+            run_simulation_scenario(tracker, "code_v1", 10, years, "cold")
 
-    with patch.object(tracker.identity, "get_code_version", return_value="git_sha_2"):
-        run_simulation_scenario(tracker, "code_v2", 10, years, "cold")
+        with patch.object(
+            tracker.identity, "get_code_version", return_value="git_sha_2"
+        ):
+            run_simulation_scenario(tracker, "code_v2", 10, years, "cold")
 
-    run2 = tracker.find_run(parent_id="code_v2", year=2020, model="generate_trips")
-    assert (run2.meta or {}).get("cache_hit") is True
+        run2 = tracker.find_run(parent_id="code_v2", year=2020, model="generate_trips")
+        assert run2 is not None
+        assert (run2.meta or {}).get("cache_hit") is True
+    finally:
+        tracker.close()
 
 
 def test_pilates_cache_replay_with_ingested_outputs(tmp_path):
@@ -546,46 +602,53 @@ def test_pilates_cache_replay_with_ingested_outputs(tmp_path):
     years = [2020]
 
     tracker1 = make_tracker(tmp_path / "runs_ingest_a", db_path)
-    tracker1.identity.hashing_strategy = "full"
-    with patch.object(
-        tracker1.identity, "get_code_version", return_value="stable_git_hash"
-    ):
-        run_simulation_scenario(
-            tracker1,
-            "ingest_a",
-            10,
-            years,
-            "cold",
-            validate_cached_outputs="eager",
-        )
+    try:
+        tracker1.identity.hashing_strategy = "full"
+        with patch.object(
+            tracker1.identity, "get_code_version", return_value="stable_git_hash"
+        ):
+            run_simulation_scenario(
+                tracker1,
+                "ingest_a",
+                10,
+                years,
+                "cold",
+                validate_cached_outputs="eager",
+            )
+    finally:
+        tracker1.close()
 
     tracker2 = make_tracker(tmp_path / "runs_ingest_b", db_path)
-    tracker2.identity.hashing_strategy = "full"
-    with patch.object(
-        tracker2.identity, "get_code_version", return_value="stable_git_hash"
-    ):
-        run_simulation_scenario(
-            tracker2,
-            "ingest_replay",
-            10,
-            years,
-            "cold",
-            validate_cached_outputs="eager",
+    try:
+        tracker2.identity.hashing_strategy = "full"
+        with patch.object(
+            tracker2.identity, "get_code_version", return_value="stable_git_hash"
+        ):
+            run_simulation_scenario(
+                tracker2,
+                "ingest_replay",
+                10,
+                years,
+                "cold",
+                validate_cached_outputs="eager",
+            )
+
+        # Cache hit preferred on trips; validation may downgrade to execute if outputs missing
+        replay_run = tracker2.find_run(
+            parent_id="ingest_replay", year=2020, model="generate_trips"
         )
+        assert replay_run is not None
+        cache_flag = (replay_run.meta or {}).get("cache_hit")
+        assert cache_flag in (True, False)
 
-    # Cache hit preferred on trips; validation may downgrade to execute if outputs missing
-    replay_run = tracker2.find_run(
-        parent_id="ingest_replay", year=2020, model="generate_trips"
-    )
-    cache_flag = (replay_run.meta or {}).get("cache_hit")
-    assert cache_flag in (True, False)
+        # Outputs should be linked and readable
+        outputs = tracker2.get_run_outputs(replay_run.id)
+        persons_art = outputs.get("persons") or next(iter(outputs.values()))
+        df = consist.load_df(persons_art, tracker=tracker2)
+        assert len(df) == 300
 
-    # Outputs should be linked and readable
-    outputs = tracker2.get_run_outputs(replay_run.id)
-    persons_art = outputs.get("persons") or next(iter(outputs.values()))
-    df = consist.load_df(persons_art, tracker=tracker2)
-    assert len(df) == 300
-
-    # Hydration should materialize the file in the new run_dir
-    out_path = tracker2.run_dir / "container_out" / "2020" / "persons.parquet"
-    assert out_path.exists()
+        # Hydration should materialize the file in the new run_dir
+        out_path = tracker2.run_dir / "container_out" / "2020" / "persons.parquet"
+        assert out_path.exists()
+    finally:
+        tracker2.close()

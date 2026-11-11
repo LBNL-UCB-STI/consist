@@ -21,7 +21,7 @@ import hashlib
 import json
 from pathlib import Path
 
-import consist
+from consist.api import find_latest_run
 from pydantic import BaseModel
 
 
@@ -91,32 +91,24 @@ def test_get_config_helpers_return_typed_values(tracker):
 
 
 def test_begin_run_uses_combined_config_facet_persistence(tracker, monkeypatch) -> None:
-    combined_calls = 0
+    persist_calls = 0
     upsert_calls = 0
-    kv_calls = 0
 
-    original_combined = tracker.db.persist_config_facet_bundle
-    original_upsert = tracker.db.upsert_config_facet
-    original_kv = tracker.db.insert_run_config_kv_bulk
+    original_persist = tracker.config_facets.persist_facet
+    original_upsert = tracker.db.ledger.upsert_run
 
-    def counting_combined(**kwargs):
-        nonlocal combined_calls
-        combined_calls += 1
-        return original_combined(**kwargs)
+    def counting_persist(**kwargs):
+        nonlocal persist_calls
+        persist_calls += 1
+        return original_persist(**kwargs)
 
     def counting_upsert(*args, **kwargs):
         nonlocal upsert_calls
         upsert_calls += 1
         return original_upsert(*args, **kwargs)
 
-    def counting_kv(*args, **kwargs):
-        nonlocal kv_calls
-        kv_calls += 1
-        return original_kv(*args, **kwargs)
-
-    monkeypatch.setattr(tracker.db, "persist_config_facet_bundle", counting_combined)
-    monkeypatch.setattr(tracker.db, "upsert_config_facet", counting_upsert)
-    monkeypatch.setattr(tracker.db, "insert_run_config_kv_bulk", counting_kv)
+    monkeypatch.setattr(tracker.config_facets, "persist_facet", counting_persist)
+    monkeypatch.setattr(tracker.db.ledger, "upsert_run", counting_upsert)
 
     tracker.begin_run(
         "run_with_combined_facet",
@@ -124,11 +116,16 @@ def test_begin_run_uses_combined_config_facet_persistence(tracker, monkeypatch) 
         config={"internal": "not_indexed"},
         facet={"household_sample_size": 250000, "num_processes": 25},
     )
+    assert persist_calls == 1
+    assert upsert_calls >= 1
     tracker.end_run()
 
-    assert combined_calls == 1
-    assert upsert_calls == 0
-    assert kv_calls == 0
+    df = tracker.query_df(
+        "SELECT meta, facet_kv FROM main.run WHERE id = ?",
+        ["run_with_combined_facet"],
+    )
+    assert len(df) == 1
+    assert df.iloc[0]["facet_kv"] is not None
 
 
 def test_find_runs_supports_mixed_run_fields_and_facet_predicates(tracker):
@@ -214,7 +211,7 @@ def test_find_latest_run_supports_facet_predicates(tracker):
     )
     tracker.end_run()
 
-    latest = consist.find_latest_run(
+    latest = find_latest_run(
         tracker=tracker,
         model="demo_model",
         year=2030,

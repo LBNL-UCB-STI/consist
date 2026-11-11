@@ -5,21 +5,21 @@ from pathlib import Path
 import re
 import uuid
 from datetime import datetime
-from typing import Optional, cast
+from typing import Optional
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
-from sqlalchemy.engine import Engine
-from sqlmodel import SQLModel, Session, create_engine, text
+import typer
 from typer.testing import CliRunner
 
 from consist import Tracker
+from consist.artifact import Artifact
 from consist.cli import (
     ConsistShell,
     _render_run_details,
     _render_scenarios,
-    _tracker_session,
+    _require_ledger,
     app,
     find_db_path,
 )
@@ -33,8 +33,8 @@ from consist.core.maintenance import (
     RebuildResult,
 )
 from consist.core.persistence import DatabaseManager
-from consist.models.artifact import Artifact
 from consist.models.run import Run, RunArtifactLink
+from tests.helpers.artifact_factory import make_artifact
 
 runner = CliRunner()
 
@@ -62,7 +62,7 @@ def mock_data(tmp_path):
     csv_path = tmp_path / "raw.csv"
     pd.DataFrame({"col1": [1, 2], "col2": ["a", "b"]}).to_csv(csv_path, index=False)
 
-    art1 = Artifact(
+    art1 = make_artifact(
         id=uuid.uuid4(),
         key="raw_data",
         container_uri=str(csv_path),
@@ -83,14 +83,14 @@ def mock_data(tmp_path):
         ended_at=datetime(2025, 1, 2, 12, 10),
         tags=["prod"],
     )
-    art2 = Artifact(
+    art2 = make_artifact(
         id=uuid.uuid4(),
         key="params",
         container_uri="config/params.json",
         driver="json",
         hash="def",
     )
-    art3 = Artifact(
+    art3 = make_artifact(
         id=uuid.uuid4(),
         key="processed_data",
         container_uri="data/processed.parquet",
@@ -113,7 +113,7 @@ def mock_data(tmp_path):
         ended_at=datetime(2025, 1, 3, 12, 5),
         tags=["dev"],
     )
-    art4 = Artifact(
+    art4 = make_artifact(
         id=uuid.uuid4(),
         key="more_raw_data",
         container_uri="data/more_raw.csv",
@@ -142,32 +142,28 @@ def mock_data(tmp_path):
 @pytest.fixture
 def mock_db_session(mock_data, tmp_path):
     """
-    Creates an isolated in-memory DB populated with mock data for CLI testing.
-    We do NOT use the global tracker fixture here because we want full control
-    over the data population for specific CLI outputs.
+    Creates an isolated Schema v2 Tracker populated with mock data for CLI testing.
     """
     db_path = str(tmp_path / "cli_test.db")
-    engine = create_engine(f"duckdb:///{db_path}")
-
-    # CRITICAL: Only create the core tables, ignoring MockTable from other tests
-    core_tables = [
-        getattr(Run, "__table__"),
-        getattr(Artifact, "__table__"),
-        getattr(RunArtifactLink, "__table__"),
-    ]
-
-    with engine.connect() as connection:
-        with connection.begin():
-            SQLModel.metadata.drop_all(connection, tables=core_tables)
-            SQLModel.metadata.create_all(connection, tables=core_tables)
-
-    with Session(engine) as session:
-        for item in mock_data:
-            session.add(item)
-        session.commit()
-        yield session
-
-    engine.dispose()
+    seeded_tracker = Tracker(run_dir=tmp_path, db_path=db_path)
+    assert seeded_tracker.db is not None
+    artifacts_by_id: dict[uuid.UUID, Artifact] = {}
+    for item in mock_data:
+        if isinstance(item, Run):
+            seeded_tracker.db.sync_run(item)
+        elif isinstance(item, Artifact):
+            artifacts_by_id[item.id] = item
+            seeded_tracker.db.sync_artifact(item)
+    for item in mock_data:
+        if isinstance(item, RunArtifactLink):
+            art = artifacts_by_id[item.artifact_id]
+            seeded_tracker.db.sync_artifact(
+                art, run_id=item.run_id, direction=item.direction
+            )
+    try:
+        yield seeded_tracker
+    finally:
+        seeded_tracker.close()
 
 
 # --- Tests ---
@@ -197,25 +193,22 @@ def test_cli_root_without_command_keeps_usage_exit_code():
     assert result.exit_code == 2
 
 
-def test_tracker_session_uses_db_session_scope(tmp_path):
+def test_require_ledger_returns_db_ledger(tmp_path):
     db = DatabaseManager(str(tmp_path / "cli_session.db"))
+    try:
+        tracker = MagicMock()
+        tracker.db = db
+        assert _require_ledger(tracker) is db.ledger
+    finally:
+        db.close()
+
+
+def test_require_ledger_exits_when_db_missing():
     tracker = MagicMock()
-    tracker.engine = create_engine("duckdb:///:memory:")
-    tracker.db = db
-
-    with patch.object(db, "session_scope", wraps=db.session_scope) as session_scope:
-        with _tracker_session(tracker) as session:
-            assert session is not None
-        assert session_scope.call_count == 1
-
-
-def test_tracker_session_falls_back_to_engine(mock_db_session):
-    tracker = MagicMock()
-    tracker.engine = mock_db_session.get_bind()
     tracker.db = None
-
-    with _tracker_session(tracker) as session:
-        assert session.get_bind() == mock_db_session.get_bind()
+    with pytest.raises(typer.Exit) as exc_info:
+        _require_ledger(tracker)
+    assert exc_info.value.exit_code == 1
 
 
 def test_find_db_path_prefers_explicit_path(monkeypatch):
@@ -256,13 +249,8 @@ def test_find_db_path_defaults_when_nothing_found(tmp_path, monkeypatch):
 def test_runs_with_db(mock_db_session):
     with (
         patch("pathlib.Path.exists", return_value=True),
-        patch("consist.cli.get_tracker") as mock_get_tracker,
+        patch("consist.cli.get_tracker", return_value=mock_db_session),
     ):
-        mock_tracker = MagicMock()
-        # For MagicMock, we CAN assign to 'engine' even if it's a property on the real class
-        mock_tracker.engine = mock_db_session.get_bind()
-        mock_get_tracker.return_value = mock_tracker
-
         # We pass a dummy path because get_tracker is mocked anyway
         result = runner.invoke(app, ["runs", "--db-path", "mock.db"])
 
@@ -276,9 +264,8 @@ def test_runs_with_db(mock_db_session):
 def test_runs_filter_by_model(mock_db_session):
     with (
         patch("pathlib.Path.exists", return_value=True),
-        patch("consist.cli.get_tracker") as m,
+        patch("consist.cli.get_tracker", return_value=mock_db_session),
     ):
-        m.return_value.engine = mock_db_session.get_bind()
         result = runner.invoke(app, ["runs", "--model", "create_data"])
         assert result.exit_code == 0
         assert "run1" in result.stdout
@@ -289,9 +276,8 @@ def test_runs_filter_by_model(mock_db_session):
 def test_runs_filter_by_tag(mock_db_session):
     with (
         patch("pathlib.Path.exists", return_value=True),
-        patch("consist.cli.get_tracker") as m,
+        patch("consist.cli.get_tracker", return_value=mock_db_session),
     ):
-        m.return_value.engine = mock_db_session.get_bind()
         result = runner.invoke(app, ["runs", "--tag", "prod"])
         assert result.exit_code == 0
         assert "run2" in result.stdout
@@ -301,9 +287,8 @@ def test_runs_filter_by_tag(mock_db_session):
 def test_runs_filter_by_status(mock_db_session):
     with (
         patch("pathlib.Path.exists", return_value=True),
-        patch("consist.cli.get_tracker") as m,
+        patch("consist.cli.get_tracker", return_value=mock_db_session),
     ):
-        m.return_value.engine = mock_db_session.get_bind()
         result = runner.invoke(app, ["runs", "--status", "failed"])
         assert result.exit_code == 0
         assert "run2" in result.stdout
@@ -313,9 +298,8 @@ def test_runs_filter_by_status(mock_db_session):
 def test_runs_json_output(mock_db_session):
     with (
         patch("pathlib.Path.exists", return_value=True),
-        patch("consist.cli.get_tracker") as m,
+        patch("consist.cli.get_tracker", return_value=mock_db_session),
     ):
-        m.return_value.engine = mock_db_session.get_bind()
         result = runner.invoke(app, ["runs", "--json"])
         assert result.exit_code == 0
         data = json.loads(result.stdout)
@@ -338,10 +322,9 @@ def test_runs_json_output_handles_non_serializable_meta(mock_db_session):
 
     with (
         patch("pathlib.Path.exists", return_value=True),
-        patch("consist.cli.get_tracker") as m_tracker,
+        patch("consist.cli.get_tracker", return_value=mock_db_session),
         patch("consist.cli.queries.get_runs", return_value=[run]) as m_get_runs,
     ):
-        m_tracker.return_value.engine = mock_db_session.get_bind()
         result = runner.invoke(app, ["runs", "--json"])
 
     assert result.exit_code == 0
@@ -370,7 +353,6 @@ def test_show_uses_renderer(mock_db_session):
         patch("consist.cli._render_run_details") as render_details,
     ):
         tracker = MagicMock()
-        tracker.engine = mock_db_session.get_bind()
         tracker.get_run.return_value = MagicMock()
         m_tracker.return_value = tracker
 
@@ -404,18 +386,11 @@ def test_render_run_details_includes_config_and_meta(capsys):
     assert "note" in out
 
 
-def test_artifacts_with_db(mock_db_session, tmp_path):
+def test_artifacts_with_db(mock_db_session):
     with (
         patch("pathlib.Path.exists", return_value=True),
-        patch("consist.cli.get_tracker") as m,
+        patch("consist.cli.get_tracker", return_value=mock_db_session),
     ):
-        # We need a real Tracker to exercise the get_artifacts_for_run delegation logic
-        tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
-        assert tracker.db is not None
-        # Fix: Inject the mock engine into the DatabaseManager, not the Tracker property
-        tracker.db.engine = cast(Engine, mock_db_session.get_bind())
-        m.return_value = tracker
-
         result = runner.invoke(app, ["artifacts", "run2"])
         assert result.exit_code == 0
         assert "Artifacts for Run run2" in result.stdout
@@ -567,7 +542,7 @@ def test_views_create_grouped_command(cli_runner, tracker, tmp_path):
             facet_index=True,
         )
 
-    schema_id = artifact.meta.get("schema_id")
+    schema_id = artifact.schema_id
     assert schema_id is not None
 
     result = cli_runner.invoke(
@@ -591,9 +566,8 @@ def test_views_create_grouped_command(cli_runner, tracker, tmp_path):
     assert result.exit_code == 0
     assert "Created grouped view 'v_grouped_cli'" in result.stdout
 
-    with tracker.engine.connect() as conn:
-        count = conn.execute(text("SELECT COUNT(*) FROM v_grouped_cli")).scalar()
-    assert count == 1
+    df_count = tracker.query_df("SELECT COUNT(*) AS cnt FROM v_grouped_cli")
+    assert int(df_count.iloc[0]["cnt"]) == 1
 
 
 def test_views_create_grouped_command_missing_file_error(cli_runner, tracker, tmp_path):
@@ -620,7 +594,7 @@ def test_views_create_grouped_command_missing_file_error(cli_runner, tracker, tm
             facet_index=True,
         )
 
-    schema_id = artifact.meta.get("schema_id")
+    schema_id = artifact.schema_id
     assert schema_id is not None
     path.unlink()
 
@@ -650,17 +624,11 @@ def test_views_create_grouped_command_missing_file_error(cli_runner, tracker, tm
     assert "grouped_cli_missing.parquet" in normalized_stdout
 
 
-def test_lineage_with_db(mock_db_session, tmp_path):
+def test_lineage_with_db(mock_db_session):
     with (
         patch("pathlib.Path.exists", return_value=True),
-        patch("consist.cli.get_tracker") as m,
+        patch("consist.cli.get_tracker", return_value=mock_db_session),
     ):
-        tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
-        assert tracker.db is not None
-        # Fix: Inject the mock engine into the DatabaseManager
-        tracker.db.engine = cast(Engine, mock_db_session.get_bind())
-        m.return_value = tracker
-
         result = runner.invoke(app, ["lineage", "processed_data"])
         assert result.exit_code == 0
         assert "Lineage for Artifact: processed_data" in result.stdout
@@ -671,9 +639,8 @@ def test_lineage_with_db(mock_db_session, tmp_path):
 def test_summary_command(mock_db_session):
     with (
         patch("pathlib.Path.exists", return_value=True),
-        patch("consist.cli.get_tracker") as m,
+        patch("consist.cli.get_tracker", return_value=mock_db_session),
     ):
-        m.return_value.engine = mock_db_session.get_bind()
         result = runner.invoke(app, ["summary"])
         assert result.exit_code == 0
         assert "Database Summary" in result.stdout
@@ -689,32 +656,31 @@ def test_render_scenarios_no_results_prints_empty_message(tracker, capsys):
 
 
 def test_render_scenarios_populated_prints_rows(tracker, capsys):
-    with Session(tracker.engine) as session:
-        session.add_all(
-            [
-                Run(
-                    id="scenario_child_1",
-                    model_name="demo",
-                    config_hash=None,
-                    git_hash=None,
-                    status="completed",
-                    parent_run_id="scenario_x",
-                    created_at=datetime(2025, 1, 1, 12, 0),
-                    started_at=datetime(2025, 1, 1, 12, 0),
-                ),
-                Run(
-                    id="scenario_child_2",
-                    model_name="demo",
-                    config_hash=None,
-                    git_hash=None,
-                    status="completed",
-                    parent_run_id="scenario_x",
-                    created_at=datetime(2025, 1, 1, 12, 5),
-                    started_at=datetime(2025, 1, 1, 12, 5),
-                ),
-            ]
+    assert tracker.db is not None
+    tracker.db.sync_run(
+        Run(
+            id="scenario_child_1",
+            model_name="demo",
+            config_hash=None,
+            git_hash=None,
+            status="completed",
+            parent_run_id="scenario_x",
+            created_at=datetime(2025, 1, 1, 12, 0),
+            started_at=datetime(2025, 1, 1, 12, 0),
         )
-        session.commit()
+    )
+    tracker.db.sync_run(
+        Run(
+            id="scenario_child_2",
+            model_name="demo",
+            config_hash=None,
+            git_hash=None,
+            status="completed",
+            parent_run_id="scenario_x",
+            created_at=datetime(2025, 1, 1, 12, 5),
+            started_at=datetime(2025, 1, 1, 12, 5),
+        )
+    )
 
     _render_scenarios(tracker, limit=5)
 
@@ -731,21 +697,20 @@ def test_scenario_command_no_runs_returns_exit_1(cli_runner):
 
 
 def test_scenario_command_lists_matching_runs(cli_runner, tracker):
-    with Session(tracker.engine) as session:
-        session.add(
-            Run(
-                id="scenario_run_1",
-                model_name="transport",
-                config_hash=None,
-                git_hash=None,
-                status="completed",
-                parent_run_id="scenario_2025",
-                year=2025,
-                created_at=datetime(2025, 1, 1, 12, 0),
-                started_at=datetime(2025, 1, 1, 12, 0),
-            )
+    assert tracker.db is not None
+    tracker.db.sync_run(
+        Run(
+            id="scenario_run_1",
+            model_name="transport",
+            config_hash=None,
+            git_hash=None,
+            status="completed",
+            parent_run_id="scenario_2025",
+            year=2025,
+            created_at=datetime(2025, 1, 1, 12, 0),
+            started_at=datetime(2025, 1, 1, 12, 0),
         )
-        session.commit()
+    )
 
     result = cli_runner.invoke(app, ["scenario", "scenario_2025"])
     assert result.exit_code == 0
@@ -754,19 +719,14 @@ def test_scenario_command_lists_matching_runs(cli_runner, tracker):
     assert "2025" in result.stdout
 
 
-def test_preview_command_success(mock_db_session, tmp_path):
+def test_preview_command_success(mock_db_session):
     with (
         patch("pathlib.Path.exists", return_value=True),
-        patch("consist.cli.get_tracker") as m,
+        patch("consist.cli.get_tracker", return_value=mock_db_session),
         patch("consist.load") as mock_load,
     ):
         mock_df = pd.DataFrame({"col1": [1, 2], "col2": ["a", "b"]})
         mock_load.return_value = mock_df
-
-        tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
-        assert tracker.db is not None
-        tracker.db.engine = cast(Engine, mock_db_session.get_bind())
-        m.return_value = tracker
 
         result = runner.invoke(app, ["preview", "raw_data"])
 
@@ -776,33 +736,23 @@ def test_preview_command_success(mock_db_session, tmp_path):
         assert "a" in result.stdout
 
 
-def test_preview_command_artifact_not_found(mock_db_session, tmp_path):
+def test_preview_command_artifact_not_found(mock_db_session):
     with (
         patch("pathlib.Path.exists", return_value=True),
-        patch("consist.cli.get_tracker") as m,
+        patch("consist.cli.get_tracker", return_value=mock_db_session),
     ):
-        tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
-        assert tracker.db is not None
-        tracker.db.engine = cast(Engine, mock_db_session.get_bind())
-        m.return_value = tracker
-
         result = runner.invoke(app, ["preview", "nonexistent_artifact"])
         assert result.exit_code == 1
         assert "Artifact 'nonexistent_artifact' not found" in result.stdout
 
 
-def test_preview_command_unsupported_loaded_type(mock_db_session, tmp_path):
+def test_preview_command_unsupported_loaded_type(mock_db_session):
     with (
         patch("pathlib.Path.exists", return_value=True),
-        patch("consist.cli.get_tracker") as m,
+        patch("consist.cli.get_tracker", return_value=mock_db_session),
         patch("consist.load") as mock_load,
     ):
         mock_load.return_value = {"not": "a dataframe"}
-
-        tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
-        assert tracker.db is not None
-        tracker.db.engine = cast(Engine, mock_db_session.get_bind())
-        m.return_value = tracker
 
         result = runner.invoke(app, ["preview", "params"])
         assert result.exit_code == 0
@@ -857,18 +807,13 @@ def test_preview_rejects_invalid_mount_override_syntax():
     mock_get_tracker.assert_not_called()
 
 
-def test_schema_export_command_success_stdout(mock_db_session, tmp_path):
+def test_schema_export_command_success_stdout(mock_db_session):
     with (
         patch("pathlib.Path.exists", return_value=True),
-        patch("consist.cli.get_tracker") as m,
+        patch("consist.cli.get_tracker", return_value=mock_db_session),
     ):
-        tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
-        assert tracker.db is not None
-        tracker.db.engine = cast(Engine, mock_db_session.get_bind())
-        m.return_value = tracker
-
         with patch.object(
-            tracker,
+            mock_db_session,
             "export_schema_sqlmodel",
             return_value="class MyTable(SQLModel, table=True):\n    pass\n",
         ):
@@ -885,16 +830,11 @@ def test_schema_export_command_success_stdout(mock_db_session, tmp_path):
         assert "class MyTable" in result.stdout
 
 
-def test_schema_export_command_requires_selector(mock_db_session, tmp_path):
+def test_schema_export_command_requires_selector(mock_db_session):
     with (
         patch("pathlib.Path.exists", return_value=True),
-        patch("consist.cli.get_tracker") as m,
+        patch("consist.cli.get_tracker", return_value=mock_db_session),
     ):
-        tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
-        assert tracker.db is not None
-        tracker.db.engine = cast(Engine, mock_db_session.get_bind())
-        m.return_value = tracker
-
         result = runner.invoke(app, ["schema", "export"])
         assert result.exit_code == 2
         assert (
@@ -903,17 +843,14 @@ def test_schema_export_command_requires_selector(mock_db_session, tmp_path):
         )
 
 
-def test_schema_export_command_schema_not_found_exits_1(mock_db_session, tmp_path):
+def test_schema_export_command_schema_not_found_exits_1(mock_db_session):
     with (
         patch("pathlib.Path.exists", return_value=True),
-        patch("consist.cli.get_tracker") as m,
+        patch("consist.cli.get_tracker", return_value=mock_db_session),
     ):
-        tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
-        assert tracker.db is not None
-        tracker.db.engine = cast(Engine, mock_db_session.get_bind())
-        m.return_value = tracker
-
-        with patch.object(tracker, "export_schema_sqlmodel", side_effect=KeyError()):
+        with patch.object(
+            mock_db_session, "export_schema_sqlmodel", side_effect=KeyError()
+        ):
             result = runner.invoke(
                 app,
                 [
@@ -927,16 +864,11 @@ def test_schema_export_command_schema_not_found_exits_1(mock_db_session, tmp_pat
         assert "Captured schema not found" in result.stdout
 
 
-def test_schema_export_command_rejects_invalid_prefer_source(mock_db_session, tmp_path):
+def test_schema_export_command_rejects_invalid_prefer_source(mock_db_session):
     with (
         patch("pathlib.Path.exists", return_value=True),
-        patch("consist.cli.get_tracker") as m,
+        patch("consist.cli.get_tracker", return_value=mock_db_session),
     ):
-        tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
-        assert tracker.db is not None
-        tracker.db.engine = cast(Engine, mock_db_session.get_bind())
-        m.return_value = tracker
-
         result = runner.invoke(
             app,
             [
@@ -952,18 +884,13 @@ def test_schema_export_command_rejects_invalid_prefer_source(mock_db_session, tm
         assert "--prefer-source must be either 'file' or 'duckdb'" in result.stdout
 
 
-def test_schema_export_command_passes_prefer_source(mock_db_session, tmp_path):
+def test_schema_export_command_passes_prefer_source(mock_db_session):
     with (
         patch("pathlib.Path.exists", return_value=True),
-        patch("consist.cli.get_tracker") as m,
+        patch("consist.cli.get_tracker", return_value=mock_db_session),
     ):
-        tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
-        assert tracker.db is not None
-        tracker.db.engine = cast(Engine, mock_db_session.get_bind())
-        m.return_value = tracker
-
         with patch.object(
-            tracker,
+            mock_db_session,
             "export_schema_sqlmodel",
             return_value="class MyTable(SQLModel, table=True):\n    pass\n",
         ) as mock_export:
@@ -991,23 +918,18 @@ def test_schema_help_does_not_list_export_manifest_command() -> None:
 
 def test_validate_paginates_artifacts(tmp_path, monkeypatch):
     db_path = tmp_path / "validate_test.duckdb"
-    engine = create_engine(f"duckdb:///{db_path}")
-
-    core_tables = [getattr(Artifact, "__table__")]
-    with engine.connect() as connection:
-        with connection.begin():
-            SQLModel.metadata.drop_all(connection, tables=core_tables)
-            SQLModel.metadata.create_all(connection, tables=core_tables)
+    tracker = Tracker(run_dir=tmp_path, db_path=str(db_path))
+    assert tracker.db is not None
 
     present_path = tmp_path / "present.txt"
     present_path.write_text("ok", encoding="utf-8")
     present_path_2 = tmp_path / "present_2.txt"
-    present_path_2.write_text("ok", encoding="utf-8")
+    present_path_2.write_text("ok2", encoding="utf-8")
 
     missing_path = tmp_path / "missing.txt"
 
     artifacts = [
-        Artifact(
+        make_artifact(
             id=uuid.uuid4(),
             key="present",
             container_uri=str(present_path),
@@ -1016,7 +938,7 @@ def test_validate_paginates_artifacts(tmp_path, monkeypatch):
             hash="hash_present",
             created_at=datetime(2025, 1, 1, 0, 0),
         ),
-        Artifact(
+        make_artifact(
             id=uuid.uuid4(),
             key="missing",
             container_uri=str(missing_path),
@@ -1025,7 +947,7 @@ def test_validate_paginates_artifacts(tmp_path, monkeypatch):
             hash="hash_missing",
             created_at=datetime(2025, 1, 1, 0, 1),
         ),
-        Artifact(
+        make_artifact(
             id=uuid.uuid4(),
             key="present_2",
             container_uri=str(present_path_2),
@@ -1036,50 +958,46 @@ def test_validate_paginates_artifacts(tmp_path, monkeypatch):
         ),
     ]
 
-    with Session(engine) as session:
-        session.add_all(artifacts)
-        session.commit()
-
-    tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
-    assert tracker.db is not None
-    tracker.db.engine = engine
+    for art in artifacts:
+        tracker.db.sync_artifact(art)
 
     monkeypatch.setenv("CONSIST_VALIDATE_BATCH_SIZE", "2")
 
-    with patch("consist.cli.get_tracker", return_value=tracker):
-        result = runner.invoke(app, ["validate", "--db-path", str(db_path)])
+    try:
+        with patch("consist.cli.get_tracker", return_value=tracker):
+            result = runner.invoke(app, ["validate", "--db-path", str(db_path)])
 
-    assert result.exit_code == 0
-    assert "Found 1 missing artifacts" in result.stdout
-    assert "missing" in result.stdout
-    assert "present_2.txt" not in result.stdout
-
-    engine.dispose()
+        assert result.exit_code == 0
+        assert "Found 1 missing artifacts" in result.stdout
+        assert "missing" in result.stdout
+        assert "present_2.txt" not in result.stdout
+    finally:
+        tracker.close()
 
 
 def test_summary_no_runs_exits_cleanly(tmp_path):
-    with (
-        patch("pathlib.Path.exists", return_value=True),
-        patch("consist.cli.get_tracker") as m_tracker,
-        patch("consist.cli.queries.get_summary") as m_summary,
-    ):
-        tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
-        assert tracker.db is not None
-        tracker.db.engine = create_engine("duckdb:///:memory:")
-        m_tracker.return_value = tracker
-        m_summary.return_value = {
-            "total_runs": 0,
-            "completed_runs": 0,
-            "failed_runs": 0,
-            "total_artifacts": 0,
-            "first_run_at": datetime(2025, 1, 1),
-            "last_run_at": datetime(2025, 1, 1),
-            "models_distribution": [],
-        }
+    tracker = Tracker(run_dir=tmp_path, db_path=":memory:")
+    try:
+        with (
+            patch("pathlib.Path.exists", return_value=True),
+            patch("consist.cli.get_tracker", return_value=tracker),
+            patch("consist.cli.queries.get_summary") as m_summary,
+        ):
+            m_summary.return_value = {
+                "total_runs": 0,
+                "completed_runs": 0,
+                "failed_runs": 0,
+                "total_artifacts": 0,
+                "first_run_at": datetime(2025, 1, 1),
+                "last_run_at": datetime(2025, 1, 1),
+                "models_distribution": [],
+            }
 
-        result = runner.invoke(app, ["summary"])
-        assert result.exit_code == 0
-        assert "No runs found in the database" in result.stdout
+            result = runner.invoke(app, ["summary"])
+            assert result.exit_code == 0
+            assert "No runs found in the database" in result.stdout
+    finally:
+        tracker.close()
 
 
 def _seed_db_for_maintenance_cli(db_path: Path) -> None:
@@ -1087,56 +1005,47 @@ def _seed_db_for_maintenance_cli(db_path: Path) -> None:
     artifact_id = uuid.uuid4()
     now = datetime(2025, 1, 1, 12, 0)
     try:
-        with db.session_scope() as session:
-            session.add(
-                Run(
-                    id="cli_run",
-                    model_name="demo",
-                    config_hash=None,
-                    git_hash=None,
-                    status="completed",
-                    created_at=now,
-                    started_at=now,
-                    ended_at=now,
-                )
+        db.sync_run(
+            Run(
+                id="cli_run",
+                model_name="demo",
+                config_hash=None,
+                git_hash=None,
+                status="completed",
+                created_at=now,
+                started_at=now,
+                ended_at=now,
             )
-            session.add(
-                Artifact(
-                    id=artifact_id,
-                    key="cli_artifact",
-                    container_uri="outputs://cli_artifact.parquet",
-                    driver="parquet",
-                    run_id="cli_run",
-                )
-            )
-            session.add(
-                RunArtifactLink(
-                    run_id="cli_run",
-                    artifact_id=artifact_id,
-                    direction="output",
-                )
-            )
-            session.commit()
+        )
+        art = make_artifact(
+            id=artifact_id,
+            key="cli_artifact",
+            container_uri="outputs://cli_artifact.parquet",
+            driver="parquet",
+            run_id="cli_run",
+            hash="cli_hash_1",
+        )
+        db.sync_artifact(art, run_id="cli_run", direction="output")
     finally:
-        db.engine.dispose()
+        db.close()
 
 
 def _seed_unscoped_cache_global_table(db_path: Path, table_name: str) -> None:
     db = DatabaseManager(str(db_path))
     try:
-        with db.engine.begin() as conn:
-            conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
-            conn.exec_driver_sql(
+        with db.ledger.exec_cursor() as cur:
+            cur.execute("CREATE SCHEMA IF NOT EXISTS global_tables")
+            cur.execute(
                 f"CREATE TABLE global_tables.{table_name} (content_hash VARCHAR)"
             )
-            conn.exec_driver_sql(
+            cur.execute(
                 f"""
                 INSERT INTO global_tables.{table_name} (content_hash)
                 VALUES ('hash_a')
                 """
             )
     finally:
-        db.engine.dispose()
+        db.close()
 
 
 def _write_cli_snapshot(
@@ -1235,6 +1144,9 @@ def test_db_doctor_json_output_includes_expected_keys(tmp_path, monkeypatch):
         "dangling_parent_run_ids",
         "artifacts_with_missing_producing_run",
         "global_table_schema_drift",
+        "artifacts_with_missing_content",
+        "orphaned_run_binding_count",
+        "digest_conflict_count",
     }
 
 
@@ -1362,7 +1274,7 @@ def test_db_snapshot_non_json_prints_snapshot_and_sidecar_paths(tmp_path, monkey
 def test_db_rebuild_json_output_is_parseable(tmp_path, monkeypatch):
     db_path = tmp_path / "cli_rebuild_target.duckdb"
     db = DatabaseManager(str(db_path))
-    db.engine.dispose()
+    db.close()
     snapshot_dir = tmp_path / "cli_rebuild_snapshots"
     _write_cli_snapshot(
         snapshot_dir,
@@ -1653,53 +1565,45 @@ def test_db_export_no_children_excludes_descendants(tmp_path, monkeypatch):
     parent_artifact_id = uuid.uuid4()
     child_artifact_id = uuid.uuid4()
     try:
-        with db.session_scope() as session:
-            session.add_all(
-                [
-                    Run(
-                        id="parent_run",
-                        model_name="demo",
-                        config_hash=None,
-                        git_hash=None,
-                        status="completed",
-                    ),
-                    Run(
-                        id="child_run",
-                        model_name="demo",
-                        config_hash=None,
-                        git_hash=None,
-                        status="completed",
-                        parent_run_id="parent_run",
-                    ),
-                    Artifact(
-                        id=parent_artifact_id,
-                        key="parent_art",
-                        container_uri="outputs://parent.parquet",
-                        driver="parquet",
-                        run_id="parent_run",
-                    ),
-                    Artifact(
-                        id=child_artifact_id,
-                        key="child_art",
-                        container_uri="outputs://child.parquet",
-                        driver="parquet",
-                        run_id="child_run",
-                    ),
-                    RunArtifactLink(
-                        run_id="parent_run",
-                        artifact_id=parent_artifact_id,
-                        direction="output",
-                    ),
-                    RunArtifactLink(
-                        run_id="child_run",
-                        artifact_id=child_artifact_id,
-                        direction="output",
-                    ),
-                ]
+        db.sync_run(
+            Run(
+                id="parent_run",
+                model_name="demo",
+                config_hash=None,
+                git_hash=None,
+                status="completed",
             )
-            session.commit()
+        )
+        db.sync_run(
+            Run(
+                id="child_run",
+                model_name="demo",
+                config_hash=None,
+                git_hash=None,
+                status="completed",
+                parent_run_id="parent_run",
+            )
+        )
+        parent_art = make_artifact(
+            id=parent_artifact_id,
+            key="parent_art",
+            container_uri="outputs://parent.parquet",
+            driver="parquet",
+            run_id="parent_run",
+            hash="parent_hash",
+        )
+        child_art = make_artifact(
+            id=child_artifact_id,
+            key="child_art",
+            container_uri="outputs://child.parquet",
+            driver="parquet",
+            run_id="child_run",
+            hash="child_hash",
+        )
+        db.sync_artifact(parent_art, run_id="parent_run", direction="output")
+        db.sync_artifact(child_art, run_id="child_run", direction="output")
     finally:
-        db.engine.dispose()
+        db.close()
 
     monkeypatch.chdir(tmp_path)
     shard_path = tmp_path / "cli_export_no_children_shard.duckdb"
@@ -1729,7 +1633,7 @@ def test_db_merge_json_output_is_parseable(tmp_path, monkeypatch):
     shard_path = tmp_path / "cli_merge_shard.duckdb"
     _seed_db_for_maintenance_cli(source_db_path)
     target_db = DatabaseManager(str(target_db_path))
-    target_db.engine.dispose()
+    target_db.close()
 
     source_db = DatabaseManager(str(source_db_path))
     source_maintenance = DatabaseMaintenance(
@@ -1743,7 +1647,7 @@ def test_db_merge_json_output_is_parseable(tmp_path, monkeypatch):
             include_snapshots=False,
         )
     finally:
-        source_db.engine.dispose()
+        source_db.close()
 
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(
@@ -1776,10 +1680,9 @@ def test_db_merge_json_output_is_parseable(tmp_path, monkeypatch):
     assert payload["runs_merged"] == ["cli_run"]
     merged_db = DatabaseManager(str(target_db_path))
     try:
-        with merged_db.session_scope() as session:
-            assert session.get(Run, "cli_run") is not None
+        assert merged_db.get_run("cli_run") is not None
     finally:
-        merged_db.engine.dispose()
+        merged_db.close()
 
 
 def test_db_merge_dry_run_json_output_is_parseable_and_no_writes(tmp_path, monkeypatch):
@@ -1788,7 +1691,7 @@ def test_db_merge_dry_run_json_output_is_parseable_and_no_writes(tmp_path, monke
     shard_path = tmp_path / "cli_merge_dry_run_shard.duckdb"
     _seed_db_for_maintenance_cli(source_db_path)
     target_db = DatabaseManager(str(target_db_path))
-    target_db.engine.dispose()
+    target_db.close()
 
     source_db = DatabaseManager(str(source_db_path))
     source_maintenance = DatabaseMaintenance(
@@ -1802,7 +1705,7 @@ def test_db_merge_dry_run_json_output_is_parseable_and_no_writes(tmp_path, monke
             include_snapshots=False,
         )
     finally:
-        source_db.engine.dispose()
+        source_db.close()
 
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(
@@ -1837,10 +1740,9 @@ def test_db_merge_dry_run_json_output_is_parseable_and_no_writes(tmp_path, monke
 
     merged_db = DatabaseManager(str(target_db_path))
     try:
-        with merged_db.session_scope() as session:
-            assert session.get(Run, "cli_run") is None
+        assert merged_db.get_run("cli_run") is None
     finally:
-        merged_db.engine.dispose()
+        merged_db.close()
 
 
 def test_db_merge_non_json_warns_when_unscoped_cache_tables_skipped(
@@ -1851,7 +1753,7 @@ def test_db_merge_non_json_warns_when_unscoped_cache_tables_skipped(
     shard_path = tmp_path / "cli_merge_warn_shard.duckdb"
     _seed_db_for_maintenance_cli(source_db_path)
     target_db = DatabaseManager(str(target_db_path))
-    target_db.engine.dispose()
+    target_db.close()
 
     source_db = DatabaseManager(str(source_db_path))
     source_maintenance = DatabaseMaintenance(
@@ -1865,23 +1767,23 @@ def test_db_merge_non_json_warns_when_unscoped_cache_tables_skipped(
             include_snapshots=False,
         )
     finally:
-        source_db.engine.dispose()
+        source_db.close()
 
     shard_db = DatabaseManager(str(shard_path))
     try:
-        with shard_db.engine.begin() as conn:
-            conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
-            conn.exec_driver_sql(
+        with shard_db.ledger.exec_cursor() as cur:
+            cur.execute("CREATE SCHEMA IF NOT EXISTS global_tables")
+            cur.execute(
                 "CREATE TABLE global_tables.cache_merge_warn (content_hash VARCHAR)"
             )
-            conn.exec_driver_sql(
+            cur.execute(
                 """
                 INSERT INTO global_tables.cache_merge_warn (content_hash)
                 VALUES ('hash_a')
                 """
             )
     finally:
-        shard_db.engine.dispose()
+        shard_db.close()
 
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(
@@ -2061,10 +1963,9 @@ def test_db_purge_non_dry_run_with_yes_executes(tmp_path, monkeypatch):
     assert payload["executed"] is True
     db = DatabaseManager(str(db_path))
     try:
-        with db.session_scope() as session:
-            assert session.get(Run, "cli_run") is None
+        assert db.get_run("cli_run") is None
     finally:
-        db.engine.dispose()
+        db.close()
 
 
 def test_db_purge_without_yes_can_be_cancelled(tmp_path, monkeypatch):
@@ -2087,10 +1988,9 @@ def test_db_purge_without_yes_can_be_cancelled(tmp_path, monkeypatch):
     assert "Purge cancelled." in result.stdout
     db = DatabaseManager(str(db_path))
     try:
-        with db.session_scope() as session:
-            assert session.get(Run, "cli_run") is not None
+        assert db.get_run("cli_run") is not None
     finally:
-        db.engine.dispose()
+        db.close()
 
 
 def test_db_purge_confirmation_shows_prune_cache_noop_when_ingested_delete_disabled(
@@ -2381,10 +2281,8 @@ def test_shell_command_invokes_cmdloop():
 
 def test_shell_uses_env_db_when_db_path_omitted(tmp_path, monkeypatch):
     env_db = tmp_path / "env_provenance.duckdb"
-    engine = create_engine(f"duckdb:///{env_db}")
-    with engine.connect():
-        pass
-    engine.dispose()
+    db = DatabaseManager(str(env_db))
+    db.close()
     monkeypatch.setenv("CONSIST_DB", str(env_db))
 
     with patch("consist.cli.ConsistShell") as m_shell:
@@ -2432,6 +2330,7 @@ def test_shell_passes_mount_overrides_to_tracker(tmp_path):
             "workspace": str(workspace_root.resolve()),
             "inputs": str(inputs_root.resolve()),
         },
+        read_only=True,
     )
     normalized_stdout = result.stdout.replace("\n", "")
     assert "Using mount override(s):" in normalized_stdout
@@ -2469,12 +2368,7 @@ def test_shell_rejects_invalid_mount_override_syntax():
 def test_shell_runs_parsing_calls_helper():
     tracker = MagicMock()
     shell = ConsistShell(tracker)
-    with (
-        patch("consist.cli._render_runs_table") as render,
-        patch("consist.cli._tracker_session") as tracker_session,
-        patch("consist.cli.queries.get_runs", return_value=[]),
-    ):
-        tracker_session.return_value.__enter__.return_value = MagicMock()
+    with patch("consist.cli._render_runs_table") as render:
         shell.do_runs("--limit 5 --model create --status failed --tag dev --tag prod")
     render.assert_called_once_with(tracker, 5, "create", ["dev", "prod"], "failed")
 
@@ -2520,16 +2414,12 @@ def test_shell_artifacts_expands_sets_when_requested():
 
 def test_shell_summary_uses_renderer():
     tracker = MagicMock()
-    tracker.engine = MagicMock()
     shell = ConsistShell(tracker)
     fake_summary = {"total_runs": 1}
     with (
-        patch("consist.cli.Session") as session_cls,
         patch("consist.cli.queries.get_summary", return_value=fake_summary),
         patch("consist.cli._render_summary") as render,
     ):
-        session_ctx = MagicMock()
-        session_cls.return_value.__enter__.return_value = session_ctx
         shell.do_summary("")
         render.assert_called_once_with(fake_summary)
 
@@ -2560,42 +2450,40 @@ def test_shell_help_lists_preview_and_schema(capsys):
 
 
 def test_scenario_command_lists_recursively_chained_runs(cli_runner, tracker):
-    with Session(tracker.engine) as session:
-        session.add_all(
-            [
-                Run(
-                    id="step_1",
-                    model_name="net_build",
-                    config_hash=None,
-                    git_hash=None,
-                    status="completed",
-                    parent_run_id="sc_chain",
-                    created_at=datetime(2025, 1, 1, 12, 0),
-                    started_at=datetime(2025, 1, 1, 12, 0),
-                ),
-                Run(
-                    id="step_2",
-                    model_name="assign",
-                    config_hash=None,
-                    git_hash=None,
-                    status="completed",
-                    parent_run_id="step_1",
-                    created_at=datetime(2025, 1, 1, 12, 5),
-                    started_at=datetime(2025, 1, 1, 12, 5),
-                ),
-                Run(
-                    id="step_3",
-                    model_name="postproc",
-                    config_hash=None,
-                    git_hash=None,
-                    status="completed",
-                    parent_run_id="step_2",
-                    created_at=datetime(2025, 1, 1, 12, 10),
-                    started_at=datetime(2025, 1, 1, 12, 10),
-                ),
-            ]
-        )
-        session.commit()
+    assert tracker.db is not None
+    for r in [
+        Run(
+            id="step_1",
+            model_name="net_build",
+            config_hash=None,
+            git_hash=None,
+            status="completed",
+            parent_run_id="sc_chain",
+            created_at=datetime(2025, 1, 1, 12, 0),
+            started_at=datetime(2025, 1, 1, 12, 0),
+        ),
+        Run(
+            id="step_2",
+            model_name="assign",
+            config_hash=None,
+            git_hash=None,
+            status="completed",
+            parent_run_id="step_1",
+            created_at=datetime(2025, 1, 1, 12, 5),
+            started_at=datetime(2025, 1, 1, 12, 5),
+        ),
+        Run(
+            id="step_3",
+            model_name="postproc",
+            config_hash=None,
+            git_hash=None,
+            status="completed",
+            parent_run_id="step_2",
+            created_at=datetime(2025, 1, 1, 12, 10),
+            started_at=datetime(2025, 1, 1, 12, 10),
+        ),
+    ]:
+        tracker.db.sync_run(r)
 
     result = cli_runner.invoke(app, ["scenario", "sc_chain"])
     assert result.exit_code == 0
@@ -2638,122 +2526,116 @@ def test_scenario_context_records_scenario_id_and_discovers_overridden_parent(
 def test_collect_scenario_run_ids_handles_cycle_safely(tracker):
     from consist.cli import _collect_scenario_run_ids
 
-    with Session(tracker.engine) as session:
-        session.add_all(
-            [
-                Run(
-                    id="cycle_a",
-                    model_name="m1",
-                    config_hash=None,
-                    git_hash=None,
-                    status="completed",
-                    parent_run_id="cycle_b",
-                    meta={"scenario_id": "sc_cycle"},
-                    created_at=datetime(2025, 1, 1, 12, 0),
-                    started_at=datetime(2025, 1, 1, 12, 0),
-                ),
-                Run(
-                    id="cycle_b",
-                    model_name="m2",
-                    config_hash=None,
-                    git_hash=None,
-                    status="completed",
-                    parent_run_id="cycle_a",
-                    created_at=datetime(2025, 1, 1, 12, 5),
-                    started_at=datetime(2025, 1, 1, 12, 5),
-                ),
-            ]
-        )
-        session.commit()
+    assert tracker.db is not None
+    for r in [
+        Run(
+            id="cycle_a",
+            model_name="m1",
+            config_hash=None,
+            git_hash=None,
+            status="completed",
+            parent_run_id="cycle_b",
+            meta={"scenario_id": "sc_cycle"},
+            created_at=datetime(2025, 1, 1, 12, 0),
+            started_at=datetime(2025, 1, 1, 12, 0),
+        ),
+        Run(
+            id="cycle_b",
+            model_name="m2",
+            config_hash=None,
+            git_hash=None,
+            status="completed",
+            parent_run_id="cycle_a",
+            created_at=datetime(2025, 1, 1, 12, 5),
+            started_at=datetime(2025, 1, 1, 12, 5),
+        ),
+    ]:
+        tracker.db.sync_run(r)
 
-        ids = _collect_scenario_run_ids(session, "sc_cycle")
-        assert set(ids) == {"cycle_a", "cycle_b"}
+    ids = _collect_scenario_run_ids(tracker, "sc_cycle")
+    assert set(ids) == {"cycle_a", "cycle_b"}
 
 
 def test_collect_scenario_run_ids_discovers_dict_steps_in_header_meta(tracker):
     from consist.cli import _collect_scenario_run_ids
 
-    with Session(tracker.engine) as session:
-        session.add_all(
-            [
-                Run(
-                    id="sc_dict_header",
-                    model_name="scenario",
-                    config_hash=None,
-                    git_hash=None,
-                    status="completed",
-                    parent_run_id=None,
-                    meta={"steps": [{"id": "step_dict_only", "name": "step_dict"}]},
-                    created_at=datetime(2025, 1, 1, 12, 0),
-                    started_at=datetime(2025, 1, 1, 12, 0),
-                ),
-                Run(
-                    id="step_dict_only",
-                    model_name="model_step",
-                    config_hash=None,
-                    git_hash=None,
-                    status="completed",
-                    parent_run_id="unrelated_parent",
-                    created_at=datetime(2025, 1, 1, 12, 5),
-                    started_at=datetime(2025, 1, 1, 12, 5),
-                ),
-            ]
-        )
-        session.commit()
+    assert tracker.db is not None
+    for r in [
+        Run(
+            id="sc_dict_header",
+            model_name="scenario",
+            config_hash=None,
+            git_hash=None,
+            status="completed",
+            parent_run_id=None,
+            meta={"steps": [{"id": "step_dict_only", "name": "step_dict"}]},
+            created_at=datetime(2025, 1, 1, 12, 0),
+            started_at=datetime(2025, 1, 1, 12, 0),
+        ),
+        Run(
+            id="step_dict_only",
+            model_name="model_step",
+            config_hash=None,
+            git_hash=None,
+            status="completed",
+            parent_run_id="unrelated_parent",
+            created_at=datetime(2025, 1, 1, 12, 5),
+            started_at=datetime(2025, 1, 1, 12, 5),
+        ),
+    ]:
+        tracker.db.sync_run(r)
 
-        ids = _collect_scenario_run_ids(session, "sc_dict_header")
-        assert ids == ["step_dict_only"]
+    ids = _collect_scenario_run_ids(tracker, "sc_dict_header")
+    assert ids == ["step_dict_only"]
 
 
 def test_render_scenarios_sorts_by_transitive_last_run_after_member_discovery(
     cli_runner, tracker
 ):
-    with Session(tracker.engine) as session:
-        session.add_all(
-            [
-                Run(
-                    id="sc_early_root",
-                    model_name="scenario",
-                    config_hash=None,
-                    git_hash=None,
-                    status="completed",
-                    parent_run_id=None,
-                    created_at=datetime(2025, 1, 1, 10, 0),
-                    started_at=datetime(2025, 1, 1, 10, 0),
-                ),
-                Run(
-                    id="early_step_1",
-                    model_name="m1",
-                    config_hash=None,
-                    git_hash=None,
-                    status="completed",
-                    parent_run_id="sc_early_root",
-                    created_at=datetime(2025, 1, 1, 10, 5),
-                    started_at=datetime(2025, 1, 1, 10, 5),
-                ),
-                Run(
-                    id="early_step_2",
-                    model_name="m2",
-                    config_hash=None,
-                    git_hash=None,
-                    status="completed",
-                    parent_run_id="early_step_1",
-                    created_at=datetime(2025, 1, 1, 13, 0),
-                    started_at=datetime(2025, 1, 1, 13, 0),
-                ),
-                Run(
-                    id="mid_step_1",
-                    model_name="m1",
-                    config_hash=None,
-                    git_hash=None,
-                    status="completed",
-                    parent_run_id="sc_mid_root",
-                    created_at=datetime(2025, 1, 1, 11, 0),
-                    started_at=datetime(2025, 1, 1, 11, 0),
-                ),
-            ]
-        )
-        session.commit()
+    assert tracker.db is not None
+    for r in [
+        Run(
+            id="sc_early_root",
+            model_name="scenario",
+            config_hash=None,
+            git_hash=None,
+            status="completed",
+            parent_run_id=None,
+            created_at=datetime(2025, 1, 1, 10, 0),
+            started_at=datetime(2025, 1, 1, 10, 0),
+        ),
+        Run(
+            id="early_step_1",
+            model_name="m1",
+            config_hash=None,
+            git_hash=None,
+            status="completed",
+            parent_run_id="sc_early_root",
+            created_at=datetime(2025, 1, 1, 10, 5),
+            started_at=datetime(2025, 1, 1, 10, 5),
+        ),
+        Run(
+            id="early_step_2",
+            model_name="m2",
+            config_hash=None,
+            git_hash=None,
+            status="completed",
+            parent_run_id="early_step_1",
+            created_at=datetime(2025, 1, 1, 13, 0),
+            started_at=datetime(2025, 1, 1, 13, 0),
+        ),
+        Run(
+            id="mid_step_1",
+            model_name="m1",
+            config_hash=None,
+            git_hash=None,
+            status="completed",
+            parent_run_id="sc_mid_root",
+            created_at=datetime(2025, 1, 1, 11, 0),
+            started_at=datetime(2025, 1, 1, 11, 0),
+        ),
+    ]:
+        tracker.db.sync_run(r)
 
     result = cli_runner.invoke(app, ["scenarios", "--limit", "1"])
     assert result.exit_code == 0
@@ -2762,42 +2644,40 @@ def test_render_scenarios_sorts_by_transitive_last_run_after_member_discovery(
 
 
 def test_runs_filter_by_scenario_includes_recursive_members(cli_runner, tracker):
-    with Session(tracker.engine) as session:
-        session.add_all(
-            [
-                Run(
-                    id="sc_step_1",
-                    model_name="m1",
-                    config_hash=None,
-                    git_hash=None,
-                    status="completed",
-                    parent_run_id="sc_filter",
-                    created_at=datetime(2025, 1, 1, 12, 0),
-                    started_at=datetime(2025, 1, 1, 12, 0),
-                ),
-                Run(
-                    id="sc_step_2",
-                    model_name="m2",
-                    config_hash=None,
-                    git_hash=None,
-                    status="completed",
-                    parent_run_id="sc_step_1",
-                    created_at=datetime(2025, 1, 1, 12, 5),
-                    started_at=datetime(2025, 1, 1, 12, 5),
-                ),
-                Run(
-                    id="other_run",
-                    model_name="m3",
-                    config_hash=None,
-                    git_hash=None,
-                    status="completed",
-                    parent_run_id="other_sc",
-                    created_at=datetime(2025, 1, 1, 12, 10),
-                    started_at=datetime(2025, 1, 1, 12, 10),
-                ),
-            ]
-        )
-        session.commit()
+    assert tracker.db is not None
+    for r in [
+        Run(
+            id="sc_step_1",
+            model_name="m1",
+            config_hash=None,
+            git_hash=None,
+            status="completed",
+            parent_run_id="sc_filter",
+            created_at=datetime(2025, 1, 1, 12, 0),
+            started_at=datetime(2025, 1, 1, 12, 0),
+        ),
+        Run(
+            id="sc_step_2",
+            model_name="m2",
+            config_hash=None,
+            git_hash=None,
+            status="completed",
+            parent_run_id="sc_step_1",
+            created_at=datetime(2025, 1, 1, 12, 5),
+            started_at=datetime(2025, 1, 1, 12, 5),
+        ),
+        Run(
+            id="other_run",
+            model_name="m3",
+            config_hash=None,
+            git_hash=None,
+            status="completed",
+            parent_run_id="other_sc",
+            created_at=datetime(2025, 1, 1, 12, 10),
+            started_at=datetime(2025, 1, 1, 12, 10),
+        ),
+    ]:
+        tracker.db.sync_run(r)
 
     result = cli_runner.invoke(app, ["runs", "--scenario", "sc_filter", "--json"])
     assert result.exit_code == 0
@@ -2809,12 +2689,6 @@ def test_runs_filter_by_scenario_includes_recursive_members(cli_runner, tracker)
 def test_shell_runs_filter_by_scenario():
     tracker = MagicMock()
     shell = ConsistShell(tracker)
-    with (
-        patch("consist.cli._render_runs_table") as render,
-        patch("consist.cli._tracker_session") as tracker_session,
-        patch("consist.cli._collect_scenario_run_ids", return_value={"r1"}),
-        patch("consist.cli.queries.get_runs", return_value=[]),
-    ):
-        tracker_session.return_value.__enter__.return_value = MagicMock()
+    with patch("consist.cli._render_runs_table") as render:
         shell.do_runs("--scenario sc_1 --limit 5")
     render.assert_called_once_with(tracker, 5, None, None, None, scenario_id="sc_1")

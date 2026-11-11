@@ -20,7 +20,7 @@ import stat as stat_mod
 import threading
 import time
 from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qsl, unquote, urlencode, urlparse
 import uuid
 import weakref
 
@@ -947,6 +947,143 @@ def lookup_live_ledger_by_path(db_path: Path | str) -> Any | None:
         return _live_ledgers.get(f"path:{norm}") or _live_ledgers.get(norm)
 
 
+_HOT_DB_SCOPE_QUERY_KEYS: frozenset[str] = frozenset(
+    {"artifact_id", "consist_artifact_id", "consist_run_id"}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class HotDbMemberInfo:
+    """Parsed table and scoping metadata for a `db://...` observation."""
+
+    schema_name: str
+    table_name: str
+    base_member: str | None
+    scoped_artifact_id: str | None = None
+    scoped_run_id: str | None = None
+    has_unrecognized_query: bool = False
+
+
+def format_hot_db_member(
+    table_name: str,
+    *,
+    artifact_id: uuid.UUID | str | None = None,
+    consist_artifact_id: uuid.UUID | str | None = None,
+    consist_run_id: str | None = None,
+) -> str:
+    """Format a canonical `db://` `Location.member` string with optional per-row scoping."""
+    if consist_artifact_id is not None:
+        return f"{table_name}?consist_artifact_id={consist_artifact_id}"
+    if artifact_id is not None:
+        return f"{table_name}?artifact_id={artifact_id}"
+    if consist_run_id is not None:
+        return f"{table_name}?consist_run_id={consist_run_id}"
+    return table_name
+
+
+def parse_hot_db_member(
+    uri: str | None,
+    member: Any = None,
+) -> HotDbMemberInfo | None:
+    """Parse `db://<schema>/<table>` and optional `?artifact_id=` / `?consist_artifact_id=` / `?consist_run_id=` scoping."""
+    if not isinstance(uri, str) or not uri.startswith("db://"):
+        return None
+    tail = uri[len("db://") :].split("?", 1)[0].split("#", 1)[0].strip("/")
+    if not tail:
+        return None
+    if "/" in tail:
+        schema_name, table_name = tail.split("/", 1)
+    elif "." in tail:
+        schema_name, table_name = tail.split(".", 1)
+    else:
+        schema_name, table_name = "global_tables", tail
+    schema_name = schema_name.strip()
+    table_name = table_name.strip()
+    if not schema_name or not table_name:
+        return None
+
+    if member is None:
+        return HotDbMemberInfo(
+            schema_name=schema_name,
+            table_name=table_name,
+            base_member=None,
+        )
+
+    mem_str = str(member)
+    if "?" not in mem_str:
+        return HotDbMemberInfo(
+            schema_name=schema_name,
+            table_name=table_name,
+            base_member=mem_str or None,
+        )
+
+    head, query_str = mem_str.split("?", 1)
+    pairs = parse_qsl(query_str, keep_blank_values=True)
+    scoped_artifact_id: str | None = None
+    scoped_run_id: str | None = None
+    remaining_pairs: list[tuple[str, str]] = []
+    recognized_any = False
+
+    for k, v in pairs:
+        if k in ("artifact_id", "consist_artifact_id"):
+            scoped_artifact_id = v
+            recognized_any = True
+        elif k == "consist_run_id":
+            scoped_run_id = v
+            recognized_any = True
+        else:
+            remaining_pairs.append((k, v))
+
+    if remaining_pairs:
+        rebuilt_query = urlencode(remaining_pairs)
+        base_member: str | None = (
+            f"{head}?{rebuilt_query}" if head else f"?{rebuilt_query}"
+        )
+    else:
+        base_member = head or None
+
+    has_unrecognized_query = not recognized_any
+    return HotDbMemberInfo(
+        schema_name=schema_name,
+        table_name=table_name,
+        base_member=base_member,
+        scoped_artifact_id=scoped_artifact_id,
+        scoped_run_id=scoped_run_id,
+        has_unrecognized_query=has_unrecognized_query,
+    )
+
+
+def matches_hot_db_info(
+    info: HotDbMemberInfo,
+    *,
+    artifact_id: uuid.UUID | str,
+    run_id: str | None,
+) -> tuple[bool, bool]:
+    """Return `(matched, v1_run_scoped)` for `info` against `(artifact_id, run_id)`."""
+    if info.has_unrecognized_query:
+        return (False, False)
+    if info.scoped_artifact_id is not None:
+        return (info.scoped_artifact_id == str(artifact_id), False)
+    if info.scoped_run_id is not None:
+        if run_id is None or info.scoped_run_id != str(run_id):
+            return (False, False)
+        return (True, True)
+    return (True, False)
+
+
+def strip_hot_db_member_scope(
+    uri: str | None,
+    member: str | None,
+) -> str | None:
+    """Strip synthetic `db://` scoping query suffixes (`?artifact_id=...`, `?consist_artifact_id=...`, `?consist_run_id=...`)."""
+    if member is None or uri is None or not uri.startswith("db://"):
+        return member
+    info = parse_hot_db_member(uri, member)
+    if info is None:
+        return member
+    return info.base_member
+
+
 __all__ = [
     "EMPTY_META",
     "DbTableChangeToken",
@@ -955,6 +1092,7 @@ __all__ = [
     "Freshness",
     "FrozenList",
     "FrozenMeta",
+    "HotDbMemberInfo",
     "LedgerRef",
     "Location",
     "MemberOf",
@@ -966,12 +1104,16 @@ __all__ = [
     "SiteContext",
     "Witness",
     "deserialize_witness_json",
+    "format_hot_db_member",
     "infer_path_driver",
     "lookup_live_ledger",
     "lookup_live_ledger_by_path",
+    "matches_hot_db_info",
     "normalize_mounts",
+    "parse_hot_db_member",
     "register_live_ledger",
     "serialize_witness_json",
+    "strip_hot_db_member_scope",
     "unregister_live_ledger",
     "witness_from_json",
     "witness_to_json",

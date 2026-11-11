@@ -2,41 +2,59 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+import uuid
 
 import duckdb
 import pytest
-from sqlalchemy import inspect
-from sqlalchemy.pool import NullPool
-from sqlmodel import SQLModel, create_engine
 
 import consist
-from consist.core.persistence import DatabaseManager, IncompatibleSchemaError
+from consist.core.persistence import (
+    DatabaseManager,
+    DatabaseMigrationRequired,
+    IncompatibleSchemaError,
+)
 from consist.core.tracker import Tracker
-from consist.models.run import RunArtifactLink
+from consist.store.schema import V1_ONLY_TABLE_NAMES, init_v2_schema
+from tests.helpers.v1_db_builder import (
+    create_v1_schema,
+    insert_v1_artifact,
+    insert_v1_link,
+    insert_v1_run,
+)
 
 
-def test_new_v1_database_stamps_consist_schema_version_1(tmp_path: Path) -> None:
-    db_path = tmp_path / "v1_provenance.duckdb"
+def test_new_v2_database_stamps_consist_schema_version_2_and_meta(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "v2_provenance.duckdb"
     db = DatabaseManager(str(db_path))
-
-    with db.engine.connect() as conn:
-        rows = conn.exec_driver_sql(
-            "SELECT version, applied_at, consist_version FROM consist_schema"
-        ).fetchall()
+    try:
+        with db.ledger.exec_cursor() as cur:
+            rows = cur.execute(
+                "SELECT version, applied_at, consist_version FROM main.consist_schema"
+            ).fetchall()
+            meta_rows = dict(
+                cur.execute("SELECT key, value FROM main.consist_meta").fetchall()
+            )
+    finally:
+        db.close()
 
     assert len(rows) == 1
     version, applied_at, consist_version = rows[0]
-    assert version == 1
+    assert version == 2
     assert applied_at is not None
     assert isinstance(consist_version, str) and len(consist_version) > 0
+    assert "db_uid" in meta_rows
+    assert uuid.UUID(str(meta_rows["db_uid"]))
+    assert "created_utc" in meta_rows
 
 
-def test_opening_v2_database_raises_incompatible_schema_error_before_mutation(
+def test_opening_future_schema_database_raises_incompatible_schema_error_before_mutation(
     tmp_path: Path,
 ) -> None:
     assert consist.IncompatibleSchemaError is IncompatibleSchemaError
 
-    db_path = tmp_path / "v2_provenance.duckdb"
+    db_path = tmp_path / "future_v3_provenance.duckdb"
     with duckdb.connect(str(db_path)) as con:
         con.execute(
             """
@@ -49,41 +67,26 @@ def test_opening_v2_database_raises_incompatible_schema_error_before_mutation(
         )
         con.execute(
             "INSERT INTO consist_schema VALUES (?, ?, ?)",
-            [2, datetime.now(timezone.utc), "0.5.0"],
+            [3, datetime.now(timezone.utc), "0.99.0"],
         )
         con.execute(
             """
-            CREATE TABLE run_binding (
-                run_id VARCHAR NOT NULL,
-                direction VARCHAR NOT NULL,
-                slot VARCHAR NOT NULL,
-                ordinal INTEGER NOT NULL DEFAULT 0,
-                artifact_id UUID NOT NULL,
-                anchor VARCHAR NOT NULL,
-                PRIMARY KEY (run_id, direction, slot, ordinal)
+            CREATE TABLE future_provenance_node (
+                node_id UUID PRIMARY KEY,
+                payload VARCHAR NOT NULL
             )
             """
         )
 
-    with pytest.raises(
-        IncompatibleSchemaError,
-        match=r'schema version 2.*pip install -U "consist>=0\.5"',
-    ):
+    with pytest.raises(IncompatibleSchemaError, match="newer schema version"):
         DatabaseManager(str(db_path))
 
-    with pytest.raises(
-        consist.IncompatibleSchemaError,
-        match=r'schema version 2.*pip install -U "consist>=0\.5"',
-    ):
+    with pytest.raises(consist.IncompatibleSchemaError, match="newer schema version"):
         DatabaseManager(str(db_path), read_only=True)
 
-    with pytest.raises(
-        consist.IncompatibleSchemaError,
-        match=r'schema version 2.*pip install -U "consist>=0\.5"',
-    ):
+    with pytest.raises(consist.IncompatibleSchemaError, match="newer schema version"):
         Tracker(run_dir=tmp_path / "runs", db_path=str(db_path))
 
-    # Verify that no v1 tables (such as `run`, `artifact`, `artifact_kv`) were created.
     with duckdb.connect(str(db_path), read_only=True) as con:
         tables = {
             row[0]
@@ -92,265 +95,194 @@ def test_opening_v2_database_raises_incompatible_schema_error_before_mutation(
                 "WHERE table_schema = 'main'"
             ).fetchall()
         }
-    assert tables == {"consist_schema", "run_binding"}
+    assert tables == {"consist_schema", "future_provenance_node"}
 
 
-def test_duckdb_engine_introspection_and_create_all_with_run_artifact_link_view(
-    tmp_path: Path,
-) -> None:
-    db_path = tmp_path / "view_introspection.duckdb"
-    engine = create_engine(f"duckdb:///{db_path}", poolclass=NullPool)
-    with engine.begin() as conn:
-        conn.exec_driver_sql(
-            """
-            CREATE TABLE run_binding (
-                run_id VARCHAR NOT NULL,
-                artifact_id UUID NOT NULL,
-                direction VARCHAR NOT NULL
-            )
-            """
-        )
-        conn.exec_driver_sql(
-            """
-            CREATE VIEW run_artifact_link AS
-            SELECT
-                run_id,
-                artifact_id,
-                CASE WHEN bool_or(direction IN ('input', 'depends_on')) THEN 'input' ELSE 'output' END AS direction
-            FROM run_binding
-            GROUP BY run_id, artifact_id
-            """
-        )
-
-    inspector = inspect(engine)
-    assert inspector.has_table("run_artifact_link") is True
-    assert "run_artifact_link" not in inspector.get_table_names()
-    assert "run_artifact_link" in inspector.get_view_names()
-
-    # SQLModel.metadata.create_all uses has_table() when checkfirst=True,
-    # so it skips creating a table over the existing SQL VIEW.
-    SQLModel.metadata.create_all(
-        engine,
-        tables=[SQLModel.metadata.tables[RunArtifactLink.__tablename__]],
-    )
-
-    inspector_after = inspect(engine)
-    assert "run_artifact_link" not in inspector_after.get_table_names()
-    assert "run_artifact_link" in inspector_after.get_view_names()
-
-
-def test_unpatched_v041_behavior_against_v2_database_fails_without_partial_writes(
+def test_opening_v1_database_requires_migration_by_default_and_migrates_when_enabled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify what an unpatched v0.4.1 process (without the consist_schema guard) does on a v2 DB."""
-    from sqlalchemy.exc import ProgrammingError
-    from consist.models.artifact import Artifact
-    from consist.models.run import Run
+    assert consist.DatabaseMigrationRequired is DatabaseMigrationRequired
+    monkeypatch.delenv("CONSIST_AUTO_MIGRATE", raising=False)
 
-    db_path = tmp_path / "v2_full_schema.duckdb"
-    with duckdb.connect(str(db_path)) as con:
-        con.execute(
-            """
-            CREATE TABLE consist_schema (
-                version INTEGER PRIMARY KEY,
-                applied_at TIMESTAMPTZ NOT NULL,
-                consist_version VARCHAR NOT NULL
-            );
-            INSERT INTO consist_schema VALUES (2, now(), '0.5.0');
-            CREATE TABLE run (
-                id VARCHAR PRIMARY KEY,
-                model_name VARCHAR NOT NULL,
-                description VARCHAR,
-                year INTEGER,
-                iteration INTEGER,
-                parent_run_id VARCHAR,
-                status VARCHAR NOT NULL,
-                code_hash VARCHAR,
-                config_hash VARCHAR,
-                input_hash VARCHAR,
-                signature VARCHAR,
-                signature_scheme VARCHAR,
-                cache_status VARCHAR NOT NULL,
-                tags JSON,
-                meta JSON NOT NULL,
-                started_at TIMESTAMPTZ,
-                ended_at TIMESTAMPTZ,
-                created_at TIMESTAMPTZ NOT NULL
-            );
-            CREATE TABLE artifact (
-                id UUID PRIMARY KEY,
-                key VARCHAR NOT NULL,
-                driver VARCHAR NOT NULL,
-                anchor VARCHAR NOT NULL,
-                run_id VARCHAR,
-                schema_id VARCHAR,
-                meta JSON NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL
-            );
-            CREATE TABLE run_binding (
-                run_id VARCHAR NOT NULL,
-                direction VARCHAR NOT NULL,
-                occurrence_index INTEGER NOT NULL,
-                slot VARCHAR NOT NULL,
-                ordinal INTEGER NOT NULL DEFAULT 0,
-                artifact_id UUID NOT NULL,
-                role VARCHAR,
-                anchor VARCHAR NOT NULL,
-                contract_scheme VARCHAR,
-                sig_scheme VARCHAR,
-                sig_hex VARCHAR,
-                PRIMARY KEY (run_id, direction, slot, ordinal)
-            );
-            CREATE VIEW run_artifact_link AS
-            SELECT
-                run_id,
-                artifact_id,
-                CASE WHEN bool_or(direction IN ('input', 'depends_on')) THEN 'input' ELSE 'output' END AS direction
-            FROM run_binding
-            GROUP BY run_id, artifact_id;
-            """
-        )
+    data_file = tmp_path / "out.parquet"
+    data_file.write_bytes(b"parquet-v1-test-bytes")
 
-    # Simulate unpatched v0.4.1 by disabling the forward-schema guard.
-    monkeypatch.setattr(
-        DatabaseManager,
-        "_check_compatible_schema_version",
-        lambda self: None,
-    )
+    def _populate_v1_db(path: Path) -> None:
+        with duckdb.connect(str(path)) as con:
+            create_v1_schema(con)
+            con.execute(
+                "CREATE TABLE consist_schema ("
+                "version INTEGER PRIMARY KEY, applied_at TIMESTAMPTZ, consist_version VARCHAR"
+                ")"
+            )
+            con.execute("INSERT INTO consist_schema VALUES (1, now(), '0.4.2')")
+            insert_v1_run(con, run_id="v1_run_1", model_name="demo_model")
+            art_id = insert_v1_artifact(
+                con,
+                key="out_table",
+                container_uri=str(data_file),
+                driver="parquet",
+                hash_val="a" * 64,
+                run_id="v1_run_1",
+            )
+            insert_v1_link(
+                con,
+                run_id="v1_run_1",
+                artifact_id=art_id,
+                direction="output",
+            )
 
-    # 1. Default init_schema (`SQLModel.metadata.create_all`) fails on FK type mismatch
-    # (`artifact.id` UUID vs v1 `artifact_schema_observation.artifact_id` CHAR(36)/VARCHAR)
-    # and rolls back the entire transaction without creating v1 tables.
-    with pytest.raises(ProgrammingError, match="incompatible types"):
-        DatabaseManager(str(db_path))
+    db_path = tmp_path / "existing_v1.duckdb"
+    _populate_v1_db(db_path)
 
     with duckdb.connect(str(db_path), read_only=True) as con:
-        remaining_objects = {
+        v1_tables_before = {
             row[0]
             for row in con.execute(
-                "SELECT table_name FROM information_schema.tables "
-                "WHERE table_schema = 'main'"
+                "SELECT table_name FROM duckdb_tables() WHERE schema_name = 'main'"
             ).fetchall()
         }
-    assert remaining_objects == {
-        "consist_schema",
-        "run",
-        "artifact",
-        "run_binding",
-        "run_artifact_link",
-    }
 
-    # 2. If schema init is skipped (`skip_schema_init=True`), attempting to write a v1
-    # Run or Artifact fails on the initial SELECT before any row is mutated.
-    db_no_init = DatabaseManager(str(db_path), skip_schema_init=True)
-    with pytest.raises(ProgrammingError, match="git_hash"):
-        db_no_init.sync_run(
-            Run(
-                id="r1",
-                model_name="m",
-                status="running",
-                config_hash="c",
-                git_hash="g",
-            ),
-            require_success=True,
-        )
-
-    art = Artifact(
-        key="k",
-        container_uri="workspace://a.parquet",
-        driver="parquet",
-        hash="a" * 64,
-    )
-    db_no_init.sync_artifact(art, "r1", "output")
-
-    with duckdb.connect(str(db_path), read_only=True) as con:
-        assert con.execute("SELECT count(*) FROM run").fetchone()[0] == 0
-        assert con.execute("SELECT count(*) FROM artifact").fetchone()[0] == 0
-        assert con.execute("SELECT count(*) FROM run_binding").fetchone()[0] == 0
-
-
-def test_v05_upgrade_notice_emitted_once_per_existing_v1_db_and_silenced_by_env(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    recwarn: pytest.WarningsRecorder,
-) -> None:
-    monkeypatch.delenv("CONSIST_SHOW_V05_NOTICE", raising=False)
-    monkeypatch.delenv("CONSIST_SILENCE_V05_NOTICE", raising=False)
-    db_path = tmp_path / "existing_v1.duckdb"
-
-    # By default (without CONSIST_SHOW_V05_NOTICE=1), opening a new or existing v1 DB is silent.
-    DatabaseManager(str(db_path))
-    DatabaseManager(str(db_path))
-    default_warnings = [
-        w
-        for w in recwarn.list
-        if issubclass(w.category, FutureWarning) and "Consist 0.5" in str(w.message)
-    ]
-    assert len(default_warnings) == 0
-
-    # When CONSIST_SHOW_V05_NOTICE=1 is enabled, opening an existing v1 database emits the FutureWarning once.
-    monkeypatch.setenv("CONSIST_SHOW_V05_NOTICE", "1")
-    with pytest.warns(
-        FutureWarning,
-        match=r"Consist 0\.5 will require a one-time upgrade.*CONSIST_SILENCE_V05_NOTICE=1",
-    ):
+    with pytest.raises(DatabaseMigrationRequired, match="consist migrate") as exc_info:
         DatabaseManager(str(db_path))
+    assert exc_info.value.run_count == 1
+    assert exc_info.value.artifact_count == 1
 
-    # Re-opening the same database does not spam a second FutureWarning.
-    recwarn.clear()
-    DatabaseManager(str(db_path))
-    repeated = [
-        w
-        for w in recwarn.list
-        if issubclass(w.category, FutureWarning) and "Consist 0.5" in str(w.message)
-    ]
-    assert len(repeated) == 0
+    with pytest.raises(DatabaseMigrationRequired, match="consist migrate"):
+        DatabaseManager(str(db_path), read_only=True)
 
-    # Setting CONSIST_SILENCE_V05_NOTICE=1 suppresses the warning on another existing DB.
-    db_path_silenced = tmp_path / "silenced_v1.duckdb"
-    monkeypatch.delenv("CONSIST_SHOW_V05_NOTICE", raising=False)
-    DatabaseManager(str(db_path_silenced))
-    monkeypatch.setenv("CONSIST_SHOW_V05_NOTICE", "1")
-    monkeypatch.setenv("CONSIST_SILENCE_V05_NOTICE", "1")
-    recwarn.clear()
-    DatabaseManager(str(db_path_silenced))
-    silenced = [
-        w
-        for w in recwarn.list
-        if issubclass(w.category, FutureWarning) and "Consist 0.5" in str(w.message)
-    ]
-    assert len(silenced) == 0
+    with pytest.raises(DatabaseMigrationRequired, match="consist migrate"):
+        Tracker(run_dir=tmp_path / "runs", db_path=str(db_path))
+
+    # Verify failed v1 opens did not mutate any v1 tables or stamp v2 objects.
+    with duckdb.connect(str(db_path), read_only=True) as con:
+        v1_tables_after = {
+            row[0]
+            for row in con.execute(
+                "SELECT table_name FROM duckdb_tables() WHERE schema_name = 'main'"
+            ).fetchall()
+        }
+        versions = [
+            row[0]
+            for row in con.execute("SELECT version FROM consist_schema").fetchall()
+        ]
+    assert v1_tables_after == v1_tables_before
+    assert versions == [1]
+
+    # Explicit auto_migrate=True upgrades the database to v2 and preserves runs.
+    db_migrated = DatabaseManager(str(db_path), auto_migrate=True)
+    try:
+        migrated_run = db_migrated.get_run("v1_run_1")
+        assert migrated_run is not None
+        assert migrated_run.model_name == "demo_model"
+        with db_migrated.ledger.exec_cursor() as cur:
+            v2_versions = [
+                row[0]
+                for row in cur.execute(
+                    "SELECT version FROM main.consist_schema"
+                ).fetchall()
+            ]
+        assert v2_versions == [2]
+    finally:
+        db_migrated.close()
+
+    backups = list(tmp_path.glob("existing_v1.v1-backup-*.duckdb"))
+    assert len(backups) == 1
+
+    # CONSIST_AUTO_MIGRATE=1 also upgrades automatically when opening via Tracker.
+    env_db_path = tmp_path / "env_auto_migrate_v1.duckdb"
+    _populate_v1_db(env_db_path)
+    monkeypatch.setenv("CONSIST_AUTO_MIGRATE", "1")
+    tracker = Tracker(run_dir=tmp_path / "runs_env", db_path=str(env_db_path))
+    try:
+        assert tracker.get_run("v1_run_1") is not None
+    finally:
+        tracker.close()
 
 
-def test_read_only_and_skip_schema_init_do_not_stamp_consist_schema_and_insert_is_idempotent(
+def test_v2_compatibility_and_v1_tripwire_views_are_installed_and_protected(
     tmp_path: Path,
 ) -> None:
-    db_path = tmp_path / "pre_v042_v1.duckdb"
+    db_path = tmp_path / "views_check.duckdb"
+    db = DatabaseManager(str(db_path))
+    try:
+        with db.ledger.exec_cursor() as cur:
+            base_tables = {
+                str(row[0])
+                for row in cur.execute(
+                    "SELECT table_name FROM duckdb_tables() WHERE schema_name = 'main'"
+                ).fetchall()
+            }
+            views = {
+                str(row[0])
+                for row in cur.execute(
+                    "SELECT view_name FROM duckdb_views() WHERE schema_name = 'main'"
+                ).fetchall()
+            }
+
+            expected_compat_views = {
+                "run_artifact_link",
+                "run_config_kv",
+                "artifact_kv",
+                "artifact_location_current",
+            }
+            assert expected_compat_views.issubset(views)
+            assert expected_compat_views.isdisjoint(base_tables)
+
+            tripwire_names = set(V1_ONLY_TABLE_NAMES)
+            assert tripwire_names.issubset(views)
+            assert tripwire_names.isdisjoint(base_tables)
+
+            for v1_view in V1_ONLY_TABLE_NAMES:
+                rel = cur.execute(f'SELECT * FROM main."{v1_view}"')
+                assert [col[0] for col in (rel.description or ())] == [
+                    "upgrade_to_consist_0_5"
+                ]
+                assert rel.fetchall() == []
+                with pytest.raises(duckdb.Error):
+                    cur.execute(f'INSERT INTO main."{v1_view}" VALUES (?)', ["x"])
+
+            with pytest.raises(duckdb.Error):
+                cur.execute(
+                    "INSERT INTO main.run_artifact_link VALUES ('r1', ?, 'output', false)",
+                    [uuid.uuid4()],
+                )
+    finally:
+        db.close()
+
+
+def test_read_only_missing_or_empty_db_does_not_stamp_schema_and_v2_init_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    missing_path = tmp_path / "does_not_exist.duckdb"
+    with pytest.raises(FileNotFoundError):
+        DatabaseManager(str(missing_path), read_only=True)
+    assert not missing_path.exists()
+
+    empty_path = tmp_path / "zero_byte.duckdb"
+    empty_path.write_bytes(b"")
+    with pytest.raises(IncompatibleSchemaError):
+        DatabaseManager(str(empty_path), read_only=True)
+    assert empty_path.stat().st_size == 0
+
+    db_path = tmp_path / "idempotent_v2.duckdb"
+    db = DatabaseManager(str(db_path))
+    try:
+        with db.ledger.exec_cursor() as cur:
+            uid_before = cur.execute(
+                "SELECT value FROM main.consist_meta WHERE key = 'db_uid'"
+            ).fetchone()[0]
+    finally:
+        db.close()
+
     with duckdb.connect(str(db_path)) as con:
-        con.execute("CREATE TABLE run (id VARCHAR PRIMARY KEY)")
-
-    db_ro = DatabaseManager(str(db_path), read_only=True)
-    db_ro._ensure_consist_schema_v1()
-    db_ro.dispose()
-
-    db_skip = DatabaseManager(str(db_path), skip_schema_init=True)
-    db_skip._ensure_consist_schema_v1()
-    db_skip.dispose()
-
-    with duckdb.connect(str(db_path), read_only=True) as con:
-        has_schema_table = con.execute(
-            "SELECT count(*) FROM information_schema.tables "
-            "WHERE table_schema = 'main' AND table_name = 'consist_schema'"
+        init_v2_schema(con)
+        init_v2_schema(con)
+        versions = con.execute("SELECT version FROM main.consist_schema").fetchall()
+        uid_after = con.execute(
+            "SELECT value FROM main.consist_meta WHERE key = 'db_uid'"
         ).fetchone()[0]
-    assert has_schema_table == 0
 
-    # Standard writable open stamps version=1 and repeated _ensure_consist_schema_v1
-    # calls are idempotent via ON CONFLICT (version) DO NOTHING.
-    db_rw = DatabaseManager(str(db_path))
-    db_rw._ensure_consist_schema_v1()
-    db_rw._ensure_consist_schema_v1()
-    with db_rw.engine.connect() as conn:
-        rows = conn.exec_driver_sql("SELECT version FROM consist_schema").fetchall()
-    assert rows == [(1,)]
-    db_rw.dispose()
+    assert versions == [(2,)]
+    assert uid_after == uid_before

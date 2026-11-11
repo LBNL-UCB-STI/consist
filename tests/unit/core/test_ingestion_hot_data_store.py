@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from consist.artifact import Artifact
 from consist.core.ingestion import ingest_artifact
-from consist.models.artifact import Artifact
 from consist.models.run import Run
+from consist.store.ledger import StoreLedger
+from tests.helpers.artifact_factory import make_artifact
 
 
 def _run() -> Run:
@@ -14,10 +17,11 @@ def _run() -> Run:
 
 
 def _artifact() -> Artifact:
-    return Artifact(
+    return make_artifact(
         key="table",
         container_uri="inputs://table.csv",
         driver="csv",
+        hash="a" * 64,
     )
 
 
@@ -25,13 +29,15 @@ def _tracker(
     *,
     hot_data_store,
     db_path,
-    engine,
+    ledger,
 ):
     return SimpleNamespace(
         hot_data_store=hot_data_store,
         db_path=db_path,
-        engine=engine,
+        ledger=ledger,
+        site_context=None,
         current_consist=None,
+        last_run=None,
         db=None,
         _dlt_lock_retries=1,
         _dlt_lock_base_sleep_seconds=0.01,
@@ -41,94 +47,86 @@ def _tracker(
     )
 
 
-def test_ingest_artifact_prefers_hot_data_store_path_and_dispose(
+def test_ingest_artifact_prefers_hot_data_store_path_and_ledger(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
+    hot_db = tmp_path / "hot-data.duckdb"
+    with StoreLedger(hot_db) as hot_ledger:
+        hot_data_store = SimpleNamespace(
+            db_path=str(hot_db),
+            ledger=hot_ledger,
+        )
 
-    class _HotDataStore:
-        db_path = "/tmp/hot-data.duckdb"
-        engine = object()
+        def _fake_ingest_artifact(**kwargs):
+            captured.update(kwargs)
+            return {"status": "ok"}, "table"
 
-        def __init__(self) -> None:
-            self.dispose_calls = 0
+        monkeypatch.setattr(
+            "consist.integrations.dlt_loader.ingest_artifact",
+            _fake_ingest_artifact,
+        )
 
-        def dispose_engine(self) -> None:
-            self.dispose_calls += 1
+        tracker = _tracker(
+            hot_data_store=hot_data_store,
+            db_path=None,
+            ledger=None,
+        )
+        result = ingest_artifact(
+            tracker=tracker,
+            artifact=_artifact(),
+            data=[{"value": 1}],
+            schema=None,
+            run=_run(),
+            profile_schema=False,
+        )
 
-    hot_data_store = _HotDataStore()
-
-    def _fake_ingest_artifact(**kwargs):
-        captured.update(kwargs)
-        return {"status": "ok"}, "table"
-
-    monkeypatch.setattr(
-        "consist.integrations.dlt_loader.ingest_artifact",
-        _fake_ingest_artifact,
-    )
-
-    tracker = _tracker(
-        hot_data_store=hot_data_store,
-        db_path=None,
-        engine=None,
-    )
-    result = ingest_artifact(
-        tracker=tracker,
-        artifact=_artifact(),
-        data=[{"value": 1}],
-        schema=None,
-        run=_run(),
-        profile_schema=False,
-    )
-
-    assert result == {"status": "ok"}
-    assert captured["db_path"] == "/tmp/hot-data.duckdb"
-    assert hot_data_store.dispose_calls == 1
+        assert isinstance(result, Artifact)
+        assert result.is_ingested is True
+        assert captured["db_path"] == str(hot_db)
+        assert captured["ledger"] is hot_ledger
 
 
-def test_ingest_artifact_falls_back_to_tracker_db_path_and_engine_dispose(
+def test_ingest_artifact_falls_back_to_tracker_db_path_and_ledger(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
+    fallback_db = tmp_path / "fallback.duckdb"
+    with StoreLedger(fallback_db) as ledger:
 
-    class _Engine:
-        def __init__(self) -> None:
-            self.dispose_calls = 0
+        def _fake_ingest_artifact(**kwargs):
+            captured.update(kwargs)
+            return {"status": "ok"}, "table"
 
-        def dispose(self) -> None:
-            self.dispose_calls += 1
+        monkeypatch.setattr(
+            "consist.integrations.dlt_loader.ingest_artifact",
+            _fake_ingest_artifact,
+        )
 
-    engine = _Engine()
+        tracker = _tracker(
+            hot_data_store=None,
+            db_path=str(fallback_db),
+            ledger=ledger,
+        )
+        result = ingest_artifact(
+            tracker=tracker,
+            artifact=_artifact(),
+            data=[{"value": 1}],
+            schema=None,
+            run=_run(),
+            profile_schema=False,
+        )
 
-    def _fake_ingest_artifact(**kwargs):
-        captured.update(kwargs)
-        return {"status": "ok"}, "table"
-
-    monkeypatch.setattr(
-        "consist.integrations.dlt_loader.ingest_artifact",
-        _fake_ingest_artifact,
-    )
-
-    tracker = _tracker(
-        hot_data_store=None,
-        db_path="/tmp/fallback.duckdb",
-        engine=engine,
-    )
-    ingest_artifact(
-        tracker=tracker,
-        artifact=_artifact(),
-        data=[{"value": 1}],
-        schema=None,
-        run=_run(),
-        profile_schema=False,
-    )
-
-    assert captured["db_path"] == "/tmp/fallback.duckdb"
-    assert engine.dispose_calls == 1
+        assert isinstance(result, Artifact)
+        assert result.is_ingested is True
+        assert captured["db_path"] == str(fallback_db)
+        assert captured["ledger"] is ledger
 
 
 def test_ingest_artifact_requires_hot_data_db_path() -> None:
-    tracker = _tracker(hot_data_store=None, db_path=None, engine=None)
+    tracker = _tracker(hot_data_store=None, db_path=None, ledger=None)
 
     with pytest.raises(RuntimeError, match="db_path is not configured"):
         ingest_artifact(

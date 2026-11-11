@@ -11,17 +11,16 @@ datasets into Python process memory, especially when compared to traditional
 in-memory operations with Pandas/Polars.
 """
 
-import logging
-import importlib
-from pathlib import Path
-
-import pytest
-import pandas as pd
-import numpy as np
-import time
-import os
 import gc
-from sqlmodel import text
+import importlib
+import logging
+import os
+from pathlib import Path
+import time
+
+import numpy as np
+import pandas as pd
+import pytest
 
 import consist
 from consist import Run
@@ -232,83 +231,88 @@ def test_comparative_join_benchmark(tmp_path: Path):
     else:
         logging.info("[Polars         ] Skipped")
 
-    # =========================================================================
-    # BENCHMARK 3: CONSIST (Cold / Zero-Copy)
-    # =========================================================================
-    with Profiler("Consist (Cold)"):
-        # Create View over raw Parquet files
-        tracker.create_view("v_bench_cold", "results")
+    try:
+        # =========================================================================
+        # BENCHMARK 3: CONSIST (Cold / Zero-Copy)
+        # =========================================================================
+        with Profiler("Consist (Cold)"):
+            # Create View over raw Parquet files
+            tracker.create_view("v_bench_cold", "results")
 
-        query = text(
-            """
-            SELECT a.category, AVG(b.val - a.val) as avg_delta
-            FROM v_bench_cold a
-            JOIN v_bench_cold b ON a.id = b.id
-            WHERE a.consist_run_id = 'run_a' AND b.consist_run_id = 'run_b'
-            GROUP BY 1 ORDER BY 1
-        """
+            res_consist_cold = tracker.query_df(
+                """
+                SELECT a.category, AVG(b.val - a.val) AS avg_delta
+                FROM v_bench_cold a
+                JOIN v_bench_cold b ON a.id = b.id
+                WHERE a.consist_run_id = 'run_a' AND b.consist_run_id = 'run_b'
+                GROUP BY 1 ORDER BY 1
+                """
+            )
+
+        # =========================================================================
+        # BENCHMARK 4: CONSIST (Hot / Native)
+        # =========================================================================
+        # 4a. Measure Ingestion Cost (Setup)
+        logging.info("\n[Ingestion Phase] moving data to DuckDB...")
+        with Profiler("Ingestion Cost"):
+            # We pass the paths directly to avoid loading into Python RAM
+            # Tracker sees the path string and streams it via Arrow
+            tracker.ingest(
+                artifact=art_a,
+                data=str(path_a),
+                run=Run(
+                    id="run_a",
+                    model_name="x",
+                    config_hash=None,
+                    git_hash=None,
+                ),
+            )
+            tracker.ingest(
+                artifact=art_b,
+                data=str(path_b),
+                run=Run(
+                    id="run_b",
+                    model_name="x",
+                    config_hash=None,
+                    git_hash=None,
+                ),
+            )
+
+        # 4b. Measure Query Cost
+        with Profiler("Consist (Hot)"):
+            # Create View over Native Table
+            # (Since artifacts are now marked 'is_ingested', this view points to global_tables.results)
+            tracker.create_view("v_bench_hot", "results")
+
+            res_consist_hot = tracker.query_df(
+                """
+                SELECT a.category, AVG(b.val - a.val) AS avg_delta
+                FROM v_bench_hot a
+                JOIN v_bench_hot b ON a.id = b.id
+                WHERE a.consist_run_id = 'run_a' AND b.consist_run_id = 'run_b'
+                GROUP BY 1 ORDER BY 1
+                """
+            )
+
+        # =========================================================================
+        # VERIFICATION
+        # =========================================================================
+        logging.info("\n[Verification (Avg Delta for Cat X)]")
+        val_pd = float(res_pandas.loc["X"])
+        val_cold = float(
+            res_consist_cold.loc[res_consist_cold["category"] == "X", "avg_delta"].iloc[
+                0
+            ]
         )
-        with tracker.engine.connect() as conn:
-            res_consist_cold = conn.execute(query).fetchall()
-
-    # =========================================================================
-    # BENCHMARK 4: CONSIST (Hot / Native)
-    # =========================================================================
-    # 4a. Measure Ingestion Cost (Setup)
-    logging.info("\n[Ingestion Phase] moving data to DuckDB...")
-    with Profiler("Ingestion Cost"):
-        # We pass the paths directly to avoid loading into Python RAM
-        # Tracker sees the path string and streams it via Arrow
-        tracker.ingest(
-            artifact=art_a,
-            data=str(path_a),
-            run=Run(
-                id="run_a",
-                model_name="x",
-                config_hash=None,
-                git_hash=None,
-            ),
-        )
-        tracker.ingest(
-            artifact=art_b,
-            data=str(path_b),
-            run=Run(
-                id="run_b",
-                model_name="x",
-                config_hash=None,
-                git_hash=None,
-            ),
+        val_hot = float(
+            res_consist_hot.loc[res_consist_hot["category"] == "X", "avg_delta"].iloc[0]
         )
 
-    # 4b. Measure Query Cost
-    with Profiler("Consist (Hot)"):
-        # Create View over Native Table
-        # (Since artifacts are now marked 'is_ingested', this view points to global_tables.results)
-        tracker.create_view("v_bench_hot", "results")
+        logging.info(f"Pandas:  {val_pd:.4f}")
+        logging.info(f"Cold:    {val_cold:.4f}")
+        logging.info(f"Hot:     {val_hot:.4f}")
 
-        query_hot = text(
-            """
-            SELECT a.category, AVG(b.val - a.val) as avg_delta
-            FROM v_bench_hot a
-            JOIN v_bench_hot b ON a.id = b.id
-            WHERE a.consist_run_id = 'run_a' AND b.consist_run_id = 'run_b'
-            GROUP BY 1 ORDER BY 1
-        """
-        )
-        with tracker.engine.connect() as conn:
-            res_consist_hot = conn.execute(query_hot).fetchall()
-
-    # =========================================================================
-    # VERIFICATION
-    # =========================================================================
-    logging.info("\n[Verification (Avg Delta for Cat X)]")
-    val_pd = res_pandas.loc["X"]
-    val_cold = next(r[1] for r in res_consist_cold if r[0] == "X")
-    val_hot = next(r[1] for r in res_consist_hot if r[0] == "X")
-
-    logging.info(f"Pandas:  {val_pd:.4f}")
-    logging.info(f"Cold:    {val_cold:.4f}")
-    logging.info(f"Hot:     {val_hot:.4f}")
-
-    assert abs(val_pd - val_cold) < 0.01
-    assert abs(val_pd - val_hot) < 0.01
+        assert abs(val_pd - val_cold) < 0.01
+        assert abs(val_pd - val_hot) < 0.01
+    finally:
+        tracker.close()

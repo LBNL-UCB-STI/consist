@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
@@ -236,7 +236,7 @@ def _schema_facet_from_artifact(
         profile = artifact.meta.get("schema_profile")
     if profile and isinstance(profile, Mapping) and "fields" in profile:
         fields = profile["fields"]
-        if isinstance(fields, list):
+        if isinstance(fields, Sequence) and not isinstance(fields, (str, bytes)):
             return {
                 "fields": [
                     {

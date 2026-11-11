@@ -7,7 +7,7 @@ from typing import Any
 import pandas as pd
 import pytest
 
-from consist import is_spatial_artifact
+from consist.api import is_spatial_artifact
 from consist.core.tracker import Tracker
 
 

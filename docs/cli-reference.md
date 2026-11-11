@@ -266,6 +266,43 @@ Notes:
 - Merge conflict mode values are `error` and `skip`.
 - `--prune-cache` only applies when `--delete-ingested-data` is enabled.
 
+### consist migrate
+
+Upgrade a Consist `0.4.x` (`v1`) DuckDB provenance database out-of-place to Schema v2 (`StoreLedger`), keeping an automatic `<stem>.v1-backup-YYYY-MM-DD.duckdb` backup of the source database.
+
+```bash
+consist migrate ./provenance.duckdb
+consist migrate ./provenance.duckdb --quick
+consist migrate ./provenance.duckdb --dry-run
+consist migrate ./provenance.duckdb --mount archive=/data/archive --mount workspace=./runs
+consist migrate undo ./provenance.duckdb
+```
+
+Options:
+
+- `--quick`: skip disk content hashing of historical files and migrate metadata, schemas, snapshots, and ingested `global_tables.*` tables immediately
+- `--dry-run`: classify runs and artifacts and report planned outcomes without writing a database
+- `--site NAME`: override automatic `SiteContext.detect()` site identifier
+- `--mount NAME=PATH`: repeatable mount root mapping used to resolve virtualized URIs during migration
+
+### consist promote
+
+Promote historical (`legacy-v1:unverified`) artifacts or all eligible inputs and outputs of a historical `<run-id>` to verified content digests and cache-eligible `sig-v2` signatures once restored bytes are accessible on disk.
+
+```bash
+# Promote all eligible inputs and outputs of a historical run using mount mappings:
+consist promote ./provenance.duckdb <run_id> --mount archive=/data/archive
+
+# Promote a single artifact UUID or historical fingerprint with an explicit file path:
+consist promote ./provenance.duckdb <artifact_id_or_historical_anchor> --path /data/archive/trips.parquet
+```
+
+Options:
+
+- `--path PATH`: explicit filesystem path for single-artifact promotion
+- `--site NAME`: override automatic `SiteContext.detect()` site identifier
+- `--mount NAME=PATH`: repeatable mount root mapping used to locate restored files on disk
+
 ### consist admission doctor
 
 Diagnose whether one resolved regular file matches a unique named artifact on an

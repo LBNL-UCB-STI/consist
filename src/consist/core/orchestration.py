@@ -340,3 +340,5 @@ def execute_worker_run(
             error_traceback=traceback.format_exc(),
             attempts=[attempt],
         )
+    finally:
+        tracker.close()

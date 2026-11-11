@@ -1,8 +1,8 @@
 from unittest.mock import MagicMock
 import uuid
 from consist.core.lineage import build_lineage_tree, format_lineage_tree, LineageService
-from consist.models.artifact import Artifact
 from consist.models.run import Run, RunArtifacts
+from tests.helpers.artifact_factory import make_artifact
 
 
 def test_build_lineage_tree():
@@ -19,14 +19,14 @@ def test_build_lineage_tree():
     run_a = Run(id="run_a", model_name="model_a", config_hash=None, git_hash=None)
     run_b = Run(id="run_b", model_name="model_b", config_hash=None, git_hash=None)
 
-    art_1 = Artifact(  # Produced by A
+    art_1 = make_artifact(  # Produced by A
         id=uuid.uuid4(),
         key="data_v1",
         container_uri="outputs://data_v1.csv",
         driver="csv",
         run_id="run_a",
     )
-    art_2 = Artifact(  # Produced by B
+    art_2 = make_artifact(  # Produced by B
         id=uuid.uuid4(),
         key="data_v2",
         container_uri="outputs://data_v2.csv",
@@ -87,7 +87,7 @@ def test_format_lineage_tree():
     Verify lineage formatting produces a readable string.
     """
     run = Run(id="run_x", model_name="model_x", config_hash=None, git_hash=None)
-    art = Artifact(
+    art = make_artifact(
         id=uuid.uuid4(),
         key="data_v1",
         container_uri="outputs://data_v1.csv",
@@ -107,7 +107,7 @@ def test_lineage_service_prints(monkeypatch):
     Verify LineageService.print_lineage formats and prints output.
     """
     run = Run(id="run_x", model_name="model_x", config_hash=None, git_hash=None)
-    art = Artifact(
+    art = make_artifact(
         id=uuid.uuid4(),
         key="data_v1",
         container_uri="outputs://data_v1.csv",
@@ -144,7 +144,7 @@ def test_build_lineage_missing_run_returns_stub() -> None:
     Missing producing run should return a node without producing_run details.
     """
     mock_tracker = MagicMock()
-    art = Artifact(
+    art = make_artifact(
         id=uuid.uuid4(),
         key="missing",
         container_uri="outputs://missing.csv",
@@ -166,14 +166,14 @@ def test_build_lineage_cycle_does_not_recurse_forever() -> None:
     """
     mock_tracker = MagicMock()
     run = Run(id="run_cycle", model_name="model", config_hash=None, git_hash=None)
-    art_root = Artifact(
+    art_root = make_artifact(
         id=uuid.uuid4(),
         key="root",
         container_uri="outputs://root.csv",
         driver="csv",
         run_id="run_cycle",
     )
-    art_cycle = Artifact(
+    art_cycle = make_artifact(
         id=uuid.uuid4(),
         key="cycle",
         container_uri="outputs://cycle.csv",
@@ -208,21 +208,21 @@ def test_build_lineage_tree_sets_truncated_by_depth_when_max_depth_reached() -> 
     run_a = Run(id="run_a", model_name="model_a", config_hash=None, git_hash=None)
     run_b = Run(id="run_b", model_name="model_b", config_hash=None, git_hash=None)
 
-    art_1 = Artifact(
+    art_1 = make_artifact(
         id=uuid.uuid4(),
         key="data_v1",
         container_uri="outputs://data_v1.csv",
         driver="csv",
         run_id="run_a",
     )
-    art_2 = Artifact(
+    art_2 = make_artifact(
         id=uuid.uuid4(),
         key="data_v2",
         container_uri="outputs://data_v2.csv",
         driver="csv",
         run_id="run_b",
     )
-    art_leaf = Artifact(
+    art_leaf = make_artifact(
         id=uuid.uuid4(),
         key="raw_leaf",
         container_uri="inputs://raw_leaf.csv",

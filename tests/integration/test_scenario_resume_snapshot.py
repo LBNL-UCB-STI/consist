@@ -1,22 +1,25 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Tuple
 import pytest
-from sqlmodel import col, delete, select
 
-import consist
+from consist.api import diff_coupler_snapshots
 from consist.core.tracker import Tracker
 from consist.models.run import RunCouplerSnapshot
 
 
 @pytest.fixture
-def tracker_setup(tmp_path: Path) -> Tuple[Tracker, Path, Path]:
+def tracker_setup(tmp_path: Path) -> Iterator[Tuple[Tracker, Path, Path]]:
     run_dir = tmp_path / "runs"
     run_dir.mkdir(parents=True, exist_ok=True)
     db_path = tmp_path / "provenance.duckdb"
     tracker = Tracker(run_dir=run_dir, db_path=str(db_path))
-    return tracker, run_dir, db_path
+    try:
+        yield tracker, run_dir, db_path
+    finally:
+        tracker.close()
 
 
 def test_scenario_mid_workflow_resumption(tmp_path: Path) -> None:
@@ -26,42 +29,44 @@ def test_scenario_mid_workflow_resumption(tmp_path: Path) -> None:
 
     # 1. Initialize Tracker(db_path=tmp_db)
     tracker1 = Tracker(db_path=str(tmp_db), run_dir=run_dir)
+    try:
+        # 2. Run Scenario S1:
+        # - Seed bootstrap artifact raw_data.
+        raw_file = tmp_path / "raw.csv"
+        raw_file.write_text("raw,data\n10,20\n")
+        with tracker1.trace("seed_raw"):
+            raw_art = tracker1.log_artifact(raw_file, key="raw_data")
 
-    # 2. Run Scenario S1:
-    # - Seed bootstrap artifact raw_data.
-    raw_file = tmp_path / "raw.csv"
-    raw_file.write_text("raw,data\n10,20\n")
-    with tracker1.trace("seed_raw"):
-        raw_art = tracker1.log_artifact(raw_file, key="raw_data")
+        clean_file = tmp_path / "clean.csv"
+        model_file = tmp_path / "model.csv"
 
-    clean_file = tmp_path / "clean.csv"
-    model_file = tmp_path / "model.csv"
+        step1_executed = 0
+        step2_executed = 0
+        step3_executed = 0
 
-    step1_executed = 0
-    step2_executed = 0
-    step3_executed = 0
+        def step1_fn() -> None:
+            nonlocal step1_executed
+            step1_executed += 1
+            clean_file.write_text("clean,data\n10,20\n")
+            tracker1.log_artifact(clean_file, key="clean_data")
 
-    def step1_fn() -> None:
-        nonlocal step1_executed
-        step1_executed += 1
-        clean_file.write_text("clean,data\n10,20\n")
-        tracker1.log_artifact(clean_file, key="clean_data")
+        def step2_fn() -> None:
+            nonlocal step2_executed
+            step2_executed += 1
+            model_file.write_text("model_result\n42\n")
+            tracker1.log_artifact(model_file, key="model_results")
 
-    def step2_fn() -> None:
-        nonlocal step2_executed
-        step2_executed += 1
-        model_file.write_text("model_result\n42\n")
-        tracker1.log_artifact(model_file, key="model_results")
+        with tracker1.scenario("S1") as s1:
+            s1.coupler.set("raw_data", raw_art)
+            s1.run(step1_fn, name="step_1")
+            res2 = s1.run(step2_fn, name="step_2")
+            step2_run_id = res2.run.id
+            step2_hash = res2.outputs["model_results"].hash
 
-    with tracker1.scenario("S1") as s1:
-        s1.coupler.set("raw_data", raw_art)
-        s1.run(step1_fn, name="step_1")
-        res2 = s1.run(step2_fn, name="step_2")
-        step2_run_id = res2.run.id
-        step2_hash = res2.outputs["model_results"].hash
-
-    assert step1_executed == 1
-    assert step2_executed == 1
+        assert step1_executed == 1
+        assert step2_executed == 1
+    finally:
+        tracker1.close()
 
     # 3. Close tracker / simulate fresh process by creating a new Tracker(db_path=tmp_db)
     # Reset execution counters to ensure step1 and step2 are never executed during resumption
@@ -69,35 +74,37 @@ def test_scenario_mid_workflow_resumption(tmp_path: Path) -> None:
     step2_executed = 0
 
     tracker2 = Tracker(db_path=str(tmp_db), run_dir=run_dir)
+    try:
+        summary_file = tmp_path / "summary.csv"
 
-    summary_file = tmp_path / "summary.csv"
+        def step3_fn() -> None:
+            nonlocal step3_executed
+            step3_executed += 1
+            summary_file.write_text("summary,score\n42,100\n")
+            tracker2.log_artifact(summary_file, key="summary_report")
 
-    def step3_fn() -> None:
-        nonlocal step3_executed
-        step3_executed += 1
-        summary_file.write_text("summary,score\n42,100\n")
-        tracker2.log_artifact(summary_file, key="summary_report")
+        # 4. Open tracker.scenario("S1_resumed", resume_from_run_id=step2_run_id):
+        with tracker2.scenario(
+            "S1_resumed",
+            resume_from_run_id=step2_run_id,
+            resume_phase="post",
+        ) as s1_resumed:
+            # - Verify scenario.coupler.get("model_results") is immediately present and identical in hash.
+            model_res = s1_resumed.coupler.get("model_results")
+            assert model_res is not None
+            assert model_res.hash == step2_hash
 
-    # 4. Open tracker.scenario("S1_resumed", resume_from_run_id=step2_run_id):
-    with tracker2.scenario(
-        "S1_resumed",
-        resume_from_run_id=step2_run_id,
-        resume_phase="post",
-    ) as s1_resumed:
-        # - Verify scenario.coupler.get("model_results") is immediately present and identical in hash.
-        model_res = s1_resumed.coupler.get("model_results")
-        assert model_res is not None
-        assert model_res.hash == step2_hash
+            # - Execute Step 3 consuming model_results and raw_data via scenario.run(...)
+            assert "raw_data" in s1_resumed.coupler
+            res3 = s1_resumed.run(step3_fn, name="step_3")
 
-        # - Execute Step 3 consuming model_results and raw_data via scenario.run(...)
-        assert "raw_data" in s1_resumed.coupler
-        res3 = s1_resumed.run(step3_fn, name="step_3")
-
-    # - Assert Step 3 succeeds without executing Step 1 or Step 2.
-    assert step3_executed == 1
-    assert step1_executed == 0
-    assert step2_executed == 0
-    assert "summary_report" in res3.outputs
+        # - Assert Step 3 succeeds without executing Step 1 or Step 2.
+        assert step3_executed == 1
+        assert step1_executed == 0
+        assert step2_executed == 0
+        assert "summary_report" in res3.outputs
+    finally:
+        tracker2.close()
 
 
 def test_scenario_resume_from_run_id_post(
@@ -254,13 +261,11 @@ def test_scenario_resume_fallback_to_completed_outputs(
         legacy_scen_id = sc.run_id
 
     # Wipe run_coupler_snapshot rows for this scenario to simulate legacy runs
-    with db.session_scope() as session:
-        session.exec(
-            delete(RunCouplerSnapshot).where(
-                col(RunCouplerSnapshot.scenario_run_id) == legacy_scen_id
-            )
+    with db.ledger.transaction() as cur:
+        cur.execute(
+            "DELETE FROM main.run_coupler_snapshot WHERE scenario_run_id = ?",
+            [legacy_scen_id],
         )
-        session.commit()
 
     # Verify no snapshots exist
     assert (
@@ -286,16 +291,14 @@ def test_scenario_resume_fallback_to_completed_outputs(
     assert "role_1" in backfilled
     assert "role_2" in backfilled
 
-    with db.session_scope() as session:
-        rows = session.exec(
-            select(RunCouplerSnapshot).where(
-                col(RunCouplerSnapshot.run_id) == res2.run.id,
-                col(RunCouplerSnapshot.phase) == "post",
-            )
-        ).all()
-        assert len(rows) == 2
-        for r in rows:
-            assert r.scenario_run_id == legacy_scen_id
+    rows = tracker.query_rows(
+        "SELECT * FROM main.run_coupler_snapshot WHERE run_id = ? AND phase = ?",
+        [res2.run.id, "post"],
+        model=RunCouplerSnapshot,
+    )
+    assert len(rows) == 2
+    for r in rows:
+        assert r.scenario_run_id == legacy_scen_id
 
 
 def test_scenario_resume_fallback_pre_phase_excludes_step_outputs(
@@ -322,13 +325,11 @@ def test_scenario_resume_fallback_pre_phase_excludes_step_outputs(
         legacy_scen_id = sc.run_id
 
     # Wipe run_coupler_snapshot rows for this scenario
-    with db.session_scope() as session:
-        session.exec(
-            delete(RunCouplerSnapshot).where(
-                col(RunCouplerSnapshot.scenario_run_id) == legacy_scen_id
-            )
+    with db.ledger.transaction() as cur:
+        cur.execute(
+            "DELETE FROM main.run_coupler_snapshot WHERE scenario_run_id = ?",
+            [legacy_scen_id],
         )
-        session.commit()
 
     # Restore with phase="pre" on res2.run.id
     # It should include role_1 (from s1), but NOT role_2 (from s2 itself)
@@ -370,13 +371,11 @@ def test_scenario_resume_fallback_preserves_execution_order(
         scen_id = sc.run_id
 
     # Wipe snapshots
-    with db.session_scope() as session:
-        session.exec(
-            delete(RunCouplerSnapshot).where(
-                col(RunCouplerSnapshot.scenario_run_id) == scen_id
-            )
+    with db.ledger.transaction() as cur:
+        cur.execute(
+            "DELETE FROM main.run_coupler_snapshot WHERE scenario_run_id = ?",
+            [scen_id],
         )
-        session.commit()
 
     # Fallback restore for the scenario should respect execution order:
     # "a_second" was executed after "z_first", so its version of "shared_role" should win
@@ -417,11 +416,9 @@ def test_scenario_diff_snapshots_across_scenarios(
     with tracker.scenario("scenario_b") as sc_b:
         res_b = sc_b.run(step_b, name="step_b")
 
-    # Use tracker convenience method and top-level consist API
+    # Use tracker convenience method and top-level consist.api helper
     diff_df = tracker.diff_coupler_snapshots(res_a.run.id, res_b.run.id)
-    diff_api = consist.diff_coupler_snapshots(
-        res_a.run.id, res_b.run.id, tracker=tracker
-    )
+    diff_api = diff_coupler_snapshots(res_a.run.id, res_b.run.id, tracker=tracker)
 
     assert diff_df.equals(diff_api)
 
@@ -441,58 +438,62 @@ def test_scenario_resume_across_tracker_instances(tmp_path: Path) -> None:
 
     # Process 1: run simulation year 1 and year 2 step 1
     t1 = Tracker(run_dir=run_dir, db_path=db_path)
+    try:
+        skims_file = tmp_path / "skims.omx"
+        skims_file.write_text("skims_v1\n")
 
-    skims_file = tmp_path / "skims.omx"
-    skims_file.write_text("skims_v1\n")
+        datastore_file_y1 = tmp_path / "datastore_y1.h5"
+        datastore_file_y1.write_text("h5_year1_data\n")
 
-    datastore_file_y1 = tmp_path / "datastore_y1.h5"
-    datastore_file_y1.write_text("h5_year1_data\n")
+        datastore_file_y2 = tmp_path / "datastore_y2.h5"
+        datastore_file_y2.write_text("h5_year2_mutated_data\n")
 
-    datastore_file_y2 = tmp_path / "datastore_y2.h5"
-    datastore_file_y2.write_text("h5_year2_mutated_data\n")
+        def year1_step() -> None:
+            t1.log_artifact(skims_file, key="final_skims_omx")
+            t1.log_artifact(datastore_file_y1, key="usim_datastore_h5")
 
-    def year1_step() -> None:
-        t1.log_artifact(skims_file, key="final_skims_omx")
-        t1.log_artifact(datastore_file_y1, key="usim_datastore_h5")
+        def year2_step1() -> None:
+            # In year 2, usim_datastore_h5 is mutated and republished
+            t1.log_artifact(datastore_file_y2, key="usim_datastore_h5")
 
-    def year2_step1() -> None:
-        # In year 2, usim_datastore_h5 is mutated and republished
-        t1.log_artifact(datastore_file_y2, key="usim_datastore_h5")
-
-    with t1.scenario("pilates_2017_2019") as sc1:
-        sc1.run(year1_step, name="year1_step")
-        res_y2_s1 = sc1.run(year2_step1, name="year2_step1")
-        y2_s1_id = res_y2_s1.run.id
-        y2_s1_hash = res_y2_s1.outputs["usim_datastore_h5"].hash
+        with t1.scenario("pilates_2017_2019") as sc1:
+            sc1.run(year1_step, name="year1_step")
+            res_y2_s1 = sc1.run(year2_step1, name="year2_step1")
+            y2_s1_id = res_y2_s1.run.id
+            y2_s1_hash = res_y2_s1.outputs["usim_datastore_h5"].hash
+    finally:
+        t1.close()
 
     # Simulate process death / restart by initializing a new Tracker
     # Process 2: new tracker, new scenario resuming from year2_step1
     t2 = Tracker(run_dir=run_dir, db_path=db_path)
+    try:
+        final_report_file = tmp_path / "final_report.csv"
 
-    final_report_file = tmp_path / "final_report.csv"
+        def year2_step2() -> None:
+            final_report_file.write_text("finished_successfully\n")
+            t2.log_artifact(final_report_file, key="final_report")
 
-    def year2_step2() -> None:
-        final_report_file.write_text("finished_successfully\n")
-        t2.log_artifact(final_report_file, key="final_report")
+        with t2.scenario(
+            "pilates_2017_2019_resumed",
+            resume_from_run_id=y2_s1_id,
+            resume_phase="post",
+        ) as sc2:
+            # Verify skims_omx from year 1 is restored
+            assert "final_skims_omx" in sc2.coupler
+            # Verify usim_datastore_h5 is the year 2 version
+            assert "usim_datastore_h5" in sc2.coupler
+            restored_ds = sc2.coupler.require("usim_datastore_h5")
+            assert restored_ds.hash == y2_s1_hash
 
-    with t2.scenario(
-        "pilates_2017_2019_resumed",
-        resume_from_run_id=y2_s1_id,
-        resume_phase="post",
-    ) as sc2:
-        # Verify skims_omx from year 1 is restored
-        assert "final_skims_omx" in sc2.coupler
-        # Verify usim_datastore_h5 is the year 2 version
-        assert "usim_datastore_h5" in sc2.coupler
-        restored_ds = sc2.coupler.require("usim_datastore_h5")
-        assert restored_ds.hash == y2_s1_hash
+            res_final = sc2.run(year2_step2, name="year2_step2")
 
-        res_final = sc2.run(year2_step2, name="year2_step2")
-
-    # Verify final step recorded snapshots containing all accumulated roles
-    db = t2.db
-    assert db is not None
-    post_snap = db.get_run_coupler_snapshot(res_final.run.id, phase="post")
-    assert "final_skims_omx" in post_snap
-    assert "usim_datastore_h5" in post_snap
-    assert "final_report" in post_snap
+        # Verify final step recorded snapshots containing all accumulated roles
+        db = t2.db
+        assert db is not None
+        post_snap = db.get_run_coupler_snapshot(res_final.run.id, phase="post")
+        assert "final_skims_omx" in post_snap
+        assert "usim_datastore_h5" in post_snap
+        assert "final_report" in post_snap
+    finally:
+        t2.close()

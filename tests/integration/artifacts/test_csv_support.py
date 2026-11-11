@@ -1,7 +1,6 @@
 # tests/integration/test_csv_support.py
 
 import pandas as pd
-from sqlalchemy import text
 
 from consist.core.tracker import Tracker
 from consist.api import load_df
@@ -69,15 +68,13 @@ def test_csv_end_to_end(tracker: Tracker):
     # This proves ViewFactory is using read_csv_auto correctly
     tracker.create_view("v_cities", "cities_data")
 
-    with tracker.engine.connect() as conn:
-        # Run a query that requires type inference (AVG on score)
-        result = conn.execute(text("SELECT AVG(score) FROM v_cities")).fetchone()
-        avg_score = result[0]
+    # Run a query that requires type inference (AVG on score)
+    avg_df = tracker.query_df("SELECT AVG(score) AS avg_score FROM v_cities")
+    avg_score = float(avg_df.iloc[0]["avg_score"])
 
-        # 95.5 + 88.0 = 183.5 / 2 = 91.75
-        assert avg_score == 91.75
+    # 95.5 + 88.0 = 183.5 / 2 = 91.75
+    assert avg_score == 91.75
 
-        # Verify text column
-        names = conn.execute(text("SELECT city FROM v_cities ORDER BY city")).fetchall()
-        assert names[0][0] == "New York"
-        assert names[1][0] == "Paris"
+    # Verify text column
+    names_df = tracker.query_df("SELECT city FROM v_cities ORDER BY city")
+    assert names_df["city"].tolist() == ["New York", "Paris"]

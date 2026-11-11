@@ -1698,8 +1698,14 @@ class RunTraceCoordinator:
                             param_name,
                         )
                     artifact = input_artifacts_by_key[param_name]
-                    if artifact.origin is None and tracker.ledger is not None:
-                        artifact = replace(artifact, origin=tracker.ledger.ref)
+                    tracker_ledger = (
+                        tracker.ledger
+                        if "ledger" in type(tracker).__dict__
+                        or "ledger" in tracker.__dict__
+                        else None
+                    )
+                    if artifact.origin is None and tracker_ledger is not None:
+                        artifact = replace(artifact, origin=tracker_ledger.ref)
                     artifact.bind_tracker(tracker)
                     use_paths_binding = input_binding == "paths" or (
                         not explicit_input_binding_requested
@@ -1731,7 +1737,9 @@ class RunTraceCoordinator:
                                 verify_on_stale=False,
                             )
                             if artifact_path is None and artifact.hints:
-                                artifact_path = replace(artifact, origin=None).locate(
+                                artifact_path = replace(
+                                    artifact, origin=None, _tracker_ref=None
+                                ).locate(
                                     mounts=effective_mounts,
                                     verify_on_stale=False,
                                 )

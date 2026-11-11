@@ -75,22 +75,24 @@ def test_beam_config_across_multiple_scenarios(tracker, tmp_path: Path):
     tracker.apply_config_plan(plan_b, ingest=True)
     tracker.end_run()
 
-    if tracker.engine is None:
-        raise AssertionError("Tracker engine missing; DB tests require DuckDB.")
+    if tracker.ledger is None:
+        raise AssertionError("Tracker ledger missing; DB tests require DuckDB.")
 
-    with tracker.engine.begin() as connection:
-        rows = connection.exec_driver_sql(
-            """
-            SELECT l.run_id, c.value_num
-            FROM global_tables.beam_config_cache c
-            JOIN global_tables.beam_config_ingest_run_link l
-              ON l.content_hash = c.content_hash
-             AND l.table_name = 'beam_config_cache'
-            WHERE c.key = 'beam.agentsim.agentSampleSizeAsFractionOfPopulation'
-            """
-        ).fetchall()
+    rows_df = tracker.query_df(
+        """
+        SELECT l.run_id, c.value_num
+        FROM global_tables.beam_config_cache c
+        JOIN global_tables.beam_config_ingest_run_link l
+          ON l.content_hash = c.content_hash
+         AND l.table_name = 'beam_config_cache'
+        WHERE c.key = 'beam.agentsim.agentSampleSizeAsFractionOfPopulation'
+        """
+    )
 
-    values_by_run = {row[0]: float(row[1]) for row in rows}
+    values_by_run = {
+        str(run_id): float(value_num)
+        for run_id, value_num in rows_df.itertuples(index=False, name=None)
+    }
     assert values_by_run.get("beam_scenario_a") == 0.25
     assert values_by_run.get("beam_scenario_b") == 0.75
 

@@ -53,22 +53,21 @@ Schema export uses the schema captured from a DuckDB-ingested table. In practice
 
 1. You run with a database configured (`db_path=...`).
 2. You ingest tabular data into DuckDB (hot data).
-3. Consist profiles the ingested table and stores a deduped schema referenced by `artifact.meta["schema_id"]`.
+3. Consist profiles the ingested table and stores a deduped schema referenced by `artifact.schema_id`.
 
-If you already see `schema_id` in an artifact’s `meta`, you’re ready to export.
+If you already see a `schema_id` on an `Artifact`, you’re ready to export.
 
 You can also capture schemas **without ingestion** for CSV/Parquet artifacts by
 enabling lightweight file profiling at log time (`profile_file_schema=True`,
-optional `file_schema_sample_rows=`). This writes the same `schema_id` pointer
-into `artifact.meta`, allowing schema export even if the original file is later
-missing or moved.
+optional `file_schema_sample_rows=`). This populates `artifact.schema_id`,
+allowing schema export even if the original file is later missing or moved.
 
 For wrapped file-writing steps, enable profiling at the run level
 (`Tracker.run(...)` or `ScenarioContext.run(...)`) or at the individual output
 declaration:
 
 ```python
-from consist import ArtifactSpec
+from consist.types import ArtifactSpec
 
 result = tracker.run(
     fn=run_step,
@@ -175,37 +174,29 @@ Consist does not require a special directory layout; it only needs you to import
 
 ## Using the Generated Model with Views
 
-Consist’s hybrid views are created from your SQLModel schema. To activate a view:
+Consist’s hybrid views can be created from your exported SQLModel schema and queried via DuckDB SQL or Ibis:
 
-1) Import the model class.
-2) Register it with the `Tracker` (at init time or after).
-
-### Register at Tracker initialization
+### Create a hybrid view and query rows
 
 ```python
 from consist import Tracker
 from your_pkg.models.persons import Persons
 
 tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb", schemas=[Persons])
-VPersons = tracker.views.Persons
+tracker.create_view("v_persons", "persons", schema_model=Persons)
+
+df = tracker.query_df("SELECT * FROM v_persons LIMIT 5")
+typed_rows = tracker.query_rows("SELECT * FROM v_persons LIMIT 5", model=Persons)
 ```
 
-### Register later
+### Lazy querying with Ibis
 
 ```python
+from consist.api import ibis_view
 from your_pkg.models.persons import Persons
 
-VPersons = tracker.view(Persons)  # registers + creates/refreshes the hybrid view
-```
-
-### Querying
-
-```python
-from sqlmodel import select
-import consist
-
-VPersons = tracker.views.Persons
-rows = consist.run_query(select(VPersons).limit(5), tracker=tracker)
+persons = ibis_view(tracker, model=Persons)
+rows = persons.limit(5).to_pandas()
 ```
 
 Views automatically include Consist metadata columns (e.g. `consist_run_id`, `consist_year`, `consist_scenario_id`) for filtering and grouping.

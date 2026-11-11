@@ -3,8 +3,8 @@ from __future__ import annotations
 import consist
 import pytest
 from consist import use_tracker
-from consist.models.artifact import Artifact
 from consist.types import CacheOptions, ExecutionOptions
+from tests.helpers.artifact_factory import make_artifact
 
 
 def test_consist_run_forwards_options_objects(tracker):
@@ -59,7 +59,8 @@ def test_consist_get_run_result_wrapper(tracker):
             output_paths={"out": "out.txt"},
             execution_options=ExecutionOptions(inject_context="ctx"),
         )
-        historical = consist.get_run_result(produced.run.id, keys=["out"])
+        with pytest.warns(DeprecationWarning, match="get_run_result"):
+            historical = consist.get_run_result(produced.run.id, keys=["out"])
 
     assert historical.run.id == produced.run.id
     assert list(historical.outputs.keys()) == ["out"]
@@ -103,7 +104,7 @@ def test_consist_ingest_delegates_without_warning(
     tracker, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: dict[str, object] = {}
-    artifact = Artifact(
+    artifact = make_artifact(
         key="table",
         container_uri="./table.csv",
         driver="csv",

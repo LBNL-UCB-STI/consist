@@ -13,7 +13,19 @@ from consist.core.spatial_views import SpatialMetadataView
 
 @dataclass
 class _TrackerStub:
-    engine: Any
+    ledger: Any
+
+
+class _LedgerStub:
+    def __init__(self, handler: Any = None) -> None:
+        self._handler = handler
+        self.calls: list[tuple[str, Any]] = []
+
+    def query_df(self, query: str, params: Any = None) -> pd.DataFrame:
+        self.calls.append((query, params))
+        if self._handler is not None:
+            return self._handler(query, params)
+        return _metadata_frame()
 
 
 def _metadata_frame(
@@ -41,33 +53,22 @@ def _metadata_frame(
 
 
 def test_get_metadata_requires_database_connection() -> None:
-    """`get_metadata` should fail fast when no DB engine is configured."""
-    view = SpatialMetadataView(_TrackerStub(engine=None))
+    """`get_metadata` should fail fast when no DB ledger is configured."""
+    view = SpatialMetadataView(_TrackerStub(ledger=None))
 
     with pytest.raises(RuntimeError, match="Database connection required"):
         view.get_metadata("tiny_spatial")
 
 
-def test_get_metadata_builds_run_id_and_year_filters(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_get_metadata_builds_run_id_and_year_filters() -> None:
     """
     `get_metadata` should parameterize run-id and year filters.
 
     This test documents expected SQL/parameter behavior for contributors
     touching query construction logic.
     """
-    captured: dict[str, Any] = {}
-
-    def fake_read_sql(query: Any, engine: Any, params: dict[str, Any]) -> pd.DataFrame:
-        captured["query"] = str(query)
-        captured["engine"] = engine
-        captured["params"] = params
-        return _metadata_frame()
-
-    monkeypatch.setattr("consist.core.spatial_views.pd.read_sql", fake_read_sql)
-    engine = object()
-    view = SpatialMetadataView(_TrackerStub(engine=engine))
+    ledger = _LedgerStub()
+    view = SpatialMetadataView(_TrackerStub(ledger=ledger))
 
     out = view.get_metadata(
         "tiny_spatial",
@@ -76,24 +77,23 @@ def test_get_metadata_builds_run_id_and_year_filters(
     )
 
     assert not out.empty
-    assert captured["engine"] is engine
-    assert "global_tables.tiny_spatial" in captured["query"]
-    assert "AND r.id IN (:0,:1)" in captured["query"]
-    assert "AND r.year = :year" in captured["query"]
-    assert captured["params"] == {"0": "run-a", "1": "run-b", "year": 2025}
+    assert len(ledger.calls) == 1
+    query, params = ledger.calls[0]
+    assert 'global_tables."tiny_spatial"' in query
+    assert "IN (SELECT UNNEST(?))" in query
+    assert "AND r.year = ?" in query
+    assert params == [["run-a", "run-b"], 2025]
 
 
 def test_get_metadata_returns_empty_dataframe_when_query_fails(
-    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """`get_metadata` should degrade gracefully to an empty DataFrame on SQL errors."""
 
-    def fake_read_sql(query: Any, engine: Any, params: dict[str, Any]) -> pd.DataFrame:
+    def raise_boom(query: str, params: Any) -> pd.DataFrame:
         raise ValueError("boom")
 
-    monkeypatch.setattr("consist.core.spatial_views.pd.read_sql", fake_read_sql)
-    view = SpatialMetadataView(_TrackerStub(engine=object()))
+    view = SpatialMetadataView(_TrackerStub(ledger=_LedgerStub(raise_boom)))
 
     out = view.get_metadata("tiny_spatial")
 
@@ -117,7 +117,7 @@ def test_get_bounds_ignores_rows_without_valid_string_run_id(
         "consist.core.spatial_views.SpatialMetadataView.get_metadata",
         lambda self, concept_key, run_ids=None, year=None: df,
     )
-    view = SpatialMetadataView(_TrackerStub(engine=object()))
+    view = SpatialMetadataView(_TrackerStub(ledger=_LedgerStub()))
 
     assert view.get_bounds("tiny_spatial") == {"run-ok": [2, 2, 3, 3]}
 
@@ -143,7 +143,7 @@ def test_get_feature_counts_accepts_integral_and_float_values(
         "consist.core.spatial_views.SpatialMetadataView.get_metadata",
         lambda self, concept_key, run_ids=None, year=None: df,
     )
-    view = SpatialMetadataView(_TrackerStub(engine=object()))
+    view = SpatialMetadataView(_TrackerStub(ledger=_LedgerStub()))
 
     assert view.get_feature_counts("tiny_spatial") == {"run-int": 5, "run-float": 7}
 
@@ -156,7 +156,7 @@ def test_get_geometry_types_returns_empty_mapping_for_empty_metadata(
         "consist.core.spatial_views.SpatialMetadataView.get_metadata",
         lambda self, concept_key, run_ids=None, year=None: pd.DataFrame(),
     )
-    view = SpatialMetadataView(_TrackerStub(engine=object()))
+    view = SpatialMetadataView(_TrackerStub(ledger=_LedgerStub()))
 
     assert view.get_geometry_types("tiny_spatial") == {}
 
@@ -172,24 +172,16 @@ def test_get_geometry_types_returns_empty_mapping_for_empty_metadata(
         'tiny_spatial"or"1"="1',
     ],
 )
-def test_get_metadata_rejects_unsafe_concept_key(
-    monkeypatch: pytest.MonkeyPatch, concept_key: str
-) -> None:
+def test_get_metadata_rejects_unsafe_concept_key(concept_key: str) -> None:
     """
     `get_metadata` should reject unsafe table identifiers before SQL construction.
 
     This test documents the injection boundary for dynamic global_tables names.
     """
-    called = {"read_sql": False}
-
-    def fake_read_sql(query: Any, engine: Any, params: dict[str, Any]) -> pd.DataFrame:
-        called["read_sql"] = True
-        return _metadata_frame()
-
-    monkeypatch.setattr("consist.core.spatial_views.pd.read_sql", fake_read_sql)
-    view = SpatialMetadataView(_TrackerStub(engine=object()))
+    ledger = _LedgerStub()
+    view = SpatialMetadataView(_TrackerStub(ledger=ledger))
 
     with pytest.raises(ValueError, match="Invalid concept_key"):
         view.get_metadata(concept_key)
 
-    assert called["read_sql"] is False
+    assert ledger.calls == []

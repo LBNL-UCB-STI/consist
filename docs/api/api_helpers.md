@@ -30,13 +30,13 @@ a tracker object to every call.
   `consist.archive_run_outputs`, `consist.archive_current_run_outputs`,
   `consist.archive_run_output_files`
 - Querying: `consist.find_run`, `consist.find_runs`,
-  `consist.find_latest_run`, `consist.find_matching_run`,
-  `consist.find_matching_runs`, `consist.run_query`, `consist.run_set`,
-  `consist.resolve_canonical_run_id`, `consist.get_run_result`,
-  `consist.get_config_bundle`, `consist.get_config_values`,
-  `consist.get_config_value`, `consist.config_run_query`,
-  `consist.config_run_rows`, `consist.ibis_connection`, `consist.ibis_view`,
-  `consist.ibis_grouped_view`
+  `consist.query_df`, `consist.query_rows`, `consist.run_set`,
+  `consist.pivot_facets`, `consist.config_run_query`,
+  `consist.config_run_rows`, `consist.api.find_latest_run`,
+  `consist.api.find_matching_run`, `consist.api.find_matching_runs`,
+  `consist.api.resolve_canonical_run_id`, `consist.api.get_run_result`,
+  `consist.api.ibis_connection`, `consist.api.ibis_view`,
+  `consist.api.ibis_grouped_view`
 
 `consist.find_runs(...)`, `consist.find_run(...)`, and
 `consist.find_latest_run(...)` forward standard run filters, including
@@ -112,9 +112,6 @@ For class-level equivalents, see [Tracker](tracker.md) and
         - cached_output
         - resolve_canonical_run_id
         - get_run_result
-        - get_config_bundle
-        - get_config_values
-        - get_config_value
         - get_artifact
         - register_artifact_facet_parser
         - log_artifact
@@ -124,16 +121,14 @@ For class-level equivalents, see [Tracker](tracker.md) and
         - log_dataframe
         - log_meta
         - ingest
-        - canonicalize_gtfs
-        - register_views
         - find_run
         - find_runs
         - find_latest_run
         - find_matching_run
         - find_matching_runs
         - run_set
-        - db_session
-        - run_query
+        - query_df
+        - query_rows
         - config_run_query
         - config_run_rows
         - pivot_facets

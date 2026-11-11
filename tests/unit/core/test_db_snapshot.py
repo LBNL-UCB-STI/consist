@@ -40,9 +40,8 @@ def test_snapshot_creates_copy_and_sidecar(tmp_path: Path) -> None:
     try:
         assert len(snapshot_db.find_runs(limit=1)) >= 1
     finally:
-        snapshot_db.engine.dispose()
-        if tracker.engine is not None:
-            tracker.engine.dispose()
+        snapshot_db.close()
+        tracker.close()
 
 
 def test_snapshot_without_checkpoint_copies_wal_when_present(tmp_path: Path) -> None:
@@ -58,7 +57,7 @@ def test_snapshot_without_checkpoint_copies_wal_when_present(tmp_path: Path) -> 
         destination_wal_path = Path(f"{destination}.wal")
         assert destination_wal_path.exists()
     finally:
-        db.engine.dispose()
+        db.close()
 
 
 def test_snapshot_rejects_in_memory_db(tmp_path: Path) -> None:
@@ -67,4 +66,4 @@ def test_snapshot_rejects_in_memory_db(tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="in-memory"):
             db.snapshot_to(tmp_path / "snapshot.duckdb")
     finally:
-        db.engine.dispose()
+        db.close()

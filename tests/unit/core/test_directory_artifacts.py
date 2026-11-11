@@ -21,7 +21,7 @@ from consist.core.directory_artifacts import (
     validate_shapefile_bundle_root,
 )
 from consist.core.tracker import Tracker
-from consist.models.artifact import Artifact
+from tests.helpers.artifact_factory import make_artifact as Artifact
 
 
 def test_directory_manifest_is_stable_and_includes_empty_directories(
@@ -227,7 +227,7 @@ def test_log_archive_and_strictly_hydrate_shapefile_bundle(
     assert logged.driver == "shapefile"
     assert logged.meta["file_bundle_artifact"] is True
     assert logged.meta["file_bundle_entry"] == "roads.shp"
-    assert logged.hash == logged.meta["file_bundle_manifest"]["tree_hash"]
+    assert logged.anchor.hex == logged.meta["file_bundle_manifest"]["tree_hash"]
 
     archive_root = tmp_path / "archive"
     archived = tracker.archive_run_outputs("spatial_completed", archive_root)
@@ -376,7 +376,9 @@ def test_shapefile_bundle_archive_move_removes_source_and_updates_runtime_path(
 
     assert archived == tmp_path / "archive" / "outputs" / "roads.shp"
     assert not list(source.parent.glob("roads.*"))
-    assert artifact.abs_path == str((archived / "roads.shp").resolve())
+    assert tracker.get_run_outputs("spatial_move")["roads"].abs_path == str(
+        (archived / "roads.shp").resolve()
+    )
 
 
 def test_shapefile_bundle_archive_rejects_unrelated_existing_member(
@@ -484,8 +486,11 @@ def test_legacy_shapefile_artifact_cannot_be_archived_or_hydrated(
     _write_shapefile_bundle(source)
     with tracker.start_run("spatial_legacy", model="spatial"):
         legacy = tracker.log_output(source, key="roads")
-        legacy.meta = {}
+        legacy = legacy.with_meta({}, merge=False, preserve_system_keys=False)
         tracker._sync_artifact_to_db(legacy, "output")
+        tracker.db.update_artifact_meta(
+            legacy, {}, merge=False, preserve_system_keys=False
+        )
 
     with pytest.raises(ValueError, match="legacy Shapefile"):
         tracker.archive_artifact(legacy, tmp_path / "archive")
@@ -652,7 +657,9 @@ def test_directory_archive_move_removes_source_and_updates_runtime_path(
 
     assert archived == tmp_path / "archive" / "outputs" / "raw_od_skims.zarr"
     assert not source.exists()
-    assert artifact.abs_path == str(archived.resolve())
+    assert tracker.get_run_outputs("beam_move")["skims"].abs_path == str(
+        archived.resolve()
+    )
 
 
 def test_top_level_log_output_declares_directory_artifact(
@@ -687,15 +694,10 @@ def test_direct_zarr_output_logging_is_an_immutable_directory_artifact(
 
     assert logged.driver == "zarr"
     assert logged.meta["directory_artifact"] is True
-    assert logged.hash == logged.meta["directory_manifest"]["tree_hash"]
-    assert logged.meta["content_identity"] == f"sha256:manifest-v1:{logged.hash}"
-    assert logged.content_id is not None
-    content = tracker.db.find_artifact_content(
-        content_hash=logged.meta["content_identity"],
-        driver="zarr",
-    )
-    assert content is not None
-    assert content.id == logged.content_id
+    assert logged.anchor.hex == logged.meta["directory_manifest"]["tree_hash"]
+    assert logged.hash == f"sha256:manifest-v1:{logged.anchor.hex}"
+    assert logged.identity.verifiable
+    assert tracker.ledger.get_manifest(logged.identity.anchor) is not None
     assert consist.is_zarr_artifact(logged)
 
 
@@ -734,6 +736,9 @@ def test_legacy_zarr_artifact_without_manifest_cannot_be_archived(
     tracker: Tracker,
     tmp_path: Path,
 ) -> None:
+    from dataclasses import replace as dc_replace
+    from consist.digest import Digest, Identity
+
     source = tracker.run_dir / "outputs" / "raw_od_skims.zarr"
     source.mkdir(parents=True)
     (source / "0.0").write_bytes(b"skim")
@@ -745,7 +750,10 @@ def test_legacy_zarr_artifact_without_manifest_cannot_be_archived(
             driver="zarr",
         )
 
-    legacy.meta = {}
+    legacy = dc_replace(
+        legacy.with_meta({}, merge=False, preserve_system_keys=False),
+        identity=Identity(anchor=Digest("legacy-v1:unverified", "a" * 64)),
+    )
     with pytest.raises(ValueError, match="legacy Zarr"):
         tracker.archive_artifact(legacy, tmp_path / "archive")
 
@@ -758,13 +766,14 @@ def test_legacy_zarr_artifact_without_manifest_cannot_be_hydrated(
     source.mkdir(parents=True)
     (source / "0.0").write_bytes(b"skim")
     with tracker.start_run("beam_legacy_zarr_hydration", model="beam"):
-        legacy = tracker.log_artifact(
-            source,
+        legacy = Artifact(
             key="skims",
-            direction="output",
+            container_uri="workspace://outputs/raw_od_skims.zarr",
             driver="zarr",
+            hash="legacy-v1:unverified:" + "a" * 64,
+            run_id="beam_legacy_zarr_hydration",
+            meta={},
         )
-        legacy.meta = {}
         tracker._sync_artifact_to_db(legacy, "output")
 
     hydrated = tracker.hydrate_run_outputs_to_destinations(
@@ -1102,8 +1111,7 @@ def test_directory_hydration_reopens_snapshot_with_original_archive_only(
             db_fallback="never",
         )
     finally:
-        if reopened.engine is not None:
-            reopened.engine.dispose()
+        reopened.close()
 
     assert hydrated["skims"].status == "materialized_directory_from_filesystem"
     assert destination.is_dir()
@@ -1519,7 +1527,7 @@ def test_partial_directory_rollback_and_stage_hydration_completion(
 
 
 def test_artifact_layout_and_record_sync_helpers(tmp_path: Path) -> None:
-    from consist.models.artifact import Artifact, merge_artifact_output_meta
+    from consist.meta import merge_artifact_output_meta
     from consist.models.run import ConsistRecord, Run
 
     bundle_dir = tmp_path / "bundle_dir"
@@ -1564,11 +1572,11 @@ def test_artifact_layout_and_record_sync_helpers(tmp_path: Path) -> None:
         abs_path=str(entry_file.resolve()),
     )
     assert len(matched) == 1
-    assert bundle_art.meta["custom"] == "new"
-    assert bundle_art.abs_path == str(entry_file.resolve())
-    record.sync_output_artifact(
+    assert matched[0].meta["custom"] == "new"
+    assert matched[0].abs_path == str(entry_file.resolve())
+    matched_preserved = record.sync_output_artifact(
         artifact_id=bundle_art.id,
         abs_path=str(bundle_dir.resolve()),
         preserve_existing_abs_path=True,
     )
-    assert bundle_art.abs_path == str(entry_file.resolve())
+    assert matched_preserved[0].abs_path == str(entry_file.resolve())

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 import pytest
-from sqlmodel import Field, SQLModel, Session, text
+from sqlmodel import Field, SQLModel
 
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
 
@@ -43,7 +43,7 @@ def test_grouped_view_if_exists_error(tracker, tmp_path) -> None:
             facet_index=True,
         )
 
-    schema_id = artifact.meta.get("schema_id")
+    schema_id = artifact.schema_id
     assert schema_id is not None
 
     tracker.create_grouped_view(
@@ -93,7 +93,7 @@ def test_grouped_view_schema_compatible_mode(tracker, tmp_path) -> None:
             facet_index=True,
         )
 
-    schema_id = base_artifact.meta.get("schema_id")
+    schema_id = base_artifact.schema_id
     assert schema_id is not None
 
     tracker.create_grouped_view(
@@ -104,9 +104,10 @@ def test_grouped_view_schema_compatible_mode(tracker, tmp_path) -> None:
         mode="cold_only",
         schema_compatible=False,
     )
-    with tracker.engine.connect() as conn:
-        exact_count = conn.execute(text("SELECT COUNT(*) FROM v_compat_exact")).scalar()
-    assert exact_count == 1
+    assert tracker.ledger is not None
+    with tracker.ledger.exec_cursor() as cur:
+        exact_row = cur.execute("SELECT COUNT(*) FROM v_compat_exact").fetchone()
+    assert exact_row is not None and exact_row[0] == 1
 
     tracker.create_grouped_view(
         "v_compat_wide",
@@ -116,9 +117,9 @@ def test_grouped_view_schema_compatible_mode(tracker, tmp_path) -> None:
         mode="cold_only",
         schema_compatible=True,
     )
-    with tracker.engine.connect() as conn:
-        wide_count = conn.execute(text("SELECT COUNT(*) FROM v_compat_wide")).scalar()
-    assert wide_count == 2
+    with tracker.ledger.exec_cursor() as cur:
+        wide_row = cur.execute("SELECT COUNT(*) FROM v_compat_wide").fetchone()
+    assert wide_row is not None and wide_row[0] == 2
 
 
 def test_grouped_view_accepts_schema_class_selector(tracker, tmp_path) -> None:
@@ -149,9 +150,10 @@ def test_grouped_view_accepts_schema_class_selector(tracker, tmp_path) -> None:
         params=["artifact_family=schema_class"],
         mode="cold_only",
     )
-    with tracker.engine.connect() as conn:
-        count = conn.execute(text("SELECT COUNT(*) FROM v_schema_class")).scalar()
-    assert count == 1
+    assert tracker.ledger is not None
+    with tracker.ledger.exec_cursor() as cur:
+        row = cur.execute("SELECT COUNT(*) FROM v_schema_class").fetchone()
+    assert row is not None and row[0] == 1
 
 
 def test_grouped_view_selector_validation(tracker, tmp_path) -> None:
@@ -172,6 +174,7 @@ def test_resolve_schema_compatible_ids_respects_table_name_and_subset_rules(
     tracker,
 ) -> None:
     assert tracker.db is not None
+    assert tracker.ledger is not None
 
     base_schema_id = "schema_base"
     superset_schema_id = "schema_superset"
@@ -179,101 +182,113 @@ def test_resolve_schema_compatible_ids_respects_table_name_and_subset_rules(
     wrong_table_schema_id = "schema_wrong_table"
     empty_schema_id = "schema_empty"
 
-    with Session(tracker.engine) as session:
-        session.add_all(
-            [
-                ArtifactSchema(
-                    id=base_schema_id,
-                    summary_json={"table_name": "events"},
-                    profile_version=1,
-                ),
-                ArtifactSchema(
-                    id=superset_schema_id,
-                    summary_json={"table_name": "events"},
-                    profile_version=1,
-                ),
-                ArtifactSchema(
-                    id=subset_schema_id,
-                    summary_json={"table_name": "events"},
-                    profile_version=1,
-                ),
-                ArtifactSchema(
-                    id=wrong_table_schema_id,
-                    summary_json={"table_name": "households"},
-                    profile_version=1,
-                ),
-                ArtifactSchema(
-                    id=empty_schema_id,
-                    summary_json={"table_name": "events"},
-                    profile_version=1,
-                ),
-            ]
-        )
-        session.add_all(
-            [
-                ArtifactSchemaField(
-                    schema_id=base_schema_id,
-                    ordinal_position=1,
-                    name="id",
-                    logical_type="integer",
-                    nullable=False,
-                ),
-                ArtifactSchemaField(
-                    schema_id=base_schema_id,
-                    ordinal_position=2,
-                    name="value",
-                    logical_type="double",
-                    nullable=True,
-                ),
-                ArtifactSchemaField(
-                    schema_id=superset_schema_id,
-                    ordinal_position=1,
-                    name="id",
-                    logical_type="integer",
-                    nullable=False,
-                ),
-                ArtifactSchemaField(
-                    schema_id=superset_schema_id,
-                    ordinal_position=2,
-                    name="value",
-                    logical_type="double",
-                    nullable=True,
-                ),
-                ArtifactSchemaField(
-                    schema_id=superset_schema_id,
-                    ordinal_position=3,
-                    name="mode",
-                    logical_type="varchar",
-                    nullable=True,
-                ),
-                ArtifactSchemaField(
-                    schema_id=subset_schema_id,
-                    ordinal_position=1,
-                    name="id",
-                    logical_type="integer",
-                    nullable=False,
-                ),
-                ArtifactSchemaField(
-                    schema_id=wrong_table_schema_id,
-                    ordinal_position=1,
-                    name="id",
-                    logical_type="integer",
-                    nullable=False,
-                ),
-                ArtifactSchemaField(
-                    schema_id=wrong_table_schema_id,
-                    ordinal_position=2,
-                    name="value",
-                    logical_type="double",
-                    nullable=True,
-                ),
-            ]
-        )
-        session.commit()
+    tracker.ledger.upsert_artifact_schema(
+        ArtifactSchema(
+            id=base_schema_id,
+            summary_json={"table_name": "events"},
+            profile_version=1,
+        ),
+        [
+            ArtifactSchemaField(
+                schema_id=base_schema_id,
+                ordinal_position=1,
+                name="id",
+                logical_type="integer",
+                nullable=False,
+            ),
+            ArtifactSchemaField(
+                schema_id=base_schema_id,
+                ordinal_position=2,
+                name="value",
+                logical_type="double",
+                nullable=True,
+            ),
+        ],
+    )
+    tracker.ledger.upsert_artifact_schema(
+        ArtifactSchema(
+            id=superset_schema_id,
+            summary_json={"table_name": "events"},
+            profile_version=1,
+        ),
+        [
+            ArtifactSchemaField(
+                schema_id=superset_schema_id,
+                ordinal_position=1,
+                name="id",
+                logical_type="integer",
+                nullable=False,
+            ),
+            ArtifactSchemaField(
+                schema_id=superset_schema_id,
+                ordinal_position=2,
+                name="value",
+                logical_type="double",
+                nullable=True,
+            ),
+            ArtifactSchemaField(
+                schema_id=superset_schema_id,
+                ordinal_position=3,
+                name="mode",
+                logical_type="varchar",
+                nullable=True,
+            ),
+        ],
+    )
+    tracker.ledger.upsert_artifact_schema(
+        ArtifactSchema(
+            id=subset_schema_id,
+            summary_json={"table_name": "events"},
+            profile_version=1,
+        ),
+        [
+            ArtifactSchemaField(
+                schema_id=subset_schema_id,
+                ordinal_position=1,
+                name="id",
+                logical_type="integer",
+                nullable=False,
+            ),
+        ],
+    )
+    tracker.ledger.upsert_artifact_schema(
+        ArtifactSchema(
+            id=wrong_table_schema_id,
+            summary_json={"table_name": "households"},
+            profile_version=1,
+        ),
+        [
+            ArtifactSchemaField(
+                schema_id=wrong_table_schema_id,
+                ordinal_position=1,
+                name="id",
+                logical_type="integer",
+                nullable=False,
+            ),
+            ArtifactSchemaField(
+                schema_id=wrong_table_schema_id,
+                ordinal_position=2,
+                name="value",
+                logical_type="double",
+                nullable=True,
+            ),
+        ],
+    )
+    tracker.ledger.upsert_artifact_schema(
+        ArtifactSchema(
+            id=empty_schema_id,
+            summary_json={"table_name": "events"},
+            profile_version=1,
+        ),
+        [],
+    )
 
-        compatible_ids = tracker.db._resolve_schema_compatible_ids(
-            session=session,
-            schema_id=base_schema_id,
-        )
+    all_schemas = tracker.ledger.list_artifact_schemas()
+    schema_fields_by_id = tracker.db._load_schema_field_names()
+    compatible_ids = tracker.db._resolve_schema_compatible_ids(
+        schema_id=base_schema_id,
+        all_schemas=all_schemas,
+        schema_fields_by_id=schema_fields_by_id,
+    )
 
     assert compatible_ids == {base_schema_id, superset_schema_id, subset_schema_id}

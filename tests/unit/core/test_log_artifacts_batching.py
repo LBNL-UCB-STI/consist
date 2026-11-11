@@ -1,15 +1,12 @@
 from pathlib import Path
 
 import pytest
-from sqlmodel import Session, select
 
 from consist.core.config_canonicalization import (
     ArtifactSpec,
     CanonicalConfigIdentity,
     ConfigContribution,
 )
-from consist.models.artifact import Artifact
-from consist.models.run import Run, RunArtifactLink
 from consist.types import ExecutionOptions
 
 
@@ -42,11 +39,13 @@ def test_log_artifacts_batches_flush_and_db_sync(tracker, run_dir: Path, monkeyp
         )
 
     def counting_sync_artifact(
-        artifact, run_id, direction, *, profile_label=None
+        artifact, run_id, direction, *, profile_label=None, **kwargs
     ) -> None:
         nonlocal sync_single_calls
         sync_single_calls += 1
-        original_sync_artifact(artifact, run_id, direction, profile_label=profile_label)
+        original_sync_artifact(
+            artifact, run_id, direction, profile_label=profile_label, **kwargs
+        )
 
     with tracker.start_run("run_batch_log_artifacts", "test_model"):
         monkeypatch.setattr(tracker.persistence, "_flush_json_now", counting_flush_now)
@@ -67,13 +66,12 @@ def test_log_artifacts_batches_flush_and_db_sync(tracker, run_dir: Path, monkeyp
 
     assert [art.key for art in tracker.last_run.outputs] == ["first", "second"]
 
-    with Session(tracker.engine) as session:
-        links = session.exec(
-            select(RunArtifactLink).where(
-                RunArtifactLink.run_id == "run_batch_log_artifacts"
-            )
-        ).all()
-    assert len(links) == 2
+    with tracker.ledger.exec_cursor() as cur:
+        bindings = cur.execute(
+            "SELECT artifact_id, direction FROM main.run_binding WHERE run_id = ?",
+            ["run_batch_log_artifacts"],
+        ).fetchall()
+    assert len(bindings) == 2
 
 
 def test_log_artifact_single_call_keeps_immediate_sync(
@@ -107,12 +105,14 @@ def test_log_artifact_single_call_keeps_immediate_sync(
     seen_profile_labels: list[str | None] = []
 
     def counting_sync_artifact(
-        artifact, run_id, direction, *, profile_label=None
+        artifact, run_id, direction, *, profile_label=None, **kwargs
     ) -> None:
         nonlocal sync_single_calls
         sync_single_calls += 1
         seen_profile_labels.append(profile_label)
-        original_sync_artifact(artifact, run_id, direction, profile_label=profile_label)
+        original_sync_artifact(
+            artifact, run_id, direction, profile_label=profile_label, **kwargs
+        )
 
     with tracker.start_run("run_single_log_artifact", "test_model"):
         monkeypatch.setattr(tracker.persistence, "_flush_json_now", counting_flush_now)
@@ -161,16 +161,18 @@ def test_begin_run_inputs_batch_flush_and_db_sync(tracker, run_dir: Path, monkey
         )
 
     def counting_sync_artifact(
-        artifact, run_id, direction, *, profile_label=None
+        artifact, run_id, direction, *, profile_label=None, **kwargs
     ) -> None:
         nonlocal sync_single_calls
         sync_single_calls += 1
-        original_sync_artifact(artifact, run_id, direction, profile_label=profile_label)
+        original_sync_artifact(
+            artifact, run_id, direction, profile_label=profile_label, **kwargs
+        )
 
-    def counting_bulk_lookup(lookups):
+    def counting_bulk_lookup(lookups, **kwargs):
         nonlocal bulk_lookup_calls
         bulk_lookup_calls += 1
-        return original_bulk_lookup(lookups)
+        return original_bulk_lookup(lookups, **kwargs)
 
     def counting_single_lookup(*args, **kwargs):
         nonlocal single_lookup_calls
@@ -209,13 +211,12 @@ def test_begin_run_inputs_batch_flush_and_db_sync(tracker, run_dir: Path, monkey
 
     tracker.end_run()
 
-    with Session(tracker.engine) as session:
-        links = session.exec(
-            select(RunArtifactLink).where(
-                RunArtifactLink.run_id == "run_batch_begin_inputs"
-            )
-        ).all()
-    assert len(links) == 2
+    with tracker.ledger.exec_cursor() as cur:
+        bindings = cur.execute(
+            "SELECT artifact_id, direction FROM main.run_binding WHERE run_id = ?",
+            ["run_batch_begin_inputs"],
+        ).fetchall()
+    assert len(bindings) == 2
 
 
 def test_begin_run_existing_artifact_input_preserves_parent_and_link(
@@ -235,10 +236,10 @@ def test_begin_run_existing_artifact_input_preserves_parent_and_link(
 
     original_bulk_lookup = tracker.db.find_latest_artifacts_at_uris
 
-    def counting_bulk_lookup(lookups):
+    def counting_bulk_lookup(lookups, **kwargs):
         nonlocal bulk_lookup_calls
         bulk_lookup_calls += 1
-        return original_bulk_lookup(lookups)
+        return original_bulk_lookup(lookups, **kwargs)
 
     monkeypatch.setattr(
         tracker.db, "find_latest_artifacts_at_uris", counting_bulk_lookup
@@ -257,13 +258,14 @@ def test_begin_run_existing_artifact_input_preserves_parent_and_link(
 
     tracker.end_run()
 
-    with Session(tracker.engine) as session:
-        links = session.exec(
-            select(RunArtifactLink).where(RunArtifactLink.run_id == "consumer_run")
-        ).all()
-    assert len(links) == 1
-    assert links[0].artifact_id == upstream.id
-    assert links[0].direction == "input"
+    with tracker.ledger.exec_cursor() as cur:
+        bindings = cur.execute(
+            "SELECT artifact_id, direction FROM main.run_binding WHERE run_id = ?",
+            ["consumer_run"],
+        ).fetchall()
+    assert len(bindings) == 1
+    assert bindings[0][0] == upstream.id
+    assert bindings[0][1] == "input"
 
 
 def test_begin_run_path_input_uses_bulk_prefetched_parent(tracker, run_dir: Path):
@@ -302,15 +304,14 @@ def test_sync_artifacts_merges_existing_artifact_rows(tracker, run_dir: Path):
             direction="output",
         )
 
-        artifact.meta["merged_marker"] = "updated"
+        updated_artifact = artifact.with_meta({"merged_marker": "updated"})
         tracker.db.sync_artifacts(
-            artifacts=[artifact],
+            artifacts=[updated_artifact],
             run_id="run_existing_artifact_merge",
             direction="output",
         )
 
-    with Session(tracker.engine) as session:
-        persisted = session.get(Artifact, artifact.id)
+    persisted = tracker.db.get_artifact(artifact.id)
     assert persisted is not None
     assert persisted.meta["merged_marker"] == "updated"
 
@@ -337,15 +338,14 @@ def test_cache_hit_persists_output_links_and_completion(tracker, run_dir: Path):
         assert tracker.current_consist.cached_run is not None
         assert tracker.current_consist.cached_run.id == "cache_seed_persisted_links"
 
-    with Session(tracker.engine) as session:
-        links = session.exec(
-            select(RunArtifactLink).where(
-                RunArtifactLink.run_id == "cache_hit_persisted_links"
-            )
-        ).all()
-        run = session.get(Run, "cache_hit_persisted_links")
+    with tracker.ledger.exec_cursor() as cur:
+        bindings = cur.execute(
+            "SELECT direction FROM main.run_binding WHERE run_id = ?",
+            ["cache_hit_persisted_links"],
+        ).fetchall()
+    run = tracker.db.get_run("cache_hit_persisted_links")
 
-    assert [link.direction for link in links] == ["output"]
+    assert [row[0] for row in bindings] == ["output"]
     assert run is not None
     assert run.status == "completed"
     assert run.ended_at is not None
@@ -371,11 +371,13 @@ def test_tracker_run_output_paths_batch_db_sync(tracker, monkeypatch):
         )
 
     def counting_sync_artifact(
-        artifact, run_id, direction, *, profile_label=None
+        artifact, run_id, direction, *, profile_label=None, **kwargs
     ) -> None:
         nonlocal sync_single_calls
         sync_single_calls += 1
-        original_sync_artifact(artifact, run_id, direction, profile_label=profile_label)
+        original_sync_artifact(
+            artifact, run_id, direction, profile_label=profile_label, **kwargs
+        )
 
     monkeypatch.setattr(tracker.db, "sync_artifacts", counting_sync_artifacts)
     monkeypatch.setattr(tracker.db, "sync_artifact", counting_sync_artifact)
@@ -413,11 +415,13 @@ def test_tracker_run_inferred_dict_outputs_batch_db_sync(tracker, monkeypatch):
         )
 
     def counting_sync_artifact(
-        artifact, run_id, direction, *, profile_label=None
+        artifact, run_id, direction, *, profile_label=None, **kwargs
     ) -> None:
         nonlocal sync_single_calls
         sync_single_calls += 1
-        original_sync_artifact(artifact, run_id, direction, profile_label=profile_label)
+        original_sync_artifact(
+            artifact, run_id, direction, profile_label=profile_label, **kwargs
+        )
 
     monkeypatch.setattr(tracker.db, "sync_artifacts", counting_sync_artifacts)
     monkeypatch.setattr(tracker.db, "sync_artifact", counting_sync_artifact)
@@ -464,11 +468,13 @@ def test_log_h5_container_batches_table_sync(tracker, run_dir: Path, monkeypatch
         )
 
     def counting_sync_artifact(
-        artifact, run_id, direction, *, profile_label=None
+        artifact, run_id, direction, *, profile_label=None, **kwargs
     ) -> None:
         nonlocal sync_single_calls
         sync_single_calls += 1
-        original_sync_artifact(artifact, run_id, direction, profile_label=profile_label)
+        original_sync_artifact(
+            artifact, run_id, direction, profile_label=profile_label, **kwargs
+        )
 
     monkeypatch.setattr(tracker.db, "sync_artifacts", counting_sync_artifacts)
     monkeypatch.setattr(tracker.db, "sync_artifact", counting_sync_artifact)
@@ -496,13 +502,11 @@ def test_log_artifacts_with_facets_keeps_batched_artifact_sync(
 
     sync_batch_calls = 0
     sync_single_calls = 0
-    combined_calls = 0
-    facet_bundle_calls = 0
+    persistence_facet_calls = 0
 
     original_sync_artifacts = tracker.db.sync_artifacts
     original_sync_artifact = tracker.db.sync_artifact
-    original_sync_with_facet = tracker.db.sync_artifact_with_facet_bundle
-    original_facet_bundle = tracker.db.persist_artifact_facet_bundle
+    original_persistence_facet = tracker.persistence.sync_artifact_with_facet_bundle
 
     def counting_sync_artifacts(*, artifacts, run_id, direction) -> None:
         nonlocal sync_batch_calls
@@ -514,38 +518,29 @@ def test_log_artifacts_with_facets_keeps_batched_artifact_sync(
         )
 
     def counting_sync_artifact(
-        artifact, run_id, direction, *, profile_label=None
+        artifact, run_id, direction, *, profile_label=None, **kwargs
     ) -> None:
         nonlocal sync_single_calls
         sync_single_calls += 1
-        original_sync_artifact(artifact, run_id, direction, profile_label=profile_label)
-
-    def counting_sync_with_facet(*args, **kwargs) -> None:
-        nonlocal combined_calls
-        combined_calls += 1
-        original_sync_with_facet(*args, **kwargs)
-
-    def counting_facet_bundle(*, artifact, facet, meta_updates, kv_rows=None) -> None:
-        nonlocal facet_bundle_calls
-        facet_bundle_calls += 1
-        original_facet_bundle(
-            artifact=artifact,
-            facet=facet,
-            meta_updates=meta_updates,
-            kv_rows=kv_rows,
+        original_sync_artifact(
+            artifact, run_id, direction, profile_label=profile_label, **kwargs
         )
+
+    def counting_persistence_facet(*args, **kwargs):
+        nonlocal persistence_facet_calls
+        persistence_facet_calls += 1
+        return original_persistence_facet(*args, **kwargs)
 
     monkeypatch.setattr(tracker.db, "sync_artifacts", counting_sync_artifacts)
     monkeypatch.setattr(tracker.db, "sync_artifact", counting_sync_artifact)
     monkeypatch.setattr(
-        tracker.db, "sync_artifact_with_facet_bundle", counting_sync_with_facet
-    )
-    monkeypatch.setattr(
-        tracker.db, "persist_artifact_facet_bundle", counting_facet_bundle
+        tracker.persistence,
+        "sync_artifact_with_facet_bundle",
+        counting_persistence_facet,
     )
 
     with tracker.start_run("run_batch_log_artifacts_facets", "test_model"):
-        tracker.log_artifacts(
+        logged = tracker.log_artifacts(
             {"first": first, "second": second},
             facets_by_key={
                 "first": {"artifact_family": "demo", "ordinal": 1},
@@ -554,10 +549,14 @@ def test_log_artifacts_with_facets_keeps_batched_artifact_sync(
             facet_index=True,
         )
 
+    assert persistence_facet_calls == 2
     assert sync_batch_calls == 1
     assert sync_single_calls == 0
-    assert combined_calls == 0
-    assert facet_bundle_calls == 2
+
+    first_kv = tracker.db.get_artifact_kv(logged["first"].id)
+    second_kv = tracker.db.get_artifact_kv(logged["second"].id)
+    assert {row.key_path for row in first_kv} == {"artifact_family", "ordinal"}
+    assert {row.key_path for row in second_kv} == {"artifact_family", "ordinal"}
 
 
 def test_apply_config_contribution_batches_artifact_sync(
@@ -584,11 +583,13 @@ def test_apply_config_contribution_batches_artifact_sync(
         )
 
     def counting_sync_artifact(
-        artifact, run_id, direction, *, profile_label=None
+        artifact, run_id, direction, *, profile_label=None, **kwargs
     ) -> None:
         nonlocal sync_single_calls
         sync_single_calls += 1
-        original_sync_artifact(artifact, run_id, direction, profile_label=profile_label)
+        original_sync_artifact(
+            artifact, run_id, direction, profile_label=profile_label, **kwargs
+        )
 
     monkeypatch.setattr(tracker.db, "sync_artifacts", counting_sync_artifacts)
     monkeypatch.setattr(tracker.db, "sync_artifact", counting_sync_artifact)

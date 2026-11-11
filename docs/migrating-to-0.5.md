@@ -34,7 +34,7 @@ If your `0.4.x` database references terabytes of cold simulation outputs on shar
 consist migrate provenance.duckdb --quick
 ```
 
-In `--quick` mode, `consist migrate` upgrades the database structure and ingested DuckDB tables immediately without reading cold files from disk.
+In `--quick` mode, `consist migrate` upgrades the database structure, captured table schemas, scenario coupler snapshots, and ingested DuckDB tables immediately without reading cold files from disk. Unverified file entries remain visible in lineage and queries as historical fingerprints until promoted with `consist promote`.
 
 ### Opt-In Automatic Upgrade on Startup
 
@@ -81,10 +81,10 @@ Whenever you want to promote historical artifacts to full content fingerprints (
 
 ```bash
 # Promote a single artifact or all unverified artifacts from a run:
-consist promote provenance.duckdb <artifact-id-or-run-id> --path /path/to/archive/file.parquet
+consist promote provenance.duckdb <artifact-id-or-run-id> --mount archive=/path/to/archive
 ```
 
-When `--path` still matches the original `0.4.x` file statistics, Consist hashes the file, upgrades its fingerprint in place, and enables full cache matching and `ViewFactory` queries for that artifact.
+When the restored files match the original `0.4.x` file statistics (or explicit `--path` bytes), Consist hashes the files, upgrades their fingerprints in place, and re-enables full cache matching and `ViewFactory` queries for the promoted run.
 
 ---
 
@@ -151,6 +151,35 @@ For lightweight runs without a DuckDB database, instantiate a DB-less `Tracker`:
 from consist import Tracker
 
 tracker = Tracker(run_dir="./runs", db_path=None)
+```
+
+### Analytical Queries Without SQLAlchemy Sessions (`query_df`, `query_rows`, `config_run_rows`)
+
+Consist `0.5.0` removes `duckdb-engine`, `consist.db_session()`, and SQLAlchemy `Executable`-based `consist.run_query(...)`, routing all provenance and analytical SQL through a single native DuckDB connection:
+
+- Replace raw SQL or DataFrame queries with `tracker.query_df(sql, params=...)` (or `consist.query_df(...)`).
+- Replace ORM model queries with `tracker.query_rows(sql, params=..., model=MyModel)` (or `consist.query_rows(..., model=MyModel)`), which validates rows into Pydantic or `SQLModel` instances.
+- Replace config-table SQLAlchemy joins with `consist.config_run_rows(MyConfigModel, link_table=MyConfigRunLink, where={"key": "sample_rate"}, tracker=tracker)` or `consist.pivot_facets(...)` (which now returns a `ParameterizedSQL(sql, params)` pair ready for `tracker.query_df(q.sql, q.params)`).
+- Legacy dynamic ORM view helpers (`consist.view(...)`, `consist.register_views(...)`, `tracker.view(...)`, `tracker.register_views(...)`) now raise `DeprecatedViewsError` with migration guidance; create SQL hybrid views via `tracker.create_view("v_persons", "persons", schema_model=Person)` and query them with `tracker.query_df(...)`, `tracker.query_rows(..., model=Person)`, or `consist.api.ibis_view(tracker, model=Person)`.
+
+```python
+from consist import ParameterizedSQL, pivot_facets
+
+df = tracker.query_df(
+    "SELECT id, model_name FROM run WHERE status = ?",
+    ["completed"],
+)
+
+q: ParameterizedSQL = pivot_facets(keys=["sample_rate", "seed"], namespace="sim")
+facet_df = tracker.query_df(q.sql, q.params)
+```
+
+### Per-Run Recovery Manifests Moved to `consist.store.manifest`
+
+Per-run store reconstruction helpers (`RunManifest`, `export_run_manifest`, `import_run_manifest`, `rebuild_store_from_manifests`) now live under `consist.store.manifest` (keeping `consist.json` as the human-readable run directory snapshot and importing without loading `duckdb` until store reconstruction runs):
+
+```python
+from consist.store.manifest import export_run_manifest, rebuild_store_from_manifests
 ```
 
 ---

@@ -4,18 +4,18 @@ from pathlib import Path
 import uuid
 
 import pytest
-from sqlmodel import col, delete, select
 
+from consist.artifact import Artifact
 from consist.core.coupler import Coupler
 from consist.core.tracker import Tracker
-from consist.models.artifact import Artifact
 from consist.models.run import RunCouplerSnapshot
+from tests.helpers.artifact_factory import make_artifact
 
 
 def _create_artifact(
     *, key: str, uri: str = "workspace://test.csv", content_hash: str = "hash1"
 ) -> Artifact:
-    return Artifact(
+    return make_artifact(
         id=uuid.uuid4(),
         key=key,
         container_uri=uri,
@@ -29,11 +29,14 @@ def test_run_coupler_snapshot_table_init(tmp_path: Path) -> None:
     run_dir = tmp_path / "runs"
     run_dir.mkdir(parents=True, exist_ok=True)
     tracker = Tracker(run_dir=run_dir, db_path=str(db_path))
-    db = tracker.db
-    assert db is not None
-    with db.session_scope() as session:
-        rows = session.exec(select(RunCouplerSnapshot)).all()
+    try:
+        rows = tracker.query_rows(
+            "SELECT * FROM main.run_coupler_snapshot",
+            model=RunCouplerSnapshot,
+        )
         assert len(rows) == 0
+    finally:
+        tracker.close()
 
 
 def test_coupler_mapping_protocol_methods() -> None:
@@ -81,16 +84,9 @@ def test_sync_and_get_snapshot(tracker: Tracker) -> None:
     art1 = _create_artifact(key="matrix", content_hash="hash_m1")
     art2 = _create_artifact(key="table", content_hash="hash_t1")
 
-    # Persist artifacts first
-    with db.session_scope() as session:
-        session.add(art1)
-        session.add(art2)
-        session.commit()
-        session.refresh(art1)
-        session.refresh(art2)
-        session.expunge_all()
+    db.upsert_artifact(art1)
+    db.upsert_artifact(art2)
 
-    # Test artifacts argument
     db.sync_run_coupler_snapshot(
         run_id="step_1",
         phase="post",
@@ -99,18 +95,14 @@ def test_sync_and_get_snapshot(tracker: Tracker) -> None:
         artifacts={"matrix": art1, "table": art2},
     )
 
-    # Fetch snapshot
     restored = db.get_run_coupler_snapshot("step_1", phase="post")
     assert len(restored) == 2
     assert "matrix" in restored
     assert "table" in restored
     assert str(restored["matrix"].id) == str(art1.id)
-    assert restored["matrix"].hash == "hash_m1"
-
-    # Verify session expunge: accessing attributes outside session succeeds
+    assert restored["matrix"].hash == art1.hash
     assert restored["table"].key == "table"
 
-    # Non-existent snapshot
     assert (
         db.get_run_coupler_snapshot("non_existent", phase="post", must_exist=False)
         == {}
@@ -125,14 +117,10 @@ def test_sync_run_coupler_snapshot_overwrite(tracker: Tracker) -> None:
 
     art1 = _create_artifact(key="output_v1", content_hash="h1")
     art2 = _create_artifact(key="output_v2", content_hash="h2")
+    assert art1.hash != art2.hash
 
-    with db.session_scope() as session:
-        session.add(art1)
-        session.add(art2)
-        session.commit()
-        session.refresh(art1)
-        session.refresh(art2)
-        session.expunge_all()
+    db.upsert_artifact(art1)
+    db.upsert_artifact(art2)
 
     db.sync_run_coupler_snapshot(
         run_id="step_a",
@@ -143,9 +131,8 @@ def test_sync_run_coupler_snapshot_overwrite(tracker: Tracker) -> None:
     )
     s1 = db.get_run_coupler_snapshot("step_a", phase="post")
     assert set(s1.keys()) == {"role1"}
-    assert s1["role1"].hash == "h1"
+    assert s1["role1"].hash == art1.hash
 
-    # Overwrite with art2 under role2
     db.sync_run_coupler_snapshot(
         run_id="step_a",
         phase="post",
@@ -155,7 +142,7 @@ def test_sync_run_coupler_snapshot_overwrite(tracker: Tracker) -> None:
     )
     s2 = db.get_run_coupler_snapshot("step_a", phase="post")
     assert set(s2.keys()) == {"role2"}
-    assert s2["role2"].hash == "h2"
+    assert s2["role2"].hash == art2.hash
 
 
 def test_get_max_coupler_snapshot_ordinal(tracker: Tracker) -> None:
@@ -165,11 +152,7 @@ def test_get_max_coupler_snapshot_ordinal(tracker: Tracker) -> None:
     assert db.get_max_coupler_snapshot_ordinal("scenario_empty") == 0
 
     art = _create_artifact(key="art")
-    with db.session_scope() as session:
-        session.add(art)
-        session.commit()
-        session.refresh(art)
-        session.expunge_all()
+    db.upsert_artifact(art)
 
     db.sync_run_coupler_snapshot(
         run_id="step_1",
@@ -199,20 +182,14 @@ def test_diff_coupler_snapshots(tracker: Tracker) -> None:
     art_left_only = _create_artifact(key="left_only", content_hash="left_only_hash")
     art_right_only = _create_artifact(key="right_only", content_hash="right_only_hash")
 
-    with db.session_scope() as session:
-        session.add_all(
-            [art_common, art_left_mod, art_right_mod, art_left_only, art_right_only]
-        )
-        session.commit()
-        for a in [
-            art_common,
-            art_left_mod,
-            art_right_mod,
-            art_left_only,
-            art_right_only,
-        ]:
-            session.refresh(a)
-        session.expunge_all()
+    for art in (
+        art_common,
+        art_left_mod,
+        art_right_mod,
+        art_left_only,
+        art_right_only,
+    ):
+        db.upsert_artifact(art)
 
     db.sync_run_coupler_snapshot(
         run_id="run_left",
@@ -249,7 +226,6 @@ def test_diff_coupler_snapshots(tracker: Tracker) -> None:
 
 
 def test_scenario_snapshot_lifecycle(tracker: Tracker, tmp_path: Path) -> None:
-    # Seed coupler with bootstrap artifact logged via a real run
     seed_file = tmp_path / "seed.csv"
     seed_file.write_text("col\n1\n")
     with tracker.trace("bootstrap"):
@@ -275,11 +251,9 @@ def test_scenario_snapshot_lifecycle(tracker: Tracker, tmp_path: Path) -> None:
     db = tracker.db
     assert db is not None
 
-    # Check init snapshot
     init_snap = db.get_run_coupler_snapshot(scen_id, phase="init")
     assert "seed_data" in init_snap
 
-    # Check step 1 pre and post snapshots
     step1_pre = db.get_run_coupler_snapshot(res1.run.id, phase="pre")
     assert "seed_data" in step1_pre
     assert "step1_out" not in step1_pre
@@ -288,7 +262,6 @@ def test_scenario_snapshot_lifecycle(tracker: Tracker, tmp_path: Path) -> None:
     assert "seed_data" in step1_post
     assert "step1_out" in step1_post
 
-    # Check step 2 pre and post snapshots
     step2_pre = db.get_run_coupler_snapshot(res2.run.id, phase="pre")
     assert "step1_out" in step2_pre
     assert "step2_out" not in step2_pre
@@ -298,62 +271,32 @@ def test_scenario_snapshot_lifecycle(tracker: Tracker, tmp_path: Path) -> None:
     assert "step1_out" in step2_post
     assert "step2_out" in step2_post
 
-    # Verify run_coupler_snapshot contains rows for:
-    # (scenario_id, "init"), (step1_id, "pre"), (step1_id, "post"), (step2_id, "pre"), (step2_id, "post")
-    # and verify step_ordinal strictly increases (0, 1, 1, 2, 2)
-    with db.session_scope() as session:
-        init_rows = session.exec(
-            select(RunCouplerSnapshot).where(
-                col(RunCouplerSnapshot.run_id) == scen_id,
-                col(RunCouplerSnapshot.phase) == "init",
-            )
-        ).all()
-        assert len(init_rows) > 0
+    init_rows = db.get_coupler_snapshots(scen_id, phase="init")
+    assert len(init_rows) > 0
 
-        s1_pre_rows = session.exec(
-            select(RunCouplerSnapshot).where(
-                col(RunCouplerSnapshot.run_id) == res1.run.id,
-                col(RunCouplerSnapshot.phase) == "pre",
-            )
-        ).all()
-        assert len(s1_pre_rows) > 0
+    s1_pre_rows = db.get_coupler_snapshots(res1.run.id, phase="pre")
+    assert len(s1_pre_rows) > 0
 
-        s1_post_rows = session.exec(
-            select(RunCouplerSnapshot).where(
-                col(RunCouplerSnapshot.run_id) == res1.run.id,
-                col(RunCouplerSnapshot.phase) == "post",
-            )
-        ).all()
-        assert len(s1_post_rows) > 0
+    s1_post_rows = db.get_coupler_snapshots(res1.run.id, phase="post")
+    assert len(s1_post_rows) > 0
 
-        s2_pre_rows = session.exec(
-            select(RunCouplerSnapshot).where(
-                col(RunCouplerSnapshot.run_id) == res2.run.id,
-                col(RunCouplerSnapshot.phase) == "pre",
-            )
-        ).all()
-        assert len(s2_pre_rows) > 0
+    s2_pre_rows = db.get_coupler_snapshots(res2.run.id, phase="pre")
+    assert len(s2_pre_rows) > 0
 
-        s2_post_rows = session.exec(
-            select(RunCouplerSnapshot).where(
-                col(RunCouplerSnapshot.run_id) == res2.run.id,
-                col(RunCouplerSnapshot.phase) == "post",
-            )
-        ).all()
-        assert len(s2_post_rows) > 0
+    s2_post_rows = db.get_coupler_snapshots(res2.run.id, phase="post")
+    assert len(s2_post_rows) > 0
 
-        observed_ordinals = [
-            init_rows[0].step_ordinal,
-            s1_pre_rows[0].step_ordinal,
-            s1_post_rows[0].step_ordinal,
-            s2_pre_rows[0].step_ordinal,
-            s2_post_rows[0].step_ordinal,
-        ]
-        assert observed_ordinals == [0, 1, 1, 2, 2]
+    observed_ordinals = [
+        init_rows[0].step_ordinal,
+        s1_pre_rows[0].step_ordinal,
+        s1_post_rows[0].step_ordinal,
+        s2_pre_rows[0].step_ordinal,
+        s2_post_rows[0].step_ordinal,
+    ]
+    assert observed_ordinals == [0, 1, 1, 2, 2]
 
 
 def test_cache_hit_captures_snapshots(tracker: Tracker, tmp_path: Path) -> None:
-    # First execution to populate cache
     out_file = tmp_path / "cache_out.csv"
 
     def work_fn() -> None:
@@ -363,7 +306,6 @@ def test_cache_hit_captures_snapshots(tracker: Tracker, tmp_path: Path) -> None:
     with tracker.scenario("first_run_scen") as sc:
         sc.run(work_fn, name="worker_step")
 
-    # Second execution - cache hit
     with tracker.scenario("second_run_scen") as sc:
         hit_res = sc.run(work_fn, name="worker_step")
 
@@ -380,8 +322,6 @@ def test_cache_hit_captures_snapshots(tracker: Tracker, tmp_path: Path) -> None:
 def test_tracker_get_coupler_snapshot_attaches_tracker_ref(
     tracker: Tracker, tmp_path: Path
 ) -> None:
-    from consist.models.artifact import get_tracker_ref
-
     out_file = tmp_path / "ref_test.csv"
 
     def work_fn() -> None:
@@ -394,10 +334,14 @@ def test_tracker_get_coupler_snapshot_attaches_tracker_ref(
     snapshot = tracker.get_coupler_snapshot(res.run.id, phase="post", must_exist=True)
     assert "ref_art" in snapshot
     art = snapshot["ref_art"]
-    tracker_ref = get_tracker_ref(art)
-    assert tracker_ref is not None
-    assert tracker_ref() is tracker
+    assert tracker.ledger is not None
+    assert art.origin == tracker.ledger.ref
     assert art.path == out_file.resolve()
+
+    # Verify DB-less tracker binds weak runtime tracker reference via bind_tracker
+    mem_tracker = Tracker(run_dir=tmp_path / "mem_runs", db_path=None)
+    art.bind_tracker(mem_tracker)
+    assert art.resolve_bound_tracker() is mem_tracker
 
 
 def test_synthesize_non_existent_run_returns_empty(tracker: Tracker) -> None:
@@ -410,7 +354,6 @@ def test_synthesize_non_existent_run_returns_empty(tracker: Tracker) -> None:
     )
     assert artifacts == {}
     assert ordinal == 0
-    # Ensure nothing was backfilled
     assert (
         db.get_run_coupler_snapshot(
             "does_not_exist_run_id", phase="post", must_exist=False
@@ -424,6 +367,7 @@ def test_synthesize_filtered_does_not_backfill(
 ) -> None:
     db = tracker.db
     assert db is not None
+    assert tracker.ledger is not None
 
     f1 = tmp_path / "f1.csv"
     f2 = tmp_path / "f2.csv"
@@ -441,17 +385,13 @@ def test_synthesize_filtered_does_not_backfill(
         sc.run(step2_fn, name="s2", year=2025)
         scen_id = sc.run_id
 
-    # Wipe snapshots
-    with db.session_scope() as session:
-        session.exec(
-            delete(RunCouplerSnapshot).where(
-                col(RunCouplerSnapshot.scenario_run_id) == scen_id
-            )
+    with tracker.ledger.transaction() as cur:
+        cur.execute(
+            "DELETE FROM main.run_coupler_snapshot WHERE scenario_run_id = ?",
+            [scen_id],
         )
-        session.commit()
 
-    # Synthesize with year=2020 filter
-    arts, ord_val = db.synthesize_coupler_snapshot_from_history(
+    arts, _ = db.synthesize_coupler_snapshot_from_history(
         scenario_run_id=scen_id,
         year=2020,
         backfill=True,
@@ -459,21 +399,17 @@ def test_synthesize_filtered_does_not_backfill(
     assert "step1_key" in arts
     assert "step2_key" not in arts
 
-    # Verify no backfilled snapshots exist in DB because it was a filtered synthesis
-    with db.session_scope() as session:
-        rows = session.exec(
-            select(RunCouplerSnapshot).where(
-                col(RunCouplerSnapshot.scenario_run_id) == scen_id
-            )
-        ).all()
-        assert len(rows) == 0
+    rows = tracker.query_rows(
+        "SELECT * FROM main.run_coupler_snapshot WHERE scenario_run_id = ?",
+        [scen_id],
+        model=RunCouplerSnapshot,
+    )
+    assert len(rows) == 0
 
 
 def test_scenario_find_latest_coupler_snapshot_attaches_tracker_ref(
     tracker: Tracker, tmp_path: Path
 ) -> None:
-    from consist.models.artifact import get_tracker_ref
-
     f = tmp_path / "find_latest.csv"
 
     def step_fn() -> None:
@@ -487,9 +423,9 @@ def test_scenario_find_latest_coupler_snapshot_attaches_tracker_ref(
         _, _, arts = found
         assert "find_key" in arts
         art = arts["find_key"]
-        tracker_ref = get_tracker_ref(art)
-        assert tracker_ref is not None
-        assert tracker_ref() is tracker
+        assert tracker.ledger is not None
+        assert art.origin == tracker.ledger.ref
+        assert art.tracker is tracker
         assert art.path == f.resolve()
 
 
@@ -515,10 +451,6 @@ def test_scenario_resume_pre_phase_ordinal_continuation(
         sc.run(step1_fn, name="s1")
         res2 = sc.run(step2_fn, name="s2")
 
-    # res2 was step 2 (step_ordinal=2)
-    # When resuming with resume_phase="pre" from res2.run.id:
-    # effective_ordinal should be 1 (2 - 1 = 1)
-    # Then running the resumed step 2 should increment to ordinal 2 (not 3)
     def step2_resumed_fn() -> None:
         f2_resumed.write_text("2_resumed\n")
         tracker.log_artifact(f2_resumed, key="step2_resumed_art")
@@ -528,10 +460,8 @@ def test_scenario_resume_pre_phase_ordinal_continuation(
         resume_from_run_id=res2.run.id,
         resume_phase="pre",
     ) as sc_resumed:
-        # Before executing resumed step: _step_ordinal should be 1
         assert sc_resumed._step_ordinal == 1
         res_resumed = sc_resumed.run(step2_resumed_fn, name="s2_rerun")
-        # After executing s2_rerun: _step_ordinal should be 2
         assert sc_resumed._step_ordinal == 2
 
     resumed_snap_pre = db.get_run_coupler_snapshot_details(

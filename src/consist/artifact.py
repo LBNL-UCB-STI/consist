@@ -8,10 +8,8 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 import importlib
-import os
 from pathlib import Path
 import re
-import threading
 from types import MappingProxyType
 from typing import Any, Literal, Protocol, cast, runtime_checkable
 import uuid
@@ -28,7 +26,10 @@ from consist.location import (
     SiteContext,
     deserialize_witness_json,
     lookup_live_ledger,
+    matches_hot_db_info,
+    parse_hot_db_member,
     serialize_witness_json,
+    strip_hot_db_member_scope,
 )
 from consist.meta import merge_artifact_output_meta, strip_system_meta
 from consist.store.detect import ConsistError
@@ -55,25 +56,11 @@ _TABULAR_DRIVERS: frozenset[str] = frozenset(
         "geojson",
         "shapefile",
         "geopackage",
+        "gtfs",
         "sql",
     }
 )
 _HEX64_RE = re.compile(r"^[0-9a-fA-F]{64}$")
-
-_bound_tracker_lock = threading.Lock()
-_bound_trackers: weakref.WeakValueDictionary[uuid.UUID, Any] = (
-    weakref.WeakValueDictionary()
-)
-
-
-def _reset_bound_trackers_after_fork() -> None:
-    global _bound_tracker_lock, _bound_trackers
-    _bound_tracker_lock = threading.Lock()
-    _bound_trackers = weakref.WeakValueDictionary()
-
-
-if "register_at_fork" in os.__dict__:
-    os.register_at_fork(after_in_child=_reset_bound_trackers_after_fork)
 
 
 @runtime_checkable
@@ -94,6 +81,11 @@ class _TrackerRunDirProtocol(Protocol):
 @runtime_checkable
 class _TrackerArchiveMountsProtocol(Protocol):
     archive_mounts: Mapping[str, Any]
+
+
+@runtime_checkable
+class _TrackerFsProtocol(Protocol):
+    fs: Any
 
 
 @runtime_checkable
@@ -394,6 +386,7 @@ class Artifact:
     created_at: datetime | None = None
     meta: FrozenMeta = field(default=EMPTY_META)
     hints: tuple[Observation, ...] = field(default=())
+    _tracker_ref: Any = field(default=None, repr=False, compare=False, kw_only=True)
 
     def __post_init__(self) -> None:
         if isinstance(self.id, str):
@@ -472,8 +465,10 @@ class Artifact:
                     )
                 )
             if live_cands:
+                db_hints = [h for h in self.hints if h.location.uri.startswith("db://")]
+                cold_cap = max(0, 4 - len(db_hints[:1]))
                 bounded_hints = _dedupe_observations(
-                    (*live_cands, *self.hints),
+                    (*live_cands[:cold_cap], *db_hints[:1], *self.hints),
                     limit=4,
                 )
         return (
@@ -494,20 +489,41 @@ class Artifact:
             ),
         )
 
+    def __copy__(self) -> Artifact:
+        return replace(self)
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> Artifact:
+        cloned = replace(self)
+        memo[id(self)] = cloned
+        return cloned
+
     def bind_tracker(self, tracker: Any) -> Artifact:
-        """Bind a weak runtime `Tracker` reference keyed by `self.id` for DB-less (`db_path=None`) runs."""
+        """Bind a weak runtime `Tracker` reference directly on this `Artifact` instance."""
         if tracker is None:
+            object.__setattr__(self, "_tracker_ref", None)
             return self
-        if isinstance(tracker, _TrackerDbPathProtocol) and tracker.db_path is not None:
-            return self
-        with _bound_tracker_lock:
-            _bound_trackers[self.id] = tracker
+        try:
+            ref: Any = weakref.ref(tracker)
+        except TypeError:
+            ref = tracker
+        object.__setattr__(
+            self,
+            "_tracker_ref",
+            (self.id, self.origin is not None, ref),
+        )
         return self
 
     def resolve_bound_tracker(self) -> Any | None:
-        """Return the bound runtime `Tracker` for this DB-less `Artifact`, if still alive."""
-        with _bound_tracker_lock:
-            return _bound_trackers.get(self.id)
+        """Return the bound runtime `Tracker` for this `Artifact`, if still alive."""
+        entry = self._tracker_ref
+        if entry is None:
+            return None
+        bound_id, bound_has_origin, ref = entry
+        if bound_id != self.id or bound_has_origin != (self.origin is not None):
+            return None
+        if isinstance(ref, weakref.ReferenceType):
+            return ref()
+        return ref
 
     @property
     def tracker(self) -> Any | None:
@@ -515,15 +531,12 @@ class Artifact:
         bound = self.resolve_bound_tracker()
         if bound is not None:
             return bound
-        try:
-            from consist.core.context import get_active_tracker, get_default_tracker
+        from consist.core.context import get_active_tracker, get_default_tracker
 
-            try:
-                return get_active_tracker()
-            except RuntimeError:
-                return get_default_tracker()
-        except Exception:
-            return None
+        try:
+            return get_active_tracker()
+        except RuntimeError:
+            return get_default_tracker()
 
     def ensure_local_path(
         self,
@@ -536,11 +549,26 @@ class Artifact:
         """Ensure this artifact exists on the local filesystem and return its `Path`."""
         resolved_tracker = tracker if tracker is not None else self.tracker
         if target_root is None:
-            candidate = self.locate(
-                mounts=self._effective_tracker_mounts(resolved_tracker)
-            )
-            if candidate is not None and candidate.exists():
-                return candidate
+            if resolved_tracker is not None:
+                from consist.engine import _normalize_mounts, resolve_uri_to_path
+
+                primary = self.primary_location
+                if (
+                    primary is not None
+                    and primary.uri
+                    and not primary.uri.startswith("db://")
+                ):
+                    trk_mounts = self._effective_tracker_mounts(resolved_tracker)
+                    primary_path, _ = resolve_uri_to_path(
+                        primary.uri,
+                        _normalize_mounts(trk_mounts) if trk_mounts else None,
+                    )
+                    if primary_path is not None and primary_path.exists():
+                        return primary_path.resolve()
+            else:
+                candidate = self.locate()
+                if candidate is not None and candidate.exists():
+                    return candidate
 
         if resolved_tracker is None:
             msg = (
@@ -622,11 +650,20 @@ class Artifact:
 
     def as_path(self, tracker: Any = None) -> Path:
         """Resolve and return the local filesystem `Path`, using `tracker`'s mounts when provided."""
-        from consist.engine import locate
+        from consist.engine import _normalize_mounts, locate, resolve_uri_to_path
+
+        eff_mounts = self._effective_tracker_mounts(tracker)
+        if tracker is not None and eff_mounts and "mount_root" not in self.meta:
+            primary = self.primary_location
+            if primary is not None and not primary.uri.startswith(("db://", "file://")):
+                norm_mounts = _normalize_mounts(eff_mounts)
+                primary_path, _ = resolve_uri_to_path(primary.uri, norm_mounts)
+                if primary_path is not None and primary_path.exists():
+                    return primary_path.resolve()
 
         return locate(
             self,
-            mounts=self._effective_tracker_mounts(tracker),
+            mounts=eff_mounts,
             verify_on_stale=(self.driver != "artifact_set"),
         ).path
 
@@ -636,7 +673,7 @@ class Artifact:
         ledger: Any = None,
         site_context: Any = None,
         mounts: Any = None,
-        verify_on_stale: bool = True,
+        verify_on_stale: bool | None = None,
     ) -> Path | None:
         """Resolve and return a verified local filesystem `Path` for this artifact, or `None` if not found."""
         from consist.engine import locate
@@ -648,13 +685,18 @@ class Artifact:
             effective_mounts = {**base_mounts, **mounts}
         else:
             effective_mounts = mounts
+        effective_verify = (
+            (self.driver != "artifact_set")
+            if verify_on_stale is None
+            else verify_on_stale
+        )
         try:
             return locate(
                 self,
                 ledger=ledger,
                 site_context=site_context,
                 mounts=effective_mounts,
-                verify_on_stale=verify_on_stale,
+                verify_on_stale=effective_verify,
             ).path
         except FileNotFoundError:
             return None
@@ -662,8 +704,8 @@ class Artifact:
     @property
     def member(self) -> str | None:
         """Return the sub-container member path (table or array key) if present."""
-        _, mem = self._first_candidate_location()
-        return mem
+        uri, mem = self._first_candidate_location()
+        return strip_hot_db_member_scope(uri, mem)
 
     @property
     def primary_location(self) -> Location | None:
@@ -671,7 +713,7 @@ class Artifact:
         uri, mem = self._first_candidate_location()
         if uri is None:
             return None
-        return Location(uri=uri, member=mem)
+        return Location(uri=uri, member=strip_hot_db_member_scope(uri, mem))
 
     @property
     def recovery_roots(self) -> list[str]:
@@ -719,39 +761,54 @@ class Artifact:
             )
         return list(dict.fromkeys(raw_roots))
 
-    def _active_hot_table_name(
+    def _active_hot_table_info(
         self, explicit_ledger: Any = None
-    ) -> tuple[str | None, Any]:
+    ) -> tuple[str | None, Any, bool]:
         led = (
             explicit_ledger
             if explicit_ledger is not None
             else lookup_live_ledger(self.origin)
         )
+        for obs in self.hints:
+            info = parse_hot_db_member(obs.location.uri, obs.location.member)
+            if info is not None and info.schema_name == "global_tables":
+                matched, v1_run_scoped = matches_hot_db_info(
+                    info,
+                    artifact_id=self.id,
+                    run_id=self.run_id,
+                )
+                if matched:
+                    return (info.table_name, led, v1_run_scoped)
+
         anchors = [self.identity.anchor]
         if self.recorded_anchor is not None:
             anchors.append(self.recorded_anchor)
 
         if isinstance(led, _LedgerLocationsProtocol):
-            rows = led.locate_current(anchors, include_evicted=False)
+            try:
+                rows = led.locate_current(anchors, include_evicted=False)
+            except ConsistError:
+                rows = []
             for row in rows:
-                uri = str(row.get("uri") or "")
-                if uri.startswith("db://global_tables/"):
-                    tbl = uri[len("db://global_tables/") :].split("?", 1)[0].strip("/")
-                    if tbl:
-                        return (tbl, led)
-            if rows:
-                return (None, led)
-
-        for obs in self.hints:
-            if obs.location.uri.startswith("db://global_tables/"):
-                tbl = (
-                    obs.location.uri[len("db://global_tables/") :]
-                    .split("?", 1)[0]
-                    .strip("/")
+                info = parse_hot_db_member(
+                    str(row.get("uri") or ""),
+                    row.get("member"),
                 )
-                if tbl:
-                    return (tbl, led)
-        return (None, led)
+                if info is not None and info.schema_name == "global_tables":
+                    matched, v1_run_scoped = matches_hot_db_info(
+                        info,
+                        artifact_id=self.id,
+                        run_id=self.run_id,
+                    )
+                    if matched:
+                        return (info.table_name, led, v1_run_scoped)
+        return (None, led, False)
+
+    def _active_hot_table_name(
+        self, explicit_ledger: Any = None
+    ) -> tuple[str | None, Any]:
+        tbl, led, _ = self._active_hot_table_info(explicit_ledger)
+        return (tbl, led)
 
     @property
     def is_ingested(self) -> bool:
@@ -778,6 +835,7 @@ class Artifact:
         meta: Mapping[str, Any] | None = None,
         *,
         merge: bool = True,
+        preserve_system_keys: bool = True,
         **updates: Any,
     ) -> Artifact:
         """Return a new `Artifact` with updated `FrozenMeta` (preserving domain-profile keys on replace)."""
@@ -788,7 +846,10 @@ class Artifact:
             incoming.update(updates)
         if merge and meta is None and not updates:
             return self
-        merged_dict = merge_artifact_output_meta(self.meta, incoming, merge=merge)
+        if not merge and not preserve_system_keys:
+            merged_dict = incoming
+        else:
+            merged_dict = merge_artifact_output_meta(self.meta, incoming, merge=merge)
         return replace(
             self,
             meta=FrozenMeta(merged_dict) if merged_dict else EMPTY_META,
@@ -858,6 +919,10 @@ class Artifact:
             site_name = str(site.site)
 
         candidate_uris: list[str] = []
+        primary = self.primary_location
+        if primary is not None and primary.uri and not primary.uri.startswith("db://"):
+            candidate_uris.append(primary.uri)
+
         if isinstance(led, _LedgerLocationsProtocol):
             anchors = [self.identity.anchor]
             if self.recorded_anchor is not None:
@@ -892,6 +957,54 @@ class Artifact:
             statuses.append(
                 ArtifactLocationStatus(label=label, path=check_path, exists=exists)
             )
+
+        raw_meta_roots = self.meta.get("recovery_roots")
+        primary_uri = primary.uri if primary is not None else ""
+        if raw_meta_roots and primary_uri and not primary_uri.startswith("db://"):
+            resolved_tracker = tracker if tracker is not None else self.tracker
+            rel_path: Path | None = None
+            if isinstance(resolved_tracker, _TrackerFsProtocol):
+                rel_path = resolved_tracker.fs.get_remappable_relative_path(primary_uri)
+            elif primary_uri.startswith("./"):
+                rel_path = Path(primary_uri[2:])
+            elif "://" in primary_uri:
+                scheme, rel_raw = primary_uri.split("://", 1)
+                if scheme != "file":
+                    rel_path = Path(rel_raw.lstrip("/"))
+            if rel_path is not None:
+                meta_root_items: Sequence[Any] = (
+                    (raw_meta_roots,)
+                    if isinstance(raw_meta_roots, (str, Path))
+                    else (
+                        raw_meta_roots
+                        if isinstance(raw_meta_roots, Sequence)
+                        and not isinstance(raw_meta_roots, bytes)
+                        else ()
+                    )
+                )
+                for raw_root in meta_root_items:
+                    if not isinstance(raw_root, (str, Path)):
+                        continue
+                    try:
+                        rec_candidate = (
+                            Path(raw_root).expanduser() / rel_path
+                        ).resolve()
+                    except OSError:
+                        continue
+                    if rec_candidate in seen_paths:
+                        continue
+                    seen_paths.add(rec_candidate)
+                    try:
+                        rec_exists = rec_candidate.exists()
+                    except OSError:
+                        rec_exists = False
+                    statuses.append(
+                        ArtifactLocationStatus(
+                            label=f"recovery_root #{len(statuses)}",
+                            path=rec_candidate,
+                            exists=rec_exists,
+                        )
+                    )
         return ArtifactAccessibility(locations=tuple(statuses))
 
     @property
@@ -933,7 +1046,7 @@ class Artifact:
             except ValueError:
                 pass
 
-        hot_table, led = self._active_hot_table_name()
+        hot_table, led, v1_run_scoped = self._active_hot_table_info()
         if hot_table is not None and isinstance(
             led, (_LedgerExecCursorProtocol, _LedgerCursorProtocol)
         ):
@@ -978,7 +1091,20 @@ class Artifact:
                     )
                 params: list[Any] = []
                 where_sql = ""
-                if "consist_artifact_id" in table_cols:
+                if (
+                    v1_run_scoped
+                    and self.run_id is not None
+                    and "consist_run_id" in table_cols
+                ):
+                    if "consist_artifact_id" in table_cols:
+                        where_sql = (
+                            " WHERE consist_artifact_id IS NULL "
+                            "AND CAST(consist_run_id AS VARCHAR) = ?"
+                        )
+                    else:
+                        where_sql = " WHERE CAST(consist_run_id AS VARCHAR) = ?"
+                    params.append(str(self.run_id))
+                elif "consist_artifact_id" in table_cols:
                     where_sql = " WHERE CAST(consist_artifact_id AS VARCHAR) = ?"
                     params.append(str(self.id))
                 limit_sql = ""
@@ -1103,8 +1229,8 @@ class Artifact:
         )
         if self.driver.strip().lower() not in _TABLE_MEMBER_DRIVERS:
             return None
-        _, mem = self._first_candidate_location()
-        return mem
+        uri, mem = self._first_candidate_location()
+        return strip_hot_db_member_scope(uri, mem)
 
     @property
     def array_path(self) -> str | None:
@@ -1150,7 +1276,11 @@ class Artifact:
             "schema_id": self.schema_id,
             "created_at": self.created_at_iso,
             "container_uri": loc.uri if loc is not None else "",
-            "member": loc.member if loc is not None else None,
+            "member": (
+                strip_hot_db_member_scope(loc.uri, loc.member)
+                if loc is not None
+                else None
+            ),
             "meta": self.meta.to_dict(),
             "locations": [
                 {

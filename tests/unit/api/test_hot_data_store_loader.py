@@ -9,7 +9,7 @@ import pytest
 
 from consist.api import _load_from_db, load
 from consist.core.tracker import Tracker
-from consist.models.artifact import Artifact
+from tests.helpers.artifact_factory import make_artifact
 
 
 def test_load_from_db_uses_hot_data_store_db_path(
@@ -33,10 +33,10 @@ def test_load_from_db_uses_hot_data_store_db_path(
         captured["read_only"] = read_only
         return _Connection()
 
-    monkeypatch.setattr("consist.api.duckdb.connect", _fake_connect)
+    monkeypatch.setattr("duckdb.connect", _fake_connect)
 
     hot_db_path = tmp_path / "hot.duckdb"
-    artifact = Artifact(
+    artifact = make_artifact(
         id=uuid4(),
         key="fallback_key",
         container_uri=str(tmp_path / "missing.csv"),
@@ -65,7 +65,7 @@ def test_load_allows_hot_data_store_without_tracker_engine(
 ) -> None:
     sentinel = object()
     resolved_path = str(tmp_path / "missing.csv")
-    artifact = Artifact(
+    artifact = make_artifact(
         id=uuid4(),
         key="fallback_key",
         container_uri=resolved_path,
@@ -78,7 +78,7 @@ def test_load_allows_hot_data_store_without_tracker_engine(
             hot_data_store=SimpleNamespace(
                 db_path=str(tmp_path / "hot.duckdb"),
             ),
-            engine=None,
+            ledger=None,
             db_path=None,
             current_consist=None,
             resolve_uri=lambda _uri: resolved_path,
@@ -97,7 +97,7 @@ def test_load_does_not_reconstruct_ingested_geoparquet_from_db(
     tmp_path: Path,
 ) -> None:
     resolved_path = str(tmp_path / "missing.parquet")
-    artifact = Artifact(
+    artifact = make_artifact(
         id=uuid4(),
         key="parcels",
         container_uri=resolved_path,
@@ -110,7 +110,7 @@ def test_load_does_not_reconstruct_ingested_geoparquet_from_db(
             hot_data_store=SimpleNamespace(
                 db_path=str(tmp_path / "hot.duckdb"),
             ),
-            engine=None,
+            ledger=None,
             db_path=None,
             current_consist=None,
             resolve_uri=lambda _uri: resolved_path,
@@ -147,10 +147,10 @@ def test_load_falls_back_to_tracker_db_path_when_hot_store_absent(
         captured["read_only"] = read_only
         return _Connection()
 
-    monkeypatch.setattr("consist.api.duckdb.connect", _fake_connect)
+    monkeypatch.setattr("duckdb.connect", _fake_connect)
 
     db_path = str(tmp_path / "legacy-fallback.duckdb")
-    artifact = Artifact(
+    artifact = make_artifact(
         id=uuid4(),
         key="legacy_key",
         container_uri=str(tmp_path / "missing.csv"),

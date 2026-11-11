@@ -7,6 +7,7 @@ from pathlib import Path
 import pickle
 import shutil
 import time
+from typing import Any
 import uuid
 
 import h5py
@@ -1194,10 +1195,10 @@ def test_phase2_seal_atomicity_bounded_pool_policy_locate_stage_and_archive_move
     nested_pools_created = 0
     orig_digest_tpe = digest_mod.ThreadPoolExecutor
 
-    def _forbid_nested_pool(*args: object, **kwargs: object) -> object:
+    def _forbid_nested_pool(*args: Any, **kwargs: Any) -> Any:
         nonlocal nested_pools_created
         nested_pools_created += 1
-        return orig_digest_tpe(*args, **kwargs)  # type: ignore[arg-type]
+        return orig_digest_tpe(*args, **kwargs)
 
     monkeypatch.setattr(digest_mod, "ThreadPoolExecutor", _forbid_nested_pool)
 

@@ -30,9 +30,10 @@ from consist.api import (
     register_run_output_recovery_copies as register_run_output_recovery_copies_api,
 )
 from consist.api import set_artifact_recovery_roots as set_artifact_recovery_roots_api
+from consist.artifact import ArchivedOutputs, Artifact
 from consist.core.tracker import Tracker
-from consist.models.artifact import Artifact, ArchivedOutputs
 from consist.models.run import Run
+from tests.helpers.artifact_factory import make_artifact
 
 
 def _canonical_output_set_identity_hash(manifest: Mapping[str, object]) -> str:
@@ -96,7 +97,7 @@ def _hydrated_result(
     for key, (path, status, resolvable, message) in outputs.items():
         hydrated_outputs[key] = consist_materialize.HydratedRunOutput(
             key=key,
-            artifact=Artifact(
+            artifact=make_artifact(
                 id=uuid.uuid4(),
                 key=key,
                 container_uri=f"./{key}.csv",
@@ -484,8 +485,7 @@ def test_register_artifact_recovery_copy_uses_full_hash_when_tracker_is_fast(
         refreshed = tracker.get_run_outputs("producer_adopt_fast")["fast_hash"]
         assert refreshed.recovery_roots == [str(recovery_root.resolve())]
     finally:
-        if tracker.engine:
-            tracker.engine.dispose()
+        tracker.close()
 
 
 def test_register_artifact_recovery_copy_fast_hash_requires_byte_hash(
@@ -521,8 +521,7 @@ def test_register_artifact_recovery_copy_fast_hash_requires_byte_hash(
         ]
         assert "recovery_roots" not in refreshed.meta
     finally:
-        if tracker.engine:
-            tracker.engine.dispose()
+        tracker.close()
 
 
 def test_register_artifact_recovery_copy_verify_false_adopts_existing_copy(
@@ -562,8 +561,7 @@ def test_register_artifact_recovery_copy_verify_false_adopts_existing_copy(
         ]
         assert refreshed.recovery_roots == [str(recovery_root.resolve())]
     finally:
-        if tracker.engine:
-            tracker.engine.dispose()
+        tracker.close()
 
 
 def test_register_artifact_recovery_copy_empty_content_hash_is_explicit(
@@ -640,15 +638,14 @@ def test_register_artifact_recovery_copy_rejects_same_metadata_wrong_bytes(
         ]
         assert "recovery_roots" not in refreshed.meta
     finally:
-        if tracker.engine:
-            tracker.engine.dispose()
+        tracker.close()
 
 
 def test_register_artifact_recovery_copy_unmappable_layout_blocks_clearly(
     tracker: Tracker,
     tmp_path: Path,
 ) -> None:
-    artifact = Artifact(
+    artifact = make_artifact(
         id=uuid.uuid4(),
         key="absolute",
         container_uri=str((tmp_path / "absolute.csv").resolve()),
@@ -695,7 +692,7 @@ def test_archive_artifact_unmappable_layout_has_actionable_error(
     tracker: Tracker,
     tmp_path: Path,
 ) -> None:
-    artifact = Artifact(
+    artifact = make_artifact(
         id=uuid.uuid4(),
         key="absolute",
         container_uri=str((tmp_path / "absolute.csv").resolve()),
@@ -784,10 +781,8 @@ def test_archive_artifact_prefers_historical_source_over_current_workspace(
 
     assert archived_path.read_text(encoding="utf-8") == "historical\n"
 
-    if tracker_a.engine:
-        tracker_a.engine.dispose()
-    if tracker_b.engine:
-        tracker_b.engine.dispose()
+    tracker_a.close()
+    tracker_b.close()
 
 
 def test_archive_run_outputs_uses_current_configured_mount_for_run_owned_file(
@@ -843,10 +838,8 @@ def test_archive_run_outputs_uses_current_configured_mount_for_run_owned_file(
         assert hydrated["shared"].path == restored_root / "outputs" / "shared.csv"
         assert hydrated["shared"].path.read_text(encoding="utf-8") == "historical\n"
     finally:
-        if tracker_a.engine:
-            tracker_a.engine.dispose()
-        if tracker_b.engine:
-            tracker_b.engine.dispose()
+        tracker_a.close()
+        tracker_b.close()
 
 
 def test_archive_run_outputs_rejects_stale_current_managed_mount_file(
@@ -887,10 +880,8 @@ def test_archive_run_outputs_rejects_stale_current_managed_mount_file(
         assert refreshed.recovery_roots == []
         assert not archive_root.exists()
     finally:
-        if tracker_a.engine:
-            tracker_a.engine.dispose()
-        if tracker_b.engine:
-            tracker_b.engine.dispose()
+        tracker_a.close()
+        tracker_b.close()
 
 
 def test_archive_artifact_move_rolls_back_on_metadata_failure(
@@ -1104,7 +1095,7 @@ def test_archive_run_outputs_preserves_compound_driver_output_set_identity(
 
     assert member_drivers == {"0.skimsOD.csv.gz": "csv", "README": "unknown"}
     assert manifest_drivers == member_drivers
-    assert parent.hash == _canonical_output_set_identity_hash(manifest_contents)
+    assert parent.anchor.hex == _canonical_output_set_identity_hash(manifest_contents)
 
     archived = tracker.archive_run_outputs(
         result.run.id, tmp_path / "archive_compound_driver_output_set"
@@ -1686,8 +1677,7 @@ def test_archive_run_outputs_supports_output_sets_with_fast_manifest_identity(
             str((tmp_path / "fast_archive_output_set").resolve())
         ]
     finally:
-        if fast_tracker.engine is not None:
-            fast_tracker.engine.dispose()
+        fast_tracker.close()
 
 
 def test_archive_run_output_files_copies_verifies_and_registers_selected_file(
@@ -1855,7 +1845,11 @@ def test_archive_run_output_files_rejects_symlink_recovery_root_before_resolutio
         )
 
     output_path.unlink()
-    artifact.meta = {"recovery_roots": [str(linked_root)]}
+    artifact = artifact.with_meta(
+        {"recovery_roots": [str(linked_root)]},
+        merge=False,
+        preserve_system_keys=False,
+    )
     monkeypatch.setattr(
         tracker, "get_run_outputs", lambda _run_id: {"root_linked": artifact}
     )
@@ -1909,7 +1903,7 @@ def test_archive_run_output_files_rejects_output_set_roles_before_copy(
     tracker: Tracker,
     tmp_path: Path,
 ) -> None:
-    artifact = Artifact(
+    artifact = make_artifact(
         id=uuid.uuid4(),
         key="set",
         container_uri="./outputs/set",
@@ -1939,7 +1933,7 @@ def test_archive_run_output_files_rejects_output_set_manifest_and_member(
     key: str,
     meta: dict[str, bool],
 ) -> None:
-    artifact = Artifact(
+    artifact = make_artifact(
         id=uuid.uuid4(),
         key=key,
         container_uri=f"./outputs/{key}.json",
@@ -2608,7 +2602,7 @@ def test_register_run_output_recovery_copies_rejects_hashes_outside_selected_key
 def test_api_register_artifact_recovery_copy_delegates_with_default_tracker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    artifact = Artifact(
+    artifact = make_artifact(
         id=uuid.uuid4(),
         key="x",
         container_uri="./x.csv",
@@ -2766,8 +2760,7 @@ def test_tracker_hydrate_run_outputs_allows_external_target_root_when_configured
 
     assert calls["allowed_base"] is None
 
-    if tracker.engine:
-        tracker.engine.dispose()
+    tracker.close()
 
 
 def test_run_materialize_outputs_delegates_to_tracker() -> None:

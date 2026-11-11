@@ -1,131 +1,147 @@
+from __future__ import annotations
+
 import copy
+from dataclasses import FrozenInstanceError, replace
 import gc
+import hashlib
 import logging
-from copy import deepcopy
 from pathlib import Path
+import pickle
 from unittest.mock import MagicMock
 
 import pytest
 
-from consist import is_spatial_artifact
-from consist.core.artifacts import ArtifactManager, _clone_artifact_for_meta_update
+import consist
+from consist.api import is_spatial_artifact
+from consist.artifact import Artifact
+from consist.core.artifacts import ArtifactManager
+from consist.core.context import use_tracker
 from consist.core.identity import IdentityManager
-from consist.core.persistence import (
-    DatabaseManager,
-    _clone_artifact,
-    _clone_artifact_content,
-)
-from consist.models.artifact import (
-    Artifact,
-    ArtifactContent,
-    get_tracker_ref,
-    set_tracker_ref,
-)
-from consist.models.artifact_facet import ArtifactFacet
-from consist.models.artifact_schema import ArtifactSchema
-from consist.models.artifact_schema import ArtifactSchemaObservation
-from consist.models.artifact_kv import ArtifactKV
+from consist.core.persistence import DatabaseManager
+from consist.core.tracker import Tracker
+from consist.digest import Digest, Identity
+from consist.location import Location, Observation
+from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaObservation
+from tests.helpers.artifact_factory import make_artifact
 
 
 @pytest.fixture
-def mock_tracker():
+def mock_tracker(tmp_path: Path) -> MagicMock:
     tracker = MagicMock()
+    tracker.run_dir = tmp_path / "workspace"
+    tracker.run_dir.mkdir(parents=True, exist_ok=True)
+    tracker.mounts = {}
+    tracker.archive_mounts = {}
+    tracker.db_path = None
+    tracker.ledger = None
+    tracker.db = None
     tracker.resolve_uri = lambda uri: f"/abs/{uri}"
     tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
-    tracker.identity.compute_file_checksum.return_value = "mock_hash"
-    tracker.db = MagicMock()
-    tracker.db.get_or_create_artifact_content.return_value = ArtifactContent(
-        content_hash="mock_hash", driver="csv"
+    tracker.fs.normalize_recovery_roots = lambda roots: (
+        [str(roots)] if isinstance(roots, (str, Path)) else [str(r) for r in roots]
     )
+    tracker.identity.hashing_strategy = "full"
+    tracker.identity.compute_file_checksum.return_value = "a" * 64
     return tracker
 
 
-def test_create_artifact_stateless(mock_tracker):
+def test_create_artifact_stateless(mock_tracker: MagicMock, tmp_path: Path) -> None:
     manager = ArtifactManager(mock_tracker)
+    csv_path = tmp_path / "test.csv"
+    csv_path.write_text("col\n1\n", encoding="utf-8")
 
-    art = manager.create_artifact(path="/tmp/test.csv", key="test", run_id="run_ABC")
+    art = manager.create_artifact(path=csv_path, key="test", run_id="run_ABC")
 
     assert art.run_id == "run_ABC"
     assert art.key == "test"
-    assert art.hash == "mock_hash"
+    assert art.driver == "csv"
+    assert art.anchor == Digest("sha256:file", "a" * 64)
+    assert art.hash == f"sha256:file:{'a' * 64}"
+    assert art.resolve_bound_tracker() is mock_tracker
 
 
-def test_create_artifact_keeps_parquet_inference_non_spatial(tmp_path):
-    tracker = MagicMock()
-    tracker.resolve_uri = lambda uri: f"/abs/{uri}"
-    tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
-    tracker.mounts = {}
-    tracker.identity.compute_file_checksum.return_value = "mock_hash"
-    tracker.db = MagicMock()
-    tracker.db.get_or_create_artifact_content.return_value = ArtifactContent(
-        content_hash="mock_hash", driver="parquet"
-    )
-
+def test_create_artifact_keeps_parquet_inference_non_spatial(
+    mock_tracker: MagicMock, tmp_path: Path
+) -> None:
     path = tmp_path / "tiny.parquet"
     path.write_bytes(b"not a real parquet file")
 
-    artifact = ArtifactManager(tracker).create_artifact(path=path, key="tiny")
+    artifact = ArtifactManager(mock_tracker).create_artifact(path=path, key="tiny")
 
     assert artifact.driver == "parquet"
     assert is_spatial_artifact(artifact) is False
 
 
-def test_create_artifact_uses_precomputed_hash(mock_tracker):
+def test_create_artifact_uses_precomputed_hash(
+    mock_tracker: MagicMock, tmp_path: Path
+) -> None:
     manager = ArtifactManager(mock_tracker)
+    precomputed = f"sha256:file:{'b' * 64}"
 
     art = manager.create_artifact(
-        path="/tmp/test.csv",
+        path=tmp_path / "test.csv",
         key="test",
         run_id="run_ABC",
-        content_hash="precomputed_hash",
+        content_hash=precomputed,
     )
 
-    assert art.hash == "precomputed_hash"
+    assert art.hash == precomputed
+    assert art.anchor == Digest.parse(precomputed)
     mock_tracker.identity.compute_file_checksum.assert_not_called()
 
 
-def test_create_artifact_dir_uses_precomputed_hash(mock_tracker, tmp_path):
+def test_create_artifact_dir_uses_precomputed_hash(
+    mock_tracker: MagicMock, tmp_path: Path
+) -> None:
     manager = ArtifactManager(mock_tracker)
     data_dir = tmp_path / "data_dir"
     data_dir.mkdir()
+    precomputed = f"sha256:manifest-v1:{'c' * 64}"
 
     art = manager.create_artifact(
         path=str(data_dir),
         key="dir_artifact",
         run_id="run_ABC",
-        content_hash="precomputed_hash",
+        content_hash=precomputed,
     )
 
-    assert art.hash == "precomputed_hash"
+    assert art.hash == precomputed
     mock_tracker.identity.compute_file_checksum.assert_not_called()
 
 
-def test_create_artifact_rejects_mismatched_validated_hash(mock_tracker):
+def test_create_artifact_rejects_mismatched_validated_hash(
+    mock_tracker: MagicMock, tmp_path: Path
+) -> None:
     manager = ArtifactManager(mock_tracker)
+    csv_path = tmp_path / "test.csv"
+    csv_path.write_text("col\n1\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match="content_hash does not match"):
         manager.create_artifact(
-            path="/tmp/test.csv",
+            path=csv_path,
             key="test",
             run_id="run_ABC",
-            content_hash="different_hash",
+            content_hash="d" * 64,
             validate_content_hash=True,
         )
 
-    mock_tracker.identity.compute_file_checksum.assert_called()
+    mock_tracker.identity.compute_file_checksum.assert_called_once()
 
 
-def test_create_artifact_hashes_once_for_reuse_and_validation(tmp_path):
+def test_create_artifact_hashes_once_for_reuse_and_validation(tmp_path: Path) -> None:
     tracker = MagicMock()
-    tracker.resolve_uri = lambda uri: f"/abs/{uri}"
-    tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
+    tracker.run_dir = tmp_path / "runs"
+    tracker.run_dir.mkdir()
     tracker.mounts = {}
-    tracker.identity.compute_file_checksum.return_value = "mock_hash"
+    tracker.archive_mounts = {}
+    tracker.db_path = None
+    tracker.ledger = None
+    digest = "e" * 64
+    tracker.identity.hashing_strategy = "full"
+    tracker.identity.compute_file_checksum.return_value = digest
+    tracker.db = MagicMock()
     tracker.db.find_latest_artifact_at_uri.return_value = None
     tracker.db.find_latest_artifact_by_hash.return_value = None
-    tracker.db.get_or_create_artifact_content.return_value = ArtifactContent(
-        content_hash="mock_hash", driver="csv"
-    )
 
     manager = ArtifactManager(tracker)
     output_path = tmp_path / "output.csv"
@@ -140,1229 +156,619 @@ def test_create_artifact_hashes_once_for_reuse_and_validation(tmp_path):
         validate_content_hash=True,
     )
 
-    assert art.hash == "mock_hash"
+    assert art.hash == f"sha256:file:{digest}"
     assert tracker.identity.compute_file_checksum.call_count == 1
 
 
-def test_create_artifact_does_not_dedupe_fast_file_observations(tmp_path):
-    tracker = MagicMock()
-    tracker.resolve_uri = lambda uri: f"/abs/{uri}"
-    tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
-    tracker.mounts = {}
-    tracker.identity.hashing_strategy = "fast"
-    tracker.identity.compute_file_checksum.return_value = "f" * 64
-    tracker.db = MagicMock()
+def test_create_artifact_does_not_mark_fast_file_observations_verifiable(
+    mock_tracker: MagicMock, tmp_path: Path
+) -> None:
+    mock_tracker.identity.hashing_strategy = "fast"
+    mock_tracker.identity.compute_file_checksum.return_value = "f" * 64
 
     source = tmp_path / "fast.csv"
     source.write_text("value\n1\n", encoding="utf-8")
 
-    artifact = ArtifactManager(tracker).create_artifact(
+    artifact = ArtifactManager(mock_tracker).create_artifact(
         path=source,
         key="fast_input",
         run_id="run_a",
     )
 
-    assert artifact.content_id is None
-    assert artifact.meta["observation_identity"] == f"stat-v1:file:{'f' * 64}"
-    tracker.db.get_or_create_artifact_content.assert_not_called()
+    assert artifact.identity.verifiable is False
+    assert artifact.anchor == Digest("legacy-v1:unverified", "f" * 64)
+    assert artifact.hints[0].basis == "computed"
 
 
-def test_create_artifact_persists_typed_full_file_content_identity(tmp_path):
-    tracker = MagicMock()
-    tracker.resolve_uri = lambda uri: f"/abs/{uri}"
-    tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
-    tracker.mounts = {}
-    tracker.identity.hashing_strategy = "full"
+def test_create_artifact_persists_typed_full_file_content_identity(
+    mock_tracker: MagicMock, tmp_path: Path
+) -> None:
     digest = "a" * 64
-    tracker.identity.compute_file_checksum.return_value = digest
-    content_identity = f"sha256:file:{digest}"
-    content_row = ArtifactContent(content_hash=content_identity, driver="csv")
-    tracker.db = MagicMock()
-    tracker.db.get_or_create_artifact_content.return_value = content_row
+    mock_tracker.identity.hashing_strategy = "full"
+    mock_tracker.identity.compute_file_checksum.return_value = digest
 
     source = tmp_path / "full.csv"
     source.write_text("value\n1\n", encoding="utf-8")
 
-    artifact = ArtifactManager(tracker).create_artifact(
+    artifact = ArtifactManager(mock_tracker).create_artifact(
         path=source,
         key="full_input",
         run_id="run_a",
     )
 
-    assert artifact.meta["content_identity"] == content_identity
-    assert artifact.content_id == content_row.id
-    tracker.db.get_or_create_artifact_content.assert_called_once_with(
-        content_hash=content_identity,
-        driver="csv",
-    )
+    assert artifact.identity.verifiable is True
+    assert artifact.anchor == Digest("sha256:file", digest)
+    assert artifact.hints[0].basis == "computed"
 
 
-def test_create_artifact_records_fast_directory_observation_without_content_id(
-    tmp_path,
-):
-    tracker = MagicMock()
-    tracker.resolve_uri = lambda uri: f"/abs/{uri}"
-    tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
-    tracker.mounts = {}
-    tracker.identity = IdentityManager(hashing_strategy="fast")
-    tracker.db = MagicMock()
+def test_create_artifact_records_fast_directory_observation_as_historical(
+    mock_tracker: MagicMock, tmp_path: Path
+) -> None:
+    mock_tracker.identity = IdentityManager(hashing_strategy="fast")
 
     directory = tmp_path / "fast_directory"
     (directory / "nested").mkdir(parents=True)
     (directory / "nested" / "payload.bin").write_bytes(b"payload")
 
-    artifact = ArtifactManager(tracker).create_artifact(
+    artifact = ArtifactManager(mock_tracker).create_artifact(
         path=directory,
         key="fast_directory",
         run_id="run_a",
         driver="other",
     )
 
-    assert artifact.content_id is None
-    assert artifact.meta["observation_identity"].startswith("stat-v2:directory:")
-    tracker.db.get_or_create_artifact_content.assert_not_called()
+    assert artifact.identity.verifiable is False
+    assert artifact.anchor.scheme == "legacy-v1:unverified"
+    assert artifact.hints[0].basis == "computed"
 
 
-def test_create_artifacts_share_content_id_when_hashes_match(tmp_path):
-    tracker = MagicMock()
-    tracker.resolve_uri = lambda uri: f"/abs/{uri}"
-    tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
-    tracker.mounts = {"outputs": str(tmp_path)}
-    tracker.identity.hashing_strategy = "full"
-    digest = "b" * 64
-    tracker.identity.compute_file_checksum.return_value = digest
-    content_identity = f"sha256:file:{digest}"
-    content_row = ArtifactContent(content_hash=content_identity, driver="parquet")
-    tracker.db = MagicMock()
-    tracker.db.get_or_create_artifact_content.return_value = content_row
+def test_create_artifacts_share_content_hub_when_hashes_match(tmp_path: Path) -> None:
+    db_path = tmp_path / "shared_content.duckdb"
+    db = DatabaseManager(str(db_path))
+    try:
+        tracker = MagicMock()
+        tracker.run_dir = tmp_path / "workspace"
+        tracker.run_dir.mkdir()
+        tracker.mounts = {"outputs": str(tmp_path)}
+        tracker.archive_mounts = {}
+        tracker.db_path = str(db_path)
+        tracker.ledger = db.ledger
+        tracker.db = db
+        digest = "b" * 64
+        tracker.identity.hashing_strategy = "full"
+        tracker.identity.compute_file_checksum.return_value = digest
 
-    manager = ArtifactManager(tracker)
+        manager = ArtifactManager(tracker)
 
-    path_a = tmp_path / "a.parquet"
-    path_a.write_text("a", encoding="utf-8")
-    path_b = tmp_path / "b.parquet"
-    path_b.write_text("b", encoding="utf-8")
+        path_a = tmp_path / "a.parquet"
+        path_a.write_text("a", encoding="utf-8")
+        path_b = tmp_path / "b.parquet"
+        path_b.write_text("b", encoding="utf-8")
 
-    art_a = manager.create_artifact(
-        path=path_a,
-        key="shared",
-        run_id="run_a",
-        driver="parquet",
-    )
-    art_b = manager.create_artifact(
-        path=path_b,
-        key="shared",
-        run_id="run_b",
-        driver="parquet",
-    )
+        art_a = manager.create_artifact(
+            path=path_a,
+            key="shared",
+            run_id="run_a",
+            driver="parquet",
+        )
+        art_b = manager.create_artifact(
+            path=path_b,
+            key="shared",
+            run_id="run_b",
+            driver="parquet",
+        )
+        db.upsert_artifact(art_a)
+        db.upsert_artifact(art_b)
 
-    assert art_a.id != art_b.id
-    assert art_a.run_id == "run_a"
-    assert art_b.run_id == "run_b"
-    assert art_a.content_id == art_b.content_id == content_row.id
+        assert art_a.id != art_b.id
+        assert art_a.run_id == "run_a"
+        assert art_b.run_id == "run_b"
+        assert art_a.anchor == art_b.anchor == Digest("sha256:file", digest)
+
+        with db.ledger.exec_cursor() as cur:
+            content_count = cur.execute(
+                "SELECT COUNT(*) FROM main.content WHERE anchor = ?",
+                [str(art_a.anchor)],
+            ).fetchone()[0]
+        assert content_count == 1
+    finally:
+        db.close()
 
 
-def test_legacy_artifact_hash_does_not_attach_content_id():
-    tracker = MagicMock()
-    tracker.resolve_uri = lambda uri: f"/abs/{uri}"
-    tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
-    tracker.db = MagicMock()
-
-    manager = ArtifactManager(tracker)
-
-    existing = Artifact(
+def test_historical_artifact_replay_does_not_create_verifiable_digest(
+    mock_tracker: MagicMock,
+) -> None:
+    manager = ArtifactManager(mock_tracker)
+    existing = make_artifact(
         key="k",
         container_uri="inputs://a.parquet",
         driver="parquet",
-        hash="hash_from_obj",
+        identity=Identity(anchor=Digest("legacy-v1:unverified", "1" * 64)),
         run_id="run_x",
     )
 
     out = manager.create_artifact(path=existing, run_id="run_x")
 
-    assert out.content_id is None
-    tracker.db.get_or_create_artifact_content.assert_not_called()
+    assert out.identity.verifiable is False
+    assert out.anchor == existing.anchor
 
 
-def test_legacy_detached_artifact_remains_without_content_id(tmp_path, caplog):
-    db = DatabaseManager(str(tmp_path / "artifact_replay.db"))
-
-    with db.session_scope() as session:
-        original = Artifact(
+def test_historical_persisted_artifact_replay_keeps_content_digest_empty(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    db_path = tmp_path / "artifact_replay.duckdb"
+    db = DatabaseManager(str(db_path))
+    try:
+        original = make_artifact(
             key="geoid_to_zone",
             container_uri="outputs://zones.parquet",
             driver="parquet",
-            hash="shared_hash",
+            identity=Identity(anchor=Digest("legacy-v1:unverified", "2" * 64)),
             run_id="run_a",
         )
-        session.add(original)
-        session.commit()
-        artifact_id = original.id
+        db.upsert_artifact(original)
 
-    detached = db.get_artifact(artifact_id)
-    assert detached is not None
-    replayed = deepcopy(detached)
+        detached = db.get_artifact(original.id)
+        assert detached is not None
+        replayed = copy.deepcopy(detached)
 
-    tracker = MagicMock()
-    tracker.resolve_uri = lambda uri: f"/abs/{uri}"
-    tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
-    tracker.identity.compute_file_checksum.return_value = "shared_hash"
-    tracker.db = db
+        tracker = MagicMock()
+        tracker.run_dir = tmp_path / "runs"
+        tracker.run_dir.mkdir()
+        tracker.mounts = {}
+        tracker.archive_mounts = {}
+        tracker.db_path = str(db_path)
+        tracker.ledger = db.ledger
+        tracker.db = db
+        tracker.resolve_uri = lambda uri: f"/abs/{uri}"
+        tracker.identity.hashing_strategy = "full"
 
-    manager = ArtifactManager(tracker)
-    with caplog.at_level(logging.WARNING):
-        out = manager.create_artifact(path=replayed, run_id="run_b")
+        manager = ArtifactManager(tracker)
+        with caplog.at_level(logging.WARNING):
+            out = manager.create_artifact(path=replayed, run_id="run_b")
 
-    content = db.find_artifact_content(content_hash="shared_hash", driver="parquet")
+        with db.ledger.exec_cursor() as cur:
+            digest_count = cur.execute(
+                "SELECT COUNT(*) FROM main.content_digest WHERE anchor = ?",
+                [str(original.anchor)],
+            ).fetchone()[0]
 
-    assert out is not replayed
-    assert out.id == replayed.id
-    assert out.hash == replayed.hash == "shared_hash"
-    assert content is None
-    assert out.content_id is None
-    assert "Failed to record artifact content identity" not in caplog.text
-    assert out.parent_artifact_id is None
+        assert out is not replayed
+        assert out.id == replayed.id
+        assert out.hash == replayed.hash == str(original.anchor)
+        assert digest_count == 0
+        assert out.identity.verifiable is False
+        assert "Failed to record artifact content identity" not in caplog.text
+        assert out.parent_artifact_id is None
+    finally:
+        db.close()
 
 
-def test_legacy_detached_artifact_driver_override_does_not_create_content_identity(
-    tmp_path, caplog
-):
-    db = DatabaseManager(str(tmp_path / "artifact_driver_override.db"))
-
-    with db.session_scope() as session:
-        original = Artifact(
+def test_historical_artifact_driver_override_preserves_unverified_identity(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    db_path = tmp_path / "artifact_driver_override.duckdb"
+    db = DatabaseManager(str(db_path))
+    try:
+        original = make_artifact(
             key="geoid_to_zone",
             container_uri="outputs://zones.parquet",
             driver="parquet",
-            hash="shared_hash",
+            identity=Identity(anchor=Digest("legacy-v1:unverified", "3" * 64)),
             run_id="run_a",
         )
-        session.add(original)
-        session.commit()
-        artifact_id = original.id
+        db.upsert_artifact(original)
+        db.ledger.record_run(run_id="run_b", model_name="demo")
 
-    detached = db.get_artifact(artifact_id)
-    assert detached is not None
-    replayed = deepcopy(detached)
+        detached = db.get_artifact(original.id)
+        assert detached is not None
+        replayed = copy.deepcopy(detached)
 
-    tracker = MagicMock()
-    tracker.resolve_uri = lambda uri: f"/abs/{uri}"
-    tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
-    tracker.identity.compute_file_checksum.return_value = "shared_hash"
-    tracker.db = db
+        tracker = MagicMock()
+        tracker.run_dir = tmp_path / "runs"
+        tracker.run_dir.mkdir()
+        tracker.mounts = {}
+        tracker.archive_mounts = {}
+        tracker.db_path = str(db_path)
+        tracker.ledger = db.ledger
+        tracker.db = db
+        tracker.resolve_uri = lambda uri: f"/abs/{uri}"
+        tracker.identity.hashing_strategy = "full"
 
-    manager = ArtifactManager(tracker)
-    with caplog.at_level(logging.WARNING):
-        out = manager.create_artifact(
-            path=replayed,
-            run_id="run_b",
-            driver="csv",
+        manager = ArtifactManager(tracker)
+        with caplog.at_level(logging.WARNING):
+            out = manager.create_artifact(
+                path=replayed,
+                run_id="run_b",
+                driver="csv",
+            )
+
+        db.sync_artifact(out, run_id="run_b", direction="output")
+        persisted = db.get_artifact(out.id)
+
+        with db.ledger.exec_cursor() as cur:
+            digest_count = cur.execute(
+                "SELECT COUNT(*) FROM main.content_digest WHERE anchor = ?",
+                [str(original.anchor)],
+            ).fetchone()[0]
+
+        assert out is not replayed
+        assert out.id == replayed.id
+        assert out.driver == "csv"
+        assert replayed.driver == "parquet"
+        assert persisted is not None
+        assert persisted.identity.verifiable is False
+        assert digest_count == 0
+        assert "Failed to record artifact content identity" not in caplog.text
+    finally:
+        db.close()
+
+
+def test_create_artifact_preserves_parent_artifact_id_on_detached_clone(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "artifact_parent_clone.duckdb"
+    db = DatabaseManager(str(db_path))
+    try:
+        parent = make_artifact(
+            key="container",
+            container_uri="outputs://container.h5",
+            driver="h5",
+            hash="c" * 64,
+            run_id="run_parent",
         )
+        db.upsert_artifact(parent)
+        parent_id = parent.id
 
-    db.sync_artifact(out, run_id="run_b", direction="output")
-    persisted = db.get_artifact(out.id)
-    content = db.find_artifact_content(content_hash="shared_hash", driver="csv")
-
-    assert out is not replayed
-    assert out.id == replayed.id
-    assert replayed.driver == "parquet"
-    assert persisted is not None
-    assert persisted.driver == "csv"
-    assert content is None
-    assert persisted.content_id is None
-    assert replayed.content_id is None
-    assert "Failed to record artifact content identity" not in caplog.text
-
-
-def test_create_artifact_preserves_parent_artifact_id_on_detached_clone(tmp_path):
-    db = DatabaseManager(str(tmp_path / "artifact_parent_clone.db"))
-    parent_id = Artifact(
-        key="container",
-        container_uri="outputs://container.h5",
-        driver="h5",
-        run_id="run_parent",
-    ).id
-
-    with db.session_scope() as session:
-        original = Artifact(
+        original = make_artifact(
             key="geoid_to_zone",
             container_uri="outputs://zones.h5",
             table_path="/zones",
             driver="h5_table",
-            hash="shared_hash",
+            hash="d" * 64,
             parent_artifact_id=parent_id,
             run_id="run_a",
             meta={"parent_id": str(parent_id)},
         )
-        session.add(original)
-        session.commit()
-        artifact_id = original.id
+        db.upsert_artifact(original)
 
-    detached = db.get_artifact(artifact_id)
-    assert detached is not None
-    replayed = deepcopy(detached)
+        detached = db.get_artifact(original.id)
+        assert detached is not None
+        replayed = copy.deepcopy(detached)
 
-    tracker = MagicMock()
-    tracker.resolve_uri = lambda uri: f"/abs/{uri}"
-    tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
-    tracker.identity.compute_file_checksum.return_value = "shared_hash"
-    tracker.db = db
+        tracker = MagicMock()
+        tracker.run_dir = tmp_path / "runs"
+        tracker.run_dir.mkdir()
+        tracker.mounts = {}
+        tracker.archive_mounts = {}
+        tracker.db_path = str(db_path)
+        tracker.ledger = db.ledger
+        tracker.db = db
+        tracker.resolve_uri = lambda uri: f"/abs/{uri}"
 
-    manager = ArtifactManager(tracker)
-    out = manager.create_artifact(path=replayed, run_id="run_b")
+        manager = ArtifactManager(tracker)
+        out = manager.create_artifact(path=replayed, run_id="run_b")
 
-    assert out.parent_artifact_id == parent_id
-    assert out.meta["parent_id"] == str(parent_id)
+        assert out.parent_artifact_id == parent_id
+        assert out.meta["parent_id"] == str(parent_id)
+        assert out.member == "/zones"
+    finally:
+        db.close()
 
 
-def test_create_artifact_clones_reused_input_artifact_before_mutation(tmp_path, caplog):
-    db = DatabaseManager(str(tmp_path / "artifact_input_reuse.db"))
+def test_create_artifact_clones_reused_input_artifact_without_mutating_parent(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    db_path = tmp_path / "artifact_input_reuse.duckdb"
+    db = DatabaseManager(str(db_path))
+    try:
+        input_path = tmp_path / "zones.parquet"
+        input_path.write_text("zone,data\n1,a\n", encoding="utf-8")
 
-    with db.session_scope() as session:
-        original = Artifact(
+        digest = "4" * 64
+        original = make_artifact(
             key="geoid_to_zone",
             container_uri="inputs://zones.parquet",
             driver="parquet",
-            hash="shared_hash",
+            hash=f"sha256:file:{digest}",
             run_id="run_a",
         )
-        session.add(original)
-        session.commit()
-        artifact_id = original.id
+        db.upsert_artifact(original)
 
-    detached = db.get_artifact(artifact_id)
-    assert detached is not None
-    reused_parent = deepcopy(detached)
+        detached = db.get_artifact(original.id)
+        assert detached is not None
+        reused_parent = copy.deepcopy(detached)
 
-    tracker = MagicMock()
-    tracker.resolve_uri = lambda uri: str(tmp_path / uri.split("://", 1)[1])
-    tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
-    tracker.identity.compute_file_checksum.return_value = "shared_hash"
-    tracker.mounts = {}
-    tracker.db = MagicMock(wraps=db)
-    tracker.db.find_latest_artifact_at_uri.return_value = reused_parent
+        tracker = MagicMock()
+        tracker.run_dir = tmp_path / "runs"
+        tracker.run_dir.mkdir()
+        tracker.mounts = {"inputs": str(tmp_path)}
+        tracker.archive_mounts = {}
+        tracker.db_path = str(db_path)
+        tracker.ledger = db.ledger
+        tracker.identity.hashing_strategy = "full"
+        tracker.identity.compute_file_checksum.return_value = digest
+        tracker.db = MagicMock(wraps=db)
+        tracker.db.find_latest_artifact_at_uri.return_value = reused_parent
 
-    manager = ArtifactManager(tracker)
-    input_path = tmp_path / "zones.parquet"
-    input_path.write_text("zone,data\n1,a\n", encoding="utf-8")
+        manager = ArtifactManager(tracker)
+        with caplog.at_level(logging.WARNING):
+            out = manager.create_artifact(
+                path=input_path,
+                key="geoid_to_zone",
+                direction="input",
+                step_tag="consumer",
+            )
 
-    with caplog.at_level(logging.WARNING):
-        out = manager.create_artifact(
-            path=input_path,
-            key="geoid_to_zone",
-            direction="input",
-        )
-
-    content = db.find_artifact_content(content_hash="shared_hash", driver="parquet")
-
-    assert out is not reused_parent
-    assert out.id == reused_parent.id
-    assert reused_parent.content_id is None
-    assert content is None
-    assert out.content_id is None
-    assert "Failed to record artifact content identity" not in caplog.text
+        assert out is not reused_parent
+        assert out.id == reused_parent.id
+        assert out.anchor == reused_parent.anchor
+        assert out.meta["step_tag"] == "consumer"
+        assert "step_tag" not in reused_parent.meta
+        assert "Failed to record artifact content identity" not in caplog.text
+    finally:
+        db.close()
 
 
-def test_sync_artifacts_preserves_existing_content_id_with_schema_dependents(
-    tmp_path,
-):
-    db = DatabaseManager(str(tmp_path / "artifact_dependent_sync.db"))
+def _seed_artifact_with_schema_dependent(
+    db: DatabaseManager,
+    *,
+    key: str,
+    schema_id: str,
+    anchor: Digest,
+) -> Artifact:
+    db.ledger.record_run(run_id="run_a", model_name="demo")
+    db.ledger.record_run(run_id="run_b", model_name="demo")
+    original = make_artifact(
+        key=key,
+        container_uri=f"outputs://{key}.csv",
+        driver="csv",
+        identity=Identity(anchor=anchor),
+        run_id="run_a",
+        meta={"marker": "original"},
+    )
+    db.upsert_artifact(original)
+    schema = ArtifactSchema(id=schema_id, summary_json={"fields": []})
+    obs = ArtifactSchemaObservation(
+        artifact_id=original.id,
+        schema_id=schema.id,
+        source="file",
+        run_id="run_a",
+    )
+    db.ledger.upsert_artifact_schema(schema, [], observation=obs)
+    return original
 
-    with db.session_scope() as session:
-        original = Artifact(
+
+def test_sync_artifacts_and_schema_updates_preserve_existing_anchor_with_dependents(
+    tmp_path: Path,
+) -> None:
+    db = DatabaseManager(str(tmp_path / "artifact_dependent_sync.duckdb"))
+    try:
+        anchor_a = Digest("sha256:file", "5" * 64)
+        anchor_b = Digest("sha256:file", "6" * 64)
+        original = _seed_artifact_with_schema_dependent(
+            db,
             key="dependent_artifact",
-            container_uri="outputs://dependent.csv",
+            schema_id="schema_hash_dep",
+            anchor=anchor_a,
+        )
+
+        # Even if an in-memory handle carries a different anchor for the same artifact UUID,
+        # ON CONFLICT (id) DO UPDATE preserves the existing immutable anchor and updates meta.
+        candidate = make_artifact(
+            id=original.id,
+            key="dependent_artifact",
+            container_uri="outputs://dependent_artifact.csv",
             driver="csv",
-            hash="shared_hash",
+            identity=Identity(anchor=anchor_b),
             run_id="run_a",
-            meta={"marker": "original"},
+            meta={"marker": "updated"},
         )
-        schema = ArtifactSchema(
-            id="schema_hash",
-            summary_json={"fields": []},
+        db.sync_artifacts(artifacts=[candidate], run_id="run_b", direction="output")
+        persisted = db.get_artifact(original.id)
+        assert persisted is not None
+        assert persisted.anchor == anchor_a
+        assert persisted.meta["marker"] == "updated"
+
+        # persist_artifact_schema_observation_bundle preserves anchor and merges meta
+        obs_b = ArtifactSchemaObservation(
+            artifact_id=original.id,
+            schema_id="schema_hash_dep",
+            source="file",
+            run_id="run_b",
         )
-        session.add_all(
-            [
-                original,
-                schema,
-                ArtifactSchemaObservation(
-                    artifact_id=original.id,
-                    schema_id=schema.id,
-                    source="file",
-                ),
-            ]
+        db.persist_artifact_schema_observation_bundle(
+            artifact=persisted,
+            observation=obs_b,
+            meta_updates={"obs_bundled": True},
         )
-        session.commit()
-        artifact_id = original.id
+        after_obs = db.get_artifact(original.id)
+        assert after_obs is not None
+        assert after_obs.anchor == anchor_a
+        assert after_obs.meta["marker"] == "updated"
+        assert after_obs.meta["obs_bundled"] is True
 
-    with db.session_scope() as session:
-        content = ArtifactContent(content_hash="shared_hash", driver="csv")
-        session.add(content)
-        session.commit()
-        content_id = content.id
+        # persist_artifact_schema_profile preserves anchor and merges meta
+        schema_prof = ArtifactSchema(id="schema_hash_prof", summary_json={"fields": []})
+        obs_prof = ArtifactSchemaObservation(
+            artifact_id=original.id,
+            schema_id=schema_prof.id,
+            source="file",
+            run_id="run_b",
+        )
+        db.persist_artifact_schema_profile(
+            artifact=after_obs,
+            schema=schema_prof,
+            fields=[],
+            observation=obs_prof,
+            meta_updates={"profiled": True},
+            relations=[],
+        )
+        after_prof = db.get_artifact(original.id)
+        assert after_prof is not None
+        assert after_prof.anchor == anchor_a
+        assert after_prof.schema_id == "schema_hash_prof"
+        assert after_prof.meta["profiled"] is True
 
-    merged = Artifact(
-        id=artifact_id,
-        key="dependent_artifact",
-        container_uri="outputs://dependent.csv",
-        driver="csv",
-        hash="shared_hash",
-        content_id=content_id,
-        run_id="run_a",
-        meta={"marker": "updated"},
-    )
+        # update_artifact_meta returns updated Artifact and preserves anchor
+        updated = db.update_artifact_meta(after_prof, {"meta_patched": True})
+        assert isinstance(updated, Artifact)
+        after_meta = db.get_artifact(original.id)
+        assert after_meta is not None
+        assert after_meta.anchor == anchor_a
+        assert after_meta.meta["meta_patched"] is True
 
-    db.sync_artifacts(artifacts=[merged], run_id="run_b", direction="output")
-
-    persisted = db.get_artifact(artifact_id)
-    assert persisted is not None
-    assert persisted.content_id is None
-    assert persisted.meta["marker"] == "updated"
-
-
-def test_persist_artifact_schema_observation_bundle_preserves_existing_content_id(
-    tmp_path,
-):
-    db = DatabaseManager(str(tmp_path / "artifact_schema_observation_bundle.db"))
-
-    with db.session_scope() as session:
-        original = Artifact(
-            key="bundle_artifact",
-            container_uri="outputs://bundle.csv",
-            driver="csv",
-            hash="shared_hash",
+        # sync_artifact preserves existing anchor while updating metadata/facets
+        with_facet = after_meta.with_meta(
+            {
+                "facet": {"label": "demo"},
+                "artifact_facet_namespace": "activitysim",
+                "facet_applied": True,
+            },
+            merge=True,
+        )
+        db.sync_artifact(
+            replace(with_facet, identity=Identity(anchor=anchor_b)),
             run_id="run_a",
-            meta={"marker": "original"},
+            direction="output",
+            facet_index=True,
         )
-        schema = ArtifactSchema(
-            id="schema_hash_bundle",
-            summary_json={"fields": []},
-        )
-        session.add_all(
-            [
-                original,
-                schema,
-                ArtifactSchemaObservation(
-                    artifact_id=original.id,
-                    schema_id=schema.id,
-                    source="file",
-                ),
-            ]
-        )
-        session.commit()
-        artifact_id = original.id
-
-    with db.session_scope() as session:
-        content = ArtifactContent(content_hash="shared_hash", driver="csv")
-        session.add(content)
-        session.commit()
-        content_id = content.id
-
-    artifact = Artifact(
-        id=artifact_id,
-        key="bundle_artifact",
-        container_uri="outputs://bundle.csv",
-        driver="csv",
-        hash="shared_hash",
-        content_id=content_id,
-        run_id="run_a",
-        meta={"marker": "updated"},
-    )
-    observation = ArtifactSchemaObservation(
-        artifact_id=artifact_id,
-        schema_id="schema_hash_bundle",
-        source="file",
-        run_id="run_b",
-    )
-
-    db.persist_artifact_schema_observation_bundle(
-        artifact=artifact,
-        observation=observation,
-        meta_updates={"profiled": True},
-    )
-
-    persisted = db.get_artifact(artifact_id)
-    assert persisted is not None
-    assert persisted.content_id is None
-    assert persisted.meta["marker"] == "updated"
-    assert persisted.meta["profiled"] is True
+        after_sync = db.get_artifact(original.id)
+        assert after_sync is not None
+        assert after_sync.anchor == anchor_a
+        assert after_sync.meta["facet_applied"] is True
+        kv_rows = db.get_artifact_kv(original.id, namespace="activitysim")
+        assert {r.key_path: r.value_str for r in kv_rows} == {"label": "demo"}
+    finally:
+        db.close()
 
 
-def test_persist_artifact_schema_profile_preserves_existing_content_id(
-    tmp_path,
-):
-    db = DatabaseManager(str(tmp_path / "artifact_schema_profile.db"))
+def test_frozen_artifact_immutability_copy_pickle_and_meta_isolation(
+    tmp_path: Path,
+) -> None:
+    local_bytes = b"x\n1\n"
+    local_file = tmp_path / "transient.csv"
+    local_file.write_bytes(local_bytes)
+    local_digest = hashlib.sha256(local_bytes).hexdigest()
 
-    with db.session_scope() as session:
-        original = Artifact(
-            key="profile_artifact",
-            container_uri="outputs://profile.csv",
-            driver="csv",
-            hash="shared_hash",
-            run_id="run_a",
-            meta={"marker": "original"},
-        )
-        schema = ArtifactSchema(
-            id="schema_hash_profile",
-            summary_json={"fields": []},
-        )
-        session.add_all(
-            [
-                original,
-                schema,
-                ArtifactSchemaObservation(
-                    artifact_id=original.id,
-                    schema_id=schema.id,
-                    source="file",
-                ),
-            ]
-        )
-        session.commit()
-        artifact_id = original.id
+    class _DblessTracker:
+        db_path = None
+        mounts = {"outputs": str(tmp_path)}
 
-    with db.session_scope() as session:
-        content = ArtifactContent(content_hash="shared_hash", driver="csv")
-        session.add(content)
-        session.commit()
-        content_id = content.id
-
-    artifact = Artifact(
-        id=artifact_id,
-        key="profile_artifact",
-        container_uri="outputs://profile.csv",
-        driver="csv",
-        hash="shared_hash",
-        content_id=content_id,
-        run_id="run_a",
-        meta={"marker": "updated"},
-    )
-    schema = ArtifactSchema(
-        id="schema_hash_profile",
-        summary_json={"fields": []},
-    )
-    observation = ArtifactSchemaObservation(
-        artifact_id=artifact_id,
-        schema_id="schema_hash_profile",
-        source="file",
-        run_id="run_b",
-    )
-
-    db.persist_artifact_schema_profile(
-        artifact=artifact,
-        schema=schema,
-        fields=[],
-        observation=observation,
-        meta_updates={"profiled": True},
-        relations=[],
-    )
-
-    persisted = db.get_artifact(artifact_id)
-    assert persisted is not None
-    assert persisted.content_id is None
-    assert persisted.meta["marker"] == "updated"
-    assert persisted.meta["profiled"] is True
-
-
-def test_update_artifact_meta_preserves_existing_content_id_with_dependents(
-    tmp_path,
-):
-    db = DatabaseManager(str(tmp_path / "artifact_update_meta.db"))
-
-    with db.session_scope() as session:
-        original = Artifact(
-            key="meta_artifact",
-            container_uri="outputs://meta.csv",
-            driver="csv",
-            hash="shared_hash",
-            run_id="run_a",
-            meta={"marker": "original"},
-        )
-        schema = ArtifactSchema(
-            id="schema_hash_meta",
-            summary_json={"fields": []},
-        )
-        session.add_all(
-            [
-                original,
-                schema,
-                ArtifactSchemaObservation(
-                    artifact_id=original.id,
-                    schema_id=schema.id,
-                    source="file",
-                ),
-            ]
-        )
-        session.commit()
-        artifact_id = original.id
-
-    with db.session_scope() as session:
-        content = ArtifactContent(content_hash="shared_hash", driver="csv")
-        session.add(content)
-        session.commit()
-        content_id = content.id
-
-    artifact = Artifact(
-        id=artifact_id,
-        key="meta_artifact",
-        container_uri="outputs://meta.csv",
-        driver="csv",
-        hash="shared_hash",
-        content_id=content_id,
-        run_id="run_a",
-        meta={"marker": "updated"},
-    )
-
-    updated = db.update_artifact_meta(artifact, {"profiled": True})
-
-    persisted = db.get_artifact(artifact_id)
-    assert updated is True
-    assert persisted is not None
-    assert persisted.content_id is None
-    assert persisted.meta["marker"] == "updated"
-    assert persisted.meta["profiled"] is True
-
-
-def test_persist_artifact_facet_bundle_preserves_existing_content_id(
-    tmp_path,
-):
-    db = DatabaseManager(str(tmp_path / "artifact_facet_bundle.db"))
-
-    with db.session_scope() as session:
-        original = Artifact(
-            key="facet_artifact",
-            container_uri="outputs://facet.csv",
-            driver="csv",
-            hash="shared_hash",
-            run_id="run_a",
-            meta={"marker": "original"},
-        )
-        schema = ArtifactSchema(
-            id="schema_hash_facet",
-            summary_json={"fields": []},
-        )
-        session.add_all(
-            [
-                original,
-                schema,
-                ArtifactSchemaObservation(
-                    artifact_id=original.id,
-                    schema_id=schema.id,
-                    source="file",
-                ),
-            ]
-        )
-        session.commit()
-        artifact_id = original.id
-
-    with db.session_scope() as session:
-        content = ArtifactContent(content_hash="shared_hash", driver="csv")
-        session.add(content)
-        session.commit()
-        content_id = content.id
-
-    artifact = Artifact(
-        id=artifact_id,
-        key="facet_artifact",
-        container_uri="outputs://facet.csv",
-        driver="csv",
-        hash="shared_hash",
-        content_id=content_id,
-        run_id="run_a",
-        meta={"marker": "updated"},
-    )
-    facet = ArtifactFacet(
-        id="facet_hash",
-        namespace="activitysim",
-        schema_name="FacetSchema",
-        schema_version=1,
-        facet_json={"label": "demo"},
-    )
-
-    db.persist_artifact_facet_bundle(
-        artifact=artifact,
-        facet=facet,
-        meta_updates={"facet_applied": True},
-        kv_rows=[
-            ArtifactKV(
-                artifact_id=artifact_id,
-                facet_id=facet.id,
-                key_path="marker",
-                value_type="str",
-                value_str="updated",
-            )
-        ],
-    )
-
-    persisted = db.get_artifact(artifact_id)
-    assert persisted is not None
-    assert persisted.content_id is None
-    assert persisted.meta["marker"] == "updated"
-    assert persisted.meta["facet_applied"] is True
-
-
-def test_sync_artifact_preserves_existing_nonnull_content_id_with_dependents(
-    tmp_path,
-):
-    db = DatabaseManager(str(tmp_path / "artifact_sync_artifact.db"))
-
-    with db.session_scope() as session:
-        content_a = ArtifactContent(content_hash="content_a", driver="csv")
-        content_b = ArtifactContent(content_hash="content_b", driver="csv")
-        original = Artifact(
-            key="sync_artifact",
-            container_uri="outputs://sync_artifact.csv",
-            driver="csv",
-            hash="shared_hash",
-            content_id=content_a.id,
-            run_id="run_a",
-            meta={"marker": "original"},
-        )
-        schema = ArtifactSchema(
-            id="schema_hash_sync_artifact",
-            summary_json={"fields": []},
-        )
-        session.add_all(
-            [
-                content_a,
-                content_b,
-                original,
-                schema,
-                ArtifactSchemaObservation(
-                    artifact_id=original.id,
-                    schema_id=schema.id,
-                    source="file",
-                ),
-            ]
-        )
-        session.commit()
-        artifact_id = original.id
-        content_a_id = content_a.id
-        content_b_id = content_b.id
-
-    artifact = Artifact(
-        id=artifact_id,
-        key="sync_artifact",
-        container_uri="outputs://sync_artifact.csv",
-        driver="csv",
-        hash="shared_hash",
-        content_id=content_b_id,
-        run_id="run_a",
-        meta={"marker": "updated"},
-    )
-
-    db.sync_artifact(artifact, run_id="run_a", direction="output")
-
-    persisted = db.get_artifact(artifact_id)
-    assert persisted is not None
-    assert persisted.content_id == content_a_id
-    assert persisted.meta["marker"] == "updated"
-
-
-def test_sync_artifact_with_facet_bundle_preserves_existing_nonnull_content_id_with_dependents(
-    tmp_path,
-):
-    db = DatabaseManager(str(tmp_path / "artifact_sync_facet_bundle.db"))
-
-    with db.session_scope() as session:
-        content_a = ArtifactContent(content_hash="content_a", driver="csv")
-        content_b = ArtifactContent(content_hash="content_b", driver="csv")
-        original = Artifact(
-            key="sync_facet_artifact",
-            container_uri="outputs://sync_facet_artifact.csv",
-            driver="csv",
-            hash="shared_hash",
-            content_id=content_a.id,
-            run_id="run_a",
-            meta={"marker": "original"},
-        )
-        schema = ArtifactSchema(
-            id="schema_hash_sync_facet_artifact",
-            summary_json={"fields": []},
-        )
-        session.add_all(
-            [
-                content_a,
-                content_b,
-                original,
-                schema,
-                ArtifactSchemaObservation(
-                    artifact_id=original.id,
-                    schema_id=schema.id,
-                    source="file",
-                ),
-            ]
-        )
-        session.commit()
-        artifact_id = original.id
-        content_a_id = content_a.id
-        content_b_id = content_b.id
-
-    artifact = Artifact(
-        id=artifact_id,
-        key="sync_facet_artifact",
-        container_uri="outputs://sync_facet_artifact.csv",
-        driver="csv",
-        hash="shared_hash",
-        content_id=content_b_id,
-        run_id="run_a",
-        meta={"marker": "updated"},
-    )
-    facet = ArtifactFacet(
-        id="facet_hash_sync",
-        namespace="activitysim",
-        schema_name="FacetSchema",
-        schema_version=1,
-        facet_json={"label": "demo"},
-    )
-
-    db.sync_artifact_with_facet_bundle(
-        artifact=artifact,
-        run_id="run_a",
-        direction="output",
-        facet=facet,
-        meta_updates={"facet_applied": True},
-        kv_rows=[
-            ArtifactKV(
-                artifact_id=artifact_id,
-                facet_id=facet.id,
-                key_path="marker",
-                value_type="str",
-                value_str="updated",
-            )
-        ],
-    )
-
-    persisted = db.get_artifact(artifact_id)
-    assert persisted is not None
-    assert persisted.content_id == content_a_id
-    assert persisted.meta["marker"] == "updated"
-    assert persisted.meta["facet_applied"] is True
-
-
-def _deref_tracker(artifact: Artifact):
-    ref = get_tracker_ref(artifact)
-    assert ref is not None
-    return ref()
-
-
-def test_artifact_deepcopy_and_copy_on_transient_instance():
-    tracker = MagicMock()
-    art = Artifact(
+    tracker = _DblessTracker()
+    art = make_artifact(
         key="transient",
         container_uri="outputs://transient.csv",
         driver="csv",
-        hash="hash123",
+        hash=f"sha256:file:{local_digest}",
         meta={"nested": {"inner_key": "inner_val"}, "list": [1, 2, 3]},
-    )
-    art.abs_path = "/tmp/transient.csv"
-    set_tracker_ref(art, tracker)
+    ).bind_tracker(tracker)
 
-    # Deepcopy via standard copy module
+    with pytest.raises(FrozenInstanceError):
+        art.key = "mutated"  # type: ignore[misc]
+
+    with pytest.raises(TypeError):
+        art.meta["nested"] = {}  # type: ignore[index]
+
+    # Deepcopy & copy preserve identity, metadata, hints, and weak tracker lookup by UUID
     deep_cloned = copy.deepcopy(art)
     assert deep_cloned is not art
+    assert deep_cloned == art
+    assert deep_cloned.id == art.id
     assert deep_cloned.key == art.key
-    assert deep_cloned.container_uri == art.container_uri
+    assert deep_cloned.primary_location == Location(uri="outputs://transient.csv")
     assert deep_cloned.hash == art.hash
-    assert deep_cloned.abs_path == "/tmp/transient.csv"
-    assert _deref_tracker(deep_cloned) is tracker
-    assert deep_cloned.__pydantic_fields_set__ == art.__pydantic_fields_set__
+    assert deep_cloned.resolve_bound_tracker() is tracker
 
-    # Deepcopy isolation: mutating nested meta does not affect original
-    deep_cloned.meta["nested"]["inner_key"] = "modified"
-    deep_cloned.meta["list"].append(4)
-    assert art.meta["nested"]["inner_key"] == "inner_val"
-    assert art.meta["list"] == [1, 2, 3]
-
-    # Model_copy(deep=True)
-    model_deep = art.model_copy(deep=True)
-    assert model_deep is not art
-    assert model_deep.abs_path == "/tmp/transient.csv"
-    assert _deref_tracker(model_deep) is tracker
-    model_deep.meta["nested"]["inner_key"] = "model_modified"
-    assert art.meta["nested"]["inner_key"] == "inner_val"
-
-    # Shallow copy via copy.copy
     shallow_cloned = copy.copy(art)
-    assert shallow_cloned is not art
-    assert shallow_cloned.key == art.key
-    assert shallow_cloned.abs_path == "/tmp/transient.csv"
-    assert _deref_tracker(shallow_cloned) is tracker
+    assert shallow_cloned == art
+    assert shallow_cloned.resolve_bound_tracker() is tracker
 
-    # Shallow copy via model_copy(deep=False)
-    model_shallow = art.model_copy(deep=False)
-    assert model_shallow is not art
-    assert model_shallow.key == art.key
-    assert model_shallow.abs_path == "/tmp/transient.csv"
-    assert _deref_tracker(model_shallow) is tracker
+    # Memo identity preservation inside compound structures
+    container = [art, art]
+    cloned_container = copy.deepcopy(container)
+    assert cloned_container[0] is cloned_container[1]
+    assert cloned_container[0].id == art.id
+
+    # with_meta returns a new Artifact without mutating original
+    updated = art.with_meta({"nested": {"inner_key": "modified"}}, merge=True)
+    assert updated.id == art.id
+    assert updated.meta["nested"]["inner_key"] == "modified"
+    assert art.meta["nested"]["inner_key"] == "inner_val"
+
+    # Pickle round-trip preserves Artifact fields
+    unpickled = pickle.loads(pickle.dumps(art))
+    assert unpickled == art
+    assert unpickled.meta.to_dict() == art.meta.to_dict()
+
+    # Deprecated v1 compatibility properties emit DeprecationWarning
+    with pytest.deprecated_call(match="container_uri is deprecated"):
+        assert art.container_uri == "outputs://transient.csv"
+    with pytest.deprecated_call(match="abs_path is deprecated"):
+        assert art.abs_path is not None
 
 
-def test_artifact_deepcopy_avoids_object_dereferenced_error_after_gc(tmp_path):
-    db = DatabaseManager(str(tmp_path / "deepcopy_test.duckdb"))
-    tracker = MagicMock()
+def test_persisted_artifact_reload_and_replace_survive_gc(tmp_path: Path) -> None:
+    db = DatabaseManager(str(tmp_path / "gc_test.duckdb"))
+    try:
+        db.ledger.record_run(run_id="run_out", model_name="demo")
+        db.ledger.record_run(run_id="run_in", model_name="demo")
 
-    with db.session_scope() as session:
-        art = Artifact(
+        art = make_artifact(
             key="persisted_art",
             container_uri="outputs://persisted.csv",
             driver="csv",
-            hash="persisted_hash",
-            run_id="run_1",
+            hash=f"sha256:file:{'8' * 64}",
+            run_id="run_out",
             meta={"initial": "value", "nested": {"k": "v"}},
         )
-        session.add(art)
-        session.commit()
-        session.refresh(art)
-
-        set_tracker_ref(art, tracker)
-        art.abs_path = "/tmp/abs/persisted.csv"
-
-        # Clone using all four copy variants
-        c_deepcopy = copy.deepcopy(art)
-        c_model_deep = art.model_copy(deep=True)
-        c_copy = copy.copy(art)
-        c_model_shallow = art.model_copy(deep=False)
-
-    # Simulate original entity and session going out of scope and getting garbage-collected
-    art_id = art.id
-    del art
-    del session
-    gc.collect()
-
-    # Verify that mutating ORM-instrumented attributes does NOT raise ObjectDereferencedError
-    for clone in [c_deepcopy, c_model_deep, c_copy, c_model_shallow]:
-        assert clone.abs_path == "/tmp/abs/persisted.csv"
-        assert _deref_tracker(clone) is tracker
-
-        # Mutate meta directly on the clone
-        clone.meta = {"updated": "directly"}
-        assert clone.meta == {"updated": "directly"}
-
-    # Verify that db.update_artifact_meta succeeds and commits cleanly
-    db.update_artifact_meta(
-        c_deepcopy, {"db_update": "from_deepcopy"}, raise_on_error=True
-    )
-    persisted = db.get_artifact(art_id)
-    assert persisted is not None
-    assert persisted.meta["db_update"] == "from_deepcopy"
-
-    # Verify model_copy(deep=True) also works with db.update_artifact_meta
-    db.update_artifact_meta(
-        c_model_deep, {"db_update": "from_model_deep"}, raise_on_error=True
-    )
-    persisted = db.get_artifact(art_id)
-    assert persisted is not None
-    assert persisted.meta["db_update"] == "from_model_deep"
-
-
-def test_artifact_deepcopy_on_db_loaded_instance_with_uninitialized_pydantic_private(
-    tmp_path,
-):
-    db = DatabaseManager(str(tmp_path / "uninitialized_private_test.duckdb"))
-    tracker = MagicMock()
-
-    with db.session_scope() as session:
-        art = Artifact(
-            key="db_loaded_art",
-            container_uri="outputs://db_loaded.csv",
-            driver="csv",
-            hash="loaded_hash",
-            run_id="run_loaded",
-            meta={"step": 1},
-        )
-        session.add(art)
-        session.commit()
+        db.sync_artifacts(artifacts=[art], run_id="run_out", direction="output")
         art_id = art.id
 
-    # Query fresh instance directly from DB (bypasses __init__, so __pydantic_private__ may be None)
-    loaded = db.get_artifact(art_id)
-    assert loaded is not None
+        loaded = db.get_artifact(art_id)
+        assert loaded is not None
+        cloned = copy.deepcopy(loaded)
+        replaced = replace(cloned, key="updated_key").with_meta({"step": 2}, merge=True)
 
-    set_tracker_ref(loaded, tracker)
-    loaded.abs_path = "/path/to/loaded.csv"
+        del art
+        del loaded
+        gc.collect()
 
-    cloned = copy.deepcopy(loaded)
-    model_cloned = loaded.model_copy(deep=True)
-
-    del loaded
-    gc.collect()
-
-    for c in [cloned, model_cloned]:
-        assert c.abs_path == "/path/to/loaded.csv"
-        assert _deref_tracker(c) is tracker
-        c.meta = {"step": 2}
-        assert c.meta == {"step": 2}
-
-
-def test_artifact_deepcopy_memo_identity_preservation():
-    art = Artifact(
-        key="memo_test",
-        container_uri="outputs://memo.csv",
-        driver="csv",
-        hash="memo_hash",
-        meta={"key": "val"},
-    )
-    container = [art, art]
-    cloned_container = copy.deepcopy(container)
-
-    assert cloned_container[0] is not art
-    assert cloned_container[0] is cloned_container[1]
-    assert cloned_container[0].key == "memo_test"
-
-
-def test_artifact_model_copy_with_updates(tmp_path):
-    tracker = MagicMock()
-    art = Artifact(
-        key="original_key",
-        container_uri="outputs://original.csv",
-        driver="csv",
-        hash="original_hash",
-        meta={"orig": 1},
-    )
-    art.abs_path = "/path/to/original.csv"
-    set_tracker_ref(art, tracker)
-
-    cloned = art.model_copy(
-        deep=True,
-        update={"key": "updated_key", "driver": "parquet", "meta": {"orig": 2}},
-    )
-    gc.collect()
-
-    assert cloned.key == "updated_key"
-    assert cloned.driver == "parquet"
-    assert cloned.hash == "original_hash"
-    assert cloned.meta == {"orig": 2}
-    assert cloned.abs_path == "/path/to/original.csv"
-    assert _deref_tracker(cloned) is tracker
-    assert cloned._sa_instance_state.obj() is cloned
-
-    # Verify merging a model_copy(deep=True, update=...) clone into a session where
-    # the original artifact row is already persistent does not lose its primary key
-    # identity or raise a duplicate primary key constraint error on autoflush.
-    db = DatabaseManager(str(tmp_path / "model_copy_update_merge.duckdb"))
-    db.sync_artifacts(artifacts=[art], run_id="run_out", direction="output")
-    db.sync_artifacts(artifacts=[cloned], run_id="run_in", direction="input")
-    persisted = db.get_artifact(art.id)
-    assert persisted is not None
-    assert persisted.driver == "parquet"
-
-
-def test_artifact_abs_path_setter_accepts_none():
-    art = Artifact(
-        key="path_test",
-        container_uri="outputs://path.csv",
-        driver="csv",
-        hash="h",
-    )
-    art.abs_path = "/test/path"
-    assert art.abs_path == "/test/path"
-
-    art.abs_path = None
-    assert art.abs_path is None
-
-
-def test_artifact_content_copy_and_deepcopy(tmp_path):
-    db = DatabaseManager(str(tmp_path / "content_test.duckdb"))
-
-    with db.session_scope() as session:
-        content = ArtifactContent(
-            content_hash="content_hash_123",
-            driver="csv",
-            meta={"schema": {"columns": ["a", "b"]}},
+        db.sync_artifacts(artifacts=[replaced], run_id="run_in", direction="input")
+        db.update_artifact_meta(
+            art_id, {"db_update": "from_deepcopy"}, merge=True, raise_on_error=True
         )
-        session.add(content)
-        session.commit()
-        session.refresh(content)
 
-        c_deep = copy.deepcopy(content)
-        c_model_deep = content.model_copy(deep=True)
-        c_shallow = copy.copy(content)
-        c_model_shallow = content.model_copy(deep=False)
-
-    del content
-    del session
-    gc.collect()
-
-    for c in [c_deep, c_model_deep, c_shallow, c_model_shallow]:
-        assert c.content_hash == "content_hash_123"
-        assert c.driver == "csv"
-        # Mutation should not raise ObjectDereferencedError
-        c.meta = {"schema": {"columns": ["x"]}}
-        assert c.meta == {"schema": {"columns": ["x"]}}
-
-    # Deepcopy isolation
-    c_deep.meta["schema"]["columns"].append("y")
-    assert c_deep.meta["schema"]["columns"] == ["x", "y"]
-    assert c_model_deep.meta["schema"]["columns"] == ["x"]
-
-    # Memo identity preservation
-    content_list = [c_deep, c_deep]
-    cloned_list = copy.deepcopy(content_list)
-    assert cloned_list[0] is not c_deep
-    assert cloned_list[0] is cloned_list[1]
+        persisted = db.get_artifact(art_id)
+        assert persisted is not None
+        assert persisted.meta["step"] == 2
+        assert persisted.meta["db_update"] == "from_deepcopy"
+    finally:
+        db.close()
 
 
-def test_cloning_helpers_delegate_safely():
-    original = Artifact(
-        key="helper_test",
-        container_uri="outputs://helper.csv",
-        driver="csv",
-        hash="helper_hash",
-        meta={"nested": {"count": 1}},
+def test_artifact_with_hints_deduplicates_observations() -> None:
+    anchor = Digest("sha256:file", "9" * 64)
+    obs = Observation(
+        location=Location(uri="outputs://dup.parquet"),
+        identity=Identity(anchor=anchor),
+        access_driver="parquet",
+        basis="declared",
     )
-    original.abs_path = "/tmp/helper.csv"
-
-    # _clone_artifact_for_meta_update
-    cloned_for_meta = _clone_artifact_for_meta_update(original)
-    assert cloned_for_meta is not original
-    assert cloned_for_meta.abs_path == "/tmp/helper.csv"
-    cloned_for_meta.meta["nested"]["count"] = 2
-    assert original.meta["nested"]["count"] == 1  # Deepcopy isolation
-
-    # persistence._clone_artifact and _clone_artifact_content
-    p_clone = _clone_artifact(original)
-    assert p_clone is not original
-    p_clone.meta["nested"]["count"] = 4
-    assert original.meta["nested"]["count"] == 1
-
-    content_row = ArtifactContent(
-        content_hash="h1",
-        driver="csv",
-        meta={"schema": {"c": 1}},
-    )
-    pc_clone = _clone_artifact_content(content_row)
-    assert pc_clone is not content_row
-    pc_clone.meta["schema"]["c"] = 2
-    assert content_row.meta["schema"]["c"] == 1
-
-
-def test_artifact_and_content_copy_with_expired_attributes(tmp_path):
-    """Confirm copying expired ORM instances reloads attributes and produces clean detached clones."""
-    db = DatabaseManager(str(tmp_path / "expired_test.duckdb"))
-
-    with db.session_scope() as session:
-        art = Artifact(
-            key="expired_art_key",
-            container_uri="outputs://expired.csv",
-            driver="csv",
-            hash="expired_hash_123",
-            meta={"tags": ["fast", "cold"]},
-        )
-        content = ArtifactContent(
-            content_hash="content_expired_hash_456",
-            driver="csv",
-            meta={"schema": {"columns": ["col_a", "col_b"]}},
-        )
-        session.add(art)
-        session.add(content)
-        session.commit()
-
-        # 1. Directly after commit() without refresh(), attributes are expired in session.
-        # __dict__ contains only '_sa_instance_state'.
-        assert "_sa_instance_state" in art.__dict__
-        assert "key" not in art.__dict__
-        assert "content_hash" not in content.__dict__
-
-        cloned_art = copy.deepcopy(art)
-        shallow_art = copy.copy(art)
-        cloned_content = copy.deepcopy(content)
-        shallow_content = copy.copy(content)
-
-        for a in [cloned_art, shallow_art]:
-            assert a.id == art.id
-            assert a.key == "expired_art_key"
-            assert a.container_uri == "outputs://expired.csv"
-            assert a.driver == "csv"
-            assert a.hash == "expired_hash_123"
-            assert a.meta == {"tags": ["fast", "cold"]}
-            # Mutation on detached clone must not raise ObjectDereferencedError
-            a.meta = {"tags": ["updated"]}
-            assert a.meta == {"tags": ["updated"]}
-
-        for c in [cloned_content, shallow_content]:
-            assert c.content_hash == "content_expired_hash_456"
-            assert c.driver == "csv"
-            assert c.meta == {"schema": {"columns": ["col_a", "col_b"]}}
-            c.meta = {"schema": {"columns": ["col_x"]}}
-            assert c.meta == {"schema": {"columns": ["col_x"]}}
-
-        # 2. Test after explicit session.expire()
-        session.refresh(art)
-        session.refresh(content)
-        session.expire(art)
-        session.expire(content)
-        assert "key" not in art.__dict__
-        assert "content_hash" not in content.__dict__
-
-        cloned_art_after_expire = copy.deepcopy(art)
-        cloned_content_after_expire = copy.deepcopy(content)
-
-        assert cloned_art_after_expire.key == "expired_art_key"
-        assert cloned_art_after_expire.id == art.id
-        assert cloned_content_after_expire.content_hash == "content_expired_hash_456"
-
-        cloned_art_after_expire.meta = {"tags": ["expired_mutation"]}
-        assert cloned_art_after_expire.meta == {"tags": ["expired_mutation"]}
-
-
-def test_artifact_deepcopy_circular_reference():
-    """Verify that deepcopy preserves instance identity on self-referential graph structures."""
     art = Artifact(
-        key="circular_key",
-        container_uri="outputs://circular.csv",
-        driver="csv",
-        hash="h_circ",
+        id="00000000-0000-0000-0000-000000000099",
+        key="dup",
+        driver="parquet",
+        identity=Identity(anchor=anchor),
     )
-    art.meta = {"self": art}
-
-    cloned = copy.deepcopy(art)
-
-    assert cloned is not art
-    assert cloned.key == "circular_key"
-    assert cloned.meta["self"] is cloned
-
-
-def test_artifact_copy_preserves_custom_attributes():
-    """Verify non-model custom attributes attached to __dict__ are cloned."""
-    art = Artifact(
-        key="custom_attr_key",
-        container_uri="outputs://custom.csv",
-        driver="csv",
-        hash="h_custom",
-    )
-    object.__setattr__(art, "extra_metric", {"runtime_sec": 42.5})
-
-    cloned = copy.deepcopy(art)
-    assert hasattr(cloned, "extra_metric")
-    assert cloned.extra_metric == {"runtime_sec": 42.5}
-    assert cloned.extra_metric is not art.extra_metric  # Deep-copied
-
-    shallow = copy.copy(art)
-    assert hasattr(shallow, "extra_metric")
-    assert shallow.extra_metric == {"runtime_sec": 42.5}
-    assert shallow.extra_metric is art.extra_metric  # Shallow-copied
-
-
-def test_artifact_abs_path_setter_accepts_path_object():
-    """Verify abs_path setter accepts pathlib.Path objects and stores normalized string."""
-    art = Artifact(
-        key="path_test",
-        container_uri="outputs://path.csv",
-        driver="csv",
-        hash="h_path",
-    )
-    art.abs_path = Path("/data/runs/output.parquet")
-    assert art.abs_path == "/data/runs/output.parquet"
-
-    cloned = copy.deepcopy(art)
-    assert cloned.abs_path == "/data/runs/output.parquet"
+    with_hints = art.with_hints([obs, obs])
+    assert len(with_hints.hints) == 1
+    assert with_hints.primary_location == Location(uri="outputs://dup.parquet")
 
 
 def test_artifact_tracker_property_and_ensure_local_path(
-    tracker, tmp_path: Path
+    tracker: Tracker, tmp_path: Path
 ) -> None:
-    import consist
-    from consist.core.context import use_tracker
-
     archive_dir = tmp_path / "archive"
     out_file = tracker.run_dir / "outputs" / "households.parquet"
     out_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1375,7 +781,7 @@ def test_artifact_tracker_property_and_ensure_local_path(
     assert artifact.tracker is tracker
 
     # Unbound artifact falls back to current_tracker() inside use_tracker
-    unbound = Artifact(
+    unbound = make_artifact(
         key="unbound",
         container_uri="inputs://unbound.parquet",
         driver="parquet",
@@ -1408,7 +814,6 @@ def test_artifact_tracker_property_and_ensure_local_path(
     # 5) Missing source behavior: on_missing="warn" returns None, on_missing="raise" raises
     (archive_dir / "outputs" / "households.parquet").unlink()
     custom_path.unlink()
-    artifact.abs_path = None
 
     assert artifact.ensure_local_path(on_missing="warn") is None
     with pytest.raises(FileNotFoundError):
@@ -1417,12 +822,13 @@ def test_artifact_tracker_property_and_ensure_local_path(
     # 6) Detached artifact with target_root requires a tracker even if self.path exists elsewhere
     elsewhere_file = tmp_path / "elsewhere.parquet"
     elsewhere_file.write_bytes(b"elsewhere")
-    detached = Artifact(
+    detached = make_artifact(
         key="detached",
-        container_uri=str(elsewhere_file),
+        container_uri=f"file://{elsewhere_file.resolve()}",
         driver="parquet",
+        basis="declared",
     )
-    assert detached.ensure_local_path() == elsewhere_file
+    assert detached.ensure_local_path() == elsewhere_file.resolve()
     assert (
         detached.ensure_local_path(
             target_root=tmp_path / "other_target", on_missing="warn"

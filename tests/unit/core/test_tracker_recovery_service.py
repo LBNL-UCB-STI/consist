@@ -11,13 +11,13 @@ from consist.core.materialize import (
     HydratedRunOutputsResult,
 )
 from consist.core.tracker import Tracker
-from consist.models.artifact import Artifact
 from consist.types import (
     ExecutionOptions,
     OutputPolicyOptions,
     OutputSet,
     RunCompletionArchivePolicy,
 )
+from tests.helpers.artifact_factory import make_artifact as Artifact
 
 
 def test_recovery_service_stage_inputs_normalizes_destination_paths(
@@ -663,10 +663,11 @@ def test_archive_shapefile_bundle_move_to_same_destination_sets_abs_path(
     for ext in (".shp", ".shx", ".dbf"):
         (shp_dir / f"zones{ext}").unlink()
 
-    shp_art.abs_path = None
     # Archiving with mode="move" when source already resolves to the archive bundle root
     tracker.archive_artifact(shp_art, archive_root, mode="move")
-    assert shp_art.abs_path == str((bundle_dest / "zones.shp").resolve())
+    assert tracker.get_run_outputs("shp_same_dest_run")["zones"].abs_path == str(
+        (bundle_dest / "zones.shp").resolve()
+    )
     assert (bundle_dest / "zones.shp").exists()
 
 
@@ -693,14 +694,13 @@ def test_archive_run_outputs_filters_virtual_ingested_and_syncs_last_consist_and
         def step_fn() -> None:
             out_path.write_text("id,val\n1,10\n", encoding="utf-8")
             # Also log a virtual unbacked ingested table row
-            virtual_art = tracker.log_artifact(
+            tracker.log_artifact(
                 "db://ingested_summary",
                 key="ingested_summary",
                 direction="output",
                 driver="duckdb",
                 is_ingested=True,
             )
-            virtual_art.abs_path = None
 
         res = sc.run(
             fn=step_fn,
@@ -842,19 +842,18 @@ def test_archive_directory_and_shapefile_under_separate_workspace_mount(
 
     # Simulate a legacy run record without mounts snapshot or artifact mount_root,
     # where original_run_dir points to run_dir (which doesn't contain beam_outputs)
-    dir_art_2.meta.pop("mount_root", None)
-    shp_art_2.meta.pop("mount_root", None)
-    tracker.db.update_artifact_meta(dir_art_2, dir_art_2.meta)
-    tracker.db.update_artifact_meta(shp_art_2, shp_art_2.meta)
+    dir_meta_2 = {k: v for k, v in dir_art_2.meta.items() if k != "mount_root"}
+    shp_meta_2 = {k: v for k, v in shp_art_2.meta.items() if k != "mount_root"}
+    tracker.db.update_artifact_meta(
+        dir_art_2, dir_meta_2, merge=False, preserve_system_keys=False
+    )
+    tracker.db.update_artifact_meta(
+        shp_art_2, shp_meta_2, merge=False, preserve_system_keys=False
+    )
     legacy_run = tracker.get_run("legacy_ws_mount_run")
     assert legacy_run is not None
     legacy_run.meta.pop("mounts", None)
-    with tracker.db.session_scope() as session:
-        db_run = session.get(type(legacy_run), "legacy_ws_mount_run")
-        if db_run is not None:
-            db_run.meta = dict(legacy_run.meta)
-            session.add(db_run)
-            session.commit()
+    tracker.db.sync_run(legacy_run)
 
     archive_root_2 = tmp_path / "archive_store_2"
     archived_2 = tracker.archive_run_outputs(

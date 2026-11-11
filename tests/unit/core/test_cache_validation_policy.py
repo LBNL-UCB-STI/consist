@@ -57,8 +57,8 @@ def test_cache_validation_policy_eager_vs_lazy(tracker) -> None:
         assert t.is_cached
         cached = t.cached_output("out")
         assert cached is not None
-        assert cached.container_uri
-        assert not Path(t.resolve_uri(cached.container_uri)).exists()
+        assert cached.primary_location is not None
+        assert not Path(t.resolve_uri(cached.primary_location.uri)).exists()
 
     run_lazy = tracker.get_run("run_lazy_check")
     assert run_lazy is not None
@@ -154,8 +154,7 @@ def test_cache_validation_warning_includes_mount_hint(tmp_path, caplog) -> None:
 
     assert any("Cache Validation Failed" in record.message for record in caplog.records)
     assert any("Mount root mismatch" in record.message for record in caplog.records)
-    if tracker.engine:
-        tracker.engine.dispose()
+    tracker.close()
 
 
 @pytest.mark.parametrize("corruption", ["delete", "modify", "extra"])

@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from consist import observe
 from consist.api import (
     RelationConnectionLeakWarning,
     active_relation_count,
@@ -10,14 +11,14 @@ from consist.api import (
     load_relation,
     to_df,
 )
-from consist.models.artifact import Artifact
+from consist.artifact import Artifact
 
 
 def _csv_artifact(tmp_path: Path) -> Artifact:
     df = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
     path = tmp_path / "data.csv"
     df.to_csv(path, index=False)
-    return Artifact(key="data", container_uri=str(path), driver="csv")
+    return observe(path, key="data", driver="csv")
 
 
 def test_load_relation_closes_connection(tmp_path):

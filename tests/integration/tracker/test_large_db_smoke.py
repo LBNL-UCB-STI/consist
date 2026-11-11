@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-from sqlmodel import Session, func, select
 
 from tests.large_db_helpers import (
     _count_artifacts_keyset,
@@ -14,8 +13,6 @@ from tests.large_db_helpers import (
     _seed_wide_lineage,
 )
 from consist.core.tracker import Tracker
-from consist.models.artifact import Artifact
-from consist.models.run import Run
 
 
 @pytest.mark.timeout(30)
@@ -33,19 +30,19 @@ def test_large_db_smoke(tmp_path):
     db_path = tmp_path / "smoke_scale.duckdb"
 
     tracker = Tracker(run_dir=run_dir, db_path=str(db_path))
+    assert tracker.ledger is not None
 
-    with Session(tracker.engine) as session:
-        sample = _seed_base_dataset(
-            session,
-            total_runs=total_runs,
-            runs_per_scenario=runs_per_scenario,
-            chunk_size=chunk_size,
-        )
-        deep_artifact_id = _seed_deep_lineage(session, depth=lineage_depth)
-        wide_artifact_id = _seed_wide_lineage(session, input_count=wide_inputs)
-        diff_run_a, diff_run_b, expected_changes = _seed_diff_runs(
-            session, num_keys=config_keys
-        )
+    sample = _seed_base_dataset(
+        tracker.ledger,
+        total_runs=total_runs,
+        runs_per_scenario=runs_per_scenario,
+        chunk_size=chunk_size,
+    )
+    deep_artifact_id = _seed_deep_lineage(tracker.ledger, depth=lineage_depth)
+    wide_artifact_id = _seed_wide_lineage(tracker.ledger, input_count=wide_inputs)
+    diff_run_a, diff_run_b, expected_changes = _seed_diff_runs(
+        tracker.ledger, num_keys=config_keys
+    )
 
     scale_sizes = sample["scale_sizes"]
     scale_100k = scale_sizes["scale_100k"]
@@ -89,17 +86,16 @@ def test_large_db_smoke(tmp_path):
 
     expected_artifacts = total_runs + lineage_depth + wide_inputs + 1
 
-    with Session(tracker.engine) as session:
-        by_hash = session.exec(
-            select(Artifact).where(Artifact.hash == lookup_hash)
-        ).first()
-        assert by_hash is not None
-        assert by_hash.id == by_key.id
+    by_hash = tracker.ledger.get_artifact(lookup_hash)
+    assert by_hash is not None
+    assert by_hash.id == by_key.id
 
-        paginated_count = _count_artifacts_keyset(session, batch_size=250)
-        assert paginated_count == expected_artifacts
+    paginated_count = _count_artifacts_keyset(tracker.ledger, batch_size=250)
+    assert paginated_count == expected_artifacts
 
-        initial_run_count = session.exec(select(func.count()).select_from(Run)).one()
+    initial_run_count = int(
+        tracker.query_df("SELECT COUNT(*) AS n FROM run")["n"].iloc[0]
+    )
 
     input_path = run_dir / "write_input.txt"
     input_path.write_text("seed", encoding="utf-8")
@@ -122,7 +118,9 @@ def test_large_db_smoke(tmp_path):
                 key=f"write_output_{i:03d}",
             )
 
-    with Session(tracker.engine) as session:
-        final_run_count = session.exec(select(func.count()).select_from(Run)).one()
+    final_run_count = int(
+        tracker.query_df("SELECT COUNT(*) AS n FROM run")["n"].iloc[0]
+    )
 
     assert final_run_count - initial_run_count == write_runs
+    tracker.close()

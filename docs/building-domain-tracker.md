@@ -30,8 +30,8 @@ from pathlib import Path
 from typing import Any
 
 import consist
-from sqlalchemy import text
 from consist import ExecutionOptions, Tracker
+from consist.api import ibis_view
 from consist.models.run_config_kv import RunConfigKV
 
 
@@ -83,17 +83,19 @@ class CalibrationTracker:
         }
 
     def query_top_k(self, *, metric: str, k: int = 5):
-        query = text("""
+        return self._tracker.query_df(
+            """
             SELECT run_id, value_num
-            FROM global_tables.run_config_kv
-            WHERE key = :metric
+            FROM run_config_kv
+            WHERE key = ?
             ORDER BY value_num ASC
-            LIMIT :k
-        """)
-        return self._tracker.run_query(query.params(metric=metric, k=k))
+            LIMIT ?
+            """,
+            [metric, k],
+        )
 
     def query_top_k_ibis(self, *, metric: str, k: int = 5):
-        kv = consist.ibis_view(self._tracker, model=RunConfigKV)
+        kv = ibis_view(self._tracker, model=RunConfigKV)
         return (
             kv.filter(kv.key == metric)
             .select("run_id", "value_num")
@@ -102,9 +104,9 @@ class CalibrationTracker:
         )
 ```
 
-Prefer the Ibis helper for analysis-time reads over the typed view surface.
-Keep the SQLAlchemy / SQLModel version when you want to show the lower-level
-tracker internals or the exact SQL text being issued.
+Prefer the Ibis helper for lazy dataframe-style reads over typed views, or
+`tracker.query_df(...)` / `tracker.query_rows(..., model=...)` when you want
+parameterized DuckDB SQL directly.
 
 Usage:
 

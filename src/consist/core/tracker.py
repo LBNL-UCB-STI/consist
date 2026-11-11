@@ -454,6 +454,7 @@ class Tracker:
         self._db_lock_retries = self.settings.db_lock_retries
         self._db_lock_base_sleep_seconds = self.settings.db_lock_base_sleep_seconds
         self._db_lock_max_sleep_seconds = self.settings.db_lock_max_sleep_seconds
+        self._suppress_ingest_identity_claim: bool = False
         self.db_skip_schema_init = db_skip_schema_init
 
         if effective_db_path:
@@ -3999,7 +4000,9 @@ class Tracker:
         if ingest:
             dlt_logger = logging.getLogger("dlt")
             previous_dlt_level = dlt_logger.level
+            previous_suppress = self._suppress_ingest_identity_claim
             dlt_logger.setLevel(logging.ERROR)
+            self._suppress_ingest_identity_claim = True
             try:
                 for spec in result.ingestables:
                     if spec.dedupe_on_hash and spec.content_hash:
@@ -4019,6 +4022,7 @@ class Tracker:
                         profile_schema=profile_schema,
                     )
             finally:
+                self._suppress_ingest_identity_claim = previous_suppress
                 dlt_logger.setLevel(previous_dlt_level)
 
         self.log_meta(

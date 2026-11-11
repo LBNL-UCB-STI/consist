@@ -1064,7 +1064,7 @@ def test_phase1_meta_preserved_keys_and_artifact_surface(tmp_path: Path) -> None
     with pytest.warns(DeprecationWarning):
         assert art_h5.array_path is None
 
-    # Weak tracker registry keyed by Artifact.id keeps Artifact frozen & picklable
+    # Per-instance weak tracker binding keeps Artifact frozen & picklable without global leaks
     class _DummyTracker:
         pass
 
@@ -1073,7 +1073,7 @@ def test_phase1_meta_preserved_keys_and_artifact_surface(tmp_path: Path) -> None
     assert art.resolve_bound_tracker() is trk
     unpickled = pickle.loads(pickle.dumps(art))
     assert unpickled == art
-    assert unpickled.resolve_bound_tracker() is trk
+    assert unpickled.resolve_bound_tracker() is None
 
     # with_meta preserves system meta (e.g. recovery_roots) when merge=False
     art2 = art.with_meta({"note": "updated"}, merge=False)

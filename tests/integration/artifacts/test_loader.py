@@ -8,7 +8,7 @@ import pytest
 import pandas as pd
 from consist.core.tracker import Tracker
 from consist.api import load, load_df
-from consist.models.artifact import Artifact
+from tests.helpers.artifact_factory import make_artifact
 
 HAS_ZARR = find_spec("xarray") is not None and find_spec("zarr") is not None
 
@@ -58,20 +58,8 @@ def test_loader_priority_and_ghost_mode(tracker: Tracker):
     # We ingest the data into DuckDB
     with tracker.start_run("run_ingest", model="model_A", inputs=[artifact]):
         tracker.ingest(artifact, df)
-        # Note: Ingest updates the artifact metadata in the DB,
-        # but our local 'artifact' variable might be stale.
-        # Let's fetch the fresh artifact from DB to ensure we have 'dlt_table_name' / 'is_ingested'
-        fresh_artifact = tracker.get_artifact(
-            artifact.key
-        )  # Assuming get_artifact helper exists, or manual fetch:
-
-        # Manual fetch for test robustness if get_artifact isn't exposed yet
-        from sqlmodel import Session, select
-
-        with Session(tracker.engine) as session:
-            fresh_artifact = session.exec(
-                select(Artifact).where(Artifact.id == artifact.id)
-            ).one()
+        fresh_artifact = tracker.get_artifact(artifact.id)
+        assert fresh_artifact is not None
 
     # --- Phase 3: Ghost Mode (Delete File) ---
     file_path.unlink()  # DELETE THE FILE
@@ -90,12 +78,11 @@ def test_loader_priority_and_ghost_mode(tracker: Tracker):
 
     # --- Phase 4: Failure Mode ---
     # Create a fake artifact that exists nowhere
-    fake_artifact = Artifact(
+    fake_artifact = make_artifact(
         key="fake",
-        container_uri="inputs://fake.csv",
+        container_uri=tracker.run_dir / "fake.csv",
         driver="csv",
     )
-    fake_artifact.abs_path = str(tracker.run_dir / "fake.csv")
 
     with pytest.raises(FileNotFoundError):
         load(fake_artifact, tracker=tracker)
@@ -127,12 +114,8 @@ def test_loader_db_fallback_policy_paths(tracker: Tracker):
         tracker.ingest(artifact, df)
 
     # Refresh the artifact so `is_ingested` is present in metadata.
-    from sqlmodel import Session, select
-
-    with Session(tracker.engine) as session:
-        ingested_artifact = session.exec(
-            select(Artifact).where(Artifact.id == artifact.id)
-        ).one()
+    ingested_artifact = tracker.get_artifact(artifact.id)
+    assert ingested_artifact is not None
 
     # Delete the file to force any recovery to come from DuckDB.
     file_path.unlink()
@@ -181,28 +164,27 @@ def test_loader_db_fallback_policy_paths(tracker: Tracker):
 
 
 def test_loader_db_fallback_uses_dlt_table_name(tracker: Tracker):
-    import duckdb
     from uuid import uuid4
 
     table_name = "My Table"
     artifact_id = uuid4()
 
-    conn = duckdb.connect(tracker.db_path)
-    conn.sql("CREATE SCHEMA IF NOT EXISTS global_tables")
-    conn.sql(f'DROP TABLE IF EXISTS global_tables."{table_name}"')
-    conn.sql(
-        f'CREATE TABLE global_tables."{table_name}" (consist_artifact_id VARCHAR, value INTEGER)'
-    )
-    conn.sql(
-        f'INSERT INTO global_tables."{table_name}" VALUES (?, ?)',
-        params=[str(artifact_id), 42],
-    )
-    conn.close()
+    assert tracker.ledger is not None
+    with tracker.ledger.exec_cursor() as cur:
+        cur.execute("CREATE SCHEMA IF NOT EXISTS global_tables")
+        cur.execute(f'DROP TABLE IF EXISTS global_tables."{table_name}"')
+        cur.execute(
+            f'CREATE TABLE global_tables."{table_name}" (consist_artifact_id VARCHAR, value INTEGER)'
+        )
+        cur.execute(
+            f'INSERT INTO global_tables."{table_name}" VALUES (?, ?)',
+            [str(artifact_id), 42],
+        )
 
-    artifact = Artifact(
+    artifact = make_artifact(
         id=artifact_id,
         key="fallback_key",
-        container_uri=str(tracker.run_dir / "missing.csv"),
+        container_uri=tracker.run_dir / "missing.csv",
         driver="csv",
         meta={"is_ingested": True, "dlt_table_name": table_name},
     )
@@ -324,7 +306,7 @@ def test_loader_type_guard_dispatch(run_dir: Path):
     - use type guards to narrow the artifact
     - call load() with the narrowed type
     """
-    from consist import (
+    from consist.api import (
         is_dataframe_artifact,
         is_json_artifact,
         is_zarr_artifact,

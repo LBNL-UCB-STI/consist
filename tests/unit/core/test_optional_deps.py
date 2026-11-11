@@ -33,7 +33,7 @@ def test_dlt_loader_missing_xarray_for_zarr(monkeypatch) -> None:
     """
     Zarr metadata extraction should raise ImportError when xarray is missing.
     """
-    monkeypatch.setattr(dlt_loader, "xr", None)
+    monkeypatch.setattr(dlt_loader, "_get_xarray", lambda: None)
     with pytest.raises(ImportError, match="xarray and zarr are required"):
         list(dlt_loader._handle_zarr_metadata("fake.zarr"))
 

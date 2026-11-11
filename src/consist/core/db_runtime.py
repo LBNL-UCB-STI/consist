@@ -13,7 +13,11 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any, Callable, Iterator, Optional
 
-import duckdb
+from consist.store.detect import (
+    ConsistError,
+    DatabaseMigrationRequired,
+    IncompatibleSchemaError,
+)
 
 if TYPE_CHECKING:
     from consist.core.persistence import DatabaseManager
@@ -144,6 +148,8 @@ class DatabaseRuntimeOps:
         retries: Optional[int] = None,
         **kwargs: Any,
     ) -> Any:
+        import duckdb
+
         default_retries = self._db._lock_retries
         base_sleep_seconds = self._db._lock_base_sleep_seconds
         max_sleep_seconds = self._db._lock_max_sleep_seconds
@@ -152,7 +158,11 @@ class DatabaseRuntimeOps:
             try:
                 with DB_CALL_PROFILER.track(operation_name):
                     return func()
-            except (duckdb.Error, OSError) as exc:
+            except (duckdb.Error, OSError, ConsistError) as exc:
+                if isinstance(
+                    exc, (DatabaseMigrationRequired, IncompatibleSchemaError)
+                ):
+                    raise
                 if is_retryable_db_error(str(exc)):
                     if i == retry_count - 1:
                         raise

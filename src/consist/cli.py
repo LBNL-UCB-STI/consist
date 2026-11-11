@@ -70,6 +70,7 @@ from consist.core.maintenance import DatabaseMaintenance
 from consist.core.persistence import DatabaseManager, _RUN_COLUMNS_SQL, _hydrate_run_row
 from consist.core.run_ordering import recent_run_order_by_sql
 from consist.location import (
+    Location,
     SiteContext,
     lookup_live_ledger_by_path,
     normalize_mounts,
@@ -404,9 +405,85 @@ def _require_ledger(tracker: Tracker) -> StoreLedger:
     return tracker.db.ledger
 
 
-def _artifact_primary_uri(artifact: Artifact) -> str:
-    loc = artifact.primary_location
-    return loc.uri if loc is not None else ""
+@runtime_checkable
+class _HasPrimaryLocationProtocol(Protocol):
+    primary_location: Any
+
+
+@runtime_checkable
+class _HasContainerUriProtocol(Protocol):
+    container_uri: Any
+
+
+@runtime_checkable
+class _HasMemberProtocol(Protocol):
+    member: Any
+
+
+@runtime_checkable
+class _HasTablePathProtocol(Protocol):
+    table_path: Any
+
+
+def _artifact_primary_uri(artifact: Any) -> str:
+    if isinstance(artifact, Artifact):
+        loc = artifact.primary_location
+        return loc.uri if loc is not None else ""
+    if isinstance(artifact, _HasPrimaryLocationProtocol):
+        loc = artifact.primary_location
+        if isinstance(loc, Location):
+            return loc.uri
+    if isinstance(artifact, _HasContainerUriProtocol):
+        raw = artifact.container_uri
+        return str(raw) if isinstance(raw, str) else ""
+    return ""
+
+
+def _artifact_member(artifact: Any) -> Optional[str]:
+    if isinstance(artifact, Artifact):
+        return artifact.member
+    if isinstance(artifact, _HasMemberProtocol):
+        raw = artifact.member
+        return str(raw) if isinstance(raw, str) and raw else None
+    if isinstance(artifact, _HasTablePathProtocol):
+        raw = artifact.table_path
+        return str(raw) if isinstance(raw, str) and raw else None
+    return None
+
+
+def _is_path_within_cli_trusted_roots(
+    tracker: Tracker,
+    candidate: Path,
+    extra_bases: Optional[Sequence[Tuple[str, Path]]] = None,
+) -> bool:
+    try:
+        resolved_candidate = candidate.expanduser().resolve()
+    except OSError:
+        return False
+
+    trusted_roots: List[Path] = []
+    if tracker.run_dir:
+        try:
+            trusted_roots.append(_resolve_cli_path(tracker.run_dir))
+        except OSError:
+            pass
+    if tracker.mounts:
+        for mount_root in tracker.mounts.values():
+            try:
+                trusted_roots.append(_resolve_cli_path(mount_root))
+            except OSError:
+                pass
+    if extra_bases:
+        for _, base_dir in extra_bases:
+            try:
+                trusted_roots.append(_resolve_cli_path(base_dir))
+            except OSError:
+                pass
+
+    return any(
+        resolved_candidate == root or resolved_candidate.is_relative_to(root)
+        for root in trusted_roots
+    )
 
 
 def get_tracker(
@@ -1425,7 +1502,7 @@ def _load_artifact_from_resolved_path(
     load_kwargs: Dict[str, Any] = {}
     if artifact.driver == "csv" and n_rows is not None:
         load_kwargs["nrows"] = n_rows
-    member = artifact.member
+    member = _artifact_member(artifact)
     if member:
         if artifact.driver in DriverType.table_path_drivers():
             load_kwargs["table_path"] = member
@@ -1464,16 +1541,25 @@ def _resolve_schema_capture_path(
             return
 
     primary_uri = _artifact_primary_uri(artifact)
-    if primary_uri.startswith("./"):
-        resolution_bases, _ = _build_relative_resolution_bases(
+    if primary_uri.startswith("./") or (
+        primary_uri.startswith("workspace://") and "workspace" not in tracker.mounts
+    ):
+        rel_subpath = (
+            primary_uri[2:]
+            if primary_uri.startswith("./")
+            else primary_uri.removeprefix("workspace://").lstrip("/")
+        )
+        resolution_bases, _ = _build_relative_resolution_bases_for_uri(
             tracker,
-            artifact,
+            container_uri=primary_uri,
+            run_id=artifact.run_id,
             db_path=db_path,
             run_dir=run_dir,
             trust_db=trust_db,
+            allow_workspace_uri=True,
         )
         for label, base_dir in resolution_bases:
-            candidates.append((label, (base_dir / primary_uri[2:]).resolve()))
+            candidates.append((label, (base_dir / rel_subpath).resolve()))
     else:
         if trust_db:
             _append_candidate(
@@ -2790,7 +2876,14 @@ def validate(
                 continue
 
             found = False
-            if uri.startswith("./"):
+            if uri.startswith("./") or (
+                uri.startswith("workspace://") and "workspace" not in tracker.mounts
+            ):
+                rel_subpath = (
+                    uri[2:]
+                    if uri.startswith("./")
+                    else uri.removeprefix("workspace://").lstrip("/")
+                )
                 resolution_bases, _ = _build_relative_resolution_bases_for_uri(
                     tracker,
                     container_uri=uri,
@@ -2798,10 +2891,11 @@ def validate(
                     db_path=resolved_db_path,
                     run_dir=run_dir,
                     trust_db=trust_db,
+                    allow_workspace_uri=True,
                 )
                 if resolution_bases:
                     for _, base_dir in resolution_bases:
-                        candidate = (base_dir / uri[2:]).resolve()
+                        candidate = (base_dir / rel_subpath).resolve()
                         if candidate.exists():
                             found = True
                             break
@@ -2812,6 +2906,20 @@ def validate(
                     if candidate.exists():
                         found = True
                         break
+            if not found:
+                located_path = artifact.locate(
+                    mounts=artifact._effective_tracker_mounts(tracker),
+                    verify_on_stale=False,
+                )
+                if (
+                    located_path is not None
+                    and located_path.exists()
+                    and (
+                        trust_db
+                        or _is_path_within_cli_trusted_roots(tracker, located_path)
+                    )
+                ):
+                    found = True
             if found:
                 continue
             if not uri:
@@ -3237,9 +3345,13 @@ def _build_relative_resolution_bases_for_uri(
     db_path: Optional[str],
     run_dir: Optional[str],
     trust_db: bool,
+    allow_workspace_uri: bool = False,
 ) -> tuple[List[Tuple[str, Path]], Optional[Path]]:
     """Build ordered base directories for resolving relative artifact URIs."""
-    if not container_uri.startswith("./"):
+    is_supported = container_uri.startswith("./") or (
+        allow_workspace_uri and container_uri.startswith("workspace://")
+    )
+    if not is_supported:
         return [], None
 
     bases: List[Tuple[str, Path]] = []
@@ -3346,7 +3458,9 @@ def _render_gtfs_bundle_preview(
     """Render a compact GTFS bundle summary for bundle-level preview."""
     meta = artifact.meta or {}
     is_legacy_gtfs_bundle = meta.get("gtfs_bundle") is True
-    if (artifact.driver != "gtfs" and not is_legacy_gtfs_bundle) or artifact.member:
+    if (artifact.driver != "gtfs" and not is_legacy_gtfs_bundle) or _artifact_member(
+        artifact
+    ):
         return False
 
     primary_uri = _artifact_primary_uri(artifact)
@@ -3596,8 +3710,15 @@ def _resolve_artifact_json_path(
     trust_db: bool,
 ) -> Path | None:
     candidates: List[Path] = []
-    if artifact.abs_path is not None:
-        candidates.append(Path(artifact.abs_path))
+    if isinstance(artifact, Artifact):
+        located = artifact.locate(
+            mounts=artifact._effective_tracker_mounts(tracker),
+            verify_on_stale=False,
+        )
+        if located is not None and (
+            trust_db or _is_path_within_cli_trusted_roots(tracker, located)
+        ):
+            candidates.append(located)
     primary_uri = _artifact_primary_uri(artifact)
     if primary_uri:
         try:
@@ -3717,6 +3838,35 @@ def _load_artifact_with_diagnostics(
 
     def _load_once() -> Any:
         import consist
+
+        if not trust_db and isinstance(artifact, Artifact):
+            primary_exists = False
+            if primary_uri and not primary_uri.startswith("db://"):
+                try:
+                    primary_exists = Path(tracker.resolve_uri(primary_uri)).exists()
+                except (
+                    AttributeError,
+                    NotImplementedError,
+                    OSError,
+                    RuntimeError,
+                    TypeError,
+                    ValueError,
+                ):
+                    primary_exists = False
+            is_ingested = artifact.is_ingested or bool(
+                (artifact.meta or {}).get("is_ingested", False)
+            )
+            if not primary_exists and not is_ingested:
+                explicit_ledger = tracker.db.ledger if tracker.db is not None else None
+                located = artifact.locate(
+                    ledger=explicit_ledger,
+                    mounts=artifact._effective_tracker_mounts(tracker),
+                    verify_on_stale=False,
+                )
+                if located is not None and not _is_path_within_cli_trusted_roots(
+                    tracker, located, resolution_bases
+                ):
+                    raise FileNotFoundError(primary_uri or str(located))
 
         load_kwargs: Dict[str, Any] = {}
         if artifact.driver == "csv" and n_rows is not None:
@@ -3962,10 +4112,9 @@ def preview(
 
     try:
         preview_label = f"Preview: {artifact_key} [dim]({artifact.driver})[/dim]"
-        if artifact.driver == "gtfs" and artifact.member:
-            preview_label = (
-                f"Preview: {artifact_key} [dim](gtfs:{artifact.member})[/dim]"
-            )
+        member_name = _artifact_member(artifact)
+        if artifact.driver == "gtfs" and member_name:
+            preview_label = f"Preview: {artifact_key} [dim](gtfs:{member_name})[/dim]"
         console.print(preview_label)
 
         if isinstance(data, duckdb.DuckDBPyRelation):
@@ -5208,9 +5357,10 @@ class ConsistShell(cmd.Cmd):
                 preview_label = (
                     f"Preview: {artifact.key} [dim]({artifact.driver})[/dim]"
                 )
-                if artifact.driver == "gtfs" and artifact.member:
+                member_name = _artifact_member(artifact)
+                if artifact.driver == "gtfs" and member_name:
                     preview_label = (
-                        f"Preview: {artifact.key} [dim](gtfs:{artifact.member})[/dim]"
+                        f"Preview: {artifact.key} [dim](gtfs:{member_name})[/dim]"
                     )
                 console.print(preview_label)
 
@@ -5468,31 +5618,34 @@ class ConsistShell(cmd.Cmd):
                 return
 
             export_selector: Dict[str, Any] = {"artifact_id": str(artifact.id)}
-            if isinstance(self.tracker, _SchemaSelectorProtocol):
+            selection: Any = None
+            try:
                 selection = self.tracker.select_artifact_schema_for_artifact(
                     artifact_id=str(artifact.id),
                     source=source,
                     strict_source=source is not None,
                 )
-                if isinstance(selection, _SchemaSelectionProtocol):
-                    schema_id = selection.schema_id
-                    selected_source = selection.source
-                    candidate_count = selection.candidate_count
-                    selection_rule = selection.selection_rule
-                    if (
-                        isinstance(schema_id, str)
-                        and isinstance(selected_source, str)
-                        and isinstance(candidate_count, int)
-                        and isinstance(selection_rule, str)
-                    ):
-                        console.print(
-                            "[dim]Schema selection: "
-                            f"source={selected_source}, "
-                            f"schema_id={schema_id}, "
-                            f"candidates={candidate_count}[/dim]"
-                        )
-                        console.print(f"[dim]Selection rule: {selection_rule}[/dim]")
-                        export_selector = {"schema_id": schema_id}
+            except AttributeError:
+                selection = None
+            if isinstance(selection, _SchemaSelectionProtocol):
+                schema_id = selection.schema_id
+                selected_source = selection.source
+                candidate_count = selection.candidate_count
+                selection_rule = selection.selection_rule
+                if (
+                    isinstance(schema_id, str)
+                    and isinstance(selected_source, str)
+                    and isinstance(candidate_count, int)
+                    and isinstance(selection_rule, str)
+                ):
+                    console.print(
+                        "[dim]Schema selection: "
+                        f"source={selected_source}, "
+                        f"schema_id={schema_id}, "
+                        f"candidates={candidate_count}[/dim]"
+                    )
+                    console.print(f"[dim]Selection rule: {selection_rule}[/dim]")
+                    export_selector = {"schema_id": schema_id}
 
             code = self.tracker.export_schema_sqlmodel(
                 **export_selector,

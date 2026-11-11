@@ -15,13 +15,16 @@ large volumes of data efficiently.
 """
 
 import logging
-import pytest
-import pandas as pd
-import numpy as np
 from typing import Optional
-from sqlmodel import SQLModel, Field, select, func
-from consist.core.tracker import Tracker
+
+import numpy as np
+import pandas as pd
+from pydantic import BaseModel
+import pytest
+from sqlmodel import Field, SQLModel
+
 import consist
+from consist.core.tracker import Tracker
 
 
 # 1. Define the Schema (The Contract)
@@ -62,117 +65,88 @@ class CensusRecord(SQLModel, table=True):
     city: Optional[str] = None
 
 
+class CensusModeSummary(BaseModel):
+    mode: str
+    count: int
+    avg_income: float
+
+
 @pytest.mark.heavy
 def test_typed_analysis_workflow(tmp_path):
     """
-    Tests an end-to-end "typed analysis" workflow using Consist, SQLModel, and `dlt`'s
+    Tests an end-to-end "typed analysis" workflow using Consist, SQLModel/Pydantic, and `dlt`'s
     strict ingestion capabilities.
-
-    This test demonstrates how Consist allows users to define explicit data schemas
-    using `SQLModel`, strictly ingest data according to those schemas, and then
-    perform Pythonic, type-safe analytical queries directly against the data in DuckDB
-    using SQLAlchemy expressions, without writing raw SQL strings. This approach
-    combines the benefits of type safety with the performance of a columnar database.
-
-    What happens:
-    1. A `Tracker` is initialized.
-    2. **Generate & Ingest**: A large Pandas DataFrame (`df`) is generated with
-       synthetic census data (100,000 rows). This DataFrame is then ingested into
-       Consist using `consist.ingest`, with `CensusRecord` provided as a strict
-       schema. This ensures the incoming data conforms to the defined types and structure.
-    3. **Pythonic Analysis**: A Pythonic analytical query is constructed using
-       SQLAlchemy expressions (e.g., `select(CensusRecord.mode, func.count(...))`)
-       to group data by mode, calculate the count of persons, and their average income,
-       filtered by age. This query is executed via the `tracker.engine`.
-    4. **Results as DataFrame**: The results of the SQLAlchemy query are also fetched
-       directly as a Pandas DataFrame for further Python-based analysis.
-
-    What's checked:
-    - The ingestion process successfully loads data into the `global_tables.census_strict`
-      table, adhering to the `CensusRecord` schema.
-    - The Pythonic SQLAlchemy query correctly translates into SQL and retrieves accurate
-      aggregated results from the DuckDB database.
-    - The printed results confirm that `count` and `avg_income` values are positive
-      for each mode.
-    - The conversion of aggregated results back into a Pandas DataFrame (`df_agg`) is
-      successful, and its length matches the number of unique modes.
     """
     run_dir = tmp_path / "typed_run"
     db_path = str(tmp_path / "typed.duckdb")
     tracker = Tracker(run_dir=run_dir, db_path=db_path)
-    tracker.identity.hashing_strategy = "fast"
+    try:
+        tracker.identity.hashing_strategy = "fast"
 
-    # =========================================================================
-    # 1. GENERATE & INGEST (With Strict Schema)
-    # =========================================================================
-    logging.info("\n[Step 1] Generating data...")
-    N = 100_000
-    df = pd.DataFrame(
-        {
-            "person_id": np.arange(N),
-            "age": np.random.randint(18, 90, size=N),
-            "income": np.random.normal(60000, 20000, size=N),
-            "mode": np.random.choice(["car", "transit", "walk"], size=N),
-            "city": "San Francisco",
-        }
-    )
-
-    with tracker.start_run("run_strict_01", model="asim"):
-        # Log + ingest in one step via the convenience helper.
-        consist.log_dataframe(
-            df,
-            key="census_strict",
-            schema=CensusRecord,  # strict schema enforcement
-            tracker=tracker,
-            path=run_dir / "census.parquet",
+        # =========================================================================
+        # 1. GENERATE & INGEST (With Strict Schema)
+        # =========================================================================
+        logging.info("\n[Step 1] Generating data...")
+        N = 100_000
+        df = pd.DataFrame(
+            {
+                "person_id": np.arange(N),
+                "age": np.random.randint(18, 90, size=N),
+                "income": np.random.normal(60000, 20000, size=N),
+                "mode": np.random.choice(["car", "transit", "walk"], size=N),
+                "city": "San Francisco",
+            }
         )
 
-    # =========================================================================
-    # 2. ANALYSIS (The "Pandas-like" SQL Way)
-    # =========================================================================
-    logging.info("[Step 2] performing Typed Analysis (No SQL Strings)...")
+        with tracker.start_run("run_strict_01", model="asim"):
+            # Log + ingest in one step via the convenience helper.
+            consist.log_dataframe(
+                df,
+                key="census_strict",
+                schema=CensusRecord,  # strict schema enforcement
+                tracker=tracker,
+                path=run_dir / "census.parquet",
+            )
 
-    # We use the tracker's session to execute SQLAlchemy expressions
-    # This is efficient: It generates the SQL query, sends it to DuckDB,
-    # and only fetches the aggregated results (not 100k objects).
+        # =========================================================================
+        # 2. ANALYSIS (Typed Rows via StoreLedger)
+        # =========================================================================
+        logging.info("[Step 2] performing Typed Analysis...")
+        tracker.create_view("v_census_strict", "census_strict")
 
-    # Query: "Group by Mode, calculate Avg Income and Count"
-    statement = (
-        select(
-            CensusRecord.mode,
-            func.count(CensusRecord.person_id).label("count"),
-            func.avg(CensusRecord.income).label("avg_income"),
-        )
-        .where(CensusRecord.age > 30)  # easy filtering
-        .group_by(CensusRecord.mode)
-        .order_by(func.avg(CensusRecord.income).desc())
-    )
+        agg_sql = """
+            SELECT
+                mode,
+                COUNT(person_id) AS count,
+                AVG(income) AS avg_income
+            FROM v_census_strict
+            WHERE age > ?
+            GROUP BY mode
+            ORDER BY avg_income DESC
+        """
+        results = tracker.query_rows(agg_sql, [30], model=CensusModeSummary)
 
-    results = consist.run_query(statement, tracker=tracker)
+        logging.info(f"\n{'Mode':<10} {'Count':<10} {'Avg Income':<15}")
+        logging.info("-" * 35)
+        for row in results:
+            logging.info(f"{row.mode:<10} {row.count:<10} ${row.avg_income:,.2f}")
 
-    logging.info(f"\n{'Mode':<10} {'Count':<10} {'Avg Income':<15}")
-    logging.info("-" * 35)
-    for row in results:
-        # Row matches the select() structure
-        mode, count, avg_inc = row
-        logging.info(f"{mode:<10} {count:<10} ${avg_inc:,.2f}")
+            assert row.count > 0
+            assert row.avg_income > 0
 
-        assert count > 0
-        assert avg_inc > 0
+        # =========================================================================
+        # 3. BONUS: Into DataFrame
+        # =========================================================================
+        logging.info("\n[Step 3] Fetching aggregated result as DataFrame...")
 
-    # =========================================================================
-    # 3. BONUS: Into DataFrame
-    # =========================================================================
-    # If you really want a DataFrame back for plotting:
-    logging.info("\n[Step 3] Fetching aggregated result as DataFrame...")
+        df_agg = tracker.query_df(agg_sql, [30])
 
-    with consist.db_session(tracker=tracker) as session:
-        df_agg = pd.read_sql(statement, session.connection())
+        logging.info(df_agg)
+        assert len(df_agg) == 3
 
-    logging.info(df_agg)
-    assert len(df_agg) == 3
-
-    # Extra check: confirm run persisted with completed status via top-level helper
-    run_meta = consist.find_run(tracker=tracker, id="run_strict_01")
-    assert run_meta is not None
-    assert run_meta.status == "completed"
+        # Extra check: confirm run persisted with completed status via top-level helper
+        run_meta = consist.find_run(tracker=tracker, id="run_strict_01")
+        assert run_meta is not None
+        assert run_meta.status == "completed"
+    finally:
+        tracker.close()

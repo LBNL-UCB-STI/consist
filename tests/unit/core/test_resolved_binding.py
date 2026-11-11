@@ -38,7 +38,7 @@ def test_artifact_identity_rejects_unknown_or_malformed_contracts() -> None:
 
 def test_artifact_identity_from_artifact_requires_explicit_semantics() -> None:
     from consist.core.resolved_binding import ArtifactIdentity
-    from consist.models.artifact import Artifact
+    from tests.helpers.artifact_factory import make_artifact as Artifact
 
     artifact = Artifact(
         key="raw",
@@ -58,14 +58,20 @@ def test_artifact_identity_from_artifact_requires_explicit_semantics() -> None:
 
     assert str(ArtifactIdentity.from_artifact(artifact)) == f"sha256:file:{'a' * 64}"
 
-    artifact.meta = {}
+    unverified = Artifact(
+        key="raw",
+        container_uri="data://raw.csv",
+        driver="csv",
+        hash=f"legacy-v1:unverified:{'a' * 64}",
+        meta={},
+    )
     with pytest.raises(ValueError, match="immutable identity"):
-        ArtifactIdentity.from_artifact(artifact)
+        ArtifactIdentity.from_artifact(unverified)
 
 
 def test_resolved_binding_input_hash_composes_strict_and_ordinary_identity() -> None:
     from consist.core.identity import IdentityManager
-    from consist.models.artifact import Artifact
+    from tests.helpers.artifact_factory import make_artifact as Artifact
 
     identity = IdentityManager()
     ordinary = Artifact(
@@ -382,7 +388,7 @@ def test_strict_binding_invocation_context_rejects_reversed_distinct_artifact_id
 
 def test_bind_tracked_artifact_derives_the_strict_artifact_contract() -> None:
     from consist.core.resolved_binding import ResolvedBindingBuilder
-    from consist.models.artifact import Artifact
+    from tests.helpers.artifact_factory import make_artifact as Artifact
 
     artifact = Artifact(
         key="warmstart",
@@ -1494,7 +1500,7 @@ def test_strict_binding_reuses_attested_ordinary_dependency_content(
             "kind": "dependency",
             "role": 0,
             "mode": "content-v1",
-            "value": f"sha256:file:{first_dependency.hash}",
+            "value": first_dependency.hash,
             "artifact_id": str(first_dependency.id),
             "selector": {
                 "driver": "txt",

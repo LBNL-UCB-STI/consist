@@ -1341,10 +1341,15 @@ class ScenarioContext:
                 if recovery_roots or "recovery_roots" in meta:
                     meta["recovery_roots"] = recovery_roots
                 hydrated_art = hydrated_art.with_meta(meta, merge=False)
-                hydrated_art = self._bind_artifact_to_tracker(hydrated_art)
+                if outcome.artifact.origin is not None:
+                    hydrated_art = self._bind_artifact_to_tracker(hydrated_art)
+                else:
+                    hydrated_art.bind_tracker(self.tracker)
 
-                restored_artifacts[key] = hydrated_art
-                self.coupler.set(key, hydrated_art)
+                stored_art = self.coupler.set(key, hydrated_art)
+                restored_artifacts[key] = (
+                    stored_art if isinstance(stored_art, Artifact) else hydrated_art
+                )
             else:
                 if prune_unrecoverable:
                     if not clear_existing:
@@ -2758,7 +2763,19 @@ class ScenarioContext:
         )
         tracker_config_dict = child_tracker_config.model_dump()
 
-        with executor_cls(max_workers=max_workers) as executor:
+        from contextlib import nullcontext
+        from consist.integrations.ibis import suspend_tracker_ibis_connection
+
+        suspend_ctx = (
+            self.tracker.ledger.suspend_for_subprocesses()
+            if self.tracker.ledger is not None
+            else nullcontext()
+        )
+        with (
+            suspend_tracker_ibis_connection(self.tracker, disconnect=True),
+            suspend_ctx,
+            executor_cls(max_workers=max_workers) as executor,
+        ):
             futures = {
                 executor.submit(execute_worker_run, tracker_config_dict, spec): (
                     idx,

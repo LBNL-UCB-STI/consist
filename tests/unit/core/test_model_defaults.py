@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from consist.models.artifact import Artifact
+import pytest
+
 from consist.models.artifact_schema import ArtifactSchema
 from consist.models.run import ConsistRecord, Run, RunArtifacts
+from tests.helpers.artifact_factory import make_artifact
 
 
 def test_run_defaults_are_isolated() -> None:
@@ -20,12 +22,12 @@ def test_run_artifacts_defaults_are_isolated() -> None:
     first = RunArtifacts()
     second = RunArtifacts()
 
-    first.inputs["input"] = Artifact(
+    first.inputs["input"] = make_artifact(
         key="input",
         container_uri="inputs://input.csv",
         driver="csv",
     )
-    first.outputs["output"] = Artifact(
+    first.outputs["output"] = make_artifact(
         key="output",
         container_uri="outputs://output.csv",
         driver="csv",
@@ -42,14 +44,14 @@ def test_consist_record_defaults_are_isolated() -> None:
     record_b = ConsistRecord(run=run_b)
 
     record_a.inputs.append(
-        Artifact(
+        make_artifact(
             key="input",
             container_uri="inputs://input.csv",
             driver="csv",
         )
     )
     record_a.outputs.append(
-        Artifact(
+        make_artifact(
             key="output",
             container_uri="outputs://output.csv",
             driver="csv",
@@ -65,11 +67,15 @@ def test_consist_record_defaults_are_isolated() -> None:
 
 
 def test_artifact_defaults_are_isolated() -> None:
-    art_a = Artifact(key="a", container_uri="inputs://a.csv", driver="csv")
-    art_b = Artifact(key="b", container_uri="inputs://b.csv", driver="csv")
+    art_a = make_artifact(key="a", container_uri="inputs://a.csv", driver="csv")
+    art_b = make_artifact(key="b", container_uri="inputs://b.csv", driver="csv")
 
-    art_a.meta["alpha"] = "a"
+    with pytest.raises(TypeError):
+        art_a.meta["alpha"] = "a"  # type: ignore[index]
 
+    art_a_with = art_a.with_meta({"alpha": "a"})
+    assert art_a_with.meta["alpha"] == "a"
+    assert "alpha" not in art_a.meta
     assert "alpha" not in art_b.meta
 
 

@@ -7,8 +7,10 @@ from typing import cast
 
 import pytest
 
+from consist.artifact import Artifact
 from consist.core.coupler import Coupler
-from consist.models.artifact import Artifact
+from consist.digest import Kind
+from tests.helpers.artifact_factory import make_artifact
 
 
 @dataclass(frozen=True)
@@ -19,7 +21,7 @@ class _DummyArtifactLike:
 
 
 def _artifact(*, key: str, container_uri: str = "workspace://dummy.csv") -> Artifact:
-    return Artifact(key=key, container_uri=container_uri, driver="csv")
+    return make_artifact(key=key, container_uri=container_uri, driver="csv")
 
 
 def test_coupler_set_get_update_mapping_protocol() -> None:
@@ -78,10 +80,10 @@ def test_coupler_path_resolves_without_mutating_artifact() -> None:
     )()
     coupler.set("data", art)
 
-    assert art.abs_path is None
+    assert art.locate() is None
     resolved = coupler.path("data")
     assert resolved == Path("/abs/data.csv")
-    assert art.abs_path is None
+    assert art.locate() is None
 
 
 def test_coupler_declare_outputs_tracks_missing_required() -> None:
@@ -183,25 +185,27 @@ def test_coupler_set_from_artifact_with_artifact_like() -> None:
 
 
 def test_coupler_set_from_artifact_with_path() -> None:
-    """Test set_from_artifact with a Path object."""
+    """Test set_from_artifact with a Path object wraps in a Kind.HISTORICAL Artifact."""
     coupler = Coupler()
     path = Path("workspace/data.csv")
 
     result = coupler.set_from_artifact("data", path)
 
-    assert result == path
-    assert coupler.get("data") == path
+    assert isinstance(result, Artifact)
+    assert result.anchor.kind is Kind.HISTORICAL
+    assert coupler.get("data") == result
 
 
 def test_coupler_set_from_artifact_with_string_path() -> None:
-    """Test set_from_artifact with a string path."""
+    """Test set_from_artifact with a string path wraps in a Kind.HISTORICAL Artifact."""
     coupler = Coupler()
     path_str = "workspace/data.csv"
 
     result = coupler.set_from_artifact("data", path_str)
 
-    assert result == path_str
-    assert coupler.get("data") == path_str
+    assert isinstance(result, Artifact)
+    assert result.anchor.kind is Kind.HISTORICAL
+    assert coupler.get("data") == result
 
 
 def test_coupler_view_sets_namespaced_keys_and_preserves_global_access() -> None:

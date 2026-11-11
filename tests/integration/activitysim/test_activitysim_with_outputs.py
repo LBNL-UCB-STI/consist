@@ -39,21 +39,21 @@ def test_activitysim_config_across_multiple_scenarios(tracker, tmp_path: Path):
     tracker.canonicalize_config(adapter, [overlay_b, base_b], ingest=True)
     tracker.end_run()
 
-    if tracker.engine is None:
-        raise AssertionError("Tracker engine missing; DB tests require DuckDB.")
+    if tracker.ledger is None:
+        raise AssertionError("Tracker ledger missing; DB tests require DuckDB.")
 
     # Query 1: Compare coefficients across both scenarios
-    with tracker.engine.begin() as connection:
-        coeff_rows = connection.exec_driver_sql(
-            """
-            SELECT l.run_id, c.coefficient_name, c.value_num
-            FROM global_tables.activitysim_coefficients_cache c
-            JOIN global_tables.activitysim_config_ingest_run_link l
-              ON l.content_hash = c.content_hash
-             AND l.table_name = 'activitysim_coefficients_cache'
-            WHERE c.file_name = 'accessibility_coefficients.csv'
-            """
-        ).fetchall()
+    coeff_df = tracker.query_df(
+        """
+        SELECT l.run_id, c.coefficient_name, c.value_num
+        FROM global_tables.activitysim_coefficients_cache c
+        JOIN global_tables.activitysim_config_ingest_run_link l
+          ON l.content_hash = c.content_hash
+         AND l.table_name = 'activitysim_coefficients_cache'
+        WHERE c.file_name = 'accessibility_coefficients.csv'
+        """
+    )
+    coeff_rows = list(coeff_df.itertuples(index=False, name=None))
 
     assert len(coeff_rows) >= 4, (
         "Should have coefficients from both scenarios (2+ per scenario)"
@@ -78,19 +78,17 @@ def test_activitysim_config_across_multiple_scenarios(tracker, tmp_path: Path):
     )
 
     # Query 2: Find runs with specific coefficient values
-    with tracker.engine.begin() as connection:
-        # In a real scenario, you might query like this:
-        # "Find all runs where time coefficient > 1.0"
-        high_time_coeff = connection.exec_driver_sql(
-            """
-            SELECT l.run_id, c.coefficient_name, c.value_num
-            FROM global_tables.activitysim_coefficients_cache c
-            JOIN global_tables.activitysim_config_ingest_run_link l
-              ON l.content_hash = c.content_hash
-             AND l.table_name = 'activitysim_coefficients_cache'
-            WHERE c.coefficient_name = 'time' AND CAST(c.value_num AS FLOAT) > 1.0
-            """
-        ).fetchall()
+    high_time_df = tracker.query_df(
+        """
+        SELECT l.run_id, c.coefficient_name, c.value_num
+        FROM global_tables.activitysim_coefficients_cache c
+        JOIN global_tables.activitysim_config_ingest_run_link l
+          ON l.content_hash = c.content_hash
+         AND l.table_name = 'activitysim_coefficients_cache'
+        WHERE c.coefficient_name = 'time' AND CAST(c.value_num AS FLOAT) > 1.0
+        """
+    )
+    high_time_coeff = list(high_time_df.itertuples(index=False, name=None))
 
     assert len(high_time_coeff) >= 2, (
         "Both scenarios should have time coefficient > 1.0"
@@ -98,19 +96,18 @@ def test_activitysim_config_across_multiple_scenarios(tracker, tmp_path: Path):
 
     # Query 3: Count config entries across runs
     # This demonstrates how you'd aggregate config metadata for scenario comparison
-    with tracker.engine.begin() as connection:
-        # Count coefficient entries per run
-        runs_coeff_count = connection.exec_driver_sql(
-            """
-            SELECT l.run_id, COUNT(*) as coeff_count
-            FROM global_tables.activitysim_coefficients_cache c
-            JOIN global_tables.activitysim_config_ingest_run_link l
-              ON l.content_hash = c.content_hash
-             AND l.table_name = 'activitysim_coefficients_cache'
-            WHERE c.coefficient_name = 'time' AND CAST(c.value_num AS FLOAT) IN (1.1, 1.3)
-            GROUP BY l.run_id
-            """
-        ).fetchall()
+    runs_coeff_df = tracker.query_df(
+        """
+        SELECT l.run_id, COUNT(*) as coeff_count
+        FROM global_tables.activitysim_coefficients_cache c
+        JOIN global_tables.activitysim_config_ingest_run_link l
+          ON l.content_hash = c.content_hash
+         AND l.table_name = 'activitysim_coefficients_cache'
+        WHERE c.coefficient_name = 'time' AND CAST(c.value_num AS FLOAT) IN (1.1, 1.3)
+        GROUP BY l.run_id
+        """
+    )
+    runs_coeff_count = list(runs_coeff_df.itertuples(index=False, name=None))
 
     assert len(runs_coeff_count) == 2, (
         "Should find both scenarios with time coefficient = 1.1"

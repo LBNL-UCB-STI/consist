@@ -32,10 +32,11 @@ from unittest.mock import MagicMock, patch
 from pathlib import Path
 
 # Import the class
+from consist.artifact import Artifact as ArtifactType
 from consist.core.identity import IdentityManager
 from consist.core.run_resolution import InputBindingRole
 from consist.digest import normalize_json
-from consist.models.artifact import Artifact
+from tests.helpers.artifact_factory import make_artifact as Artifact
 
 # Conditional numpy import for testing
 try:
@@ -230,7 +231,7 @@ class TestInputHashing:
         assert first_action.bindings[0].mode == "content-v1"
 
     def test_action_v2_distinguishes_swapped_named_roles(self):
-        def artifact(key: str, digest: str) -> Artifact:
+        def artifact(key: str, digest: str) -> ArtifactType:
             return Artifact(
                 key=key,
                 container_uri=f"archive://{key}.csv",
@@ -403,7 +404,8 @@ class TestInputHashing:
             key="data",
             container_uri="archive://data",
             driver="unknown",
-            hash="a" * 64,
+            hash="legacy-v1:unverified:" + "a" * 64 if not meta else "a" * 64,
+            basis="derived" if not meta else "computed",
             run_id="producer",
             meta=meta,
         )
@@ -508,12 +510,12 @@ class TestInputHashing:
         ids=["fast-observation", "missing-semantics"],
     )
     def test_action_v2_keeps_weak_managed_inputs_provenance_sensitive(self, meta):
-        def artifact(run_id: str) -> Artifact:
+        def artifact(run_id: str) -> ArtifactType:
             return Artifact(
                 key="data",
                 container_uri="archive://data.csv",
                 driver="csv",
-                hash="a" * 64,
+                hash="legacy-v1:unverified:" + "a" * 64 if not meta else "a" * 64,
                 run_id=run_id,
                 meta=meta,
             )

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from consist.core import run_resolution
-from consist.models.artifact import Artifact
+from consist.artifact import Artifact
 from consist.types import ExecutionOptions
 
 

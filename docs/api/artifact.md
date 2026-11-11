@@ -1,7 +1,12 @@
 # Artifact
 
-`Artifact` represents a tracked input or output file with stable provenance
-metadata (`run_id`, `hash`, `container_uri`, driver, and custom metadata).
+`Artifact` (`consist.Artifact` / `consist.artifact.Artifact`) is an immutable,
+frozen dataclass representing a tracked input or output item with Triad identity
+(`identity` / `anchor` / `hash`), site-scoped locations (`primary_location`,
+`member`, `locations`), driver, and read-only JSON metadata (`meta`:
+`FrozenMeta`). Use `artifact.with_meta(**updates)` or
+`tracker.update_artifact_meta(artifact, ...)` to derive an updated instance
+rather than mutating `artifact.meta` in place.
 
 Container-backed child artifacts, such as HDF5 tables discovered from a parent
 file, are still ordinary `Artifact` rows. Consist records their canonical
@@ -66,14 +71,23 @@ read-only archived-path mapping, and use `.outputs` when you want the refreshed
 artifacts with the new recovery root already attached for downstream
 `inputs=...` reuse.
 
-::: consist.models.artifact.Artifact
+::: consist.artifact.Artifact
     options:
       show_source: false
       show_root_heading: false
       show_root_toc_entry: false
       members:
-        - abs_path
         - path
+        - as_df
+        - locations
+        - locate
+        - ensure_local_path
+        - primary_location
+        - member
+        - anchor
+        - hash
+        - with_meta
+        - with_schema
         - is_matrix
         - is_tabular
         - created_at_iso

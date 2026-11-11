@@ -17,7 +17,6 @@ import pandas as pd
 import numpy as np
 import consist
 from consist.core.tracker import Tracker
-from sqlmodel import text
 
 
 @pytest.mark.heavy
@@ -60,67 +59,71 @@ def test_cold_vectorized_view(tmp_path):
     tracker = Tracker(run_dir=run_dir, db_path=db_path)
     tracker.identity.hashing_strategy = "fast"
 
-    logging.info("\n[Setup] Generating 50 files across 5 runs...")
+    try:
+        logging.info("\n[Setup] Generating 50 files across 5 runs...")
 
-    # We will track expected counts
-    total_rows = 0
-    expected_extra_sum = 0
+        # We will track expected counts
+        total_rows = 0
+        expected_extra_sum = 0
 
-    for i in range(5):
-        run_id = f"run_{i}"
-        with tracker.start_run(run_id, model="asim"):
-            # Create 10 files per run
-            for j in range(10):
-                rows = 100
-                total_rows += rows
+        for i in range(5):
+            run_id = f"run_{i}"
+            with tracker.start_run(run_id, model="asim"):
+                # Create 10 files per run
+                for j in range(10):
+                    rows = 100
+                    total_rows += rows
 
-                data = {"id": np.arange(rows), "val": np.random.rand(rows)}
+                    data = {"id": np.arange(rows), "val": np.random.rand(rows)}
 
-                # Introduce Schema Drift in later runs
-                if i >= 3:
-                    data["extra_col"] = 1
-                    expected_extra_sum += rows
+                    # Introduce Schema Drift in later runs
+                    if i >= 3:
+                        data["extra_col"] = 1
+                        expected_extra_sum += rows
 
-                df = pd.DataFrame(data)
+                    df = pd.DataFrame(data)
 
-                fname = f"part_{j}.parquet"
-                path = run_dir / f"{run_id}_{fname}"
-                df.to_parquet(path)
+                    fname = f"part_{j}.parquet"
+                    path = run_dir / f"{run_id}_{fname}"
+                    df.to_parquet(path)
 
-                # Log only (No Ingest!)
-                consist.log_artifact(str(path), key="distributed_data")
+                    # Log only (No Ingest!)
+                    consist.log_artifact(str(path), key="distributed_data")
 
-    # =========================================================================
-    # VERIFICATION
-    # =========================================================================
-    logging.info("[Verification] Creating Hybrid View over Cold Data...")
+        # =========================================================================
+        # VERIFICATION
+        # =========================================================================
+        logging.info("[Verification] Creating Hybrid View over Cold Data...")
 
-    # This should trigger _generate_cold_query_optimized
-    # It should produce a single SELECT ... FROM read_parquet([... list of 50 files ...])
-    tracker.create_view("v_cold", "distributed_data")
+        # This should trigger _generate_cold_query_optimized
+        # It should produce a single SELECT ... FROM read_parquet([... list of 50 files ...])
+        tracker.create_view("v_cold", "distributed_data")
 
-    logging.info("[Verification] Querying...")
-    with tracker.engine.connect() as conn:
+        logging.info("[Verification] Querying...")
         # 1. Count Total Rows
-        count = conn.execute(text("SELECT COUNT(*) FROM v_cold")).scalar()
+        count_df = tracker.query_df("SELECT COUNT(*) AS cnt FROM v_cold")
+        count = int(count_df["cnt"].iloc[0])
         logging.info(f"   -> Total Rows: {count}")
         assert count == total_rows
 
         # 2. Check Schema Drift (extra_col should be NULL for runs 0-2, 1 for runs 3-4)
         # Summing it verifies that DuckDB correctly aligned the schemas
-        extra_sum = conn.execute(text("SELECT SUM(extra_col) FROM v_cold")).scalar()
+        sum_df = tracker.query_df("SELECT SUM(extra_col) AS extra_sum FROM v_cold")
+        extra_sum = int(sum_df["extra_sum"].iloc[0])
         logging.info(f"   -> Extra Col Sum: {extra_sum}")
         assert extra_sum == expected_extra_sum
 
         # 3. Check Metadata Injection (The CTE Join)
         # We group by run_id to ensure the join against filenames worked
-        run_counts = conn.execute(
-            text("SELECT consist_run_id, COUNT(*) FROM v_cold GROUP BY 1 ORDER BY 1")
-        ).fetchall()
+        run_counts_df = tracker.query_df(
+            "SELECT consist_run_id, COUNT(*) AS cnt FROM v_cold GROUP BY 1 ORDER BY 1"
+        )
 
         logging.info("   -> Rows per Run:")
-        for r in run_counts:
-            logging.info(f"      {r[0]}: {r[1]}")
-            assert r[1] == 1000  # 10 files * 100 rows
+        for _, r in run_counts_df.iterrows():
+            logging.info(f"      {r['consist_run_id']}: {int(r['cnt'])}")
+            assert int(r["cnt"]) == 1000  # 10 files * 100 rows
 
-    logging.info("Success! Vectorized Read Optimization works.")
+        logging.info("Success! Vectorized Read Optimization works.")
+    finally:
+        tracker.close()

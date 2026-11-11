@@ -25,7 +25,7 @@ from consist.core.config_canonicalization import (
 from consist.core.resolved_binding import ArtifactIdentity
 from consist.core.run_resolution import InputBindingRole
 from consist.core.tracker import Tracker
-from consist.models.artifact import Artifact
+from consist.artifact import Artifact, Location, Observation
 from consist.models.run import RunResult
 from consist.types import (
     ArtifactSpec,
@@ -124,7 +124,7 @@ def test_tracker_run_output_path_spec_tags_schema_and_profiles_output(
     assert artifact.driver == "csv"
     assert artifact.meta["schema_name"] == "SyntheticFirm"
     assert artifact.meta.get("has_strict_schema") is not True
-    assert artifact.meta["schema_id"]
+    assert artifact.schema_id
     assert tracker.db.get_artifact_schema_for_artifact(artifact_id=artifact.id)
 
 
@@ -389,7 +389,17 @@ def test_tracker_run_path_binding_falls_back_from_stale_abs_path(tracker, sample
         key="data",
         direction="input",
     )
-    artifact.abs_path = str(stale_path)
+    artifact = artifact.with_hints(
+        (
+            Observation(
+                location=Location(uri=stale_path.resolve().as_uri()),
+                identity=artifact.identity,
+                access_driver=artifact.driver,
+                basis="derived",
+            ),
+            *artifact.hints,
+        )
+    )
 
     def step(data: Path) -> None:
         seen["data"] = data
@@ -445,7 +455,7 @@ def test_tracker_run_reuses_attested_content_from_distinct_producers(
     first_input = produce("first")
     second_input = produce("second")
     assert first_input.run_id != second_input.run_id
-    assert first_input.meta["content_identity"] == second_input.meta["content_identity"]
+    assert first_input.identity.anchor == second_input.identity.anchor
 
     calls: list[str] = []
 
@@ -585,7 +595,7 @@ def test_action_v2_content_binding_survives_later_caller_hash_logging_after_reop
     assert binding["mode"] == "content-v1"
     assert binding["artifact_id"] == str(trusted.id)
 
-    tracker.db.engine.dispose()
+    tracker.close()
     reopened = Tracker(run_dir=tmp_path / "runs", db_path=db_path)
     persisted = reopened.db.get_artifact(UUID(binding["artifact_id"]))
 
@@ -621,7 +631,7 @@ def test_action_v2_records_caller_hash_input_as_legacy_after_reopen(
         execution_options=ExecutionOptions(input_binding="none"),
     )
 
-    tracker.db.engine.dispose()
+    tracker.close()
     reopened = Tracker(run_dir=tmp_path / "runs", db_path=db_path)
     persisted = reopened.db.get_artifact(untrusted.id)
     binding = reopened.get_run(result.run.id).identity_summary["input_identity"][
@@ -629,7 +639,8 @@ def test_action_v2_records_caller_hash_input_as_legacy_after_reopen(
     ][0]
 
     assert persisted is not None
-    assert persisted.meta["hash_semantics"]["source"] == "caller_supplied"
+    assert not persisted.identity.verifiable
+    assert persisted.anchor.hex == "a" * 64
     assert binding["mode"] == "legacy-provenance-v1"
     assert binding["evidence"] == {
         "identity_strength": "legacy-provenance-v1",
@@ -656,7 +667,7 @@ def test_tracker_run_separates_same_content_container_selectors(
         driver="h5",
         table_path="/tables/right",
     )
-    assert left.meta["content_identity"] == right.meta["content_identity"]
+    assert left.identity.anchor == right.identity.anchor
 
     calls: list[str] = []
 
@@ -1405,7 +1416,7 @@ def test_tracker_run_profiles_tabular_outputs_for_grouped_analysis(tracker):
     result = tracker.run(fn=step, outputs=["table"])
     artifact = result.outputs["table"]
 
-    assert artifact.meta.get("schema_id") is not None
+    assert artifact.schema_id is not None
     assert tracker.db is not None
     assert (
         tracker.db.get_artifact_schema_for_artifact(artifact_id=artifact.id) is not None
@@ -1646,7 +1657,20 @@ def test_run_result_output_path_supports_explicit_tracker_fallback(tracker):
         execution_options=ExecutionOptions(inject_context="ctx"),
     )
 
-    detached_output = Artifact.model_validate(produced.outputs["out"].model_dump())
+    import dataclasses
+
+    raw_out = produced.outputs["out"]
+    detached_hints = tuple(
+        obs for obs in raw_out.hints if not obs.location.uri.startswith("file://")
+    ) or (
+        Observation(
+            location=Location(uri=raw_out.container_uri),
+            identity=raw_out.identity,
+            access_driver=raw_out.driver,
+            basis="declared",
+        ),
+    )
+    detached_output = dataclasses.replace(raw_out, origin=None, hints=detached_hints)
     detached_result = RunResult(
         run=produced.run,
         outputs={"out": detached_output},

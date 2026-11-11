@@ -137,26 +137,19 @@ After a few runs, the ingested tables let you ask questions that would otherwise
 require grepping config directories or reading old notes:
 
 ```python
-from sqlmodel import Session, select
+from consist import config_run_rows
 from consist.models.activitysim import (
-    ActivitySimConstantsCache,
     ActivitySimConfigIngestRunLink,
+    ActivitySimConstantsCache,
 )
 
-with Session(tracker.engine) as session:
-    rows = session.exec(
-        select(
-            ActivitySimConfigIngestRunLink.run_id,
-            ActivitySimConstantsCache.value_num,
-        )
-        .join(
-            ActivitySimConstantsCache,
-            ActivitySimConstantsCache.content_hash
-            == ActivitySimConfigIngestRunLink.content_hash,
-        )
-        .where(ActivitySimConfigIngestRunLink.table_name == "activitysim_constants_cache")
-        .where(ActivitySimConstantsCache.key == "CONSTANTS.AUTO_TIME")
-    ).all()
+rows = config_run_rows(
+    ActivitySimConstantsCache,
+    link_table=ActivitySimConfigIngestRunLink,
+    where={"key": "CONSTANTS.AUTO_TIME"},
+    columns=("value_num",),
+    tracker=tracker,
+)
 
 for run_id, value in rows:
     print(f"{run_id}: AUTO_TIME = {value}")

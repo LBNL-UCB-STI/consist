@@ -147,7 +147,7 @@ These enable joins across runs and filtering by scenario or year in hybrid views
 
 Hybrid views are SQL views that union hot data (ingested into DuckDB) with cold data (read from files on disk). Query both as one logical table without requiring all data in the database.
 
-Register a SQLModel schema to activate a view:
+Create a hybrid SQL view from a SQLModel schema or query it via Ibis:
 
 ```python
 from sqlmodel import SQLModel, Field
@@ -163,15 +163,16 @@ tracker = Tracker(
     schemas=[Person],
 )
 
-VPerson = tracker.views.Person
+tracker.create_view("v_people", "people", schema_model=Person)
+adults_df = tracker.query_df("SELECT * FROM v_people WHERE age >= ?", [18])
 ```
 
-Once registered, you can query across all runs (both ingested and cold data):
+You can also query across all runs lazily via Ibis (both ingested and cold data):
 
 ```python
-import consist
+from consist.api import ibis_view
 
-persons = consist.ibis_view(tracker, model=Person)
+persons = ibis_view(tracker, model=Person)
 summary = (
     persons.filter(persons.age >= 18)
     .group_by(persons.consist_year)
@@ -180,11 +181,11 @@ summary = (
 rows = summary.to_pandas()
 ```
 
-Use `consist.run_query(...)` when you need explicit SQLAlchemy / SQLModel
-queries or database-native SQL over tracker tables and views. For lazy analysis
-over typed tracker views, `consist.ibis_view(...)` is the recommended surface.
-For schema-driven cross-artifact analysis, create a grouped view and query it
-with `consist.ibis_grouped_view(...)`.
+Use `tracker.query_df(...)` or `tracker.query_rows(..., model=...)` (`consist.query_df` /
+`consist.query_rows`) when you want direct read-only DuckDB SQL or typed model rows over
+tracker tables and views. For lazy dataframe-style analysis over typed tracker views,
+`consist.api.ibis_view(...)` is the recommended surface. For schema-driven cross-artifact
+analysis, create a grouped view and query it with `consist.api.ibis_grouped_view(...)`.
 
 For schema/facet-driven cross-key analysis, use
 [Grouped Views](grouped-views.md) to create one view over many artifacts that
@@ -213,21 +214,23 @@ df = artifact.as_df(tracker=tracker, db_fallback="always")
 Use the narrowest surface that matches the task:
 
 - `artifact.as_df()` (or `consist.load_df(...)`) for one artifact when you want an eager pandas DataFrame.
-- `consist.ibis_view(...)` or `consist.ibis_connection(...)` when you want lazy,
+- `consist.api.ibis_view(...)` or `consist.api.ibis_connection(...)` when you want lazy,
   dataframe-style analysis over a Consist DuckDB view. This is the recommended
   surface for tabular tracker analysis when you are willing to install the
   optional `consist[ibis]` extra.
-- `consist.ibis_grouped_view(...)` when you want the same lazy Ibis surface but
+- `consist.api.ibis_grouped_view(...)` when you want the same lazy Ibis surface but
   need to aggregate or compare many artifacts through a grouped DuckDB view.
-- `consist.run_query(...)` when you need explicit SQLAlchemy / SQLModel queries
-  or hand-written SQL against Consist tables or views.
-- Call Ibis after the current SQLAlchemy session or run has released its DuckDB
-  connection; the adapter opens a separate DuckDB handle for analysis.
+- `tracker.query_df(...)` or `tracker.query_rows(..., model=...)` when you need
+  parameterized DuckDB SQL or typed Pydantic/SQLModel rows over Consist tables or views.
+- Ibis shares `StoreLedger`'s native DuckDB connection via cloned cursors, so you can
+  open Ibis views directly alongside an active `Tracker` without file-lock conflicts.
 
 Example:
 
 ```python
-persons = consist.ibis_view(tracker, model=Person)
+from consist.api import ibis_view
+
+persons = ibis_view(tracker, model=Person)
 summary = persons.filter(persons.age >= 18).group_by("home_zone_id").count()
 ```
 

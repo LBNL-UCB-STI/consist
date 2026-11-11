@@ -6,15 +6,15 @@ from unittest.mock import patch
 
 import pandas as pd
 import pytest
-from sqlmodel import select
 from typer.testing import CliRunner
 
 import consist
+from consist.api import to_df
+from consist.artifact import Artifact
 from consist.cli import app as cli_app
 from consist.core.identity import IdentityManager
 from consist.core.tracker import Tracker
 from consist.core.workflow import RunContext
-from consist.models.artifact import Artifact
 from consist.models.artifact_schema import (
     ArtifactSchema,
     ArtifactSchemaField,
@@ -37,35 +37,6 @@ def _write_csv(path: Path, rows: int = 5) -> None:
 def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
     """
     Basic Consist workflow template (end-to-end).
-
-    This test is meant to be a readable starting point for new workflows. It shows:
-
-    1) **Scenario header run**
-       Use `tracker.scenario(...)` to create a parent run that groups multiple steps
-       under a single scenario identifier (useful for multi-step pipelines/simulations).
-
-    2) **Step runs + artifact lineage**
-       Each `scenario.run(...)` creates a child run. Within a step:
-       - write some data
-       - `ctx.log_dataframe(...)` to register outputs (and optionally inputs)
-       - use `scenario.coupler` to pass artifacts between steps (auto-updated)
-
-    3) **Dual-write provenance**
-       Consist writes a human-inspectable JSON snapshot (`consist.json`) and (when
-       configured with `db_path`) persists runs/artifacts to DuckDB for querying.
-
-    4) **Hot-data ingestion + schema persistence**
-       Calling `tracker.ingest(artifact)` materializes the artifact into DuckDB (via dlt)
-       and (as of this feature) persists a deduped schema profile referenced from
-       `artifact.meta` (`schema_id`, `schema_summary`).
-
-    5) **CLI introspection**
-       Demonstrates how developers can inspect the resulting provenance via the CLI.
-
-    Developers can adapt this by:
-    - swapping CSV for Parquet/Zarr/HDF5 artifacts,
-    - adding more steps and richer facets/tags,
-    - ingesting selected outputs for query performance and schema tracking.
     """
     runner = CliRunner()
     tracker.identity.hashing_strategy = "fast"
@@ -80,10 +51,10 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
 
     with tracker.scenario(
         scenario_id,
-        config={"seed": 7},  # identity config (hashed)
+        config={"seed": 7},
         facet_from=["seed"],
-        facet={"region": "demo"},  # queryable config facet (optional)
-        hash_inputs=[("scenario_config", scenario_cfg_path)],  # hash-only attachment(s)
+        facet={"region": "demo"},
+        hash_inputs=[("scenario_config", scenario_cfg_path)],
         tags=["e2e", "scenario_header"],
     ) as scenario:
         scenario.declare_outputs("raw_table", "features", required=True)
@@ -161,21 +132,18 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
     assert data["run"]["git_hash"] is not None
 
     # Database snapshot
-    # For tests, `consist.run_query(...)` is a convenient wrapper around a Session.
-    runs = consist.run_query(select(Run), tracker=tracker)
+    runs = tracker.query_rows("SELECT * FROM main.run", model=Run)
     run_ids = {r.id for r in runs}
     assert {scenario_id, ingest_run_id, transform_run_id} <= run_ids
     assert all(r.status == "completed" for r in runs)
 
-    artifacts = consist.run_query(select(Artifact), tracker=tracker)
-    keys = {a.key for a in artifacts}
+    artifacts_df = tracker.query_df("SELECT key FROM main.artifact")
+    keys = set(artifacts_df["key"].tolist())
     assert {"raw_table", "features"} <= keys
     assert raw_artifact is not None
     outputs = tracker.get_run_outputs(transform_run_id)
     assert "features" in outputs
-    loaded_features = consist.to_df(
-        tracker.load_run_output(transform_run_id, "features")
-    )
+    loaded_features = to_df(tracker.load_run_output(transform_run_id, "features"))
     assert "value_doubled" in loaded_features.columns
 
     # Ensure parent linkage captured by scenario header
@@ -185,26 +153,29 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
 
     # Schema persistence: ingest an artifact and verify schema discovery is persisted.
     assert features_artifact is not None
-    tracker.ingest(features_artifact)
-    assert "schema_id" in features_artifact.meta
+    features_artifact = tracker.ingest(features_artifact)
+    assert features_artifact.schema_id is not None
     assert "schema_summary" in features_artifact.meta
 
-    # `consist.db_session(...)` is the ergonomic way to open a Session for ad-hoc queries.
-    with consist.db_session(tracker=tracker) as session:
-        schema_id = features_artifact.meta["schema_id"]
-        assert session.get(ArtifactSchema, schema_id) is not None
-        fields = session.exec(
-            select(ArtifactSchemaField).where(
-                ArtifactSchemaField.schema_id == schema_id
-            )
-        ).all()
-        assert {f.name for f in fields} >= {"value", "category", "value_doubled"}
-        observations = session.exec(
-            select(ArtifactSchemaObservation).where(
-                ArtifactSchemaObservation.schema_id == schema_id
-            )
-        ).all()
-        assert len(observations) >= 1
+    schema_id = features_artifact.schema_id
+    schemas = tracker.query_rows(
+        "SELECT * FROM main.artifact_schema WHERE id = ?",
+        [schema_id],
+        model=ArtifactSchema,
+    )
+    assert len(schemas) == 1
+    fields = tracker.query_rows(
+        "SELECT * FROM main.artifact_schema_field WHERE schema_id = ?",
+        [schema_id],
+        model=ArtifactSchemaField,
+    )
+    assert {f.name for f in fields} >= {"value", "category", "value_doubled"}
+    observations = tracker.query_rows(
+        "SELECT * FROM main.artifact_schema_observation WHERE schema_id = ?",
+        [schema_id],
+        model=ArtifactSchemaObservation,
+    )
+    assert len(observations) >= 1
 
     # CLI sanity: runs/show/artifacts/summary/preview
     db_path = str(tracker.db_path)
@@ -242,7 +213,6 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
         )
         assert preview_result.exit_code == 0
         assert "value" in preview_result.stdout
-        # Rich may truncate wide headers in terminal tables.
         assert "value_do" in preview_result.stdout
 
         schema_result = runner.invoke(
@@ -259,7 +229,7 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
         assert schema_result.exit_code == 0
         assert "class " in schema_result.stdout
         assert "__tablename__" in schema_result.stdout
-        assert features_artifact.meta["schema_id"] in schema_result.stdout
+        assert schema_id in schema_result.stdout
         assert "value_doubled" in schema_result.stdout
 
 
@@ -268,30 +238,6 @@ def test_resume_after_failure_uses_cache_and_ghost_mode(
 ):
     """
     Regression test: resume a multi-step workflow after a failure, using cache.
-
-    This test is intentionally narrative and "readable first" because it documents a
-    common pain point in real pipelines: a long workflow fails late (e.g., out-of-disk),
-    and you want to re-run without repeating expensive earlier steps.
-
-    What we validate
-    ----------------
-    1) A predecessor step (`prepare_data`) completes successfully and its output is
-       cached by Consist (keyed by signature = code hash + config hash + input hash).
-
-    2) A downstream step (`train_model`) fails on the first attempt with an ENOSPC-like
-       exception. Consist should persist the run with `status="failed"` and an error
-       message in `run.meta["error"]`. Failed runs should never be reused as cache hits.
-
-    3) On a second execution of the workflow with the same inputs/config/code:
-       - `prepare_data` should be a cache hit (not re-executed).
-       - `train_model` should re-execute (since the previous attempt failed).
-       - the pipeline should be able to continue to `evaluate_model`.
-
-    Bonus: Ghost Mode
-    -----------------
-    After we ingest `prepare_data` into DuckDB, we delete the original CSV file.
-    Downstream steps then call `consist.load(...)` on the input artifact; since the file
-    is missing but `is_ingested=True`, Consist transparently loads the data from DuckDB.
     """
     tracker.identity.hashing_strategy = "fast"
 
@@ -310,12 +256,10 @@ def test_resume_after_failure_uses_cache_and_ghost_mode(
     def train_model(_consist_ctx: RunContext) -> Path:
         execution_counts["train_model"] += 1
 
-        df = consist.to_df(_consist_ctx.load("prepared_data"))
+        df = to_df(_consist_ctx.load("prepared_data"))
 
         train_attempts["count"] += 1
         if train_attempts["count"] == 1:
-            # Simulate an OS-level failure (e.g., writing model artifacts runs out of space).
-            # The tracker should mark this run "failed" and record the exception string.
             raise OSError(errno.ENOSPC, "No space left on device")
 
         model_payload = {"rows": int(len(df)), "mean_value": float(df["value"].mean())}
@@ -327,7 +271,7 @@ def test_resume_after_failure_uses_cache_and_ghost_mode(
 
         model_artifact = _consist_ctx.inputs["model"]
         model_payload = json.loads(Path(model_artifact.path).read_text())
-        df = consist.to_df(_consist_ctx.load("prepared_data"))
+        df = to_df(_consist_ctx.load("prepared_data"))
 
         report_path.write_text(
             json.dumps(
@@ -348,13 +292,12 @@ def test_resume_after_failure_uses_cache_and_ghost_mode(
         execution_options=ExecutionOptions(runtime_kwargs={"rows": 8}),
     )
     prepared_artifact = prepared_result.outputs["prepared_data"]
-    # Materialize the predecessor output into DuckDB so downstream steps can still
-    # read it even if the underlying file disappears (ghost mode).
-    tracker.ingest(prepared_artifact)
+    prepared_orig_path = prepared_artifact.path
+    prepared_artifact = tracker.ingest(prepared_artifact)
 
     # Delete the on-disk file to force `consist.load(...)` to go through DuckDB.
-    prepared_artifact.path.unlink()
-    assert not prepared_artifact.path.exists()
+    prepared_orig_path.unlink()
+    assert not prepared_orig_path.exists()
 
     with pytest.raises(OSError) as exc_info:
         tracker.run(
@@ -366,21 +309,27 @@ def test_resume_after_failure_uses_cache_and_ghost_mode(
         )
     assert "No space left on device" in str(exc_info.value)
 
-    prepare_runs = consist.run_query(
-        select(Run).where(Run.model_name == "prepare_data"), tracker=tracker
+    prepare_runs = tracker.query_rows(
+        "SELECT * FROM main.run WHERE model_name = ?",
+        ["prepare_data"],
+        model=Run,
     )
     assert len(prepare_runs) == 1
     assert prepare_runs[0].status == "completed"
 
-    train_runs = consist.run_query(
-        select(Run).where(Run.model_name == "train_model"), tracker=tracker
+    train_runs = tracker.query_rows(
+        "SELECT * FROM main.run WHERE model_name = ?",
+        ["train_model"],
+        model=Run,
     )
     assert len(train_runs) == 1
     assert train_runs[0].status == "failed"
     assert "No space left on device" in train_runs[0].meta.get("error", "")
 
-    eval_runs = consist.run_query(
-        select(Run).where(Run.model_name == "evaluate_model"), tracker=tracker
+    eval_runs = tracker.query_rows(
+        "SELECT * FROM main.run WHERE model_name = ?",
+        ["evaluate_model"],
+        model=Run,
     )
     assert len(eval_runs) == 0
 
@@ -392,7 +341,7 @@ def test_resume_after_failure_uses_cache_and_ghost_mode(
         execution_options=ExecutionOptions(runtime_kwargs={"rows": 8}),
     )
     prepared_artifact_2 = prepared_result_2.outputs["prepared_data"]
-    assert prepared_artifact_2.container_uri == prepared_artifact.container_uri
+    assert prepared_artifact_2.identity.anchor == prepared_artifact.identity.anchor
 
     model_result: RunResult = tracker.run(
         fn=train_model,
@@ -420,21 +369,27 @@ def test_resume_after_failure_uses_cache_and_ghost_mode(
     assert execution_counts["train_model"] == 2
     assert execution_counts["evaluate_model"] == 1
 
-    prepare_runs = consist.run_query(
-        select(Run).where(Run.model_name == "prepare_data"), tracker=tracker
+    prepare_runs = tracker.query_rows(
+        "SELECT * FROM main.run WHERE model_name = ?",
+        ["prepare_data"],
+        model=Run,
     )
     assert len(prepare_runs) == 2
     assert any(r.meta.get("cache_hit") is True for r in prepare_runs)
 
-    train_runs = consist.run_query(
-        select(Run).where(Run.model_name == "train_model"), tracker=tracker
+    train_runs = tracker.query_rows(
+        "SELECT * FROM main.run WHERE model_name = ?",
+        ["train_model"],
+        model=Run,
     )
     assert len(train_runs) == 2
     assert [r.status for r in train_runs].count("failed") == 1
     assert [r.status for r in train_runs].count("completed") == 1
 
-    eval_runs = consist.run_query(
-        select(Run).where(Run.model_name == "evaluate_model"), tracker=tracker
+    eval_runs = tracker.query_rows(
+        "SELECT * FROM main.run WHERE model_name = ?",
+        ["evaluate_model"],
+        model=Run,
     )
     assert len(eval_runs) == 1
     assert eval_runs[0].status == "completed"
@@ -443,9 +398,6 @@ def test_resume_after_failure_uses_cache_and_ghost_mode(
 def test_scenario_run_skips_callable_on_cache_hit(tracker: Tracker):
     """
     End-to-end demonstration of `ScenarioContext.run(...)` cache skipping.
-
-    `scenario.run(...)` can skip executing the callable on cache hits while still
-    hydrating cached outputs and populating the scenario Coupler.
     """
     tracker.identity.hashing_strategy = "fast"
 
@@ -473,8 +425,6 @@ def test_scenario_run_skips_callable_on_cache_hit(tracker: Tracker):
     assert calls == ["called"]
     assert result.outputs["out"].path.read_text() == "calls=1\n"
 
-    # Repeat with the same signature (code/config/inputs). This should be a cache hit
-    # and should NOT execute `expensive_step()` again.
     with tracker.scenario("run_demo_B") as sc:
         sc.declare_outputs("out", required=True)
         result = sc.run(

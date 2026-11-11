@@ -10,6 +10,7 @@ import duckdb
 import pandas as pd
 
 import consist
+from consist.api import to_df
 from consist.core.persistence import DatabaseManager, _RUN_COLUMNS_SQL, _hydrate_run_row
 from consist.core.run_ordering import recent_run_order_by_sql
 from consist.models.run import Run
@@ -132,7 +133,7 @@ def get_artifact_preview(
         if isinstance(data, pd.DataFrame):
             return data.head(limit)
         if isinstance(data, duckdb.DuckDBPyRelation):
-            return consist.to_df(data)
+            return to_df(data)
     except FileNotFoundError:
         raise
     except Exception:

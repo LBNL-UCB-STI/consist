@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import consist.api as consist_api
+from consist.artifact import Artifact
 from consist.core.fs import FileSystemManager
 from consist.core.materialize import (
     StagedInput,
@@ -13,7 +14,8 @@ from consist.core.materialize import (
     stage_artifact,
     stage_inputs,
 )
-from consist.models.artifact import Artifact
+from consist.location import Location, Observation
+from tests.helpers.artifact_factory import make_artifact
 
 
 def _checksum(path: Path) -> str:
@@ -64,7 +66,7 @@ def _artifact(
     meta: dict | None = None,
     abs_path: Path | None = None,
 ) -> Artifact:
-    artifact = Artifact(
+    artifact = make_artifact(
         key=key,
         container_uri=container_uri,
         driver=driver,
@@ -72,7 +74,13 @@ def _artifact(
         meta=dict(meta or {}),
     )
     if abs_path is not None:
-        artifact.abs_path = str(abs_path)
+        local_obs = Observation(
+            location=Location(uri=Path(abs_path).expanduser().resolve().as_uri()),
+            identity=artifact.identity,
+            access_driver=driver,
+            basis="derived",
+        )
+        artifact = artifact.with_hints((*artifact.hints, local_obs))
     return artifact
 
 
@@ -150,7 +158,8 @@ def test_stage_artifact_preserves_missing_hash_on_detached_artifact(
     result = stage_artifact(tracker, artifact, destination)
 
     assert result.status == "staged"
-    assert result.artifact.hash is None
+    assert not result.artifact.identity.verifiable
+    assert result.artifact.anchor.hex == "0" * 64
 
 
 def test_stage_artifact_uses_runtime_abs_path_when_canonical_resolution_missing(
@@ -192,7 +201,7 @@ def test_stage_artifact_uses_recovery_roots_when_source_is_not_resolved(
     artifact = _artifact(
         "source",
         "./inputs/source.csv",
-        meta={"recovery_roots": [archive_root]},
+        meta={"recovery_roots": [str(archive_root)]},
         hash_value=_checksum(source),
     )
 

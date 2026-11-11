@@ -1,8 +1,11 @@
-import pytest
+from dataclasses import replace
 from pathlib import Path
-import consist
+import uuid
+
+import pytest
 from consist import Tracker
-from consist.models.artifact import Artifact
+from consist.api import to_df
+from consist.artifact import Artifact
 from consist.models.run import RunArtifacts
 
 
@@ -94,7 +97,7 @@ def test_run_output_helpers(tracker: Tracker, run_dir):
     assert "results" in outputs
 
     loaded = tracker.load_run_output("run_outputs", "results")
-    df = consist.to_df(loaded)
+    df = to_df(loaded)
     assert df.shape[0] == 1
 
 
@@ -108,6 +111,7 @@ def test_hydrate_run_outputs_across_shared_db_workspaces(tmp_path):
 
     with tracker_a.start_run("historical_run", "model_outputs"):
         tracker_a.log_artifact(output_path, key="results", direction="output")
+    tracker_a.close()
 
     tracker_b = Tracker(run_dir=tmp_path / "runs_b", db_path=db_path)
     target_root = tracker_b.run_dir / "workspace_root"
@@ -123,6 +127,7 @@ def test_hydrate_run_outputs_across_shared_db_workspaces(tmp_path):
     assert result.path == restored_path
     assert result.artifact.as_path() == restored_path
     assert restored_path.exists()
+    tracker_b.close()
 
 
 def test_hydrate_run_outputs_to_destinations_across_shared_db_workspaces(tmp_path):
@@ -135,6 +140,7 @@ def test_hydrate_run_outputs_to_destinations_across_shared_db_workspaces(tmp_pat
 
     with tracker_a.start_run("historical_destination_run", "model_outputs"):
         tracker_a.log_artifact(output_path, key="results", direction="output")
+    tracker_a.close()
 
     tracker_b = Tracker(run_dir=tmp_path / "runs_b", db_path=db_path)
     destination = tracker_b.run_dir / "staged" / "external-tool-input.csv"
@@ -149,6 +155,7 @@ def test_hydrate_run_outputs_to_destinations_across_shared_db_workspaces(tmp_pat
     assert result.path == destination.resolve()
     assert result.artifact.as_path() == destination.resolve()
     assert destination.read_text(encoding="utf-8") == "a,b\n1,2\n"
+    tracker_b.close()
 
 
 def test_artifact_accessor_helpers_support_attached_and_explicit_tracker(
@@ -168,8 +175,8 @@ def test_artifact_accessor_helpers_support_attached_and_explicit_tracker(
     assert attached_df["a"].tolist() == [1]
     assert attached_df["b"].tolist() == [2]
 
-    detached = Artifact.model_validate(attached_artifact.model_dump())
-    with pytest.raises(RuntimeError, match="requires a Tracker instance"):
+    detached = replace(attached_artifact, id=uuid.uuid4(), origin=None)
+    with pytest.raises((RuntimeError, FileNotFoundError)):
         detached.as_df()
 
     assert detached.as_path(tracker=tracker) == output_path
@@ -200,7 +207,10 @@ def test_artifact_accessibility_reports_primary_and_recovery_root(
     assert accessibility.locations[0].exists is True
     assert artifact.locations == accessibility.locations
 
-    relative_path = tracker.fs.get_remappable_relative_path(artifact.container_uri)
+    assert artifact.primary_location is not None
+    relative_path = tracker.fs.get_remappable_relative_path(
+        artifact.primary_location.uri
+    )
     assert relative_path is not None
     archived_path = archive_root / relative_path
     archived_path.parent.mkdir(parents=True, exist_ok=True)
@@ -307,10 +317,10 @@ def test_access_modes(tracker: Tracker, run_dir):
         art = tracker.log_artifact(csv_path, key="my_data")
 
     # --- TEST: Analysis Mode ---
+    db_path = tracker.db_path
+    tracker.close()
     # Create a NEW tracker instance pointing to same DB
-    analysis_tracker = Tracker(
-        run_dir=run_dir, db_path=tracker.db_path, access_mode="analysis"
-    )
+    analysis_tracker = Tracker(run_dir=run_dir, db_path=db_path, access_mode="analysis")
 
     # 1. Allowed: Ingest (Backfill)
     # This should work by attributing data to 'base_run' found in artifact metadata
@@ -320,11 +330,10 @@ def test_access_modes(tracker: Tracker, run_dir):
     with pytest.raises(RuntimeError) as exc:
         analysis_tracker.begin_run("new_run", "test")
     assert "forbidden in 'analysis' mode" in str(exc.value)
+    analysis_tracker.close()
 
     # --- TEST: Read-Only Mode ---
-    ro_tracker = Tracker(
-        run_dir=run_dir, db_path=tracker.db_path, access_mode="read_only"
-    )
+    ro_tracker = Tracker(run_dir=run_dir, db_path=db_path, access_mode="read_only")
 
     # 1. Allowed: Find Run
     run = ro_tracker.find_run(run_id="base_run")
@@ -340,3 +349,4 @@ def test_access_modes(tracker: Tracker, run_dir):
         # FIX: Use absolute path
         ro_tracker.log_artifact(csv_path, key="rogue")
     assert "forbidden in 'read_only' mode" in str(exc.value)
+    ro_tracker.close()

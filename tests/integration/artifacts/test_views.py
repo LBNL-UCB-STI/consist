@@ -4,8 +4,9 @@ import logging
 import pytest
 import pandas as pd
 from typing import Optional
-from sqlmodel import SQLModel, Field, text
-from consist.core.tracker import Tracker
+from sqlmodel import SQLModel, Field
+from consist.core.tracker import DeprecatedViewsError, Tracker
+from consist.core.views import ViewFactory
 
 
 # --- Models ---
@@ -89,16 +90,15 @@ def test_hybrid_view_generation(tracker, tmp_path):
     # 3. Verify
     tracker.create_view("v_households", "households")
 
-    with tracker.engine.connect() as conn:
-        df = pd.read_sql("SELECT * FROM v_households ORDER BY consist_year", conn)
+    df = tracker.query_df("SELECT * FROM v_households ORDER BY consist_year")
 
-        assert len(df) == 2
-        # Check Cold Row (year 2010)
-        assert df.iloc[0]["consist_year"] == 2010
-        assert pd.isna(df.iloc[0]["persons"])
-        # Check Hot Row (year 2011)
-        assert df.iloc[1]["consist_year"] == 2011
-        assert df.iloc[1]["persons"] == 3.0
+    assert len(df) == 2
+    # Check Cold Row (year 2010)
+    assert df.iloc[0]["consist_year"] == 2010
+    assert pd.isna(df.iloc[0]["persons"])
+    # Check Hot Row (year 2011)
+    assert df.iloc[1]["consist_year"] == 2011
+    assert df.iloc[1]["persons"] == 3.0
 
 
 def test_pure_cold_view(tracker, tmp_path):
@@ -143,12 +143,11 @@ def test_pure_cold_view(tracker, tmp_path):
     # Create view (No 'global_tables.zones' exists)
     tracker.create_view("v_zones", "zones")
 
-    with tracker.engine.connect() as conn:
-        df = pd.read_sql("SELECT * FROM v_zones ORDER BY id", conn)
-        assert len(df) == 2
-        assert df["val"].tolist() == ["A", "B"]
-        # Ensure system columns were injected
-        assert "consist_run_id" in df.columns
+    df = tracker.query_df("SELECT * FROM v_zones ORDER BY id")
+    assert len(df) == 2
+    assert df["val"].tolist() == ["A", "B"]
+    # Ensure system columns were injected
+    assert "consist_run_id" in df.columns
 
 
 def test_bidirectional_schema_drift(tracker, tmp_path):
@@ -203,16 +202,15 @@ def test_bidirectional_schema_drift(tracker, tmp_path):
 
     tracker.create_view("v_drift", "drift_test")
 
-    with tracker.engine.connect() as conn:
-        df = pd.read_sql("SELECT * FROM v_drift ORDER BY id", conn)
+    df = tracker.query_df("SELECT * FROM v_drift ORDER BY id")
 
-        # Row 1 (Cold): legacy=old, new=NaN
-        assert df.iloc[0]["legacy_col"] == "old"
-        assert pd.isna(df.iloc[0]["new_col"])
+    # Row 1 (Cold): legacy=old, new=NaN
+    assert df.iloc[0]["legacy_col"] == "old"
+    assert pd.isna(df.iloc[0]["new_col"])
 
-        # Row 2 (Hot): legacy=NaN, new=fresh
-        assert pd.isna(df.iloc[1]["legacy_col"])
-        assert df.iloc[1]["new_col"] == "fresh"
+    # Row 2 (Hot): legacy=NaN, new=fresh
+    assert pd.isna(df.iloc[1]["legacy_col"])
+    assert df.iloc[1]["new_col"] == "fresh"
 
 
 def test_empty_state_safety(tracker):
@@ -237,14 +235,13 @@ def test_empty_state_safety(tracker):
     """
     tracker.create_view("v_ghost", "ghost_concept")
 
-    with tracker.engine.connect() as conn:
-        # Should not raise table not found
-        count = conn.execute(text("SELECT count(*) FROM v_ghost")).scalar()
-        assert count == 0
+    # Should not raise table not found
+    count_df = tracker.query_df("SELECT count(*) AS cnt FROM v_ghost")
+    assert int(count_df.iloc[0]["cnt"]) == 0
 
-        # Ensure it's select-able
-        df = pd.read_sql("SELECT * FROM v_ghost", conn)
-        assert len(df) == 0
+    # Ensure it's select-able
+    df = tracker.query_df("SELECT * FROM v_ghost")
+    assert len(df) == 0
 
 
 @pytest.fixture
@@ -261,8 +258,7 @@ def mounted_tracker(tmp_path: Path):
         mounts={"inputs": str(data_dir)},
     )
     yield t, data_dir
-    if t.engine:
-        t.engine.dispose()
+    t.close()
 
 
 def test_view_with_mounts(mounted_tracker):
@@ -304,20 +300,19 @@ def test_view_with_mounts(mounted_tracker):
         tracker.log_artifact(str(p_path), key="mounted_data", driver="parquet")
 
     # Verify internal storage is virtualized
-    with tracker.engine.connect() as conn:
-        # We query the artifact table directly to prove it stored the virtualization
-        uris = pd.read_sql(
-            "SELECT container_uri FROM artifact WHERE key='mounted_data'", conn
-        )["container_uri"].tolist()
-        assert uris[0] == "inputs://mounted.parquet"
+    uris = tracker.query_df(
+        "SELECT l.uri FROM main.artifact a "
+        "JOIN main.artifact_location_current l ON l.anchor = a.anchor "
+        "WHERE a.key = 'mounted_data'"
+    )["uri"].tolist()
+    assert uris[0] == "inputs://mounted.parquet"
 
     # Create View (This tests if ViewFactory correctly resolves inputs:// back to absolute)
     tracker.create_view("v_mounted", "mounted_data")
 
-    with tracker.engine.connect() as conn:
-        df = pd.read_sql("SELECT * FROM v_mounted", conn)
-        assert len(df) == 1
-        assert df.iloc[0]["x"] == 100
+    df = tracker.query_df("SELECT * FROM v_mounted")
+    assert len(df) == 1
+    assert df.iloc[0]["x"] == 100
 
 
 def test_hybrid_view_with_multiple_cold_schema_drift(tracker, tmp_path):
@@ -370,30 +365,28 @@ def test_hybrid_view_with_multiple_cold_schema_drift(tracker, tmp_path):
     tracker.create_view("v_drift_concept", "drift_concept")
 
     # 4. Query the view and perform assertions
-    with tracker.engine.connect() as conn:
-        df_result = pd.read_sql(
-            "SELECT consist_run_id, id, value_a, value_b FROM v_drift_concept ORDER BY id",
-            conn,
-        )
+    df_result = tracker.query_df(
+        "SELECT consist_run_id, id, value_a, value_b FROM v_drift_concept ORDER BY id"
+    )
 
-        # Assertions
-        assert len(df_result) == 4
-        assert df_result["id"].tolist() == [1, 2, 3, 4]
-        assert df_result["value_a"].tolist() == [10, 20, 30, 40]
+    # Assertions
+    assert len(df_result) == 4
+    assert df_result["id"].tolist() == [1, 2, 3, 4]
+    assert df_result["value_a"].tolist() == [10, 20, 30, 40]
 
-        # Check value_b for rows from run1 (should be NaN)
-        assert pd.isna(df_result.iloc[0]["value_b"])
-        assert pd.isna(df_result.iloc[1]["value_b"])
+    # Check value_b for rows from run1 (should be NaN)
+    assert pd.isna(df_result.iloc[0]["value_b"])
+    assert pd.isna(df_result.iloc[1]["value_b"])
 
-        # Check value_b for rows from run2 (should have values)
-        assert df_result.iloc[2]["value_b"] == "x"
-        assert df_result.iloc[3]["value_b"] == "y"
+    # Check value_b for rows from run2 (should have values)
+    assert df_result.iloc[2]["value_b"] == "x"
+    assert df_result.iloc[3]["value_b"] == "y"
 
-        # Check run_id associations
-        assert df_result.iloc[0]["consist_run_id"] == run_id1
-        assert df_result.iloc[1]["consist_run_id"] == run_id1
-        assert df_result.iloc[2]["consist_run_id"] == run_id2
-        assert df_result.iloc[3]["consist_run_id"] == run_id2
+    # Check run_id associations
+    assert df_result.iloc[0]["consist_run_id"] == run_id1
+    assert df_result.iloc[1]["consist_run_id"] == run_id1
+    assert df_result.iloc[2]["consist_run_id"] == run_id2
+    assert df_result.iloc[3]["consist_run_id"] == run_id2
 
 
 def test_grouped_view_selects_cross_key_family_with_facets(tracker, tmp_path):
@@ -440,9 +433,9 @@ def test_grouped_view_selects_cross_key_family_with_facets(tracker, tmp_path):
             facet_index=True,
         )
 
-    schema_id = a1.meta.get("schema_id")
+    schema_id = a1.schema_id
     assert schema_id is not None
-    assert a2.meta.get("schema_id") == schema_id
+    assert a2.schema_id == schema_id
 
     tracker.create_grouped_view(
         "v_linkstats_all",
@@ -464,13 +457,11 @@ def test_grouped_view_selects_cross_key_family_with_facets(tracker, tmp_path):
         mode="cold_only",
     )
 
-    with tracker.engine.connect() as conn:
-        result = pd.read_sql(
-            "SELECT id, value, consist_artifact_id, facet_year, "
-            "facet_iteration, facet_phys_sim_iteration, facet_beam_sub_iteration "
-            "FROM v_linkstats_all ORDER BY id",
-            conn,
-        )
+    result = tracker.query_df(
+        "SELECT id, value, consist_artifact_id, facet_year, "
+        "facet_iteration, facet_phys_sim_iteration, facet_beam_sub_iteration "
+        "FROM v_linkstats_all ORDER BY id"
+    )
 
     assert len(result) == 2
     assert result["id"].tolist() == [1, 2]
@@ -527,7 +518,7 @@ def test_grouped_view_hybrid_mode_combines_hot_and_cold(tracker, tmp_path):
             facet_index=True,
         )
 
-    schema_id = cold_artifact.meta.get("schema_id")
+    schema_id = cold_artifact.schema_id
     assert schema_id is not None
 
     tracker.create_grouped_view(
@@ -544,12 +535,10 @@ def test_grouped_view_hybrid_mode_combines_hot_and_cold(tracker, tmp_path):
         mode="hybrid",
     )
 
-    with tracker.engine.connect() as conn:
-        result = pd.read_sql(
-            "SELECT id, value, consist_artifact_id, facet_beam_sub_iteration "
-            "FROM v_linkstats_hybrid ORDER BY id",
-            conn,
-        )
+    result = tracker.query_df(
+        "SELECT id, value, consist_artifact_id, facet_beam_sub_iteration "
+        "FROM v_linkstats_hybrid ORDER BY id"
+    )
 
     assert len(result) == 2
     assert result["id"].tolist() == [1, 2]
@@ -578,7 +567,7 @@ def test_grouped_view_missing_file_policy(tracker, tmp_path):
             facet_index=True,
         )
 
-    schema_id = artifact.meta.get("schema_id")
+    schema_id = artifact.schema_id
     assert schema_id is not None
     path.unlink()
 
@@ -592,9 +581,8 @@ def test_grouped_view_missing_file_policy(tracker, tmp_path):
         missing_files="warn",
     )
 
-    with tracker.engine.connect() as conn:
-        count = conn.execute(text("SELECT COUNT(*) FROM v_missing_warn")).scalar()
-    assert count == 0
+    count_df = tracker.query_df("SELECT COUNT(*) AS cnt FROM v_missing_warn")
+    assert int(count_df.iloc[0]["cnt"]) == 0
 
     with pytest.raises(FileNotFoundError):
         tracker.create_grouped_view(
@@ -645,11 +633,11 @@ def test_grouped_view_resolution_handles_shared_run_instance(tracker, tmp_path, 
             facet_index=True,
         )
 
-    schema_id = a1.meta.get("schema_id")
+    schema_id = a1.schema_id
     run_id = a1.run_id
     assert schema_id is not None
     assert run_id is not None
-    assert a2.meta.get("schema_id") == schema_id
+    assert a2.schema_id == schema_id
     assert a2.run_id == run_id
     assert tracker.db is not None
 
@@ -681,12 +669,9 @@ def test_grouped_view_resolution_handles_shared_run_instance(tracker, tmp_path, 
         mode="cold_only",
     )
 
-    with tracker.engine.connect() as conn:
-        result = pd.read_sql(
-            "SELECT id, value, facet_beam_sub_iteration "
-            "FROM v_shared_run_group ORDER BY id",
-            conn,
-        )
+    result = tracker.query_df(
+        "SELECT id, value, facet_beam_sub_iteration FROM v_shared_run_group ORDER BY id"
+    )
     assert len(result) == 2
     assert result["id"].tolist() == [1, 2]
     assert result["value"].tolist() == [10.0, 20.0]
@@ -713,7 +698,8 @@ def test_hybrid_view_resolves_archived_move_mode_outputs_via_ensure_local_path(
             direction="output",
         )
 
-    primary_path = Path(tracker.resolve_uri(art.container_uri))
+    assert art.primary_location is not None
+    primary_path = Path(tracker.resolve_uri(art.primary_location.uri))
     assert primary_path.exists()
 
     tracker.archive_run_outputs(
@@ -724,9 +710,15 @@ def test_hybrid_view_resolves_archived_move_mode_outputs_via_ensure_local_path(
     )
     assert not primary_path.exists()
 
-    tracker.view(ArchivedZone, "archived_zones")
-    with tracker.engine.connect() as conn:
-        df = pd.read_sql("SELECT * FROM v_archived_zones ORDER BY id", conn)
+    with pytest.warns(DeprecationWarning), pytest.raises(DeprecatedViewsError):
+        tracker.view(ArchivedZone, "archived_zones")
+
+    ViewFactory(tracker).create_hybrid_view(
+        "v_archived_zones",
+        "archived_zones",
+        schema_model=ArchivedZone,
+    )
+    df = tracker.query_df("SELECT * FROM v_archived_zones ORDER BY id")
     assert len(df) == 2
     assert df["id"].tolist() == [1, 2]
     assert df["val"].tolist() == ["A", "B"]

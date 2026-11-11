@@ -27,7 +27,6 @@ from typing import (
 )
 import uuid
 
-import duckdb
 from pydantic import TypeAdapter
 
 from consist.core.facet_common import flatten_facet_values
@@ -42,7 +41,9 @@ from consist.location import (
     Observation,
     Witness,
     deserialize_witness_json,
+    matches_hot_db_info,
     normalize_mounts,
+    parse_hot_db_member,
     register_live_ledger,
     serialize_witness_json,
     unregister_live_ledger,
@@ -58,6 +59,7 @@ from consist.store.detect import (
 from consist.store.schema import init_v2_schema
 
 if TYPE_CHECKING:
+    import duckdb
     import pandas as pd
 
     from consist.artifact import Artifact
@@ -288,6 +290,8 @@ def _build_facet_kv_json(
 def _validate_select_only_sql(sql: str) -> None:
     if not isinstance(sql, str) or not sql.strip():
         raise ValueError("SQL query must be a non-empty SELECT statement")
+    import duckdb
+
     stmts = duckdb.extract_statements(sql)
     if not (
         len(stmts) == 1 and stmts[0].type == duckdb.StatementType.SELECT  # ty: ignore[unresolved-attribute]
@@ -322,6 +326,7 @@ class StoreLedger:
         self.instance_key: str = instance_key or str(uuid.uuid4())
         self.writer: str = writer or _default_writer()
         self._closed: bool = False
+        self._suspended_needs_reopen: bool = False
         self._lock: threading.RLock = threading.RLock()
         self._tx_depth: int = 0
         self._tx_cursor: duckdb.DuckDBPyConnection | None = None
@@ -373,6 +378,8 @@ class StoreLedger:
                         f"Cannot open database {self.db_path}: schema state is {state.value!r}"
                     )
 
+        import duckdb
+
         self._con: duckdb.DuckDBPyConnection = duckdb.connect(
             target,
             read_only=self.read_only,
@@ -398,13 +405,38 @@ class StoreLedger:
     def schema_state(self) -> SchemaState:
         return SchemaState.V2
 
+    def _ensure_reopened_locked(self) -> None:
+        if not self._suspended_needs_reopen or self.db_path is None:
+            return
+        import duckdb
+
+        reopened = duckdb.connect(
+            str(self.db_path),
+            read_only=self.read_only,
+        )
+        self._con = reopened
+        self._closed = False
+        self._suspended_needs_reopen = False
+        self._memoized_observations.clear()
+        self._memoized_locations.clear()
+        register_live_ledger(
+            self,
+            instance_key=self.instance_key,
+            db_path=self.db_path,
+        )
+
     @property
     def connection(self) -> duckdb.DuckDBPyConnection:
+        if self._suspended_needs_reopen:
+            with self._lock:
+                self._ensure_reopened_locked()
         return self._con
 
     def cursor(self) -> duckdb.DuckDBPyConnection:
         """Return a cloned `DuckDBPyConnection` cursor sharing this database handle."""
         with self._lock:
+            if self._suspended_needs_reopen:
+                self._ensure_reopened_locked()
             if self._closed:
                 raise ConsistError("StoreLedger is closed")
             if self._tx_depth > 0:
@@ -418,6 +450,8 @@ class StoreLedger:
     def exec_cursor(self) -> Iterator[duckdb.DuckDBPyConnection]:
         """Yield the active transaction cursor when in `transaction()`, or a temporary cursor."""
         with self._lock:
+            if self._suspended_needs_reopen:
+                self._ensure_reopened_locked()
             if self._closed:
                 raise ConsistError("StoreLedger is closed")
             if self._tx_depth > 0 and self._tx_cursor is not None:
@@ -434,6 +468,8 @@ class StoreLedger:
         """Execute nested `StoreLedger` operations atomically on one shared cursor."""
         self._require_writable("transaction")
         with self._lock:
+            if self._suspended_needs_reopen:
+                self._ensure_reopened_locked()
             if self._closed:
                 raise ConsistError("StoreLedger is closed")
             if self._tx_depth > 0 and self._tx_cursor is not None:
@@ -495,6 +531,10 @@ class StoreLedger:
     def close(self) -> None:
         """Unregister from `_live_ledgers` and close the underlying DuckDB connection."""
         with self._lock:
+            if self._suspended_needs_reopen:
+                self._suspended_needs_reopen = False
+                self._closed = True
+                return
             if self._closed:
                 return
             self._closed = True
@@ -511,6 +551,88 @@ class StoreLedger:
                 self._tx_cursor = None
                 self._tx_depth = 0
             self._con.close()
+
+    @contextmanager
+    def suspend_for_subprocesses(self) -> Iterator[None]:
+        """Temporarily release the file-backed DuckDB lock while child worker processes run."""
+        with self._lock:
+            if self._closed or self.db_path is None or self.read_only:
+                should_reopen = False
+            else:
+                if self._tx_depth > 0:
+                    raise ConsistError(
+                        "Cannot suspend StoreLedger for subprocesses inside an active transaction()"
+                    )
+                try:
+                    self._con.execute("CHECKPOINT")
+                except Exception:
+                    pass
+                unregister_live_ledger(
+                    self,
+                    instance_key=self.instance_key,
+                    db_path=self.db_path,
+                )
+                self._con.close()
+                self._closed = True
+                self._suspended_needs_reopen = True
+                should_reopen = True
+
+        try:
+            yield
+        finally:
+            if should_reopen and self.db_path is not None:
+                import duckdb
+
+                def _install_reopened(new_con: duckdb.DuckDBPyConnection) -> None:
+                    with self._lock:
+                        if not self._suspended_needs_reopen:
+                            new_con.close()
+                            return
+                        self._con = new_con
+                        self._closed = False
+                        self._suspended_needs_reopen = False
+                        self._memoized_observations.clear()
+                        self._memoized_locations.clear()
+                        register_live_ledger(
+                            self,
+                            instance_key=self.instance_key,
+                            db_path=self.db_path,
+                        )
+
+                deadline = time.monotonic() + 20.0
+                attempt = 0
+                last_err: Exception | None = None
+                try:
+                    while True:
+                        try:
+                            reopened = duckdb.connect(
+                                str(self.db_path),
+                                read_only=self.read_only,
+                            )
+                            _install_reopened(reopened)
+                            last_err = None
+                            break
+                        except duckdb.Error as exc:
+                            last_err = exc
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                break
+                            sleep_s = min(0.02 * (1.3**attempt), 0.25, remaining)
+                            attempt += 1
+                            time.sleep(sleep_s)
+                except KeyboardInterrupt:
+                    try:
+                        reopened = duckdb.connect(
+                            str(self.db_path),
+                            read_only=self.read_only,
+                        )
+                        _install_reopened(reopened)
+                    except duckdb.Error:
+                        pass
+                    raise
+
+                if last_err is not None:
+                    raise last_err
 
     def record_content(
         self,
@@ -790,6 +912,30 @@ class StoreLedger:
                 ],
             )
 
+    def get_content_manifest(self, anchor: Digest | str) -> dict[str, Any] | None:
+        """Return stored `content_manifest` row for `anchor`, or `None` if absent."""
+        anchor_digest = _coerce_digest(anchor)
+        with self.exec_cursor() as cur:
+            row = cur.execute(
+                "SELECT anchor, format, policy_sha256, entry_count, total_bytes, body "
+                "FROM main.content_manifest WHERE anchor = ?",
+                [str(anchor_digest)],
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "anchor": str(row[0]),
+            "format": str(row[1]),
+            "policy_sha256": str(row[2]) if row[2] is not None else None,
+            "entry_count": int(row[3]),
+            "total_bytes": int(row[4]),
+            "body": bytes(row[5]),
+        }
+
+    def get_manifest(self, anchor: Digest | str) -> dict[str, Any] | None:
+        """Alias for `get_content_manifest`."""
+        return self.get_content_manifest(anchor)
+
     def record_anchor_promotion(
         self,
         historical_anchor: Digest | str,
@@ -929,7 +1075,8 @@ class StoreLedger:
             resolved_anchors: list[tuple[Digest, Digest | None, Digest | None]] = []
             needed_identity_digests: list[Digest] = []
             uncached_loc_digests: list[Digest] = []
-            seen_uncached: set[str] = set()
+            cached_loc_digests: list[Digest] = []
+            seen_loc_digests: set[str] = set()
 
             for raw_d in raw_digests:
                 if raw_d.kind is not Kind.HISTORICAL:
@@ -964,13 +1111,12 @@ class StoreLedger:
                             continue
                         needed_identity_digests.append(cand)
                         cand_str = str(cand)
-                        if (
-                            not self._closed
-                            and cand_str not in self._memoized_observations
-                            and cand_str not in seen_uncached
-                        ):
-                            seen_uncached.add(cand_str)
-                            uncached_loc_digests.append(cand)
+                        if not self._closed and cand_str not in seen_loc_digests:
+                            seen_loc_digests.add(cand_str)
+                            if cand_str not in self._memoized_observations:
+                                uncached_loc_digests.append(cand)
+                            else:
+                                cached_loc_digests.append(cand)
 
             identities: dict[str, Identity] = {
                 str(d): Identity(anchor=d)
@@ -1013,25 +1159,82 @@ class StoreLedger:
                         claims=tuple(claims_by_anchor[a_str].values()),
                     )
 
-            if include_locations and uncached_loc_digests and not self._closed:
-                loc_rows = self.locate_current(
-                    uncached_loc_digests,
-                    include_evicted=False,
-                )
-                reconstructed_by_anchor: dict[str, list[Observation]] = {
-                    str(d): [] for d in uncached_loc_digests
-                }
-                for lrow in loc_rows:
-                    l_anchor_str = str(lrow["anchor"])
-                    bucket = reconstructed_by_anchor.get(l_anchor_str)
-                    if bucket is None or len(bucket) >= 4:
-                        continue
-                    row_id = identities.get(l_anchor_str) or self.get_identity(
-                        l_anchor_str
+            db_obs_by_anchor: dict[str, list[Observation]] = {}
+            if include_locations and not self._closed:
+                if uncached_loc_digests:
+                    loc_rows = self.locate_current(
+                        uncached_loc_digests,
+                        include_evicted=False,
                     )
-                    bucket.append(self._observation_from_location_row(lrow, row_id))
-                for a_str, bucket in reconstructed_by_anchor.items():
-                    self._memoized_observations[a_str] = tuple(bucket)
+                    cold_by_anchor: dict[str, list[Observation]] = {
+                        str(d): [] for d in uncached_loc_digests
+                    }
+                    unscoped_db_by_anchor: dict[str, list[Observation]] = {
+                        str(d): [] for d in uncached_loc_digests
+                    }
+                    for lrow in loc_rows:
+                        l_anchor_str = str(lrow["anchor"])
+                        cold_bucket = cold_by_anchor.get(l_anchor_str)
+                        if cold_bucket is None:
+                            continue
+                        raw_uri = str(lrow.get("uri") or "")
+                        if raw_uri.startswith("db://"):
+                            row_id = identities.get(l_anchor_str) or self.get_identity(
+                                l_anchor_str
+                            )
+                            obs_obj = self._observation_from_location_row(lrow, row_id)
+                            db_obs_by_anchor.setdefault(l_anchor_str, []).append(
+                                obs_obj
+                            )
+                            info = parse_hot_db_member(raw_uri, lrow.get("member"))
+                            if (
+                                info is not None
+                                and info.scoped_artifact_id is None
+                                and info.scoped_run_id is None
+                                and not info.has_unrecognized_query
+                                and len(unscoped_db_by_anchor[l_anchor_str]) < 4
+                            ):
+                                unscoped_db_by_anchor[l_anchor_str].append(obs_obj)
+                            continue
+                        if len(cold_bucket) >= 4:
+                            continue
+                        row_id = identities.get(l_anchor_str) or self.get_identity(
+                            l_anchor_str
+                        )
+                        cold_bucket.append(
+                            self._observation_from_location_row(lrow, row_id)
+                        )
+                    for a_str, cold_bucket in cold_by_anchor.items():
+                        self._memoized_observations[a_str] = tuple(
+                            (*cold_bucket[:4], *unscoped_db_by_anchor[a_str])[:4]
+                        )
+
+                if cached_loc_digests:
+                    cached_anchor_strs = [str(d) for d in cached_loc_digests]
+                    if self._overlay_observations or self._overlay_events:
+                        cached_db_rows = [
+                            r
+                            for r in self._compute_location_current_with_overlay(
+                                anchors=set(cached_anchor_strs),
+                                include_evicted=False,
+                            )
+                            if str(r.get("uri") or "").startswith("db://")
+                        ]
+                    else:
+                        cached_db_rows = self._query_sql_locations(
+                            "main.locate_current(?)",
+                            [cached_anchor_strs],
+                            uri_prefix="db://",
+                            include_evicted=False,
+                        )
+                    for lrow in cached_db_rows:
+                        l_anchor_str = str(lrow["anchor"])
+                        row_id = identities.get(l_anchor_str) or self.get_identity(
+                            l_anchor_str
+                        )
+                        db_obs_by_anchor.setdefault(l_anchor_str, []).append(
+                            self._observation_from_location_row(lrow, row_id)
+                        )
 
             origin_ref = self.ref
             hydrated: list[Artifact] = []
@@ -1055,6 +1258,7 @@ class StoreLedger:
                 )
                 effective_identity = identities[str(eff_anchor)]
                 meta_dict = _parse_json_mapping(raw_meta)
+                run_id_str = str(run_id) if run_id is not None else None
 
                 hint_obs: list[Observation] = []
                 if include_locations:
@@ -1063,14 +1267,44 @@ class StoreLedger:
                         if eff_anchor.kind is Kind.HISTORICAL
                         else (eff_anchor, verified_anchor_opt, recorded_anchor_opt)
                     )
+                    cold_hints: list[Observation] = []
+                    matching_db_hints: list[Observation] = []
                     for cand_anchor in cand_anchors:
-                        if cand_anchor is None or len(hint_obs) >= 4:
+                        if cand_anchor is None:
                             continue
-                        for obs in self._memoized_observations.get(
-                            str(cand_anchor), ()
-                        )[: 4 - len(hint_obs)]:
-                            if obs not in hint_obs:
-                                hint_obs.append(obs)
+                        cand_str = str(cand_anchor)
+                        if len(cold_hints) < 4:
+                            for obs in self._memoized_observations.get(cand_str, ()):
+                                if obs.location.uri.startswith("db://"):
+                                    continue
+                                if obs not in cold_hints:
+                                    cold_hints.append(obs)
+                                    if len(cold_hints) >= 4:
+                                        break
+                        for obs in db_obs_by_anchor.get(cand_str, ()):
+                            info = parse_hot_db_member(
+                                obs.location.uri,
+                                obs.location.member,
+                            )
+                            if info is None:
+                                continue
+                            matched, _ = matches_hot_db_info(
+                                info,
+                                artifact_id=art_uuid,
+                                run_id=run_id_str,
+                            )
+                            if matched and obs not in matching_db_hints:
+                                matching_db_hints.append(obs)
+
+                    if matching_db_hints:
+                        kept_db = matching_db_hints[:3]
+                        cold_cap = max(
+                            1 if cold_hints else 0,
+                            4 - len(kept_db),
+                        )
+                        hint_obs = [*cold_hints[:cold_cap], *kept_db][:4]
+                    else:
+                        hint_obs = cold_hints[:4]
 
                 hydrated.append(
                     Artifact(
@@ -1080,7 +1314,7 @@ class StoreLedger:
                         identity=effective_identity,
                         recorded_anchor=recorded_anchor_opt,
                         origin=origin_ref,
-                        run_id=str(run_id) if run_id is not None else None,
+                        run_id=run_id_str,
                         parent_artifact_id=parent_uuid,
                         schema_id=str(schema_id) if schema_id is not None else None,
                         created_at=(
@@ -1120,6 +1354,30 @@ class StoreLedger:
         if row is None:
             return None
         return self._hydrate_artifact_row(row, include_locations=include_locations)
+
+    def load_artifacts(
+        self,
+        artifact_ids: Sequence[uuid.UUID | str],
+        *,
+        include_locations: bool = True,
+    ) -> dict[uuid.UUID, Artifact]:
+        """Batch-load frozen `Artifact` handles keyed by `id`."""
+        if not artifact_ids:
+            return {}
+        id_strs = [str(_coerce_uuid(aid)) for aid in artifact_ids]
+        with self.exec_cursor() as cur:
+            rows = cur.execute(
+                "SELECT id, key, driver, anchor, run_id, parent_artifact_id, "
+                "schema_id, meta, created_at FROM main.artifact "
+                "WHERE id IN (SELECT CAST(UNNEST(?) AS UUID))",
+                [id_strs],
+            ).fetchall()
+        if not rows:
+            return {}
+        hydrated = self._hydrate_artifact_rows(
+            rows, include_locations=include_locations
+        )
+        return {art.id: art for art in hydrated}
 
     def get_artifact(
         self,
@@ -1249,6 +1507,7 @@ class StoreLedger:
         meta: FrozenMeta | Mapping[str, Any],
         *,
         merge: bool = False,
+        preserve_system_keys: bool = True,
         schema_id: str | None | _UnsetType = _UNSET,
         facet_index: bool | None = None,
     ) -> Artifact: ...
@@ -1260,6 +1519,7 @@ class StoreLedger:
         meta: FrozenMeta | Mapping[str, Any] | None = None,
         *,
         merge: bool = True,
+        preserve_system_keys: bool = True,
         schema_id: str | None | _UnsetType = _UNSET,
         facet_index: bool | None = None,
         **changes: Any,
@@ -1271,6 +1531,7 @@ class StoreLedger:
         meta: FrozenMeta | Mapping[str, Any] | None = None,
         *,
         merge: bool | None = None,
+        preserve_system_keys: bool = True,
         schema_id: str | None | _UnsetType = _UNSET,
         facet_index: bool | None = None,
         **changes: Any,
@@ -1296,12 +1557,17 @@ class StoreLedger:
             if changes:
                 incoming.update(changes)
 
-            merged_dict = merge_artifact_output_meta(
-                current_art.meta,
-                incoming,
-                merge=effective_merge,
+            if not effective_merge and not preserve_system_keys:
+                merged_dict = incoming
+            else:
+                merged_dict = merge_artifact_output_meta(
+                    current_art.meta,
+                    incoming,
+                    merge=effective_merge,
+                )
+            updated = current_art.with_meta(
+                merged_dict, merge=False, preserve_system_keys=preserve_system_keys
             )
-            updated = current_art.with_meta(merged_dict, merge=False)
             if not isinstance(schema_id, _UnsetType):
                 updated = updated.with_schema(schema_id)
 
@@ -1358,6 +1624,35 @@ class StoreLedger:
         )
         now = created_at if created_at is not None else datetime.now(timezone.utc)
         with self.exec_cursor() as cur:
+            existing_row = cur.execute(
+                "SELECT meta FROM main.artifact WHERE id = ?",
+                [artifact_id],
+            ).fetchone()
+            if existing_row is not None and existing_row[0] is not None:
+                raw_existing = existing_row[0]
+                existing_meta = (
+                    json.loads(raw_existing)
+                    if isinstance(raw_existing, str)
+                    else dict(raw_existing)
+                    if isinstance(raw_existing, Mapping)
+                    else {}
+                )
+                if existing_meta:
+                    meta_payload = FrozenMeta(
+                        merge_artifact_output_meta(
+                            existing_meta,
+                            meta_payload,
+                            merge=True,
+                        )
+                    ).to_dict()
+                    meta_json = json.dumps(
+                        meta_payload, sort_keys=True, separators=(",", ":")
+                    )
+                    facet_kv_json = _build_facet_kv_json(
+                        meta_payload,
+                        include_json_leaves=False,
+                        facet_index=facet_index,
+                    )
             cur.execute(
                 "INSERT INTO main.artifact ("
                 "id, key, driver, anchor, run_id, parent_artifact_id, "
@@ -1473,7 +1768,7 @@ class StoreLedger:
                 "meta = EXCLUDED.meta, "
                 "facet_kv = EXCLUDED.facet_kv, "
                 "started_at = COALESCE(EXCLUDED.started_at, run.started_at), "
-                "ended_at = COALESCE(EXCLUDED.ended_at, run.ended_at), "
+                "ended_at = CASE WHEN EXCLUDED.status = 'running' AND EXCLUDED.ended_at IS NULL THEN NULL ELSE COALESCE(EXCLUDED.ended_at, run.ended_at) END, "
                 "updated_at = COALESCE(EXCLUDED.updated_at, run.updated_at)",
                 [
                     run_id,
@@ -2568,10 +2863,27 @@ class StoreLedger:
                 return cached[:max_items] if cached is not None else ()
 
             rows = self.locate_current([anchor_digest], include_evicted=False)
+            cold_rows = [
+                r for r in rows if not str(r.get("uri") or "").startswith("db://")
+            ]
+            unscoped_db_rows = [
+                r
+                for r in rows
+                if str(r.get("uri") or "").startswith("db://")
+                and (
+                    info := parse_hot_db_member(
+                        str(r.get("uri") or ""), r.get("member")
+                    )
+                )
+                is not None
+                and info.scoped_artifact_id is None
+                and info.scoped_run_id is None
+                and not info.has_unrecognized_query
+            ]
             reconstructed: list[Observation] = []
             identity = self.get_identity(anchor_digest)
             fetch_cap = max(4, max_items)
-            for row in rows:
+            for row in (*cold_rows, *unscoped_db_rows):
                 reconstructed.append(self._observation_from_location_row(row, identity))
                 if len(reconstructed) >= fetch_cap:
                     break
@@ -3005,6 +3317,7 @@ class StoreLedger:
         anchor: str | None = None,
         site: str | None = None,
         uri: str | None = None,
+        uri_prefix: str | None = None,
         include_evicted: bool = True,
     ) -> list[dict[str, Any]]:
         clauses: list[str] = []
@@ -3017,6 +3330,9 @@ class StoreLedger:
         if uri is not None:
             clauses.append("uri = ?")
             params.append(uri)
+        if uri_prefix is not None:
+            clauses.append("uri LIKE ?")
+            params.append(f"{uri_prefix}%")
         if not include_evicted:
             clauses.append("status != 'evicted' AND status != 'failed_transfer'")
 

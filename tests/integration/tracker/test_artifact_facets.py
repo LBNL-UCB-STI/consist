@@ -2,9 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sqlmodel import Session, select
-
-from consist.models.artifact_facet import ArtifactFacet
 from consist.models.artifact_kv import ArtifactKV
 from consist.tools import queries
 
@@ -67,19 +64,21 @@ def test_log_artifacts_facets_are_deduplicated_by_json_hash(
     }
 
     with tracker.start_run("run_bulk_artifact_facets", "beam"):
-        tracker.log_artifacts(
+        logged = tracker.log_artifacts(
             {"a": a_path, "b": b_path},
             facets_by_key={"a": facet_payload, "b": facet_payload},
             facet_schema_versions_by_key={"a": "1", "b": "1"},
             facet_index=True,
         )
 
-    assert tracker.engine is not None
-    with Session(tracker.engine) as session:
-        facets = session.exec(select(ArtifactFacet)).all()
-        kv_rows = session.exec(select(ArtifactKV)).all()
+    assert (
+        logged["a"].meta["artifact_facet_id"] == logged["b"].meta["artifact_facet_id"]
+    )
+    assert logged["a"].meta["facet"] == facet_payload
+    assert logged["b"].meta["facet"] == facet_payload
 
-    assert len(facets) == 1
+    kv_rows = tracker.query_rows("SELECT * FROM main.artifact_kv", model=ArtifactKV)
+    assert len({row.facet_id for row in kv_rows}) == 1
     assert len({row.artifact_id for row in kv_rows}) == 2
 
 
@@ -91,11 +90,11 @@ def test_log_output_uses_single_transaction_for_faceted_artifacts(
 
     combined_calls = 0
     sync_calls = 0
-    facet_calls = 0
+    tx_calls = 0
 
-    original_combined = tracker.db.sync_artifact_with_facet_bundle
+    original_combined = tracker.persistence.sync_artifact_with_facet_bundle
     original_sync = tracker.db.sync_artifact
-    original_facet = tracker.db.persist_artifact_facet_bundle
+    original_tx = tracker.db.ledger.transaction
 
     def counting_combined(*args, **kwargs):
         nonlocal combined_calls
@@ -107,28 +106,29 @@ def test_log_output_uses_single_transaction_for_faceted_artifacts(
         sync_calls += 1
         return original_sync(*args, **kwargs)
 
-    def counting_facet(*args, **kwargs):
-        nonlocal facet_calls
-        facet_calls += 1
-        return original_facet(*args, **kwargs)
-
-    monkeypatch.setattr(
-        tracker.db, "sync_artifact_with_facet_bundle", counting_combined
-    )
-    monkeypatch.setattr(tracker.db, "sync_artifact", counting_sync)
-    monkeypatch.setattr(tracker.db, "persist_artifact_facet_bundle", counting_facet)
-
     with tracker.start_run("run_combined_artifact_facet", "beam"):
+
+        def counting_tx(*args, **kwargs):
+            nonlocal tx_calls
+            if tracker.db.ledger._tx_depth == 0:
+                tx_calls += 1
+            return original_tx(*args, **kwargs)
+
+        monkeypatch.setattr(
+            tracker.persistence, "sync_artifact_with_facet_bundle", counting_combined
+        )
+        monkeypatch.setattr(tracker.db, "sync_artifact", counting_sync)
+        monkeypatch.setattr(tracker.db.ledger, "transaction", counting_tx)
+
         tracker.log_output(
             out,
             key="combined_facet",
             facet={"artifact_family": "beam_output", "iteration": 1},
             facet_index=True,
         )
-
-    assert combined_calls == 1
-    assert sync_calls == 0
-    assert facet_calls == 0
+        assert combined_calls == 1
+        assert sync_calls == 1
+        assert tx_calls == 1
 
 
 def test_log_output_without_facet_keeps_legacy_sync_path(
@@ -140,7 +140,7 @@ def test_log_output_without_facet_keeps_legacy_sync_path(
     combined_calls = 0
     sync_calls = 0
 
-    original_combined = tracker.db.sync_artifact_with_facet_bundle
+    original_combined = tracker.persistence.sync_artifact_with_facet_bundle
     original_sync = tracker.db.sync_artifact
 
     def counting_combined(*args, **kwargs):
@@ -154,7 +154,7 @@ def test_log_output_without_facet_keeps_legacy_sync_path(
         return original_sync(*args, **kwargs)
 
     monkeypatch.setattr(
-        tracker.db, "sync_artifact_with_facet_bundle", counting_combined
+        tracker.persistence, "sync_artifact_with_facet_bundle", counting_combined
     )
     monkeypatch.setattr(tracker.db, "sync_artifact", counting_sync)
 

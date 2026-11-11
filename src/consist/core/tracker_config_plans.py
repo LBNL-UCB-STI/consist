@@ -647,50 +647,55 @@ class TrackerConfigPlanService(_TrackerServiceBase):
                 artifacts_by_key[spec.key] = art
 
         if ingest:
-            for spec in contribution.ingestables:
-                source_key = spec.source
-                artifact = (
-                    artifacts_by_key.get(source_key)
-                    if source_key
-                    else next(iter(artifacts_by_key.values()), None)
-                )
-                if artifact is None:
-                    logging.warning(
-                        "[Consist] Skipping ingest for %s; no source artifact found.",
-                        spec.table_name,
+            previous_suppress = self.tracker._suppress_ingest_identity_claim
+            self.tracker._suppress_ingest_identity_claim = True
+            try:
+                for spec in contribution.ingestables:
+                    source_key = spec.source
+                    artifact = (
+                        artifacts_by_key.get(source_key)
+                        if source_key
+                        else next(iter(artifacts_by_key.values()), None)
                     )
-                    continue
-                if spec.rows is None:
-                    logging.warning(
-                        "[Consist] Skipping ingest for %s; no rows provided.",
-                        spec.table_name,
-                    )
-                    continue
-                if spec.dedupe_on_hash and spec.content_hash:
-                    if self._ingest_cache_hit(spec.table_name, spec.content_hash):
-                        logging.info(
-                            "[Consist] Skipping ingest for %s; cache hit for %s.",
+                    if artifact is None:
+                        logging.warning(
+                            "[Consist] Skipping ingest for %s; no source artifact found.",
                             spec.table_name,
-                            spec.content_hash,
                         )
                         continue
-                if source_key is None:
-                    logging.warning(
-                        "[Consist] Ingest spec for %s missing source; using %s.",
-                        spec.table_name,
-                        artifact.key,
+                    if spec.rows is None:
+                        logging.warning(
+                            "[Consist] Skipping ingest for %s; no rows provided.",
+                            spec.table_name,
+                        )
+                        continue
+                    if spec.dedupe_on_hash and spec.content_hash:
+                        if self._ingest_cache_hit(spec.table_name, spec.content_hash):
+                            logging.info(
+                                "[Consist] Skipping ingest for %s; cache hit for %s.",
+                                spec.table_name,
+                                spec.content_hash,
+                            )
+                            continue
+                    if source_key is None:
+                        logging.warning(
+                            "[Consist] Ingest spec for %s missing source; using %s.",
+                            spec.table_name,
+                            artifact.key,
+                        )
+                    rows = spec.materialize_rows(run.id)
+                    artifact = self.tracker.ingest(
+                        artifact,
+                        data=rows,
+                        schema=spec.schema,
+                        run=run,
+                        profile_schema=profile_schema,
                     )
-                rows = spec.materialize_rows(run.id)
-                artifact = self.tracker.ingest(
-                    artifact,
-                    data=rows,
-                    schema=spec.schema,
-                    run=run,
-                    profile_schema=profile_schema,
-                )
-                target_key = source_key if source_key is not None else artifact.key
-                if target_key in artifacts_by_key:
-                    artifacts_by_key[target_key] = artifact
+                    target_key = source_key if source_key is not None else artifact.key
+                    if target_key in artifacts_by_key:
+                        artifacts_by_key[target_key] = artifact
+            finally:
+                self.tracker._suppress_ingest_identity_claim = previous_suppress
 
         return artifacts_by_key
 

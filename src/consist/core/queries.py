@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence, Set as AbstractSet
 from dataclasses import dataclass
+import json
 from typing import Any, Dict, Hashable, List, Optional, Type, Union, TYPE_CHECKING
 
 from pydantic import BaseModel, TypeAdapter
@@ -46,6 +47,7 @@ class _TableSpec:
     columns: Optional[tuple[str, ...]]
     field_to_col: Optional[dict[str, str]]
     col_to_field: Optional[dict[str, str]]
+    json_columns: frozenset[str] = frozenset()
 
     @property
     def qualified_sql(self) -> str:
@@ -76,6 +78,16 @@ class _ProjectionItem:
     model_cls: Optional[Type[BaseModel]] = None
     col_names: tuple[str, ...] = ()
     col_to_field: Optional[dict[str, str]] = None
+    json_columns: frozenset[str] = frozenset()
+
+
+def _decode_json_if_str(val: Any) -> Any:
+    if isinstance(val, str):
+        try:
+            return json.loads(val)
+        except json.JSONDecodeError:
+            return val
+    return val
 
 
 def _inspect_table_spec(spec: Type[BaseModel] | str) -> _TableSpec:
@@ -103,6 +115,7 @@ def _inspect_table_spec(spec: Type[BaseModel] | str) -> _TableSpec:
 
     if isinstance(spec, type) and issubclass(spec, BaseModel):
         from sqlalchemy.sql.schema import Column as SAColumn
+        from sqlalchemy.sql.sqltypes import JSON as SAJSON
 
         table_name: Optional[str] = None
         schema_name = "global_tables"
@@ -132,10 +145,13 @@ def _inspect_table_spec(spec: Type[BaseModel] | str) -> _TableSpec:
         if table_name is None:
             table_name = spec.__name__.lower()
 
+        from sqlmodel.main import FieldInfo as SQLModelFieldInfo
+
         field_to_col: dict[str, str] = {}
         col_to_field: dict[str, str] = {}
+        json_cols: set[str] = set()
         for fname, finfo in spec.model_fields.items():
-            sa_col = finfo.__dict__.get("sa_column")
+            sa_col = finfo.sa_column if isinstance(finfo, SQLModelFieldInfo) else None
             if (
                 isinstance(sa_col, SAColumn)
                 and isinstance(sa_col.name, str)
@@ -144,6 +160,8 @@ def _inspect_table_spec(spec: Type[BaseModel] | str) -> _TableSpec:
                 cname = sa_col.name
             else:
                 cname = fname
+            if isinstance(sa_col, SAColumn) and isinstance(sa_col.type, SAJSON):
+                json_cols.add(cname)
             field_to_col[fname] = cname
             col_to_field[cname] = fname
 
@@ -154,6 +172,7 @@ def _inspect_table_spec(spec: Type[BaseModel] | str) -> _TableSpec:
             columns=tuple(field_to_col.values()),
             field_to_col=field_to_col,
             col_to_field=col_to_field,
+            json_columns=frozenset(json_cols),
         )
 
     raise TypeError(
@@ -427,7 +446,19 @@ def _compile_config_run_plan(
             )
         run_id_col = link_spec.resolve_column_name("run_id")
         select_exprs.append(f'l.{_quote_ident(run_id_col)} AS "run_id"')
-        projections.append(_ProjectionItem(kind="scalar", start_idx=0, width=1))
+        projections.append(
+            _ProjectionItem(
+                kind="scalar",
+                start_idx=0,
+                width=1,
+                col_names=(run_id_col,),
+                json_columns=(
+                    frozenset({run_id_col})
+                    if run_id_col in link_spec.json_columns
+                    else frozenset()
+                ),
+            )
+        )
 
         if table_spec.model_cls is not None and table_spec.columns is not None:
             for c in table_spec.columns:
@@ -440,6 +471,7 @@ def _compile_config_run_plan(
                     model_cls=table_spec.model_cls,
                     col_names=table_spec.columns,
                     col_to_field=table_spec.col_to_field,
+                    json_columns=table_spec.json_columns,
                 )
             )
         elif inferred_table_columns is not None and len(inferred_table_columns) > 0:
@@ -484,14 +516,24 @@ def _compile_config_run_plan(
                         model_cls=item,
                         col_names=model_spec.columns,
                         col_to_field=model_spec.col_to_field,
+                        json_columns=model_spec.json_columns,
                     )
                 )
                 cursor_idx += len(model_spec.columns)
             else:
                 alias, c = _resolve_qualified_column(item, table_spec, link_spec)
+                owner = table_spec if alias == "t" else link_spec
                 select_exprs.append(f"{alias}.{_quote_ident(c)} AS {_quote_ident(c)}")
                 projections.append(
-                    _ProjectionItem(kind="scalar", start_idx=cursor_idx, width=1)
+                    _ProjectionItem(
+                        kind="scalar",
+                        start_idx=cursor_idx,
+                        width=1,
+                        col_names=(c,),
+                        json_columns=(
+                            frozenset({c}) if c in owner.json_columns else frozenset()
+                        ),
+                    )
                 )
                 cursor_idx += 1
 
@@ -631,6 +673,7 @@ def execute_config_run_rows(
         raw_rows = cur.fetchall()
 
     col_labels = [str(desc[0]) for desc in description]
+    col_is_db_json = [str(desc[1]) == "JSON" for desc in description]
     adapters: dict[Type[BaseModel], TypeAdapter[Any]] = {}
     for proj in projections:
         if proj.kind == "model" and proj.model_cls is not None:
@@ -642,22 +685,67 @@ def execute_config_run_rows(
         built: list[Any] = []
         for proj in projections:
             if proj.kind == "scalar":
-                built.append(raw_row[proj.start_idx])
+                raw_val = raw_row[proj.start_idx]
+                is_json = bool(proj.json_columns) or (
+                    proj.start_idx < len(col_is_db_json)
+                    and col_is_db_json[proj.start_idx]
+                )
+                built.append(_decode_json_if_str(raw_val) if is_json else raw_val)
             elif proj.kind == "model" and proj.model_cls is not None:
                 slice_vals = raw_row[proj.start_idx : proj.start_idx + proj.width]
                 col_map = proj.col_to_field or {}
                 payload = {
-                    col_map.get(cname, cname): val
-                    for cname, val in zip(proj.col_names, slice_vals)
+                    col_map.get(cname, cname): (
+                        _decode_json_if_str(val)
+                        if (
+                            cname in proj.json_columns
+                            or (
+                                (proj.start_idx + offset) < len(col_is_db_json)
+                                and col_is_db_json[proj.start_idx + offset]
+                            )
+                        )
+                        else val
+                    )
+                    for offset, (cname, val) in enumerate(
+                        zip(proj.col_names, slice_vals)
+                    )
                 }
                 built.append(adapters[proj.model_cls].validate_python(payload))
             elif proj.kind == "explicit_dict":
                 slice_vals = raw_row[proj.start_idx : proj.start_idx + proj.width]
-                built.append(dict(zip(proj.col_names, slice_vals)))
+                built.append(
+                    {
+                        cname: (
+                            _decode_json_if_str(val)
+                            if (
+                                (proj.start_idx + offset) < len(col_is_db_json)
+                                and col_is_db_json[proj.start_idx + offset]
+                            )
+                            else val
+                        )
+                        for offset, (cname, val) in enumerate(
+                            zip(proj.col_names, slice_vals)
+                        )
+                    }
+                )
             elif proj.kind == "wildcard_dict":
                 slice_vals = raw_row[proj.start_idx :]
                 slice_names = col_labels[proj.start_idx :]
-                built.append(dict(zip(slice_names, slice_vals)))
+                built.append(
+                    {
+                        cname: (
+                            _decode_json_if_str(val)
+                            if (
+                                (proj.start_idx + offset) < len(col_is_db_json)
+                                and col_is_db_json[proj.start_idx + offset]
+                            )
+                            else val
+                        )
+                        for offset, (cname, val) in enumerate(
+                            zip(slice_names, slice_vals)
+                        )
+                    }
+                )
         if unwrap_single:
             results.append(built[0])
         else:

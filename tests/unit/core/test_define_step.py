@@ -175,7 +175,7 @@ def test_define_step_adapter_identity_inputs_metadata_stored() -> None:
     def step() -> None:
         return None
 
-    metadata = getattr(step, "__consist_step__")
+    metadata = step.__dict__["__consist_step__"]
     assert metadata.adapter is adapter
     assert metadata.identity_inputs == ["dep.yaml"]
 

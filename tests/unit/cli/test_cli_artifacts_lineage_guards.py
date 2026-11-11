@@ -127,6 +127,7 @@ def test_schema_capture_file_passes_mount_overrides_to_tracker(tmp_path) -> None
         "mock.db",
         run_dir=None,
         mounts={"workspace": str(workspace_root.resolve())},
+        read_only=False,
     )
 
 
@@ -234,7 +235,10 @@ def test_artifacts_run_mode_shows_accessibility_status(
     artifact = tracker.get_artifact("results")
     assert artifact is not None
 
-    relative_path = tracker.fs.get_remappable_relative_path(artifact.container_uri)
+    assert artifact.primary_location is not None
+    relative_path = tracker.fs.get_remappable_relative_path(
+        artifact.primary_location.uri
+    )
     assert relative_path is not None
     archived_path = archive_root / relative_path
     archived_path.parent.mkdir(parents=True, exist_ok=True)
@@ -266,7 +270,7 @@ def test_artifacts_accepts_run_dir_for_moved_run_roots(
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text("a,b\n1,2\n", encoding="utf-8")
         tracker.log_output(output_path, key="results")
-    tracker.engine.dispose()
+    tracker.close()
 
     monkeypatch.chdir(repo_root)
     result = runner.invoke(

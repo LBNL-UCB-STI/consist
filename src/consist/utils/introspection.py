@@ -1,15 +1,34 @@
 from __future__ import annotations
 
 import warnings
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Protocol,
+    runtime_checkable,
+)
 
 from consist.core.decorators import StepDefinition
 from consist.core.step_context import StepContext, resolve_metadata
 from consist.core.step_contracts import resolve_step_contract
 
 
+@runtime_checkable
+class _NamedStep(Protocol):
+    __name__: str
+
+
+@runtime_checkable
+class _DecoratedStep(Protocol):
+    __consist_step__: StepDefinition
+
+
 def _step_name(step: Any) -> str:
-    return getattr(step, "__name__", step.__class__.__name__)
+    return step.__name__ if isinstance(step, _NamedStep) else step.__class__.__name__
 
 
 def _normalize_outputs(value: Any) -> List[str]:
@@ -48,7 +67,7 @@ def collect_step_schema(
     schema: Dict[str, str] = dict(extra_keys or {})
 
     for step in steps:
-        defn = getattr(step, "__consist_step__", None)
+        defn = step.__consist_step__ if isinstance(step, _DecoratedStep) else None
         if not isinstance(defn, StepDefinition):
             continue
 
@@ -113,7 +132,9 @@ def collect_step_schema(
                 description_value = resolve_metadata(description_value, ctx)
             except TypeError:
                 description_value = None
-        description = description_value or f"Output from {step_name}"
+        description: str = (
+            str(description_value) if description_value else f"Output from {step_name}"
+        )
         for key in outputs:
             schema.setdefault(key, description)
 

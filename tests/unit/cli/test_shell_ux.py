@@ -226,7 +226,7 @@ def test_shell_completion_falls_back_to_empty_on_query_failure(tmp_path) -> None
     ):
         shell = ConsistShell(tracker)
 
-    with patch("consist.cli._tracker_session", side_effect=RuntimeError("db down")):
+    with patch("consist.cli._require_ledger", side_effect=RuntimeError("db down")):
         assert shell.complete_show("", "show ", 5, 5) == []
         assert shell.complete_artifacts("", "artifacts ", 10, 10) == []
         assert shell.complete_preview("", "preview ", 8, 8) == []
@@ -277,9 +277,11 @@ def test_shell_hash_lookup_reports_run_scoped_miss(tmp_path, capsys) -> None:
     ):
         shell = ConsistShell(tracker)
 
-    with patch("consist.cli._tracker_session") as tracker_session:
-        session = tracker_session.return_value.__enter__.return_value
-        session.exec.return_value.all.return_value = []
+    with patch("consist.cli._require_ledger") as require_ledger:
+        cursor = (
+            require_ledger.return_value.exec_cursor.return_value.__enter__.return_value
+        )
+        cursor.execute.return_value.fetchall.return_value = []
         resolved = shell._lookup_artifact_by_hash_prefix(
             "deadbeef", command_name="preview", run_id="run-123"
         )
@@ -302,9 +304,11 @@ def test_shell_hash_lookup_does_not_inherit_last_artifact_run_scope(
         shell = ConsistShell(tracker)
     shell._last_artifact_run_id = "run-123"
 
-    with patch("consist.cli._tracker_session") as tracker_session:
-        session = tracker_session.return_value.__enter__.return_value
-        session.exec.return_value.all.return_value = []
+    with patch("consist.cli._require_ledger") as require_ledger:
+        cursor = (
+            require_ledger.return_value.exec_cursor.return_value.__enter__.return_value
+        )
+        cursor.execute.return_value.fetchall.return_value = []
         resolved = shell._lookup_artifact_by_hash_prefix(
             "deadbeef", command_name="preview"
         )
@@ -325,24 +329,28 @@ def test_shell_hash_lookup_reports_ambiguity_with_candidates(tmp_path, capsys) -
     ):
         shell = ConsistShell(tracker)
 
-    matches = [
-        SimpleNamespace(
+    id1 = "00000000-0000-0000-0000-000000000001"
+    id2 = "00000000-0000-0000-0000-000000000002"
+    matches = {
+        id1: SimpleNamespace(
             hash="deadbeef001",
             key="trips_2018_it0",
-            id="artifact-1",
+            id=id1,
             run_id="run-a",
         ),
-        SimpleNamespace(
+        id2: SimpleNamespace(
             hash="deadbeef002",
             key="trips_2018_it1",
-            id="artifact-2",
+            id=id2,
             run_id="run-a",
         ),
-    ]
+    }
 
-    with patch("consist.cli._tracker_session") as tracker_session:
-        session = tracker_session.return_value.__enter__.return_value
-        session.exec.return_value.all.return_value = matches
+    with patch("consist.cli._require_ledger") as require_ledger:
+        ledger = require_ledger.return_value
+        cursor = ledger.exec_cursor.return_value.__enter__.return_value
+        cursor.execute.return_value.fetchall.return_value = [(id1,), (id2,)]
+        ledger.load_artifact.side_effect = lambda uid: matches[str(uid)]
         resolved = shell._lookup_artifact_by_hash_prefix(
             "deadbeef", command_name="schema_profile", run_id="run-a"
         )
@@ -352,7 +360,7 @@ def test_shell_hash_lookup_reports_ambiguity_with_candidates(tmp_path, capsys) -
     assert resolved is None
     assert "Hash prefix 'deadbeef' is ambiguous in run 'run-a'" in out
     assert "Use a longer prefix for schema_profile." in normalized
-    assert "deadbeef001 (key=trips_2018_it0, id=artifact-1, run=run-a)" in out
+    assert f"deadbeef001 (key=trips_2018_it0, id={id1}, run=run-a)" in normalized
 
 
 def test_shell_history_loads_existing_file_on_start(tmp_path) -> None:
@@ -628,11 +636,9 @@ def test_shell_runs_json_mode_uses_output_json(tmp_path) -> None:
     )
 
     with (
-        patch("consist.cli._tracker_session") as tracker_session,
         patch("consist.cli.queries.get_runs", return_value=[fake_run]),
         patch("consist.cli.output_json") as output_json_mock,
     ):
-        tracker_session.return_value.__enter__.return_value = MagicMock()
         shell.do_runs("--json")
 
     output_json_mock.assert_called_once()

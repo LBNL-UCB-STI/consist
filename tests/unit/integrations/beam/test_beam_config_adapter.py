@@ -33,8 +33,8 @@ from consist.integrations.beam.config_adapter import (
 from consist.integrations.beam.config_adapter import _load_config_tree
 from consist.integrations.beam.config_adapter import _resolve_reference
 from consist.integrations.beam.config_adapter import _resolves_under_config_root
-from consist.models.artifact import Artifact
 from consist.types import CacheOptions, ExecutionOptions
+from tests.helpers.artifact_factory import make_artifact
 from tests.helpers.beam_fixtures import build_beam_test_configs
 
 
@@ -534,14 +534,9 @@ def test_beam_canonicalize_ingests_gtfs_tables(gtfs_tracker, tmp_path: Path):
     assert bundle_artifact is not None
     assert bundle_artifact.driver == "gtfs"
 
-    if gtfs_tracker.engine is None:
-        raise AssertionError("Tracker engine missing; DB tests require DuckDB.")
-
-    with gtfs_tracker.engine.begin() as connection:
-        count = connection.exec_driver_sql(
-            "SELECT COUNT(*) FROM global_tables.trips"
-        ).scalar_one()
-    assert count == 2
+    assert gtfs_tracker.ledger is not None
+    df = gtfs_tracker.query_df("SELECT COUNT(*) AS count FROM global_tables.trips")
+    assert int(df.iloc[0]["count"]) == 2
 
 
 def test_beam_canonicalization_snapshot_omits_unlogged_gtfs_directory_delegate(
@@ -1200,8 +1195,9 @@ def test_beam_materialize_bundle_recovers_artifact_backed_member(
         )
 
     archive_root = tmp_path / "source_archive"
+    assert source_artifact.primary_location is not None
     relative_path = tracker.fs.get_remappable_relative_path(
-        source_artifact.container_uri
+        source_artifact.primary_location.uri
     )
     assert relative_path is not None
     archived_source = archive_root / relative_path
@@ -1270,7 +1266,7 @@ def test_beam_materialize_bundle_rejects_symlinked_external_artifact_member(
     prepared.write_text("zone,value\n1,2\n", encoding="utf-8")
     linked = tmp_path / "linked.csv"
     linked.symlink_to(prepared)
-    source_artifact = Artifact(
+    source_artifact = make_artifact(
         key="prepared_skims",
         container_uri=f"file://{linked.absolute()}",
         driver="csv",
@@ -1303,7 +1299,7 @@ def test_beam_materialize_bundle_stages_percent_escaped_external_artifact_uri(
     case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
     prepared = tmp_path / "prepared skims.csv"
     prepared.write_text("zone,value\n1,2\n", encoding="utf-8")
-    source_artifact = Artifact(
+    source_artifact = make_artifact(
         key="prepared_skims",
         container_uri=prepared.as_uri(),
         driver="csv",
@@ -1580,8 +1576,12 @@ def test_beam_materialize_bundle_is_bound_as_a_downstream_input(
         {
             "destination": "inputs/prepared.csv",
             "source_artifact_id": str(source_artifact.id),
-            "source_uri": source_artifact.container_uri,
-            "source_hash": source_artifact.hash,
+            "source_uri": (
+                source_artifact.primary_location.uri
+                if source_artifact.primary_location is not None
+                else ""
+            ),
+            "source_hash": source_artifact.anchor.hex,
         }
     ]
     assert bundle.artifact.id in {

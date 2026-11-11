@@ -158,7 +158,7 @@ Only historical runs whose files were already deleted or overwritten, or whose v
 - If you later restore or mount the original file, you can upgrade that artifact to full cache-eligible status at any time:
 
 ```bash
-consist promote ./provenance.duckdb <artifact-id-or-historical-fingerprint> --path /path/to/restored_file.parquet
+consist promote ./provenance.duckdb <artifact-id-or-run-id> --mount archive=/path/to/archive
 ```
 
 ---

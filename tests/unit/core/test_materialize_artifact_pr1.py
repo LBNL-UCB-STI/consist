@@ -11,7 +11,7 @@ from consist.core.directory_artifacts import (
 )
 from consist.core.fs import FileSystemManager
 from consist.core.materialize import materialize_artifact
-from consist.models.artifact import Artifact
+from tests.helpers.artifact_factory import make_artifact
 
 
 def _create_stub_tracker(
@@ -105,7 +105,7 @@ def _create_stub_tracker(
 
 def test_coupler_and_view_pop_behavior() -> None:
     coupler = Coupler()
-    art_a = Artifact(key="a", container_uri="workspace://a.csv", driver="csv")
+    art_a = make_artifact(key="a", container_uri="workspace://a.csv", driver="csv")
     coupler.set("a", art_a)
 
     # Pop existing returns artifact
@@ -115,7 +115,7 @@ def test_coupler_and_view_pop_behavior() -> None:
 
     # Pop missing returns default
     assert coupler.pop("a") is None
-    sentinel = Artifact(key="s", container_uri="workspace://s.csv", driver="csv")
+    sentinel = make_artifact(key="s", container_uri="workspace://s.csv", driver="csv")
     assert coupler.pop("missing", sentinel) == sentinel
 
     # Key validation
@@ -124,7 +124,7 @@ def test_coupler_and_view_pop_behavior() -> None:
 
     # CouplerView pop
     view = coupler.view("sub")
-    art_b = Artifact(key="sub/b", container_uri="workspace://b.csv", driver="csv")
+    art_b = make_artifact(key="sub/b", container_uri="workspace://b.csv", driver="csv")
     view.set("b", art_b)
     assert "sub/b" in coupler
 
@@ -154,7 +154,7 @@ def test_directory_artifact_materialization_with_manifest(tmp_path: Path) -> Non
     (dir_path / "meta.json").write_text('{"chunks": 1}', encoding="utf-8")
 
     manifest = build_directory_manifest(dir_path)
-    artifact = Artifact(
+    artifact = make_artifact(
         key="zarr_output",
         container_uri="workspace://models/zarr_data",
         driver="zarr",
@@ -185,7 +185,7 @@ def test_directory_artifact_materialization_with_manifest(tmp_path: Path) -> Non
     assert dest.is_dir()
     assert (dest / "data.bin").read_bytes() == b"hello-zarr"
     assert (dest / "meta.json").read_text(encoding="utf-8") == '{"chunks": 1}'
-    assert result.artifact.abs_path == str(dest.resolve())
+    assert str(result.artifact.as_path()) == str(dest.resolve())
 
     # Second run with preserve_existing=True returns already_present
     result_preserved = materialize_artifact(
@@ -200,7 +200,7 @@ def test_directory_artifact_materialization_with_manifest(tmp_path: Path) -> Non
     )
     assert result_preserved.status == "already_present"
     assert result_preserved.resolvable
-    assert result_preserved.artifact.abs_path == str(dest.resolve())
+    assert str(result_preserved.artifact.as_path()) == str(dest.resolve())
 
 
 def test_directory_artifact_materialization_never_skips_manifest_hashing(
@@ -213,7 +213,7 @@ def test_directory_artifact_materialization_never_skips_manifest_hashing(
     dir_path.mkdir(parents=True)
     (dir_path / "large.dat").write_bytes(b"some-bytes")
 
-    artifact = Artifact(
+    artifact = make_artifact(
         key="large_dir",
         container_uri="workspace://large_dir",
         driver="directory",
@@ -286,7 +286,7 @@ def test_directory_artifact_manifest_mismatch_returns_hash_mismatch(
     # Corrupt the file after building manifest
     (dir_path / "file.txt").write_text("corrupted", encoding="utf-8")
 
-    artifact = Artifact(
+    artifact = make_artifact(
         key="dir_a",
         container_uri="workspace://dir_a",
         driver="directory",
@@ -330,7 +330,7 @@ def test_shapefile_bundle_materialization_from_archive_dir(tmp_path: Path) -> No
     (bundle_dir / "roads.prj").write_bytes(b"prj-bytes")
 
     manifest = build_shapefile_bundle_manifest(shp_file)
-    artifact = Artifact(
+    artifact = make_artifact(
         key="roads",
         container_uri="workspace://outputs/roads.shp",
         driver="shapefile",
@@ -373,7 +373,7 @@ def test_shapefile_bundle_materialization_from_archive_dir(tmp_path: Path) -> No
     assert (target_root / "outputs" / "roads.prj").read_bytes() == b"prj-bytes"
 
     # Crucial: destination artifact abs_path points to the .shp file
-    assert result.artifact.abs_path == str(dest_shp.resolve())
+    assert str(result.artifact.as_path()) == str(dest_shp.resolve())
     # Crucial: unrelated sibling file remains untouched
     assert unrelated_file.exists()
     assert unrelated_file.read_text(encoding="utf-8") == "a,b,c\n1,2,3\n"
@@ -393,7 +393,7 @@ def test_shapefile_bundle_materialization_from_workspace_file(tmp_path: Path) ->
     (source_outputs / "other_file.parquet").write_bytes(b"parquet-bytes")
 
     manifest = build_shapefile_bundle_manifest(source_shp)
-    artifact = Artifact(
+    artifact = make_artifact(
         key="roads",
         container_uri="workspace://outputs/roads.shp",
         driver="shapefile",
@@ -430,7 +430,7 @@ def test_shapefile_bundle_materialization_from_workspace_file(tmp_path: Path) ->
     assert dest_shp.read_bytes() == b"shp-live-bytes"
     assert (target_root / "outputs" / "roads.dbf").read_bytes() == b"dbf-live-bytes"
     assert (target_root / "outputs" / "roads.shx").read_bytes() == b"shx-live-bytes"
-    assert result.artifact.abs_path == str(dest_shp.resolve())
+    assert str(result.artifact.as_path()) == str(dest_shp.resolve())
     assert (dest_dir / "pre_existing.txt").read_text(encoding="utf-8") == "hello"
 
     # Retain existing returns already_present
@@ -461,7 +461,7 @@ def test_submount_relative_path_with_explicit_scheme_prefixes(tmp_path: Path) ->
     src_file.parent.mkdir(parents=True)
     src_file.write_text("trip_id,arrival_time\n1,08:00\n", encoding="utf-8")
 
-    artifact = Artifact(
+    artifact = make_artifact(
         key="transit_schedule",
         container_uri="beam_input://transit/schedule.csv",
         driver="csv",
@@ -483,7 +483,7 @@ def test_submount_relative_path_with_explicit_scheme_prefixes(tmp_path: Path) ->
     dest_file = target_root / "beam" / "input" / "transit" / "schedule.csv"
     assert dest_file.exists()
     assert dest_file.read_text(encoding="utf-8") == "trip_id,arrival_time\n1,08:00\n"
-    assert result.artifact.abs_path == str(dest_file.resolve())
+    assert str(result.artifact.as_path()) == str(dest_file.resolve())
 
 
 def test_submount_relative_path_auto_derived_from_run_mount(tmp_path: Path) -> None:
@@ -502,7 +502,7 @@ def test_submount_relative_path_auto_derived_from_run_mount(tmp_path: Path) -> N
     src_file.parent.mkdir(parents=True)
     src_file.write_text("trip_id,arrival_time\n2,09:00\n", encoding="utf-8")
 
-    artifact = Artifact(
+    artifact = make_artifact(
         key="transit_schedule",
         container_uri="beam_input://transit/schedule.csv",
         driver="csv",
@@ -548,7 +548,7 @@ def test_submount_relative_path_auto_derived_from_historical_run_mount(
     src_file.parent.mkdir(parents=True)
     src_file.write_text("trip_id,arrival_time\n3,10:00\n", encoding="utf-8")
 
-    artifact = Artifact(
+    artifact = make_artifact(
         key="transit_schedule",
         run_id="run-123",
         container_uri="beam_input://transit/schedule.csv",
@@ -573,7 +573,7 @@ def test_submount_strict_filtering_when_scheme_prefixes_provided(
     tmp_path: Path,
 ) -> None:
     target_root = tmp_path / "target"
-    artifact = Artifact(
+    artifact = make_artifact(
         key="external",
         container_uri="unmapped://data.csv",
         driver="csv",

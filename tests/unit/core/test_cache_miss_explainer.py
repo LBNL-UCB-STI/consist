@@ -1,20 +1,20 @@
 from __future__ import annotations
 
 import logging
-import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
+from consist.artifact import Artifact
 from consist.core.cache_miss_explainer import CacheMissExplainer
 from consist.core.config_canonicalization import (
     CanonicalConfig,
     CanonicalConfigIdentity,
     ConfigPlan,
 )
-from consist.models.artifact import Artifact
 from consist.models.run import Run
 from consist.types import CacheOptions
 from consist.types import ExecutionOptions
+from tests.helpers.artifact_factory import make_artifact
 
 
 def _artifact(
@@ -24,7 +24,6 @@ def _artifact(
     container_uri: str = "inputs://shared.csv",
     driver: str = "csv",
     hash_value: str | None = None,
-    content_id: uuid.UUID | None = None,
     table_path: str | None = None,
     array_path: str | None = None,
 ) -> Artifact:
@@ -35,13 +34,12 @@ def _artifact(
     inputs explicit at each call site.
     """
 
-    return Artifact(
+    return make_artifact(
         key=key,
         run_id=run_id,
         container_uri=container_uri,
         driver=driver,
         hash=hash_value,
-        content_id=content_id,
         table_path=table_path,
         array_path=array_path,
     )
@@ -1123,13 +1121,11 @@ def test_cache_miss_explanation_records_upstream_run_changed():
         key="upstream",
         run_id="producer_v2",
         hash_value="same_hash",
-        content_id=uuid.uuid4(),
     )
     candidate_input = _artifact(
         key="upstream",
         run_id="producer_v1",
         hash_value="same_hash",
-        content_id=uuid.uuid4(),
     )
 
     class StubTracker:
@@ -1192,14 +1188,12 @@ def test_cache_miss_explanation_records_content_hash_and_id_drift():
         run_id=None,
         container_uri="inputs://raw_v2.csv",
         hash_value="hash_v2",
-        content_id=uuid.uuid4(),
     )
     candidate_input = _artifact(
         key="raw",
         run_id=None,
         container_uri="inputs://raw_v1.csv",
         hash_value="hash_v1",
-        content_id=uuid.uuid4(),
     )
 
     class StubTracker:

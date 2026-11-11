@@ -86,7 +86,8 @@ def _raw_verifiable_artifact_hex(artifact: Artifact) -> Optional[str]:
         manifest_digest = artifact.identity.get(
             "sha256:manifest-v1"
         ) or artifact.identity.get("sha256:dir_manifest")
-        return manifest_digest.hex if manifest_digest is not None else None
+        if manifest_digest is not None:
+            return manifest_digest.hex
     file_digest = artifact.identity.get("sha256:file")
     return file_digest.hex if file_digest is not None else None
 
@@ -138,6 +139,7 @@ def _bind_hydrated_path(
         witness=_capture_hydrated_witness(entry_path, member=artifact.member),
         basis="derived",
         site="local",
+        observed_at_ns=time.time_ns(),
     )
     if (
         record_in_ledger
@@ -148,7 +150,11 @@ def _bind_hydrated_path(
             tracker.ledger.record_observation(obs)
         except Exception:
             pass
-    return artifact.with_hints((*artifact.hints, obs)).bind_tracker(tracker)
+    deduped_hints = (
+        obs,
+        *(h for h in artifact.hints if h.place_key != obs.place_key),
+    )
+    return artifact.with_hints(deduped_hints).bind_tracker(tracker)
 
 
 def _ledger_batch_tx(tracker: Any) -> Any:

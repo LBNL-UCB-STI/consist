@@ -30,8 +30,16 @@ flowchart TD
 | **Fingerprint** | `art.identity`, `art.anchor` | `content.anchor` (`VARCHAR` primary key, formatted `<scheme>:<hex>`) + `content_digest(anchor, scheme, value, basis)` |
 | **Name** | `art.key`, `inputs`/`outputs` keys | `run_binding.slot` (paired with `direction`, `ordinal`, `role`, `anchor`, and `artifact_id`) and `artifact.key` |
 | **Location** | `art.path`, `art.primary_location` | `artifact_location` observations + `location_event` status transitions, queried via `artifact_location_current` and `locate_current(anchors)` |
-| **Artifact** | `Artifact` | `artifact(id, key, driver, anchor, run_id, schema_id, meta, created_at)` |
-| **Run** | `Run` | `run(id, model_name, status, code_hash, config_hash, input_hash, signature, signature_scheme, cache_status, ...)` |
+| **Artifact** | `Artifact` | `artifact(id, key, driver, anchor, run_id, parent_artifact_id, schema_id, meta, facet_kv, created_at)` |
+| **Run** | `Run` | `run(id, model_name, status, stage, phase, git_hash, code_hash, config_hash, input_hash, signature, signature_scheme, cache_status, facet_kv, ...)` |
+
+### Single-Connection `StoreLedger` Ownership
+
+`StoreLedger` owns the single native `duckdb.DuckDBPyConnection` for a configured `db_path` (all legacy SQLAlchemy `Engine`/`Session` provenance access has been removed). Thread safety and multi-statement atomicity are enforced via `threading.RLock` and re-entrant transaction-cursor affinity:
+
+- Outside an active transaction (`tx_depth == 0`), queries execute on short-lived cloned `cursor()` handles.
+- Inside `StoreLedger.transaction()`, nested reads and writes share one active transaction cursor (`BEGIN TRANSACTION` / `COMMIT` / `ROLLBACK` at depth `0 <-> 1`), avoiding intra-process MVCC conflicts.
+- `dlt` ingestion borrows `StoreLedger`'s connection under the ledger lock outside active transactions and restores `SET search_path = 'main'`, while `ibis`, `consist.load`, `query_df`, and `query_rows` execute on cloned cursors.
 
 ### 1. The Content Hub (`content`, `content_digest`, `content_manifest`)
 
@@ -40,10 +48,12 @@ flowchart TD
 - **`content_manifest`**: Stores canonical binary/JSON structural manifests for directory trees and multi-member bundles alongside `digest_policy(policy_sha256, policy_json)`.
 - **`content_derivation`**: Tracks cross-representation relationships (`src_anchor`, `dst_anchor`, `kind`), such as ingesting a Parquet file into a DuckDB table or materializing a table back to disk.
 
-### 2. The Role Spoke (`run`, `run_binding`, `artifact`)
+### 2. The Role Spoke, Preserved Operational Tables & Facet Views
 
 - **`run_binding`**: Records every input and output binding occurrence for a run (`PRIMARY KEY (run_id, direction, slot, ordinal)`). Stores the bound `artifact_id`, `anchor`, `role`, `contract_scheme`, and per-binding signature contribution (`sig_scheme`, `sig_hex`).
-- **Compatibility views**: `run_artifact_link` and `run_artifact_role` are SQL views over `run_binding` that preserve query compatibility for tools inspecting `(run_id, artifact_id, direction)`.
+- **Compatibility views**: `run_artifact_link` (1-row-per-`(run_id, artifact_id)` `GROUP BY`) and `run_artifact_role` are SQL views over `run_binding` that preserve query compatibility for tools inspecting `(run_id, artifact_id, direction)`.
+- **Dedicated `facet_kv JSON` columns and facet views (`run_config_kv`, `artifact_kv`)**: `StoreLedger`, `consist migrate`, and `consist.store.manifest.import_run_manifest` flatten run and artifact facets into internal `run.facet_kv` and `artifact.facet_kv` JSON columns (keeping `Run.meta`, `Artifact.meta`, and `consist.json` clean) and project them through single-level `LATERAL json_each(facet_kv)` SQL views `run_config_kv` and `artifact_kv` with full predicate pushdown.
+- **Preserved operational tables**: Schema v2 defines and migrates six operational tables without physical DuckDB foreign keys: `run_coupler_snapshot`, `run_binding_invocation`, `artifact_schema`, `artifact_schema_field`, `artifact_schema_relation`, and `artifact_schema_observation`.
 
 ### 3. The Location Spoke (`artifact_location`, `location_event`, `artifact_location_current`)
 
@@ -69,7 +79,7 @@ Consist represents every fingerprint via `Identity(anchor, claims=())` (`consist
 
 `Kind.HISTORICAL` (`legacy-v1:unverified:<hash>`) is strictly isolated from cache-hit matching (`Identity.verifiable` is `False`). Historical artifacts participate in lineage traversal, hybrid views, and metadata queries, but `StoreLedger.find_cached_run` never matches a run whose inputs or outputs rely on unverified historical anchors.
 
-When a user runs `consist promote <db_path> <target> --path <file>`, Consist hashes the restored file to obtain a verified `anchor`, inserts a mapping row into `anchor_promotion(historical_anchor, verified_anchor, basis, asserted_by, evidence, promoted_at)`, and records an active `artifact_location` observation so subsequent runs can reuse the artifact.
+When a user runs `consist promote <db_path> <artifact-id|historical-anchor|run-id> [--path <file>] [--mount NAME=PATH]`, Consist hashes the restored files (using `SiteContext.detect()` and any `--mount` overrides), inserts mapping rows into `anchor_promotion(historical_anchor, verified_anchor, basis, asserted_by, evidence, promoted_at)`, records active `artifact_location` observations, and—once all bound inputs and outputs of a historical run resolve to verified anchors—recomputes `run.input_hash` and `run.signature` (`signature_scheme='sig-v2'`) and sets `run.cache_status='live'` so subsequent runs hit the cache.
 
 ---
 
@@ -121,7 +131,7 @@ When Consist resolves a location via `locate()` or observes an existing path via
 
 Every run maintains two persistence records:
 
-1. **`consist.json` (Per-Run Snapshot)**: Written atomically inside the run's output folder when the run completes. Contains the run record, config, facet metadata, input/output bindings, digests, and initial locations at completion time.
+1. **`consist.json` (Per-Run Debug Snapshot) & `consist.store.manifest` (Lossless Recovery Manifests)**: `consist.json` is written atomically inside `run_dir` when a run completes for human-readable inspection. For DB-less batch workers (`Tracker(..., db_path=None)`), `consist.store.manifest` (`RunManifest`, `export_run_manifest`, `import_run_manifest`, `rebuild_store_from_manifests`) serializes lossless Schema v2 wire manifests (secondary claims, embedded directory manifests with SHA-256 verification, and witness JSON) without importing `duckdb` until store reconstruction runs.
 2. **`StoreLedger` (`provenance.duckdb`)**: Commits the run, `content`, `content_digest`, `run_binding`, and `artifact_location` rows inside an explicit DuckDB transaction.
 
 ### Schema Version Detection & v1 Tripwires
@@ -130,7 +140,7 @@ When opening a database (`consist.store.detect.detect_schema`), Consist inspects
 
 - **v2 database (`version = 2`)**: Initializes `StoreLedger` and verifies all expected v2 tables and views.
 - **v1 database (`run` / `artifact` present without `consist_schema.version = 2`)**: Raises `DatabaseMigrationRequired` with instructions to run `consist migrate <db_path>`.
-- **v1 Tripwire Views**: `init_v2_schema` installs empty read-only SQL views for all 12 legacy v1-only table names (`artifact_content`, `artifact_schema`, `config_facet`, etc.). Because `duckdb_engine` treats views as existing tables during `SQLModel.metadata.create_all()` and DuckDB rejects `INSERT` into views, an older Consist 0.3/0.4 process accidentally pointed at a v2 database fails fast at bind time without corrupting the v2 store.
+- **v1 Tripwire Views**: `init_v2_schema` installs single-column read-only tripwire SQL views for the four retired v1-only tables (`artifact_content`, `config_facet`, `artifact_facet`, and `run_artifact_dir_entry`). Because DuckDB rejects legacy SQL column bindings and `INSERT` statements against these views, an older Consist 0.3/0.4 process accidentally pointed at a v2 database fails fast at bind time without corrupting the v2 store.
 
 ### The 5-Stage `consist migrate` Pipeline
 

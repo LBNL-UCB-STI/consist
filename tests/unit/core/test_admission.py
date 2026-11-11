@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 from pathlib import Path
+import uuid
 
 import pytest
 from pydantic import ValidationError
@@ -22,8 +24,8 @@ from consist.core.admission import (
     compare_path_to_identity,
     hash_semantics_for_new_artifact,
 )
-from consist.models.artifact import Artifact
-from consist.models.run import RunArtifactLink
+from consist.digest import Digest, Identity
+from tests.helpers.artifact_factory import make_artifact
 
 
 FULL_FILE_SHA256 = {
@@ -46,9 +48,7 @@ def _complete_run(tracker, run_id: str, *, status: str = "completed") -> None:
         run = tracker.get_run(run_id)
         assert run is not None
         run.status = status
-        with tracker.db.session_scope() as session:
-            session.add(run)
-            session.commit()
+        tracker.db.sync_run(run)
 
 
 def _record_input(
@@ -61,19 +61,23 @@ def _record_input(
     semantics: dict[str, object] | None,
     direction: str = "input",
 ) -> None:
-    artifact = Artifact(
+    if semantics == FULL_FILE_SHA256 and digest is not None:
+        identity = Identity(
+            anchor=Digest("sha256:file", digest),
+            claims=(Digest("sha256:file", digest),),
+        )
+    else:
+        identity = Identity(
+            anchor=Digest("legacy-v1:unverified", digest or ("0" * 64)),
+        )
+    artifact = make_artifact(
         key=key,
         container_uri=f"inputs://{source_path.name}",
         driver="other",
-        hash=digest,
-        meta={} if semantics is None else {"hash_semantics": semantics},
+        identity=identity,
+        origin=tracker.ledger.ref,
     )
-    with tracker.db.session_scope() as session:
-        session.add(artifact)
-        session.add(
-            RunArtifactLink(run_id=run_id, artifact_id=artifact.id, direction=direction)
-        )
-        session.commit()
+    tracker.db.sync_artifact(artifact, run_id=run_id, direction=direction)
 
 
 def _assert_observation(report: AdmissionReport, text: str) -> None:
@@ -407,7 +411,8 @@ def test_caller_hash_override_does_not_retain_cloned_full_hash_semantics(
     candidate.write_bytes(b"caller-controlled bytes")
     with tracker.start_run("full-hash", "admission_contract"):
         original = tracker.log_artifact(source, key="raw_gtfs", direction="input")
-    assert original.meta["hash_semantics"]["source"] == "computed_full"
+    assert original.identity.verifiable is True
+    assert original.anchor.scheme == "sha256:file"
 
     caller_hash = _sha256(candidate.read_bytes())
     with tracker.start_run("caller-override", "admission_contract"):
@@ -419,8 +424,9 @@ def test_caller_hash_override_does_not_retain_cloned_full_hash_semantics(
             force_hash_override=True,
         )
 
-    assert overridden.hash == caller_hash
-    assert overridden.meta["hash_semantics"]["source"] == "caller_supplied"
+    assert overridden.anchor.hex == caller_hash
+    assert overridden.identity.verifiable is False
+    assert overridden.anchor.scheme == "legacy-v1:unverified"
     report = check_artifact_identity(
         tracker,
         execution_path=candidate,
@@ -467,7 +473,8 @@ def test_logged_artifact_semantics_admit_full_but_not_fast_inputs(
         full_artifact = tracker.log_artifact(
             full_source, key="full_feed", direction="input"
         )
-    assert full_artifact.meta["hash_semantics"]["source"] == "computed_full"
+    assert full_artifact.identity.verifiable is True
+    assert full_artifact.anchor.scheme == "sha256:file"
 
     full_report = check_artifact_identity(
         tracker,
@@ -486,7 +493,8 @@ def test_logged_artifact_semantics_admit_full_but_not_fast_inputs(
         fast_artifact = tracker.log_artifact(
             fast_source, key="fast_feed", direction="input"
         )
-    assert fast_artifact.meta["hash_semantics"]["source"] == "computed_fast"
+    assert fast_artifact.identity.verifiable is False
+    assert fast_artifact.anchor.scheme == "legacy-v1:unverified"
 
     fast_report = check_artifact_identity(
         tracker,
@@ -1063,7 +1071,18 @@ def test_hydrate_admitted_input_preserves_destination_on_mismatch_and_supports_l
     dest.write_bytes(b"preexisting-target-bytes")
     orig_ino = dest.stat().st_ino
 
-    legacy_art = Artifact(
+    @dataclasses.dataclass
+    class _LegacyArtifactStub:
+        key: str
+        container_uri: str
+        driver: str
+        hash: str | None
+        abs_path: str | None = None
+        run_id: str | None = None
+        meta: dict[str, object] = dataclasses.field(default_factory=dict)
+        id: uuid.UUID = dataclasses.field(default_factory=uuid.uuid4)
+
+    legacy_art = _LegacyArtifactStub(
         key="raw_gtfs",
         container_uri=str(src),
         driver="zip",

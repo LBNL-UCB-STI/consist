@@ -45,10 +45,10 @@ def test_db_failure_does_not_crash_run(tracker):
 
     # Start a run
     with tracker.start_run("run_fail_test", "model"):
-        # Mock the Session object that the method uses internally.
-        # This simulates the DB blowing up, while letting the method handle it.
-        with patch(
-            "consist.core.persistence.Session", side_effect=Exception("DB EXPLODED")
+        # Mock StoreLedger.transaction to simulate the DB blowing up during artifact sync,
+        # while letting ProvenanceWriter handle it gracefully.
+        with patch.object(
+            tracker.db.ledger, "transaction", side_effect=RuntimeError("DB EXPLODED")
         ):
             tracker.log_artifact("test.csv", "test")
 

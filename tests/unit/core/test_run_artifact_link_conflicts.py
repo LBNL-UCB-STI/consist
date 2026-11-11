@@ -1,10 +1,5 @@
 import logging
 
-from sqlmodel import Session, select
-
-from consist.models.artifact import Artifact
-from consist.models.run import RunArtifactLink
-
 
 def test_run_artifact_link_direction_conflict_warns_and_preserves_first_link(
     tracker, tmp_path, caplog
@@ -34,13 +29,20 @@ def test_run_artifact_link_direction_conflict_warns_and_preserves_first_link(
         for msg in warnings
     ), f"Expected conflict warning; got: {warnings}"
 
-    with Session(tracker.engine) as session:
-        links = session.exec(
-            select(RunArtifactLink).where(RunArtifactLink.run_id == "conflict_run")
-        ).all()
+    with tracker.ledger.exec_cursor() as cur:
+        bindings = cur.execute(
+            "SELECT direction FROM main.run_binding WHERE run_id = ?",
+            ["conflict_run"],
+        ).fetchall()
+        links = cur.execute(
+            "SELECT direction FROM main.run_artifact_link WHERE run_id = ?",
+            ["conflict_run"],
+        ).fetchall()
 
+    assert len(bindings) == 1
+    assert bindings[0][0] == "input"
     assert len(links) == 1
-    assert links[0].direction == "input"
+    assert links[0][0] == "input"
 
 
 def test_run_artifact_link_distinct_input_and_output_no_warning(
@@ -72,13 +74,14 @@ def test_run_artifact_link_distinct_input_and_output_no_warning(
         f"Did not expect conflict warning; got: {warnings}"
     )
 
-    with Session(tracker.engine) as session:
-        links = session.exec(
-            select(RunArtifactLink).where(RunArtifactLink.run_id == "happy_run")
-        ).all()
+    with tracker.ledger.exec_cursor() as cur:
+        bindings = cur.execute(
+            "SELECT direction FROM main.run_binding WHERE run_id = ?",
+            ["happy_run"],
+        ).fetchall()
 
-    assert len(links) == 2
-    assert sorted([link.direction for link in links]) == ["input", "output"]
+    assert len(bindings) == 2
+    assert sorted([row[0] for row in bindings]) == ["input", "output"]
 
 
 def test_log_artifact_syncs_artifact_and_link_in_one_db_step(
@@ -95,15 +98,13 @@ def test_log_artifact_syncs_artifact_and_link_in_one_db_step(
     with tracker.start_run(run_id="single_sync_run", model="unit_test"):
         artifact = tracker.log_artifact(path, key="single", direction="output")
 
-    with Session(tracker.engine) as session:
-        persisted_artifact = session.get(Artifact, artifact.id)
-        links = session.exec(
-            select(RunArtifactLink).where(
-                RunArtifactLink.run_id == "single_sync_run",
-                RunArtifactLink.artifact_id == artifact.id,
-            )
-        ).all()
+    persisted_artifact = tracker.db.get_artifact(artifact.id)
+    with tracker.ledger.exec_cursor() as cur:
+        bindings = cur.execute(
+            "SELECT direction FROM main.run_binding WHERE run_id = ? AND artifact_id = ?",
+            ["single_sync_run", artifact.id],
+        ).fetchall()
 
     assert persisted_artifact is not None
-    assert len(links) == 1
-    assert links[0].direction == "output"
+    assert len(bindings) == 1
+    assert bindings[0][0] == "output"

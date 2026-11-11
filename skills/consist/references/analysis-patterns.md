@@ -15,16 +15,17 @@
 - Use the CLI first for quick read-only inspection:
   `consist show`, `consist artifacts`, `consist preview`, `consist scenario`,
   and `consist summary`.
-- Use `consist.ibis_view(...)` for analysis-time queries over typed tabular
+- Use `consist.api.ibis_view(...)` for analysis-time queries over typed tabular
   artifacts, including filtering to one run or artifact key.
-- Use `consist.ibis_grouped_view(...)` for grouped views across many compatible
+- Use `consist.api.ibis_grouped_view(...)` for grouped views across many compatible
   profiled artifacts selected by schema, facets, and run filters.
 - Use `load_df(...)` or `tracker.load_run_output(...)` as a pandas escape hatch
   when you need a concrete local dataframe from one known output.
 - Use `RunSet` or `consist.run_set(...)` when the task is run comparison,
   alignment, recency selection, or config diffs.
-- Use `tracker.views.*`, `run_query(...)`, and `pivot_facets(...)` when you need
-  lower-level SQLModel/SQL control or facet-only run summaries.
+- Use `tracker.create_view(...)`, `tracker.query_df(...)`, `tracker.query_rows(...)`,
+  and `pivot_facets(...)` when you need direct parameterized SQL, Pydantic row
+  hydration, or facet-only run summaries.
 
 Terminology: `RunSet` is for selecting and comparing multiple runs.
 `OutputSet` is different: it is one logical output artifact made of multiple
@@ -58,6 +59,7 @@ Consist-specific dataframe wrapper.
 
 ```python
 import consist
+from consist.api import ibis_view, to_df
 from sqlmodel import Field, SQLModel
 
 
@@ -68,7 +70,7 @@ class Person(SQLModel, table=True):
     income: float
 
 
-people = consist.ibis_view(tracker, model=Person, key="persons")
+people = ibis_view(tracker, model=Person, key="persons")
 run = consist.find_run(tracker=tracker, parent_id="baseline", year=2030)
 people_for_run = people.filter(people.consist_run_id == run.id)
 
@@ -82,33 +84,34 @@ summary = (
 
 Filter on Consist system columns, such as `consist_run_id`, `consist_year`, and
 `consist_scenario_id`, when the question is about one run or scenario. Install
-the optional dependency with `consist[ibis]`, configure the tracker with
-`db_path=...`, and avoid opening Ibis while a Consist SQLAlchemy session is
-still active for the same DuckDB file.
+the optional dependency with `consist[ibis]` and configure the tracker with
+`db_path=...`; `ibis_view(...)` shares the tracker's `StoreLedger` DuckDB
+connection directly.
 
 Use pandas loading when you need a concrete object from one known output rather
 than a query expression:
 
 ```python
 run = consist.find_run(tracker=tracker, parent_id="baseline", year=2030)
-df = consist.to_df(tracker.load_run_output(run.id, "persons"))
+df = to_df(tracker.load_run_output(run.id, "persons"))
 ```
 
 ## Grouped Artifact Views
 
-Use `consist.ibis_grouped_view(...)` when related tabular artifacts have
+Use `consist.api.ibis_grouped_view(...)` when related tabular artifacts have
 different keys or are spread across a sweep, scenario, or repeated model runs.
 The grouped view is selected from a profiled seed artifact plus optional schema,
 facet, driver, and run filters.
 
 ```python
 import consist
+from consist.api import ibis_grouped_view
 
 seed_run = consist.find_run(tracker=tracker, parent_id="baseline", year=2018)
 artifacts = tracker.get_artifacts_for_run(seed_run.id)
 seed = artifacts.outputs["linkstats"]
 
-with consist.ibis_grouped_view(
+with ibis_grouped_view(
     tracker,
     view_name="v_linkstats_all",
     artifact_id=seed.id,
@@ -142,12 +145,14 @@ instrumentation when you expect to query related artifacts together later.
 
 ## SQL Escape Hatches
 
-Use SQLModel views or raw SQL when you need exact SQL text, lower-level tracker
-internals, or a path that avoids the optional Ibis dependency.
+Use DuckDB hybrid views with `tracker.query_df(...)` or `tracker.query_rows(...)`
+when you need exact parameterized SQL, typed Pydantic row hydration, or a path
+that avoids the optional Ibis dependency.
 
 ```python
-from sqlmodel import Field, SQLModel, func, select
-import consist
+from pydantic import BaseModel
+from sqlmodel import Field, SQLModel
+from consist import Tracker
 
 
 class Person(SQLModel, table=True):
@@ -156,24 +161,32 @@ class Person(SQLModel, table=True):
     number_of_trips: int
 
 
+class ScenarioTripSummary(BaseModel):
+    consist_scenario_id: str
+    consist_year: int
+    avg_trips: float
+
+
 tracker = Tracker(
     run_dir="./runs",
     db_path="./provenance.duckdb",
     schemas=[Person],
 )
+tracker.create_view("v_persons", "persons", schema_model=Person)
 
-VPerson = tracker.views.Person
-query = (
-    select(
-        VPerson.consist_scenario_id,
-        VPerson.consist_year,
-        func.avg(VPerson.number_of_trips).label("avg_trips"),
-    )
-    .where(VPerson.consist_scenario_id.in_(["baseline", "policy"]))
-    .group_by(VPerson.consist_scenario_id, VPerson.consist_year)
+rows = tracker.query_rows(
+    """
+    SELECT
+        consist_scenario_id,
+        consist_year,
+        AVG(number_of_trips) AS avg_trips
+    FROM v_persons
+    WHERE consist_scenario_id IN ($s1, $s2)
+    GROUP BY consist_scenario_id, consist_year
+    """,
+    params={"s1": "baseline", "s2": "policy"},
+    model=ScenarioTripSummary,
 )
-
-rows = consist.run_query(query, tracker=tracker)
 ```
 
 Use `pivot_facets(...)` when you want a wide, parameter-comparison table from
@@ -209,8 +222,9 @@ Good use cases:
 - `load_df(...)` prefers the original file when it still exists.
 - Use `db_fallback="always"` when the artifact was ingested and the original
   file may have moved or been deleted.
-- Inspect `artifact.container_uri` and use `tracker.resolve_uri(...)` when the
-  stored path no longer matches the current host layout.
+- Inspect `artifact.primary_location` (or `consist.locate(artifact)`) and use
+  `tracker.resolve_uri(...)` when the stored path no longer matches the current
+  host layout.
 - If artifacts display mounted URIs such as `data://...`, `--trust-db` can
   recover stored mount roots when inspecting the same trusted provenance
   database. Use explicit `--mount data=/path/to/root` when inspecting from a

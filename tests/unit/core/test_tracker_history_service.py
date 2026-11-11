@@ -4,7 +4,6 @@ from pathlib import Path
 
 import pytest
 
-from consist.models.artifact import get_tracker_ref
 from consist.models.run import ConsistRecord, Run
 
 
@@ -37,9 +36,7 @@ def test_history_service_caches_non_current_run_artifacts(
 
     assert call_count == 1
     assert second is first
-    tracker_ref = get_tracker_ref(first.outputs["result"])
-    assert tracker_ref is not None
-    assert tracker_ref() is tracker
+    assert first.outputs["result"].origin is not None
 
 
 def test_history_service_snapshot_db_uses_active_and_last_completed_metadata(

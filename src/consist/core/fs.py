@@ -86,7 +86,11 @@ class FileSystemManager:
         # Force absolute resolve to prevent /var vs /private/var mismatches
         self.run_dir = Path(run_dir).resolve()
         self.run_dir.mkdir(parents=True, exist_ok=True)
-        self.mounts = mounts or {}
+        self.mounts = (
+            {str(k): os.fspath(v) for k, v in mounts.items() if k and v is not None}
+            if mounts
+            else {}
+        )
 
     def resolve_uri(self, uri: str) -> str:
         """

@@ -4,20 +4,28 @@ import pandas as pd
 import pytest
 from sqlmodel import SQLModel
 
+from consist.artifact import Artifact
 from consist.integrations import dlt_loader
-from consist.models.artifact import Artifact
+from tests.helpers.artifact_factory import make_artifact
 
 
 class _StrictSchema(SQLModel):
     value: int
 
 
-def _artifact(*, key: str, driver: str, table_path: str | None = None) -> Artifact:
-    return Artifact(
+def _artifact(
+    *,
+    key: str,
+    driver: str,
+    table_path: str | None = None,
+    meta: dict[str, object] | None = None,
+) -> Artifact:
+    return make_artifact(
         key=key,
         container_uri=f"./{key}",
         driver=driver,
         table_path=table_path,
+        meta=meta,
     )
 
 
@@ -146,7 +154,7 @@ def test_ingest_artifact_h5_table_driver_requires_table_path(
     artifact = _artifact(key="h5_rows", driver="h5_table", table_path=None)
     run_context = _run_context()
 
-    with pytest.raises(ValueError, match="missing 'table_path'"):
+    with pytest.raises(ValueError, match="missing member/table_path"):
         dlt_loader.ingest_artifact(
             artifact=artifact,
             run_context=run_context,
@@ -183,7 +191,7 @@ def test_handle_spatial_metadata_uses_read_parquet_for_geoparquet(
         def read_file(self, path):
             raise AssertionError("read_file should not be used for GeoParquet")
 
-    monkeypatch.setattr(dlt_loader, "geopandas", _FakeGeoPandas())
+    monkeypatch.setattr(dlt_loader, "_get_geopandas", lambda: _FakeGeoPandas())
 
     result = list(
         dlt_loader._handle_spatial_metadata("/tmp/tiny.parquet", driver="geoparquet")
@@ -206,13 +214,13 @@ def test_ingest_artifact_geoparquet_wkt_mode_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(dlt_loader, "dlt", object())
-    monkeypatch.setattr(dlt_loader, "geopandas", object())
+    monkeypatch.setattr(dlt_loader, "_get_geopandas", lambda: object())
 
     artifact = _artifact(
         key="spatial_rows",
         driver="geoparquet",
+        meta={"spatial_ingest_mode": "wkt"},
     )
-    artifact.meta["spatial_ingest_mode"] = "wkt"
 
     with pytest.raises(ValueError, match="GeoParquet does not support"):
         dlt_loader.ingest_artifact(
@@ -379,7 +387,7 @@ def test_ingest_artifact_retryable_lock_exhausts_retries_and_raises(
 def test_handle_netcdf_metadata_raises_when_xarray_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(dlt_loader, "xr", None)
+    monkeypatch.setattr(dlt_loader, "_get_xarray", lambda: None)
 
     with pytest.raises(ImportError, match="xarray is required for NetCDF ingestion"):
         list(dlt_loader._handle_netcdf_metadata("/tmp/data.nc"))
@@ -409,7 +417,7 @@ def test_handle_netcdf_metadata_falls_back_to_default_open_dataset(
                 raise RuntimeError("engine-specific reader failed")
             return _FakeDataset()
 
-    monkeypatch.setattr(dlt_loader, "xr", _FakeXarray())
+    monkeypatch.setattr(dlt_loader, "_get_xarray", lambda: _FakeXarray())
     monkeypatch.setattr(dlt_loader, "resolve_netcdf_engine", lambda: "h5netcdf")
 
     records = list(dlt_loader._handle_netcdf_metadata("/tmp/data.nc"))
@@ -426,8 +434,8 @@ def test_handle_netcdf_metadata_falls_back_to_default_open_dataset(
 def test_handle_openmatrix_metadata_raises_when_openmatrix_and_h5py_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(dlt_loader, "openmatrix", None)
-    monkeypatch.setattr(dlt_loader, "h5py", None)
+    monkeypatch.setattr(dlt_loader, "_get_openmatrix", lambda: None)
+    monkeypatch.setattr(dlt_loader, "_get_h5py", lambda: None)
 
     with pytest.raises(ImportError, match="h5py or openmatrix is required"):
         list(dlt_loader._handle_openmatrix_metadata("/tmp/data.omx"))
@@ -465,8 +473,8 @@ def test_handle_openmatrix_metadata_falls_back_to_h5py_on_openmatrix_failure(
             raise RuntimeError("openmatrix failed")
 
     fake_h5py = SimpleNamespace(File=_FakeFile, Dataset=_FakeDataset, Group=_FakeGroup)
-    monkeypatch.setattr(dlt_loader, "openmatrix", _FakeOpenMatrix())
-    monkeypatch.setattr(dlt_loader, "h5py", fake_h5py)
+    monkeypatch.setattr(dlt_loader, "_get_openmatrix", lambda: _FakeOpenMatrix())
+    monkeypatch.setattr(dlt_loader, "_get_h5py", lambda: fake_h5py)
 
     records = list(dlt_loader._handle_openmatrix_metadata("/tmp/data.omx"))
 
@@ -486,7 +494,7 @@ def test_handle_openmatrix_metadata_falls_back_to_h5py_on_openmatrix_failure(
 def test_handle_spatial_metadata_raises_when_geopandas_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(dlt_loader, "geopandas", None)
+    monkeypatch.setattr(dlt_loader, "_get_geopandas", lambda: None)
 
     with pytest.raises(
         ImportError,
@@ -503,7 +511,7 @@ def test_handle_spatial_metadata_wraps_reader_errors_in_value_error(
         def read_file(_path: str):
             raise RuntimeError("boom")
 
-    monkeypatch.setattr(dlt_loader, "geopandas", _FakeGeoPandas())
+    monkeypatch.setattr(dlt_loader, "_get_geopandas", lambda: _FakeGeoPandas())
 
     with pytest.raises(ValueError, match="Failed to extract spatial metadata .* boom"):
         list(dlt_loader._handle_spatial_metadata("/tmp/data.geojson", driver="geojson"))

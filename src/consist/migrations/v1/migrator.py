@@ -55,6 +55,7 @@ from consist.location import (
     Mount,
     Observation,
     Witness,
+    format_hot_db_member,
 )
 from consist.meta import strip_system_meta
 from consist.migrations.v1.fasthash import (
@@ -1611,6 +1612,7 @@ def _resolve_ingested_db_location(
     art: V1ArtifactRecord,
     cls: ArtifactClassification,
     dlt_tables: Sequence[V1DltTableInfo],
+    ingested_table_counts_per_run: Mapping[tuple[str, str], int] | None = None,
 ) -> tuple[str, str | None] | None:
     if cls.dlt_table is not None:
         schema_name = cls.dlt_schema or "global_tables"
@@ -1622,17 +1624,40 @@ def _resolve_ingested_db_location(
         return None
     matched = _match_ingested_dlt_table(art, dlt_tables)
     if matched is not None:
-        member = (
-            f"{matched.table_name}?consist_artifact_id={art.id}"
-            if matched.has_consist_artifact_id
-            else f"{matched.table_name}?artifact_id={art.id}"
+        run_tbl_count = (
+            ingested_table_counts_per_run.get(
+                (art.run_id, matched.table_name.lower()),
+                1,
+            )
+            if (ingested_table_counts_per_run is not None and art.run_id is not None)
+            else 1
         )
+        if matched.has_consist_artifact_id:
+            member = format_hot_db_member(
+                matched.table_name,
+                consist_artifact_id=art.id,
+            )
+        elif (
+            matched.has_consist_run_id and art.run_id is not None and run_tbl_count == 1
+        ):
+            member = format_hot_db_member(
+                matched.table_name,
+                consist_run_id=art.run_id,
+            )
+        else:
+            member = format_hot_db_member(
+                matched.table_name,
+                artifact_id=art.id,
+            )
         return (f"db://{matched.schema_name}/{matched.table_name}", member)
 
     raw_tbl = art.meta.get("dlt_table_name") or art.meta.get("_dlt_table_name")
     if isinstance(raw_tbl, str) and raw_tbl.strip():
         tbl = raw_tbl.strip()
-        return (f"db://global_tables/{tbl}", f"{tbl}?artifact_id={art.id}")
+        return (
+            f"db://global_tables/{tbl}",
+            format_hot_db_member(tbl, artifact_id=art.id),
+        )
 
     raw_uri = art.container_uri.strip()
     if raw_uri.lower().startswith("db://"):
@@ -1641,20 +1666,26 @@ def _resolve_ingested_db_location(
             schema_part, tbl_part = tail.split("/", 1)
             return (
                 f"db://{schema_part}/{tbl_part}",
-                f"{tbl_part}?artifact_id={art.id}",
+                format_hot_db_member(tbl_part, artifact_id=art.id),
             )
         if "." in tail:
             schema_part, tbl_part = tail.split(".", 1)
             return (
                 f"db://{schema_part}/{tbl_part}",
-                f"{tbl_part}?artifact_id={art.id}",
+                format_hot_db_member(tbl_part, artifact_id=art.id),
             )
         if tail:
-            return (f"db://global_tables/{tail}", f"{tail}?artifact_id={art.id}")
+            return (
+                f"db://global_tables/{tail}",
+                format_hot_db_member(tail, artifact_id=art.id),
+            )
 
     if art.key.strip():
         k = art.key.strip()
-        return (f"db://global_tables/{k}", f"{k}?artifact_id={art.id}")
+        return (
+            f"db://global_tables/{k}",
+            format_hot_db_member(k, artifact_id=art.id),
+        )
     return None
 
 
@@ -1716,6 +1747,14 @@ def apply_migration(
         c.artifact_id: c for c in plan.classifications
     }
     art_by_id: dict[uuid.UUID, V1ArtifactRecord] = {a.id: a for a in artifacts}
+    ingested_counts_per_run: Counter[tuple[str, str]] = Counter()
+    for art_item in artifacts:
+        if art_item.run_id is not None and _is_ingested_v1_artifact(art_item):
+            matched_t = _match_ingested_dlt_table(art_item, plan.dlt_tables)
+            if matched_t is not None:
+                ingested_counts_per_run[
+                    (art_item.run_id, matched_t.table_name.lower())
+                ] += 1
 
     with StoreLedger(resolved_v2, mounts=mount_map, writer="consist.migrate") as ledger:
         con = ledger.connection
@@ -1887,6 +1926,7 @@ def apply_migration(
                     art,
                     cls,
                     plan.dlt_tables,
+                    ingested_counts_per_run,
                 )
 
                 if cls.outcome == "verified" and cls.dlt_member is not None:

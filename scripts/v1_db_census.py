@@ -143,6 +143,7 @@ def inspect_v1_passthrough_direction_behavior() -> dict[str, Any]:
             tracker.log_artifact(art, key="shared_item", direction="input")
             tracker.log_artifact(art, key="shared_item", direction="output")
 
+        tracker.close()
         with duckdb.connect(str(tmp / "provenance.duckdb"), read_only=True) as con:
             links_in_then_out = con.execute(
                 "SELECT direction, is_implicit FROM run_artifact_link "

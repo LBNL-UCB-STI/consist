@@ -1,9 +1,9 @@
-import pytest
 from pathlib import Path
-from sqlmodel import Session, select
+import uuid
+
+import pytest
 
 from consist.core.tracker import Tracker
-from consist.models.run import RunArtifactLink
 
 
 def test_scenario_records_child_artifacts_and_steps(tracker: Tracker, run_dir: Path):
@@ -27,7 +27,9 @@ def test_scenario_records_child_artifacts_and_steps(tracker: Tracker, run_dir: P
     assert "stage_output" in parent_artifacts.outputs
 
     header = tracker.get_run("scenario_merge")
+    assert header is not None
     assert header.status == "completed"
+    assert tracker._last_consist is not None
     assert tracker._last_consist.run.status == "completed"
     assert header.meta.get("steps")
     step_summary = header.meta["steps"][0]
@@ -55,11 +57,15 @@ def test_scenario_links_child_artifacts_in_db(tracker: Tracker, run_dir: Path):
     out_id = child_artifacts.outputs["db_out"].id
     in_id = child_artifacts.inputs["db_in"].id
 
-    with Session(tracker.db.engine) as session:
-        links = session.exec(
-            select(RunArtifactLink).where(RunArtifactLink.run_id == "scenario_db")
-        ).all()
+    links_df = tracker.query_df(
+        "SELECT CAST(artifact_id AS VARCHAR) AS artifact_id, direction "
+        "FROM main.run_binding WHERE run_id = ?",
+        ["scenario_db"],
+    )
 
-    directions = {(link.artifact_id, link.direction) for link in links}
+    directions = {
+        (uuid.UUID(str(row["artifact_id"])), str(row["direction"]))
+        for _, row in links_df.iterrows()
+    }
     assert (out_id, "output") in directions
     assert (in_id, "input") in directions

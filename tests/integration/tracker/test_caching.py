@@ -242,11 +242,14 @@ def test_log_input_force_override_preserves_existing_artifact(tracker, dummy_inp
 
     assert reused.id != produced.id
     assert reused.run_id is None
-    assert reused.hash == "override_hash"
+    assert reused.hash != produced.hash
+    assert reused.identity.anchor.scheme == "legacy-v1:unverified"
+    assert not reused.identity.verifiable
     persisted = tracker.db.get_artifact(produced.id)
     assert persisted is not None
     assert persisted.hash == produced.hash
-    assert persisted.meta["hash_semantics"]["source"] == "computed_full"
+    assert persisted.identity.verifiable
+    assert persisted.identity.anchor.scheme == "sha256:file"
 
     with tracker.start_run(
         "run_C_input_after_override",
@@ -324,7 +327,7 @@ def test_log_output_reuses_same_uri_when_enabled(tracker, tmp_path, caplog):
     assert reused.id != first.id
     assert reused.run_id == "run_output_reuse_same_uri_b"
     assert reused.hash == first.hash
-    assert reused.content_id == first.content_id
+    assert reused.identity.anchor == first.identity.anchor
     same_content = tracker.find_artifacts_with_same_content(reused.id)
     assert {artifact.id for artifact in same_content} == {first.id, reused.id}
     producing_runs = tracker.find_runs_producing_same_content(reused.id)
@@ -372,7 +375,7 @@ def test_log_output_reuses_any_uri_when_enabled(tracker, tmp_path, caplog):
         )
 
     assert reused.id != first.id
-    assert reused.content_id == first.content_id
+    assert reused.identity.anchor == first.identity.anchor
     assert any(
         "reuse_scope='any_uri' is ignored for outputs" in record.message
         for record in caplog.records

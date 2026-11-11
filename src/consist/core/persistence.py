@@ -23,7 +23,6 @@ from typing import (
 )
 import uuid
 
-import duckdb
 import pandas as pd
 
 from consist.artifact import Artifact
@@ -58,6 +57,7 @@ from consist.store.detect import (
 from consist.store.ledger import StoreLedger, _UNSET, _UnsetType, open_v2_store
 
 if TYPE_CHECKING:
+    import duckdb
     from sqlmodel import SQLModel
 
 _ModelT = TypeVar("_ModelT")
@@ -94,12 +94,19 @@ def _quote_ident(identifier: str) -> str:
 
 def _infer_repr_kind(artifact: Artifact) -> str:
     for obs in artifact.hints:
+        if obs.location.uri.startswith("db://"):
+            continue
         if obs.location.member is not None or isinstance(obs.witness, MemberOf):
             return "member"
         if isinstance(obs.witness, DirTreeStat):
             return "tree"
+        return "file"
+    for obs in artifact.hints:
         if obs.location.uri.startswith("db://"):
             return "table"
+    first_uri, _ = artifact._first_candidate_location()
+    if first_uri is not None and first_uri.startswith("db://"):
+        return "table"
     if artifact.member is not None:
         return "member"
     if artifact.driver in (
@@ -204,13 +211,23 @@ class DatabaseManager:
                 )
             if not self.read_only:
                 fs_path.parent.mkdir(parents=True, exist_ok=True)
-            self.ledger = open_v2_store(
-                fs_path,
-                read_only=self.read_only,
-                auto_migrate=auto_migrate,
-                mounts=mounts,
-                site=site,
-            )
+
+            def _open_store() -> StoreLedger:
+                return open_v2_store(
+                    fs_path,
+                    read_only=self.read_only,
+                    auto_migrate=auto_migrate,
+                    mounts=mounts,
+                    site=site,
+                )
+
+            if self.read_only:
+                self.ledger = _open_store()
+            else:
+                self.ledger = self.execute_with_retry(
+                    _open_store,
+                    operation_name="open_v2_store",
+                )
             if self.ledger.db_path is not None:
                 self.db_path = str(self.ledger.db_path)
 
@@ -319,8 +336,12 @@ class DatabaseManager:
             return
         if run.stage is None and isinstance(run.meta.get("stage"), str):
             run.stage = run.meta["stage"]
+        elif run.stage is not None:
+            run.meta["stage"] = run.stage
         if run.phase is None and isinstance(run.meta.get("phase"), str):
             run.phase = run.meta["phase"]
+        elif run.phase is not None:
+            run.meta["phase"] = run.phase
 
     def sync_run(
         self,
@@ -873,14 +894,14 @@ class DatabaseManager:
                 )
                 if aligned_obs.place_key not in existing_places:
                     obs_repr = (
-                        "member"
-                        if aligned_obs.location.member is not None
+                        "table"
+                        if aligned_obs.location.uri.startswith("db://")
                         else (
-                            "tree"
-                            if isinstance(aligned_obs.witness, DirTreeStat)
+                            "member"
+                            if aligned_obs.location.member is not None
                             else (
-                                "table"
-                                if aligned_obs.location.uri.startswith("db://")
+                                "tree"
+                                if isinstance(aligned_obs.witness, DirTreeStat)
                                 else "file"
                             )
                         )
@@ -1108,6 +1129,7 @@ class DatabaseManager:
         updates: Mapping[str, Any] | FrozenMeta,
         *,
         merge: bool = True,
+        preserve_system_keys: bool = True,
         schema_id: str | None | _UnsetType = _UNSET,
         facet_index: bool | None = None,
         raise_on_error: bool = False,
@@ -1117,6 +1139,7 @@ class DatabaseManager:
                 artifact,
                 updates,
                 merge=merge,
+                preserve_system_keys=preserve_system_keys,
                 schema_id=schema_id,
                 facet_index=facet_index,
             )
@@ -1667,9 +1690,9 @@ class DatabaseManager:
                     "SELECT id, key, driver, anchor, run_id, parent_artifact_id, "
                     "schema_id, meta, created_at FROM main.artifact "
                     "WHERE anchor = ? OR anchor IN ("
-                    "SELECT old_anchor FROM main.anchor_promotion WHERE new_anchor = ? "
+                    "SELECT historical_anchor FROM main.anchor_promotion WHERE verified_anchor = ? "
                     "UNION "
-                    "SELECT new_anchor FROM main.anchor_promotion WHERE old_anchor = ?"
+                    "SELECT verified_anchor FROM main.anchor_promotion WHERE historical_anchor = ?"
                     ") ORDER BY created_at ASC, id ASC",
                     [anchor_str, anchor_str, anchor_str],
                 ).fetchall()
@@ -2583,16 +2606,20 @@ class DatabaseManager:
 
     @staticmethod
     def _schema_model_field_names(schema_model: Type[SQLModel]) -> Set[str]:
+        from sqlalchemy.sql.schema import Column as SAColumn
+
         field_names: Set[str] = set()
         for attr_name, field_info in schema_model.model_fields.items():
             sql_name = attr_name
-            sa_col = (
-                field_info.sa_column  # type: ignore[attr-defined]
-                if "sa_column" in type(field_info).model_fields
-                or "sa_column" in field_info.__dict__
-                else None
-            )
-            if sa_col is not None and isinstance(sa_col.name, str) and sa_col.name:
+            try:
+                sa_col = field_info.sa_column  # type: ignore[attr-defined]
+            except AttributeError:
+                sa_col = None
+            if (
+                isinstance(sa_col, SAColumn)
+                and isinstance(sa_col.name, str)
+                and sa_col.name
+            ):
                 sql_name = sa_col.name
             if sql_name.startswith("consist_"):
                 continue
@@ -2838,6 +2865,8 @@ class DatabaseManager:
                         f"{src_s}.{from_tbl}({from_fld}) -> {dst_s}.{to_tbl}({to_fld})"
                     )
                     try:
+                        import duckdb
+
                         cur.execute(
                             f"ALTER TABLE {_quote_ident(src_s)}.{_quote_ident(str(from_tbl))} "
                             f"ADD FOREIGN KEY ({_quote_ident(str(from_fld))}) "

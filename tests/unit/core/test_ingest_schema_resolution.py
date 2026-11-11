@@ -7,7 +7,7 @@ import pytest
 from sqlmodel import Field, SQLModel
 
 from consist import Tracker
-from consist.models.artifact import Artifact
+from tests.helpers.artifact_factory import make_artifact
 
 
 def test_ingest_resolves_schema_from_registered_schemas(tmp_path):
@@ -27,7 +27,7 @@ def test_ingest_resolves_schema_from_registered_schemas(tmp_path):
         schemas=[MySchema],
     )
 
-    artifact = Artifact(
+    artifact = make_artifact(
         id=uuid.uuid4(),
         key="artifact",
         container_uri="inputs://data.csv",
@@ -97,7 +97,7 @@ def test_ingest_ignores_whitespace_schema_name(tmp_path):
         schemas=[MySchema],
     )
 
-    artifact = Artifact(
+    artifact = make_artifact(
         id=uuid.uuid4(),
         key="artifact",
         container_uri="inputs://data.csv",

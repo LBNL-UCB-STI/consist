@@ -56,13 +56,20 @@ def _is_backend_connected(backend: IbisDuckDBBackend) -> bool:
 
 
 @contextmanager
-def suspend_tracker_ibis_connection(tracker: Tracker) -> Iterator[None]:
-    """No-op context manager retained for view-creation compatibility.
+def suspend_tracker_ibis_connection(
+    tracker: Tracker,
+    *,
+    disconnect: bool = False,
+) -> Iterator[None]:
+    """Suspend or evict a cached Ibis connection around tracker store operations.
 
-    Because Ibis attaches to a cloned ``StoreLedger.cursor()``, DDL/DML on the
-    ledger connection never conflicts with the Ibis cursor in-process.
+    In-process DDL/DML uses ``disconnect=False`` (no-op) because Ibis attaches to
+    a cloned ``StoreLedger.cursor()``. Subprocess suspension passes
+    ``disconnect=True`` so any cached cloned cursor is closed before releasing
+    the underlying DuckDB file lock.
     """
-    _ = tracker
+    if disconnect:
+        close_tracker_ibis_connection(tracker)
     yield
 
 

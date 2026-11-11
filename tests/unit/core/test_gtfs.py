@@ -427,16 +427,16 @@ def test_tracker_canonicalize_gtfs_logs_manifest_metadata_and_ingests(
         assert set(trips_df["feed_key"]) == {"feed"}
         assert set(trips_df["trip_id"]) == {"T1"}
 
-        assert gtfs_tracker.engine is not None
-        with gtfs_tracker.engine.begin() as connection:
-            rows = connection.exec_driver_sql(
+        assert gtfs_tracker.ledger is not None
+        with gtfs_tracker.ledger.exec_cursor() as cur:
+            rows = cur.execute(
                 """
                 SELECT feed_key, trip_id
                 FROM global_tables.trips
                 ORDER BY trip_id
                 """
             ).fetchall()
-            route_rows = connection.exec_driver_sql(
+            route_rows = cur.execute(
                 """
                 SELECT feed_key, route_id, consist_artifact_id
                 FROM global_tables.routes

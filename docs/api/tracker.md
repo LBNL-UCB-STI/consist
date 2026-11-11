@@ -100,7 +100,7 @@ with tracker.start_run("weekday_transit", "gtfs"):
 
 trips = weekday.table_artifacts["trips"].as_df()
 children = tracker.get_child_artifacts(weekday.selected_service_artifact)
-RouteView = tracker.view(GtfsRoutes)
+tracker.create_view("v_gtfs_routes", "gtfs_routes", schema_model=GtfsRoutes)
 ```
 
 `selected_service_artifact` is the traversal parent for selected tables.
@@ -197,7 +197,7 @@ copies on the parent H5 artifact and keep child `h5_table` artifacts
 descriptive-only for schema, lineage, diffing, and diagnostics.
 
 ```python
-from consist import H5ChildSpec
+from consist.types import H5ChildSpec
 
 container, children = tracker.log_h5_container(
     "input_data_for_2019_outputs.h5",
@@ -337,6 +337,8 @@ result = tracker.exec(
         - materialize
         - ingest
         # Querying and history
+        - query_df
+        - query_rows
         - find_runs
         - run_set
         - find_run
@@ -380,7 +382,6 @@ result = tracker.exec(
         - registered_schemas
         - find_runs_by_facet_kv
         # Views and matrices
-        - view
         - create_view
         - create_grouped_view
         - load_matrix
@@ -400,11 +401,10 @@ result = tracker.exec(
         - log_netcdf_file
         - log_openmatrix_file
         # Advanced / low-level
-        - engine
+        - ledger
         - set_run_subdir_fn
         - run_artifact_dir
         - resolve_uri
-        - run_query
         - get_run_record
         - resolve_historical_path
         - load_input_bundle

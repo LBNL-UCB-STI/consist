@@ -27,13 +27,16 @@ Guidance: [Manual Lifecycle and Decorators](../advanced/manual-lifecycle-and-dec
   [`Tracker.prepare_config`](tracker.md#consist.core.tracker.Tracker.prepare_config),
   [`Tracker.apply_config_plan`](tracker.md#consist.core.tracker.Tracker.apply_config_plan)
 - View and matrix systems:
-  [`consist.view`](api_helpers.md#consist.api.view),
-  [`consist.register_views`](api_helpers.md#consist.api.register_views),
+  [`Tracker.create_view`](tracker.md#consist.core.tracker.Tracker.create_view),
+  [`Tracker.create_grouped_view`](tracker.md#consist.core.tracker.Tracker.create_grouped_view),
   [`Tracker.load_matrix`](tracker.md#consist.core.tracker.Tracker.load_matrix)
 - Query/lower-level utilities:
-  [`consist.run_query`](api_helpers.md#consist.api.run_query),
-  [`consist.db_session`](api_helpers.md#consist.api.db_session),
+  [`consist.query_df`](api_helpers.md#consist.api.query_df),
+  [`consist.query_rows`](api_helpers.md#consist.api.query_rows),
+  [`ParameterizedSQL`](public_api.md#querying-and-views),
   [`Tracker.resolve_uri`](tracker.md#consist.core.tracker.Tracker.resolve_uri)
+- Store & disaster-recovery manifests:
+  `consist.store.manifest` (`RunManifest`, `export_run_manifest`, `import_run_manifest`, `rebuild_store_from_manifests`)
 - Cryptographic digests & boundary contracts:
   [`consist.digest`](digest.md) (stateless content, table, and array hashing),
   [`consist.admission`](admission.md) (artifact admission and expectation contracts)

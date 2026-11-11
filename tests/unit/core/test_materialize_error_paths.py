@@ -3,18 +3,18 @@ from types import SimpleNamespace
 
 import pandas as pd
 import pytest
-from sqlalchemy.exc import SQLAlchemyError
 
+from consist.artifact import Artifact
 from consist.core.materialize import (
     materialize_artifacts,
     materialize_artifacts_from_sources,
     materialize_ingested_artifact_from_db,
 )
-from consist.models.artifact import Artifact
+from tests.helpers.artifact_factory import make_artifact
 
 
 def _artifact(*, key: str, driver: str = "csv", is_ingested: bool = False) -> Artifact:
-    return Artifact(
+    return make_artifact(
         key=key,
         container_uri=f"./{key}.{driver}",
         driver=driver,
@@ -186,13 +186,13 @@ def test_materialize_artifacts_from_sources_refuses_symlink_destination_when_ove
     assert target.read_text(encoding="utf-8") == "value\nstale\n"
 
 
-def test_materialize_ingested_artifact_from_db_requires_tracker_engine(
+def test_materialize_ingested_artifact_from_db_requires_tracker_ledger(
     tmp_path: Path,
 ) -> None:
     artifact = _artifact(key="ingested_csv", is_ingested=True)
-    tracker = SimpleNamespace(engine=None)
+    tracker = SimpleNamespace(ledger=None)
 
-    with pytest.raises(RuntimeError, match="tracker has no DB engine"):
+    with pytest.raises(RuntimeError, match="tracker has no DB"):
         materialize_ingested_artifact_from_db(
             artifact=artifact,
             tracker=tracker,
@@ -204,7 +204,7 @@ def test_materialize_ingested_artifact_from_db_rejects_unsupported_driver(
     tmp_path: Path,
 ) -> None:
     artifact = _artifact(key="ingested_json", driver="json", is_ingested=True)
-    tracker = SimpleNamespace(engine=object())
+    tracker = SimpleNamespace(ledger=object())
 
     with pytest.raises(ValueError, match="Only csv/parquet artifacts"):
         materialize_ingested_artifact_from_db(
@@ -217,18 +217,13 @@ def test_materialize_ingested_artifact_from_db_rejects_unsupported_driver(
 def test_materialize_ingested_artifact_from_db_wraps_reflection_failure(
     tmp_path: Path,
 ) -> None:
-    artifact = Artifact(
-        key="ingested_csv",
-        container_uri="./ingested_csv.csv",
-        driver="csv",
-        meta={"is_ingested": True},
-    )
+    artifact = _artifact(key="ingested_csv", driver="csv", is_ingested=True)
 
-    class _FailingEngine:
-        def connect(self):
-            raise SQLAlchemyError("reflection failed")
+    class _FailingLedger:
+        def exec_cursor(self):
+            raise RuntimeError("reflection failed")
 
-    tracker = SimpleNamespace(engine=_FailingEngine())
+    tracker = SimpleNamespace(ledger=_FailingLedger())
 
     with pytest.raises(RuntimeError, match="Failed to reflect table"):
         materialize_ingested_artifact_from_db(
@@ -241,14 +236,9 @@ def test_materialize_ingested_artifact_from_db_wraps_reflection_failure(
 def test_materialize_ingested_artifact_from_db_fails_when_table_has_no_columns(
     tmp_path: Path,
 ) -> None:
-    artifact = Artifact(
-        key="ingested_csv",
-        container_uri="./ingested_csv.csv",
-        driver="csv",
-        meta={"is_ingested": True},
-    )
+    artifact = _artifact(key="ingested_csv", driver="csv", is_ingested=True)
 
-    class _EmptyConn:
+    class _EmptyCursor:
         def __enter__(self):
             return self
 
@@ -258,11 +248,11 @@ def test_materialize_ingested_artifact_from_db_fails_when_table_has_no_columns(
         def execute(self, *_args, **_kwargs):
             return SimpleNamespace(fetchall=lambda: [])
 
-    class _EmptyEngine:
-        def connect(self):
-            return _EmptyConn()
+    class _EmptyLedger:
+        def exec_cursor(self):
+            return _EmptyCursor()
 
-    tracker = SimpleNamespace(engine=_EmptyEngine())
+    tracker = SimpleNamespace(ledger=_EmptyLedger())
 
     with pytest.raises(
         RuntimeError,
@@ -278,14 +268,9 @@ def test_materialize_ingested_artifact_from_db_fails_when_table_has_no_columns(
 def test_materialize_ingested_artifact_from_db_requires_consist_artifact_id_column(
     tmp_path: Path,
 ) -> None:
-    artifact = Artifact(
-        key="ingested_csv",
-        container_uri="./ingested_csv.csv",
-        driver="csv",
-        meta={"is_ingested": True},
-    )
+    artifact = _artifact(key="ingested_csv", driver="csv", is_ingested=True)
 
-    class _NoArtifactIdConn:
+    class _NoArtifactIdCursor:
         def __enter__(self):
             return self
 
@@ -295,11 +280,11 @@ def test_materialize_ingested_artifact_from_db_requires_consist_artifact_id_colu
         def execute(self, *_args, **_kwargs):
             return SimpleNamespace(fetchall=lambda: [("value",)])
 
-    class _NoArtifactIdEngine:
-        def connect(self):
-            return _NoArtifactIdConn()
+    class _NoArtifactIdLedger:
+        def exec_cursor(self):
+            return _NoArtifactIdCursor()
 
-    tracker = SimpleNamespace(engine=_NoArtifactIdEngine())
+    tracker = SimpleNamespace(ledger=_NoArtifactIdLedger())
 
     with pytest.raises(RuntimeError, match="missing consist_artifact_id"):
         materialize_ingested_artifact_from_db(
@@ -312,45 +297,40 @@ def test_materialize_ingested_artifact_from_db_requires_consist_artifact_id_colu
 @pytest.mark.parametrize(
     "artifact",
     [
-        Artifact(
+        make_artifact(
             key="ingested_csv",
             container_uri="./ingested_csv.csv",
             driver="csv",
             meta={"is_ingested": True, "dlt_table_name": 123},
         ),
-        Artifact(
+        SimpleNamespace(
+            id="id-empty-key",
             key="",
-            container_uri="./ingested_csv.csv",
             driver="csv",
             meta={"is_ingested": True, "dlt_table_name": ""},
         ),
     ],
 )
 def test_materialize_ingested_artifact_from_db_rejects_invalid_or_empty_table_name(
-    tmp_path: Path, artifact: Artifact
+    tmp_path: Path, artifact: object
 ) -> None:
-    tracker = SimpleNamespace(engine=object())
+    tracker = SimpleNamespace(ledger=object())
 
     with pytest.raises(ValueError, match="table name is missing"):
         materialize_ingested_artifact_from_db(
-            artifact=artifact,
+            artifact=artifact,  # type: ignore[arg-type]
             tracker=tracker,
             destination=tmp_path / "reconstructed.csv",
         )
 
 
-def test_materialize_ingested_artifact_from_db_uses_hot_data_store_engine(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_materialize_ingested_artifact_from_db_uses_hot_data_store_ledger(
+    tmp_path: Path,
 ) -> None:
-    artifact = Artifact(
-        key="ingested_csv",
-        container_uri="./ingested_csv.csv",
-        driver="csv",
-        meta={"is_ingested": True},
-    )
+    artifact = _artifact(key="ingested_csv", driver="csv", is_ingested=True)
     captured: dict[str, object] = {}
 
-    class _Conn:
+    class _Cursor:
         def __enter__(self):
             return self
 
@@ -363,22 +343,21 @@ def test_materialize_ingested_artifact_from_db_uses_hot_data_store_engine(
                 fetchall=lambda: [("consist_artifact_id",), ("value",)]
             )
 
-    class _HotEngine:
-        def connect(self):
-            captured["connected_engine"] = self
-            return _Conn()
+    class _HotLedger:
+        def exec_cursor(self):
+            captured["cursor_ledger"] = self
+            return _Cursor()
 
-    hot_engine = _HotEngine()
+        def query_df(self, _sql, params=None):
+            captured["query_df_ledger"] = self
+            captured["query_df_params"] = params
+            return pd.DataFrame({"value": [1]})
+
+    hot_ledger = _HotLedger()
     tracker = SimpleNamespace(
-        engine=None,
-        hot_data_store=SimpleNamespace(engine=hot_engine),
+        ledger=None,
+        hot_data_store=SimpleNamespace(ledger=hot_ledger),
     )
-
-    def _fake_read_sql(_stmt, engine):
-        captured["read_sql_engine"] = engine
-        return pd.DataFrame({"value": [1]})
-
-    monkeypatch.setattr("consist.core.materialize.pd.read_sql", _fake_read_sql)
 
     output = tmp_path / "reconstructed.csv"
     result = materialize_ingested_artifact_from_db(
@@ -387,7 +366,8 @@ def test_materialize_ingested_artifact_from_db_uses_hot_data_store_engine(
         destination=output,
     )
 
-    assert captured["connected_engine"] is hot_engine
-    assert captured["read_sql_engine"] is hot_engine
-    assert captured["queried_params"] == {"table_name": "ingested_csv"}
+    assert captured["cursor_ledger"] is hot_ledger
+    assert captured["query_df_ledger"] is hot_ledger
+    assert captured["queried_params"] == ["ingested_csv"]
+    assert captured["query_df_params"] == [str(artifact.id)]
     assert Path(result).resolve() == output.resolve()

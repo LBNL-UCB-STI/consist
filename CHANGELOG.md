@@ -5,6 +5,64 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog], and this project adheres to
 [Semantic Versioning].
 
+## [0.5.0] - 2026-11-11
+
+### Added
+
+- Introduce Schema v2 (`StoreLedger`, `consist_schema.version = 2`) as the single native
+  DuckDB provenance backend across `Tracker`, `ScenarioContext`, `Coupler`,
+  `ViewFactory`, `DatabaseMaintenance`, `dlt` ingestion, Ibis views, and all `consist`
+  CLI subcommands, serialized via `threading.RLock` with re-entrant transaction-cursor
+  affinity by @zneedell
+  ([#316](https://github.com/LBNL-UCB-STI/consist/pull/316)).
+- Unify `consist.Artifact` on the frozen Artifact Triad (`Digest` content identity and
+  comparison contracts, `Location` site-scoped mounts and stat witnesses, and
+  `FrozenMeta` immutable JSON metadata) alongside plain Pydantic `consist.Run` models by
+  @zneedell ([#316](https://github.com/LBNL-UCB-STI/consist/pull/316)).
+- Add `Tracker.query_df`, `Tracker.query_rows(..., model=...)`, `consist.query_df`,
+  `consist.query_rows`, and `ParameterizedSQL` (`config_run_query`, `config_run_rows`,
+  `pivot_facets`) for read-only analytical SQL and typed Pydantic/`SQLModel` row
+  hydration over `StoreLedger` by @zneedell
+  ([#316](https://github.com/LBNL-UCB-STI/consist/pull/316)).
+- Add out-of-place `consist migrate` (preserving `run_coupler_snapshot`,
+  `run_binding_invocation`, `artifact_schema*`, `global_tables.*` DDL constraints, and
+  JSON-backed `run_config_kv` / `artifact_kv` views) and cache-eligible
+  `consist promote` (`<artifact-id>`, `<historical-anchor>`, or `<run-id>`, plus
+  repeatable `--mount NAME=PATH` options and `SiteContext.detect()`) by @zneedell
+  ([#316](https://github.com/LBNL-UCB-STI/consist/pull/316)).
+- Add per-run disaster-recovery manifests under `consist.store.manifest`
+  (`RunManifest`, `export_run_manifest`, `import_run_manifest`,
+  `rebuild_store_from_manifests`) with zero-`duckdb` lazy module imports, body digest
+  verification, path-traversal guards, and lifecycle-ranked deduplication by @zneedell
+  ([#316](https://github.com/LBNL-UCB-STI/consist/pull/316)).
+- Support `outputs={...}` declarations, `: Path` and `: Artifact` parameter injection,
+  and tracked `Coupler.set(key, path)` seeding with immediate `StoreLedger` persistence
+  by @zneedell ([#316](https://github.com/LBNL-UCB-STI/consist/pull/316)).
+
+### Changed
+
+- Remove `duckdb-engine`, `db_session()`, SQLAlchemy `Executable`-based `run_query()`,
+  `NoopTracker`, and dynamic SQLModel ORM view generation (`create_view_model`,
+  `ViewRegistry`, `Tracker.views`); retain `register_views` and `view` as explicit
+  deprecation-error stubs directing callers to `create_view` with `query_df`,
+  `query_rows`, or `ibis_view` by @zneedell
+  ([#316](https://github.com/LBNL-UCB-STI/consist/pull/316)).
+- Curate `consist.__all__` to 58 core workflow symbols while forwarding secondary and
+  internal top-level helpers lazily with `DeprecationWarning` by @zneedell
+  ([#316](https://github.com/LBNL-UCB-STI/consist/pull/316)).
+- Open `StoreLedger(..., read_only=True)` across read-only CLI inspection commands and
+  surface actionable lock diagnostics when an external writer holds the DuckDB file lock
+  by @zneedell ([#316](https://github.com/LBNL-UCB-STI/consist/pull/316)).
+
+### Fixed
+
+- Harden eviction survivor checks, `HintLedger` anchor scoping, two-second racy-stat
+  witness freshness, descriptor-pinned hashing, copy-on-write / byte-copy staging
+  (`stage(mode="auto")`), verify-before-stage `hydrate_admitted_input`, sub-container
+  member digest rules, `ViewFactory` hot/cold deduplication on Schema v2, and
+  `Tracker.trace` cache-hit validation by @zneedell
+  ([#316](https://github.com/LBNL-UCB-STI/consist/pull/316)).
+
 ## [0.4.2] - 2026-11-09
 
 ### Added
@@ -938,7 +996,9 @@ The format is based on [Keep a Changelog], and this project adheres to
 
 [Semantic Versioning]: https://semver.org/spec/v2.0.0.html
 
-[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.5.0...HEAD
+
+[0.5.0]: https://github.com/LBNL-UCB-STI/consist/compare/v0.4.2...v0.5.0
 
 [0.4.2]: https://github.com/LBNL-UCB-STI/consist/compare/v0.4.1...v0.4.2
 

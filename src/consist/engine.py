@@ -689,6 +689,18 @@ def compute_scheme_digest(
     if canonical_scheme == "sha256:manifest-v1" or canonical_scheme.startswith(
         "sha256:manifest-v1+p:"
     ):
+        if (
+            canonical_scheme == "sha256:manifest-v1"
+            and driver.strip().lower() == "shapefile"
+            and path.is_file()
+        ):
+            from consist.core.directory_artifacts import build_shapefile_bundle_manifest
+
+            shp_manifest = build_shapefile_bundle_manifest(path)
+            shp_digest = Digest("sha256:manifest-v1", str(shp_manifest["tree_hash"]))
+            _, stat_after = _run_fd_pinned(path, lambda _fd: shp_digest)
+            return (shp_digest, stat_after)
+
         manifest_policy: DigestPolicy | None = (
             policy if isinstance(policy, DigestPolicy) else None
         )
@@ -862,7 +874,11 @@ def _resolve_active_ledger(
     artifact: Artifact,
     explicit_ledger: StoreLedger | HintLedger | None,
 ) -> StoreLedger | HintLedger:
-    if explicit_ledger is not None:
+    if explicit_ledger is not None and not (
+        _is_store_ledger(explicit_ledger)
+        and explicit_ledger._closed
+        and not explicit_ledger._suspended_needs_reopen
+    ):
         return explicit_ledger
     live = lookup_live_ledger(artifact.origin)
     if isinstance(live, HintLedger) or _is_store_ledger(live):

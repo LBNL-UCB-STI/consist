@@ -49,9 +49,9 @@ def _resolve_producing_run_id(tracker: Tracker, artifact: Artifact) -> Optional[
             """,
             [artifact.id],
         ).fetchone()
-    if row is None or row[0] is None:
+    if not isinstance(row, (tuple, list)) or not row or not isinstance(row[0], str):
         return None
-    run_id = str(row[0]).strip()
+    run_id = row[0].strip()
     return run_id or None
 
 

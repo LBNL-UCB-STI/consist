@@ -2887,7 +2887,7 @@ def config_run_rows(
 
 def pivot_facets(
     *,
-    namespace: Optional[str],
+    namespace: Optional[str] = None,
     keys: Iterable[str],
     value_column: str = "value_num",
     value_columns: Optional[Mapping[str, str]] = None,
@@ -3628,17 +3628,75 @@ def _load_from_db(
         ledger = lookup_live_ledger_by_path(Path(hot_data_db_path))
 
     table_name: Optional[str] = None
+    v1_run_scoped = False
+    v1_run_id: Optional[str] = None
     if isinstance(artifact, Artifact):
-        table_name, _ = artifact._active_hot_table_name(ledger)
+        table_name, _, v1_run_scoped = artifact._active_hot_table_info(ledger)
+        v1_run_id = artifact.run_id
     if not table_name:
         raw_meta_table = artifact.meta.get("dlt_table_name") or artifact.key
         table_name = raw_meta_table if isinstance(raw_meta_table, str) else None
     if not isinstance(table_name, str) or not table_name:
         raise RuntimeError(f"Invalid table name for DuckDB load: {table_name!r}")
 
-    if ledger is not None:
-        with ledger._lock:
-            conn = ledger.connection.cursor()
+    quoted_table = _quote_ident(table_name)
+    columns = _normalize_columns(kwargs.get("columns"))
+    select_sql = ", ".join(_quote_ident(col) for col in columns) if columns else "*"
+    nrows = kwargs.get("nrows")
+
+    def _build_query_sql(inspect_cur: Any | None) -> str:
+        if v1_run_scoped and v1_run_id is not None:
+            escaped_run = str(v1_run_id).replace("'", "''")
+            has_art_col = True
+            if inspect_cur is not None:
+                try:
+                    col_rows = inspect_cur.execute(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_schema = 'global_tables' AND table_name = ?",
+                        [table_name],
+                    ).fetchall()
+                    if col_rows:
+                        has_art_col = "consist_artifact_id" in {
+                            str(r[0]) for r in col_rows
+                        }
+                except Exception:
+                    has_art_col = True
+            where_sql = (
+                f"consist_artifact_id IS NULL AND CAST(consist_run_id AS VARCHAR) = '{escaped_run}'"
+                if has_art_col
+                else f"CAST(consist_run_id AS VARCHAR) = '{escaped_run}'"
+            )
+        else:
+            artifact_id = str(artifact.id).replace("'", "''")
+            where_sql = f"consist_artifact_id = '{artifact_id}'"
+        return (
+            f"SELECT {select_sql} FROM global_tables.{quoted_table} WHERE {where_sql}"
+        )
+
+    if ledger is not None and (not ledger._closed or ledger._suspended_needs_reopen):
+        if ledger._tx_depth > 0 and ledger._tx_cursor is not None:
+            with ledger._lock:
+                tx_cur = ledger._tx_cursor
+                if tx_cur is None:
+                    conn = ledger.cursor()
+                    in_tx_arrow = None
+                else:
+                    tx_rel = tx_cur.sql(_build_query_sql(tx_cur))
+                    if nrows is not None:
+                        tx_rel = tx_rel.limit(int(nrows))
+                    in_tx_arrow = tx_rel.to_arrow_table()
+                    conn = ledger._con.cursor()
+            if in_tx_arrow is not None:
+                try:
+                    relation = conn.from_arrow(in_tx_arrow)
+                except Exception:
+                    conn.close()
+                    raise
+                _RELATION_CONNECTIONS[relation] = conn
+                _maybe_warn_relation_leaks()
+                return relation
+        else:
+            conn = ledger.cursor()
     elif hot_data_db_path:
         import duckdb
 
@@ -3646,16 +3704,9 @@ def _load_from_db(
     else:
         raise RuntimeError("Tracker has no StoreLedger or DuckDB path configured.")
 
-    artifact_id = str(artifact.id).replace("'", "''")
-    quoted_table = _quote_ident(table_name)
-    columns = _normalize_columns(kwargs.get("columns"))
-    select_sql = ", ".join(_quote_ident(col) for col in columns) if columns else "*"
     try:
-        relation = conn.sql(
-            f"SELECT {select_sql} FROM global_tables.{quoted_table} "
-            f"WHERE consist_artifact_id = '{artifact_id}'"
-        )
-        nrows = kwargs.get("nrows")
+        inspect_cur = conn if v1_run_scoped else None
+        relation = conn.sql(_build_query_sql(inspect_cur))
         if nrows is not None:
             relation = relation.limit(int(nrows))
     except Exception:
@@ -3880,12 +3931,20 @@ def __getattr__(name: str) -> Any:
 
     if name in _DEPRECATED_TOP_LEVEL_EXPORTS:
         target_mod, target_attr = _DEPRECATED_TOP_LEVEL_EXPORTS[name]
-        warnings.warn(
-            f"Importing {name!r} from 'consist.api' is deprecated; use '{target_mod}.{target_attr}' instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        module = importlib.import_module(target_mod)
-        return module.__dict__[target_attr]
+        if target_mod != "consist.api":
+            warnings.warn(
+                f"Importing {name!r} from 'consist.api' is deprecated; use '{target_mod}.{target_attr}' instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            module = importlib.import_module(target_mod)
+            if target_attr in module.__dict__:
+                return module.__dict__[target_attr]
+            mod_getattr = module.__dict__.get("__getattr__")
+            if callable(mod_getattr):
+                return mod_getattr(target_attr)
+            raise AttributeError(
+                f"module {target_mod!r} has no attribute {target_attr!r}"
+            )
 
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

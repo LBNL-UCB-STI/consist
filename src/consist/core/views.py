@@ -23,7 +23,7 @@ from pydantic import BaseModel
 from consist.artifact import Artifact
 from consist.digest import Digest, Kind
 from consist.engine import _is_candidate_visible, resolve_uri_to_path
-from consist.location import SiteContext
+from consist.location import SiteContext, matches_hot_db_info, parse_hot_db_member
 from consist.models.run import Run
 
 if TYPE_CHECKING:
@@ -153,20 +153,15 @@ def build_v2_hot_artifact_join_sql(
     return f"TRY_CAST({hot_alias}.consist_artifact_id AS UUID) = {artifact_alias}.id"
 
 
-def _extract_hot_table_from_uri(uri: str) -> Optional[str]:
-    if not uri.startswith("db://global_tables/"):
-        return None
-    tail = uri[len("db://global_tables/") :].split("?", 1)[0].split("#", 1)[0]
-    table_name = tail.strip("/")
-    return table_name if table_name else None
-
-
 def _extract_schema_model_columns(schema_model: Type[BaseModel]) -> List[str]:
     from sqlalchemy.sql.schema import Column as SAColumn
+    from sqlmodel.main import FieldInfo as SQLModelFieldInfo
 
     schema_columns: List[str] = []
     for attr_name, field_info in schema_model.model_fields.items():
-        sa_col = field_info.__dict__.get("sa_column")
+        sa_col = (
+            field_info.sa_column if isinstance(field_info, SQLModelFieldInfo) else None
+        )
         col_name = sa_col.name if isinstance(sa_col, SAColumn) else None
         sql_name = (
             str(col_name) if isinstance(col_name, str) and col_name else str(attr_name)
@@ -304,6 +299,7 @@ class ViewFactory:
                 rows_by_anchor.setdefault(a_key, []).append(loc_row)
 
         candidate_hot_by_art: dict[uuid.UUID, str] = {}
+        candidate_v1_run_scoped_ids: set[uuid.UUID] = set()
         cold_rows_by_art: dict[uuid.UUID, list[dict[str, Any]]] = {}
         candidate_hot_tables: set[str] = set()
         art_by_id: dict[uuid.UUID, Artifact] = {art.id: art for art in artifacts}
@@ -340,24 +336,40 @@ class ViewFactory:
             merged_rows.sort(key=_loc_sort_key)
 
             hot_tbl: Optional[str] = None
+            hot_v1_run_scoped = False
             cold_list: list[dict[str, Any]] = []
             for r in merged_rows:
                 uri = str(r.get("uri") or "")
                 if not uri:
                     continue
-                maybe_tbl = _extract_hot_table_from_uri(uri)
-                if maybe_tbl is not None:
-                    if hot_tbl is None:
-                        hot_tbl = maybe_tbl
+                info = parse_hot_db_member(uri, r.get("member"))
+                if info is not None and info.schema_name == "global_tables":
+                    matched, is_v1_run = matches_hot_db_info(
+                        info,
+                        artifact_id=art.id,
+                        run_id=art.run_id,
+                    )
+                    if matched and hot_tbl is None:
+                        hot_tbl = info.table_name
+                        hot_v1_run_scoped = is_v1_run
+                    continue
+                if uri.startswith("db://"):
                     continue
                 cold_list.append(r)
 
             if hot_tbl is None:
                 for obs in art.hints:
-                    maybe_tbl = _extract_hot_table_from_uri(obs.location.uri)
-                    if maybe_tbl is not None:
-                        hot_tbl = maybe_tbl
-                        break
+                    info = parse_hot_db_member(obs.location.uri, obs.location.member)
+                    if info is not None and info.schema_name == "global_tables":
+                        matched, is_v1_run = matches_hot_db_info(
+                            info,
+                            artifact_id=art.id,
+                            run_id=art.run_id,
+                        )
+                        if matched:
+                            hot_tbl = info.table_name
+                            hot_v1_run_scoped = is_v1_run
+                            break
 
             if hot_tbl is None and bool(art.meta.get("is_ingested")):
                 raw_meta_tbl = (
@@ -371,6 +383,8 @@ class ViewFactory:
             if hot_tbl is not None:
                 candidate_hot_by_art[art.id] = hot_tbl
                 candidate_hot_tables.add(hot_tbl)
+                if hot_v1_run_scoped:
+                    candidate_v1_run_scoped_ids.add(art.id)
             cold_rows_by_art[art.id] = cold_list
 
         # Validate hot tables exist in DuckDB via a single batched information_schema query
@@ -404,7 +418,8 @@ class ViewFactory:
                                 and str(aid) not in present_ids
                                 and art_by_id[aid].run_id
                                 and (
-                                    bool(art_by_id[aid].meta.get("is_ingested"))
+                                    aid in candidate_v1_run_scoped_ids
+                                    or bool(art_by_id[aid].meta.get("is_ingested"))
                                     or art_by_id[aid].driver == "dlt"
                                 )
                             ]
@@ -779,13 +794,15 @@ class ViewFactory:
                     continue
 
                 where_clauses: list[str] = []
-                if "consist_artifact_id" in extra_cols and art_id_set:
-                    escaped_ids = ", ".join(
-                        _safe_duckdb_string_literal(aid) for aid in sorted(art_id_set)
-                    )
-                    where_clauses.append(
-                        f"CAST(t.consist_artifact_id AS VARCHAR) IN ({escaped_ids})"
-                    )
+                if "consist_artifact_id" in extra_cols:
+                    if art_id_set:
+                        escaped_ids = ", ".join(
+                            _safe_duckdb_string_literal(aid)
+                            for aid in sorted(art_id_set)
+                        )
+                        where_clauses.append(
+                            f"CAST(t.consist_artifact_id AS VARCHAR) IN ({escaped_ids})"
+                        )
                     if "consist_run_id" in extra_cols and v1_run_set:
                         escaped_v1_runs = ", ".join(
                             _safe_duckdb_string_literal(rid)
@@ -1297,7 +1314,11 @@ class ViewFactory:
             is_v1_ingested_in_concept = (
                 art.run_id is not None
                 and str(art.run_id) in v1_concept_runs
-                and (bool(art.meta.get("is_ingested")) or art.driver == "dlt")
+                and (
+                    art.id in v1_null_art_ids
+                    or bool(art.meta.get("is_ingested"))
+                    or art.driver == "dlt"
+                )
             )
             if str(art.id) in concept_hot_artifact_ids or is_v1_ingested_in_concept:
                 hot_tbl = concept_key

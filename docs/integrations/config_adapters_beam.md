@@ -188,25 +188,16 @@ Links runs to ingested config hashes for query joins.
 **Query example**: Compare a key across runs
 
 ```python
-from sqlmodel import Session, select
-
+from consist import config_run_rows
 from consist.models.beam import BeamConfigCache, BeamConfigIngestRunLink
 
-with Session(tracker.engine) as session:
-    rows = session.exec(
-        select(
-            BeamConfigIngestRunLink.run_id,
-            BeamConfigCache.key,
-            BeamConfigCache.value_num,
-            BeamConfigCache.value_str,
-        )
-        .join(
-            BeamConfigCache,
-            BeamConfigCache.content_hash == BeamConfigIngestRunLink.content_hash,
-        )
-        .where(BeamConfigIngestRunLink.table_name == "beam_config_cache")
-        .where(BeamConfigCache.key == "beam.agentsim.agentSampleSizeAsFractionOfPopulation")
-    ).all()
+rows = config_run_rows(
+    BeamConfigCache,
+    link_table=BeamConfigIngestRunLink,
+    where={"key": "beam.agentsim.agentSampleSizeAsFractionOfPopulation"},
+    columns=("key", "value_num", "value_str"),
+    tracker=tracker,
+)
 ```
 
 ## Behavior Notes

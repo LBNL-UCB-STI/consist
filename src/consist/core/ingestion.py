@@ -11,8 +11,13 @@ from pydantic import BaseModel
 
 from consist.artifact import Artifact
 from consist.core.stores import get_hot_data_db_path, get_hot_data_ledger
-from consist.digest import Digest, compute_ctd1_digest
-from consist.location import DbTableChangeToken, Location, Observation
+from consist.digest import Digest, Kind, compute_ctd1_digest
+from consist.location import (
+    DbTableChangeToken,
+    Location,
+    Observation,
+    format_hot_db_member,
+)
 from consist.models.run import Run
 
 if TYPE_CHECKING:
@@ -249,11 +254,12 @@ def _sync_ingested_artifact_into_tracker_state(
             tracker.persistence.flush_record_json(last_run)
 
     seen_couplers: set[int] = set()
-    active_coupler = tracker._active_coupler
+    tracker_dict = tracker.__dict__
+    active_coupler = tracker_dict.get("_active_coupler")
     if active_coupler is not None:
         seen_couplers.add(id(active_coupler))
         active_coupler.replace_artifact_by_id(updated_artifact)
-    for coupler in list(tracker._couplers):
+    for coupler in list(tracker_dict.get("_couplers") or ()):
         if id(coupler) not in seen_couplers:
             seen_couplers.add(id(coupler))
             coupler.replace_artifact_by_id(updated_artifact)
@@ -301,15 +307,39 @@ def ingest_artifact(
         artifact_id=artifact.id,
     )
 
+    db_uri = f"db://global_tables/{resource_name}"
+    has_other_db_table = any(
+        h.location.uri.startswith("db://global_tables/") and h.location.uri != db_uri
+        for h in artifact.hints
+    )
+    existing_ctd1 = artifact.identity.get("ctd1:sha256")
+    suppress_claim = bool(
+        tracker.__dict__.get("_suppress_ingest_identity_claim", False)
+    )
+    can_claim_ctd1 = (
+        ctd1_digest is not None
+        and not suppress_claim
+        and artifact.identity.anchor.kind is not Kind.HISTORICAL
+        and artifact.is_tabular
+        and not has_other_db_table
+        and (existing_ctd1 is None or existing_ctd1.hex == ctd1_digest.hex)
+    )
+
     updated_identity = artifact.identity
-    if ctd1_digest is not None:
+    if can_claim_ctd1 and ctd1_digest is not None:
         updated_identity = updated_identity.with_claim(ctd1_digest)
 
     site_name = (
         tracker.site_context.site if tracker.site_context is not None else "local"
     )
     db_obs = Observation(
-        location=Location(uri=f"db://global_tables/{resource_name}"),
+        location=Location(
+            uri=db_uri,
+            member=format_hot_db_member(
+                resource_name,
+                consist_artifact_id=artifact.id,
+            ),
+        ),
         identity=updated_identity,
         access_driver="duckdb",
         witness=witness,
@@ -321,7 +351,17 @@ def ingest_artifact(
     existing_non_db_hints = [
         h for h in artifact.hints if not h.location.uri.startswith("db://")
     ]
-    new_hints = tuple((*existing_non_db_hints[:3], db_obs))
+    existing_other_db_hints = [
+        h
+        for h in artifact.hints
+        if h.location.uri.startswith("db://") and h.location.uri != db_uri
+    ]
+    kept_prefix = (
+        (*existing_non_db_hints[:1], *existing_other_db_hints)[:3]
+        if existing_other_db_hints and existing_non_db_hints
+        else (*existing_non_db_hints, *existing_other_db_hints)[:3]
+    )
+    new_hints = tuple((*kept_prefix, db_obs))
     updated_artifact = replace(
         artifact,
         identity=updated_identity,
@@ -338,7 +378,7 @@ def ingest_artifact(
                 basis="computed" if updated_identity.verifiable else "declared",
                 source=f"dlt:global_tables.{resource_name}",
             )
-            if ctd1_digest is not None:
+            if can_claim_ctd1 and ctd1_digest is not None:
                 ledger.record_content_digest(
                     anchor=updated_identity.anchor,
                     digest=ctd1_digest,

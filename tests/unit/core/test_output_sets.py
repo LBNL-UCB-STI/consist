@@ -20,7 +20,7 @@ from consist.core.output_sets import (
     resolve_output_set_expected_members,
     validate_cached_output_sets,
 )
-from consist.models.artifact import Artifact
+from tests.helpers.artifact_factory import make_artifact as Artifact
 
 
 def test_discover_output_set_members_are_filtered_and_sorted(tmp_path: Path) -> None:

@@ -23,7 +23,7 @@ The short version:
 
 Consist separates artifact identity from byte location.
 
-`container_uri` and artifact metadata describe the canonical artifact. A
+`primary_location` (`container_uri`) and artifact metadata describe the canonical artifact. A
 historical file can move from a workspace to an archive without becoming a new
 artifact. Recovery tells Consist where to find or recreate the bytes when the
 original path is unavailable.
@@ -391,7 +391,7 @@ not independently recoverable unless its parent container policy explicitly
 allows child recovery.
 
 ```python
-from consist import H5ChildSpec
+from consist.types import H5ChildSpec
 
 container, children = tracker.log_h5_container(
     "input_data_for_2019_outputs.h5",

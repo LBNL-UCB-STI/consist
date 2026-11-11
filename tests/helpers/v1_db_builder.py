@@ -1,4 +1,4 @@
-"""Pure-DuckDB Schema v1 (`v0.4.2`) test fixture builder without `duckdb-engine` or `SQLModel`."""
+"""Pure-DuckDB Schema v1 (`v0.4.2`) test fixture builder without SQLAlchemy or `SQLModel`."""
 
 from __future__ import annotations
 

@@ -14,17 +14,16 @@ or superior performance and resource usage compared to traditional Python data
 analysis libraries for certain workloads.
 """
 
-import logging
-import importlib
-from pathlib import Path
-
-import pytest
-import pandas as pd
-import numpy as np
-import time
-import os
 import gc
-from sqlmodel import text
+import importlib
+import logging
+import os
+from pathlib import Path
+import time
+
+import numpy as np
+import pandas as pd
+import pytest
 
 import consist
 from consist.core.tracker import Tracker
@@ -277,33 +276,34 @@ def test_comparative_analysis_benchmark(tmp_path: Path):
     # BENCHMARK 3: CONSIST (Cold View)
     # =========================================================================
     # Workflow: Create View (Metadata scan), SQL Query (Vectorized Read)
-    with Profiler("Consist (Cold)"):
-        # 1. Create View
-        # This scans the artifacts DB and generates the 'read_parquet([file1, file2])' SQL
-        tracker.create_view("v_bench_cold", "results")
+    try:
+        with Profiler("Consist (Cold)"):
+            # 1. Create View
+            # This scans the artifacts DB and generates the 'read_parquet([file1, file2])' SQL
+            tracker.create_view("v_bench_cold", "results")
 
-        # 2. Query
-        with tracker.engine.connect() as conn:
-            query = text(
+            # 2. Query
+            res_consist = tracker.query_df(
                 """
                 SELECT
                     consist_run_id,
-                    AVG(val),
-                    AVG(subsidy)
+                    AVG(val) AS avg_val,
+                    AVG(subsidy) AS avg_subsidy
                 FROM v_bench_cold
                 GROUP BY 1
-            """
+                """
             )
-            res_consist = conn.execute(query).fetchall()
 
-    # =========================================================================
-    # VERIFICATION
-    # =========================================================================
-    # Ensure they got similar results
-    logging.info("\n[Verification]")
-    logging.info(f"Pandas Rows: {len(res_pandas)}")
-    if pl:
-        logging.info(f"Polars Rows: {len(res_polars)}")
-    logging.info(f"Consist Rows: {len(res_consist)}")
+        # =========================================================================
+        # VERIFICATION
+        # =========================================================================
+        # Ensure they got similar results
+        logging.info("\n[Verification]")
+        logging.info(f"Pandas Rows: {len(res_pandas)}")
+        if pl:
+            logging.info(f"Polars Rows: {len(res_polars)}")
+        logging.info(f"Consist Rows: {len(res_consist)}")
 
-    assert len(res_consist) == 2
+        assert len(res_consist) == 2
+    finally:
+        tracker.close()

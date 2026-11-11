@@ -25,7 +25,8 @@ import shlex
 import subprocess
 import shutil
 from pathlib import Path
-from typing import Dict, List, Optional, Union, Any, Literal, Mapping
+from typing import Any, Dict, List, Literal, Mapping, Optional, Union
+
 
 # Optional Docker Import
 try:
@@ -357,7 +358,11 @@ class DockerBackend(ContainerBackend):
         }
 
         try:
-            if self.pull_latest and hasattr(self.client, "images"):
+            try:
+                images_api = self.client.images
+            except AttributeError:
+                images_api = None
+            if self.pull_latest and images_api is not None:
                 _pull_latest_docker_image(self.client, image)
 
             logger.info(

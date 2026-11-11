@@ -11,9 +11,10 @@ import pytest
 from consist.core.cache import ActiveRunCacheOptions, materialize_requested_inputs
 from consist.core.directory_artifacts import build_directory_manifest
 from consist.core.tracker_orchestration import RunTraceCoordinator, RunTraceHelpers
-from consist.models.artifact import Artifact
+from consist.artifact import Location, Observation
 from consist.models.run import ConsistRecord, Run
 from consist.types import BindingResult, ExecutionOptions
+from tests.helpers.artifact_factory import make_artifact as Artifact
 
 
 def _sha256(path: Path) -> str:
@@ -99,7 +100,7 @@ def test_materialize_requested_inputs_stages_requested_key(tmp_path: Path) -> No
 
     assert staged == {"raw": str(destination.resolve())}
     assert destination.read_text(encoding="utf-8") == "value\n1\n"
-    assert artifact.abs_path == str(destination.resolve())
+    assert tracker.current_consist.inputs[0].locate() == destination.resolve()
 
 
 def test_materialize_requested_inputs_rejects_distinct_artifacts_for_one_key(
@@ -170,7 +171,7 @@ def test_materialize_requested_inputs_stages_manifest_backed_directory(
     )
 
     assert staged == {"skims": str(destination.resolve())}
-    assert build_directory_manifest(destination)["tree_hash"] == artifact.hash
+    assert build_directory_manifest(destination)["tree_hash"] == artifact.anchor.hex
 
 
 def test_materialize_requested_inputs_rejects_mutated_manifest_directory(
@@ -212,18 +213,19 @@ def test_materialize_requested_inputs_preserves_legacy_directory_checksum(
     destination = tmp_path / "staged" / "legacy.zarr"
     destination.mkdir(parents=True)
     (destination / "0.0").write_bytes(b"legacy")
+    legacy_hex = hashlib.sha256(b"legacy-directory-checksum").hexdigest()
 
     artifact = Artifact(
         key="legacy",
         container_uri=str(tmp_path / "missing.zarr"),
         driver="zarr",
-        hash="legacy-directory-checksum",
+        hash=legacy_hex,
         meta={},
     )
     tracker = _FakeTracker(
         run_dir=tmp_path,
         current_consist=ConsistRecord(run=_make_run(), inputs=[artifact]),
-        compute_file_checksum=lambda _path: "legacy-directory-checksum",
+        compute_file_checksum=lambda _path: legacy_hex,
     )
 
     staged = materialize_requested_inputs(
@@ -244,14 +246,24 @@ def test_execute_python_run_uses_staged_input_path(tmp_path: Path) -> None:
     staged.parent.mkdir(parents=True, exist_ok=True)
     staged.write_text("staged\n", encoding="utf-8")
 
-    artifact = Artifact(
+    base_artifact = Artifact(
         key="raw",
         container_uri=str(source),
         driver="csv",
         hash=_sha256(staged),
         meta={},
     )
-    artifact.abs_path = str(staged)
+    artifact = base_artifact.with_hints(
+        (
+            Observation(
+                location=Location(uri=staged.resolve().as_uri()),
+                identity=base_artifact.identity,
+                access_driver="csv",
+                basis="derived",
+            ),
+            *base_artifact.hints,
+        )
+    )
 
     tracker = _FakeTracker(run_dir=tmp_path)
 

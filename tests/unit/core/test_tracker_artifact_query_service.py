@@ -4,8 +4,8 @@ import uuid
 
 import pytest
 
-from consist.models.artifact import Artifact, get_tracker_ref
 from consist.models.run import Run
+from tests.helpers.artifact_factory import make_artifact as Artifact
 
 
 def test_artifact_query_service_prefers_current_run_artifacts_by_uri(
@@ -67,6 +67,18 @@ def test_artifact_query_service_normalizes_run_filters_and_attaches_tracker(
 
     monkeypatch.setattr(tracker.db, "find_artifacts", fake_find_artifacts)
 
+    bound_calls: list[object] = []
+    monkeypatch.setattr(
+        Artifact(
+            id=uuid.uuid4(),
+            key="probe",
+            container_uri="outputs://probe.csv",
+            driver="csv",
+        ).__class__,
+        "bind_tracker",
+        lambda self, trk: bound_calls.append((self, trk)) or self,
+    )
+
     results = service.find_artifacts(
         creator=producer,
         consumer=consumer,
@@ -81,6 +93,4 @@ def test_artifact_query_service_normalizes_run_filters_and_attaches_tracker(
         "key": "result",
         "limit": 7,
     }
-    tracker_ref = get_tracker_ref(artifact)
-    assert tracker_ref is not None
-    assert tracker_ref() is tracker
+    assert bound_calls == [(artifact, tracker)]
