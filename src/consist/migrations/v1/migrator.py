@@ -14,7 +14,7 @@ from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -25,9 +25,11 @@ import socket
 import time
 from typing import Any, Literal
 import uuid
+import warnings
 
 import duckdb
 
+from consist.core.identity import compute_sig_v2
 from consist.digest import (
     Digest,
     Identity,
@@ -48,6 +50,7 @@ from consist.engine import (
 from consist.location import (
     DbTableChangeToken,
     DirTreeStat,
+    FileStat,
     Location,
     Mount,
     Observation,
@@ -55,16 +58,23 @@ from consist.location import (
 )
 from consist.meta import strip_system_meta
 from consist.migrations.v1.fasthash import (
-    RACY_STAT_WINDOW_NS,
+    stat_v1_fast_directory_hash,
     stat_v1_fast_file_hash,
 )
 from consist.migrations.v1.reader import (
     V1ArtifactRecord,
+    V1ArtifactSchemaBundle,
+    V1BindingInvocationRecord,
+    V1ConfigFacetRecord,
+    V1CouplerSnapshotRecord,
     V1DatabaseReader,
     V1DirEntryRecord,
     V1DltTableInfo,
     V1LinkRecord,
+    V1RunConfigKvRecord,
     V1RunRecord,
+    V1UserSchemasDDL,
+    unflatten_facet_key_path,
 )
 from consist.store.detect import (
     ConsistError,
@@ -114,6 +124,8 @@ class ArtifactClassification:
     witness: Witness | None = None
     manifest_payload: tuple[bytes, int, int] | None = None
     dlt_member: str | None = None
+    dlt_schema: str | None = None
+    dlt_table: str | None = None
     v1_row_json: str = "{}"
     cold_path_overwritten: bool = False
 
@@ -133,6 +145,14 @@ class MigrationPlan:
     runs: tuple[V1RunRecord, ...] = ()
     artifacts: tuple[V1ArtifactRecord, ...] = ()
     links: tuple[V1LinkRecord, ...] = ()
+    config_facets: Mapping[str, V1ConfigFacetRecord] = field(default_factory=dict)
+    run_config_kv: Mapping[str, tuple[V1RunConfigKvRecord, ...]] = field(
+        default_factory=dict
+    )
+    coupler_snapshots: tuple[V1CouplerSnapshotRecord, ...] = ()
+    binding_invocations: tuple[V1BindingInvocationRecord, ...] = ()
+    artifact_schemas: V1ArtifactSchemaBundle | None = None
+    user_schemas_ddl: V1UserSchemasDDL | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -542,17 +562,12 @@ def _resolve_candidate_path(
     search_roots.extend(snapshot_dirs)
 
     rel_candidate = Path(rel_tail) if rel_tail else None
-    basename = rel_candidate.name if rel_candidate is not None else ""
 
     for root in search_roots:
         if rel_candidate is not None and not rel_candidate.is_absolute():
             joined = root / rel_candidate
             if joined.exists():
                 return joined.resolve()
-        if basename:
-            by_name = root / basename
-            if by_name.exists():
-                return by_name.resolve()
 
     return None
 
@@ -646,41 +661,29 @@ def _build_manifest_payload_from_v1_records(
     return (anchor, (body_bytes, len(sorted_entries), total_bytes))
 
 
-def _cursor_to_arrow_table(cursor: Any) -> Any:
-    if "to_arrow_table" in dir(cursor):
-        return cursor.to_arrow_table()
-    return cursor.fetch_arrow_table()
+def _is_ingested_v1_artifact(art: V1ArtifactRecord) -> bool:
+    return (
+        art.driver.strip().lower() in ("dlt", "duckdb", "table")
+        or art.container_uri.strip().lower().startswith("db://")
+        or bool(art.meta.get("is_ingested"))
+    )
 
 
-def _try_classify_dlt_hot_table(
+def _match_ingested_dlt_table(
     art: V1ArtifactRecord,
-    *,
-    con: duckdb.DuckDBPyConnection,
     dlt_tables: Sequence[V1DltTableInfo],
-    candidate_path: Path | None = None,
-    v1_row_json: str,
-) -> ArtifactClassification | None:
+) -> V1DltTableInfo | None:
     if not dlt_tables:
         return None
-
-    is_explicit_dlt = art.driver.strip().lower() in (
-        "dlt",
-        "duckdb",
-        "table",
-    ) or art.container_uri.strip().lower().startswith("db://")
-    is_ingested = bool(art.meta.get("is_ingested"))
-
-    if not is_explicit_dlt and not is_ingested and candidate_path is not None:
-        return None
-    if not is_explicit_dlt and not is_ingested and _is_v1_full_hash_semantics(art):
-        return None
-
     cand_names: list[str] = []
-    dlt_meta_name = art.meta.get("dlt_table_name")
-    if isinstance(dlt_meta_name, str) and dlt_meta_name.strip():
-        cand_names.append(dlt_meta_name.strip())
+    for meta_key in ("dlt_table_name", "_dlt_table_name"):
+        dlt_meta_name = art.meta.get(meta_key)
+        if isinstance(dlt_meta_name, str) and dlt_meta_name.strip():
+            cand_names.append(dlt_meta_name.strip())
     if art.container_uri.strip().lower().startswith("db://"):
         tail = art.container_uri.strip()[5:].strip("/")
+        if "?" in tail:
+            tail = tail.split("?", 1)[0]
         if "." in tail:
             tail = tail.split(".")[-1]
         if "/" in tail:
@@ -697,131 +700,237 @@ def _try_classify_dlt_hot_table(
         cand_names.append(art.key)
 
     non_internal = [t for t in dlt_tables if not t.is_dlt_internal]
-    matched_info: V1DltTableInfo | None = None
     for cand in cand_names:
         cand_lower = cand.lower()
         for info in non_internal:
             if info.table_name.lower() == cand_lower:
-                matched_info = info
-                break
-        if matched_info is not None:
-            break
+                return info
+    return None
 
-    if matched_info is None:
-        return None
 
-    q_schema = _quote_ident(matched_info.schema_name)
-    q_table = _quote_ident(matched_info.table_name)
-    user_cols = [
-        col
-        for col in matched_info.columns
-        if col
-        not in {
-            "consist_artifact_id",
-            "consist_run_id",
-            "consist_year",
-            "consist_iteration",
-        }
-        and not col.startswith("_dlt_")
-    ]
-    select_cols = user_cols if user_cols else list(matched_info.columns.keys())
-    if not select_cols:
-        return None
+def _is_nested_duckdb_type(dtype_str: str) -> bool:
+    upper_t = dtype_str.strip().upper()
+    if "[" in upper_t or "]" in upper_t:
+        return True
+    return any(tok in upper_t for tok in ("LIST", "STRUCT", "MAP", "UNION"))
+
+
+def _is_ieee_float_duckdb_type(dtype_str: str) -> bool:
+    upper_t = dtype_str.strip().upper()
+    return upper_t in ("FLOAT", "REAL", "DOUBLE", "FLOAT4", "FLOAT8")
+
+
+def _stream_ctd1_hex_from_duckdb(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    q_schema: str,
+    q_table: str,
+    select_cols: Sequence[str],
+    column_types: Mapping[str, str],
+    where_sql: str,
+    params: Sequence[Any],
+    rows_per_batch: int = 65_536,
+) -> str | None:
+    import pyarrow as pa
+
+    for col in select_cols:
+        if _is_nested_duckdb_type(column_types.get(col, "")):
+            return None
+
     cols_sql = ", ".join(_quote_ident(c) for c in select_cols)
-
-    arrow_table: Any = None
-    where_sql = ""
-    params: list[Any] = []
-    dlt_member = matched_info.table_name
-
-    if matched_info.has_consist_artifact_id:
-        cand_where = " WHERE CAST(consist_artifact_id AS VARCHAR) = ?"
-        cand_params = [str(art.id)]
-        cand_arrow = _cursor_to_arrow_table(
-            con.execute(
-                f"SELECT {cols_sql} FROM {q_schema}.{q_table}{cand_where}",
-                cand_params,
+    order_parts: list[str] = []
+    for c in select_cols:
+        c_ident = _quote_ident(c)
+        if _is_ieee_float_duckdb_type(column_types.get(c, "")):
+            order_parts.append(
+                f"CASE WHEN {c_ident} IS NULL THEN 0 WHEN isnan({c_ident}) THEN 1 ELSE 2 END ASC, {c_ident} ASC"
             )
-        )
-        if int(cand_arrow.num_rows) > 0:
-            arrow_table = cand_arrow
-            where_sql = cand_where
-            params = cand_params
-            dlt_member = f"{matched_info.table_name}?consist_artifact_id={art.id}"
+        else:
+            order_parts.append(f"{c_ident} ASC NULLS FIRST")
+    order_sql = ", ".join(order_parts)
 
-    if (
-        arrow_table is None
-        and (is_explicit_dlt or is_ingested)
-        and matched_info.has_consist_run_id
-        and art.run_id is not None
-    ):
-        cand_where = (
-            " WHERE CAST(consist_run_id AS VARCHAR) = ? AND consist_artifact_id IS NULL"
-            if matched_info.has_consist_artifact_id
-            else " WHERE CAST(consist_run_id AS VARCHAR) = ?"
+    cur = con.cursor()
+    try:
+        cur.execute(
+            f"SELECT {cols_sql} FROM {q_schema}.{q_table}{where_sql} ORDER BY {order_sql}",
+            list(params),
         )
-        cand_params = [art.run_id]
-        cand_arrow = _cursor_to_arrow_table(
-            con.execute(
-                f"SELECT {cols_sql} FROM {q_schema}.{q_table}{cand_where}",
-                cand_params,
-            )
-        )
-        if int(cand_arrow.num_rows) > 0:
-            arrow_table = cand_arrow
-            where_sql = cand_where
-            params = cand_params
-            dlt_member = f"{matched_info.table_name}?consist_run_id={art.run_id}"
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            batch_reader = cur.fetch_record_batch(rows_per_batch=rows_per_batch)
+        return compute_ctd1_digest(
+            batch_reader,
+            columns=select_cols,
+            presorted=True,
+        ).hex
+    except (duckdb.Error, pa.ArrowException, ValueError, TypeError):
+        return None
+    finally:
+        cur.close()
 
-    if arrow_table is None and is_explicit_dlt and matched_info.row_count > 0:
-        cand_arrow = _cursor_to_arrow_table(
-            con.execute(f"SELECT {cols_sql} FROM {q_schema}.{q_table}")
-        )
-        if int(cand_arrow.num_rows) > 0:
-            arrow_table = cand_arrow
-            where_sql = ""
-            params = []
-            dlt_member = matched_info.table_name
 
-    if arrow_table is None:
+def _try_classify_dlt_hot_table(
+    art: V1ArtifactRecord,
+    *,
+    con: duckdb.DuckDBPyConnection,
+    dlt_tables: Sequence[V1DltTableInfo],
+    candidate_path: Path | None = None,
+    ingested_table_counts_per_run: Mapping[tuple[str, str], int] | None = None,
+    v1_row_json: str,
+) -> ArtifactClassification | None:
+    import pyarrow as pa
+
+    if not dlt_tables:
         return None
 
-    num_rows = int(arrow_table.num_rows)
-    hex_val = compute_ctd1_digest(arrow_table, columns=select_cols).hex
-    load_id = str(art.run_id or art.id)
-    if "_dlt_load_id" in matched_info.columns:
-        ld_row = con.execute(
-            f'SELECT CAST(MAX("_dlt_load_id") AS VARCHAR) FROM {q_schema}.{q_table}{where_sql}',
-            params,
-        ).fetchone()
-        if ld_row is not None and ld_row[0] is not None:
-            load_id = str(ld_row[0])
-    else:
-        for t_info in dlt_tables:
-            if (
-                t_info.schema_name == matched_info.schema_name
-                and t_info.table_name == "_dlt_loads"
-                and "load_id" in t_info.columns
-            ):
-                ld_row = con.execute(
-                    f'SELECT CAST(MAX("load_id") AS VARCHAR) FROM {q_schema}."_dlt_loads"'
-                ).fetchone()
-                if ld_row is not None and ld_row[0] is not None:
-                    load_id = str(ld_row[0])
-                break
+    try:
+        is_explicit_dlt = art.driver.strip().lower() in (
+            "dlt",
+            "duckdb",
+            "table",
+        ) or art.container_uri.strip().lower().startswith("db://")
+        is_ingested = bool(art.meta.get("is_ingested"))
 
-    return ArtifactClassification(
-        artifact_id=art.id,
-        outcome="verified",
-        basis="dlt_hot_table",
-        anchor=Digest("ctd1:sha256", hex_val),
-        repr_kind="table",
-        resolved_path=None,
-        witness=DbTableChangeToken(load_id=load_id, row_count=num_rows),
-        manifest_payload=None,
-        dlt_member=dlt_member,
-        v1_row_json=v1_row_json,
-    )
+        if not is_explicit_dlt and not is_ingested and candidate_path is not None:
+            return None
+        if not is_explicit_dlt and not is_ingested and _is_v1_full_hash_semantics(art):
+            return None
+
+        matched_info = _match_ingested_dlt_table(art, dlt_tables)
+        if matched_info is None:
+            return None
+
+        q_schema = _quote_ident(matched_info.schema_name)
+        q_table = _quote_ident(matched_info.table_name)
+        user_cols = [
+            col
+            for col in matched_info.columns
+            if col
+            not in {
+                "consist_artifact_id",
+                "consist_run_id",
+                "consist_year",
+                "consist_iteration",
+            }
+            and not col.startswith("_dlt_")
+        ]
+        select_cols = user_cols if user_cols else list(matched_info.columns.keys())
+        if not select_cols:
+            return None
+
+        where_sql = ""
+        params: list[Any] = []
+        dlt_member = matched_info.table_name
+        matched_rows = 0
+
+        if matched_info.has_consist_artifact_id:
+            cand_where = " WHERE CAST(consist_artifact_id AS VARCHAR) = ?"
+            cand_params = [str(art.id)]
+            cnt_row = con.execute(
+                f"SELECT COUNT(*) FROM {q_schema}.{q_table}{cand_where}",
+                cand_params,
+            ).fetchone()
+            cnt = (
+                int(cnt_row[0]) if cnt_row is not None and cnt_row[0] is not None else 0
+            )
+            if cnt > 0:
+                matched_rows = cnt
+                where_sql = cand_where
+                params = cand_params
+                dlt_member = f"{matched_info.table_name}?consist_artifact_id={art.id}"
+
+        if (
+            matched_rows == 0
+            and (is_explicit_dlt or is_ingested)
+            and matched_info.has_consist_run_id
+            and art.run_id is not None
+        ):
+            run_tbl_count = (
+                ingested_table_counts_per_run.get(
+                    (art.run_id, matched_info.table_name.lower()),
+                    1,
+                )
+                if ingested_table_counts_per_run is not None
+                else 1
+            )
+            if run_tbl_count == 1:
+                cand_where = (
+                    " WHERE CAST(consist_run_id AS VARCHAR) = ? AND consist_artifact_id IS NULL"
+                    if matched_info.has_consist_artifact_id
+                    else " WHERE CAST(consist_run_id AS VARCHAR) = ?"
+                )
+                cand_params = [art.run_id]
+                cnt_row = con.execute(
+                    f"SELECT COUNT(*) FROM {q_schema}.{q_table}{cand_where}",
+                    cand_params,
+                ).fetchone()
+                cnt = (
+                    int(cnt_row[0])
+                    if cnt_row is not None and cnt_row[0] is not None
+                    else 0
+                )
+                if cnt > 0:
+                    matched_rows = cnt
+                    where_sql = cand_where
+                    params = cand_params
+                    dlt_member = (
+                        f"{matched_info.table_name}?consist_run_id={art.run_id}"
+                    )
+
+        if matched_rows == 0:
+            return None
+
+        hex_val = _stream_ctd1_hex_from_duckdb(
+            con,
+            q_schema=q_schema,
+            q_table=q_table,
+            select_cols=select_cols,
+            column_types=matched_info.columns,
+            where_sql=where_sql,
+            params=params,
+            rows_per_batch=65_536,
+        )
+        if hex_val is None:
+            return None
+
+        load_id = str(art.run_id or art.id)
+        if "_dlt_load_id" in matched_info.columns:
+            ld_row = con.execute(
+                f'SELECT CAST(MAX("_dlt_load_id") AS VARCHAR) FROM {q_schema}.{q_table}{where_sql}',
+                params,
+            ).fetchone()
+            if ld_row is not None and ld_row[0] is not None:
+                load_id = str(ld_row[0])
+        else:
+            for t_info in dlt_tables:
+                if (
+                    t_info.schema_name == matched_info.schema_name
+                    and t_info.table_name == "_dlt_loads"
+                    and "load_id" in t_info.columns
+                ):
+                    ld_row = con.execute(
+                        f'SELECT CAST(MAX("load_id") AS VARCHAR) FROM {q_schema}."_dlt_loads"'
+                    ).fetchone()
+                    if ld_row is not None and ld_row[0] is not None:
+                        load_id = str(ld_row[0])
+                    break
+
+        return ArtifactClassification(
+            artifact_id=art.id,
+            outcome="verified",
+            basis="dlt_hot_table",
+            anchor=Digest("ctd1:sha256", hex_val),
+            repr_kind="table",
+            resolved_path=None,
+            witness=DbTableChangeToken(load_id=load_id, row_count=matched_rows),
+            manifest_payload=None,
+            dlt_member=dlt_member,
+            dlt_schema=matched_info.schema_name,
+            dlt_table=matched_info.table_name,
+            v1_row_json=v1_row_json,
+        )
+    except (duckdb.Error, pa.ArrowException, ValueError, TypeError):
+        return None
 
 
 def _fallback_historical_hex(art: V1ArtifactRecord) -> str:
@@ -901,15 +1010,54 @@ def _classify_cold_artifact_on_disk(
 
     # Step 4: Cold file or directory on disk when not quick
     if not quick and candidate_path is not None and candidate_path.exists():
+        recorded_ns = (
+            int(art.created_at.timestamp() * 1_000_000_000)
+            if art.created_at is not None
+            else None
+        )
         if candidate_path.is_dir():
+            if effective_hash is None:
+                return ArtifactClassification(
+                    artifact_id=art.id,
+                    outcome="historical",
+                    basis="unhashed_v1",
+                    anchor=Digest(
+                        "legacy-v1:unverified", _fallback_historical_hex(art)
+                    ),
+                    repr_kind="historical",
+                    resolved_path=None,
+                    witness=None,
+                    v1_row_json=v1_row_json,
+                )
+            lower_hash = effective_hash.lower()
+            raw_v1_hash = (art.hash or "").strip()
             try:
+                fast_dir = stat_v1_fast_directory_hash(
+                    candidate_path,
+                    v1_recorded_ns=recorded_ns,
+                )
+                matched_fast_dir = (
+                    fast_dir.legacy_fast_hex == lower_hash
+                    or fast_dir.stat_v2_observation == raw_v1_hash
+                )
+                if matched_fast_dir and fast_dir.is_racy:
+                    return ArtifactClassification(
+                        artifact_id=art.id,
+                        outcome="historical",
+                        basis="racy_fast_stat",
+                        anchor=Digest("legacy-v1:unverified", lower_hash),
+                        repr_kind="historical",
+                        resolved_path=None,
+                        witness=None,
+                        v1_row_json=v1_row_json,
+                    )
                 anchor_dir, body_bytes, entry_count, total_bytes, dir_stat = (
                     _compute_manifest_v1_and_witness(
                         candidate_path,
                         max_workers=max(1, max_workers),
                     )
                 )
-                if effective_hash is None or effective_hash.lower() == anchor_dir.hex:
+                if matched_fast_dir or lower_hash == anchor_dir.hex:
                     return ArtifactClassification(
                         artifact_id=art.id,
                         outcome="verified",
@@ -948,26 +1096,22 @@ def _classify_cold_artifact_on_disk(
             repr_kind = "member" if member is not None else "file"
 
             try:
-                current_fast, st, _ = stat_v1_fast_file_hash(candidate_path)
+                current_fast, _st, is_racy = stat_v1_fast_file_hash(
+                    candidate_path,
+                    v1_recorded_ns=recorded_ns,
+                )
                 if current_fast == lower_hash:
-                    if art.created_at is not None:
-                        recorded_ns = int(art.created_at.timestamp() * 1_000_000_000)
-                        mtime_ns = (
-                            st.st_mtime_ns
-                            if st.st_mtime_ns is not None
-                            else int(st.st_mtime * 1_000_000_000)
+                    if is_racy:
+                        return ArtifactClassification(
+                            artifact_id=art.id,
+                            outcome="historical",
+                            basis="racy_fast_stat",
+                            anchor=Digest("legacy-v1:unverified", lower_hash),
+                            repr_kind="historical",
+                            resolved_path=None,
+                            witness=None,
+                            v1_row_json=v1_row_json,
                         )
-                        if (recorded_ns - mtime_ns) < RACY_STAT_WINDOW_NS:
-                            return ArtifactClassification(
-                                artifact_id=art.id,
-                                outcome="historical",
-                                basis="racy_fast_stat",
-                                anchor=Digest("legacy-v1:unverified", lower_hash),
-                                repr_kind="historical",
-                                resolved_path=None,
-                                witness=None,
-                                v1_row_json=v1_row_json,
-                            )
 
                     anchor_ver, witness_ver = compute_scheme_digest(
                         candidate_path,
@@ -1076,6 +1220,7 @@ def _classify_db_backed_artifact(
     dlt_tables: Sequence[V1DltTableInfo],
     dir_entries: Sequence[V1DirEntryRecord],
     candidate_path: Path | None,
+    ingested_table_counts_per_run: Mapping[tuple[str, str], int] | None = None,
     quick: bool,
     v1_row_json: str,
 ) -> ArtifactClassification | None:
@@ -1108,6 +1253,7 @@ def _classify_db_backed_artifact(
         con=con,
         dlt_tables=dlt_tables,
         candidate_path=candidate_path,
+        ingested_table_counts_per_run=ingested_table_counts_per_run,
         v1_row_json=v1_row_json,
     )
 
@@ -1122,6 +1268,7 @@ def classify_v1_artifact(
     run_record: V1RunRecord | None = None,
     mounts: Mapping[str, Mount] | None = None,
     snapshot_dirs: Sequence[Path] = (),
+    ingested_table_counts_per_run: Mapping[tuple[str, str], int] | None = None,
     quick: bool = False,
 ) -> ArtifactClassification:
     """Classify a single `V1ArtifactRecord` without deduplicating by v1 fast hash."""
@@ -1145,6 +1292,7 @@ def classify_v1_artifact(
         dlt_tables=dlt_tables,
         dir_entries=dir_entries,
         candidate_path=candidate_path,
+        ingested_table_counts_per_run=ingested_table_counts_per_run,
         quick=quick,
         v1_row_json=v1_row_json,
     )
@@ -1181,6 +1329,23 @@ def plan_migration(
         artifacts = tuple(reader.read_artifacts())
         links = tuple(reader.read_links())
         all_dir_entries = reader.read_dir_entries()
+        config_facets = reader.read_config_facets()
+        run_config_kv = {
+            rid: tuple(items) for rid, items in reader.read_run_config_kv().items()
+        }
+        coupler_snapshots = tuple(reader.read_coupler_snapshots())
+        binding_invocations = tuple(reader.read_binding_invocations())
+        artifact_schemas = reader.read_artifact_schemas()
+        user_schemas_ddl = reader.read_user_schema_tables_ddl()
+
+        ingested_counts_per_run: Counter[tuple[str, str]] = Counter()
+        for art_item in artifacts:
+            if art_item.run_id is not None and _is_ingested_v1_artifact(art_item):
+                matched_t = _match_ingested_dlt_table(art_item, dlt_tables)
+                if matched_t is not None:
+                    ingested_counts_per_run[
+                        (art_item.run_id, matched_t.table_name.lower())
+                    ] += 1
 
         runs_by_id: dict[str, V1RunRecord] = {r.id: r for r in runs}
         dir_entries_by_art: dict[uuid.UUID, list[V1DirEntryRecord]] = {}
@@ -1212,6 +1377,7 @@ def plan_migration(
                 dlt_tables=dlt_tables,
                 dir_entries=dir_entries_by_art.get(art.id, ()),
                 candidate_path=candidate_path,
+                ingested_table_counts_per_run=ingested_counts_per_run,
                 quick=quick,
                 v1_row_json=v1_row_json,
             )
@@ -1278,7 +1444,218 @@ def plan_migration(
             runs=runs,
             artifacts=artifacts,
             links=links,
+            config_facets=config_facets,
+            run_config_kv=run_config_kv,
+            coupler_snapshots=coupler_snapshots,
+            binding_invocations=binding_invocations,
+            artifact_schemas=artifact_schemas,
+            user_schemas_ddl=user_schemas_ddl,
         )
+
+
+def _lex_sql_ddl(sql: str) -> list[tuple[str, str, str]]:
+    """Lex SQL DDL into `(kind, raw_text, normalized_val)` tokens."""
+    tokens: list[tuple[str, str, str]] = []
+    n = len(sql)
+    i = 0
+    while i < n:
+        ch = sql[i]
+        if ch.isspace():
+            start = i
+            while i < n and sql[i].isspace():
+                i += 1
+            tokens.append(("ws", sql[start:i], ""))
+        elif ch == "-" and i + 1 < n and sql[i + 1] == "-":
+            start = i
+            i += 2
+            while i < n and sql[i] != "\n":
+                i += 1
+            if i < n:
+                i += 1
+            tokens.append(("comment", sql[start:i], ""))
+        elif ch == "/" and i + 1 < n and sql[i + 1] == "*":
+            start = i
+            i += 2
+            while i < n and not (sql[i] == "*" and i + 1 < n and sql[i + 1] == "/"):
+                i += 1
+            i = min(n, i + 2)
+            tokens.append(("comment", sql[start:i], ""))
+        elif ch == "'":
+            start = i
+            i += 1
+            inner: list[str] = []
+            while i < n:
+                if sql[i] == "'":
+                    if i + 1 < n and sql[i + 1] == "'":
+                        inner.append("'")
+                        i += 2
+                    else:
+                        i += 1
+                        break
+                else:
+                    inner.append(sql[i])
+                    i += 1
+            tokens.append(("str", sql[start:i], "".join(inner)))
+        elif ch == '"':
+            start = i
+            i += 1
+            inner_q: list[str] = []
+            while i < n:
+                if sql[i] == '"':
+                    if i + 1 < n and sql[i + 1] == '"':
+                        inner_q.append('"')
+                        i += 2
+                    else:
+                        i += 1
+                        break
+                else:
+                    inner_q.append(sql[i])
+                    i += 1
+            tokens.append(("ident", sql[start:i], "".join(inner_q)))
+        elif ch.isalpha() or ch == "_":
+            start = i
+            i += 1
+            while i < n and (sql[i].isalnum() or sql[i] in ("_", "$")):
+                i += 1
+            word = sql[start:i]
+            tokens.append(("ident", word, word))
+        elif ch == ".":
+            tokens.append(("dot", ".", ""))
+            i += 1
+        elif ch == "(":
+            tokens.append(("lparen", "(", ""))
+            i += 1
+        else:
+            tokens.append(("other", ch, ""))
+            i += 1
+    return tokens
+
+
+def _strip_catalog_prefix_from_ddl(
+    sql: str,
+    *,
+    catalog_names: Sequence[str],
+    known_schemas: Sequence[str],
+) -> str:
+    catalog_set = {c.lower() for c in catalog_names if c}
+    schema_set = {s.lower() for s in known_schemas if s}
+    if not catalog_set or not schema_set or not sql:
+        return sql
+
+    tokens = _lex_sql_ddl(sql)
+    total = len(tokens)
+
+    def _next_sig(idx: int) -> int | None:
+        j = idx
+        while j < total and tokens[j][0] in ("ws", "comment"):
+            j += 1
+        return j if j < total else None
+
+    def _prev_sig(idx: int) -> int | None:
+        j = idx
+        while j >= 0 and tokens[j][0] in ("ws", "comment"):
+            j -= 1
+        return j if j >= 0 else None
+
+    out: list[str] = []
+    i = 0
+    while i < total:
+        kind, raw, val = tokens[i]
+        if kind == "ident" and val.lower() in catalog_set:
+            j1 = _next_sig(i + 1)
+            j2 = (
+                _next_sig(j1 + 1) if j1 is not None and tokens[j1][0] == "dot" else None
+            )
+            j3 = (
+                _next_sig(j2 + 1)
+                if j2 is not None
+                and tokens[j2][0] == "ident"
+                and tokens[j2][2].lower() in schema_set
+                else None
+            )
+            j4 = (
+                _next_sig(j3 + 1) if j3 is not None and tokens[j3][0] == "dot" else None
+            )
+            if j4 is not None and tokens[j4][0] == "ident":
+                assert j2 is not None
+                i = j2
+                continue
+        elif kind == "str":
+            p1 = _prev_sig(i - 1)
+            p2 = (
+                _prev_sig(p1 - 1)
+                if p1 is not None and tokens[p1][0] == "lparen"
+                else None
+            )
+            if (
+                p2 is not None
+                and tokens[p2][0] == "ident"
+                and tokens[p2][2].lower() == "nextval"
+            ):
+                stripped_seq = _strip_catalog_prefix_from_ddl(
+                    val,
+                    catalog_names=catalog_names,
+                    known_schemas=known_schemas,
+                )
+                if stripped_seq != val:
+                    escaped_seq = stripped_seq.replace("'", "''")
+                    out.append(f"'{escaped_seq}'")
+                    i += 1
+                    continue
+        out.append(raw)
+        i += 1
+    return "".join(out)
+
+
+def _resolve_ingested_db_location(
+    art: V1ArtifactRecord,
+    cls: ArtifactClassification,
+    dlt_tables: Sequence[V1DltTableInfo],
+) -> tuple[str, str | None] | None:
+    if cls.dlt_table is not None:
+        schema_name = cls.dlt_schema or "global_tables"
+        return (
+            f"db://{schema_name}/{cls.dlt_table}",
+            cls.dlt_member or cls.dlt_table,
+        )
+    if not _is_ingested_v1_artifact(art):
+        return None
+    matched = _match_ingested_dlt_table(art, dlt_tables)
+    if matched is not None:
+        member = (
+            f"{matched.table_name}?consist_artifact_id={art.id}"
+            if matched.has_consist_artifact_id
+            else f"{matched.table_name}?artifact_id={art.id}"
+        )
+        return (f"db://{matched.schema_name}/{matched.table_name}", member)
+
+    raw_tbl = art.meta.get("dlt_table_name") or art.meta.get("_dlt_table_name")
+    if isinstance(raw_tbl, str) and raw_tbl.strip():
+        tbl = raw_tbl.strip()
+        return (f"db://global_tables/{tbl}", f"{tbl}?artifact_id={art.id}")
+
+    raw_uri = art.container_uri.strip()
+    if raw_uri.lower().startswith("db://"):
+        tail = raw_uri[5:].split("?", 1)[0].strip("/")
+        if "/" in tail:
+            schema_part, tbl_part = tail.split("/", 1)
+            return (
+                f"db://{schema_part}/{tbl_part}",
+                f"{tbl_part}?artifact_id={art.id}",
+            )
+        if "." in tail:
+            schema_part, tbl_part = tail.split(".", 1)
+            return (
+                f"db://{schema_part}/{tbl_part}",
+                f"{tbl_part}?artifact_id={art.id}",
+            )
+        if tail:
+            return (f"db://global_tables/{tail}", f"{tail}?artifact_id={art.id}")
+
+    if art.key.strip():
+        k = art.key.strip()
+        return (f"db://global_tables/{k}", f"{k}?artifact_id={art.id}")
+    return None
 
 
 def apply_migration(
@@ -1309,11 +1686,31 @@ def apply_migration(
         runs: Sequence[V1RunRecord] = plan.runs
         artifacts: Sequence[V1ArtifactRecord] = plan.artifacts
         links: Sequence[V1LinkRecord] = plan.links
+        config_facets: Mapping[str, V1ConfigFacetRecord] = plan.config_facets
+        run_config_kv: Mapping[str, tuple[V1RunConfigKvRecord, ...]] = (
+            plan.run_config_kv
+        )
+        coupler_snapshots: Sequence[V1CouplerSnapshotRecord] = plan.coupler_snapshots
+        binding_invocations: Sequence[V1BindingInvocationRecord] = (
+            plan.binding_invocations
+        )
+        artifact_schemas: V1ArtifactSchemaBundle | None = plan.artifact_schemas
+        user_schemas_ddl: V1UserSchemasDDL | None = plan.user_schemas_ddl
     else:
         with V1DatabaseReader(resolved_v1) as reader:
             runs = reader.read_runs()
             artifacts = reader.read_artifacts()
             links = reader.read_links()
+            config_facets = reader.read_config_facets()
+            run_config_kv = reader.read_run_config_kv()
+            coupler_snapshots = reader.read_coupler_snapshots()
+            binding_invocations = reader.read_binding_invocations()
+            artifact_schemas = reader.read_artifact_schemas()
+            user_schemas_ddl = reader.read_user_schema_tables_ddl()
+
+    if user_schemas_ddl is None and plan.dlt_tables and resolved_v1.exists():
+        with V1DatabaseReader(resolved_v1) as reader:
+            user_schemas_ddl = reader.read_user_schema_tables_ddl()
 
     cls_by_art_id: dict[uuid.UUID, ArtifactClassification] = {
         c.artifact_id: c for c in plan.classifications
@@ -1323,22 +1720,90 @@ def apply_migration(
     with StoreLedger(resolved_v2, mounts=mount_map, writer="consist.migrate") as ledger:
         con = ledger.connection
 
-        # 1. Selectively copy all non-main (dlt / global_tables) schemas & tables
-        if plan.dlt_tables:
+        # 1. Replay user schemas (global_tables / _dlt_*): sequences -> FK-ordered tables -> row copy -> indexes
+        has_user_ddl = user_schemas_ddl is not None and bool(
+            user_schemas_ddl.schemas
+            or user_schemas_ddl.sequences
+            or user_schemas_ddl.tables
+        )
+        if has_user_ddl or plan.dlt_tables:
             escaped_v1 = str(resolved_v1).replace("'", "''")
             con.execute(f"ATTACH '{escaped_v1}' AS v1_src (READ_ONLY)")
             try:
-                seen_schemas: set[str] = set()
+                known_schemas: list[str] = []
+                if user_schemas_ddl is not None:
+                    for s_name in user_schemas_ddl.schemas:
+                        if s_name not in known_schemas:
+                            known_schemas.append(s_name)
                 for t_info in plan.dlt_tables:
+                    if t_info.schema_name not in known_schemas:
+                        known_schemas.append(t_info.schema_name)
+
+                raw_prefixes = [
+                    "v1_src",
+                    resolved_v1.stem,
+                    resolved_v1.name.split(".", 1)[0],
+                    user_schemas_ddl.catalog_name
+                    if user_schemas_ddl is not None
+                    else "",
+                ]
+                catalog_prefixes = tuple(dict.fromkeys(p for p in raw_prefixes if p))
+                for s_name in known_schemas:
+                    con.execute(f"CREATE SCHEMA IF NOT EXISTS {_quote_ident(s_name)}")
+
+                if user_schemas_ddl is not None:
+                    for seq_ddl in user_schemas_ddl.sequences:
+                        if seq_ddl.sql.strip():
+                            seq_sql = _strip_catalog_prefix_from_ddl(
+                                seq_ddl.sql,
+                                catalog_names=catalog_prefixes,
+                                known_schemas=known_schemas,
+                            )
+                            con.execute(seq_sql)
+
+                copied_tables: set[tuple[str, str]] = set()
+                if user_schemas_ddl is not None:
+                    for tbl_ddl in user_schemas_ddl.tables:
+                        q_schema = _quote_ident(tbl_ddl.schema_name)
+                        q_table = _quote_ident(tbl_ddl.table_name)
+                        if tbl_ddl.sql.strip():
+                            tbl_sql = _strip_catalog_prefix_from_ddl(
+                                tbl_ddl.sql,
+                                catalog_names=catalog_prefixes,
+                                known_schemas=known_schemas,
+                            )
+                            con.execute(tbl_sql)
+                        else:
+                            con.execute(
+                                f"CREATE TABLE {q_schema}.{q_table} AS "
+                                f"SELECT * FROM v1_src.{q_schema}.{q_table} WHERE 1=0"
+                            )
+                        con.execute(
+                            f"INSERT INTO {q_schema}.{q_table} "
+                            f"SELECT * FROM v1_src.{q_schema}.{q_table}"
+                        )
+                        copied_tables.add((tbl_ddl.schema_name, tbl_ddl.table_name))
+
+                for t_info in plan.dlt_tables:
+                    if (t_info.schema_name, t_info.table_name) in copied_tables:
+                        continue
                     q_schema = _quote_ident(t_info.schema_name)
                     q_table = _quote_ident(t_info.table_name)
-                    if t_info.schema_name not in seen_schemas:
-                        con.execute(f"CREATE SCHEMA IF NOT EXISTS {q_schema}")
-                        seen_schemas.add(t_info.schema_name)
                     con.execute(
                         f"CREATE TABLE {q_schema}.{q_table} AS "
                         f"SELECT * FROM v1_src.{q_schema}.{q_table}"
                     )
+                    copied_tables.add((t_info.schema_name, t_info.table_name))
+
+                if user_schemas_ddl is not None:
+                    for idx_ddl in user_schemas_ddl.indexes:
+                        if idx_ddl.sql.strip():
+                            idx_sql = _strip_catalog_prefix_from_ddl(
+                                idx_ddl.sql,
+                                catalog_names=catalog_prefixes,
+                                known_schemas=known_schemas,
+                            )
+                            con.execute(idx_sql)
             finally:
                 con.execute("DETACH v1_src")
 
@@ -1372,25 +1837,29 @@ def apply_migration(
                         body=body_bytes,
                     )
 
-                extra_meta: dict[str, Any] = {}
-                if art.facet_kv:
-                    extra_meta["facet"] = art.facet_kv
-                elif art.facet:
-                    extra_meta["facet"] = art.facet
+                cleaned_art_meta = dict(strip_system_meta(art.meta))
+                if art.facet:
+                    cleaned_art_meta["facet"] = art.facet
+                if art.facet_id and "artifact_facet_id" not in cleaned_art_meta:
+                    cleaned_art_meta["artifact_facet_id"] = art.facet_id
+                if art.facet_namespace and "facet_namespace" not in cleaned_art_meta:
+                    cleaned_art_meta["facet_namespace"] = art.facet_namespace
+                if (
+                    art.facet_schema_version
+                    and "facet_schema_version" not in cleaned_art_meta
+                ):
+                    cleaned_art_meta["facet_schema_version"] = art.facet_schema_version
                 if art.parent_artifact_id is not None:
-                    extra_meta["parent_artifact_id"] = str(art.parent_artifact_id)
+                    cleaned_art_meta["parent_artifact_id"] = str(art.parent_artifact_id)
 
-                v2_meta = json.loads(
-                    json.dumps(
-                        {**extra_meta, **strip_system_meta(art.meta)}, default=str
-                    )
-                )
+                v2_meta = json.loads(json.dumps(cleaned_art_meta, default=str))
                 ledger.record_artifact(
                     artifact_id=art.id,
                     key=art.key,
                     driver=art.driver,
                     anchor=cls.anchor,
                     run_id=art.run_id,
+                    parent_artifact_id=art.parent_artifact_id,
                     schema_id=art.schema_id,
                     meta=v2_meta,
                     created_at=art.created_at or now_utc,
@@ -1414,12 +1883,17 @@ def apply_migration(
 
                 member = art.table_path or art.array_path
                 identity = Identity(anchor=cls.anchor)
+                ingested_db_loc = _resolve_ingested_db_location(
+                    art,
+                    cls,
+                    plan.dlt_tables,
+                )
 
                 if cls.outcome == "verified" and cls.dlt_member is not None:
                     db_uri = (
-                        art.container_uri
-                        if art.container_uri.startswith("db://")
-                        else f"db://{cls.dlt_member.split('?', 1)[0]}"
+                        ingested_db_loc[0]
+                        if ingested_db_loc is not None
+                        else f"db://global_tables/{cls.dlt_member.split('?', 1)[0]}"
                     )
                     ledger.record_observation(
                         Observation(
@@ -1435,7 +1909,11 @@ def apply_migration(
                         writer="consist.migrate",
                     )
                 elif cls.outcome == "verified" and cls.resolved_path is not None:
-                    if art.container_uri.strip() and "://" in art.container_uri:
+                    if (
+                        art.container_uri.strip()
+                        and "://" in art.container_uri
+                        and not art.container_uri.strip().lower().startswith("db://")
+                    ):
                         uri = art.container_uri.strip()
                         _, matched_mount = resolve_uri_to_path(uri, mount_map)
                     else:
@@ -1462,29 +1940,82 @@ def apply_migration(
                         repr_kind=None,
                         writer="consist.migrate",
                     )
-                elif art.container_uri.strip():
-                    obs_id = ledger.record_observation(
-                        Observation(
-                            location=Location(
-                                uri=art.container_uri.strip(),
-                                member=member,
+                    if ingested_db_loc is not None:
+                        ledger.record_observation(
+                            Observation(
+                                location=Location(
+                                    uri=ingested_db_loc[0],
+                                    member=ingested_db_loc[1],
+                                ),
+                                identity=identity,
+                                access_driver=art.driver or "dlt",
+                                witness=None,
+                                basis="declared",
+                                site=site,
+                                observed_at_ns=obs_ts_ns + 2,
                             ),
-                            identity=identity,
-                            access_driver=art.driver,
-                            witness=None,
-                            basis="declared",
-                            site=site,
-                            observed_at_ns=obs_ts_ns,
-                        ),
-                        repr_kind=None,
-                        writer="consist.migrate",
-                    )
-                    if cls.cold_path_overwritten or cls.basis == "overwritten_cold":
-                        ledger.record_location_event(
-                            observation_id=obs_id,
-                            status="evicted",
-                            status_rank=2,
-                            at_ns=obs_ts_ns + 1,
+                            repr_kind=None,
+                            writer="consist.migrate",
+                        )
+                else:
+                    raw_uri = art.container_uri.strip()
+                    if raw_uri and not raw_uri.lower().startswith("db://"):
+                        obs_id = ledger.record_observation(
+                            Observation(
+                                location=Location(
+                                    uri=raw_uri,
+                                    member=member,
+                                ),
+                                identity=identity,
+                                access_driver=art.driver,
+                                witness=None,
+                                basis="declared",
+                                site=site,
+                                observed_at_ns=obs_ts_ns,
+                            ),
+                            repr_kind=None,
+                            writer="consist.migrate",
+                        )
+                        if cls.cold_path_overwritten or cls.basis == "overwritten_cold":
+                            ledger.record_location_event(
+                                observation_id=obs_id,
+                                status="evicted",
+                                status_rank=2,
+                                at_ns=obs_ts_ns + 1,
+                                writer="consist.migrate",
+                            )
+                    if ingested_db_loc is not None:
+                        ledger.record_observation(
+                            Observation(
+                                location=Location(
+                                    uri=ingested_db_loc[0],
+                                    member=ingested_db_loc[1],
+                                ),
+                                identity=identity,
+                                access_driver=art.driver or "dlt",
+                                witness=None,
+                                basis="declared",
+                                site=site,
+                                observed_at_ns=obs_ts_ns + 2,
+                            ),
+                            repr_kind=None,
+                            writer="consist.migrate",
+                        )
+                    elif raw_uri and raw_uri.lower().startswith("db://"):
+                        ledger.record_observation(
+                            Observation(
+                                location=Location(
+                                    uri=raw_uri,
+                                    member=member,
+                                ),
+                                identity=identity,
+                                access_driver=art.driver,
+                                witness=None,
+                                basis="declared",
+                                site=site,
+                                observed_at_ns=obs_ts_ns,
+                            ),
+                            repr_kind=None,
                             writer="consist.migrate",
                         )
 
@@ -1522,29 +2053,85 @@ def apply_migration(
                     sig_val = None
                     sig_scheme = None
 
-                extra_run_meta: dict[str, Any] = {}
+                cleaned_run_meta = {
+                    str(k): v
+                    for k, v in run.meta.items()
+                    if not str(k).startswith("_dlt_")
+                }
                 if run.stage is not None:
-                    extra_run_meta["stage"] = run.stage
+                    cleaned_run_meta.setdefault("stage", run.stage)
                 if run.phase is not None:
-                    extra_run_meta["phase"] = run.phase
-                if run.facet is not None:
-                    extra_run_meta["facet"] = run.facet
+                    cleaned_run_meta.setdefault("phase", run.phase)
                 if run.signature is not None and sig_val is None:
-                    extra_run_meta["v1_signature"] = run.signature
+                    cleaned_run_meta.setdefault("v1_signature", run.signature)
 
-                v2_run_meta = json.loads(
-                    json.dumps(
-                        {
-                            **extra_run_meta,
-                            **{
-                                str(k): v
-                                for k, v in run.meta.items()
-                                if not str(k).startswith("_dlt_")
-                            },
-                        },
-                        default=str,
+                kv_rows_for_run = run_config_kv.get(run.id, ())
+                raw_cf_id = (
+                    cleaned_run_meta.get("config_facet_id")
+                    or cleaned_run_meta.get("facet_id")
+                    or next(
+                        (
+                            kv.facet_id
+                            for kv in kv_rows_for_run
+                            if kv.facet_id is not None
+                        ),
+                        None,
                     )
                 )
+                cf_id = (
+                    str(raw_cf_id).strip()
+                    if raw_cf_id is not None and str(raw_cf_id).strip()
+                    else None
+                )
+                cf_rec = config_facets.get(cf_id) if cf_id is not None else None
+
+                merged_run_facet: dict[str, Any] = {}
+                if cf_rec is not None and cf_rec.facet_json:
+                    merged_run_facet.update(cf_rec.facet_json)
+                if isinstance(cleaned_run_meta.get("facet"), Mapping):
+                    merged_run_facet.update(cleaned_run_meta["facet"])
+                if run.facet is not None:
+                    merged_run_facet.update(run.facet)
+                for kv_rec in kv_rows_for_run:
+                    unflatten_facet_key_path(
+                        merged_run_facet,
+                        kv_rec.key,
+                        kv_rec.value,
+                    )
+
+                if merged_run_facet:
+                    cleaned_run_meta["facet"] = merged_run_facet
+                if cf_id is not None:
+                    cleaned_run_meta.setdefault("config_facet_id", cf_id)
+                if cf_rec is not None:
+                    if cf_rec.namespace:
+                        cleaned_run_meta.setdefault(
+                            "facet_namespace",
+                            cf_rec.namespace,
+                        )
+                    if cf_rec.schema_version:
+                        cleaned_run_meta.setdefault(
+                            "facet_schema_version",
+                            cf_rec.schema_version,
+                        )
+                    if cf_rec.schema_name:
+                        cleaned_run_meta.setdefault(
+                            "config_facet_schema_name",
+                            cf_rec.schema_name,
+                        )
+                elif kv_rows_for_run:
+                    first_ns = next(
+                        (
+                            kv.namespace
+                            for kv in kv_rows_for_run
+                            if kv.namespace is not None and kv.namespace
+                        ),
+                        None,
+                    )
+                    if first_ns is not None:
+                        cleaned_run_meta.setdefault("facet_namespace", first_ns)
+
+                v2_run_meta = json.loads(json.dumps(cleaned_run_meta, default=str))
                 ledger.record_run(
                     run_id=run.id,
                     model_name=run.model_name,
@@ -1553,8 +2140,11 @@ def apply_migration(
                     description=run.description,
                     year=run.year,
                     iteration=run.iteration,
+                    stage=run.stage,
+                    phase=run.phase,
                     parent_run_id=run.parent_run_id,
                     code_hash=run.git_hash,
+                    git_hash=run.git_hash,
                     config_hash=run.config_hash,
                     input_hash=run.input_hash,
                     signature=sig_val,
@@ -1564,6 +2154,7 @@ def apply_migration(
                     started_at=run.started_at,
                     ended_at=run.ended_at,
                     created_at=run.created_at or now_utc,
+                    updated_at=run.updated_at,
                 )
                 recorded_run_ids.add(run.id)
 
@@ -1614,12 +2205,193 @@ def apply_migration(
 
                 for art_id, raw_dir in run_links:
                     norm_dir: Literal["input", "output", "depends_on"] = (
-                        "input" if raw_dir in ("input", "depends_on") else "output"
+                        "input"
+                        if raw_dir == "input"
+                        else ("depends_on" if raw_dir == "depends_on" else "output")
                     )
                     _insert_binding(norm_dir, art_id)
                     art_rec = art_by_id[art_id]
-                    if norm_dir == "input" and art_rec.run_id == run_id:
+                    if norm_dir in ("input", "depends_on") and art_rec.run_id == run_id:
                         _insert_binding("output", art_id)
+
+            # 5. Copy operational tables (run_coupler_snapshot, run_binding_invocation, artifact_schema*)
+            if coupler_snapshots:
+                tx_cur.executemany(
+                    "INSERT INTO main.run_coupler_snapshot ("
+                    "run_id, phase, role_key, scenario_run_id, step_ordinal, "
+                    "artifact_id, producer_run_id, updated_at"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT (run_id, phase, role_key) DO UPDATE SET "
+                    "scenario_run_id = EXCLUDED.scenario_run_id, "
+                    "step_ordinal = EXCLUDED.step_ordinal, "
+                    "artifact_id = EXCLUDED.artifact_id, "
+                    "producer_run_id = EXCLUDED.producer_run_id, "
+                    "updated_at = EXCLUDED.updated_at",
+                    [
+                        [
+                            snap.run_id,
+                            snap.phase,
+                            snap.role_key,
+                            snap.scenario_run_id,
+                            snap.step_ordinal,
+                            snap.artifact_id,
+                            snap.producer_run_id,
+                            snap.updated_at or now_utc,
+                        ]
+                        for snap in coupler_snapshots
+                    ],
+                )
+
+            if binding_invocations:
+                tx_cur.executemany(
+                    "INSERT INTO main.run_binding_invocation ("
+                    "id, requested_run_id, execution_run_id, cache_source_run_id, "
+                    "cache_outcome, binding_json, created_at"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT (id) DO UPDATE SET "
+                    "requested_run_id = EXCLUDED.requested_run_id, "
+                    "execution_run_id = EXCLUDED.execution_run_id, "
+                    "cache_source_run_id = EXCLUDED.cache_source_run_id, "
+                    "cache_outcome = EXCLUDED.cache_outcome, "
+                    "binding_json = EXCLUDED.binding_json, "
+                    "created_at = EXCLUDED.created_at",
+                    [
+                        [
+                            inv.id,
+                            inv.requested_run_id,
+                            inv.execution_run_id,
+                            inv.cache_source_run_id,
+                            inv.cache_outcome,
+                            inv.binding_json,
+                            inv.created_at or now_utc,
+                        ]
+                        for inv in binding_invocations
+                    ],
+                )
+
+            if artifact_schemas is not None:
+                if artifact_schemas.schemas:
+                    tx_cur.executemany(
+                        "INSERT INTO main.artifact_schema ("
+                        "id, profile_version, summary_json, profile_json, created_at"
+                        ") VALUES (?, ?, ?, ?, ?) "
+                        "ON CONFLICT (id) DO UPDATE SET "
+                        "profile_version = EXCLUDED.profile_version, "
+                        "summary_json = EXCLUDED.summary_json, "
+                        "profile_json = EXCLUDED.profile_json, "
+                        "created_at = EXCLUDED.created_at",
+                        [
+                            [
+                                sch_rec.id,
+                                sch_rec.profile_version,
+                                json.dumps(
+                                    sch_rec.summary_json,
+                                    sort_keys=True,
+                                    separators=(",", ":"),
+                                ),
+                                (
+                                    json.dumps(
+                                        sch_rec.profile_json,
+                                        sort_keys=True,
+                                        separators=(",", ":"),
+                                    )
+                                    if sch_rec.profile_json is not None
+                                    else None
+                                ),
+                                sch_rec.created_at or now_utc,
+                            ]
+                            for sch_rec in artifact_schemas.schemas
+                        ],
+                    )
+                if artifact_schemas.fields:
+                    tx_cur.executemany(
+                        "INSERT INTO main.artifact_schema_field ("
+                        "schema_id, ordinal_position, name, logical_type, nullable, "
+                        "stats_json, is_enum, enum_values_json"
+                        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                        "ON CONFLICT (schema_id, name) DO UPDATE SET "
+                        "ordinal_position = EXCLUDED.ordinal_position, "
+                        "logical_type = EXCLUDED.logical_type, "
+                        "nullable = EXCLUDED.nullable, "
+                        "stats_json = EXCLUDED.stats_json, "
+                        "is_enum = EXCLUDED.is_enum, "
+                        "enum_values_json = EXCLUDED.enum_values_json",
+                        [
+                            [
+                                fld_rec.schema_id,
+                                fld_rec.ordinal_position,
+                                fld_rec.name,
+                                fld_rec.logical_type,
+                                fld_rec.nullable,
+                                (
+                                    json.dumps(
+                                        fld_rec.stats_json,
+                                        sort_keys=True,
+                                        separators=(",", ":"),
+                                    )
+                                    if fld_rec.stats_json is not None
+                                    else None
+                                ),
+                                fld_rec.is_enum,
+                                (
+                                    json.dumps(
+                                        fld_rec.enum_values_json,
+                                        separators=(",", ":"),
+                                    )
+                                    if fld_rec.enum_values_json is not None
+                                    else None
+                                ),
+                            ]
+                            for fld_rec in artifact_schemas.fields
+                        ],
+                    )
+                if artifact_schemas.observations:
+                    tx_cur.executemany(
+                        "INSERT INTO main.artifact_schema_observation ("
+                        "id, artifact_id, schema_id, run_id, source, sample_rows, observed_at"
+                        ") VALUES (?, ?, ?, ?, ?, ?, ?) "
+                        "ON CONFLICT (id) DO UPDATE SET "
+                        "artifact_id = EXCLUDED.artifact_id, "
+                        "schema_id = EXCLUDED.schema_id, "
+                        "run_id = EXCLUDED.run_id, "
+                        "source = EXCLUDED.source, "
+                        "sample_rows = EXCLUDED.sample_rows, "
+                        "observed_at = EXCLUDED.observed_at",
+                        [
+                            [
+                                obs_rec.id,
+                                obs_rec.artifact_id,
+                                obs_rec.schema_id,
+                                obs_rec.run_id,
+                                obs_rec.source,
+                                obs_rec.sample_rows,
+                                obs_rec.observed_at or now_utc,
+                            ]
+                            for obs_rec in artifact_schemas.observations
+                        ],
+                    )
+                if artifact_schemas.relations:
+                    tx_cur.executemany(
+                        "INSERT INTO main.artifact_schema_relation ("
+                        "schema_id, from_field, to_table, to_field, relationship_type, cardinality"
+                        ") VALUES (?, ?, ?, ?, ?, ?) "
+                        "ON CONFLICT (schema_id, from_field) DO UPDATE SET "
+                        "to_table = EXCLUDED.to_table, "
+                        "to_field = EXCLUDED.to_field, "
+                        "relationship_type = EXCLUDED.relationship_type, "
+                        "cardinality = EXCLUDED.cardinality",
+                        [
+                            [
+                                rel_rec.schema_id,
+                                rel_rec.from_field,
+                                rel_rec.to_table,
+                                rel_rec.to_field,
+                                rel_rec.relationship_type,
+                                rel_rec.cardinality,
+                            ]
+                            for rel_rec in artifact_schemas.relations
+                        ],
+                    )
 
 
 def verify_migration(
@@ -1742,7 +2514,11 @@ def verify_migration(
                 v2_con.execute(
                     "SELECT COUNT(*) FROM main.run r "
                     "JOIN main.run_binding rb ON r.id = rb.run_id "
-                    "WHERE r.cache_status = 'live' AND rb.anchor LIKE 'legacy-v1:unverified:%'"
+                    "LEFT JOIN main.anchor_promotion ap "
+                    "ON ap.historical_anchor = rb.anchor "
+                    "AND ap.basis IN ('v1_fast_recomputed', 'caller_supplied_match') "
+                    "WHERE r.cache_status = 'live' "
+                    "AND COALESCE(ap.verified_anchor, rb.anchor) LIKE 'legacy-v1:unverified:%'"
                 ).fetchone()
                 or (0,)
             )[0]
@@ -1823,11 +2599,22 @@ def _choose_backup_path(v1_path: Path) -> Path:
 
 
 def activate_migration(v1_path: Path | str, v2_tmp_path: Path | str) -> Path:
-    """Copy `v1_path` to `.v1-backup-YYYY-MM-DD.duckdb` and atomically swap `v2_tmp_path` into place."""
+    """Checkpoint `v1_path`, copy `.v1-backup-YYYY-MM-DD.duckdb`, unlink residual WAL, and swap `v2_tmp_path`."""
     resolved_v1 = Path(v1_path).expanduser().resolve()
     resolved_tmp = Path(v2_tmp_path).expanduser().resolve()
+    if resolved_v1.exists():
+        try:
+            with duckdb.connect(str(resolved_v1)) as v1_con:
+                v1_con.execute("CHECKPOINT")
+        except duckdb.Error:
+            pass
     backup_path = _choose_backup_path(resolved_v1)
     shutil.copy2(resolved_v1, backup_path)
+    for wal_candidate in (Path(f"{resolved_v1}.wal"), Path(f"{resolved_tmp}.wal")):
+        try:
+            wal_candidate.unlink(missing_ok=True)
+        except OSError:
+            pass
     os.replace(resolved_tmp, resolved_v1)
     try:
         Path(f"{resolved_v1}.wal").unlink(missing_ok=True)
@@ -1996,111 +2783,274 @@ def undo_migration(
         return backup_path
 
 
+class PromotionError(ConsistError, ValueError):
+    """Raised when historical artifact or run promotion fails validation."""
+
+
+@dataclass(frozen=True, slots=True)
+class _PromotionTargetInfo:
+    artifact_id: uuid.UUID
+    key: str
+    historical_anchor: Digest
+    driver: str
+    v1_hash: str | None
+    table_path: str | None
+    array_path: str | None
+    audit_basis: str | None
+    v1_container_uri: str | None
+
+
+def _inspect_artifact_promotion_info(
+    cur: duckdb.DuckDBPyConnection,
+    art_row: tuple[Any, ...],
+) -> _PromotionTargetInfo:
+    art_id = (
+        art_row[0] if isinstance(art_row[0], uuid.UUID) else uuid.UUID(str(art_row[0]))
+    )
+    key_str = str(art_row[1] or "")
+    anchor_digest = Digest.parse(str(art_row[2]))
+    if anchor_digest.kind is not Kind.HISTORICAL:
+        raise PromotionError(
+            f"Artifact {art_id} already has a verified anchor ({anchor_digest}); "
+            "only historical ('legacy-v1:unverified:*') anchors can be promoted."
+        )
+    driver = str(art_row[3] or "file")
+
+    audit_row = cur.execute(
+        "SELECT v1_row_json, basis FROM main.artifact_migration_audit WHERE artifact_id = ?",
+        [art_id],
+    ).fetchone()
+    v1_hash: str | None = None
+    table_path: str | None = None
+    array_path: str | None = None
+    audit_basis: str | None = None
+    v1_container_uri: str | None = None
+    if audit_row is not None:
+        if audit_row[1] is not None:
+            audit_basis = str(audit_row[1])
+        if audit_row[0]:
+            try:
+                parsed_v1 = json.loads(str(audit_row[0]))
+                if isinstance(parsed_v1, Mapping):
+                    if isinstance(parsed_v1.get("hash"), str):
+                        v1_hash = parsed_v1["hash"]
+                    if isinstance(parsed_v1.get("table_path"), str):
+                        table_path = parsed_v1["table_path"]
+                    if isinstance(parsed_v1.get("array_path"), str):
+                        array_path = parsed_v1["array_path"]
+                    if isinstance(parsed_v1.get("container_uri"), str):
+                        v1_container_uri = parsed_v1["container_uri"]
+            except ValueError:
+                pass
+    if v1_hash is None and _is_64_hex(anchor_digest.hex):
+        v1_hash = anchor_digest.hex
+
+    return _PromotionTargetInfo(
+        artifact_id=art_id,
+        key=key_str,
+        historical_anchor=anchor_digest,
+        driver=driver,
+        v1_hash=v1_hash,
+        table_path=table_path,
+        array_path=array_path,
+        audit_basis=audit_basis,
+        v1_container_uri=v1_container_uri,
+    )
+
+
 def _resolve_promotion_target(
-    con: duckdb.DuckDBPyConnection,
+    cur: duckdb.DuckDBPyConnection,
     target: uuid.UUID | str,
-) -> tuple[uuid.UUID, Digest, str, str | None, str | None, str | None]:
-    """Return `(artifact_id, historical_anchor, driver, v1_hash, table_path, array_path)`."""
+) -> _PromotionTargetInfo | None:
+    """Resolve `target` as `<historical-anchor>`, `<artifact-id>`, or `<artifact-key>`, or return `None`."""
     raw_target = str(target).strip()
+    if not raw_target:
+        return None
     queries: list[tuple[str, list[Any]]] = []
     if raw_target.startswith("legacy-v1:unverified:"):
+        Digest.parse(raw_target)
         queries.append(("anchor = ? ORDER BY created_at DESC", [raw_target]))
     try:
         target_uuid = target if isinstance(target, uuid.UUID) else uuid.UUID(raw_target)
         queries.append(("id = ?", [target_uuid]))
     except ValueError:
         pass
-    queries.extend(
-        [
-            (
-                "key = ? AND anchor LIKE 'legacy-v1:unverified:%' "
-                "AND anchor NOT IN (SELECT historical_anchor FROM main.anchor_promotion) "
-                "ORDER BY created_at DESC",
-                [raw_target],
-            ),
-            (
-                "key = ? AND anchor LIKE 'legacy-v1:unverified:%' ORDER BY created_at DESC",
-                [raw_target],
-            ),
-            ("key = ? ORDER BY created_at DESC", [raw_target]),
-        ]
-    )
+    if not raw_target.startswith("legacy-v1:unverified:"):
+        queries.extend(
+            [
+                (
+                    "key = ? AND anchor LIKE 'legacy-v1:unverified:%' "
+                    "AND anchor NOT IN (SELECT historical_anchor FROM main.anchor_promotion) "
+                    "ORDER BY created_at DESC",
+                    [raw_target],
+                ),
+                (
+                    "key = ? AND anchor LIKE 'legacy-v1:unverified:%' ORDER BY created_at DESC",
+                    [raw_target],
+                ),
+                ("key = ? ORDER BY created_at DESC", [raw_target]),
+            ]
+        )
 
-    art_row: tuple[Any, ...] | None = None
-    for idx, (clause, params) in enumerate(queries):
-        art_row = con.execute(
-            f"SELECT id, anchor, driver FROM main.artifact WHERE {clause} LIMIT 1",
+    for clause, params in queries:
+        art_row = cur.execute(
+            f"SELECT id, key, anchor, driver FROM main.artifact WHERE {clause} LIMIT 1",
             params,
         ).fetchone()
         if art_row is not None:
-            break
-        if idx == 0 and raw_target.startswith("legacy-v1:unverified:"):
-            hist_digest = Digest.parse(raw_target)
-            return (uuid.uuid4(), hist_digest, "file", hist_digest.hex, None, None)
-
-    if art_row is None:
-        raise ConsistError(
-            f"Could not find historical artifact matching target {raw_target!r}."
-        )
-
-    art_id = (
-        art_row[0] if isinstance(art_row[0], uuid.UUID) else uuid.UUID(str(art_row[0]))
-    )
-    anchor_digest = Digest.parse(str(art_row[1]))
-    if anchor_digest.kind is not Kind.HISTORICAL:
-        raise ConsistError(
-            f"Artifact {art_id} already has a verified anchor ({anchor_digest}); "
-            "only historical ('legacy-v1:unverified:*') anchors can be promoted."
-        )
-    driver = str(art_row[2] or "file")
-
-    audit_row = con.execute(
-        "SELECT v1_row_json FROM main.artifact_migration_audit WHERE artifact_id = ?",
-        [art_id],
-    ).fetchone()
-    v1_hash: str | None = None
-    table_path: str | None = None
-    array_path: str | None = None
-    if audit_row is not None and audit_row[0]:
-        try:
-            parsed_v1 = json.loads(str(audit_row[0]))
-            if isinstance(parsed_v1, Mapping):
-                if isinstance(parsed_v1.get("hash"), str):
-                    v1_hash = parsed_v1["hash"]
-                if isinstance(parsed_v1.get("table_path"), str):
-                    table_path = parsed_v1["table_path"]
-                if isinstance(parsed_v1.get("array_path"), str):
-                    array_path = parsed_v1["array_path"]
-        except ValueError:
-            pass
-    if v1_hash is None and _is_64_hex(anchor_digest.hex):
-        v1_hash = anchor_digest.hex
-
-    return (art_id, anchor_digest, driver, v1_hash, table_path, array_path)
+            return _inspect_artifact_promotion_info(cur, art_row)
+    return None
 
 
-def promote_historical_artifact(
-    db_path_or_ledger: Path | str | StoreLedger,
-    target: uuid.UUID | str,
+def _resolve_stored_candidate_path(
+    cur: duckdb.DuckDBPyConnection,
+    info: _PromotionTargetInfo,
+    effective_mounts: Mapping[str, Mount],
     *,
-    path: Path | str,
-    asserted: bool = False,
-    asserted_by: str | None = None,
-    expected_digest: Digest | str | None = None,
-    site: str = "local",
-    mounts: Sequence[Mount] | Mapping[str, Mount | Path | str] | None = None,
+    search_root: Path | None = None,
+) -> Path | None:
+    loc_rows = cur.execute(
+        "SELECT uri FROM main.artifact_location_current "
+        "WHERE anchor = ? AND status = 'active' "
+        "ORDER BY observed_at_ns DESC",
+        [str(info.historical_anchor)],
+    ).fetchall()
+    raw_uris = [str(r[0]).strip() for r in loc_rows if r[0]]
+    if info.v1_container_uri and info.v1_container_uri.strip() not in raw_uris:
+        raw_uris.append(info.v1_container_uri.strip())
+
+    for uri in raw_uris:
+        if not uri or uri.lower().startswith("db://"):
+            continue
+        resolved, _ = resolve_uri_to_path(uri, effective_mounts)
+        if resolved is not None and resolved.exists():
+            return resolved
+        if "://" not in uri:
+            raw_p = Path(uri).expanduser()
+            if raw_p.is_absolute() and raw_p.exists():
+                return raw_p.resolve()
+            if not raw_p.is_absolute() and search_root is not None:
+                cand = (search_root / raw_p).resolve()
+                if cand.exists():
+                    return cand
+    return None
+
+
+def _upgrade_eligible_historical_runs(
+    ledger: StoreLedger,
+    *,
+    candidate_run_ids: Sequence[str],
+    require_non_trivial: bool = False,
+) -> list[str]:
+    """Compute `sig-v2` and mark `cache_status='live'` for eligible completed historical runs."""
+    unique_run_ids = sorted(
+        {str(r).strip() for r in candidate_run_ids if str(r).strip()}
+    )
+    if not unique_run_ids:
+        return []
+
+    upgraded: list[str] = []
+    with ledger.exec_cursor() as cur:
+        hist_runs = cur.execute(
+            "SELECT id, code_hash, git_hash, config_hash FROM main.run "
+            "WHERE id IN (SELECT UNNEST(?)) "
+            "AND cache_status = 'historical' AND status = 'completed' "
+            "ORDER BY id ASC",
+            [unique_run_ids],
+        ).fetchall()
+        for raw_run_id, raw_code_hash, raw_git_hash, raw_config_hash in hist_runs:
+            run_id = str(raw_run_id)
+            bind_rows = cur.execute(
+                "SELECT rb.direction, rb.slot, rb.ordinal, "
+                "COALESCE(ap.verified_anchor, rb.anchor) AS resolved_anchor "
+                "FROM main.run_binding rb "
+                "LEFT JOIN main.anchor_promotion ap "
+                "ON ap.historical_anchor = rb.anchor "
+                "AND ap.basis IN ('v1_fast_recomputed', 'caller_supplied_match') "
+                "WHERE rb.run_id = ? "
+                "ORDER BY rb.occurrence_index ASC, rb.ordinal ASC",
+                [run_id],
+            ).fetchall()
+            prod_rows = cur.execute(
+                "SELECT COALESCE(ap.verified_anchor, a.anchor) AS resolved_anchor "
+                "FROM main.artifact a "
+                "LEFT JOIN main.anchor_promotion ap "
+                "ON ap.historical_anchor = a.anchor "
+                "AND ap.basis IN ('v1_fast_recomputed', 'caller_supplied_match') "
+                "WHERE a.run_id = ?",
+                [run_id],
+            ).fetchall()
+
+            if (
+                require_non_trivial
+                and not bind_rows
+                and not prod_rows
+                and raw_code_hash is None
+                and raw_git_hash is None
+                and raw_config_hash is None
+            ):
+                continue
+
+            all_resolved_strs = [str(r[3]) for r in bind_rows] + [
+                str(r[0]) for r in prod_rows
+            ]
+            all_verified = True
+            for a_str in all_resolved_strs:
+                try:
+                    parsed_d = Digest.parse(a_str)
+                except ValueError:
+                    all_verified = False
+                    break
+                if parsed_d.kind is Kind.HISTORICAL:
+                    all_verified = False
+                    break
+            if not all_verified:
+                continue
+
+            input_slot_anchors: list[tuple[str, int, str]] = [
+                (
+                    f"depends_on:{slot}"
+                    if str(direction) == "depends_on"
+                    else str(slot),
+                    int(ordinal),
+                    str(res_anchor),
+                )
+                for direction, slot, ordinal, res_anchor in bind_rows
+                if str(direction) in ("input", "depends_on")
+            ]
+            code_identity = (
+                str(raw_code_hash)
+                if raw_code_hash is not None
+                else (str(raw_git_hash) if raw_git_hash is not None else None)
+            )
+            config_hash = str(raw_config_hash) if raw_config_hash is not None else None
+            new_input_hash, new_sig = compute_sig_v2(
+                code_identity,
+                config_hash,
+                input_slot_anchors,
+            )
+            cur.execute(
+                "UPDATE main.run "
+                "SET input_hash = ?, signature = ?, signature_scheme = 'sig-v2', "
+                "cache_status = 'live' "
+                "WHERE id = ?",
+                [new_input_hash, new_sig, run_id],
+            )
+            upgraded.append(run_id)
+    return upgraded
+
+
+def _promote_single_info(
+    ledger: StoreLedger,
+    info: _PromotionTargetInfo,
+    *,
+    candidate_path: Path | str | None,
+    asserted: bool,
+    asserted_by: str | None,
+    expected_digest: Digest | str | None,
+    site: str,
+    effective_mounts: Mapping[str, Mount],
 ) -> tuple[Digest, Digest, str]:
-    """Promote a `Kind.HISTORICAL` (`legacy-v1:unverified:<hex>`) tombstone to a verified anchor.
-
-    Returns `(historical_anchor, verified_anchor, basis)`.
-    """
-    local_path = Path(path).expanduser().resolve()
-    if not local_path.exists():
-        raise FileNotFoundError(
-            f"Promotion candidate path does not exist: {local_path}"
-        )
-
-    mount_map = _normalize_mounts(mounts)
     parsed_expected: Digest | None = (
         (
             Digest.parse(expected_digest)
@@ -2110,109 +3060,399 @@ def promote_historical_artifact(
         if expected_digest is not None
         else None
     )
+    if parsed_expected is not None and parsed_expected.kind is Kind.HISTORICAL:
+        raise PromotionError(
+            f"expected_digest must be a verifiable digest, got {parsed_expected}"
+        )
+
+    local_path: Path | None
+    if candidate_path is not None:
+        local_path = Path(candidate_path).expanduser()
+        if not local_path.exists():
+            if info.audit_basis == "racy_fast_stat":
+                raise PromotionError(
+                    f"Cannot promote racy_fast_stat artifact {info.artifact_id} "
+                    f"({info.historical_anchor}): content bytes do not exist at '{local_path}'."
+                )
+            raise FileNotFoundError(
+                f"Promotion candidate path does not exist: {local_path}"
+            )
+        local_path = (
+            local_path.parent.resolve() / local_path.name
+            if local_path.is_dir()
+            else local_path.resolve()
+        )
+    else:
+        with ledger.exec_cursor() as cur:
+            local_path = _resolve_stored_candidate_path(
+                cur,
+                info,
+                effective_mounts,
+            )
+        if local_path is None or not local_path.exists():
+            raise PromotionError(
+                f"Cannot promote historical artifact {info.artifact_id} "
+                f"({info.historical_anchor}): full content bytes do not exist on disk."
+            )
+
+    member = info.table_path or info.array_path
+    if parsed_expected is not None:
+        scheme = parsed_expected.scheme
+    elif local_path.is_dir():
+        scheme = "sha256:manifest-v1"
+    elif info.table_path:
+        scheme = "ctd1:sha256"
+    elif info.array_path:
+        scheme = "sha256:logical_matrix:v1"
+    else:
+        scheme = "sha256:file"
+
+    verified_anchor, witness = compute_scheme_digest(
+        local_path,
+        scheme,
+        driver=info.driver,
+        member=member,
+        ledger=ledger,
+    )
+    witness_is_racy = isinstance(witness, (FileStat, DirTreeStat)) and witness.racy
+    if (
+        info.audit_basis == "racy_fast_stat"
+        and witness_is_racy
+        and parsed_expected is None
+    ):
+        raise PromotionError(
+            f"Cannot promote racy_fast_stat artifact {info.artifact_id}: "
+            f"candidate '{local_path}' is still within the active racy stat window."
+        )
+
+    hist_anchor = info.historical_anchor
+    v1_hash = info.v1_hash
+
+    if parsed_expected is not None:
+        if verified_anchor != parsed_expected:
+            raise PromotionError(
+                f"Promotion digest mismatch for '{local_path}': expected {parsed_expected}, "
+                f"computed {verified_anchor}."
+            )
+        basis: Literal["v1_fast_recomputed", "caller_supplied_match", "asserted"] = (
+            "caller_supplied_match"
+        )
+        evidence: dict[str, Any] = {
+            "expected_digest": str(parsed_expected),
+            "path": str(local_path),
+        }
+    elif (
+        not local_path.is_dir()
+        and _is_64_hex(v1_hash)
+        and stat_v1_fast_file_hash(local_path)[0] == str(v1_hash).lower()
+    ):
+        basis = "v1_fast_recomputed"
+        evidence = {
+            "v1_fast_hash": str(v1_hash).lower(),
+            "path": str(local_path),
+        }
+    elif local_path.is_dir() and v1_hash is not None:
+        raw_v1 = str(v1_hash).strip()
+        dir_stat = stat_v1_fast_directory_hash(local_path)
+        if (_is_64_hex(raw_v1) and dir_stat.legacy_fast_hex == raw_v1.lower()) or (
+            dir_stat.stat_v2_observation == raw_v1
+        ):
+            basis = "v1_fast_recomputed"
+            evidence = {
+                "v1_fast_hash": raw_v1,
+                "path": str(local_path),
+            }
+        elif asserted and info.audit_basis != "racy_fast_stat":
+            basis = "asserted"
+            evidence = {"path": str(local_path)}
+        else:
+            raise PromotionError(
+                f"Candidate directory '{local_path}' does not match the original v1 fast-stat "
+                f"hash for {hist_anchor} and no --expected-digest was supplied."
+            )
+    elif asserted and info.audit_basis != "racy_fast_stat":
+        basis = "asserted"
+        evidence = {"path": str(local_path)}
+    else:
+        if info.audit_basis == "racy_fast_stat":
+            raise PromotionError(
+                f"Cannot promote racy_fast_stat artifact {info.artifact_id} ({hist_anchor}) "
+                f"from '{local_path}' without matching on-disk content or --expected-digest."
+            )
+        raise PromotionError(
+            f"Candidate file '{local_path}' does not match the original v1 fast-stat "
+            f"hash for {hist_anchor} and no --expected-digest was supplied. "
+            "Pass --asserted (asserted=True) to record an asserted location promotion."
+        )
+
+    repr_kind = (
+        "tree" if local_path.is_dir() else ("member" if member is not None else "file")
+    )
+    uri, matched_mount = virtualize_path(local_path, effective_mounts)
+    mount_inst_id = (
+        matched_mount.resolve_instance_id() if matched_mount is not None else None
+    )
+    obs_basis: Literal["computed", "declared"] = (
+        "declared" if basis == "asserted" else "computed"
+    )
+    obs = Observation(
+        location=Location(uri=uri, member=member),
+        identity=Identity(anchor=verified_anchor),
+        access_driver=info.driver,
+        witness=witness,
+        basis=obs_basis,
+        site=site,
+        mount_instance_id=mount_inst_id,
+        observed_at_ns=time.time_ns(),
+    )
+    promoted_ok = ledger.record_anchor_promotion(
+        hist_anchor,
+        verified_anchor,
+        basis=basis,
+        asserted_by=asserted_by,
+        evidence=evidence,
+    )
+    if not promoted_ok:
+        raise PromotionError(
+            f"Historical anchor {hist_anchor} is already promoted to a different "
+            f"verified anchor and cannot be re-promoted to {verified_anchor}."
+        )
+    ledger.record_observation(
+        obs,
+        repr_kind=repr_kind,
+        writer="consist.promote",
+    )
+    return (hist_anchor, verified_anchor, basis)
+
+
+def promote_historical_run(
+    db_path_or_ledger: Path | str | StoreLedger,
+    run_id: str,
+    *,
+    path: Path | str | None = None,
+    paths: Mapping[uuid.UUID | str, Path | str] | None = None,
+    asserted: bool = False,
+    asserted_by: str | None = None,
+    expected_digests: Mapping[uuid.UUID | str, Digest | str] | None = None,
+    site: str = "local",
+    mounts: Sequence[Mount] | Mapping[str, Mount | Path | str] | None = None,
+) -> list[tuple[Digest, Digest, str]]:
+    """Promote all historical input/output artifacts bound to `run_id` and upgrade `run_id` to `sig-v2` if eligible."""
+    clean_run_id = str(run_id).strip()
+    if not clean_run_id:
+        raise PromotionError("run_id must be a non-empty string")
+    mount_map = _normalize_mounts(mounts)
+
+    def _run_with_ledger(ledger: StoreLedger) -> list[tuple[Digest, Digest, str]]:
+        if mount_map:
+            ledger.mounts.update(mount_map)
+        effective_mounts = ledger.mounts
+
+        with ledger.transaction() as cur:
+            run_row = cur.execute(
+                "SELECT id FROM main.run WHERE id = ?",
+                [clean_run_id],
+            ).fetchone()
+            if run_row is None:
+                raise PromotionError(
+                    f"Could not find run {clean_run_id!r} for historical promotion."
+                )
+
+            art_rows = cur.execute(
+                "SELECT DISTINCT a.id, a.key, a.anchor, a.driver, a.created_at "
+                "FROM main.artifact a "
+                "LEFT JOIN main.run_binding rb ON rb.artifact_id = a.id AND rb.run_id = ? "
+                "WHERE (rb.run_id = ? OR a.run_id = ?) "
+                "AND a.anchor LIKE 'legacy-v1:unverified:%' "
+                "ORDER BY a.created_at ASC, a.id ASC",
+                [clean_run_id, clean_run_id, clean_run_id],
+            ).fetchall()
+
+            search_dir: Path | None = None
+            single_override_path: Path | str | None = None
+            if path is not None:
+                p_obj = Path(path).expanduser()
+                if p_obj.exists() and p_obj.is_dir() and len(art_rows) != 1:
+                    search_dir = p_obj.resolve()
+                elif len(art_rows) == 1:
+                    single_override_path = path
+                elif p_obj.exists() and p_obj.is_dir():
+                    search_dir = p_obj.resolve()
+                else:
+                    single_override_path = path
+
+            results: list[tuple[Digest, Digest, str]] = []
+            for raw_row in art_rows:
+                info = _inspect_artifact_promotion_info(cur, raw_row[:4])
+                existing_promo = cur.execute(
+                    "SELECT verified_anchor, basis FROM main.anchor_promotion "
+                    "WHERE historical_anchor = ? "
+                    "AND basis IN ('v1_fast_recomputed', 'caller_supplied_match')",
+                    [str(info.historical_anchor)],
+                ).fetchone()
+
+                cand_path: Path | str | None = single_override_path
+                if paths is not None:
+                    for lookup_key in (
+                        info.artifact_id,
+                        str(info.artifact_id),
+                        info.key,
+                        str(info.historical_anchor),
+                    ):
+                        if lookup_key in paths:
+                            cand_path = paths[lookup_key]
+                            break
+                if cand_path is None and search_dir is not None:
+                    cand_path = _resolve_stored_candidate_path(
+                        cur,
+                        info,
+                        effective_mounts,
+                        search_root=search_dir,
+                    )
+
+                exp_dig: Digest | str | None = None
+                if expected_digests is not None:
+                    for lookup_key in (
+                        info.artifact_id,
+                        str(info.artifact_id),
+                        info.key,
+                        str(info.historical_anchor),
+                    ):
+                        if lookup_key in expected_digests:
+                            exp_dig = expected_digests[lookup_key]
+                            break
+
+                if existing_promo is not None and cand_path is None and exp_dig is None:
+                    stored_cand = _resolve_stored_candidate_path(
+                        cur,
+                        info,
+                        effective_mounts,
+                    )
+                    if stored_cand is None or not stored_cand.exists():
+                        results.append(
+                            (
+                                info.historical_anchor,
+                                Digest.parse(str(existing_promo[0])),
+                                str(existing_promo[1]),
+                            )
+                        )
+                        continue
+
+                promo_res = _promote_single_info(
+                    ledger,
+                    info,
+                    candidate_path=cand_path,
+                    asserted=asserted,
+                    asserted_by=asserted_by,
+                    expected_digest=exp_dig,
+                    site=site,
+                    effective_mounts=effective_mounts,
+                )
+                results.append(promo_res)
+
+            _upgrade_eligible_historical_runs(
+                ledger,
+                candidate_run_ids=[clean_run_id],
+            )
+            return results
+
+    if isinstance(db_path_or_ledger, StoreLedger):
+        return _run_with_ledger(db_path_or_ledger)
+
+    with StoreLedger(
+        db_path_or_ledger, mounts=mount_map, writer="consist.promote"
+    ) as led:
+        return _run_with_ledger(led)
+
+
+def promote_historical_artifact(
+    db_path_or_ledger: Path | str | StoreLedger,
+    target: uuid.UUID | str,
+    *,
+    path: Path | str | None = None,
+    asserted: bool = False,
+    asserted_by: str | None = None,
+    expected_digest: Digest | str | None = None,
+    site: str = "local",
+    mounts: Sequence[Mount] | Mapping[str, Mount | Path | str] | None = None,
+) -> tuple[Digest, Digest, str]:
+    """Promote a historical `<artifact-id>`, `<historical-anchor>`, `<key>`, or `<run-id>`.
+
+    Returns `(historical_anchor, verified_anchor, basis)` and upgrades any completed
+    historical runs whose bound inputs and outputs are now all verified to `sig-v2`.
+    """
+    mount_map = _normalize_mounts(mounts)
 
     def _run_with_ledger(ledger: StoreLedger) -> tuple[Digest, Digest, str]:
         if mount_map:
             ledger.mounts.update(mount_map)
         effective_mounts = ledger.mounts
 
-        _art_id, hist_anchor, driver, v1_hash, table_path, array_path = (
-            _resolve_promotion_target(ledger.connection, target)
-        )
-        member = table_path or array_path
-
-        if parsed_expected is not None:
-            scheme = parsed_expected.scheme
-        elif local_path.is_dir():
-            scheme = "sha256:manifest-v1"
-        elif table_path:
-            scheme = "ctd1:sha256"
-        elif array_path:
-            scheme = "sha256:logical_matrix:v1"
-        else:
-            scheme = "sha256:file"
-
-        verified_anchor, witness = compute_scheme_digest(
-            local_path,
-            scheme,
-            driver=driver,
-            member=member,
-            ledger=ledger,
-        )
-
-        if parsed_expected is not None:
-            if verified_anchor != parsed_expected:
-                raise ConsistError(
-                    f"Promotion digest mismatch for '{local_path}': expected {parsed_expected}, "
-                    f"computed {verified_anchor}."
+        with ledger.transaction() as cur:
+            info = _resolve_promotion_target(cur, target)
+            if info is not None:
+                res = _promote_single_info(
+                    ledger,
+                    info,
+                    candidate_path=path,
+                    asserted=asserted,
+                    asserted_by=asserted_by,
+                    expected_digest=expected_digest,
+                    site=site,
+                    effective_mounts=effective_mounts,
                 )
-            basis: Literal[
-                "v1_fast_recomputed", "caller_supplied_match", "asserted"
-            ] = "caller_supplied_match"
-            evidence: dict[str, Any] = {
-                "expected_digest": str(parsed_expected),
-                "path": str(local_path),
-            }
-        elif (
-            not local_path.is_dir()
-            and _is_64_hex(v1_hash)
-            and stat_v1_fast_file_hash(local_path)[0] == str(v1_hash).lower()
-        ):
-            basis = "v1_fast_recomputed"
-            evidence = {
-                "v1_fast_hash": str(v1_hash).lower(),
-                "path": str(local_path),
-            }
-        elif asserted:
-            basis = "asserted"
-            evidence = {"path": str(local_path)}
-        else:
-            raise ConsistError(
-                f"Candidate file '{local_path}' does not match the original v1 fast-stat "
-                f"hash for {hist_anchor} and no --expected-digest was supplied. "
-                "Pass --asserted (asserted=True) to record an asserted location promotion."
-            )
+                if res[2] in ("v1_fast_recomputed", "caller_supplied_match"):
+                    hist_str = str(info.historical_anchor)
+                    linked_run_rows = cur.execute(
+                        "SELECT DISTINCT run_id FROM ("
+                        "SELECT rb.run_id AS run_id FROM main.run_binding rb "
+                        "WHERE rb.anchor = ? OR rb.artifact_id = ? "
+                        "UNION "
+                        "SELECT a.run_id AS run_id FROM main.artifact a "
+                        "WHERE (a.anchor = ? OR a.id = ?) AND a.run_id IS NOT NULL"
+                        ") ORDER BY run_id ASC",
+                        [hist_str, info.artifact_id, hist_str, info.artifact_id],
+                    ).fetchall()
+                    _upgrade_eligible_historical_runs(
+                        ledger,
+                        candidate_run_ids=[str(r[0]) for r in linked_run_rows],
+                        require_non_trivial=True,
+                    )
+                return res
 
-        repr_kind = (
-            "tree"
-            if local_path.is_dir()
-            else ("member" if member is not None else "file")
-        )
-        uri, matched_mount = virtualize_path(local_path, effective_mounts)
-        mount_inst_id = (
-            matched_mount.resolve_instance_id() if matched_mount is not None else None
-        )
-        obs_basis: Literal["computed", "declared"] = (
-            "declared" if basis == "asserted" else "computed"
-        )
-        obs = Observation(
-            location=Location(uri=uri, member=member),
-            identity=Identity(anchor=verified_anchor),
-            access_driver=driver,
-            witness=witness,
-            basis=obs_basis,
-            site=site,
-            mount_instance_id=mount_inst_id,
-            observed_at_ns=time.time_ns(),
-        )
-        promoted_ok = ledger.record_anchor_promotion(
-            hist_anchor,
-            verified_anchor,
-            basis=basis,
-            asserted_by=asserted_by,
-            evidence=evidence,
-        )
-        if not promoted_ok:
-            raise ConsistError(
-                f"Historical anchor {hist_anchor} is already promoted to a different "
-                f"verified anchor and cannot be re-promoted to {verified_anchor}."
+            raw_target = str(target).strip()
+            if not isinstance(target, uuid.UUID) and not raw_target.startswith(
+                "legacy-v1:unverified:"
+            ):
+                run_row = cur.execute(
+                    "SELECT id FROM main.run WHERE id = ?",
+                    [raw_target],
+                ).fetchone()
+                if run_row is not None:
+                    exp_map: dict[uuid.UUID | str, Digest | str] | None = (
+                        {raw_target: expected_digest}
+                        if expected_digest is not None
+                        else None
+                    )
+                    run_results = promote_historical_run(
+                        ledger,
+                        raw_target,
+                        path=path,
+                        asserted=asserted,
+                        asserted_by=asserted_by,
+                        expected_digests=exp_map,
+                        site=site,
+                        mounts=mounts,
+                    )
+                    if not run_results:
+                        raise PromotionError(
+                            f"Run {raw_target!r} has no historical artifacts to promote."
+                        )
+                    return run_results[-1]
+
+            raise PromotionError(
+                f"Could not find historical artifact or run matching target {raw_target!r}."
             )
-        ledger.record_observation(
-            obs,
-            repr_kind=repr_kind,
-            writer="consist.promote",
-        )
-        return (hist_anchor, verified_anchor, basis)
 
     if isinstance(db_path_or_ledger, StoreLedger):
         return _run_with_ledger(db_path_or_ledger)
@@ -2267,6 +3507,7 @@ __all__ = [
     "MigrationPlan",
     "MigrationResult",
     "MigrationVerificationReport",
+    "PromotionError",
     "_migration_lock_context",
     "activate_migration",
     "apply_migration",
@@ -2277,6 +3518,7 @@ __all__ = [
     "plan_migration",
     "preflight_check_migration",
     "promote_historical_artifact",
+    "promote_historical_run",
     "undo_migration",
     "verify_migration",
 ]

@@ -4,24 +4,13 @@ import ast
 from datetime import datetime, timezone
 import os
 from pathlib import Path
-from typing import Any
 import uuid
 
 import duckdb
 import pytest
-from sqlalchemy import inspect
-from sqlalchemy.exc import IntegrityError, ProgrammingError
-from sqlalchemy.pool import NullPool
-from sqlmodel import SQLModel, create_engine
 
 import consist
 from consist.core.identity import IdentityManager
-from consist.core.persistence import (
-    ConsistError,
-    DatabaseManager,
-    DatabaseMigrationRequired,
-    IncompatibleSchemaError,
-)
 from consist.digest import Digest, Identity
 from consist.location import (
     FileStat,
@@ -36,13 +25,10 @@ from consist.migrations.v1 import (
     compute_v1_fast_file_hash,
     stat_v1_fast_file_hash,
 )
-from consist.models.artifact import Artifact as V1ORMArtifact
-from consist.models.artifact_facet import ArtifactFacet
-from consist.models.artifact_kv import ArtifactKV
-from consist.models.config_facet import ConfigFacet
-from consist.models.run import Run as V1ORMRun, RunArtifactLink
-from consist.models.run_config_kv import RunConfigKV
 from consist.store import (
+    ConsistError,
+    DatabaseMigrationRequired,
+    IncompatibleSchemaError,
     SchemaState,
     StoreLedger,
     V1_ONLY_TABLE_NAMES,
@@ -56,6 +42,7 @@ from consist.store import (
     init_v2_schema,
     inspect_v1_summary,
 )
+from tests.helpers.v1_db_builder import create_v1_schema
 
 
 def test_init_v2_schema_creates_all_tables_views_macro_and_tripwires(
@@ -144,34 +131,28 @@ def test_init_v2_schema_rolls_back_atomically_on_failure(
         assert tables == set()
 
 
-def _consist_v1_main_sqlmodel_tables() -> list[Any]:
-    """Return only Consist's built-in `consist.models.*` main-schema SQLModel tables."""
-    import consist.core.persistence  # noqa: F401
-
-    tables: dict[str, Any] = {}
-    queue = list(SQLModel.__subclasses__())
-    while queue:
-        cls = queue.pop()
-        queue.extend(cls.__subclasses__())
-        if not cls.__module__.startswith("consist.models"):
-            continue
-        table = cls.__dict__.get("__table__")
-        if table is not None and table.schema is None:
-            tables[table.name] = table
-    return list(tables.values())
+def _consist_v1_main_table_names() -> set[str]:
+    """Return all Consist `v0.4.2` Schema v1 main-schema table names via `v1_db_builder`."""
+    with duckdb.connect(":memory:") as con:
+        create_v1_schema(con)
+        return {
+            str(r[0])
+            for r in con.execute(
+                "SELECT table_name FROM duckdb_tables() WHERE schema_name = 'main'"
+            ).fetchall()
+        }
 
 
 def test_every_v1_sqlmodel_main_table_is_covered_by_v2_or_tripwires() -> None:
-    main_sqlmodel_tables = {t.name for t in _consist_v1_main_sqlmodel_tables()}
-    assert len(main_sqlmodel_tables) >= 8
+    main_v1_tables = _consist_v1_main_table_names()
+    assert len(main_v1_tables) >= 8
     covered = set(V2_TABLE_NAMES) | set(V2_VIEW_NAMES) | set(V1_ONLY_TABLE_NAMES)
-    missing = main_sqlmodel_tables - covered
+    missing = main_v1_tables - covered
     assert missing == set()
 
 
 def test_version_matrix_tripwire_defense_against_real_v2_database(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path = tmp_path / "real_v2.duckdb"
     with duckdb.connect(str(db_path)) as con:
@@ -189,97 +170,36 @@ def test_version_matrix_tripwire_defense_against_real_v2_database(
             ).fetchall()
         }
 
-    # 1. v0.4.2's DatabaseManager raises IncompatibleSchemaError before any DDL/writes.
-    with pytest.raises(IncompatibleSchemaError, match="schema version 2"):
-        DatabaseManager(str(db_path))
-
-    # 2. Simulated unpatched v0.4.1 (`SQLModel.metadata.create_all(engine)` without guard):
-    # `inspect(engine).has_table()` returns True for every v1 table because of the
-    # tripwire views, so `create_all` executes zero CREATE TABLE statements.
-    engine = create_engine(f"duckdb:///{db_path}", poolclass=NullPool)
-    try:
-        inspector = inspect(engine)
+    with duckdb.connect(str(db_path)) as con:
+        # 1. Every v1-only retired table exists as a read-only tripwire view (not a base table).
         for v1_table in V1_ONLY_TABLE_NAMES:
-            assert inspector.has_table(v1_table) is True
-            assert v1_table in inspector.get_view_names()
-            assert v1_table not in inspector.get_table_names()
+            assert v1_table in baseline_views
+            assert v1_table not in baseline_tables
 
-        main_v1_tables = _consist_v1_main_sqlmodel_tables()
-        SQLModel.metadata.create_all(engine, tables=main_v1_tables)
+        # 2. Replaying v1 `CREATE TABLE IF NOT EXISTS` DDL is absorbed by the tripwire views
+        # (creating zero new tables), while direct `CREATE TABLE` or legacy v1 queries/writes fail.
+        create_v1_schema(con)
 
-        # Any attempt to query/insert v1 columns on a tripwire view or v2 table fails at bind time.
-        with engine.connect() as conn:
-            with pytest.raises(
-                ProgrammingError, match="upgrade_to_consist_0_5|Binder Error"
-            ):
-                conn.exec_driver_sql(
-                    "SELECT id FROM config_facet WHERE namespace = 'a'"
-                )
-            with pytest.raises(ProgrammingError):
-                conn.exec_driver_sql("INSERT INTO artifact_kv VALUES ('id')")
-    finally:
-        engine.dispose()
+        with pytest.raises(duckdb.Error):
+            con.execute("CREATE TABLE config_facet (id VARCHAR)")
 
-    # Verify v0.4.1 skip_schema_init sync_run / sync_artifact also fail without mutating rows.
-    monkeypatch.setattr(
-        DatabaseManager,
-        "_check_compatible_schema_version",
-        lambda self: None,
-    )
-    db_no_init = DatabaseManager(str(db_path), skip_schema_init=True)
-    try:
-        with pytest.raises(
-            (ProgrammingError, IntegrityError),
-            match="facet|cache_status|Binder Error|NOT NULL",
-        ):
-            db_no_init.sync_run(
-                V1ORMRun(
-                    id="r1",
-                    model_name="m",
-                    status="running",
-                    config_hash="c",
-                    git_hash="g",
-                ),
-                require_success=True,
+        with pytest.raises(duckdb.Error, match="upgrade_to_consist_0_5|Binder Error"):
+            con.execute("SELECT id FROM config_facet WHERE namespace = 'a'")
+
+        with pytest.raises(duckdb.Error):
+            con.execute("INSERT INTO artifact_kv VALUES ('id')")
+
+        with pytest.raises(duckdb.Error):
+            con.execute(
+                "INSERT INTO config_facet VALUES ('f1', 'ns', 's', '1', '{}', now())"
             )
-        db_no_init.sync_artifact(
-            V1ORMArtifact(
-                key="k",
-                container_uri="workspace://x.parquet",
-                driver="parquet",
-                hash="a" * 64,
-            ),
-            "r1",
-            "output",
-        )
-    finally:
-        db_no_init.dispose()
 
-    # 3. Simulated older v0.3.x metadata (subset of SQLModel tables without
-    # `artifact_schema_observation`) ALSO skips CREATE TABLE for all V1_ONLY_TABLE_NAMES
-    # and fails on INSERT into a view.
-    v03_tables = [
-        SQLModel.metadata.tables[V1ORMRun.__tablename__],
-        SQLModel.metadata.tables[V1ORMArtifact.__tablename__],
-        SQLModel.metadata.tables[RunArtifactLink.__tablename__],
-        SQLModel.metadata.tables[ConfigFacet.__tablename__],
-        SQLModel.metadata.tables[RunConfigKV.__tablename__],
-        SQLModel.metadata.tables[ArtifactFacet.__tablename__],
-        SQLModel.metadata.tables[ArtifactKV.__tablename__],
-    ]
-    engine_v03 = create_engine(f"duckdb:///{db_path}", poolclass=NullPool)
-    try:
-        SQLModel.metadata.create_all(engine_v03, tables=v03_tables)
-        with engine_v03.begin() as conn:
-            with pytest.raises(
-                ProgrammingError,
-                match="not an? table|Cannot insert|view|upgrade_to_consist_0_5|Binder Error",
-            ):
-                conn.exec_driver_sql(
-                    "INSERT INTO config_facet VALUES ('f1', 'ns', 's', '1', '{}', now())"
-                )
-    finally:
-        engine_v03.dispose()
+        with pytest.raises(duckdb.Error):
+            con.execute(
+                "INSERT INTO artifact (id, key, container_uri, driver, hash) "
+                "VALUES (?, 'k', 'workspace://x.parquet', 'parquet', ?)",
+                [str(uuid.uuid4()), "a" * 64],
+            )
 
     with duckdb.connect(str(db_path), read_only=True) as con:
         after_tables = {
@@ -323,8 +243,10 @@ def test_detect_schema_all_states_and_live_ledger_lookup(
 
     # 4. V1 0.4.2 (with consist_schema.version = 1)
     v1_042_path = tmp_path / "v1_042.duckdb"
-    db_v1 = DatabaseManager(str(v1_042_path))
-    db_v1.dispose()
+    with duckdb.connect(str(v1_042_path)) as con:
+        create_v1_schema(con)
+        con.execute("CREATE TABLE consist_schema (version INTEGER)")
+        con.execute("INSERT INTO consist_schema VALUES (1)")
     assert detect_schema(v1_042_path) is SchemaState.V1
 
     # 5. V2 + in-process live ledger lookup avoiding read_only=True connection conflict
@@ -788,13 +710,13 @@ def test_v1_database_reader_across_minimal_v01_and_full_v042_schemas(
 
     # 2. Full v0.4.2 schema with artifact_content, run_artifact_dir_entry, and global_tables
     v042_path = tmp_path / "v042_full.duckdb"
-    db = DatabaseManager(str(v042_path))
-    db.dispose()
-
     art_id = uuid.uuid4()
     content_id = uuid.uuid4()
     now = datetime.now(timezone.utc)
     with duckdb.connect(str(v042_path)) as con:
+        create_v1_schema(con)
+        con.execute("CREATE TABLE consist_schema (version INTEGER)")
+        con.execute("INSERT INTO consist_schema VALUES (1)")
         con.execute(
             "INSERT INTO run (id, model_name, status, config_hash, git_hash, signature, "
             "tags, meta, started_at, created_at, updated_at, stage, phase) "
@@ -818,12 +740,6 @@ def test_v1_database_reader_across_minimal_v01_and_full_v042_schemas(
             "INSERT INTO run_artifact_link (run_id, artifact_id, direction, is_implicit) "
             "VALUES ('r_full', ?, 'output', true)",
             [str(art_id)],
-        )
-        con.execute(
-            "CREATE TABLE run_artifact_dir_entry ("
-            "artifact_id VARCHAR, run_id VARCHAR, rel_path VARCHAR, kind VARCHAR, "
-            "size BIGINT, sha256 VARCHAR, mtime_ns BIGINT"
-            ")"
         )
         con.execute(
             "INSERT INTO run_artifact_dir_entry VALUES (?, 'r_full', 'part-0.parquet', 'file', 512, ?, 999)",
@@ -1669,3 +1585,305 @@ def test_phase1_store_ledger_domain_crud_facets_and_select_only_queries(
                 ledger.query_df(forbidden_sql)
             with pytest.raises(ValueError, match="SELECT"):
                 ledger.query_rows(forbidden_sql, model=_RunSummaryRow)
+
+
+def test_v1_reader_phase2_naive_utc_int_kv_operational_tables_and_user_ddl(
+    tmp_path: Path,
+) -> None:
+    """Verify Phase 2 V1DatabaseReader extensions (Item 15)."""
+    from tests.helpers.v1_db_builder import (
+        insert_v1_artifact,
+        insert_v1_artifact_kv,
+        insert_v1_binding_invocation,
+        insert_v1_config_facet,
+        insert_v1_coupler_snapshot,
+        insert_v1_run,
+        insert_v1_run_config_kv,
+        insert_v1_schema_bundle,
+    )
+
+    # 1. Naive DuckDB `TIMESTAMP` (without timezone) columns normalize to timezone.utc
+    naive_db = tmp_path / "v1_naive_ts.duckdb"
+    art_id = uuid.uuid4()
+    obs_id = uuid.uuid4()
+    with duckdb.connect(str(naive_db)) as con:
+        con.execute(
+            """
+            CREATE TABLE run (
+                id VARCHAR PRIMARY KEY,
+                model_name VARCHAR NOT NULL,
+                status VARCHAR NOT NULL,
+                stage VARCHAR,
+                phase VARCHAR,
+                git_hash VARCHAR,
+                started_at TIMESTAMP,
+                ended_at TIMESTAMP,
+                created_at TIMESTAMP,
+                updated_at TIMESTAMP
+            );
+            CREATE TABLE artifact (
+                id UUID PRIMARY KEY,
+                key VARCHAR NOT NULL,
+                container_uri VARCHAR NOT NULL,
+                driver VARCHAR NOT NULL,
+                parent_artifact_id UUID,
+                created_at TIMESTAMP
+            );
+            CREATE TABLE artifact_schema (
+                id VARCHAR PRIMARY KEY,
+                profile_version INTEGER,
+                summary_json JSON,
+                created_at TIMESTAMP
+            );
+            CREATE TABLE artifact_schema_observation (
+                id UUID PRIMARY KEY,
+                artifact_id UUID NOT NULL,
+                schema_id VARCHAR NOT NULL,
+                source VARCHAR NOT NULL,
+                observed_at TIMESTAMP
+            );
+            INSERT INTO run VALUES (
+                'r_naive', 'beam', 'completed', 'calibration', 'iter_1', 'deadbeef',
+                '2025-03-10 08:00:00', '2025-03-10 08:30:00',
+                '2025-03-10 07:59:00', '2025-03-10 08:31:00'
+            );
+            """
+        )
+        parent_id = uuid.uuid4()
+        con.execute(
+            "INSERT INTO artifact VALUES (?, 'child_tbl', 'workspace://c.parquet', 'parquet', ?, '2025-03-10 08:15:00')",
+            [art_id, parent_id],
+        )
+        con.execute(
+            "INSERT INTO artifact_schema VALUES ('sch_1', 1, '{\"cols\":2}', '2025-03-10 08:16:00')"
+        )
+        con.execute(
+            "INSERT INTO artifact_schema_observation VALUES (?, ?, 'sch_1', 'file', '2025-03-10 08:17:00')",
+            [obs_id, art_id],
+        )
+
+    with V1DatabaseReader(naive_db) as reader:
+        run_rec = reader.read_runs()[0]
+        assert run_rec.stage == "calibration"
+        assert run_rec.phase == "iter_1"
+        assert run_rec.git_hash == "deadbeef"
+        assert run_rec.started_at == datetime(2025, 3, 10, 8, 0, 0, tzinfo=timezone.utc)
+        assert run_rec.ended_at == datetime(2025, 3, 10, 8, 30, 0, tzinfo=timezone.utc)
+        assert run_rec.created_at == datetime(
+            2025, 3, 10, 7, 59, 0, tzinfo=timezone.utc
+        )
+        assert run_rec.updated_at == datetime(
+            2025, 3, 10, 8, 31, 0, tzinfo=timezone.utc
+        )
+
+        art_rec = reader.read_artifacts()[0]
+        assert art_rec.parent_artifact_id == parent_id
+        assert art_rec.created_at == datetime(
+            2025, 3, 10, 8, 15, 0, tzinfo=timezone.utc
+        )
+
+        schemas = reader.read_artifact_schemas()
+        assert schemas.schemas[0].created_at == datetime(
+            2025, 3, 10, 8, 16, 0, tzinfo=timezone.utc
+        )
+        assert schemas.observations[0].observed_at == datetime(
+            2025, 3, 10, 8, 17, 0, tzinfo=timezone.utc
+        )
+
+    # 2. Full operational readers, integer KV preservation, and user schema DDL introspection
+    op_db = tmp_path / "v1_operational.duckdb"
+    parent_art_id = uuid.uuid4()
+    child_art_id = uuid.uuid4()
+    inv_id = uuid.uuid4()
+    with duckdb.connect(str(op_db)) as con:
+        create_v1_schema(con)
+        insert_v1_config_facet(
+            con,
+            facet_id="cf_1",
+            namespace="activitysim",
+            schema_name="AsimConfig",
+            schema_version="2.0",
+            facet_json={"households_sample_size": 5000},
+        )
+        insert_v1_run(
+            con,
+            run_id="r_op",
+            model_name="activitysim",
+            stage="main",
+            phase="step_2",
+            git_hash="abc1234",
+            meta={"config_facet_id": "cf_1"},
+        )
+        insert_v1_run_config_kv(
+            con,
+            run_id="r_op",
+            facet_id="cf_1",
+            namespace="activitysim",
+            key="num_processes",
+            value_type="int",
+            value_num=8.0,
+        )
+        insert_v1_run_config_kv(
+            con,
+            run_id="r_op",
+            facet_id="cf_1",
+            namespace="activitysim",
+            key="sample_rate",
+            value_type="float",
+            value_num=0.25,
+        )
+        insert_v1_run_config_kv(
+            con,
+            run_id="r_op",
+            facet_id="cf_1",
+            namespace="activitysim",
+            key="strict",
+            value_type="bool",
+            value_bool=True,
+        )
+        insert_v1_artifact(
+            con,
+            artifact_id=parent_art_id,
+            key="container_h5",
+            container_uri="workspace://store.h5",
+            driver="hdf5",
+            run_id="r_op",
+        )
+        insert_v1_artifact(
+            con,
+            artifact_id=child_art_id,
+            key="persons",
+            container_uri="workspace://store.h5",
+            table_path="/persons",
+            driver="h5_table",
+            parent_artifact_id=parent_art_id,
+            run_id="r_op",
+        )
+        insert_v1_artifact_kv(
+            con,
+            artifact_id=child_art_id,
+            facet_id="af_1",
+            namespace="urbansim",
+            key_path="row_count",
+            value_type="int",
+            value_num=4200.0,
+        )
+        insert_v1_artifact_kv(
+            con,
+            artifact_id=child_art_id,
+            facet_id="af_1",
+            namespace="urbansim",
+            key_path="scale_factor",
+            value_type="float",
+            value_num=1.5,
+        )
+        insert_v1_artifact_kv(
+            con,
+            artifact_id=child_art_id,
+            facet_id="af_1",
+            namespace="urbansim",
+            key_path="validated",
+            value_type="bool",
+            value_bool=True,
+        )
+        insert_v1_coupler_snapshot(
+            con,
+            run_id="r_op",
+            phase="post",
+            slot_key="persons",
+            artifact_id=child_art_id,
+            step_ordinal=2,
+        )
+        insert_v1_binding_invocation(
+            con,
+            invocation_id=inv_id,
+            requested_run_id="r_req",
+            execution_run_id="r_op",
+            cache_source_run_id="r_op",
+            cache_outcome="hit",
+            binding_json='{"persons":"anchor1"}',
+        )
+        insert_v1_schema_bundle(
+            con,
+            schema_id="sch_persons",
+            summary_json={"n_cols": 2},
+            fields=[
+                {
+                    "ordinal_position": 1,
+                    "name": "person_id",
+                    "logical_type": "BIGINT",
+                    "nullable": False,
+                },
+                {
+                    "ordinal_position": 2,
+                    "name": "hh_id",
+                    "logical_type": "BIGINT",
+                    "nullable": False,
+                },
+            ],
+            relations=[
+                {"from_field": "hh_id", "to_table": "households", "to_field": "hh_id"},
+            ],
+            artifact_id=child_art_id,
+            run_id="r_op",
+        )
+
+        # User schemas (`global_tables` + `_dlt_meta`) with sequences, FK parent/child tables, and index
+        con.execute("CREATE SCHEMA global_tables")
+        con.execute("CREATE SEQUENCE global_tables.seq_hh START WITH 10 INCREMENT BY 5")
+        con.execute(
+            "CREATE TABLE global_tables.households ("
+            "hh_id BIGINT PRIMARY KEY, income DOUBLE NOT NULL"
+            ")"
+        )
+        con.execute(
+            "CREATE TABLE global_tables.persons ("
+            "person_id BIGINT PRIMARY KEY, "
+            "hh_id BIGINT NOT NULL REFERENCES global_tables.households(hh_id)"
+            ")"
+        )
+        con.execute("CREATE INDEX idx_persons_hh ON global_tables.persons(hh_id)")
+        con.execute("CREATE SCHEMA _dlt_pipeline_state")
+        con.execute(
+            "CREATE TABLE _dlt_pipeline_state._dlt_version (version BIGINT NOT NULL)"
+        )
+
+    with V1DatabaseReader(op_db) as reader:
+        arts_by_id = {a.id: a for a in reader.read_artifacts()}
+        child_rec = arts_by_id[child_art_id]
+        assert child_rec.parent_artifact_id == parent_art_id
+        assert child_rec.facet_kv["row_count"] == 4200
+        assert type(child_rec.facet_kv["row_count"]) is int
+        assert type(child_rec.facet_kv["scale_factor"]) is float
+        assert child_rec.facet_kv["validated"] is True
+
+        facets = reader.read_config_facets()
+        assert facets["cf_1"].namespace == "activitysim"
+        assert facets["cf_1"].schema_version == "2.0"
+
+        rkv = {r.key: r.value for r in reader.read_run_config_kv()["r_op"]}
+        assert rkv["num_processes"] == 8 and type(rkv["num_processes"]) is int
+        assert rkv["sample_rate"] == 0.25 and type(rkv["sample_rate"]) is float
+
+        snaps = reader.read_coupler_snapshots()
+        assert len(snaps) == 1 and snaps[0].role_key == "persons"
+        assert snaps[0].artifact_id == child_art_id
+
+        invs = reader.read_binding_invocations()
+        assert len(invs) == 1 and invs[0].id == inv_id
+
+        sch_bundle = reader.read_artifact_schemas()
+        assert [s.id for s in sch_bundle.schemas] == ["sch_persons"]
+        assert len(sch_bundle.fields) == 2
+        assert len(sch_bundle.relations) == 1
+        assert len(sch_bundle.observations) == 1
+
+        ddl = reader.read_user_schema_tables_ddl()
+        assert "_dlt_pipeline_state" in ddl.schemas
+        assert "global_tables" in ddl.schemas
+        assert any(s.sequence_name == "seq_hh" for s in ddl.sequences)
+        gt_tables = [
+            t.table_name for t in ddl.tables if t.schema_name == "global_tables"
+        ]
+        assert gt_tables.index("households") < gt_tables.index("persons")
+        assert any(idx.index_name == "idx_persons_hh" for idx in ddl.indexes)

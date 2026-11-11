@@ -38,7 +38,6 @@ from consist.admission import (
     PriorRunExpectation,
     check_artifact_identity,
 )
-from consist.core.persistence import DatabaseManager
 from consist.core.views import ViewFactory
 from consist.digest import (
     Agreement,
@@ -54,6 +53,7 @@ from consist.migrations.v1.fasthash import stat_v1_fast_file_hash
 from consist.migrations.v1.migrator import migrate_v1_to_v2
 from consist.store.detect import ConsistError
 from consist.store.ledger import StoreLedger
+from tests.helpers.v1_db_builder import create_v1_schema
 
 
 def test_readme_quick_example_and_quickstart_workflow(
@@ -338,9 +338,6 @@ def test_decision_d3_quick_migration_historical_run_promote_and_view_factory(
        `.path` and `.as_df()`, and is queryable through `ViewFactory`.
     """
     db_path = tmp_path / "d3_prov.duckdb"
-    db = DatabaseManager(str(db_path))
-    db.dispose()
-
     parquet_path = tmp_path / "households.parquet"
     df_hh = pd.DataFrame({"hh_id": [10, 20, 30], "income": [55000, 72000, 91000]})
     df_hh.to_parquet(parquet_path, index=False)
@@ -351,6 +348,7 @@ def test_decision_d3_quick_migration_historical_run_promote_and_view_factory(
 
     con = duckdb.connect(str(db_path))
     try:
+        create_v1_schema(con)
         con.execute(
             "INSERT INTO run (id, model_name, status, signature, created_at, updated_at, started_at, ended_at, meta, tags) "
             "VALUES ('run_d3_v1', 'synth_pop', 'completed', 'sig_v1', ?, ?, ?, ?, '{}', '[]')",
@@ -1083,9 +1081,17 @@ def test_pr6_reviewer_regressions(tmp_path: Path) -> None:
         )
         assert hydrated_f64.report.outcome == "verified"
         assert hydrated_f64.verdict.agreement is Agreement.AGREE
-        assert hydrated_f64.artifact.identity.get(
-            "sha256:logical_matrices:v1"
-        ) == Digest("sha256:logical_matrices:v1", f32_hex)
+        assert (
+            hydrated_f64.report.observed_artifact_id
+            == f"sha256:logical_matrices:{f32_hex}"
+        )
+        assert hydrated_f64.artifact.identity.get("sha256:logical_matrices:v1") is None
+        assert (
+            ledger2.get_identity(hydrated_f64.artifact.identity.anchor).get(
+                "sha256:logical_matrices:v1"
+            )
+            is None
+        )
 
         # --- 4. evict safety when surviving copy was deleted or target_path is unrelated ---
         ev_src = work_dir / "evict_me.txt"
@@ -1565,6 +1571,323 @@ def test_phase1_store_manifest_hardening_dedup_and_lazy_imports(
         winner_run_2 = dedup_ledger.get_run("dup_run_2")
         assert winner_run_1 is not None and winner_run_1.status == "completed"
         assert winner_run_2 is not None and winner_run_2.status == "running"
+
+
+def test_phase2_hydrate_admitted_input_preverifies_before_staging_and_reexports_v2_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+    import time
+
+    import consist.admission as top_admission
+    import consist.artifact as v2_artifact_mod
+    import consist.engine as engine_mod
+
+    assert top_admission.Artifact is v2_artifact_mod.Artifact
+
+    ws_root = tmp_path / "ws"
+    arch_root = tmp_path / "archive"
+    stage_dir = tmp_path / "staged"
+    ws_root.mkdir()
+    arch_root.mkdir()
+    stage_dir.mkdir()
+    mounts = {"workspace": ws_root, "archive": arch_root}
+
+    src_file = ws_root / "zones.csv"
+    good_bytes = b"zone_id,pop\n1,500\n2,900\n"
+    src_file.write_bytes(good_bytes)
+    safe_past_ns = time.time_ns() - 10_000_000_000
+    os.utime(src_file, ns=(safe_past_ns, safe_past_ns))
+
+    db_path = tmp_path / "phase2_admit.duckdb"
+    with StoreLedger(db_path, mounts=mounts) as ledger:
+        ledger.record_run(run_id="r_prod", model_name="test", status="completed")
+        sealed = seal(
+            [PendingOutput(role="zones", path=src_file)],
+            ledger=ledger,
+            run_id="r_prod",
+            mounts=mounts,
+            archive_root=arch_root,
+        )
+        art = sealed["zones"]
+        arch_copy = arch_root / "zones.csv"
+        os.utime(arch_copy, ns=(safe_past_ns, safe_past_ns))
+        expected_good = DeclaredDigestExpectation(
+            identity=f"sha256:file:{file_sha256(src_file)}"
+        )
+        expected_wrong = DeclaredDigestExpectation(identity="sha256:file:" + ("b" * 64))
+
+        # 1. Existing destination file must remain completely untouched if expectation fails
+        dest = stage_dir / "zones_in.csv"
+        dest.write_bytes(b"existing-sentinel-do-not-clobber")
+        orig_dest_ino = dest.stat().st_ino
+
+        failed = hydrate_admitted_input(
+            art,
+            destination=dest,
+            expectation=expected_wrong,
+            ledger=ledger,
+            mounts=mounts,
+        )
+        assert failed.report.outcome == "mismatched"
+        assert failed.verdict.agreement == Agreement.MISMATCH
+        assert dest.read_bytes() == b"existing-sentinel-do-not-clobber"
+        assert dest.stat().st_ino == orig_dest_ino
+
+        # 2. Corrupt primary candidate -> skips bad candidate without touching dest, stages from valid archive
+        #    and does NOT hash the verified file a second time during atomic staging!
+        src_file.write_bytes(b"corrupted-primary-bytes")
+        hash_calls = 0
+        orig_hash_fd = engine_mod._hash_file_descriptor_pinned
+
+        def _counting_hash_fd(p: Path) -> tuple[Digest, object]:
+            nonlocal hash_calls
+            hash_calls += 1
+            return orig_hash_fd(p)
+
+        monkeypatch.setattr(
+            engine_mod, "_hash_file_descriptor_pinned", _counting_hash_fd
+        )
+        hydrated = hydrate_admitted_input(
+            art,
+            destination=dest,
+            expectation=expected_good,
+            ledger=ledger,
+            mounts=mounts,
+            stage_mode="copy",
+        )
+        monkeypatch.setattr(engine_mod, "_hash_file_descriptor_pinned", orig_hash_fd)
+
+        assert hydrated.report.outcome == "verified"
+        assert hydrated.verdict.agreement == Agreement.AGREE
+        assert hydrated.path == dest.resolve()
+        assert dest.read_bytes() == good_bytes
+        # Primary was hashed once (detected mismatch); archived copy had a fresh non-racy witness + stored identity (0 hashes)
+        # and atomic staging did zero extra hashes!
+        assert hash_calls <= 1
+        assert list(stage_dir.glob(".consist-tmp-*")) == []
+
+
+def test_phase2_audit_part_a1_and_a6_admission_regressions(
+    tmp_path: Path,
+) -> None:
+    from consist.artifact import Artifact
+    from consist.location import FileStat, Location, Observation
+
+    ws_dir = tmp_path / "workspace"
+    arch_dir = tmp_path / "archive"
+    stage_dir = tmp_path / "stage"
+    ws_dir.mkdir()
+    arch_dir.mkdir()
+    stage_dir.mkdir()
+    mounts = [Mount("workspace", ws_dir), Mount("archive", arch_dir)]
+
+    with StoreLedger(tmp_path / "audit_a1_a6.duckdb", mounts=mounts) as ledger:
+        # --- Part A1: hydrate_admitted_input(art, expectation=None) rejects corrupted primary ---
+        src_file = ws_dir / "skims.bin"
+        good_bytes = b"clean-canonical-bytes-v1"
+        corrupt_bytes = b"corrupted-primary-bytes!"
+        src_file.write_bytes(good_bytes)
+        art = observe(src_file, key="skims_bin", ledger=ledger, mounts=mounts)
+        art = archive(
+            art,
+            arch_dir / "skims.bin",
+            mode="copy",
+            ledger=ledger,
+            mounts=mounts,
+        )
+
+        # Corrupt primary workspace file behind Consist's back
+        src_file.write_bytes(corrupt_bytes)
+        dest_with_fallback = stage_dir / "hydrated_fallback.bin"
+        hydrated_ok = hydrate_admitted_input(
+            art,
+            destination=dest_with_fallback,
+            expectation=None,
+            ledger=ledger,
+            mounts=mounts,
+            stage_mode="copy",
+        )
+        assert hydrated_ok.report.outcome == "verified"
+        assert hydrated_ok.verdict.agreement is Agreement.AGREE
+        assert dest_with_fallback.read_bytes() == good_bytes
+        assert hydrated_ok.artifact.identity.anchor == art.identity.anchor
+
+        # Without a clean archive fallback, expectation=None rejects the corrupted primary
+        solo_src = ws_dir / "solo.bin"
+        solo_src.write_bytes(b"solo-good-payload")
+        solo_art = observe(solo_src, key="solo_bin", ledger=ledger, mounts=mounts)
+        solo_src.write_bytes(b"solo-corrupted!!!")
+        solo_dest = stage_dir / "solo_dest.bin"
+        solo_dest.write_bytes(b"preexisting-sentinel")
+        hydrated_bad = hydrate_admitted_input(
+            solo_art,
+            destination=solo_dest,
+            expectation=None,
+            ledger=ledger,
+            mounts=mounts,
+            stage_mode="copy",
+        )
+        assert hydrated_bad.report.outcome == "mismatched"
+        assert hydrated_bad.verdict.agreement is Agreement.MISMATCH
+        assert solo_dest.read_bytes() == b"preexisting-sentinel"
+
+        # Unverifiable Kind.HISTORICAL Artifact with expectation=None stays unverified
+        hist_src = ws_dir / "legacy.csv"
+        hist_src.write_text("a,b\n1,2\n", encoding="utf-8")
+        hist_anchor = Digest("legacy-v1:unverified", "a" * 64)
+        hist_obs = Observation(
+            location=Location(uri="workspace://legacy.csv"),
+            identity=Identity(hist_anchor),
+            access_driver="csv",
+            witness=FileStat.capture(hist_src),
+            basis="migrated_v1",
+            site="local",
+        )
+        ledger.record_observation(hist_obs, repr_kind="file")
+        hist_art = Artifact(
+            id=uuid.uuid4(),
+            key="legacy_csv",
+            driver="csv",
+            identity=Identity(hist_anchor),
+            hints=(hist_obs,),
+        )
+        hydrated_hist = hydrate_admitted_input(
+            hist_art,
+            expectation=None,
+            ledger=ledger,
+            mounts=mounts,
+        )
+        assert hydrated_hist.report.outcome == "unverified"
+        assert hydrated_hist.verdict.agreement is Agreement.UNKNOWN
+
+        # --- Part A6: lossy float32_matrices_v1 admission does NOT poison StoreLedger ---
+        omx_f64 = ws_dir / "skims_f64.omx"
+        zarr_f32 = ws_dir / "skims_f32.zarr"
+        # Values with non-zero float64 vs float32 rounding delta (1.1 in IEEE-754)
+        arr_f64 = np.array([[1.1, 2.2], [3.3, 4.4]], dtype=np.float64)
+        arr_f32 = arr_f64.astype(np.float32)
+        with h5py.File(omx_f64, "w") as h5f:
+            grp = h5f.create_group("data")
+            grp.create_dataset("DIST", data=arr_f64)
+        zr = zarr.open_group(str(zarr_f32), mode="w")
+        zds = zr.create_dataset("DIST", data=arr_f32)
+        zds.attrs["_ARRAY_DIMENSIONS"] = ["o", "d"]
+
+        f64_canonical_hex = compute_logical_matrices_sha256(
+            {"DIST": arr_f64},
+            policy="preserve_canonical",
+        )
+        f32_lossy_hex = compute_logical_matrices_sha256(
+            {"DIST": arr_f32},
+            policy="float32_matrices_v1",
+        )
+        assert f64_canonical_hex != f32_lossy_hex
+
+        prior_db = tmp_path / "prior_f32.duckdb"
+        with StoreLedger(prior_db, mounts=mounts) as prior_ledger:
+            prior_ledger.record_run(
+                run_id="run_f32_ref",
+                model_name="skim_gen",
+                status="completed",
+                cache_status="live",
+            )
+            seal(
+                [
+                    PendingOutput(
+                        role="skims_zarr",
+                        path=zarr_f32,
+                        driver="zarr",
+                        is_dir=True,
+                    )
+                ],
+                ledger=prior_ledger,
+                run_id="run_f32_ref",
+                mounts=mounts,
+            )
+
+        omx_art = observe(
+            omx_f64, key="skims", driver="omx", ledger=ledger, mounts=mounts
+        )
+        zarr_art = observe(
+            zarr_f32, key="skims_zarr", driver="zarr", ledger=ledger, mounts=mounts
+        )
+
+        # Admit float64 OMX against float32_matrices_v1 fallback PriorRunExpectation
+        prior_f32_exp = PriorRunExpectation(
+            expected_run_id="run_f32_ref",
+            artifact_key="skims_zarr",
+            source_tracker_db=prior_db,
+            identity_scheme="logical",
+            logical_profile="float32_matrices_v1",
+            expected_logical_hash=f"sha256:logical_matrices:{f32_lossy_hex}",
+        )
+        hyd_omx_lossy = hydrate_admitted_input(
+            omx_art,
+            input_role="skims",
+            expectation=prior_f32_exp,
+            ledger=ledger,
+            mounts=mounts,
+        )
+        assert hyd_omx_lossy.report.outcome == "verified"
+        assert hyd_omx_lossy.verdict.agreement is Agreement.AGREE
+        assert hyd_omx_lossy.artifact.identity.get("sha256:logical_matrices:v1") is None
+
+        hyd_zarr_lossy = hydrate_admitted_input(
+            zarr_art,
+            input_role="skims_zarr",
+            expectation=DeclaredDigestExpectation(
+                identity=f"sha256:logical_matrices:{f32_lossy_hex}",
+                logical_profile="float32_matrices_v1",
+            ),
+            ledger=ledger,
+            mounts=mounts,
+        )
+        assert hyd_zarr_lossy.report.outcome == "verified"
+        assert (
+            hyd_zarr_lossy.artifact.identity.get("sha256:logical_matrices:v1") is None
+        )
+
+        for checked_anchor in (omx_art.identity.anchor, zarr_art.identity.anchor):
+            assert (
+                ledger.get_identity(checked_anchor).get("sha256:logical_matrices:v1")
+                is None
+            )
+            with ledger.exec_cursor() as cur:
+                stored_schemes = [
+                    r[0]
+                    for r in cur.execute(
+                        "SELECT scheme FROM main.content_digest WHERE anchor = ?",
+                        [str(checked_anchor)],
+                    ).fetchall()
+                ]
+            assert "sha256:logical_matrices:v1" not in stored_schemes
+
+        # Subsequent canonical preserve_canonical admission against f64_canonical_hex succeeds and records canonical claim
+        hyd_omx_canon = hydrate_admitted_input(
+            omx_art,
+            input_role="skims",
+            expectation=DeclaredDigestExpectation(
+                identity=f"sha256:logical_matrices:{f64_canonical_hex}",
+                logical_profile="preserve_canonical",
+            ),
+            ledger=ledger,
+            mounts=mounts,
+        )
+        assert hyd_omx_canon.report.outcome == "verified"
+        assert hyd_omx_canon.verdict.agreement is Agreement.AGREE
+        expected_canon_digest = Digest("sha256:logical_matrices:v1", f64_canonical_hex)
+        assert (
+            hyd_omx_canon.artifact.identity.get("sha256:logical_matrices:v1")
+            == expected_canon_digest
+        )
+        assert (
+            ledger.get_identity(omx_art.identity.anchor).get(
+                "sha256:logical_matrices:v1"
+            )
+            == expected_canon_digest
+        )
 
 
 def test_pr6_modules_have_no_getattr_setattr_or_ponytail_comments() -> None:

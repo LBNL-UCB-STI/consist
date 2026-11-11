@@ -13,9 +13,10 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 from pathlib import Path
+import re
 from typing import Any
 import uuid
 
@@ -57,13 +58,121 @@ def _parse_uuid(val: Any) -> uuid.UUID | None:
 
 def _parse_datetime(val: Any) -> datetime | None:
     if isinstance(val, datetime):
-        return val
+        return val.replace(tzinfo=timezone.utc) if val.tzinfo is None else val
     if val is not None and (raw := str(val).strip()):
         try:
-            return datetime.fromisoformat(raw)
+            dt = datetime.fromisoformat(raw)
+            return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
         except ValueError:
             pass
     return None
+
+
+def _parse_json_any(val: Any) -> Any:
+    if isinstance(val, str) and (raw := val.strip()):
+        try:
+            return json.loads(raw)
+        except ValueError:
+            return val
+    return val
+
+
+def _parse_typed_kv_value(kv_row: Mapping[str, Any]) -> Any:
+    vtype = str(kv_row.get("value_type") or "").strip().lower()
+    if vtype == "null":
+        return None
+    if vtype == "int" and kv_row.get("value_num") is not None:
+        return int(round(float(kv_row["value_num"])))
+    if vtype == "float" and kv_row.get("value_num") is not None:
+        return float(kv_row["value_num"])
+    if vtype == "bool" and kv_row.get("value_bool") is not None:
+        return bool(kv_row["value_bool"])
+    if vtype in ("str", "string") and kv_row.get("value_str") is not None:
+        return str(kv_row["value_str"])
+    if vtype == "json" and kv_row.get("value_json") is not None:
+        return _parse_json_any(kv_row["value_json"])
+
+    for val_col in (
+        "value_str",
+        "value_num",
+        "value_bool",
+        "value_json",
+        "value",
+    ):
+        if kv_row.get(val_col) is not None:
+            raw_val = kv_row[val_col]
+            return _parse_json_any(raw_val) if val_col == "value_json" else raw_val
+    return None
+
+
+def _split_escaped_key_path(key_path: str) -> list[str]:
+    parts: list[str] = []
+    buf: list[str] = []
+    escaped = False
+    for ch in key_path:
+        if escaped:
+            buf.append(ch)
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        elif ch == ".":
+            parts.append("".join(buf))
+            buf.clear()
+        else:
+            buf.append(ch)
+    if escaped:
+        buf.append("\\")
+    parts.append("".join(buf))
+    return [p for p in parts if p] or [key_path]
+
+
+def unflatten_facet_key_path(target: dict[str, Any], key_path: str, val: Any) -> None:
+    """Insert `val` into `target` along unescaped `.` segments in `key_path`."""
+    segments = _split_escaped_key_path(key_path)
+    cur = target
+    for seg in segments[:-1]:
+        existing = cur.get(seg)
+        if not isinstance(existing, dict):
+            nested: dict[str, Any] = {}
+            cur[seg] = nested
+            cur = nested
+        else:
+            cur = existing
+    cur[segments[-1]] = val
+
+
+_FK_REF_RE = re.compile(
+    r'REFERENCES\s+(?:(?:"((?:[^"]|"")+)"|([A-Za-z_][A-Za-z0-9_]*))\s*\.\s*)?'
+    r'(?:(?:"((?:[^"]|"")+)"|([A-Za-z_][A-Za-z0-9_]*))\s*\.\s*)?'
+    r'(?:"((?:[^"]|"")+)"|([A-Za-z_][A-Za-z0-9_]*))',
+    re.IGNORECASE,
+)
+
+
+def _unescape_ident_match(quoted: str | None, plain: str | None) -> str | None:
+    if quoted is not None:
+        return quoted.replace('""', '"')
+    return plain
+
+
+def _extract_fk_target(
+    constraint_text: str,
+    *,
+    default_schema: str,
+) -> tuple[str, str] | None:
+    m = _FK_REF_RE.search(constraint_text)
+    if m is None:
+        return None
+    p1 = _unescape_ident_match(m.group(1), m.group(2))
+    p2 = _unescape_ident_match(m.group(3), m.group(4))
+    tbl = _unescape_ident_match(m.group(5), m.group(6))
+    if not tbl:
+        return None
+    if p2 is not None:
+        return (p2, tbl)
+    if p1 is not None:
+        return (p1, tbl)
+    return (default_schema, tbl)
 
 
 def _opt_str(val: Any) -> str | None:
@@ -125,6 +234,9 @@ class V1ArtifactRecord:
     content_meta: dict[str, Any] | None = None
     is_dir: bool = False
     facet_kv: dict[str, Any] = field(default_factory=dict)
+    facet_id: str | None = None
+    facet_namespace: str | None = None
+    facet_schema_version: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +276,158 @@ class V1DltTableInfo:
     has_consist_run_id: bool
     consist_run_id_type: str | None
     is_dlt_internal: bool
+
+
+@dataclass(frozen=True, slots=True)
+class V1ConfigFacetRecord:
+    """Normalized record read from `main.config_facet`."""
+
+    id: str
+    namespace: str
+    schema_name: str
+    schema_version: str | None = None
+    facet_json: dict[str, Any] = field(default_factory=dict)
+    created_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class V1RunConfigKvRecord:
+    """Normalized record read from `main.run_config_kv`."""
+
+    run_id: str
+    facet_id: str | None
+    namespace: str | None
+    key: str
+    value_type: str
+    value: Any
+    created_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class V1CouplerSnapshotRecord:
+    """Normalized record read from `main.run_coupler_snapshot`."""
+
+    run_id: str
+    phase: str
+    role_key: str
+    scenario_run_id: str
+    step_ordinal: int
+    artifact_id: uuid.UUID
+    producer_run_id: str | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class V1BindingInvocationRecord:
+    """Normalized record read from `main.run_binding_invocation`."""
+
+    id: uuid.UUID
+    requested_run_id: str
+    execution_run_id: str
+    cache_source_run_id: str | None
+    cache_outcome: str
+    binding_json: str
+    created_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class V1ArtifactSchemaRecord:
+    """Normalized record read from `main.artifact_schema`."""
+
+    id: str
+    profile_version: int
+    summary_json: dict[str, Any]
+    profile_json: dict[str, Any] | None = None
+    created_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class V1ArtifactSchemaFieldRecord:
+    """Normalized record read from `main.artifact_schema_field`."""
+
+    schema_id: str
+    ordinal_position: int | None
+    name: str
+    logical_type: str
+    nullable: bool
+    stats_json: dict[str, Any] | None = None
+    is_enum: bool = False
+    enum_values_json: list[str] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class V1ArtifactSchemaObservationRecord:
+    """Normalized record read from `main.artifact_schema_observation`."""
+
+    id: uuid.UUID
+    artifact_id: uuid.UUID
+    schema_id: str
+    run_id: str | None
+    source: str
+    sample_rows: int | None
+    observed_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class V1ArtifactSchemaRelationRecord:
+    """Normalized record read from `main.artifact_schema_relation`."""
+
+    schema_id: str
+    from_field: str
+    to_table: str
+    to_field: str
+    relationship_type: str
+    cardinality: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class V1ArtifactSchemaBundle:
+    """All `artifact_schema*` rows read from a v1 database."""
+
+    schemas: tuple[V1ArtifactSchemaRecord, ...] = ()
+    fields: tuple[V1ArtifactSchemaFieldRecord, ...] = ()
+    observations: tuple[V1ArtifactSchemaObservationRecord, ...] = ()
+    relations: tuple[V1ArtifactSchemaRelationRecord, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class V1SequenceDDL:
+    """Catalog sequence DDL read from `duckdb_sequences()`."""
+
+    schema_name: str
+    sequence_name: str
+    sql: str
+
+
+@dataclass(frozen=True, slots=True)
+class V1TableDDL:
+    """Catalog table DDL read from `duckdb_tables()` ordered by FK dependencies."""
+
+    schema_name: str
+    table_name: str
+    sql: str
+    fk_targets: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class V1IndexDDL:
+    """Catalog secondary index DDL read from `duckdb_indexes()`."""
+
+    schema_name: str
+    table_name: str
+    index_name: str
+    sql: str
+
+
+@dataclass(frozen=True, slots=True)
+class V1UserSchemasDDL:
+    """Introspected sequences, FK-ordered tables, and secondary indexes for user schemas."""
+
+    schemas: tuple[str, ...]
+    sequences: tuple[V1SequenceDDL, ...]
+    tables: tuple[V1TableDDL, ...]
+    indexes: tuple[V1IndexDDL, ...]
+    catalog_name: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,6 +587,40 @@ class V1DatabaseReader:
             dlt_tables=tuple(dlt_tables),
         )
 
+    def _iter_rows(
+        self,
+        table: str,
+        *,
+        order_by: tuple[str, ...] = (),
+        required_cols: set[str] | None = None,
+        batch_size: int = 4096,
+    ) -> tuple[set[str], Iterator[dict[str, Any]]]:
+        if table not in self._main_tables():
+            return set(), iter(())
+        cols = set(self._columns_for("main", table).keys())
+        if required_cols is not None and not (required_cols <= cols):
+            return cols, iter(())
+        order_cols = [c for c in order_by if c in cols]
+        order_clause = (
+            f" ORDER BY {', '.join(_quote_ident(c) for c in order_cols)}"
+            if order_cols
+            else ""
+        )
+        sql = f"SELECT * FROM main.{_quote_ident(table)}{order_clause}"
+
+        def _gen() -> Iterator[dict[str, Any]]:
+            cur = self._con.cursor()
+            try:
+                cur.execute(sql)
+                col_names = [str(d[0]) for d in (cur.description or ())]
+                while batch := cur.fetchmany(batch_size):
+                    for r in batch:
+                        yield dict(zip(col_names, r))
+            finally:
+                cur.close()
+
+        return cols, _gen()
+
     def _fetch_rows(
         self,
         table: str,
@@ -330,26 +628,16 @@ class V1DatabaseReader:
         order_by: tuple[str, ...] = (),
         required_cols: set[str] | None = None,
     ) -> tuple[set[str], list[dict[str, Any]]]:
-        if table not in self._main_tables():
-            return set(), []
-        cols = set(self._columns_for("main", table).keys())
-        if required_cols is not None and not (required_cols <= cols):
-            return cols, []
-        order_cols = [c for c in order_by if c in cols]
-        order_clause = (
-            f" ORDER BY {', '.join(_quote_ident(c) for c in order_cols)}"
-            if order_cols
-            else ""
+        cols, row_iter = self._iter_rows(
+            table,
+            order_by=order_by,
+            required_cols=required_cols,
         )
-        cur = self._con.execute(
-            f"SELECT * FROM main.{_quote_ident(table)}{order_clause}"
-        )
-        col_names = [str(d[0]) for d in (cur.description or ())]
-        return cols, [dict(zip(col_names, r)) for r in cur.fetchall()]
+        return cols, list(row_iter)
 
     def iter_runs(self) -> Iterator[V1RunRecord]:
         """Yield `V1RunRecord` rows from `main.run`, adapting to available columns."""
-        _, rows = self._fetch_rows(
+        _, rows = self._iter_rows(
             "run",
             order_by=("created_at", "started_at", "id"),
             required_cols={"id"},
@@ -401,16 +689,17 @@ class V1DatabaseReader:
 
     def iter_artifacts(self) -> Iterator[V1ArtifactRecord]:
         """Yield `V1ArtifactRecord` rows from `main.artifact` (joining `artifact_content` when present)."""
-        art_cols, rows = self._fetch_rows(
+        art_cols, rows = self._iter_rows(
             "artifact",
             order_by=("created_at", "id"),
             required_cols={"id"},
         )
-        if not rows:
+        first_row = next(rows, None)
+        if first_row is None:
             return
 
         content_by_id: dict[uuid.UUID, tuple[str | None, dict[str, Any] | None]] = {}
-        _, ac_rows = self._fetch_rows("artifact_content", required_cols={"id"})
+        _, ac_rows = self._iter_rows("artifact_content", required_cols={"id"})
         for ac_row in ac_rows:
             ac_id = _parse_uuid(ac_row.get("id"))
             if ac_id is not None:
@@ -420,30 +709,63 @@ class V1DatabaseReader:
                 )
                 content_by_id[ac_id] = (c_hash, c_meta)
 
-        kv_by_art_id: dict[uuid.UUID, dict[str, Any]] = {}
-        _, kv_rows = self._fetch_rows(
-            "artifact_kv",
-            required_cols={"artifact_id", "key_path"},
-        )
-        for kv_row in kv_rows:
-            kv_art_id = _parse_uuid(kv_row.get("artifact_id"))
-            key_path = _opt_str(kv_row.get("key_path"))
-            if kv_art_id is None or not key_path:
-                continue
-            val: Any = None
-            for val_col in (
-                "value_str",
-                "value_num",
-                "value_bool",
-                "value_json",
-                "value",
-            ):
-                if kv_row.get(val_col) is not None:
-                    val = kv_row[val_col]
-                    break
-            kv_by_art_id.setdefault(kv_art_id, {})[key_path] = val
+        artifact_facets_by_id: dict[str, dict[str, Any]] = {}
+        _, af_rows = self._iter_rows("artifact_facet", required_cols={"id"})
+        for af_row in af_rows:
+            af_id = _opt_str(af_row.get("id"))
+            if af_id:
+                artifact_facets_by_id[af_id] = af_row
 
-        for row in rows:
+        kv_by_art_id: dict[uuid.UUID, dict[str, Any]] = {}
+        kv_meta_by_art_id: dict[uuid.UUID, tuple[str | None, str | None]] = {}
+        if "artifact_kv" in self._main_tables():
+            akv_cols = set(self._columns_for("main", "artifact_kv").keys())
+            if {"artifact_id", "key_path"} <= akv_cols:
+                select_akv_cols = [
+                    c
+                    for c in (
+                        "artifact_id",
+                        "facet_id",
+                        "namespace",
+                        "key_path",
+                        "value_type",
+                        "value_str",
+                        "value_num",
+                        "value_bool",
+                        "value_json",
+                        "value",
+                    )
+                    if c in akv_cols
+                ]
+                cur_akv = self._con.cursor()
+                try:
+                    cur_akv.execute(
+                        f"SELECT {', '.join('akv.' + _quote_ident(c) for c in select_akv_cols)} "
+                        'FROM main."artifact_kv" akv'
+                    )
+                    akv_names = [str(d[0]) for d in (cur_akv.description or ())]
+                    while akv_batch := cur_akv.fetchmany(4096):
+                        for raw_akv in akv_batch:
+                            kv_row = dict(zip(akv_names, raw_akv))
+                            kv_art_id = _parse_uuid(kv_row.get("artifact_id"))
+                            key_path = _opt_str(kv_row.get("key_path"))
+                            if kv_art_id is None or not key_path:
+                                continue
+                            val = _parse_typed_kv_value(kv_row)
+                            kv_by_art_id.setdefault(kv_art_id, {})[key_path] = val
+                            if kv_art_id not in kv_meta_by_art_id:
+                                kv_meta_by_art_id[kv_art_id] = (
+                                    _opt_str(kv_row.get("facet_id")),
+                                    _opt_str(kv_row.get("namespace")),
+                                )
+                finally:
+                    cur_akv.close()
+
+        def _all_art_rows() -> Iterator[dict[str, Any]]:
+            yield first_row
+            yield from rows
+
+        for row in _all_art_rows():
             art_id = _parse_uuid(row["id"])
             if art_id is None:
                 continue
@@ -461,7 +783,7 @@ class V1DatabaseReader:
 
             raw_sem = (
                 row.get("hash_semantics")
-                if "hash_semantics" in art_cols
+                if row.get("hash_semantics") is not None
                 else meta.get("hash_semantics")
             )
             if isinstance(raw_sem, str):
@@ -474,7 +796,7 @@ class V1DatabaseReader:
 
             raw_roots = (
                 row.get("recovery_roots")
-                if "recovery_roots" in art_cols
+                if row.get("recovery_roots") is not None
                 else meta.get("recovery_roots")
             )
             recovery_roots = (
@@ -485,14 +807,52 @@ class V1DatabaseReader:
             if schema_id is None and isinstance(meta.get("schema_id"), str):
                 schema_id = meta["schema_id"]
 
-            raw_facet = row.get("facet") if "facet" in art_cols else meta.get("facet")
-            facet = _parse_json_obj(raw_facet) if raw_facet is not None else None
+            raw_facet = (
+                row.get("facet") if row.get("facet") is not None else meta.get("facet")
+            )
+            facet_dict: dict[str, Any] = (
+                _parse_json_obj(raw_facet) if raw_facet is not None else {}
+            )
+
+            kv_facet_id, kv_ns = kv_meta_by_art_id.get(art_id, (None, None))
+            facet_id = (
+                _opt_str(meta.get("artifact_facet_id"))
+                or _opt_str(meta.get("facet_id"))
+                or kv_facet_id
+            )
+            facet_ns = (
+                _opt_str(meta.get("facet_namespace"))
+                or _opt_str(meta.get("artifact_facet_namespace"))
+                or kv_ns
+            )
+            facet_ver = _opt_str(meta.get("facet_schema_version")) or _opt_str(
+                meta.get("artifact_facet_schema_version")
+            )
+            if facet_id and facet_id in artifact_facets_by_id:
+                af_rec = artifact_facets_by_id[facet_id]
+                af_json = _parse_json_obj(
+                    af_rec.get("json") if "json" in af_rec else af_rec.get("facet_json")
+                )
+                if af_json and not facet_dict:
+                    facet_dict = dict(af_json)
+                elif af_json:
+                    merged_af = dict(af_json)
+                    merged_af.update(facet_dict)
+                    facet_dict = merged_af
+                if facet_ns is None:
+                    facet_ns = _opt_str(af_rec.get("namespace"))
+                if facet_ver is None:
+                    facet_ver = _opt_str(af_rec.get("schema_version"))
 
             facet_kv: dict[str, Any] = {}
-            if facet is not None:
-                facet_kv.update(facet)
+            if facet_dict:
+                facet_kv.update(facet_dict)
             if art_id in kv_by_art_id:
-                facet_kv.update(kv_by_art_id[art_id])
+                for kp, kval in kv_by_art_id[art_id].items():
+                    facet_kv[kp] = kval
+                    unflatten_facet_key_path(facet_dict, kp, kval)
+
+            facet: dict[str, Any] | None = facet_dict if facet_dict else None
 
             driver_str = str(row.get("driver") or "other")
             is_dir_val = bool(
@@ -509,6 +869,10 @@ class V1DatabaseReader:
             if content_id is not None and content_id in content_by_id:
                 content_hash, content_meta = content_by_id[content_id]
 
+            parent_art_id = _parse_uuid(row.get("parent_artifact_id"))
+            if parent_art_id is None:
+                parent_art_id = _parse_uuid(meta.get("parent_artifact_id"))
+
             yield V1ArtifactRecord(
                 id=art_id,
                 key=str(row.get("key") or ""),
@@ -520,7 +884,7 @@ class V1DatabaseReader:
                 table_path=_opt_str(row.get("table_path")),
                 array_path=_opt_str(row.get("array_path")),
                 content_id=content_id,
-                parent_artifact_id=_parse_uuid(row.get("parent_artifact_id")),
+                parent_artifact_id=parent_art_id,
                 run_id=_opt_str(row.get("run_id")),
                 schema_id=_opt_str(schema_id),
                 recovery_roots=recovery_roots,
@@ -531,11 +895,14 @@ class V1DatabaseReader:
                 content_meta=content_meta,
                 is_dir=is_dir_val,
                 facet_kv=facet_kv,
+                facet_id=facet_id,
+                facet_namespace=facet_ns,
+                facet_schema_version=facet_ver,
             )
 
     def iter_links(self) -> Iterator[V1LinkRecord]:
         """Yield `V1LinkRecord` rows from `main.run_artifact_link`."""
-        _, rows = self._fetch_rows(
+        _, rows = self._iter_rows(
             "run_artifact_link",
             order_by=("run_id", "artifact_id"),
             required_cols={"run_id", "artifact_id"},
@@ -553,7 +920,7 @@ class V1DatabaseReader:
 
     def iter_dir_entries(self) -> Iterator[V1DirEntryRecord]:
         """Yield `V1DirEntryRecord` rows from `main.run_artifact_dir_entry` if the table exists."""
-        _, rows = self._fetch_rows("run_artifact_dir_entry")
+        _, rows = self._iter_rows("run_artifact_dir_entry")
         for row in rows:
             rel_path = (
                 row.get("rel_path") or row.get("relative_path") or row.get("path") or ""
@@ -577,6 +944,435 @@ class V1DatabaseReader:
                 raw=row,
             )
 
+    def read_config_facets(self) -> dict[str, V1ConfigFacetRecord]:
+        """Read `main.config_facet` keyed by `id` if the table exists."""
+        _, rows = self._fetch_rows(
+            "config_facet",
+            order_by=("created_at", "id"),
+            required_cols={"id"},
+        )
+        out: dict[str, V1ConfigFacetRecord] = {}
+        for row in rows:
+            fid = _opt_str(row.get("id"))
+            if not fid:
+                continue
+            raw_json = row.get("json") if "json" in row else row.get("facet_json")
+            out[fid] = V1ConfigFacetRecord(
+                id=fid,
+                namespace=str(row.get("namespace") or ""),
+                schema_name=str(row.get("schema_name") or ""),
+                schema_version=_opt_str(row.get("schema_version")),
+                facet_json=_parse_json_obj(raw_json),
+                created_at=_parse_datetime(row.get("created_at")),
+            )
+        return out
+
+    def read_run_config_kv(self) -> dict[str, list[V1RunConfigKvRecord]]:
+        """Read `main.run_config_kv` grouped by `run_id`, preserving `int` vs `float`."""
+        if "run_config_kv" not in self._main_tables():
+            return {}
+        cols = set(self._columns_for("main", "run_config_kv").keys())
+        if not ({"run_id", "key"} <= cols):
+            return {}
+        select_cols = [
+            c
+            for c in (
+                "run_id",
+                "facet_id",
+                "namespace",
+                "key",
+                "value_type",
+                "value_str",
+                "value_num",
+                "value_bool",
+                "value_json",
+                "value",
+                "created_at",
+            )
+            if c in cols
+        ]
+        order_cols = [c for c in ("run_id", "key") if c in cols]
+        order_clause = (
+            f" ORDER BY {', '.join('rkv.' + _quote_ident(c) for c in order_cols)}"
+            if order_cols
+            else ""
+        )
+        cur = self._con.execute(
+            f"SELECT {', '.join('rkv.' + _quote_ident(c) for c in select_cols)} "
+            f'FROM main."run_config_kv" rkv{order_clause}'
+        )
+        col_names = [str(d[0]) for d in (cur.description or ())]
+        out: dict[str, list[V1RunConfigKvRecord]] = {}
+        for raw in cur.fetchall():
+            row = dict(zip(col_names, raw))
+            run_id = _opt_str(row.get("run_id"))
+            key = _opt_str(row.get("key"))
+            if not run_id or not key:
+                continue
+            val = _parse_typed_kv_value(row)
+            vtype = str(row.get("value_type") or "").strip().lower()
+            if not vtype:
+                if val is None:
+                    vtype = "null"
+                elif isinstance(val, bool):
+                    vtype = "bool"
+                elif isinstance(val, int):
+                    vtype = "int"
+                elif isinstance(val, float):
+                    vtype = "float"
+                elif isinstance(val, str):
+                    vtype = "str"
+                else:
+                    vtype = "json"
+            out.setdefault(run_id, []).append(
+                V1RunConfigKvRecord(
+                    run_id=run_id,
+                    facet_id=_opt_str(row.get("facet_id")),
+                    namespace=_opt_str(row.get("namespace")),
+                    key=key,
+                    value_type=vtype,
+                    value=val,
+                    created_at=_parse_datetime(row.get("created_at")),
+                )
+            )
+        return out
+
+    def iter_coupler_snapshots(self) -> Iterator[V1CouplerSnapshotRecord]:
+        """Yield `V1CouplerSnapshotRecord` rows from `main.run_coupler_snapshot` if present."""
+        cols, rows = self._fetch_rows(
+            "run_coupler_snapshot",
+            order_by=("run_id", "step_ordinal", "phase"),
+            required_cols={"run_id", "phase", "artifact_id"},
+        )
+        if not rows:
+            return
+        run_parents: dict[str, str | None] = {}
+        if "scenario_run_id" not in cols and "run" in self._main_tables():
+            run_cols = set(self._columns_for("main", "run").keys())
+            if {"id", "parent_run_id"} <= run_cols:
+                for rid, pid in self._con.execute(
+                    'SELECT id, parent_run_id FROM main."run"'
+                ).fetchall():
+                    if rid is not None:
+                        run_parents[str(rid)] = _opt_str(pid)
+
+        for row in rows:
+            art_id = _parse_uuid(row.get("artifact_id"))
+            run_id = _opt_str(row.get("run_id"))
+            phase = _opt_str(row.get("phase"))
+            role_key = _opt_str(
+                row.get("role_key")
+                if "role_key" in cols
+                else (row.get("slot_key") if "slot_key" in cols else row.get("key"))
+            )
+            if art_id is None or not run_id or not phase or not role_key:
+                continue
+            scen_id = _opt_str(row.get("scenario_run_id"))
+            if not scen_id:
+                scen_id = run_parents.get(run_id) or run_id
+            step_ord = (
+                int(row["step_ordinal"]) if row.get("step_ordinal") is not None else 0
+            )
+            yield V1CouplerSnapshotRecord(
+                run_id=run_id,
+                phase=phase,
+                role_key=role_key,
+                scenario_run_id=scen_id,
+                step_ordinal=step_ord,
+                artifact_id=art_id,
+                producer_run_id=_opt_str(row.get("producer_run_id")),
+                updated_at=_parse_datetime(row.get("updated_at")),
+            )
+
+    def iter_binding_invocations(self) -> Iterator[V1BindingInvocationRecord]:
+        """Yield `V1BindingInvocationRecord` rows from `main.run_binding_invocation` if present."""
+        _, rows = self._fetch_rows(
+            "run_binding_invocation",
+            order_by=("created_at", "id"),
+            required_cols={"id", "requested_run_id", "execution_run_id"},
+        )
+        for row in rows:
+            inv_id = _parse_uuid(row.get("id"))
+            req_id = _opt_str(row.get("requested_run_id"))
+            exec_id = _opt_str(row.get("execution_run_id"))
+            if inv_id is None or not req_id or not exec_id:
+                continue
+            raw_bjson = row.get("binding_json")
+            bjson = (
+                raw_bjson
+                if isinstance(raw_bjson, str)
+                else json.dumps(raw_bjson or {}, sort_keys=True, separators=(",", ":"))
+            )
+            yield V1BindingInvocationRecord(
+                id=inv_id,
+                requested_run_id=req_id,
+                execution_run_id=exec_id,
+                cache_source_run_id=_opt_str(row.get("cache_source_run_id")),
+                cache_outcome=str(row.get("cache_outcome") or "unknown"),
+                binding_json=bjson,
+                created_at=_parse_datetime(row.get("created_at")),
+            )
+
+    def read_artifact_schemas(self) -> V1ArtifactSchemaBundle:
+        """Read `main.artifact_schema*` (`schema`, `field`, `observation`, `relation`)."""
+        schemas: list[V1ArtifactSchemaRecord] = []
+        _, s_rows = self._fetch_rows(
+            "artifact_schema",
+            order_by=("created_at", "id"),
+            required_cols={"id"},
+        )
+        for row in s_rows:
+            sid = _opt_str(row.get("id"))
+            if not sid:
+                continue
+            raw_prof = row.get("profile_json")
+            prof_obj = _parse_json_obj(raw_prof) if raw_prof is not None else None
+            schemas.append(
+                V1ArtifactSchemaRecord(
+                    id=sid,
+                    profile_version=(
+                        int(row["profile_version"])
+                        if row.get("profile_version") is not None
+                        else 1
+                    ),
+                    summary_json=_parse_json_obj(row.get("summary_json")),
+                    profile_json=prof_obj if prof_obj else None,
+                    created_at=_parse_datetime(row.get("created_at")),
+                )
+            )
+
+        fields_out: list[V1ArtifactSchemaFieldRecord] = []
+        _, f_rows = self._fetch_rows(
+            "artifact_schema_field",
+            order_by=("schema_id", "ordinal_position", "name"),
+            required_cols={"schema_id", "name"},
+        )
+        for row in f_rows:
+            sid = _opt_str(row.get("schema_id"))
+            fname = _opt_str(row.get("name"))
+            if not sid or not fname:
+                continue
+            raw_stats = row.get("stats_json")
+            stats_obj = _parse_json_obj(raw_stats) if raw_stats is not None else None
+            raw_enums = row.get("enum_values_json")
+            enums_list = (
+                _parse_json_list_str(raw_enums) if raw_enums is not None else None
+            )
+            fields_out.append(
+                V1ArtifactSchemaFieldRecord(
+                    schema_id=sid,
+                    ordinal_position=(
+                        int(row["ordinal_position"])
+                        if row.get("ordinal_position") is not None
+                        else None
+                    ),
+                    name=fname,
+                    logical_type=str(row.get("logical_type") or "VARCHAR"),
+                    nullable=(
+                        bool(row["nullable"])
+                        if row.get("nullable") is not None
+                        else True
+                    ),
+                    stats_json=stats_obj if stats_obj else None,
+                    is_enum=bool(row.get("is_enum", False)),
+                    enum_values_json=enums_list if enums_list else None,
+                )
+            )
+
+        observations: list[V1ArtifactSchemaObservationRecord] = []
+        _, o_rows = self._fetch_rows(
+            "artifact_schema_observation",
+            order_by=("observed_at", "id"),
+            required_cols={"id", "artifact_id", "schema_id"},
+        )
+        for row in o_rows:
+            oid = _parse_uuid(row.get("id"))
+            aid = _parse_uuid(row.get("artifact_id"))
+            sid = _opt_str(row.get("schema_id"))
+            if oid is None or aid is None or not sid:
+                continue
+            observations.append(
+                V1ArtifactSchemaObservationRecord(
+                    id=oid,
+                    artifact_id=aid,
+                    schema_id=sid,
+                    run_id=_opt_str(row.get("run_id")),
+                    source=str(row.get("source") or "duckdb"),
+                    sample_rows=(
+                        int(row["sample_rows"])
+                        if row.get("sample_rows") is not None
+                        else None
+                    ),
+                    observed_at=_parse_datetime(row.get("observed_at")),
+                )
+            )
+
+        relations: list[V1ArtifactSchemaRelationRecord] = []
+        _, r_rows = self._fetch_rows(
+            "artifact_schema_relation",
+            order_by=("schema_id", "from_field"),
+            required_cols={"schema_id", "from_field", "to_table", "to_field"},
+        )
+        for row in r_rows:
+            sid = _opt_str(row.get("schema_id"))
+            ff = _opt_str(row.get("from_field"))
+            tt = _opt_str(row.get("to_table"))
+            tf = _opt_str(row.get("to_field"))
+            if not sid or not ff or not tt or not tf:
+                continue
+            relations.append(
+                V1ArtifactSchemaRelationRecord(
+                    schema_id=sid,
+                    from_field=ff,
+                    to_table=tt,
+                    to_field=tf,
+                    relationship_type=str(
+                        row.get("relationship_type") or "foreign_key"
+                    ),
+                    cardinality=_opt_str(row.get("cardinality")),
+                )
+            )
+
+        return V1ArtifactSchemaBundle(
+            schemas=tuple(schemas),
+            fields=tuple(fields_out),
+            observations=tuple(observations),
+            relations=tuple(relations),
+        )
+
+    def read_user_schema_tables_ddl(self) -> V1UserSchemasDDL:
+        """Introspect user schemas (`global_tables`, `_dlt_*`, etc.) for DDL replay.
+
+        Queries `duckdb_sequences()`, `duckdb_tables()`, `duckdb_constraints()`, and
+        `duckdb_indexes()`, ordering tables topologically by foreign-key constraints.
+        """
+        excluded = ("main", "information_schema", "pg_catalog")
+        excl_sql = "('main', 'information_schema', 'pg_catalog')"
+        cat_row = self._con.execute("SELECT current_database()").fetchone()
+        catalog_name = (
+            str(cat_row[0]) if cat_row is not None and cat_row[0] is not None else ""
+        )
+
+        seq_rows = self._con.execute(
+            "SELECT schema_name, sequence_name, sql FROM duckdb_sequences() "
+            f"WHERE schema_name NOT IN {excl_sql} AND NOT temporary "
+            "ORDER BY schema_name, sequence_name"
+        ).fetchall()
+        sequences: list[V1SequenceDDL] = []
+        schema_set: set[str] = set()
+        for raw_s, raw_seq, raw_sql in seq_rows:
+            s_name = str(raw_s)
+            seq_name = str(raw_seq)
+            sql_str = str(raw_sql or "").strip()
+            if sql_str:
+                q_seq_target = f"{_quote_ident(s_name)}.{_quote_ident(seq_name)}"
+                sql_str = re.sub(
+                    r"^(\s*CREATE\s+SEQUENCE\s+(?:IF\s+NOT\s+EXISTS\s+)?)"
+                    r'(?:"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_]*)(?![A-Za-z0-9_"]|\s*\.)',
+                    lambda m: f"{m.group(1)}{q_seq_target}",
+                    sql_str,
+                    count=1,
+                    flags=re.IGNORECASE,
+                )
+                schema_set.add(s_name)
+                sequences.append(
+                    V1SequenceDDL(
+                        schema_name=s_name,
+                        sequence_name=seq_name,
+                        sql=sql_str,
+                    )
+                )
+
+        tbl_rows = self._con.execute(
+            "SELECT schema_name, table_name, sql FROM duckdb_tables() "
+            f"WHERE schema_name NOT IN {excl_sql} AND NOT temporary "
+            "ORDER BY schema_name, table_name"
+        ).fetchall()
+
+        fk_rows = self._con.execute(
+            "SELECT schema_name, table_name, constraint_type, constraint_text "
+            "FROM duckdb_constraints() "
+            f"WHERE schema_name NOT IN {excl_sql} "
+            "ORDER BY schema_name, table_name, constraint_index"
+        ).fetchall()
+        fk_map: dict[tuple[str, str], list[tuple[str, str]]] = {}
+        for raw_s, raw_t, raw_ctype, raw_ctext in fk_rows:
+            if str(raw_ctype or "").upper() != "FOREIGN KEY":
+                continue
+            s_name = str(raw_s)
+            t_name = str(raw_t)
+            target = _extract_fk_target(str(raw_ctext or ""), default_schema=s_name)
+            if (
+                target is not None
+                and target[0] not in excluded
+                and target != (s_name, t_name)
+            ):
+                bucket = fk_map.setdefault((s_name, t_name), [])
+                if target not in bucket:
+                    bucket.append(target)
+
+        raw_tables: dict[tuple[str, str], V1TableDDL] = {}
+        for raw_s, raw_t, raw_sql in tbl_rows:
+            s_name = str(raw_s)
+            t_name = str(raw_t)
+            schema_set.add(s_name)
+            sql_str = str(raw_sql or "").strip()
+            key = (s_name, t_name)
+            raw_tables[key] = V1TableDDL(
+                schema_name=s_name,
+                table_name=t_name,
+                sql=sql_str,
+                fk_targets=tuple(fk_map.get(key, ())),
+            )
+
+        ordered_tables: list[V1TableDDL] = []
+        visited: set[tuple[str, str]] = set()
+        visiting: set[tuple[str, str]] = set()
+
+        def _visit(node: tuple[str, str]) -> None:
+            if node in visited or node not in raw_tables:
+                return
+            if node in visiting:
+                return
+            visiting.add(node)
+            for dep in raw_tables[node].fk_targets:
+                _visit(dep)
+            visiting.remove(node)
+            visited.add(node)
+            ordered_tables.append(raw_tables[node])
+
+        for key in sorted(raw_tables):
+            _visit(key)
+
+        idx_rows = self._con.execute(
+            "SELECT schema_name, table_name, index_name, sql FROM duckdb_indexes() "
+            f"WHERE schema_name NOT IN {excl_sql} "
+            "ORDER BY schema_name, table_name, index_name"
+        ).fetchall()
+        indexes: list[V1IndexDDL] = []
+        for raw_s, raw_t, raw_idx, raw_sql in idx_rows:
+            sql_str = str(raw_sql or "").strip()
+            if not sql_str:
+                continue
+            s_name = str(raw_s)
+            schema_set.add(s_name)
+            indexes.append(
+                V1IndexDDL(
+                    schema_name=s_name,
+                    table_name=str(raw_t),
+                    index_name=str(raw_idx),
+                    sql=sql_str,
+                )
+            )
+
+        return V1UserSchemasDDL(
+            schemas=tuple(sorted(schema_set)),
+            sequences=tuple(sequences),
+            tables=tuple(ordered_tables),
+            indexes=tuple(indexes),
+            catalog_name=catalog_name,
+        )
+
     def read_runs(self) -> list[V1RunRecord]:
         """Materialize all `V1RunRecord` rows from `main.run`."""
         return list(self.iter_runs())
@@ -593,13 +1389,35 @@ class V1DatabaseReader:
         """Materialize all `V1DirEntryRecord` rows from `main.run_artifact_dir_entry`."""
         return list(self.iter_dir_entries())
 
+    def read_coupler_snapshots(self) -> list[V1CouplerSnapshotRecord]:
+        """Materialize all `V1CouplerSnapshotRecord` rows from `main.run_coupler_snapshot`."""
+        return list(self.iter_coupler_snapshots())
+
+    def read_binding_invocations(self) -> list[V1BindingInvocationRecord]:
+        """Materialize all `V1BindingInvocationRecord` rows from `main.run_binding_invocation`."""
+        return list(self.iter_binding_invocations())
+
 
 __all__ = [
     "V1ArtifactRecord",
+    "V1ArtifactSchemaBundle",
+    "V1ArtifactSchemaFieldRecord",
+    "V1ArtifactSchemaObservationRecord",
+    "V1ArtifactSchemaRecord",
+    "V1ArtifactSchemaRelationRecord",
+    "V1BindingInvocationRecord",
+    "V1ConfigFacetRecord",
+    "V1CouplerSnapshotRecord",
     "V1DatabaseReader",
     "V1DirEntryRecord",
     "V1DltTableInfo",
+    "V1IndexDDL",
     "V1LinkRecord",
+    "V1RunConfigKvRecord",
     "V1RunRecord",
     "V1SchemaInventory",
+    "V1SequenceDDL",
+    "V1TableDDL",
+    "V1UserSchemasDDL",
+    "unflatten_facet_key_path",
 ]

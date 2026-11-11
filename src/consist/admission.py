@@ -4,6 +4,7 @@ Consist admission control, provenance sidecars, and container inspection.
 
 from __future__ import annotations
 
+from consist.artifact import Artifact
 from consist.core.admission import (
     AdmissionIdentity,
     AdmissionReference,
@@ -38,6 +39,7 @@ __all__ = [
     "AdmissionIdentity",
     "AdmissionReference",
     "AdmissionReport",
+    "Artifact",
     "ArtifactProvenanceSidecar",
     "DeclaredDigestExpectation",
     "FileIdentity",

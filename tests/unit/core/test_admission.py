@@ -1048,3 +1048,50 @@ def test_unresolvable_expected_input_is_unverified(
 
     assert report.outcome == "unverified"
     _assert_observation(report, expected_observation)
+
+
+def test_hydrate_admitted_input_preserves_destination_on_mismatch_and_supports_legacy_artifact(
+    tmp_path: Path,
+):
+    from consist.artifact import Artifact as V2Artifact
+    from consist.core.admission import hydrate_admitted_input
+    from consist.engine import observe
+
+    src = tmp_path / "source_feed.zip"
+    src.write_bytes(b"canonical-feed-bytes")
+    dest = tmp_path / "staged_feed.zip"
+    dest.write_bytes(b"preexisting-target-bytes")
+    orig_ino = dest.stat().st_ino
+
+    legacy_art = Artifact(
+        key="raw_gtfs",
+        container_uri=str(src),
+        driver="zip",
+        hash=_sha256(src.read_bytes()),
+        abs_path=str(src),
+    )
+
+    bad_exp = DeclaredDigestExpectation(identity=f"sha256:file:{'0' * 64}")
+    mismatch_res = hydrate_admitted_input(
+        legacy_art,
+        destination=dest,
+        expectation=bad_exp,
+    )
+    assert mismatch_res.report.outcome == "mismatched"
+    assert isinstance(mismatch_res.artifact, V2Artifact)
+    assert dest.read_bytes() == b"preexisting-target-bytes"
+    assert dest.stat().st_ino == orig_ino
+
+    good_exp = DeclaredDigestExpectation(
+        identity=f"sha256:file:{_sha256(src.read_bytes())}"
+    )
+    v2_observed = observe(src, key="raw_gtfs")
+    ok_res = hydrate_admitted_input(
+        v2_observed,
+        destination=dest,
+        expectation=good_exp,
+        stage_mode="copy",
+    )
+    assert ok_res.report.outcome == "verified"
+    assert ok_res.path == dest.resolve()
+    assert dest.read_bytes() == b"canonical-feed-bytes"

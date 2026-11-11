@@ -17,12 +17,12 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 from sqlmodel import col, select
 
-from consist.artifact import Artifact as V2Artifact
+from consist.artifact import Artifact
 from consist.core.logical_array_identity import (
     LogicalProfileName,
     admission_directory_identity,
@@ -37,16 +37,18 @@ from consist.digest import (
     Digest,
     Expectation,
     Identity,
+    Kind,
+    SchemeRegistry,
     Verdict,
+    compare,
     digest_bytes,
     digest_file,
 )
 from consist.engine import (
-    ensure_digest,
-    locate,
+    compute_scheme_digest,
+    iter_artifact_candidates,
     observe,
-    stage,
-    verify as engine_verify,
+    stage_verified_source,
 )
 from consist.location import (
     Location,
@@ -55,13 +57,39 @@ from consist.location import (
     lookup_live_ledger_by_path,
 )
 from consist.meta import strip_system_meta
-from consist.models.artifact import Artifact
 from consist.models.run import Run, RunArtifactLink
-from consist.store.detect import SchemaState, detect_schema
+from consist.store.detect import ConsistError, SchemaState, detect_schema
 from consist.store.ledger import StoreLedger
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
+
+
+@runtime_checkable
+class _LegacyArtifactLike(Protocol):
+    @property
+    def id(self) -> uuid.UUID: ...
+
+    @property
+    def key(self) -> str: ...
+
+    @property
+    def driver(self) -> str: ...
+
+    @property
+    def container_uri(self) -> str: ...
+
+    @property
+    def hash(self) -> str | None: ...
+
+    @property
+    def run_id(self) -> str | None: ...
+
+    @property
+    def meta(self) -> Mapping[str, Any]: ...
+
+    @property
+    def abs_path(self) -> str | None: ...
 
 
 ADMISSION_REPORT_SCHEMA_VERSION = 3
@@ -330,7 +358,7 @@ class PriorRunExpectation(BaseModel):
     @classmethod
     def from_artifact(
         cls,
-        artifact: V2Artifact | Artifact,
+        artifact: Artifact,
         *,
         expected_run_id: str | None = None,
         expected_direction: Literal["input", "output", "any"] = "any",
@@ -346,7 +374,7 @@ class PriorRunExpectation(BaseModel):
 
         Parameters
         ----------
-        artifact : V2Artifact or Artifact
+        artifact : Artifact
             Consist artifact whose ``key``, ``run_id``, and optional
             ``meta["logical_identity"]`` / ``meta["logical_profile"]`` (or v2
             ``sha256:logical_matrices:v1`` claim) seed the expectation.
@@ -793,13 +821,13 @@ def _resolved_path(path: Path) -> str | None:
         return None
 
 
-def _known_admission_identity(artifact: V2Artifact | Artifact) -> str | None:
+def _known_admission_identity(artifact: Artifact | _LegacyArtifactLike) -> str | None:
     """
     Return a trusted container identity when artifact semantics or manifest prove it.
 
     Parameters
     ----------
-    artifact : V2Artifact or Artifact
+    artifact : Artifact
         Persisted artifact from the explicitly selected expected run.
 
     Returns
@@ -816,7 +844,7 @@ def _known_admission_identity(artifact: V2Artifact | Artifact) -> str | None:
     hashes without a directory manifest, and caller-supplied hashes even when
     they happen to be hexadecimal SHA-256 text.
     """
-    if isinstance(artifact, V2Artifact):
+    if isinstance(artifact, Artifact):
         if artifact.identity.verifiable:
             file_claim = artifact.identity.get("sha256:file")
             if file_claim is not None:
@@ -875,7 +903,7 @@ def _known_admission_identity(artifact: V2Artifact | Artifact) -> str | None:
 
 
 def _known_logical_admission_identity(
-    artifact: V2Artifact | Artifact,
+    artifact: Artifact | _LegacyArtifactLike,
 ) -> tuple[str | None, LogicalProfileName | None]:
     """
     Extract an optional logical array identity and profile from artifact claims or metadata.
@@ -887,7 +915,7 @@ def _known_logical_admission_identity(
         if raw_profile in ("preserve_canonical", "float32_matrices_v1")
         else None
     )
-    if isinstance(artifact, V2Artifact):
+    if isinstance(artifact, Artifact):
         logical_claim = artifact.identity.get("sha256:logical_matrices:v1")
         if logical_claim is not None:
             return (
@@ -1317,7 +1345,7 @@ def _query_expected_artifact_v2_ledger(
     expected_run_id: str,
     artifact_key: str,
     expected_direction: Literal["input", "output", "any"] = "any",
-) -> tuple[V2Artifact | None, str | None, str | None]:
+) -> tuple[Artifact | None, str | None, str | None]:
     con = ledger.connection
     run_row = con.execute(
         "SELECT status FROM run WHERE id = ?",
@@ -1389,7 +1417,7 @@ def _expected_artifact_v2(
     artifact_key: str,
     expected_direction: Literal["input", "output", "any"] = "any",
     live_ledger: StoreLedger | None = None,
-) -> tuple[V2Artifact | None, str | None, str | None]:
+) -> tuple[Artifact | None, str | None, str | None]:
     """Resolve one expected v2 `Artifact` from a v2 `StoreLedger` database."""
     live = (
         live_ledger
@@ -1418,10 +1446,12 @@ def _expected_artifact(
     expected_run_id: str,
     artifact_key: str,
     expected_direction: Literal["input", "output", "any"] = "any",
-) -> tuple[Artifact | None, str | None]:
+) -> tuple[_LegacyArtifactLike | None, str | None]:
     """
     Resolve one exact expected artifact without key-collapsing history helpers.
     """
+    from consist.models.artifact import Artifact as LegacyArtifact
+
     with database.session_scope() as session:
         run = session.get(Run, expected_run_id)
         if run is None:
@@ -1429,17 +1459,17 @@ def _expected_artifact(
         if run.status != "completed":
             return None, "expected_prior_run_not_completed"
         statement = (
-            select(Artifact)
+            select(LegacyArtifact)
             .join(
                 RunArtifactLink,
-                Artifact.id == RunArtifactLink.artifact_id,  # ty: ignore[invalid-argument-type]
+                LegacyArtifact.id == RunArtifactLink.artifact_id,  # ty: ignore[invalid-argument-type]
             )
             .where(RunArtifactLink.run_id == expected_run_id)
-            .where(Artifact.key == artifact_key)
+            .where(LegacyArtifact.key == artifact_key)
         )
         if expected_direction in ("input", "output"):
             statement = statement.where(RunArtifactLink.direction == expected_direction)
-        statement = statement.order_by(col(Artifact.id))
+        statement = statement.order_by(col(LegacyArtifact.id))
         matches = list(session.exec(statement).all())
 
     if not matches:
@@ -1541,6 +1571,38 @@ def check_artifact_identity(
         If ``expected_logical_hash`` is provided and is not a valid 64-character
         hexadecimal SHA-256 digest or ``sha256:logical_matrices:<hex>`` URI.
     """
+    return _check_artifact_identity_impl(
+        tracker=tracker,
+        execution_path=execution_path,
+        expected_run_id=expected_run_id,
+        artifact_key=artifact_key,
+        expected_bytes_path=expected_bytes_path,
+        input_role=input_role,
+        expected_direction=expected_direction,
+        source_tracker_db=source_tracker_db,
+        identity_scheme=identity_scheme,
+        logical_profile=logical_profile,
+        expected_logical_hash=expected_logical_hash,
+    )
+
+
+def _check_artifact_identity_impl(
+    tracker: "Tracker" | None = None,
+    *,
+    execution_path: str | Path,
+    expected_run_id: str,
+    artifact_key: str,
+    expected_bytes_path: str | Path | None = None,
+    input_role: str | None = None,
+    expected_direction: Literal["input", "output", "any"] = "any",
+    source_tracker_db: str | Path | None = None,
+    identity_scheme: IdentityScheme = "auto",
+    logical_profile: LogicalProfileName | None = None,
+    expected_logical_hash: str | None = None,
+    _preverified_identity: AdmissionIdentity | None = None,
+    _preverified_logical_identity: AdmissionIdentity | None = None,
+    _out_logical_profile: list[LogicalProfileName] | None = None,
+) -> AdmissionReport:
     if source_tracker_db is None and (tracker is None or tracker.db is None):
         raise RuntimeError("Artifact admission requires a provenance database.")
 
@@ -1583,17 +1645,24 @@ def check_artifact_identity(
             source_tracker_db=source_db_str,
         )
     if candidate.is_file() and identity_scheme != "logical":
-        file_observation = _observe_candidate(execution_path)
-        if file_observation.observed_identity is None:
-            return _report_candidate_failure(
-                file_observation,
-                expected_source="prior_run",
-                expected_run_id=expected_run_id,
-                artifact_key=artifact_key,
-                input_role=role,
-                expected_direction=expected_direction,
-                source_tracker_db=source_db_str,
+        if isinstance(_preverified_identity, FileIdentity):
+            file_observation = _CandidateObservation(
+                execution_path=candidate,
+                physical_target_path=physical_target_path,
+                observed_identity=_preverified_identity,
             )
+        else:
+            file_observation = _observe_candidate(execution_path)
+            if file_observation.observed_identity is None:
+                return _report_candidate_failure(
+                    file_observation,
+                    expected_source="prior_run",
+                    expected_run_id=expected_run_id,
+                    artifact_key=artifact_key,
+                    input_role=role,
+                    expected_direction=expected_direction,
+                    source_tracker_db=source_db_str,
+                )
     observed_file_id_str = (
         str(file_observation.observed_identity)
         if file_observation is not None
@@ -1620,7 +1689,7 @@ def check_artifact_identity(
             except Exception:
                 is_v2_db = False
 
-    artifact: V2Artifact | Artifact | None = None
+    artifact: Artifact | _LegacyArtifactLike | None = None
     expected_error: str | None = None
     v2_historical_hash: str | None = None
 
@@ -1733,6 +1802,8 @@ def check_artifact_identity(
     resolved_logical_profile: LogicalProfileName = (
         logical_profile or artifact_logical_profile or "preserve_canonical"
     )
+    if _out_logical_profile is not None:
+        _out_logical_profile.append(resolved_logical_profile)
 
     if identity_scheme == "logical":
         if resolved_logical_identity is None:
@@ -1752,9 +1823,35 @@ def check_artifact_identity(
                 expected_direction=expected_direction,
                 source_tracker_db=source_db_str,
             )
+        logical_expected = AdmissionIdentity.parse(resolved_logical_identity)
+        if (
+            _preverified_logical_identity is not None
+            and resolved_logical_profile == "preserve_canonical"
+        ):
+            logical_obs = _CandidateObservation(
+                execution_path=candidate,
+                physical_target_path=physical_target_path,
+                observed_identity=_preverified_logical_identity,
+            )
+            extra_obs = (
+                ("logical_identity_verified",)
+                if logical_obs.observed_identity == logical_expected
+                else ("logical_identity_mismatched",)
+            )
+            return _compare_observed_identity(
+                logical_obs,
+                expected_identity=logical_expected,
+                expected_source="prior_run",
+                expected_run_id=expected_run_id,
+                artifact_key=artifact_key,
+                input_role=role,
+                expected_direction=expected_direction,
+                source_tracker_db=source_db_str,
+                extra_observations=extra_obs,
+            )
         return compare_path_to_identity(
             execution_path=candidate,
-            expected_identity=AdmissionIdentity.parse(resolved_logical_identity),
+            expected_identity=logical_expected,
             input_role=role,
             expected_source="prior_run",
             artifact_key=artifact_key,
@@ -1825,7 +1922,7 @@ def check_artifact_identity(
             )
         stored_hash = (
             (v2_historical_hash or artifact.anchor.hex)
-            if isinstance(artifact, V2Artifact)
+            if isinstance(artifact, Artifact)
             else artifact.hash
         )
         if (
@@ -1856,9 +1953,35 @@ def check_artifact_identity(
 
     if expected_identity is None:
         if identity_scheme == "auto" and resolved_logical_identity is not None:
+            logical_expected = AdmissionIdentity.parse(resolved_logical_identity)
+            if (
+                _preverified_logical_identity is not None
+                and resolved_logical_profile == "preserve_canonical"
+            ):
+                logical_obs = _CandidateObservation(
+                    execution_path=candidate,
+                    physical_target_path=physical_target_path,
+                    observed_identity=_preverified_logical_identity,
+                )
+                extra_obs = (
+                    ("logical_identity_verified",)
+                    if logical_obs.observed_identity == logical_expected
+                    else ("logical_identity_mismatched",)
+                )
+                return _compare_observed_identity(
+                    logical_obs,
+                    expected_identity=logical_expected,
+                    expected_source="prior_run",
+                    expected_run_id=expected_run_id,
+                    artifact_key=artifact_key,
+                    input_role=role,
+                    expected_direction=expected_direction,
+                    source_tracker_db=source_db_str,
+                    extra_observations=extra_obs,
+                )
             return compare_path_to_identity(
                 execution_path=candidate,
-                expected_identity=AdmissionIdentity.parse(resolved_logical_identity),
+                expected_identity=logical_expected,
                 input_role=role,
                 expected_source="prior_run",
                 artifact_key=artifact_key,
@@ -1894,6 +2017,16 @@ def check_artifact_identity(
     parsed_expected = AdmissionIdentity.parse(expected_identity)
     if parsed_expected.kind == "file" and file_observation is not None:
         container_observation = file_observation
+    elif (
+        _preverified_identity is not None
+        and _preverified_identity.kind == parsed_expected.kind
+        and (parsed_expected.kind != "manifest-v1" or candidate.is_dir())
+    ):
+        container_observation = _CandidateObservation(
+            execution_path=candidate,
+            physical_target_path=physical_target_path,
+            observed_identity=_preverified_identity,
+        )
     else:
         container_observation = _observe_candidate_for_kind(
             candidate,
@@ -1935,11 +2068,21 @@ def check_artifact_identity(
     # Auto fallback to logical array identity when container bytes/format differed.
     if identity_scheme == "auto" and resolved_logical_identity is not None:
         logical_expected = AdmissionIdentity.parse(resolved_logical_identity)
-        logical_obs = _observe_candidate_for_kind(
-            candidate,
-            kind="logical_matrices",
-            logical_profile=resolved_logical_profile,
-        )
+        if (
+            _preverified_logical_identity is not None
+            and resolved_logical_profile == "preserve_canonical"
+        ):
+            logical_obs = _CandidateObservation(
+                execution_path=candidate,
+                physical_target_path=physical_target_path,
+                observed_identity=_preverified_logical_identity,
+            )
+        else:
+            logical_obs = _observe_candidate_for_kind(
+                candidate,
+                kind="logical_matrices",
+                logical_profile=resolved_logical_profile,
+            )
         if logical_obs.observed_identity is not None:
             extra_obs = (
                 ("container_bytes_mismatched", "logical_identity_verified")
@@ -2284,7 +2427,7 @@ def check_admission_reference_prior_run_expectation(
 class HydratedAdmittedInput:
     """Result of unified v2 input admission and local path staging."""
 
-    artifact: V2Artifact
+    artifact: Artifact
     path: Path
     report: AdmissionReport
     verdict: Verdict
@@ -2309,56 +2452,9 @@ def _digest_to_admission_identity_str(digest: Digest) -> str:
     return str(digest)
 
 
-def _verify_and_attach_digest(
-    v2_art: V2Artifact,
-    v2_exp: Expectation,
-    *,
-    effective_contract: Contract,
-    local_path: Path,
-    ledger: Any,
-    effective_mounts: Mapping[str, str | Path | Mount] | None,
-    policy: Any = None,
-) -> tuple[V2Artifact, Verdict]:
-    raw_verdict = engine_verify(
-        v2_art,
-        v2_exp,
-        contract=effective_contract,
-        ledger=ledger,
-        mounts=effective_mounts,
-        policy=policy,
-    )
-    verdict = (
-        raw_verdict
-        if isinstance(raw_verdict, Verdict)
-        else Verdict(
-            Agreement.AGREE if raw_verdict else Agreement.DISAGREE,
-            effective_contract.equivalence,
-            (),
-            True,
-        )
-    )
-    if (
-        verdict.matched_scheme is not None
-        and v2_art.identity.get(verdict.matched_scheme) is None
-        and v2_art.identity.verifiable
-    ):
-        try:
-            v2_art, _ = ensure_digest(
-                v2_art,
-                verdict.matched_scheme,
-                path=local_path,
-                ledger=ledger,
-                mounts=effective_mounts,
-                policy=policy,
-            )
-        except Exception:
-            pass
-    return (v2_art, verdict)
-
-
 def _unreadable_hydrated_input(
     *,
-    v2_art: V2Artifact,
+    v2_art: Artifact,
     candidate_path: Path,
     role: str,
     expectation: Any,
@@ -2472,188 +2568,24 @@ def _report_from_verdict(
     )
 
 
-def hydrate_admitted_input(
-    artifact_or_path: V2Artifact | Artifact | str | Path,
-    *,
-    input_role: str | None = None,
-    destination: str | Path | None = None,
-    expectation: (
-        Expectation
-        | DeclaredDigestExpectation
-        | PriorRunExpectation
-        | AdmissionIdentity
-        | Digest
-        | str
-        | None
-    ) = None,
-    contract: Contract | None = None,
-    tracker: "Tracker" | None = None,
-    ledger: Any = None,
-    mounts: Mapping[str, str | Path | Mount] | None = None,
-    stage_mode: Literal["auto", "reflink", "hardlink", "symlink", "copy"] = "auto",
-) -> HydratedAdmittedInput:
-    """
-    Observe/locate/stage an input artifact or path and verify it against an expectation.
-
-    Built directly on top of the v2 engine primitives (`observe()`, `locate()`,
-    `stage()`, `ensure_digest()`, `verify()`, and `compare()`).
-    """
-    effective_mounts = (
-        mounts
-        if mounts is not None
-        else (tracker.mounts if tracker is not None else None)
+def _contract_to_expectation(contract: Contract | Expectation) -> Expectation:
+    if isinstance(contract, Expectation):
+        return contract
+    eq_spec = SchemeRegistry.get(contract.equivalence)
+    return Expectation(
+        accepts_kinds=frozenset({eq_spec.kind}),
+        pinned_schemes=frozenset({eq_spec.name}),
     )
 
-    if isinstance(artifact_or_path, V2Artifact):
-        v2_art = artifact_or_path
-        if input_role is not None and input_role.strip() and v2_art.key != input_role:
-            v2_art = replace(v2_art, key=input_role)
-    elif isinstance(artifact_or_path, Artifact):
-        legacy_path: Path | None = None
-        if artifact_or_path.abs_path:
-            legacy_path = Path(artifact_or_path.abs_path)
-        elif tracker is not None and artifact_or_path.container_uri:
-            resolved_str = tracker.resolve_uri(artifact_or_path.container_uri)
-            if resolved_str:
-                legacy_path = Path(resolved_str)
-        elif artifact_or_path.container_uri:
-            legacy_path = Path(artifact_or_path.container_uri)
-        role_for_legacy = input_role or artifact_or_path.key
-        raw_meta = (
-            dict(artifact_or_path.meta)
-            if isinstance(artifact_or_path.meta, Mapping)
-            else {}
-        )
-        cleaned_meta = strip_system_meta(raw_meta)
-        if legacy_path is None or not legacy_path.exists():
-            fallback_path = (
-                legacy_path
-                if legacy_path is not None
-                else Path(artifact_or_path.container_uri or artifact_or_path.key)
-            )
-            fallback_hex = digest_bytes(
-                f"{artifact_or_path.id}:{role_for_legacy}:{artifact_or_path.hash}".encode(
-                    "utf-8"
-                )
-            )
-            placeholder_art = V2Artifact(
-                id=artifact_or_path.id,
-                key=role_for_legacy,
-                driver=artifact_or_path.driver,
-                identity=Identity(anchor=Digest("legacy-v1:unverified", fallback_hex)),
-                hints=(
-                    Observation(
-                        location=Location(uri=str(fallback_path)),
-                        identity=Identity(
-                            anchor=Digest("legacy-v1:unverified", fallback_hex)
-                        ),
-                    ),
-                ),
-                run_id=(
-                    str(artifact_or_path.run_id)
-                    if artifact_or_path.run_id is not None
-                    else None
-                ),
-                meta=cleaned_meta,
-            )
-            return _unreadable_hydrated_input(
-                v2_art=placeholder_art,
-                candidate_path=fallback_path,
-                role=role_for_legacy,
-                expectation=expectation,
-                tracker=tracker,
-            )
-        observed = observe(
-            legacy_path,
-            key=role_for_legacy,
-            driver=artifact_or_path.driver,
-            ledger=ledger,
-            mounts=effective_mounts,
-        )
-        v2_art = replace(
-            observed,
-            id=artifact_or_path.id,
-            key=role_for_legacy,
-            run_id=(
-                str(artifact_or_path.run_id)
-                if artifact_or_path.run_id is not None
-                else None
-            ),
-            meta=cleaned_meta,
-        )
-    elif isinstance(artifact_or_path, (str, Path)):
-        cand_path = Path(artifact_or_path).expanduser()
-        role_for_path = input_role or cand_path.name or "input"
-        if not cand_path.exists():
-            fallback_hex = digest_bytes(str(cand_path).encode("utf-8"))
-            placeholder_art = V2Artifact(
-                id=uuid.uuid4(),
-                key=role_for_path,
-                driver="file",
-                identity=Identity(anchor=Digest("legacy-v1:unverified", fallback_hex)),
-                hints=(
-                    Observation(
-                        location=Location(uri=str(cand_path)),
-                        identity=Identity(
-                            anchor=Digest("legacy-v1:unverified", fallback_hex)
-                        ),
-                    ),
-                ),
-            )
-            return _unreadable_hydrated_input(
-                v2_art=placeholder_art,
-                candidate_path=cand_path,
-                role=role_for_path,
-                expectation=expectation,
-                tracker=tracker,
-            )
-        v2_art = observe(
-            cand_path,
-            key=input_role,
-            ledger=ledger,
-            mounts=effective_mounts,
-        )
-    else:
-        raise TypeError(
-            f"Unsupported artifact_or_path type: {type(artifact_or_path).__name__}"
-        )
 
-    role = input_role or v2_art.key
-
-    # Resolve or stage the local path via v2 engine primitives
-    stage_contract = contract if contract is not None else Contract()
-    try:
-        if destination is not None:
-            local_path = stage(
-                v2_art,
-                Path(destination),
-                mode=stage_mode,
-                contract=stage_contract,
-                ledger=ledger,
-                mounts=effective_mounts,
-            )
-        else:
-            located = locate(
-                v2_art,
-                ledger=ledger,
-                mounts=effective_mounts,
-            )
-            local_path = located.path
-    except FileNotFoundError:
-        fallback_uri = v2_art.hints[0].location.uri if v2_art.hints else v2_art.key
-        fallback_p = Path(fallback_uri.split("://", 1)[-1])
-        return _unreadable_hydrated_input(
-            v2_art=v2_art,
-            candidate_path=fallback_p,
-            role=role,
-            expectation=expectation,
-            tracker=tracker,
-        )
-
-    # Determine effective Contract
+def _effective_contract_for_expectation(
+    expectation: Any,
+    contract: Contract | None,
+    cand_path: Path,
+) -> Contract:
     if contract is not None:
-        effective_contract = contract
-    elif (
+        return contract
+    if (
         (
             isinstance(expectation, DeclaredDigestExpectation)
             and expectation.identity.kind == "logical_matrices"
@@ -2676,50 +2608,141 @@ def hydrate_admitted_input(
             and expectation.identity_scheme == "logical"
         )
     ):
-        effective_contract = Contract(equivalence="sha256:logical_matrices:v1")
-    elif local_path.is_dir():
-        effective_contract = Contract(equivalence="sha256:manifest-v1")
-    else:
-        effective_contract = Contract(equivalence="sha256:file")
+        return Contract(equivalence="sha256:logical_matrices:v1")
+    if cand_path.is_dir():
+        return Contract(equivalence="sha256:manifest-v1")
+    return Contract(equivalence="sha256:file")
+
+
+def _maybe_attach_verified_claim(
+    cand_art: Artifact,
+    obs_digest: Digest,
+    *,
+    is_verified_on_disk: bool,
+    allow_persist_to_ledger: bool,
+    used_canonical_logical_profile: bool,
+    store_ledger: StoreLedger | None,
+) -> Artifact:
+    anchor_verified = is_verified_on_disk or (
+        cand_art.identity.verifiable and obs_digest == cand_art.identity.anchor
+    )
+    if not anchor_verified or not cand_art.identity.verifiable:
+        return cand_art
+    if (
+        obs_digest.scheme == cand_art.identity.anchor.scheme
+        and obs_digest.hex != cand_art.identity.anchor.hex
+    ):
+        return cand_art
+    if (
+        obs_digest.scheme == "sha256:logical_matrices:v1"
+        and not used_canonical_logical_profile
+    ):
+        return cand_art
+    if cand_art.identity.get(obs_digest.scheme) is None:
+        cand_art = replace(
+            cand_art,
+            identity=cand_art.identity.with_claim(obs_digest),
+        )
+    if (
+        allow_persist_to_ledger
+        and store_ledger is not None
+        and not store_ledger.read_only
+    ):
+        store_ledger.record_content_digest(
+            cand_art.identity.anchor,
+            obs_digest,
+            basis="computed",
+        )
+    return cand_art
+
+
+def _evaluate_candidate_admission(
+    cand_art: Artifact,
+    *,
+    cand_path: Path,
+    cand_member: str | None,
+    is_verified_on_disk: bool,
+    allow_persist_to_ledger: bool = True,
+    role: str,
+    expectation: Any,
+    contract: Contract | None,
+    tracker: "Tracker" | None,
+    ledger: Any,
+) -> tuple[Artifact, Verdict, AdmissionReport]:
+    effective_contract = _effective_contract_for_expectation(
+        expectation,
+        contract,
+        cand_path,
+    )
+    store_ledger = ledger if isinstance(ledger, StoreLedger) else None
 
     # Case 1: PriorRunExpectation
     if isinstance(expectation, PriorRunExpectation):
-        report = check_prior_run_expectation(
+        pre_id: AdmissionIdentity | None = None
+        pre_logical_id: AdmissionIdentity | None = None
+        if is_verified_on_disk and cand_art.identity.verifiable:
+            is_lfs = cand_path.is_file() and _is_git_lfs_pointer(cand_path)
+            if not is_lfs:
+                file_claim = cand_art.identity.get("sha256:file")
+                manifest_claim = cand_art.identity.get("sha256:manifest-v1")
+                logical_claim = cand_art.identity.get("sha256:logical_matrices:v1")
+                if file_claim is not None:
+                    pre_id = FileIdentity.parse(f"sha256:file:{file_claim.hex}")
+                elif manifest_claim is not None:
+                    pre_id = AdmissionIdentity.parse(
+                        f"sha256:manifest-v1:{manifest_claim.hex}"
+                    )
+                if logical_claim is not None:
+                    pre_logical_id = AdmissionIdentity.parse(
+                        f"sha256:logical_matrices:{logical_claim.hex}"
+                    )
+
+        prior_role = role if role else expectation.input_role
+        used_profiles: list[LogicalProfileName] = []
+        report = _check_artifact_identity_impl(
             tracker,
-            execution_path=local_path,
-            expectation=expectation,
-            input_role=role,
+            execution_path=cand_path,
+            expected_run_id=expectation.expected_run_id,
+            artifact_key=expectation.artifact_key,
+            expected_bytes_path=expectation.expected_bytes_path,
+            input_role=prior_role,
+            expected_direction=expectation.expected_direction,
+            source_tracker_db=expectation.source_tracker_db,
+            identity_scheme=expectation.identity_scheme,
+            logical_profile=expectation.logical_profile,
+            expected_logical_hash=expectation.expected_logical_hash,
+            _preverified_identity=pre_id,
+            _preverified_logical_identity=pre_logical_id,
+            _out_logical_profile=used_profiles,
         )
         if report.expected_artifact_id is not None:
             exp_digest = _admission_identity_to_digest(report.expected_artifact_id)
-            if contract is None:
-                effective_contract = Contract(equivalence=exp_digest.scheme)
-            v2_exp = Expectation(
-                frozenset({exp_digest}),
-                basis=((exp_digest.scheme, "computed"),),
+            cmp_contract = (
+                Contract(equivalence=exp_digest.scheme)
+                if contract is None
+                else effective_contract
             )
-            prior_policy = (
-                expectation.logical_profile
-                if expectation.logical_profile not in (None, "preserve_canonical")
-                else None
-            )
-            v2_art, verdict = _verify_and_attach_digest(
-                v2_art,
-                v2_exp,
-                effective_contract=effective_contract,
-                local_path=local_path,
-                ledger=ledger,
-                effective_mounts=effective_mounts,
-                policy=prior_policy,
-            )
+            if report.observed_artifact_id is not None:
+                obs_digest = _admission_identity_to_digest(report.observed_artifact_id)
+                eff_prof = used_profiles[0] if used_profiles else "preserve_canonical"
+                cand_art = _maybe_attach_verified_claim(
+                    cand_art,
+                    obs_digest,
+                    is_verified_on_disk=is_verified_on_disk,
+                    allow_persist_to_ledger=allow_persist_to_ledger,
+                    used_canonical_logical_profile=(eff_prof == "preserve_canonical"),
+                    store_ledger=store_ledger,
+                )
+                verdict = compare(
+                    Identity(anchor=obs_digest, claims=(obs_digest,)),
+                    Identity(anchor=exp_digest, claims=(exp_digest,)),
+                    _contract_to_expectation(cmp_contract),
+                )
+            else:
+                verdict = Verdict(Agreement.UNKNOWN, None, (), False)
         else:
             verdict = Verdict(Agreement.UNKNOWN, None, (), False)
-        return HydratedAdmittedInput(
-            artifact=v2_art,
-            path=local_path,
-            report=report,
-            verdict=verdict,
-        )
+        return (cand_art, verdict, report)
 
     # Case 2: DeclaredDigestExpectation, AdmissionIdentity, Digest, or str
     if isinstance(
@@ -2738,53 +2761,166 @@ def hydrate_admitted_input(
             )
             else None
         )
-        v2_exp = Expectation(
-            frozenset({target_digest}),
-            basis=((target_digest.scheme, "declared"),),
-        )
-        v2_art, verdict = _verify_and_attach_digest(
-            v2_art,
-            v2_exp,
-            effective_contract=effective_contract,
-            local_path=local_path,
-            ledger=ledger,
-            effective_mounts=effective_mounts,
-            policy=decl_policy,
-        )
+        if cand_path.is_file() and _is_git_lfs_pointer(cand_path):
+            if decl is not None:
+                return (
+                    cand_art,
+                    Verdict(Agreement.UNKNOWN, None, (), False),
+                    check_expected_identity(
+                        execution_path=cand_path,
+                        input_role=role,
+                        expectation=decl,
+                    ),
+                )
+            obs_lfs = _observe_candidate(cand_path)
+            return (
+                cand_art,
+                Verdict(Agreement.UNKNOWN, None, (), False),
+                _report_candidate_failure(
+                    obs_lfs,
+                    expected_source="declared_digest",
+                    expected_run_id=None,
+                    artifact_key=None,
+                    input_role=role,
+                ),
+            )
 
+        if decl is not None and (
+            (decl.identity.kind == "file" and not cand_path.is_file())
+            or (decl.identity.kind == "manifest-v1" and not cand_path.is_dir())
+        ):
+            return (
+                cand_art,
+                Verdict(Agreement.UNKNOWN, None, (), False),
+                check_expected_identity(
+                    execution_path=cand_path,
+                    input_role=role,
+                    expectation=decl,
+                ),
+            )
+
+        cached_obs_digest = (
+            cand_art.identity.get(target_digest.scheme)
+            if (is_verified_on_disk and decl_policy is None)
+            else None
+        )
+        if cached_obs_digest is not None:
+            obs_digest = cached_obs_digest
+        else:
+            try:
+                obs_digest, _ = compute_scheme_digest(
+                    cand_path,
+                    target_digest.scheme,
+                    driver=cand_art.driver,
+                    member=cand_member,
+                    ledger=store_ledger,
+                    policy=decl_policy
+                    if decl_policy is not None
+                    else "preserve_canonical",
+                )
+            except (OSError, KeyError, ValueError, RuntimeError, ConsistError) as exc:
+                if decl is not None:
+                    return (
+                        cand_art,
+                        Verdict(Agreement.UNKNOWN, None, (), False),
+                        check_expected_identity(
+                            execution_path=cand_path,
+                            input_role=role,
+                            expectation=decl,
+                        ),
+                    )
+                return (
+                    cand_art,
+                    Verdict(Agreement.UNKNOWN, None, (), False),
+                    _report(
+                        outcome="unreadable",
+                        execution_path=cand_path,
+                        physical_target_path=_resolved_path(cand_path),
+                        expected_source="declared_digest",
+                        expected_run_id=None,
+                        artifact_key=None,
+                        input_role=role,
+                        expected_artifact_id=_digest_to_admission_identity_str(
+                            target_digest
+                        ),
+                        observations=("file_unreadable",),
+                        reason=str(exc),
+                    ),
+                )
+            cand_art = _maybe_attach_verified_claim(
+                cand_art,
+                obs_digest,
+                is_verified_on_disk=is_verified_on_disk,
+                allow_persist_to_ledger=allow_persist_to_ledger,
+                used_canonical_logical_profile=(decl_policy is None),
+                store_ledger=store_ledger,
+            )
+
+        verdict = compare(
+            Identity(anchor=obs_digest, claims=(obs_digest,)),
+            Identity(anchor=target_digest, claims=(target_digest,)),
+            _contract_to_expectation(effective_contract),
+        )
         if decl is not None:
-            report = check_expected_identity(
-                execution_path=local_path,
+            obs_adm = AdmissionIdentity.parse(
+                _digest_to_admission_identity_str(obs_digest)
+            )
+            cand_obs = _CandidateObservation(
+                execution_path=cand_path,
+                physical_target_path=_resolved_path(cand_path),
+                observed_identity=obs_adm,
+            )
+            extra_obs: tuple[str, ...] = ()
+            if decl.identity.kind == "logical_matrices":
+                extra_obs = (
+                    ("logical_identity_verified",)
+                    if obs_adm == decl.identity
+                    else ("logical_identity_mismatched",)
+                )
+            report = _compare_observed_identity(
+                cand_obs,
+                expected_identity=decl.identity,
+                expected_source="declared_digest",
+                expected_run_id=None,
+                artifact_key=None,
                 input_role=role,
-                expectation=decl,
+                expected_source_label=decl.source_label,
+                expected_source_uri=decl.source_uri,
+                extra_observations=extra_obs,
             )
         else:
-            obs_digest = (
-                v2_art.identity.get(verdict.matched_scheme)
-                if verdict.matched_scheme is not None
-                else v2_art.identity.anchor
-            )
             report = _report_from_verdict(
                 verdict,
-                local_path=local_path,
+                local_path=cand_path,
                 role=role,
                 expected_digest=target_digest,
                 observed_digest=obs_digest,
             )
-        return HydratedAdmittedInput(
-            artifact=v2_art,
-            path=local_path,
-            report=report,
-            verdict=verdict,
-        )
+        return (cand_art, verdict, report)
 
     # Case 3: v2 Expectation or None (default self-consistency / contract verification)
+    if expectation is None and not cand_art.identity.verifiable:
+        return (
+            cand_art,
+            Verdict(Agreement.UNKNOWN, None, (), False),
+            _report(
+                outcome="unverified",
+                execution_path=cand_path,
+                physical_target_path=_resolved_path(cand_path),
+                expected_source="declared_digest",
+                expected_run_id=None,
+                artifact_key=None,
+                input_role=role,
+                observations=("expected_artifact_unverifiable",),
+            ),
+        )
+
     v2_exp = (
         expectation
         if isinstance(expectation, Expectation)
         else Expectation(
-            frozenset(v2_art.identity.all_digests),
-            basis=tuple((d.scheme, "computed") for d in v2_art.identity.all_digests),
+            frozenset(cand_art.identity.all_digests),
+            basis=tuple((d.scheme, "computed") for d in cand_art.identity.all_digests),
         )
     )
     if contract is None and v2_exp.pinned_schemes:
@@ -2795,36 +2931,389 @@ def hydrate_admitted_input(
                 equivalence=next(iter(sorted(v2_exp.pinned_schemes)))
             )
 
-    v2_art, verdict = _verify_and_attach_digest(
-        v2_art,
-        v2_exp,
-        effective_contract=effective_contract,
-        local_path=local_path,
-        ledger=ledger,
-        effective_mounts=effective_mounts,
+    cmp_expectation = (
+        _contract_to_expectation(effective_contract)
+        if contract is not None
+        else Expectation(
+            accepts_kinds=v2_exp.accepts_kinds,
+            pinned_schemes=v2_exp.pinned_schemes,
+        )
     )
+    sorted_exp_digests = sorted(
+        v2_exp.digests,
+        key=lambda d: (SchemeRegistry.get(d.scheme).cost_rank, d.scheme),
+    )
+    non_hist_exp = [d for d in sorted_exp_digests if d.kind is not Kind.HISTORICAL]
+    exp_anchor = non_hist_exp[0] if non_hist_exp else sorted_exp_digests[0]
+    exp_identity = Identity(
+        anchor=exp_anchor,
+        claims=tuple(non_hist_exp[1:]) if non_hist_exp else (),
+    )
+    if not is_verified_on_disk:
+        target_scheme = effective_contract.equivalence or exp_anchor.scheme
+        try:
+            computed_d, _ = compute_scheme_digest(
+                cand_path,
+                target_scheme,
+                driver=cand_art.driver,
+                member=cand_member,
+                ledger=store_ledger,
+            )
+            cand_identity = Identity(anchor=computed_d, claims=(computed_d,))
+        except (OSError, KeyError, ValueError, RuntimeError, ConsistError):
+            return (
+                cand_art,
+                Verdict(Agreement.UNKNOWN, None, (), False),
+                _report(
+                    outcome="unverified",
+                    execution_path=cand_path,
+                    physical_target_path=_resolved_path(cand_path),
+                    expected_source="declared_digest",
+                    expected_run_id=None,
+                    artifact_key=None,
+                    input_role=role,
+                    expected_artifact_id=_digest_to_admission_identity_str(exp_anchor),
+                    observations=("unverified",),
+                ),
+            )
+        verdict = compare(cand_identity, exp_identity, cmp_expectation)
+        obs_d: Digest | None = computed_d
+    else:
+        verdict = compare(cand_art.identity, exp_identity, cmp_expectation)
+        if verdict.agreement == Agreement.UNKNOWN and verdict.needed:
+            for needed_scheme in verdict.needed:
+                if cand_art.identity.get(needed_scheme) is None:
+                    try:
+                        new_d, _ = compute_scheme_digest(
+                            cand_path,
+                            needed_scheme,
+                            driver=cand_art.driver,
+                            member=cand_member,
+                            ledger=store_ledger,
+                        )
+                        cand_art = _maybe_attach_verified_claim(
+                            cand_art,
+                            new_d,
+                            is_verified_on_disk=is_verified_on_disk,
+                            allow_persist_to_ledger=allow_persist_to_ledger,
+                            used_canonical_logical_profile=True,
+                            store_ledger=store_ledger,
+                        )
+                    except (OSError, KeyError, ValueError, RuntimeError, ConsistError):
+                        continue
+            verdict = compare(cand_art.identity, exp_identity, cmp_expectation)
+        matched_scheme = verdict.matched_scheme or effective_contract.equivalence
+        obs_d = cand_art.identity.get(matched_scheme) or cand_art.identity.anchor
 
     matched_scheme = verdict.matched_scheme or effective_contract.equivalence
-    obs_d = v2_art.identity.get(matched_scheme) or v2_art.identity.anchor
     exp_d = (
         next(
             (d for d in v2_exp.digests if d.scheme == matched_scheme),
-            next(iter(v2_exp.digests), obs_d),
+            next(iter(v2_exp.digests), obs_d or exp_anchor),
         )
         if v2_exp.digests
-        else obs_d
+        else (obs_d or exp_anchor)
     )
     report = _report_from_verdict(
         verdict,
-        local_path=local_path,
+        local_path=cand_path,
         role=role,
         expected_digest=exp_d,
         observed_digest=obs_d,
         include_reason=True,
     )
-    return HydratedAdmittedInput(
-        artifact=v2_art,
-        path=local_path,
-        report=report,
-        verdict=verdict,
+    return (cand_art, verdict, report)
+
+
+def hydrate_admitted_input(
+    artifact_or_path: Artifact | str | Path,
+    *,
+    input_role: str | None = None,
+    destination: str | Path | None = None,
+    expectation: (
+        Expectation
+        | DeclaredDigestExpectation
+        | PriorRunExpectation
+        | AdmissionIdentity
+        | Digest
+        | str
+        | None
+    ) = None,
+    contract: Contract | None = None,
+    tracker: "Tracker" | None = None,
+    ledger: Any = None,
+    mounts: Mapping[str, str | Path | Mount] | None = None,
+    stage_mode: Literal["auto", "reflink", "hardlink", "symlink", "copy"] = "auto",
+) -> HydratedAdmittedInput:
+    """
+    Verify an input artifact or path against `expectation` before staging to `destination`.
+
+    Candidate source locations are verified in order using fresh non-racy witnesses +
+    stored identities or single-pass content verification. Any existing target at
+    `destination` is left untouched when `expectation` fails, and staged atomically via
+    a sibling `.consist-tmp-<uuid4>` file once verified without hashing a second time.
+    """
+    stage_contract = contract if contract is not None else Contract()
+    if destination is not None:
+        if stage_mode not in ("auto", "hardlink", "reflink", "symlink", "copy"):
+            raise ValueError(f"Unsupported stage mode: {stage_mode!r}")
+        if stage_contract.mutates and stage_mode in ("hardlink", "symlink"):
+            raise ValueError(
+                f"Cannot stage artifact with mode={stage_mode!r} when contract.mutates=True"
+            )
+
+    effective_mounts = (
+        mounts
+        if mounts is not None
+        else (tracker.mounts if tracker is not None else None)
     )
+
+    candidates: list[tuple[Path, str | None, Artifact, bool]] = []
+    base_artifact_for_eval: Artifact | None = None
+    effective_expectation = expectation
+    if isinstance(artifact_or_path, Artifact):
+        base_art = artifact_or_path
+        if input_role is not None and input_role.strip() and base_art.key != input_role:
+            base_art = replace(base_art, key=input_role)
+        if base_art.identity.anchor.kind is Kind.HISTORICAL and isinstance(
+            ledger, StoreLedger
+        ):
+            eff_id, _rec, _ver = ledger.resolve_effective_identity(
+                base_art.identity.anchor
+            )
+            if eff_id.verifiable:
+                base_art = replace(base_art, identity=eff_id)
+        base_artifact_for_eval = base_art
+        if expectation is None and base_art.identity.verifiable:
+            effective_expectation = Expectation(
+                frozenset(base_art.identity.all_digests),
+                basis=tuple(
+                    (d.scheme, "computed") for d in base_art.identity.all_digests
+                ),
+            )
+        role = input_role or base_art.key
+        candidates = list(
+            iter_artifact_candidates(
+                base_art,
+                ledger=ledger,
+                mounts=effective_mounts,
+            )
+        )
+        if not candidates:
+            fallback_uri = (
+                base_art.hints[0].location.uri if base_art.hints else base_art.key
+            )
+            fallback_p = Path(fallback_uri.split("://", 1)[-1])
+            return _unreadable_hydrated_input(
+                v2_art=base_art,
+                candidate_path=fallback_p,
+                role=role,
+                expectation=effective_expectation,
+                tracker=tracker,
+            )
+    elif isinstance(artifact_or_path, _LegacyArtifactLike):
+        legacy_path: Path | None = None
+        if artifact_or_path.abs_path:
+            legacy_path = Path(artifact_or_path.abs_path)
+        elif tracker is not None and artifact_or_path.container_uri:
+            resolved_str = tracker.resolve_uri(artifact_or_path.container_uri)
+            if resolved_str:
+                legacy_path = Path(resolved_str)
+        elif artifact_or_path.container_uri:
+            legacy_path = Path(artifact_or_path.container_uri)
+        role = input_role or artifact_or_path.key
+        raw_meta = (
+            dict(artifact_or_path.meta)
+            if isinstance(artifact_or_path.meta, Mapping)
+            else {}
+        )
+        cleaned_meta = strip_system_meta(raw_meta)
+        fallback_path = (
+            legacy_path
+            if legacy_path is not None
+            else Path(artifact_or_path.container_uri or artifact_or_path.key)
+        )
+        fallback_hex = digest_bytes(
+            f"{artifact_or_path.id}:{role}:{artifact_or_path.hash}".encode("utf-8")
+        )
+        placeholder_art = Artifact(
+            id=artifact_or_path.id,
+            key=role,
+            driver=artifact_or_path.driver,
+            identity=Identity(anchor=Digest("legacy-v1:unverified", fallback_hex)),
+            hints=(
+                Observation(
+                    location=Location(uri=str(fallback_path)),
+                    identity=Identity(
+                        anchor=Digest("legacy-v1:unverified", fallback_hex)
+                    ),
+                ),
+            ),
+            run_id=(
+                str(artifact_or_path.run_id)
+                if artifact_or_path.run_id is not None
+                else None
+            ),
+            meta=cleaned_meta,
+        )
+        if legacy_path is None or not legacy_path.exists():
+            return _unreadable_hydrated_input(
+                v2_art=placeholder_art,
+                candidate_path=fallback_path,
+                role=role,
+                expectation=expectation,
+                tracker=tracker,
+            )
+        if legacy_path.is_file() and _is_git_lfs_pointer(legacy_path):
+            return _unreadable_hydrated_input(
+                v2_art=placeholder_art,
+                candidate_path=legacy_path,
+                role=role,
+                expectation=expectation,
+                tracker=tracker,
+            )
+        observed = observe(
+            legacy_path,
+            key=role,
+            driver=artifact_or_path.driver,
+            ledger=ledger,
+            mounts=effective_mounts,
+        )
+        v2_art = replace(
+            observed,
+            id=artifact_or_path.id,
+            key=role,
+            run_id=(
+                str(artifact_or_path.run_id)
+                if artifact_or_path.run_id is not None
+                else None
+            ),
+            meta=cleaned_meta,
+        )
+        candidates = [(legacy_path.expanduser().resolve(), None, v2_art, True)]
+    elif isinstance(artifact_or_path, (str, Path)):
+        cand_path = Path(artifact_or_path).expanduser()
+        role = input_role or cand_path.name or "input"
+        fallback_hex = digest_bytes(str(cand_path).encode("utf-8"))
+        placeholder_art = Artifact(
+            id=uuid.uuid4(),
+            key=role,
+            driver="file",
+            identity=Identity(anchor=Digest("legacy-v1:unverified", fallback_hex)),
+            hints=(
+                Observation(
+                    location=Location(uri=str(cand_path)),
+                    identity=Identity(
+                        anchor=Digest("legacy-v1:unverified", fallback_hex)
+                    ),
+                ),
+            ),
+        )
+        if not cand_path.exists():
+            return _unreadable_hydrated_input(
+                v2_art=placeholder_art,
+                candidate_path=cand_path,
+                role=role,
+                expectation=expectation,
+                tracker=tracker,
+            )
+        if cand_path.is_file() and _is_git_lfs_pointer(cand_path):
+            return _unreadable_hydrated_input(
+                v2_art=placeholder_art,
+                candidate_path=cand_path,
+                role=role,
+                expectation=expectation,
+                tracker=tracker,
+            )
+        v2_art = observe(
+            cand_path,
+            key=input_role,
+            ledger=ledger,
+            mounts=effective_mounts,
+        )
+        role = input_role or v2_art.key
+        candidates = [(cand_path.resolve(), None, v2_art, True)]
+    else:
+        raise TypeError(
+            f"Unsupported artifact_or_path type: {type(artifact_or_path).__name__}"
+        )
+
+    last_failure: HydratedAdmittedInput | None = None
+    for cand_p, cand_member, cand_art, raw_verified_on_disk in candidates:
+        if (
+            base_artifact_for_eval is not None
+            and expectation is None
+            and not base_artifact_for_eval.identity.verifiable
+        ):
+            target_cand_art = base_artifact_for_eval
+            cand_verified_on_disk = False
+            allow_persist = False
+        elif base_artifact_for_eval is not None:
+            target_cand_art = cand_art
+            anchor_matches_base = (
+                cand_art.identity.anchor == base_artifact_for_eval.identity.anchor
+            )
+            cand_verified_on_disk = raw_verified_on_disk
+            allow_persist = raw_verified_on_disk and anchor_matches_base
+        else:
+            target_cand_art = cand_art
+            cand_verified_on_disk = raw_verified_on_disk
+            allow_persist = raw_verified_on_disk
+
+        eval_art, verdict, report = _evaluate_candidate_admission(
+            target_cand_art,
+            cand_path=cand_p,
+            cand_member=cand_member,
+            is_verified_on_disk=cand_verified_on_disk,
+            allow_persist_to_ledger=allow_persist,
+            role=role,
+            expectation=effective_expectation,
+            contract=contract,
+            tracker=tracker,
+            ledger=ledger,
+        )
+        passed = report.outcome == "verified" and verdict.agreement == Agreement.AGREE
+        if not passed:
+            last_failure = HydratedAdmittedInput(
+                artifact=eval_art,
+                path=cand_p,
+                report=report,
+                verdict=verdict,
+            )
+            continue
+
+        if destination is not None:
+            staged_path = stage_verified_source(
+                eval_art,
+                cand_p,
+                Path(destination),
+                src_member=cand_member,
+                mode=stage_mode,
+                contract=stage_contract,
+                ledger=ledger,
+                mounts=effective_mounts,
+            )
+            if str(staged_path) != report.execution_path:
+                report = AdmissionReport.model_validate(
+                    {
+                        **report.model_dump(),
+                        "execution_path": str(staged_path),
+                        "physical_target_path": _resolved_path(staged_path),
+                    }
+                )
+            return HydratedAdmittedInput(
+                artifact=eval_art,
+                path=staged_path,
+                report=report,
+                verdict=verdict,
+            )
+
+        return HydratedAdmittedInput(
+            artifact=eval_art,
+            path=cand_p,
+            report=report,
+            verdict=verdict,
+        )
+
+    assert last_failure is not None
+    return last_failure

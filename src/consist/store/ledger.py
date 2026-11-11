@@ -2574,6 +2574,9 @@ class StoreLedger:
         src_uri: str,
         dst_uri: str,
         site: str,
+        src_site: str | None = None,
+        evict_scope_key: str | None = None,
+        evict_mount_instance_id: str | None = None,
         dst_path: Path | None = None,
         scope_key: str | None = None,
         mount_instance_id: str | None = None,
@@ -2584,23 +2587,36 @@ class StoreLedger:
         """Carry along active parent and container-child observations from `src_uri` to `dst_uri`."""
         ts_ns = time.time_ns() if observed_at_ns is None else int(observed_at_ns)
         effective_writer = writer or self.writer
+        query_site = src_site if src_site is not None else site
 
         with self._lock:
             current_rows = [
                 row
                 for row in self.query_location_current(
-                    site=site,
+                    site=query_site,
                     uri=src_uri,
                     include_evicted=False,
                 )
                 if str(row.get("status", "active")) == "active"
+                and (
+                    evict_scope_key is None
+                    or str(row.get("scope_key") or "") == evict_scope_key
+                )
+                and (
+                    evict_mount_instance_id is None
+                    or str(row.get("mount_instance_id") or "")
+                    == evict_mount_instance_id
+                )
             ]
             if not current_rows:
                 return []
 
             parent_stat: FileStat | None = None
+            dir_stat: DirTreeStat | None = None
             if dst_path is not None and Path(dst_path).is_file():
                 parent_stat = FileStat.capture(dst_path, observed_at_ns=ts_ns)
+            elif dst_path is not None and Path(dst_path).is_dir():
+                dir_stat = DirTreeStat.capture(dst_path, observed_at_ns=ts_ns)
             else:
                 for row in current_rows:
                     w = row.get("witness")
@@ -2632,11 +2648,8 @@ class StoreLedger:
                 row_identity = self.get_identity(row_anchor_str)
                 old_witness = row.get("witness")
                 if row_member is None:
-                    if dst_path is not None and Path(dst_path).is_dir():
-                        new_witness: Witness | None = DirTreeStat.capture(
-                            dst_path,
-                            observed_at_ns=ts_ns,
-                        )
+                    if dir_stat is not None:
+                        new_witness: Witness | None = dir_stat
                         repr_kind = "tree"
                     else:
                         new_witness = (
@@ -2646,11 +2659,12 @@ class StoreLedger:
                             "tree" if isinstance(new_witness, DirTreeStat) else "file"
                         )
                 else:
-                    new_witness = (
-                        MemberOf(parent=parent_stat, member=row_member)
-                        if parent_stat is not None
-                        else old_witness
-                    )
+                    if parent_stat is not None:
+                        new_witness = MemberOf(parent=parent_stat, member=row_member)
+                    elif dir_stat is not None:
+                        new_witness = dir_stat
+                    else:
+                        new_witness = old_witness
                     repr_kind = "member"
 
                 derived_obs = Observation(

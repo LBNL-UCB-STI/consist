@@ -408,3 +408,66 @@ def test_golden_v1_directory_manifest_canonical_json_and_tree_hash(
     assert compute_manifest_v1_digest(root) == Digest(
         "sha256:manifest-v1", manifest["tree_hash"]
     )
+
+
+def test_golden_sig_v2_and_v1_db_builder_corpus_parity(tmp_path: Path) -> None:
+    """Verify deterministic `compute_sig_v2` and pure-DuckDB `v1_db_builder` corpus migration."""
+    from consist.core.identity import compute_sig_v2
+    from consist.migrations.v1.migrator import migrate_v1_to_v2
+    from consist.migrations.v1.reader import V1DatabaseReader
+    from tests.helpers.v1_db_builder import (
+        create_v1_schema,
+        insert_v1_artifact,
+        insert_v1_link,
+        insert_v1_run,
+    )
+
+    slots_a = [
+        ("persons", f"ctd1:sha256:{'2' * 64}"),
+        ("households", f"sha256:file:{'1' * 64}"),
+    ]
+    slots_b = list(reversed(slots_a))
+    in_hash_a, sig_a = compute_sig_v2("code_sha_v2", "cfg_sha_v2", slots_a)
+    in_hash_b, sig_b = compute_sig_v2("code_sha_v2", "cfg_sha_v2", slots_b)
+    assert (in_hash_a, sig_a) == (in_hash_b, sig_b)
+
+    # Pure-DuckDB v1 corpus built via v1_db_builder (no duckdb-engine)
+    v1_db = tmp_path / "golden_builder_v1.duckdb"
+    sample_parquet = tmp_path / "zones.parquet"
+    pd.DataFrame({"zone_id": [1, 2], "area": [10.5, 20.0]}).to_parquet(
+        sample_parquet, index=False
+    )
+    with duckdb.connect(str(v1_db)) as con:
+        create_v1_schema(con)
+        insert_v1_run(
+            con,
+            run_id="golden_builder_run",
+            model_name="urbansim",
+            year=2025,
+            iteration=1,
+            stage="baseline",
+            phase="init",
+            config_hash="cfg_sha_v2",
+            git_hash="code_sha_v2",
+        )
+        art_id = insert_v1_artifact(
+            con,
+            key="zones",
+            container_uri=str(sample_parquet),
+            driver="parquet",
+            hash_val=None,
+            run_id="golden_builder_run",
+        )
+        insert_v1_link(
+            con,
+            run_id="golden_builder_run",
+            artifact_id=art_id,
+            direction="output",
+        )
+
+    with V1DatabaseReader(v1_db) as reader:
+        runs = reader.read_runs()
+        assert len(runs) == 1 and runs[0].stage == "baseline"
+
+    mig = migrate_v1_to_v2(v1_db, quick=True)
+    assert mig.verification.ok is True

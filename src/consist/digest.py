@@ -18,11 +18,12 @@ This is a leaf module in Consist's dependency graph:
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Executor, ThreadPoolExecutor
 from contextlib import closing
 import dataclasses
 from dataclasses import dataclass, field
 from enum import Enum
+import fnmatch
 import hashlib
 import importlib
 import json
@@ -34,6 +35,7 @@ import re
 import sqlite3
 import struct
 import sys
+import threading
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -423,6 +425,7 @@ def digest_table(
     sqlite_table: str | None = None,
     h5_key: str | None = None,
     member: str | None = None,
+    presorted: bool = False,
 ) -> str:
     """Compute an order-invariant canonical SHA-256 tabular digest.
 
@@ -549,6 +552,80 @@ def digest_table(
             pa.Table.from_batches([source]), pa, columns
         )
     elif isinstance(source, pa.RecordBatchReader):
+        stream_proj_cols: list[str] | None = None
+        if presorted:
+            schema_names = list(source.schema.names)
+            if len(set(schema_names)) != len(schema_names):
+                raise ValueError(
+                    "Duplicate column names are not supported in digest_table"
+                )
+            if columns is not None:
+                stream_proj_cols = list(columns)
+            else:
+                meta = source.schema.pandas_metadata
+                raw_idx_cols = meta.get("index_columns", []) if meta else []
+                needs_range_materialize = False
+                idx_col_names: list[str] = []
+                for i, entry in enumerate(raw_idx_cols):
+                    if isinstance(entry, str):
+                        if entry in schema_names:
+                            idx_col_names.append(entry)
+                    elif isinstance(entry, Mapping) and entry.get("kind") == "range":
+                        if (
+                            entry.get("name") is not None
+                            or int(entry.get("start", 0)) != 0
+                            or int(entry.get("step", 1)) != 1
+                        ):
+                            col_name = (
+                                str(entry["name"])
+                                if entry.get("name") is not None
+                                else f"__index_level_{i}__"
+                            )
+                            if col_name not in schema_names:
+                                needs_range_materialize = True
+                                break
+                            idx_col_names.append(col_name)
+                if not needs_range_materialize:
+                    if idx_col_names:
+                        idx_set = set(idx_col_names)
+                        stream_proj_cols = [
+                            *idx_col_names,
+                            *(c for c in schema_names if c not in idx_set),
+                        ]
+                    else:
+                        stream_proj_cols = schema_names
+
+        if stream_proj_cols is not None:
+            schema_names = list(source.schema.names)
+            missing = [c for c in stream_proj_cols if c not in schema_names]
+            if missing:
+                raise ValueError(f"Columns not found in RecordBatchReader: {missing}")
+            if resolved_keys is not None:
+                for k in resolved_keys:
+                    if k not in stream_proj_cols:
+                        raise ValueError(
+                            f"Key column '{k}' must be in declared columns: {stream_proj_cols}"
+                        )
+            hasher = hashlib.sha256()
+            header_parts = [profile.encode("utf-8")] + [
+                col.encode("utf-8") for col in stream_proj_cols
+            ]
+            hasher.update(_DELIMITER_FIELD.join(header_parts) + _DELIMITER_RECORD)
+            for batch in source:
+                batch_dict = batch.select(stream_proj_cols).to_pydict()
+                num_rows = batch.num_rows
+                for row_idx in range(num_rows):
+                    row_bytes = [
+                        normalize_table_scalar(batch_dict[col][row_idx])
+                        for col in stream_proj_cols
+                    ]
+                    hasher.update(_DELIMITER_FIELD.join(row_bytes) + _DELIMITER_RECORD)
+            digest_hex = hasher.hexdigest()
+            return (
+                f"ctd1:sha256:{digest_hex}"
+                if profile == "ctd1"
+                else f"sha256:{digest_hex}"
+            )
         table, columns = _materialize_arrow_pandas_index(source.read_all(), pa, columns)
     else:
         # Check DataFrame or DuckDB relation via duck typing
@@ -602,7 +679,7 @@ def digest_table(
                 table.column(col_name).cast(field_def.type.value_type),
             )
 
-    if sort_cols:
+    if sort_cols and not presorted:
         sort_keys = [(col, "ascending") for col in sort_cols]
         table = table.sort_by(sort_keys, null_placement="at_start")
 
@@ -2305,7 +2382,7 @@ def compare(
 # --- v2 Digest Helpers for `sha256:manifest-v1`, `ctd1:sha256`, and Logical Matrices ---
 
 
-def _reject_manifest_symlink_components(path: Path, *, label: str) -> Path:
+def _resolve_manifest_root(path: Path, *, label: str) -> Path:
     raw_path = Path(path).expanduser()
     if raw_path.is_symlink():
         raise ValueError(
@@ -2316,6 +2393,11 @@ def _reject_manifest_symlink_components(path: Path, *, label: str) -> Path:
         raise ValueError(
             f"directory artifact {label} cannot traverse a symlink: {canonical_root}"
         )
+    return canonical_root
+
+
+def _reject_manifest_symlink_components(path: Path, *, label: str) -> Path:
+    canonical_root = _resolve_manifest_root(path, label=label)
     if canonical_root.is_dir():
         for dirpath, dirnames, filenames in os.walk(
             canonical_root, topdown=True, followlinks=False
@@ -2329,22 +2411,97 @@ def _reject_manifest_symlink_components(path: Path, *, label: str) -> Path:
     return canonical_root
 
 
+class _ManifestWorkerState(threading.local):
+    active: bool = False
+
+
+_MANIFEST_WORKER_STATE = _ManifestWorkerState()
+
+
+@dataclass(frozen=True, slots=True)
+class DigestPolicy:
+    """Filter policy for structural directory manifests (`sha256:manifest-v1+p:<policy_sha256>`)."""
+
+    include: tuple[str, ...] = ()
+    exclude: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "include",
+            tuple(str(p) for p in (self.include or ())),
+        )
+        object.__setattr__(
+            self,
+            "exclude",
+            tuple(str(p) for p in (self.exclude or ())),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "include": list(self.include),
+            "exclude": list(self.exclude),
+        }
+
+    @property
+    def policy_json(self) -> str:
+        return canonical_json_str(self.to_dict())
+
+    @property
+    def policy_sha256(self) -> str:
+        return canonical_json_sha256(self.to_dict())
+
+    @property
+    def scheme(self) -> str:
+        return f"sha256:manifest-v1+p:{self.policy_sha256}"
+
+    @staticmethod
+    def _pattern_matches(relative_path: str, pattern: str) -> bool:
+        clean_pat = pattern.strip("/")
+        if not clean_pat:
+            return False
+        if fnmatch.fnmatchcase(relative_path, clean_pat):
+            return True
+        if relative_path.startswith(f"{clean_pat}/"):
+            return True
+        if "/" not in clean_pat:
+            return any(
+                fnmatch.fnmatchcase(part, clean_pat)
+                for part in relative_path.split("/")
+            )
+        return False
+
+    def matches(self, relative_path: str) -> bool:
+        if self.include and not any(
+            self._pattern_matches(relative_path, pat) for pat in self.include
+        ):
+            return False
+        if self.exclude and any(
+            self._pattern_matches(relative_path, pat) for pat in self.exclude
+        ):
+            return False
+        return True
+
+
 def build_manifest_v1(
     root: Path | str,
     *,
     max_workers: int = 1,
     file_hasher: Callable[[Path], tuple[str, int]] | None = None,
+    policy: DigestPolicy | None = None,
+    executor: Executor | None = None,
 ) -> dict[str, Any]:
     """Build a deterministic v1-compatible directory manifest (`version=1`, `entries`, `tree_hash`).
 
     Produces byte-for-byte identical canonical JSON and `tree_hash` to
-    `consist.core.directory_artifacts.build_directory_manifest`.
+    `consist.core.directory_artifacts.build_directory_manifest` when `policy is None`.
     """
-    root_path = _reject_manifest_symlink_components(Path(root), label="root")
+    root_path = _resolve_manifest_root(Path(root), label="root")
     if not root_path.is_dir():
         raise ValueError(f"directory artifact root must be a directory: {root_path}")
 
-    entries: list[dict[str, Any]] = []
+    dir_paths: list[str] = []
     file_items: list[tuple[str, Path, int]] = []
 
     def visit(directory: Path) -> None:
@@ -2358,16 +2515,17 @@ def build_manifest_v1(
                     f"directory artifact cannot contain a symlink: {child_path}"
                 )
             if child.is_dir(follow_symlinks=False):
-                entries.append({"kind": "directory", "path": relative_path})
+                dir_paths.append(relative_path)
                 visit(child_path)
             elif child.is_file(follow_symlinks=False):
-                file_items.append(
-                    (
-                        relative_path,
-                        child_path,
-                        child.stat(follow_symlinks=False).st_size,
+                if policy is None or policy.matches(relative_path):
+                    file_items.append(
+                        (
+                            relative_path,
+                            child_path,
+                            child.stat(follow_symlinks=False).st_size,
+                        )
                     )
-                )
             else:
                 raise ValueError(
                     "directory artifact cannot contain a non-regular filesystem entry: "
@@ -2376,30 +2534,70 @@ def build_manifest_v1(
 
     visit(root_path)
 
-    def _hash_item(item: tuple[str, Path, int]) -> dict[str, Any]:
-        rel_posix, fpath, st_size = item
-        sha_hex, size = (
-            file_hasher(fpath)
-            if file_hasher is not None
-            else (file_sha256(fpath), st_size)
-        )
-        return {"kind": "file", "path": rel_posix, "sha256": sha_hex, "size": size}
+    entries: list[dict[str, Any]] = []
+    if policy is None:
+        for rel_dir in dir_paths:
+            entries.append({"kind": "directory", "path": rel_dir})
+    else:
+        kept_ancestors: set[str] = set()
+        for rel_file, _, _ in file_items:
+            parts = rel_file.split("/")
+            for depth in range(1, len(parts)):
+                kept_ancestors.add("/".join(parts[:depth]))
+        for rel_dir in dir_paths:
+            if rel_dir in kept_ancestors or policy.matches(rel_dir):
+                entries.append({"kind": "directory", "path": rel_dir})
 
-    if len(file_items) > 1 and max_workers > 1:
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            entries.extend(pool.map(_hash_item, file_items))
+    def _hash_item(item: tuple[str, Path, int]) -> dict[str, Any]:
+        prev_active = _MANIFEST_WORKER_STATE.active
+        _MANIFEST_WORKER_STATE.active = True
+        try:
+            rel_posix, fpath, st_size = item
+            sha_hex, size = (
+                file_hasher(fpath)
+                if file_hasher is not None
+                else (file_sha256(fpath), st_size)
+            )
+            return {"kind": "file", "path": rel_posix, "sha256": sha_hex, "size": size}
+        finally:
+            _MANIFEST_WORKER_STATE.active = prev_active
+
+    in_worker = _MANIFEST_WORKER_STATE.active
+
+    if len(file_items) > 1 and not in_worker:
+        if executor is not None:
+            entries.extend(executor.map(_hash_item, file_items))
+        elif max_workers > 1:
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                entries.extend(pool.map(_hash_item, file_items))
+        else:
+            entries.extend(_hash_item(item) for item in file_items)
     else:
         entries.extend(_hash_item(item) for item in file_items)
 
     entries.sort(key=lambda entry: (entry["path"], entry["kind"]))
-    identity_payload = {"version": 1, "entries": entries}
+    identity_payload: dict[str, Any] = {"version": 1, "entries": entries}
+    if policy is not None:
+        identity_payload["policy_sha256"] = policy.policy_sha256
     return {**identity_payload, "tree_hash": canonical_json_sha256(identity_payload)}
 
 
-def compute_manifest_v1_digest(root: Path | str) -> Digest:
-    """Compute `Digest('sha256:manifest-v1', tree_hash)` for a directory tree."""
-    manifest = build_manifest_v1(root)
-    return Digest("sha256:manifest-v1", manifest["tree_hash"])
+def compute_manifest_v1_digest(
+    root: Path | str,
+    *,
+    policy: DigestPolicy | None = None,
+    max_workers: int = 1,
+    executor: Executor | None = None,
+) -> Digest:
+    """Compute `Digest('sha256:manifest-v1', tree_hash)` (or `+p:<policy_sha256>`) for a directory tree."""
+    manifest = build_manifest_v1(
+        root,
+        max_workers=max_workers,
+        policy=policy,
+        executor=executor,
+    )
+    scheme = policy.scheme if policy is not None else "sha256:manifest-v1"
+    return Digest(scheme, manifest["tree_hash"])
 
 
 def compute_ctd1_digest(
@@ -2411,6 +2609,7 @@ def compute_ctd1_digest(
     sqlite_table: str | None = None,
     h5_key: str | None = None,
     member: str | None = None,
+    presorted: bool = False,
 ) -> Digest:
     """Compute a `Digest('ctd1:sha256', <hex>)` over a tabular data source."""
     raw = digest_table(
@@ -2422,6 +2621,7 @@ def compute_ctd1_digest(
         sqlite_table=sqlite_table,
         h5_key=h5_key,
         member=member,
+        presorted=presorted,
     )
     return Digest.parse(raw)
 
@@ -2466,6 +2666,7 @@ __all__ = [
     "SchemeSpec",
     "SchemeRegistry",
     "Digest",
+    "DigestPolicy",
     "IdentityConflict",
     "Identity",
     "Expectation",

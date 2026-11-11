@@ -11,6 +11,7 @@ from consist.migrations.v1 import (
     MigrationPlan,
     MigrationResult,
     MigrationVerificationReport,
+    PromotionError,
     V1ArtifactRecord,
     V1DatabaseReader,
     V1DirEntryRecord,
@@ -27,6 +28,7 @@ from consist.migrations.v1 import (
     plan_migration,
     preflight_check_migration,
     promote_historical_artifact,
+    promote_historical_run,
     undo_migration,
     verify_migration,
 )
@@ -38,6 +40,7 @@ __all__ = [
     "MigrationPlan",
     "MigrationResult",
     "MigrationVerificationReport",
+    "PromotionError",
     "V1ArtifactRecord",
     "V1DatabaseReader",
     "V1DirEntryRecord",
@@ -54,6 +57,7 @@ __all__ = [
     "plan_migration",
     "preflight_check_migration",
     "promote_historical_artifact",
+    "promote_historical_run",
     "undo_migration",
     "verify_migration",
 ]

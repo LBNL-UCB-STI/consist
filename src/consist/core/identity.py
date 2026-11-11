@@ -11,7 +11,7 @@ import inspect
 import fnmatch
 import warnings
 from dataclasses import dataclass
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from importlib import import_module
 from types import ModuleType
 from typing import (
@@ -30,6 +30,8 @@ from pathlib import Path
 from consist.types import CodeIdentityMode
 from consist.core.resolved_binding import ArtifactIdentity
 from consist.digest import (
+    Digest,
+    Kind,
     canonical_json_sha256,
     canonical_json_str,
     file_sha256,
@@ -1217,3 +1219,59 @@ class IdentityManager:
                 )
 
         return digest_map
+
+
+def compute_sig_v2(
+    code_identity: str | None,
+    config_hash: str | None,
+    input_slot_anchors: Sequence[tuple[str, str] | tuple[str, int, str]],
+) -> tuple[str, str]:
+    """Compute `(input_hash, signature)` for `signature_scheme='sig-v2'`.
+
+    Deterministically hashes `(code_identity, config_hash, sorted_input_slot_anchors)`
+    over verified input slot anchors without output target paths.
+    """
+    normalized_items: list[tuple[str, int, str]] = []
+    for item in input_slot_anchors:
+        if len(item) == 2:
+            raw_slot, raw_anchor = item
+            ordinal = 0
+        elif len(item) == 3:
+            raw_slot, raw_ord, raw_anchor = item
+            ordinal = int(raw_ord)
+        else:
+            raise ValueError(
+                f"Expected (slot, anchor) or (slot, ordinal, anchor), got {item!r}"
+            )
+        if ordinal < 0:
+            raise ValueError(f"Input slot ordinal must be >= 0, got {ordinal}")
+        slot_str = str(raw_slot)
+        anchor_str = str(raw_anchor)
+        parsed = Digest.parse(anchor_str)
+        if parsed.kind is Kind.HISTORICAL:
+            raise ValueError(
+                f"compute_sig_v2 requires verified input anchors; got {anchor_str!r} for slot {slot_str!r}"
+            )
+        normalized_items.append((slot_str, ordinal, str(parsed)))
+
+    normalized_items.sort()
+    sorted_slots: list[list[str | int]] = [
+        [slot, anchor] if ordinal == 0 else [slot, ordinal, anchor]
+        for slot, ordinal, anchor in normalized_items
+    ]
+
+    input_hash = canonical_json_sha256(
+        {
+            "scheme": "sig-v2-inputs",
+            "inputs": sorted_slots,
+        }
+    )
+    signature = canonical_json_sha256(
+        {
+            "scheme": "sig-v2",
+            "code": code_identity or "",
+            "config": config_hash or "",
+            "inputs": input_hash,
+        }
+    )
+    return input_hash, signature
