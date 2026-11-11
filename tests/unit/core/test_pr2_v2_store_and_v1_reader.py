@@ -10,7 +10,7 @@ import uuid
 import duckdb
 import pytest
 from sqlalchemy import inspect
-from sqlalchemy.exc import ProgrammingError
+from sqlalchemy.exc import IntegrityError, ProgrammingError
 from sqlalchemy.pool import NullPool
 from sqlmodel import SQLModel, create_engine
 
@@ -213,7 +213,7 @@ def test_version_matrix_tripwire_defense_against_real_v2_database(
                 ProgrammingError, match="upgrade_to_consist_0_5|Binder Error"
             ):
                 conn.exec_driver_sql(
-                    "SELECT artifact_id FROM artifact_kv WHERE key_path = 'a'"
+                    "SELECT id FROM config_facet WHERE namespace = 'a'"
                 )
             with pytest.raises(ProgrammingError):
                 conn.exec_driver_sql("INSERT INTO artifact_kv VALUES ('id')")
@@ -228,7 +228,10 @@ def test_version_matrix_tripwire_defense_against_real_v2_database(
     )
     db_no_init = DatabaseManager(str(db_path), skip_schema_init=True)
     try:
-        with pytest.raises(ProgrammingError, match="stage|git_hash"):
+        with pytest.raises(
+            (ProgrammingError, IntegrityError),
+            match="facet|cache_status|Binder Error|NOT NULL",
+        ):
             db_no_init.sync_run(
                 V1ORMRun(
                     id="r1",
@@ -930,3 +933,739 @@ def test_fasthash_is_never_imported_outside_consist_migrations() -> None:
                     )
 
     assert violations == []
+
+
+def test_phase1_v1_db_builder_and_store_ledger_startup_guards(
+    tmp_path: Path,
+) -> None:
+    from consist.store.detect import DatabaseMigrationRequired
+    from tests.helpers.v1_db_builder import (
+        create_v1_global_table,
+        create_v1_schema,
+        insert_v1_artifact,
+        insert_v1_artifact_content,
+        insert_v1_artifact_facet,
+        insert_v1_artifact_kv,
+        insert_v1_binding_invocation,
+        insert_v1_config_facet,
+        insert_v1_coupler_snapshot,
+        insert_v1_dir_entry,
+        insert_v1_link,
+        insert_v1_run,
+        insert_v1_run_config_kv,
+        insert_v1_schema_bundle,
+    )
+
+    v1_db = tmp_path / "built_v1.duckdb"
+    with duckdb.connect(str(v1_db)) as con:
+        create_v1_schema(con)
+        insert_v1_run(
+            con,
+            run_id="r_v1",
+            model_name="activitysim",
+            year=2025,
+            iteration=1,
+            stage="main",
+            phase="calib",
+            git_hash="abc1234",
+            signature="sig_r_v1",
+            facet={"sample_rate": 0.1},
+        )
+        cid = insert_v1_artifact_content(con, content_hash="1" * 64)
+        aid = insert_v1_artifact(
+            con,
+            key="trips",
+            container_uri="workspace://trips.parquet",
+            hash_val="1" * 64,
+            content_id=cid,
+            run_id="r_v1",
+            schema_id="sch_1",
+        )
+        insert_v1_link(con, run_id="r_v1", artifact_id=aid, direction="output")
+        insert_v1_dir_entry(con, artifact_id=aid, rel_path="part.parquet", size=128)
+        insert_v1_config_facet(
+            con,
+            facet_id="cf_1",
+            namespace="activitysim",
+            facet_json={"sample_rate": 0.1},
+        )
+        insert_v1_run_config_kv(
+            con,
+            run_id="r_v1",
+            facet_id="cf_1",
+            namespace="activitysim",
+            key="sample_rate",
+            value_type="float",
+            value_num=0.1,
+        )
+        insert_v1_artifact_facet(
+            con,
+            facet_id="af_1",
+            namespace="activitysim",
+            facet_json={"rows": 50},
+        )
+        insert_v1_artifact_kv(
+            con,
+            artifact_id=aid,
+            facet_id="af_1",
+            key_path="rows",
+            value_type="int",
+            value_num=50.0,
+        )
+        insert_v1_schema_bundle(
+            con,
+            schema_id="sch_1",
+            summary_json={"n_cols": 1},
+            fields=[{"name": "trip_id", "logical_type": "BIGINT"}],
+            artifact_id=aid,
+            run_id="r_v1",
+        )
+        insert_v1_coupler_snapshot(
+            con,
+            run_id="r_v1",
+            phase="end",
+            slot_key="trips",
+            artifact_id=aid,
+        )
+        insert_v1_binding_invocation(
+            con,
+            requested_run_id="r_v1_req",
+            execution_run_id="r_v1",
+            cache_outcome="miss",
+        )
+        create_v1_global_table(
+            con,
+            "trips",
+            [{"trip_id": 1, "consist_run_id": "r_v1", "consist_artifact_id": str(aid)}],
+        )
+
+    assert detect_schema(v1_db) is SchemaState.V1
+    with V1DatabaseReader(v1_db) as reader:
+        inv = reader.inventory()
+        assert inv.run_count == 1
+        assert inv.artifact_count == 1
+        assert inv.link_count == 1
+        assert len(inv.dlt_tables) == 1
+
+    # StoreLedger unconditionally rejects V1 DBs with DatabaseMigrationRequired
+    with pytest.raises(DatabaseMigrationRequired):
+        StoreLedger(v1_db)
+
+    # StoreLedger rejects UNKNOWN and FUTURE schemas with IncompatibleSchemaError
+    unknown_db = tmp_path / "unknown.duckdb"
+    with duckdb.connect(str(unknown_db)) as con:
+        con.execute("CREATE TABLE arbitrary_foreign_table (x INTEGER)")
+    assert detect_schema(unknown_db) is SchemaState.UNKNOWN
+    with pytest.raises(IncompatibleSchemaError):
+        StoreLedger(unknown_db)
+
+    future_db = tmp_path / "future.duckdb"
+    with duckdb.connect(str(future_db)) as con:
+        con.execute(
+            "CREATE TABLE consist_schema (version INTEGER PRIMARY KEY, applied_at TIMESTAMPTZ, consist_version VARCHAR)"
+        )
+        con.execute("INSERT INTO consist_schema VALUES (99, now(), '9.9.9')")
+    assert detect_schema(future_db) is SchemaState.FUTURE
+    with pytest.raises(IncompatibleSchemaError):
+        StoreLedger(future_db)
+
+
+def test_phase1_store_ledger_transactions_overlay_basis_memo_and_container_supersession(
+    tmp_path: Path,
+) -> None:
+    import threading
+    from consist.digest import Digest, Identity
+    from consist.location import FileStat, Location, MemberOf, Observation
+
+    db_path = tmp_path / "ledger_p1.duckdb"
+    h5_file = tmp_path / "pipeline.h5"
+    h5_file.write_bytes(b"initial-h5-bytes")
+    base_mtime = h5_file.stat().st_mtime_ns
+    safe_obs_1 = base_mtime + 5_000_000_000
+
+    with StoreLedger(db_path) as ledger:
+        # 1. Re-entrant transaction commit, cursor() guard, seal() + export_run_manifest() inside tx,
+        # and rollback clearing _memoized_observations / _memoized_locations
+        from consist.engine import PendingOutput, seal
+        from consist.store.detect import ConsistError
+        from consist.store.manifest import export_run_manifest
+
+        seal_f1 = tmp_path / "tx_seal_1.csv"
+        seal_f2 = tmp_path / "tx_seal_2.csv"
+        seal_f1.write_text("a,b\n1,2\n", encoding="utf-8")
+        seal_f2.write_text("x,y\n3,4\n", encoding="utf-8")
+
+        with ledger.transaction() as outer_cur:
+            with pytest.raises(ConsistError, match="exec_cursor"):
+                ledger.cursor()
+            ledger.record_run(run_id="tx_ok", model_name="m1")
+            sealed_1 = seal(
+                [PendingOutput(role="out1", path=seal_f1, driver="csv", key="out1")],
+                ledger=ledger,
+                run_id="tx_ok",
+            )
+            sealed_2 = seal(
+                [PendingOutput(role="out2", path=seal_f2, driver="csv", key="out2")],
+                ledger=ledger,
+                run_id="tx_ok",
+            )
+            assert set(sealed_1) == {"out1"}
+            assert set(sealed_2) == {"out2"}
+            tx_manifest = export_run_manifest(ledger, "tx_ok")
+            assert {o.slot for o in tx_manifest.outputs} == {"out1", "out2"}
+            with ledger.transaction() as inner_cur:
+                assert inner_cur is outer_cur
+                ledger.record_run(run_id="tx_ok_2", model_name="m1")
+        assert ledger.get_run("tx_ok") is not None
+        assert ledger.get_run("tx_ok_2") is not None
+
+        rb_anchor = Digest("sha256:file", "f" * 64)
+        with pytest.raises(RuntimeError, match="boom"):
+            with ledger.transaction():
+                ledger.record_run(run_id="tx_rolled_back", model_name="m1")
+                ledger.record_observation(
+                    Observation(
+                        location=Location(uri=h5_file.resolve().as_uri()),
+                        identity=Identity(rb_anchor),
+                        access_driver="file",
+                        witness=FileStat.capture(h5_file, observed_at_ns=safe_obs_1),
+                        basis="computed",
+                        site="local",
+                        observed_at_ns=safe_obs_1,
+                    )
+                )
+                assert len(ledger.memoized_candidates(rb_anchor)) == 1
+                ledger.memoize_location(rb_anchor, "sentinel_loc", site="local")
+                assert len(ledger._memoized_observations) > 0
+                assert len(ledger._memoized_locations) > 0
+                raise RuntimeError("boom")
+        assert ledger.get_run("tx_rolled_back") is None
+        assert ledger._memoized_observations == {}
+        assert ledger._memoized_locations == {}
+        assert ledger.memoized_candidates(rb_anchor) == ()
+
+        # Multi-threaded RLock safety
+        errors: list[Exception] = []
+
+        def _worker(idx: int) -> None:
+            try:
+                with ledger.transaction():
+                    ledger.record_run(run_id=f"thr_run_{idx}", model_name="mt")
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=_worker, args=(i,)) for i in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert errors == []
+        assert len(ledger.find_runs(model="mt")) == 6
+
+        # 2. Digest basis widening: 'computed' supersedes conflicting 'declared' / 'trusted_foreign'
+        anchor = Digest("sha256:file", "a" * 64)
+        foreign_ctd = Digest("ctd1:sha256", "b" * 64)
+        computed_ctd = Digest("ctd1:sha256", "c" * 64)
+        ledger.record_identity(
+            Identity(anchor=anchor, claims=(foreign_ctd,)),
+            basis="trusted_foreign",
+            anchor_basis="computed",
+        )
+        assert ledger.get_identity(anchor).get("ctd1:sha256") == foreign_ctd
+
+        assert (
+            ledger.record_content_digest(
+                anchor,
+                computed_ctd,
+                basis="computed",
+                source="local_verify",
+            )
+            is True
+        )
+        assert ledger.get_identity(anchor).get("ctd1:sha256") == computed_ctd
+        with ledger.cursor() as cur:
+            conflict_row = cur.execute(
+                "SELECT kept_value, rejected_value, source FROM main.content_digest_conflict "
+                "WHERE anchor = ? AND scheme = 'ctd1:sha256'",
+                [str(anchor)],
+            ).fetchone()
+        assert conflict_row == ("c" * 64, "b" * 64, "local_verify")
+
+        # 3. _memoized_observations < 4 sentinel caching (including empty () and 1 item) + invalidation
+        unseen_anchor = Digest("sha256:file", "d" * 64)
+        assert ledger.memoized_candidates(unseen_anchor) == ()
+        assert ledger._memoized_observations.get(str(unseen_anchor)) == ()
+
+        obs_single = Observation(
+            location=Location(uri=h5_file.resolve().as_uri()),
+            identity=Identity(unseen_anchor),
+            access_driver="file",
+            witness=FileStat.capture(h5_file, observed_at_ns=safe_obs_1),
+            basis="computed",
+            site="local",
+            observed_at_ns=safe_obs_1,
+        )
+        obs_id = ledger.record_observation(obs_single)
+        assert str(unseen_anchor) not in ledger._memoized_observations
+        cands_1 = ledger.memoized_candidates(unseen_anchor)
+        assert len(cands_1) == 1
+        assert ledger._memoized_observations.get(str(unseen_anchor)) == cands_1
+        # Eviction invalidates memo!
+        ledger.record_location_event(observation_id=obs_id, status="evicted")
+        assert str(unseen_anchor) not in ledger._memoized_observations
+        assert ledger.memoized_candidates(unseen_anchor) == ()
+
+        # 4. Container-over-member NOT EXISTS supersession in SQL locate_current
+        member_anchor = Digest("ctd1:sha256", "1" * 64)
+        container_anchor_1 = Digest("sha256:file", "2" * 64)
+        container_anchor_2 = Digest("sha256:file", "3" * 64)
+        container_uri = "workspace://pipeline.h5"
+
+        parent_stat_1 = FileStat(
+            size=100, mtime_ns=1000, ctime_ns=1000, ino=1, racy=False
+        )
+        parent_stat_2 = FileStat(
+            size=250, mtime_ns=2000, ctime_ns=2000, ino=1, racy=False
+        )
+        ledger.record_observation(
+            Observation(
+                location=Location(uri=container_uri, member=None),
+                identity=Identity(container_anchor_1),
+                access_driver="hdf5",
+                witness=parent_stat_1,
+                basis="computed",
+                site="local",
+                observed_at_ns=10_000,
+            )
+        )
+        ledger.record_observation(
+            Observation(
+                location=Location(uri=container_uri, member="/households"),
+                identity=Identity(member_anchor),
+                access_driver="h5_table",
+                witness=MemberOf(parent=parent_stat_1, member="/households"),
+                basis="computed",
+                site="local",
+                observed_at_ns=10_001,
+            )
+        )
+        assert len(ledger.locate_current([member_anchor])) == 1
+
+        # Overwrite container at t=20_000 with new witness -> member observation is superseded!
+        ledger.record_observation(
+            Observation(
+                location=Location(uri=container_uri, member=None),
+                identity=Identity(container_anchor_2),
+                access_driver="hdf5",
+                witness=parent_stat_2,
+                basis="computed",
+                site="local",
+                observed_at_ns=20_000,
+            )
+        )
+        assert ledger.locate_current([member_anchor]) == []
+
+        # Member row whose witness_json lacks 'parent' (e.g. FileStat instead of MemberOf)
+        # MUST ALSO be superseded in SQL locate_current & artifact_location_current (3-valued NULL fix)!
+        member_no_parent_anchor = Digest("ctd1:sha256", "8" * 64)
+        ledger.record_observation(
+            Observation(
+                location=Location(uri=container_uri, member="/legacy_member"),
+                identity=Identity(member_no_parent_anchor),
+                access_driver="h5_table",
+                witness=parent_stat_1,
+                basis="migrated_v1",
+                site="local",
+                observed_at_ns=15_000,
+            )
+        )
+        assert ledger.locate_current([member_no_parent_anchor]) == []
+        assert ledger.query_location_current(anchor=member_no_parent_anchor) == []
+
+        # Record a fresh member at t=25_000 so we can also test read_only overlay supersession!
+        member_anchor_2 = Digest("ctd1:sha256", "4" * 64)
+        ledger.record_observation(
+            Observation(
+                location=Location(uri=container_uri, member="/persons"),
+                identity=Identity(member_anchor_2),
+                access_driver="h5_table",
+                witness=MemberOf(parent=parent_stat_2, member="/persons"),
+                basis="computed",
+                site="local",
+                observed_at_ns=25_000,
+            )
+        )
+        assert len(ledger.locate_current([member_anchor_2])) == 1
+
+    # 5. Read-only StoreLedger: overlay allows observations/events/digests; mutators raise PermissionError
+    with StoreLedger(db_path, read_only=True) as ro_ledger:
+        assert len(ro_ledger.locate_current([member_anchor_2])) == 1
+        parent_stat_3 = FileStat(
+            size=999, mtime_ns=3000, ctime_ns=3000, ino=2, racy=False
+        )
+        ro_ledger.record_observation(
+            Observation(
+                location=Location(uri=container_uri, member=None),
+                identity=Identity(Digest("sha256:file", "5" * 64)),
+                access_driver="hdf5",
+                witness=parent_stat_3,
+                basis="computed",
+                site="local",
+                observed_at_ns=30_000,
+            )
+        )
+        # Overlay container observation supersedes older DB member observation!
+        assert ro_ledger.locate_current([member_anchor_2]) == []
+
+        with pytest.raises(PermissionError):
+            ro_ledger.record_run(run_id="ro_fail", model_name="m")
+        with pytest.raises(PermissionError):
+            ro_ledger.record_artifact(
+                artifact_id=uuid.uuid4(),
+                key="k",
+                driver="csv",
+                anchor=Digest("sha256:file", "6" * 64),
+            )
+        with pytest.raises(PermissionError):
+            ro_ledger.record_promotion(
+                Digest("legacy-v1:unverified", "7" * 64),
+                Digest("sha256:file", "6" * 64),
+                basis="asserted",
+            )
+        with pytest.raises(PermissionError):
+            ro_ledger.record_coupler_snapshots(
+                run_id="tx_ok",
+                phase="end",
+                artifacts={},
+            )
+        with pytest.raises(PermissionError):
+            ro_ledger.record_binding_invocation(
+                requested_run_id="a",
+                execution_run_id="b",
+                cache_outcome="hit",
+                binding_json="{}",
+            )
+
+
+def test_phase1_store_ledger_domain_crud_facets_and_select_only_queries(
+    tmp_path: Path,
+) -> None:
+    from pydantic import BaseModel
+    from consist.digest import Digest, Identity
+    from consist.models.artifact_schema import (
+        ArtifactSchema,
+        ArtifactSchemaField,
+        ArtifactSchemaObservation,
+        ArtifactSchemaRelation,
+    )
+    from consist.models.run import Run
+
+    class _RunSummaryRow(BaseModel):
+        id: str
+        model_name: str
+
+    db_path = tmp_path / "domain_crud.duckdb"
+    with StoreLedger(db_path) as ledger:
+        # 1. upsert_run, get_run, find_runs, find_cached_run, and run_config_kv view
+        run_obj = Run(
+            id="run_live_1",
+            model_name="beam",
+            status="completed",
+            year=2030,
+            iteration=2,
+            stage="sim",
+            phase="iter",
+            config_hash="cfg_1",
+            input_hash="in_1",
+            git_hash="git_1",
+            signature="sig_beam_1",
+            tags=["baseline", "calib"],
+            meta={
+                "facet": {"pop_scale": 0.25, "transit_enabled": True, "region": "bay"},
+                "facet_namespace": "beam_ns",
+            },
+        )
+        ledger.upsert_run(run_obj)
+        loaded_run = ledger.get_run("run_live_1")
+        assert loaded_run is not None
+        assert loaded_run.id == "run_live_1"
+        assert loaded_run.stage == "sim"
+        assert loaded_run.phase == "iter"
+        assert loaded_run.git_hash == "git_1"
+        assert loaded_run.tags == ["baseline", "calib"]
+
+        # find_cached_run matches ONLY cache_status='live' AND status='completed'
+        cached = ledger.find_cached_run("sig_beam_1", model_name="beam")
+        assert cached is not None and cached.id == "run_live_1"
+
+        ledger.record_run(
+            run_id="run_hist_1",
+            model_name="beam",
+            status="completed",
+            cache_status="historical",
+            signature="sig_beam_hist",
+        )
+        assert ledger.find_cached_run("sig_beam_hist", model_name="beam") is None
+
+        found = ledger.find_runs(
+            model="beam",
+            year=2030,
+            stage="sim",
+            tags=["baseline"],
+            facet={"region": "bay", "transit_enabled": True},
+        )
+        assert [r.id for r in found] == ["run_live_1"]
+
+        # Verify run_config_kv LATERAL json_each view
+        kv_df = ledger.query_df(
+            "SELECT namespace, key, value_type, value_num, value_bool, value_str "
+            "FROM run_config_kv WHERE run_id = ? ORDER BY key",
+            ["run_live_1"],
+        )
+        assert list(kv_df["key"]) == ["pop_scale", "region", "transit_enabled"]
+        assert list(kv_df["namespace"].unique()) == ["beam_ns"]
+
+        # > 500 facet leaves -> facet_kv is NULL
+        huge_facet = {f"k_{i}": i for i in range(505)}
+        ledger.record_run(
+            run_id="run_huge_facet",
+            model_name="beam",
+            meta={"facet": huge_facet},
+        )
+        assert (
+            len(
+                ledger.query_df(
+                    "SELECT * FROM run_config_kv WHERE run_id = 'run_huge_facet'"
+                )
+            )
+            == 0
+        )
+
+        # Nested dicts, JSON list leaves, dotted keys, and {"facet": None, "config_facet": ...} non-colliding facet_id
+        ledger.record_run(
+            run_id="run_nested_facet_1",
+            model_name="ml_sim",
+            meta={
+                "facet": None,
+                "config_facet": {
+                    "nested": {"lr": 0.01, "layers": [64, 128]},
+                    "top_list": ["a", "b"],
+                },
+            },
+        )
+        ledger.record_run(
+            run_id="run_nested_facet_2",
+            model_name="ml_sim",
+            meta={
+                "facet": None,
+                "config_facet": {
+                    "nested": {"lr": 0.05, "layers": [32]},
+                    "top_list": ["c"],
+                },
+            },
+        )
+        facet_ids_df = ledger.query_df(
+            "SELECT DISTINCT run_id, facet_id FROM run_config_kv "
+            "WHERE run_id IN ('run_nested_facet_1', 'run_nested_facet_2') ORDER BY run_id"
+        )
+        assert len(facet_ids_df) == 2
+        assert facet_ids_df.iloc[0]["facet_id"] != facet_ids_df.iloc[1]["facet_id"]
+
+        assert [
+            r.id
+            for r in ledger.find_runs(
+                model="ml_sim",
+                facet={
+                    "nested": {"lr": 0.01, "layers": [64, 128]},
+                    "top_list": ["a", "b"],
+                },
+            )
+        ] == ["run_nested_facet_1"]
+        assert [
+            r.id
+            for r in ledger.find_runs(
+                model="ml_sim",
+                facet={"nested.lr": 0.05},
+            )
+        ] == ["run_nested_facet_2"]
+        # SQL LIMIT / OFFSET pushdown when tags and metadata are empty
+        paged_1 = ledger.find_runs(model="ml_sim", limit=1, offset=0)
+        paged_2 = ledger.find_runs(model="ml_sim", limit=1, offset=1)
+        assert len(paged_1) == 1 and len(paged_2) == 1
+        assert {paged_1[0].id, paged_2[0].id} == {
+            "run_nested_facet_1",
+            "run_nested_facet_2",
+        }
+
+        # 2. Artifacts, parent/child lineage, update_artifact_meta, artifact_kv, get_artifacts_for_run
+        parent_id = uuid.uuid4()
+        child_id = uuid.uuid4()
+        d_parent = Digest("sha256:file", "1" * 64)
+        d_child = Digest("ctd1:sha256", "2" * 64)
+        ledger.record_identity(Identity(d_parent))
+        ledger.record_identity(Identity(d_child), repr_kind="table")
+        ledger.record_artifact(
+            artifact_id=parent_id,
+            key="container_h5",
+            driver="hdf5",
+            anchor=d_parent,
+            run_id="run_live_1",
+            meta={"facet": {"tables": 2}, "facet_namespace": "h5_ns"},
+        )
+        ledger.record_artifact(
+            artifact_id=child_id,
+            key="households",
+            driver="h5_table",
+            anchor=d_child,
+            run_id="run_live_1",
+            parent_artifact_id=parent_id,
+            meta={"custom": "initial"},
+        )
+        ledger.record_run_binding(
+            run_id="run_live_1",
+            direction="input",
+            occurrence_index=0,
+            slot="container_h5",
+            artifact_id=parent_id,
+            anchor=d_parent,
+        )
+        ledger.record_run_binding(
+            run_id="run_live_1",
+            direction="output",
+            occurrence_index=0,
+            slot="households",
+            artifact_id=child_id,
+            anchor=d_child,
+        )
+
+        assert ledger.get_artifact(parent_id) is not None
+        assert ledger.get_artifact(str(d_child)) is not None
+        children = ledger.get_child_artifacts(parent_id)
+        assert [c.id for c in children] == [child_id]
+
+        updated_child = ledger.update_artifact_meta(
+            child_id,
+            {"custom": "replaced", "facet": {"zone_count": 1454}},
+            merge=False,
+            schema_id="sch_hh",
+        )
+        assert updated_child.meta["custom"] == "replaced"
+        assert updated_child.schema_id == "sch_hh"
+
+        art_kv_df = ledger.query_df(
+            "SELECT key_path, value_num FROM artifact_kv WHERE artifact_id = ?",
+            [child_id],
+        )
+        assert len(art_kv_df) == 1
+        assert art_kv_df.iloc[0]["key_path"] == "zone_count"
+        assert float(art_kv_df.iloc[0]["value_num"]) == 1454.0
+
+        # Verify get_artifacts_for_run uses batched queries (never calling load_artifact in an N+1 loop)
+        unbound_id = uuid.uuid4()
+        hist_d = Digest("legacy-v1:unverified", "9" * 64)
+        ver_d = Digest("sha256:file", "7" * 64)
+        ledger.record_identity(Identity(hist_d), repr_kind="historical")
+        ledger.record_identity(Identity(ver_d), repr_kind="file")
+        ledger.record_promotion(hist_d, ver_d, basis="caller_supplied_match")
+        ledger.record_artifact(
+            artifact_id=unbound_id,
+            key="promoted_extra",
+            driver="parquet",
+            anchor=hist_d,
+            run_id="run_live_1",
+        )
+        ledger._memoized_observations.clear()
+        orig_load_artifact = ledger.load_artifact
+
+        def _forbid_n_plus_1(*_a: object, **_kw: object) -> None:
+            raise AssertionError("get_artifacts_for_run must not call load_artifact")
+
+        ledger.load_artifact = _forbid_n_plus_1  # type: ignore[method-assign]
+        try:
+            run_arts = ledger.get_artifacts_for_run("run_live_1")
+        finally:
+            ledger.load_artifact = orig_load_artifact  # type: ignore[method-assign]
+        assert set(run_arts.inputs.keys()) == {"container_h5"}
+        assert set(run_arts.outputs.keys()) == {"households", "promoted_extra"}
+        assert run_arts.outputs["promoted_extra"].anchor == ver_d
+        assert run_arts.outputs["promoted_extra"].recorded_anchor == hist_d
+
+        # 3. Operational tables: binding invocations, coupler snapshots, artifact schemas
+        inv_id = ledger.record_binding_invocation(
+            requested_run_id="run_req_2",
+            execution_run_id="run_live_1",
+            cache_source_run_id="run_live_1",
+            cache_outcome="hit",
+            binding_json='{"sig":"sig_beam_1"}',
+        )
+        invs = ledger.list_binding_invocations(requested_run_id="run_req_2")
+        assert len(invs) == 1 and invs[0].id == inv_id
+
+        ledger.record_coupler_snapshots(
+            scenario_run_id="scen_1",
+            run_id="run_live_1",
+            phase="post_step",
+            step_ordinal=3,
+            artifacts={"hh": updated_child},
+        )
+        snaps = ledger.get_coupler_snapshots("run_live_1", phase="post_step")
+        assert len(snaps) == 1
+        assert snaps[0].role_key == "hh"
+        assert snaps[0].artifact_id == child_id
+
+        schema_row = ArtifactSchema(
+            id="sch_hh",
+            profile_version=1,
+            summary_json={"rows": 100},
+            profile_json={"columns": ["hh_id"]},
+        )
+        field_row = ArtifactSchemaField(
+            schema_id="sch_hh",
+            ordinal_position=1,
+            name="hh_id",
+            logical_type="BIGINT",
+            nullable=False,
+        )
+        rel_row = ArtifactSchemaRelation(
+            schema_id="sch_hh",
+            from_field="hh_id",
+            to_table="persons",
+            to_field="hh_id",
+        )
+        obs_row = ArtifactSchemaObservation(
+            artifact_id=child_id,
+            schema_id="sch_hh",
+            run_id="run_live_1",
+            source="duckdb",
+            sample_rows=100,
+        )
+        ledger.upsert_artifact_schema(
+            schema_row,
+            [field_row],
+            relations=[rel_row],
+            observation=obs_row,
+        )
+        fetched_bundle = ledger.get_artifact_schema("sch_hh")
+        assert fetched_bundle is not None
+        assert fetched_bundle[0].id == "sch_hh"
+        assert [f.name for f in fetched_bundle[1]] == ["hh_id"]
+        assert len(ledger.list_artifact_schemas(artifact_id=child_id)) == 1
+
+        # 4. query_rows typed validation & SELECT-only enforcement
+        rows = ledger.query_rows(
+            "SELECT id, model_name FROM run WHERE model_name = ? ORDER BY id",
+            ["beam"],
+            model=_RunSummaryRow,
+        )
+        assert [r.id for r in rows] == ["run_hist_1", "run_huge_facet", "run_live_1"]
+
+        for forbidden_sql in (
+            "DELETE FROM run",
+            "INSERT INTO consist_meta VALUES ('k', 'v')",
+            "SELECT 1; DROP TABLE run",
+            "CREATE TABLE sneaky (x INT)",
+        ):
+            with pytest.raises(ValueError, match="SELECT"):
+                ledger.query_df(forbidden_sql)
+            with pytest.raises(ValueError, match="SELECT"):
+                ledger.query_rows(forbidden_sql, model=_RunSummaryRow)

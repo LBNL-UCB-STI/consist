@@ -25,7 +25,6 @@ if TYPE_CHECKING:
         engine,
         gtfs,
         location,
-        manifest,
         meta,
         migrations,
         store,
@@ -37,16 +36,6 @@ if TYPE_CHECKING:
     from consist.artifact import (
         HintLedger,
         MissingOutputError,
-    )
-    from consist.manifest import (
-        ManifestArtifactEntry,
-        ManifestLocationEntry,
-        RunManifest,
-        export_run_manifest,
-        import_run_manifest,
-        load_run_manifest,
-        rebuild_store_from_manifests,
-        write_run_manifest,
     )
     from consist.migrations import (
         ArtifactClassification,
@@ -335,8 +324,6 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
         "IncompatibleSchemaError",
     ),
     "IntCapture": ("consist.types", "IntCapture"),
-    "ManifestArtifactEntry": ("consist.manifest", "ManifestArtifactEntry"),
-    "ManifestLocationEntry": ("consist.manifest", "ManifestLocationEntry"),
     "MaterializationResult": ("consist.core.materialize", "MaterializationResult"),
     "MaterializedArtifact": ("consist.core.materialize", "MaterializedArtifact"),
     "MigrationPlan": ("consist.migrations", "MigrationPlan"),
@@ -372,7 +359,6 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "RunCouplerSnapshot": ("consist.models.run", "RunCouplerSnapshot"),
     "RunFieldIndex": ("consist.core.indexing", "RunFieldIndex"),
     "RunIdentifiedResultLike": ("consist.protocols", "RunIdentifiedResultLike"),
-    "RunManifest": ("consist.manifest", "RunManifest"),
     "RunOutputRecoveryCopiesRegistration": (
         "consist.core.materialize",
         "RunOutputRecoveryCopiesRegistration",
@@ -417,7 +403,6 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "evict": ("consist.engine", "evict"),
     "exec": ("consist.api", "exec"),
     "execute_worker_run": ("consist.core.orchestration", "execute_worker_run"),
-    "export_run_manifest": ("consist.manifest", "export_run_manifest"),
     "find_latest_run": ("consist.api", "find_latest_run"),
     "find_matching_run": ("consist.api", "find_matching_run"),
     "find_matching_runs": ("consist.api", "find_matching_runs"),
@@ -435,7 +420,6 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "ibis_connection": ("consist.api", "ibis_connection"),
     "ibis_grouped_view": ("consist.api", "ibis_grouped_view"),
     "ibis_view": ("consist.api", "ibis_view"),
-    "import_run_manifest": ("consist.manifest", "import_run_manifest"),
     "index_by_facet": ("consist.core.indexing", "index_by_facet"),
     "index_by_field": ("consist.core.indexing", "index_by_field"),
     "ingest": ("consist.api", "ingest"),
@@ -448,7 +432,6 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "load": ("consist.api", "load"),
     "load_df": ("consist.api", "load_df"),
     "load_relation": ("consist.api", "load_relation"),
-    "load_run_manifest": ("consist.manifest", "load_run_manifest"),
     "locate": ("consist.engine", "locate"),
     "log_artifact": ("consist.api", "log_artifact"),
     "log_artifacts": ("consist.api", "log_artifacts"),
@@ -468,10 +451,6 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "promote_historical_artifact": (
         "consist.migrations",
         "promote_historical_artifact",
-    ),
-    "rebuild_store_from_manifests": (
-        "consist.manifest",
-        "rebuild_store_from_manifests",
     ),
     "ref": ("consist.api", "ref"),
     "refs": ("consist.api", "refs"),
@@ -513,7 +492,6 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "verify_path_digest": ("consist.engine", "verify_path_digest"),
     "view": ("consist.api", "view"),
     "virtualize_path": ("consist.engine", "virtualize_path"),
-    "write_run_manifest": ("consist.manifest", "write_run_manifest"),
 }
 
 _DEPRECATED_TOP_LEVEL_EXPORTS: dict[str, tuple[str, str]] = {
@@ -619,7 +597,6 @@ __all__ = [
     "engine",
     "gtfs",
     "location",
-    "manifest",
     "meta",
     "migrations",
     "store",
@@ -665,8 +642,6 @@ __all__ = [
     "HydratedRunOutputsResult",
     "IncompatibleSchemaError",
     "IntCapture",
-    "ManifestArtifactEntry",
-    "ManifestLocationEntry",
     "MaterializationResult",
     "MaterializedArtifact",
     "MigrationPlan",
@@ -690,7 +665,6 @@ __all__ = [
     "RunCouplerSnapshot",
     "RunFieldIndex",
     "RunIdentifiedResultLike",
-    "RunManifest",
     "RunOutputRecoveryCopiesRegistration",
     "RunResult",
     "RunResultLike",
@@ -729,7 +703,6 @@ __all__ = [
     "evict",
     "exec",
     "execute_worker_run",
-    "export_run_manifest",
     "find_latest_run",
     "find_matching_run",
     "find_matching_runs",
@@ -744,7 +717,6 @@ __all__ = [
     "ibis_connection",
     "ibis_grouped_view",
     "ibis_view",
-    "import_run_manifest",
     "index_by_facet",
     "index_by_field",
     "ingest",
@@ -757,7 +729,6 @@ __all__ = [
     "load",
     "load_df",
     "load_relation",
-    "load_run_manifest",
     "locate",
     "log_artifact",
     "log_artifacts",
@@ -775,7 +746,6 @@ __all__ = [
     "pivot_facets",
     "plan_migration",
     "promote_historical_artifact",
-    "rebuild_store_from_manifests",
     "ref",
     "refs",
     "register_artifact_facet_parser",
@@ -810,7 +780,6 @@ __all__ = [
     "verify_path_digest",
     "view",
     "virtualize_path",
-    "write_run_manifest",
 ]
 
 
@@ -820,7 +789,6 @@ def __getattr__(name: str) -> Any:
         "gtfs",
         "admission",
         "location",
-        "manifest",
         "meta",
         "migrations",
         "store",
@@ -860,7 +828,6 @@ def __dir__() -> list[str]:
             "gtfs",
             "admission",
             "location",
-            "manifest",
             "meta",
             "migrations",
             "store",

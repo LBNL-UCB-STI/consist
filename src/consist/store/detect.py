@@ -9,11 +9,21 @@ from datetime import date, datetime
 import enum
 import os
 from pathlib import Path
-from typing import Literal
-
-import duckdb
+from typing import TYPE_CHECKING, Literal
 
 from consist.location import lookup_live_ledger_by_path
+
+if TYPE_CHECKING:
+    import duckdb
+
+V1_SENTINEL_TABLES: frozenset[str] = frozenset(
+    {
+        "artifact_content",
+        "config_facet",
+        "artifact_facet",
+        "run_artifact_dir_entry",
+    }
+)
 
 
 class ConsistError(RuntimeError):
@@ -21,7 +31,7 @@ class ConsistError(RuntimeError):
 
 
 class IncompatibleSchemaError(ConsistError):
-    """Raised when a Consist database uses a newer schema version than supported."""
+    """Raised when a Consist database uses an incompatible or newer schema version."""
 
 
 class SchemaState(enum.Enum):
@@ -132,6 +142,8 @@ _UNREADABLE_ERROR_MARKERS: tuple[str, ...] = (
 
 def detect_schema(db_path: Path | str) -> SchemaState:
     """Inspect `db_path` read-only and classify its schema state without mutating disk."""
+    import duckdb
+
     path = Path(db_path)
     if _migration_workdir(path).exists():
         return SchemaState.INTERRUPTED
@@ -172,10 +184,13 @@ def detect_schema(db_path: Path | str) -> SchemaState:
             if v == 1:
                 return SchemaState.V1
 
+        if tables & V1_SENTINEL_TABLES:
+            return SchemaState.V1
+
         cols = _table_columns(con, "artifact")
-        return (
-            SchemaState.V1 if {"container_uri", "hash"} <= cols else SchemaState.UNKNOWN
-        )
+        if {"container_uri", "hash"} <= cols or {"uri", "hash"} <= cols:
+            return SchemaState.V1
+        return SchemaState.UNKNOWN
     finally:
         con.close()
 
@@ -193,6 +208,8 @@ def _format_last_written(value: object) -> str | None:
 
 def inspect_v1_summary(db_path: Path | str) -> DatabaseMigrationRequired:
     """Query `COUNT(*)` and `MAX(created_at)` from a v1 database and build `DatabaseMigrationRequired`."""
+    import duckdb
+
     path = Path(db_path)
     run_count = 0
     artifact_count = 0
@@ -243,6 +260,7 @@ __all__ = [
     "DatabaseMigrationRequired",
     "IncompatibleSchemaError",
     "SchemaState",
+    "V1_SENTINEL_TABLES",
     "_migration_workdir",
     "_resolve_auto_migrate",
     "detect_schema",

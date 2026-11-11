@@ -15,7 +15,7 @@ import os
 from pathlib import Path
 import shutil
 import time
-from typing import Any, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeGuard, TypeVar
 from urllib.parse import unquote, urlparse
 import uuid
 
@@ -55,11 +55,21 @@ from consist.location import (
 )
 from consist.meta import EMPTY_META, FrozenMeta
 from consist.store.detect import ConsistError
-from consist.store.ledger import StoreLedger
+
+if TYPE_CHECKING:
+    from consist.store.ledger import StoreLedger
 
 _STREAM_CHUNK_BYTES: int = 1024 * 1024  # 1 MiB
 _default_mounts: dict[str, Mount] = {}
 _T = TypeVar("_T")
+
+
+def _is_store_ledger(obj: object) -> TypeGuard[StoreLedger]:
+    if obj is None or isinstance(obj, HintLedger):
+        return False
+    from consist.store.ledger import StoreLedger
+
+    return isinstance(obj, StoreLedger)
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,9 +223,7 @@ def _effective_mounts(
     active_ledger: StoreLedger | HintLedger | None,
     mounts: Sequence[Mount] | Mapping[str, Mount | Path | str] | None,
 ) -> dict[str, Mount]:
-    ledger_mounts = (
-        active_ledger.mounts if isinstance(active_ledger, StoreLedger) else {}
-    )
+    ledger_mounts = active_ledger.mounts if _is_store_ledger(active_ledger) else {}
     return {**_default_mounts, **ledger_mounts, **_normalize_mounts(mounts)}
 
 
@@ -408,13 +416,18 @@ def _read_single_matrix_from_path(
 def _dir_stat_signature(
     st: DirTreeStat,
 ) -> tuple[
-    int, int, int, tuple[tuple[str, tuple[int, int, int | None, int | None]], ...]
+    int,
+    int,
+    int,
+    tuple[tuple[str, tuple[int, int, int | None, int | None]], ...],
+    tuple[tuple[str, int], ...],
 ]:
     return (
         st.file_count,
         st.total_bytes,
         st.max_mtime_ns,
         tuple((rel, _stat_tuple(fs)) for rel, fs in st.entries),
+        st.subdirs,
     )
 
 
@@ -588,7 +601,7 @@ def _resolve_active_ledger(
     if explicit_ledger is not None:
         return explicit_ledger
     live = lookup_live_ledger(artifact.origin)
-    if isinstance(live, (StoreLedger, HintLedger)):
+    if isinstance(live, HintLedger) or _is_store_ledger(live):
         return live
     return HintLedger(artifact.hints)
 
@@ -640,13 +653,13 @@ def locate(
     active_ledger = _resolve_active_ledger(artifact, ledger)
     effective_mounts = _effective_mounts(active_ledger, mounts)
     primary_anchor = artifact.identity.anchor
+    memo_site = site_context.site if site_context is not None else "local"
 
     # Fast-path: check memoized ResolvedLocation when no custom mounts override resolution
     if not mounts:
         hint_member = (
             artifact.hints[0].location.member if len(artifact.hints) == 1 else None
         )
-        memo_site = site_context.site if site_context is not None else "local"
         memo = active_ledger.get_memoized_location(
             primary_anchor,
             member=hint_member,
@@ -662,16 +675,17 @@ def locate(
     anchors_to_search: list[Digest] = [primary_anchor]
     promoted_verified_anchor: Digest | None = None
 
-    if (
-        isinstance(active_ledger, StoreLedger)
-        and primary_anchor.kind is Kind.HISTORICAL
-    ):
+    if _is_store_ledger(active_ledger) and primary_anchor.kind is Kind.HISTORICAL:
         promo = active_ledger.get_promotion(primary_anchor)
         if promo is not None:
             ver_anchor, _basis, _ev = promo
             promoted_verified_anchor = ver_anchor
             if ver_anchor not in anchors_to_search:
                 anchors_to_search.append(ver_anchor)
+    elif primary_anchor.kind is Kind.HISTORICAL and artifact.hints:
+        for hint_obs in artifact.hints:
+            if hint_obs.identity.anchor not in anchors_to_search:
+                anchors_to_search.append(hint_obs.identity.anchor)
 
     if (
         artifact.recorded_anchor is not None
@@ -756,7 +770,7 @@ def locate(
                 primary_anchor,
                 resolved_loc,
                 member=cand_member,
-                site=effective_site,
+                site=memo_site,
             )
             return resolved_loc
 
@@ -790,9 +804,7 @@ def locate(
                 expected_digest,
                 driver=artifact.driver,
                 member=cand_member,
-                ledger=(
-                    active_ledger if isinstance(active_ledger, StoreLedger) else None
-                ),
+                ledger=active_ledger if _is_store_ledger(active_ledger) else None,
             )
         except ConsistError:
             raise
@@ -805,7 +817,7 @@ def locate(
 
         refreshed_witness = _non_racy_witness(new_witness)
         new_obs_id = row.get("observation_id")
-        if isinstance(active_ledger, StoreLedger):
+        if _is_store_ledger(active_ledger):
             obs_anchor = (
                 primary_anchor
                 if primary_anchor.kind is not Kind.HISTORICAL
@@ -871,7 +883,7 @@ def locate(
             primary_anchor,
             resolved_loc,
             member=cand_member,
-            site=effective_site,
+            site=memo_site,
         )
         return resolved_loc
 
@@ -1012,7 +1024,7 @@ def verify(
         current_art = artifact
         # First ensure the physical file on disk matches current_art's primary anchor
         active_ledger = _resolve_active_ledger(current_art, ledger)
-        store_ledger = active_ledger if isinstance(active_ledger, StoreLedger) else None
+        store_ledger = active_ledger if _is_store_ledger(active_ledger) else None
         try:
             target_path, member = _resolve_target_path_and_member(
                 current_art,
@@ -1098,7 +1110,7 @@ def verify(
         return False
 
     active_ledger = _resolve_active_ledger(artifact, ledger)
-    store_ledger = active_ledger if isinstance(active_ledger, StoreLedger) else None
+    store_ledger = active_ledger if _is_store_ledger(active_ledger) else None
 
     try:
         target_path, member = _resolve_target_path_and_member(
@@ -1147,7 +1159,7 @@ def ensure_digest(
         return (artifact, existing)
 
     active_ledger = _resolve_active_ledger(artifact, ledger)
-    store_ledger = active_ledger if isinstance(active_ledger, StoreLedger) else None
+    store_ledger = active_ledger if _is_store_ledger(active_ledger) else None
 
     if policy is None and store_ledger is not None:
         stored_identity = store_ledger.get_identity(artifact.identity.anchor)
@@ -1276,7 +1288,7 @@ def stage(
         else:
             shutil.copy2(src, dest)
 
-    if isinstance(active_ledger, StoreLedger) and not contract.mutates:
+    if _is_store_ledger(active_ledger) and not contract.mutates:
         now_ns = time.time_ns()
         dest_witness, repr_kind = _capture_path_witness(
             dest,
@@ -1541,11 +1553,12 @@ def seal(
 
     next_occurrence_idx = 0
     if ledger is not None and run_id is not None and not ledger.read_only:
-        row = ledger.connection.execute(
-            "SELECT COALESCE(MAX(occurrence_index) + 1, 0) "
-            "FROM run_binding WHERE run_id = ? AND direction = 'output'",
-            [run_id],
-        ).fetchone()
+        with ledger.exec_cursor() as cur:
+            row = cur.execute(
+                "SELECT COALESCE(MAX(occurrence_index) + 1, 0) "
+                "FROM main.run_binding WHERE run_id = ? AND direction = 'output'",
+                [run_id],
+            ).fetchone()
         if row is not None and row[0] is not None:
             next_occurrence_idx = int(row[0])
 
@@ -1740,7 +1753,7 @@ def archive(
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dest)
 
-    store_ledger = active_ledger if isinstance(active_ledger, StoreLedger) else None
+    store_ledger = active_ledger if _is_store_ledger(active_ledger) else None
     if artifact.identity.verifiable and artifact.identity.anchor.scheme in (
         "sha256:file",
         "sha256:manifest-v1",
@@ -1866,7 +1879,7 @@ def evict(
 ) -> list[uuid.UUID]:
     """Evict a physical copy of `artifact`, optionally requiring at least one surviving copy."""
     active_ledger = _resolve_active_ledger(artifact, ledger)
-    store_ledger = active_ledger if isinstance(active_ledger, StoreLedger) else None
+    store_ledger = active_ledger if _is_store_ledger(active_ledger) else None
     effective_mounts = _effective_mounts(active_ledger, mounts)
     effective_site = site_context.site if site_context is not None else None
     target_path = Path(path).expanduser().resolve() if path is not None else None

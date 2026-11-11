@@ -16,9 +16,11 @@ import json
 import os
 from pathlib import Path
 import socket
+import stat as stat_mod
 import threading
 import time
-from typing import Any, Literal, TypeAlias
+from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
+from urllib.parse import unquote, urlparse
 import uuid
 import weakref
 
@@ -36,30 +38,13 @@ class Freshness(Enum):
     MISSING = "missing"
 
 
-def _scandir_files(root_path: Path) -> list[tuple[str, Path]]:
-    files: list[tuple[str, Path]] = []
-
-    def visit(directory: Path) -> None:
-        with os.scandir(directory) as scan:
-            children = sorted(scan, key=lambda entry: entry.name)
-        for child in children:
-            child_path = Path(child.path)
-            if child.is_dir(follow_symlinks=False):
-                visit(child_path)
-            elif child.is_file(follow_symlinks=False):
-                files.append((child_path.relative_to(root_path).as_posix(), child_path))
-
-    visit(root_path)
-    files.sort(key=lambda pair: pair[0])
-    return files
-
-
 @dataclass(frozen=True, slots=True)
 class FileStat:
     """Stat witness for a single regular file.
 
-    Treats `racy=True` (`observed_at_ns - mtime_ns < 2_000_000_000`) as `STALE`
-    once the 2-second filesystem timestamp granularity window has elapsed.
+    Treats `racy=True` (`abs(observed_at_ns - mtime_ns) < 2_000_000_000`) as
+    `Freshness.STALE`, forcing content digest verification until a non-racy
+    witness is recorded.
     """
 
     size: int
@@ -96,7 +81,7 @@ class FileStat:
             mtime_ns=mtime_ns,
             ctime_ns=ctime_ns,
             ino=st.st_ino,
-            racy=(now_ns - mtime_ns) < _RACY_WINDOW_NS,
+            racy=abs(now_ns - mtime_ns) < _RACY_WINDOW_NS,
         )
 
     @classmethod
@@ -119,13 +104,15 @@ class FileStat:
         now_ns: int | None = None,
     ) -> Freshness:
         """Check whether `path` still matches this `FileStat` witness."""
+        _ = now_ns
         try:
             st = Path(path).stat()
         except (FileNotFoundError, NotADirectoryError):
             return Freshness.MISSING
+        except OSError:
+            return Freshness.STALE
 
-        effective_now_ns = time.time_ns() if now_ns is None else now_ns
-        if self.racy and (effective_now_ns - self.mtime_ns) >= _RACY_WINDOW_NS:
+        if self.racy:
             return Freshness.STALE
         if st.st_size != self.size or st.st_mtime_ns != self.mtime_ns:
             return Freshness.STALE
@@ -159,6 +146,41 @@ class FileStat:
         )
 
 
+def _scan_dir_tree(
+    root_path: Path,
+    *,
+    abort_on_symlink: bool,
+) -> tuple[list[tuple[str, os.stat_result]], list[tuple[str, int]], bool]:
+    files: list[tuple[str, os.stat_result]] = []
+    subdirs: list[tuple[str, int]] = []
+    has_symlink = False
+
+    def _walk(cur_dir: Path, rel_prefix: str) -> bool:
+        nonlocal has_symlink
+        with os.scandir(cur_dir) as it:
+            entries = sorted(it, key=lambda e: e.name)
+        for entry in entries:
+            if entry.is_symlink():
+                has_symlink = True
+                if abort_on_symlink:
+                    return False
+                continue
+            rel = f"{rel_prefix}/{entry.name}" if rel_prefix else entry.name
+            st = entry.stat(follow_symlinks=False)
+            if stat_mod.S_ISDIR(st.st_mode):
+                subdirs.append((rel, int(st.st_mtime_ns)))
+                if not _walk(Path(entry.path), rel):
+                    return False
+            elif stat_mod.S_ISREG(st.st_mode):
+                files.append((rel, st))
+        return True
+
+    _walk(root_path, "")
+    files.sort(key=lambda pair: pair[0])
+    subdirs.sort(key=lambda pair: pair[0])
+    return (files, subdirs, has_symlink)
+
+
 @dataclass(frozen=True, slots=True)
 class DirTreeStat:
     """Stat witness for a directory tree."""
@@ -167,11 +189,17 @@ class DirTreeStat:
     total_bytes: int = 0
     max_mtime_ns: int = 0
     entries: tuple[tuple[str, FileStat], ...] = ()
+    subdirs: tuple[tuple[str, int], ...] = ()
     racy: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.entries, tuple):
             object.__setattr__(self, "entries", tuple(self.entries))
+        object.__setattr__(
+            self,
+            "subdirs",
+            tuple((str(rel), int(mtime)) for rel, mtime in self.subdirs),
+        )
 
     @classmethod
     def capture(
@@ -181,29 +209,43 @@ class DirTreeStat:
         observed_at_ns: int | None = None,
     ) -> DirTreeStat:
         """Walk `root` deterministically and capture a `DirTreeStat` witness."""
-        root_path = Path(root)
+        raw_root = Path(root).expanduser().absolute()
+        root_is_symlink = raw_root.is_symlink()
+        root_path = (
+            raw_root if root_is_symlink else (raw_root.parent.resolve() / raw_root.name)
+        )
         if not root_path.is_dir():
             raise ValueError(f"DirTreeStat root is not a directory: {root_path}")
         now_ns = time.time_ns() if observed_at_ns is None else observed_at_ns
-        root_st = root_path.stat()
+        root_st = os.lstat(root_path)
 
+        scanned_files, captured_subdirs, scanned_symlink = _scan_dir_tree(
+            root_path,
+            abort_on_symlink=False,
+        )
+        has_symlink = root_is_symlink or scanned_symlink
         captured_entries = [
-            (rel, FileStat.capture(fpath, observed_at_ns=now_ns))
-            for rel, fpath in _scandir_files(root_path)
+            (rel_file, FileStat.from_os_stat(lst, observed_at_ns=now_ns))
+            for rel_file, lst in scanned_files
         ]
         total_bytes = sum(fs.size for _, fs in captured_entries)
-        max_mtime_ns = max(
-            (fs.mtime_ns for _, fs in captured_entries),
-            default=root_st.st_mtime_ns,
-        )
-        racy = any(fs.racy for _, fs in captured_entries) or (
-            (now_ns - max_mtime_ns) < _RACY_WINDOW_NS
+        all_mtimes = [
+            *(fs.mtime_ns for _, fs in captured_entries),
+            *(sm for _, sm in captured_subdirs),
+        ]
+        max_mtime_ns = max(all_mtimes, default=int(root_st.st_mtime_ns))
+        racy = (
+            has_symlink
+            or any(fs.racy for _, fs in captured_entries)
+            or any(abs(now_ns - sm) < _RACY_WINDOW_NS for _, sm in captured_subdirs)
+            or (abs(now_ns - max_mtime_ns) < _RACY_WINDOW_NS)
         )
         return cls(
             file_count=len(captured_entries),
             total_bytes=total_bytes,
             max_mtime_ns=max_mtime_ns,
             entries=tuple(captured_entries),
+            subdirs=tuple(captured_subdirs),
             racy=racy,
         )
 
@@ -214,40 +256,73 @@ class DirTreeStat:
         now_ns: int | None = None,
     ) -> Freshness:
         """Check whether `root` still matches this `DirTreeStat` witness."""
-        root_path = Path(root)
+        _ = now_ns
+        raw_root = Path(root).expanduser().absolute()
+        if raw_root.is_symlink():
+            return Freshness.STALE
+        if not raw_root.exists():
+            return Freshness.MISSING
+        root_path = raw_root.parent.resolve() / raw_root.name
         if not root_path.exists() or not root_path.is_dir():
             return Freshness.MISSING
 
-        effective_now_ns = time.time_ns() if now_ns is None else now_ns
-        if self.racy and (effective_now_ns - self.max_mtime_ns) >= _RACY_WINDOW_NS:
+        if self.racy:
             return Freshness.STALE
 
         try:
-            current_files = _scandir_files(root_path)
+            current_files, current_subdirs, has_symlink = _scan_dir_tree(
+                root_path,
+                abort_on_symlink=True,
+            )
         except OSError:
             return Freshness.MISSING
+        if has_symlink:
+            return Freshness.STALE
+
+        if not self.subdirs and any("/" in rel for rel, _ in self.entries):
+            implied_dirs: set[str] = set()
+            for rel, _ in self.entries:
+                parts = rel.split("/")[:-1]
+                for idx in range(1, len(parts) + 1):
+                    implied_dirs.add("/".join(parts[:idx]))
+            if {rel_d for rel_d, _ in current_subdirs} != implied_dirs:
+                return Freshness.STALE
+        elif tuple(current_subdirs) != self.subdirs:
+            return Freshness.STALE
 
         if self.entries:
             if len(current_files) != len(self.entries):
                 return Freshness.STALE
-            for (expected_rel, expected_stat), (actual_rel, actual_path) in zip(
+            for (expected_rel, expected_stat), (actual_rel, st) in zip(
                 self.entries, current_files, strict=True
             ):
                 if expected_rel != actual_rel:
                     return Freshness.STALE
+                if expected_stat.racy:
+                    return Freshness.STALE
                 if (
-                    expected_stat.check(actual_path, now_ns=effective_now_ns)
-                    is not Freshness.FRESH
+                    st.st_size != expected_stat.size
+                    or st.st_mtime_ns != expected_stat.mtime_ns
                 ):
+                    return Freshness.STALE
+                if (
+                    expected_stat.ctime_ns is not None
+                    and st.st_ctime_ns != expected_stat.ctime_ns
+                ):
+                    return Freshness.STALE
+                if expected_stat.ino is not None and st.st_ino != expected_stat.ino:
                     return Freshness.STALE
             return Freshness.FRESH
 
         if len(current_files) != self.file_count:
             return Freshness.STALE
-        stats = [fpath.stat() for _, fpath in current_files]
-        total_bytes = sum(st.st_size for st in stats)
+        total_bytes = sum(st.st_size for _, st in current_files)
+        all_mtimes = [
+            *(st.st_mtime_ns for _, st in current_files),
+            *(sm for _, sm in current_subdirs),
+        ]
         max_mtime = max(
-            (st.st_mtime_ns for st in stats),
+            all_mtimes,
             default=root_path.stat().st_mtime_ns,
         )
         if total_bytes != self.total_bytes or max_mtime != self.max_mtime_ns:
@@ -263,6 +338,9 @@ class DirTreeStat:
             "entries": [
                 {"path": rel, "stat": fs.to_json_dict()} for rel, fs in self.entries
             ],
+            "subdirs": [
+                {"path": rel, "mtime_ns": mtime} for rel, mtime in self.subdirs
+            ],
             "racy": self.racy,
         }
 
@@ -274,11 +352,19 @@ class DirTreeStat:
             (str(item["path"]), FileStat.from_json_dict(item["stat"]))
             for item in raw_entries
         )
+        raw_subdirs = data.get("subdirs", ())
+        subdirs: list[tuple[str, int]] = []
+        for item in raw_subdirs:
+            if isinstance(item, Mapping):
+                subdirs.append((str(item["path"]), int(item["mtime_ns"])))
+            elif isinstance(item, (list, tuple)) and len(item) == 2:
+                subdirs.append((str(item[0]), int(item[1])))
         return cls(
             file_count=int(data.get("file_count", len(entries))),
             total_bytes=int(data.get("total_bytes", 0)),
             max_mtime_ns=int(data.get("max_mtime_ns", 0)),
             entries=entries,
+            subdirs=tuple(subdirs),
             racy=bool(data.get("racy", False)),
         )
 
@@ -316,7 +402,7 @@ class MemberOf:
     def to_json_dict(self) -> dict[str, Any]:
         """Serialize this `MemberOf` witness to a JSON-compatible dictionary."""
         return {
-            "parent": self.parent.to_json_dict(),
+            "parent": {"kind": "file_stat", **self.parent.to_json_dict()},
             "member": self.member,
         }
 
@@ -690,7 +776,12 @@ class Location:
 
 
 ObservationBasis: TypeAlias = Literal[
-    "computed", "derived", "implied", "declared", "trusted_foreign"
+    "computed",
+    "derived",
+    "implied",
+    "declared",
+    "trusted_foreign",
+    "migrated_v1",
 ]
 
 
@@ -771,7 +862,24 @@ def _normalize_ledger_path_key(db_path: Path | str | None) -> str | None:
     raw = str(db_path).strip()
     if not raw or raw == ":memory:":
         return None
+    if raw.startswith("file://"):
+        parsed = urlparse(raw)
+        return str(Path(unquote(parsed.path)).expanduser().resolve())
     return str(Path(raw).expanduser().resolve())
+
+
+@runtime_checkable
+class _LiveLedgerWithUid(Protocol):
+    @property
+    def db_uid(self) -> str: ...
+
+
+def _ledger_matches_uid(ledger: Any, expected_uid: str) -> bool:
+    if not expected_uid:
+        return True
+    if isinstance(ledger, _LiveLedgerWithUid):
+        return ledger.db_uid == expected_uid
+    return False
 
 
 def register_live_ledger(
@@ -813,15 +921,20 @@ def lookup_live_ledger(ref: LedgerRef | str | None) -> Any | None:
     """Look up a live in-process ledger by `LedgerRef` or `instance_key`."""
     if ref is None:
         return None
-    key = ref.instance_key if isinstance(ref, LedgerRef) else str(ref)
     with _lock:
-        led = _live_ledgers.get(key)
-        if led is not None:
-            return led
-        if isinstance(ref, LedgerRef) and ref.db_uri:
+        if not isinstance(ref, LedgerRef):
+            return _live_ledgers.get(str(ref))
+        expected_uid = ref.db_uid
+        if ref.instance_key:
+            led = _live_ledgers.get(ref.instance_key)
+            if led is not None and _ledger_matches_uid(led, expected_uid):
+                return led
+        if ref.db_uri:
             norm = _normalize_ledger_path_key(ref.db_uri)
             if norm is not None:
-                return _live_ledgers.get(f"path:{norm}") or _live_ledgers.get(norm)
+                led = _live_ledgers.get(f"path:{norm}") or _live_ledgers.get(norm)
+                if led is not None and _ledger_matches_uid(led, expected_uid):
+                    return led
         return None
 
 

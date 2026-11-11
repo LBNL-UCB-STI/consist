@@ -846,6 +846,148 @@ def test_review_regressions_symlinks_archive_subpaths_scope_keys_and_missing_mem
             )
 
 
+def test_phase1_unified_artifact_hint_ledger_accessibility_pydantic_and_weak_tracker(
+    tmp_path: Path,
+) -> None:
+    from datetime import datetime, timezone
+    import gc
+    from pydantic import TypeAdapter
+    from consist.artifact import (
+        ArchivedOutputs,
+        ArtifactAccessibility,
+        ArtifactLocationStatus,
+        HintLedger,
+    )
+
+    work_dir = tmp_path / "work"
+    arch_dir = tmp_path / "arch"
+    work_dir.mkdir()
+    arch_dir.mkdir()
+    mounts = {
+        "workspace": Mount(name="workspace", root=work_dir, scope="site"),
+        "archive": Mount(name="archive", root=arch_dir, scope="site"),
+    }
+
+    # 1. HintLedger returns () when no hint matches requested anchors (no unsafe fallback)
+    primary_file = work_dir / "zones.parquet"
+    recovery_file = arch_dir / "zones.parquet"
+    df = pd.DataFrame({"z": [1, 2]})
+    df.to_parquet(primary_file, index=False)
+    df.to_parquet(recovery_file, index=False)
+
+    d_match = Digest("sha256:file", file_sha256(primary_file))
+    d_other = Digest("sha256:file", "b" * 64)
+    obs_match = Observation(
+        location=Location(uri="workspace://zones.parquet", member=None),
+        identity=Identity(d_match),
+        access_driver="parquet",
+        site="local",
+        observed_at_ns=100,
+    )
+    hl = HintLedger(hints=(obs_match,))
+    assert hl.memoized_candidates(d_other) == ()
+    assert hl.candidates_for(d_other) == ()
+    assert hl.locate_current([d_other]) == []
+    assert len(hl.memoized_candidates(d_match)) == 1
+
+    # 2. Unified Artifact fields, properties, with_meta / with_schema / with_hints, accessibility, ArchivedOutputs
+    parent_id = uuid.uuid4()
+    ts = datetime(2026, 11, 10, 12, 0, 0, tzinfo=timezone.utc)
+    obs_rec = Observation(
+        location=Location(uri="archive://zones.parquet", member=None),
+        identity=Identity(d_match),
+        access_driver="parquet",
+        site="local",
+        observed_at_ns=200,
+    )
+    obs_db = Observation(
+        location=Location(uri="db://global_tables/zones", member="zones"),
+        identity=Identity(d_match),
+        access_driver="db",
+        site="local",
+        observed_at_ns=300,
+    )
+    art = Artifact(
+        id=uuid.uuid4(),
+        key="zones",
+        identity=Identity(d_match),
+        driver="parquet",
+        run_id="run_p1",
+        parent_artifact_id=parent_id,
+        created_at=ts,
+        meta=FrozenMeta({"tag": "v1", "schema_profile": {"cols": 1}}),
+        hints=(obs_match, obs_rec),
+    )
+    assert art.hash == str(d_match)
+    assert art.parent_artifact_id == parent_id
+    assert art.created_at == ts
+    assert art.created_at_iso == ts.isoformat()
+    assert art.primary_location == Location(
+        uri="workspace://zones.parquet", member=None
+    )
+    assert art.member is None
+    assert art.is_ingested is False
+
+    art_ingested = art.with_hints((obs_match, obs_rec, obs_db))
+    assert art_ingested.is_ingested is True
+
+    # with_meta preserves system meta when merge=False
+    replaced = art.with_meta({"tag": "v2"}, merge=False)
+    assert replaced.meta["tag"] == "v2"
+    assert replaced.meta["schema_profile"] == {"cols": 1}
+
+    with_sch = replaced.with_schema("sch_zones", summary={"rows": 2})
+    assert with_sch.schema_id == "sch_zones"
+    assert with_sch.meta["schema_summary"] == {"rows": 2}
+
+    # Weak tracker registry (DB-less runs only) + picklability
+    class _DummyDblessTracker:
+        def __init__(self, m: dict[str, Mount]) -> None:
+            self.db_path = None
+            self.mounts = m
+
+    dummy_tracker: _DummyDblessTracker | None = _DummyDblessTracker(mounts)
+    art.bind_tracker(dummy_tracker)
+    assert art.resolve_bound_tracker() is dummy_tracker
+    assert str(arch_dir.resolve()) in art.recovery_roots
+    with pytest.deprecated_call(match="abs_path is deprecated"):
+        assert art.abs_path == str(primary_file.resolve())
+
+    acc_primary = art.accessibility(dummy_tracker)
+    assert isinstance(acc_primary, ArtifactAccessibility)
+    assert acc_primary.status == "primary"
+    assert acc_primary.accessible is True
+    assert isinstance(acc_primary.best_location, ArtifactLocationStatus)
+
+    primary_file.unlink()
+    acc_recovery = art.accessibility(dummy_tracker)
+    assert acc_recovery.status == "recovery"
+    assert acc_recovery.accessible is True
+    assert acc_recovery.best_location is not None
+    assert acc_recovery.best_location.path == recovery_file.resolve()
+
+    archived_map = ArchivedOutputs({"zones": recovery_file}, {"zones": art})
+    assert archived_map["zones"] == recovery_file
+    assert archived_map.outputs["zones"] == art
+    assert len(archived_map) == 1
+
+    # Pickling stays clean and weak tracker GC drops weak reference
+    unpickled = pickle.loads(pickle.dumps(art))
+    assert unpickled == art
+    dummy_tracker = None
+    gc.collect()
+    assert art.resolve_bound_tracker() is None
+
+    # 3. Pydantic v2 TypeAdapter round-trip
+    adapter = TypeAdapter(Artifact)
+    dumped = adapter.dump_python(with_sch, mode="json")
+    restored = adapter.validate_python(dumped)
+    assert restored.id == with_sch.id
+    assert restored.anchor == with_sch.anchor
+    assert restored.parent_artifact_id == parent_id
+    assert restored.schema_id == "sch_zones"
+
+
 def test_pr3_modules_have_no_getattr_setattr_or_ponytail_comments() -> None:
     root = Path(__file__).resolve().parents[3]
     paths = [

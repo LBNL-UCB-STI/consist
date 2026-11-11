@@ -19,15 +19,18 @@ from consist import (
     archive,
     ensure_digest,
     evict,
-    export_run_manifest,
     hydrate_admitted_input,
-    import_run_manifest,
-    load_run_manifest,
     locate,
     observe,
     promote_historical_artifact,
-    rebuild_store_from_manifests,
     seal,
+)
+from consist.store.manifest import (
+    export_run_manifest,
+    import_run_manifest,
+    load_run_manifest,
+    rebuild_store_from_manifests,
+    write_run_manifest,
 )
 from consist.admission import (
     AdmissionIdentity,
@@ -1115,17 +1118,474 @@ def test_pr6_reviewer_regressions(tmp_path: Path) -> None:
         assert unrelated_file.exists()
 
 
+def test_phase1_store_manifest_hardening_dedup_and_lazy_imports(
+    tmp_path: Path,
+) -> None:
+    import base64
+    import subprocess
+    import sys
+    import consist
+    import consist.store as consist_store
+    import consist.store.manifest as store_manifest
+
+    # 1. Top-level consist manifest exports removed; consist.store & consist.store.manifest lazy without duckdb
+    for removed_name in (
+        "manifest",
+        "RunManifest",
+        "export_run_manifest",
+        "import_run_manifest",
+        "rebuild_store_from_manifests",
+    ):
+        assert removed_name not in consist.__all__
+        assert removed_name not in consist.__dict__
+
+    expected_manifest_symbols = (
+        "SCHEMA_VERSION",
+        "ManifestLocationEntry",
+        "ManifestArtifactEntry",
+        "RunManifest",
+        "write_run_manifest",
+        "load_run_manifest",
+        "export_run_manifest",
+        "import_run_manifest",
+        "rebuild_store_from_manifests",
+    )
+    for sym in expected_manifest_symbols:
+        assert sym in store_manifest.__all__
+        assert sym in consist_store.__all__
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys, consist, consist.store, consist.store.manifest; "
+            "assert 'duckdb' not in sys.modules",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0
+
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    mounts = {"workspace": Mount(name="workspace", root=work_dir, scope="site")}
+    db_path = tmp_path / "manifest_hardening.duckdb"
+
+    # 2. Tampered or invalid-scheme / invalid-JSON manifest_body_b64 raises ValueError and rolls back cleanly
+    import hashlib
+
+    dir_anchor = f"sha256:manifest-v1:{'a' * 64}"
+    bad_body_b64 = base64.b64encode(b'{"entries":[]}').decode("ascii")
+    tampered_manifest = load_run_manifest(
+        {
+            "schema_version": 2,
+            "run": {"id": "tampered_run", "model_name": "m", "status": "completed"},
+            "config": {},
+            "inputs": [],
+            "outputs": [
+                {
+                    "slot": "bad_dir",
+                    "artifact_id": str(uuid.uuid4()),
+                    "key": "bad_dir",
+                    "driver": "zarr",
+                    "anchor": dir_anchor,
+                    "manifest_body_b64": bad_body_b64,
+                }
+            ],
+        }
+    )
+    valid_body_bytes = b'{"entries":[]}'
+    valid_body_hex = hashlib.sha256(valid_body_bytes).hexdigest()
+    valid_body_b64 = base64.b64encode(valid_body_bytes).decode("ascii")
+
+    no_entries_bytes = b'{"not_entries":true}'
+    no_entries_hex = hashlib.sha256(no_entries_bytes).hexdigest()
+    no_entries_b64 = base64.b64encode(no_entries_bytes).decode("ascii")
+
+    with StoreLedger(db_path, mounts=mounts) as ledger:
+        with pytest.raises(ValueError, match="SHA-256"):
+            import_run_manifest(ledger, tampered_manifest, mounts=mounts)
+        assert ledger.get_run("tampered_run") is None
+
+        # Non-manifest schemes MUST reject manifest_body_b64 even when sha256(body_bytes) matches!
+        for bad_scheme in ("sha256:file", "ctd1:sha256"):
+            bad_scheme_manifest = load_run_manifest(
+                {
+                    "schema_version": 2,
+                    "run": {
+                        "id": "bad_scheme_run",
+                        "model_name": "m",
+                        "status": "completed",
+                    },
+                    "config": {},
+                    "inputs": [],
+                    "outputs": [
+                        {
+                            "slot": "bad_scheme",
+                            "artifact_id": str(uuid.uuid4()),
+                            "key": "bad_scheme",
+                            "driver": "zarr",
+                            "anchor": f"{bad_scheme}:{valid_body_hex}",
+                            "manifest_body_b64": valid_body_b64,
+                        }
+                    ],
+                }
+            )
+            with pytest.raises(ValueError, match="manifest-v1"):
+                import_run_manifest(ledger, bad_scheme_manifest, mounts=mounts)
+            assert ledger.get_run("bad_scheme_run") is None
+
+        # Malformed manifest JSON (missing list 'entries') MUST raise ValueError before opening transaction
+        bad_shape_manifest = load_run_manifest(
+            {
+                "schema_version": 2,
+                "run": {
+                    "id": "bad_shape_run",
+                    "model_name": "m",
+                    "status": "completed",
+                },
+                "config": {},
+                "inputs": [],
+                "outputs": [
+                    {
+                        "slot": "bad_shape",
+                        "artifact_id": str(uuid.uuid4()),
+                        "key": "bad_shape",
+                        "driver": "zarr",
+                        "anchor": f"sha256:manifest-v1:{no_entries_hex}",
+                        "manifest_body_b64": no_entries_b64,
+                    }
+                ],
+            }
+        )
+        with pytest.raises(ValueError, match="entries"):
+            import_run_manifest(ledger, bad_shape_manifest, mounts=mounts)
+        assert ledger.get_run("bad_shape_run") is None
+
+        # Valid foreign manifest_body_b64 keeps anchor basis='trusted_foreign' when not verified on local disk
+        foreign_dir_anchor = f"sha256:manifest-v1:{valid_body_hex}"
+        foreign_dir_manifest = load_run_manifest(
+            {
+                "schema_version": 2,
+                "run": {
+                    "id": "foreign_dir_run",
+                    "model_name": "m",
+                    "status": "completed",
+                },
+                "config": {},
+                "inputs": [],
+                "outputs": [
+                    {
+                        "slot": "dir_out",
+                        "artifact_id": str(uuid.uuid4()),
+                        "key": "dir_out",
+                        "driver": "zarr",
+                        "anchor": foreign_dir_anchor,
+                        "manifest_body_b64": valid_body_b64,
+                    }
+                ],
+            }
+        )
+        import_run_manifest(ledger, foreign_dir_manifest, mounts=mounts)
+        with ledger.cursor() as cur:
+            dir_basis_row = cur.execute(
+                "SELECT basis FROM main.content_digest WHERE anchor = ? AND scheme = 'sha256:manifest-v1'",
+                [foreign_dir_anchor],
+            ).fetchone()
+        assert dir_basis_row == ("trusted_foreign",)
+
+        # Consumer-before-producer import preserves producer artifact.run_id
+        shared_art_id = uuid.uuid4()
+        shared_anchor = f"sha256:file:{'4' * 64}"
+        consumer_manifest = load_run_manifest(
+            {
+                "schema_version": 2,
+                "run": {
+                    "id": "consumer_first",
+                    "model_name": "downstream",
+                    "status": "completed",
+                },
+                "config": {},
+                "inputs": [
+                    {
+                        "slot": "in_shared",
+                        "artifact_id": str(shared_art_id),
+                        "key": "shared_tbl",
+                        "driver": "parquet",
+                        "anchor": shared_anchor,
+                        "run_id": None,
+                    }
+                ],
+                "outputs": [],
+            }
+        )
+        producer_manifest = load_run_manifest(
+            {
+                "schema_version": 2,
+                "run": {
+                    "id": "producer_second",
+                    "model_name": "upstream",
+                    "status": "completed",
+                },
+                "config": {},
+                "inputs": [],
+                "outputs": [
+                    {
+                        "slot": "out_shared",
+                        "artifact_id": str(shared_art_id),
+                        "key": "shared_tbl",
+                        "driver": "parquet",
+                        "anchor": shared_anchor,
+                        "run_id": "producer_second",
+                    }
+                ],
+            }
+        )
+        consumer_after_manifest = load_run_manifest(
+            {
+                "schema_version": 2,
+                "run": {
+                    "id": "consumer_third",
+                    "model_name": "downstream2",
+                    "status": "completed",
+                },
+                "config": {},
+                "inputs": [
+                    {
+                        "slot": "in_shared",
+                        "artifact_id": str(shared_art_id),
+                        "key": "shared_tbl",
+                        "driver": "parquet",
+                        "anchor": shared_anchor,
+                        "run_id": None,
+                    }
+                ],
+                "outputs": [],
+            }
+        )
+        import_run_manifest(ledger, consumer_manifest, mounts=mounts)
+        import_run_manifest(ledger, producer_manifest, mounts=mounts)
+        loaded_shared = ledger.load_artifact(shared_art_id)
+        assert loaded_shared is not None and loaded_shared.run_id == "producer_second"
+        import_run_manifest(ledger, consumer_after_manifest, mounts=mounts)
+        loaded_shared_after = ledger.load_artifact(shared_art_id)
+        assert (
+            loaded_shared_after is not None
+            and loaded_shared_after.run_id == "producer_second"
+        )
+
+        # 3. URI / key '..' path traversal raises ValueError atomically
+        for bad_uri, bad_key in (
+            ("workspace://../../etc/passwd", "ok_key"),
+            ("file:///tmp/../etc/passwd", "ok_key"),
+            ("../escape.csv", "ok_key"),
+            ("workspace://ok.csv", "../escape_key"),
+        ):
+            traversal_manifest = load_run_manifest(
+                {
+                    "schema_version": 2,
+                    "run": {"id": "trav_run", "model_name": "m", "status": "completed"},
+                    "config": {},
+                    "inputs": [],
+                    "outputs": [
+                        {
+                            "slot": "out",
+                            "artifact_id": str(uuid.uuid4()),
+                            "key": bad_key,
+                            "driver": "csv",
+                            "anchor": f"sha256:file:{'b' * 64}",
+                            "locations": [{"uri": bad_uri}],
+                        }
+                    ],
+                }
+            )
+            with pytest.raises(ValueError, match=r"\.\.|escapes"):
+                import_run_manifest(
+                    ledger,
+                    traversal_manifest,
+                    mounts=mounts,
+                    reobserve_roots=[work_dir],
+                )
+            assert ledger.get_run("trav_run") is None
+
+        # 4. Foreign secondary claims use basis='trusted_foreign' and facet_kv is populated
+        art_uuid = uuid.uuid4()
+        file_anchor = Digest("sha256:file", "1" * 64)
+        foreign_ctd = Digest("ctd1:sha256", "2" * 64)
+        computed_ctd = Digest("ctd1:sha256", "3" * 64)
+        foreign_manifest = load_run_manifest(
+            {
+                "schema_version": 2,
+                "run": {
+                    "id": "foreign_run",
+                    "model_name": "activitysim",
+                    "status": "completed",
+                    "meta": {"facet": {"sample_rate": 0.1}},
+                },
+                "config": {"sample_rate": 0.1},
+                "inputs": [],
+                "outputs": [
+                    {
+                        "slot": "trips",
+                        "artifact_id": str(art_uuid),
+                        "key": "trips",
+                        "driver": "parquet",
+                        "anchor": str(file_anchor),
+                        "claims": [str(foreign_ctd)],
+                        "meta": {"facet": {"row_count": 500}},
+                    }
+                ],
+            }
+        )
+        import_run_manifest(ledger, foreign_manifest, mounts=mounts)
+        with ledger.cursor() as cur:
+            basis_row = cur.execute(
+                "SELECT basis, value FROM main.content_digest WHERE anchor = ? AND scheme = 'ctd1:sha256'",
+                [str(file_anchor)],
+            ).fetchone()
+        assert basis_row == ("trusted_foreign", "2" * 64)
+
+        # Local computed digest supersedes trusted_foreign and logs conflict
+        ledger.record_content_digest(
+            file_anchor,
+            computed_ctd,
+            basis="computed",
+            source="local_reverify",
+        )
+        assert ledger.get_identity(file_anchor).get("ctd1:sha256") == computed_ctd
+        assert (
+            len(
+                ledger.query_df(
+                    "SELECT * FROM run_config_kv WHERE run_id = 'foreign_run' AND key = 'sample_rate'"
+                )
+            )
+            == 1
+        )
+        assert (
+            len(
+                ledger.query_df(
+                    "SELECT * FROM artifact_kv WHERE artifact_id = ? AND key_path = 'row_count'",
+                    [art_uuid],
+                )
+            )
+            == 1
+        )
+
+    # 5. rebuild_store_from_manifests deduplicates duplicate run_id by status rank
+    # (completed/failed [2] > running [1] > missing/None [0])
+    snap_root = tmp_path / "dedup_snaps"
+    dir_early = snap_root / "a_early_sort"
+    dir_mid = snap_root / "m_mid_sort"
+    dir_late = snap_root / "z_late_sort"
+    dir_early.mkdir(parents=True)
+    dir_mid.mkdir(parents=True)
+    dir_late.mkdir(parents=True)
+
+    # Alphabetically LATER paths have running and missing status with newer-looking started_at;
+    # completed status MUST still win for dup_run_1, and running MUST beat missing status for dup_run_2!
+    write_run_manifest(
+        dir_early / "consist.json",
+        load_run_manifest(
+            {
+                "schema_version": 2,
+                "run": {
+                    "id": "dup_run_1",
+                    "model_name": "beam",
+                    "status": "completed",
+                    "started_at": "2026-11-10T10:00:00+00:00",
+                    "ended_at": "2026-11-10T11:00:00+00:00",
+                },
+                "config": {"winner": "completed"},
+                "inputs": [],
+                "outputs": [],
+            }
+        ),
+    )
+    write_run_manifest(
+        dir_late / "consist.json",
+        load_run_manifest(
+            {
+                "schema_version": 2,
+                "run": {
+                    "id": "dup_run_1",
+                    "model_name": "beam",
+                    "status": "running",
+                    "started_at": "2026-11-10T12:00:00+00:00",
+                },
+                "config": {"winner": "running"},
+                "inputs": [],
+                "outputs": [],
+            }
+        ),
+    )
+    (dir_mid / "consist_runs").mkdir()
+    write_run_manifest(
+        dir_mid / "consist_runs" / "dup2_running.json",
+        load_run_manifest(
+            {
+                "schema_version": 2,
+                "run": {
+                    "id": "dup_run_2",
+                    "model_name": "beam",
+                    "status": "running",
+                    "started_at": "2026-11-10T09:00:00+00:00",
+                },
+                "config": {"winner": "running"},
+                "inputs": [],
+                "outputs": [],
+            }
+        ),
+    )
+    (dir_late / "consist_runs").mkdir()
+    write_run_manifest(
+        dir_late / "consist_runs" / "dup2_missing_status.json",
+        load_run_manifest(
+            {
+                "schema_version": 2,
+                "run": {
+                    "id": "dup_run_2",
+                    "model_name": "beam",
+                    "started_at": "2026-11-10T15:00:00+00:00",
+                },
+                "config": {"winner": "missing_status"},
+                "inputs": [],
+                "outputs": [],
+            }
+        ),
+    )
+    dedup_db = tmp_path / "dedup.duckdb"
+    rebuilt = rebuild_store_from_manifests(dedup_db, [snap_root], mounts=mounts)
+    assert len(rebuilt) == 2
+    by_id = {m.run["id"]: m for m in rebuilt}
+    assert by_id["dup_run_1"].run["status"] == "completed"
+    assert by_id["dup_run_2"].run["status"] == "running"
+    with StoreLedger(dedup_db, mounts=mounts) as dedup_ledger:
+        winner_run_1 = dedup_ledger.get_run("dup_run_1")
+        winner_run_2 = dedup_ledger.get_run("dup_run_2")
+        assert winner_run_1 is not None and winner_run_1.status == "completed"
+        assert winner_run_2 is not None and winner_run_2.status == "running"
+
+
 def test_pr6_modules_have_no_getattr_setattr_or_ponytail_comments() -> None:
     root = Path(__file__).resolve().parents[3]
+    assert not (root / "src" / "consist" / "manifest.py").exists()
     paths = [
-        root / "src" / "consist" / "manifest.py",
+        root / "src" / "consist" / "location.py",
+        root / "src" / "consist" / "digest.py",
+        root / "src" / "consist" / "meta.py",
+        root / "src" / "consist" / "artifact.py",
+        root / "src" / "consist" / "store" / "detect.py",
+        root / "src" / "consist" / "store" / "schema.py",
+        root / "src" / "consist" / "store" / "ledger.py",
+        root / "src" / "consist" / "store" / "manifest.py",
+        root / "src" / "consist" / "store" / "__init__.py",
         root / "src" / "consist" / "admission.py",
         root / "src" / "consist" / "core" / "admission.py",
         root / "src" / "consist" / "core" / "logical_array_identity.py",
         root / "src" / "consist" / "engine.py",
-        root / "src" / "consist" / "digest.py",
-        root / "src" / "consist" / "meta.py",
         root / "src" / "consist" / "__init__.py",
+        root / "tests" / "helpers" / "v1_db_builder.py",
     ]
     for path in paths:
         source = path.read_text(encoding="utf-8")

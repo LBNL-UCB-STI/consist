@@ -18,17 +18,9 @@ V2_SCHEMA_VERSION: int = 2
 
 V1_ONLY_TABLE_NAMES: tuple[str, ...] = (
     "artifact_content",
-    "artifact_schema",
-    "artifact_schema_field",
-    "artifact_schema_relation",
-    "artifact_schema_observation",
-    "artifact_facet",
-    "artifact_kv",
-    "run_artifact_dir_entry",
     "config_facet",
-    "run_config_kv",
-    "run_binding_invocation",
-    "run_coupler_snapshot",
+    "artifact_facet",
+    "run_artifact_dir_entry",
 )
 
 V2_TABLE_NAMES: tuple[str, ...] = (
@@ -47,12 +39,20 @@ V2_TABLE_NAMES: tuple[str, ...] = (
     "run_binding",
     "artifact_location",
     "location_event",
+    "run_coupler_snapshot",
+    "run_binding_invocation",
+    "artifact_schema",
+    "artifact_schema_field",
+    "artifact_schema_observation",
+    "artifact_schema_relation",
 )
 
 V2_VIEW_NAMES: tuple[str, ...] = (
     "run_artifact_link",
     "run_artifact_role",
     "artifact_location_current",
+    "run_config_kv",
+    "artifact_kv",
 )
 
 V2_EXPECTED_TABLE_COLUMNS: dict[str, dict[str, str]] = {
@@ -71,9 +71,12 @@ V2_EXPECTED_TABLE_COLUMNS: dict[str, dict[str, str]] = {
         "description": "VARCHAR",
         "year": "INTEGER",
         "iteration": "INTEGER",
+        "stage": "VARCHAR",
+        "phase": "VARCHAR",
         "parent_run_id": "VARCHAR",
         "status": "VARCHAR",
         "code_hash": "VARCHAR",
+        "git_hash": "VARCHAR",
         "config_hash": "VARCHAR",
         "input_hash": "VARCHAR",
         "signature": "VARCHAR",
@@ -81,9 +84,11 @@ V2_EXPECTED_TABLE_COLUMNS: dict[str, dict[str, str]] = {
         "cache_status": "VARCHAR",
         "tags": "JSON",
         "meta": "JSON",
+        "facet_kv": "JSON",
         "started_at": "TIMESTAMP WITH TIME ZONE",
         "ended_at": "TIMESTAMP WITH TIME ZONE",
         "created_at": "TIMESTAMP WITH TIME ZONE",
+        "updated_at": "TIMESTAMP WITH TIME ZONE",
     },
     "artifact": {
         "id": "UUID",
@@ -91,8 +96,10 @@ V2_EXPECTED_TABLE_COLUMNS: dict[str, dict[str, str]] = {
         "driver": "VARCHAR",
         "anchor": "VARCHAR",
         "run_id": "VARCHAR",
+        "parent_artifact_id": "UUID",
         "schema_id": "VARCHAR",
         "meta": "JSON",
+        "facet_kv": "JSON",
         "created_at": "TIMESTAMP WITH TIME ZONE",
     },
     "content": {
@@ -185,6 +192,97 @@ V2_EXPECTED_TABLE_COLUMNS: dict[str, dict[str, str]] = {
         "at_ns": "BIGINT",
         "writer": "VARCHAR",
     },
+    "run_coupler_snapshot": {
+        "run_id": "VARCHAR",
+        "phase": "VARCHAR",
+        "role_key": "VARCHAR",
+        "scenario_run_id": "VARCHAR",
+        "step_ordinal": "INTEGER",
+        "artifact_id": "UUID",
+        "producer_run_id": "VARCHAR",
+        "updated_at": "TIMESTAMP WITH TIME ZONE",
+    },
+    "run_binding_invocation": {
+        "id": "UUID",
+        "requested_run_id": "VARCHAR",
+        "execution_run_id": "VARCHAR",
+        "cache_source_run_id": "VARCHAR",
+        "cache_outcome": "VARCHAR",
+        "binding_json": "VARCHAR",
+        "created_at": "TIMESTAMP WITH TIME ZONE",
+    },
+    "artifact_schema": {
+        "id": "VARCHAR",
+        "profile_version": "INTEGER",
+        "summary_json": "JSON",
+        "profile_json": "JSON",
+        "created_at": "TIMESTAMP WITH TIME ZONE",
+    },
+    "artifact_schema_field": {
+        "schema_id": "VARCHAR",
+        "ordinal_position": "INTEGER",
+        "name": "VARCHAR",
+        "logical_type": "VARCHAR",
+        "nullable": "BOOLEAN",
+        "stats_json": "JSON",
+        "is_enum": "BOOLEAN",
+        "enum_values_json": "JSON",
+    },
+    "artifact_schema_observation": {
+        "id": "UUID",
+        "artifact_id": "UUID",
+        "schema_id": "VARCHAR",
+        "run_id": "VARCHAR",
+        "source": "VARCHAR",
+        "sample_rows": "INTEGER",
+        "observed_at": "TIMESTAMP WITH TIME ZONE",
+    },
+    "artifact_schema_relation": {
+        "schema_id": "VARCHAR",
+        "from_field": "VARCHAR",
+        "to_table": "VARCHAR",
+        "to_field": "VARCHAR",
+        "relationship_type": "VARCHAR",
+        "cardinality": "VARCHAR",
+    },
+}
+
+V2_EXPECTED_VIEW_COLUMNS: dict[str, dict[str, str]] = {
+    "run_artifact_link": {
+        "run_id": "VARCHAR",
+        "artifact_id": "UUID",
+        "direction": "VARCHAR",
+        "is_implicit": "BOOLEAN",
+    },
+    "run_artifact_role": {
+        "run_id": "VARCHAR",
+        "artifact_id": "UUID",
+        "is_input": "BOOLEAN",
+        "is_output": "BOOLEAN",
+    },
+    "run_config_kv": {
+        "run_id": "VARCHAR",
+        "facet_id": "VARCHAR",
+        "namespace": "VARCHAR",
+        "key": "VARCHAR",
+        "value_type": "VARCHAR",
+        "value_str": "VARCHAR",
+        "value_num": "DOUBLE",
+        "value_bool": "BOOLEAN",
+        "value_json": "JSON",
+        "created_at": "TIMESTAMP WITH TIME ZONE",
+    },
+    "artifact_kv": {
+        "artifact_id": "UUID",
+        "facet_id": "VARCHAR",
+        "namespace": "VARCHAR",
+        "key_path": "VARCHAR",
+        "value_type": "VARCHAR",
+        "value_str": "VARCHAR",
+        "value_num": "DOUBLE",
+        "value_bool": "BOOLEAN",
+        "created_at": "TIMESTAMP WITH TIME ZONE",
+    },
 }
 
 
@@ -269,6 +367,7 @@ def init_v2_schema(
 __all__ = [
     "V1_ONLY_TABLE_NAMES",
     "V2_EXPECTED_TABLE_COLUMNS",
+    "V2_EXPECTED_VIEW_COLUMNS",
     "V2_SCHEMA_VERSION",
     "V2_TABLE_NAMES",
     "V2_VIEW_NAMES",

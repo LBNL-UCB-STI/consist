@@ -174,7 +174,6 @@ _EMPTY_META = EMPTY_META
 
 SYSTEM_META_KEYS: frozenset[str] = frozenset(
     {
-        "recovery_roots",
         "hash_semantics",
         "hash_algorithm",
         "hashing_strategy",
@@ -196,12 +195,39 @@ SYSTEM_META_KEYS: frozenset[str] = frozenset(
 )
 
 
+_PRESERVED_META_PREFIXES: tuple[str, ...] = (
+    "output_set_",
+    "file_bundle_",
+)
+
+PRESERVED_SYSTEM_META_KEYS: frozenset[str] = frozenset(
+    {
+        "schema_profile",
+        "schema_summary",
+        "file_schema",
+        "facet",
+        "facet_namespace",
+        "facet_schema_version",
+        "facet_index",
+        "output_set_key",
+        "output_set_role",
+        "output_set_index",
+        "output_set_member_keys",
+        "manifest_artifact_id",
+        "recovery_roots",
+        "year",
+        "iteration",
+        "tags",
+    }
+)
+
+
 def strip_system_meta(
     raw: Mapping[str, Any] | None,
     *,
     extra_keys: Iterable[str] = (),
 ) -> FrozenMeta:
-    """Return a `FrozenMeta` with internal system keys removed."""
+    """Return a `FrozenMeta` with internal v1 system keys removed."""
     if not raw:
         return EMPTY_META
     blocked = SYSTEM_META_KEYS | frozenset(extra_keys)
@@ -213,10 +239,52 @@ def strip_system_meta(
     return FrozenMeta(cleaned) if cleaned else EMPTY_META
 
 
+def _unfreeze_mapping(raw: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not raw:
+        return {}
+    return {str(k): _unfreeze_meta_val(v) for k, v in raw.items()}
+
+
+def preserve_system_artifact_meta(
+    existing_meta: Mapping[str, Any] | None,
+    incoming_meta: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Preserve `PRESERVED_SYSTEM_META_KEYS` from `existing_meta` under `incoming_meta`."""
+    merged: dict[str, Any] = {}
+    if existing_meta:
+        for k, v in existing_meta.items():
+            ks = str(k)
+            if ks in PRESERVED_SYSTEM_META_KEYS or ks.startswith(
+                _PRESERVED_META_PREFIXES
+            ):
+                merged[ks] = _unfreeze_meta_val(v)
+    if incoming_meta:
+        merged.update(_unfreeze_mapping(incoming_meta))
+    return merged
+
+
+def merge_artifact_output_meta(
+    existing_meta: Mapping[str, Any] | None,
+    updates: Mapping[str, Any] | None,
+    *,
+    merge: bool = True,
+) -> dict[str, Any]:
+    """Merge or replace user metadata while retaining `PRESERVED_SYSTEM_META_KEYS` on replace."""
+    if not merge:
+        return preserve_system_artifact_meta(existing_meta, updates)
+    merged = _unfreeze_mapping(existing_meta)
+    if updates:
+        merged.update(_unfreeze_mapping(updates))
+    return merged
+
+
 __all__ = [
     "EMPTY_META",
     "FrozenList",
     "FrozenMeta",
+    "PRESERVED_SYSTEM_META_KEYS",
     "SYSTEM_META_KEYS",
+    "merge_artifact_output_meta",
+    "preserve_system_artifact_meta",
     "strip_system_meta",
 ]

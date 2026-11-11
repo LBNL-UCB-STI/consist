@@ -170,16 +170,17 @@ def test_identity_invariants_and_refines_monotonicity() -> None:
     step1 = ident_bare.with_claim(claim_ctd)
     step2 = step1.with_claim(claim_blake)
     assert step1.with_claim(claim_ctd) is step1
-    assert Identity.refines(ident_bare, ident_bare)
-    assert Identity.refines(ident_bare, step1)
-    assert Identity.refines(step1, step2)
-    assert Identity.refines(ident_bare, step2)
-    assert not Identity.refines(step1, ident_bare)
-    assert not Identity.refines(step2, step1)
-    assert refines(ident_bare, step2)
+    assert ident_bare.refines(ident_bare)
+    assert step1.refines(ident_bare)
+    assert step2.refines(step1)
+    assert step2.refines(ident_bare)
+    assert not ident_bare.refines(step1)
+    assert not step1.refines(step2)
+    assert refines(step2, ident_bare)
+    assert not refines(ident_bare, step2)
 
     other_anchor_ident = Identity(anchor=Digest("sha256:file", "f" * 64))
-    assert not Identity.refines(ident_bare, other_anchor_ident)
+    assert not ident_bare.refines(other_anchor_ident)
 
     # Historical anchor invariants
     hist_ident = Identity(anchor=hist)
@@ -274,7 +275,7 @@ def test_compare_contracts_drivers_needed_and_historical() -> None:
     assert v_needed.needed == ("ctd1:sha256",)
     assert v_needed.agree_reachable is True
 
-    # 5. Incompatible drivers under LOGICAL_DATA -> agree_reachable=False
+    # 5. Incompatible drivers under LOGICAL_DATA -> Agreement.UNVERIFIABLE, agree_reachable=False
     v_incompat = compare(
         Identity(d_sha_1),
         Identity(d_sha_2),
@@ -282,7 +283,7 @@ def test_compare_contracts_drivers_needed_and_historical() -> None:
         driver_a="parquet",
         driver_b="zarr",
     )
-    assert v_incompat == Verdict(Agreement.UNKNOWN, None, (), False)
+    assert v_incompat == Verdict(Agreement.UNVERIFIABLE, None, (), False)
 
     # 6. SCHEMA_ONLY
     id_s1 = Identity(d_sha_1, claims=(d_schema_1,))
@@ -478,12 +479,12 @@ def test_file_stat_freshness_racy_window_and_witness_json_roundtrip(
         is Freshness.STALE
     )
 
-    # Racy capture (< 2s after mtime_ns) transitions from FRESH inside window to STALE once >= 2s
+    # Racy capture (abs(now_ns - mtime_ns) < 2s) returns STALE immediately whenever racy is True
     racy_obs_ns = raw_st.st_mtime_ns + 500_000_000  # 0.5s after mtime
     racy_stat = FileStat.capture(f, observed_at_ns=racy_obs_ns)
     assert racy_stat.racy is True
     assert (
-        racy_stat.check(f, now_ns=raw_st.st_mtime_ns + 1_000_000_000) is Freshness.FRESH
+        racy_stat.check(f, now_ns=raw_st.st_mtime_ns + 1_000_000_000) is Freshness.STALE
     )
     assert (
         racy_stat.check(f, now_ns=raw_st.st_mtime_ns + 2_000_000_000) is Freshness.STALE
@@ -662,3 +663,524 @@ def test_manifest_v1_byte_for_byte_parity_with_build_directory_manifest(
     ctd_digest = compute_ctd1_digest(df)
     assert ctd_digest.scheme == "ctd1:sha256"
     assert ctd_digest.kind is Kind.LOGICAL
+
+
+def test_phase1_location_racy_subdirs_symlinks_and_ledger_uid_guard(
+    tmp_path: Path,
+) -> None:
+    from consist.location import (
+        lookup_live_ledger,
+        register_live_ledger,
+        unregister_live_ledger,
+    )
+
+    # 1. Symmetric negative clock-skew racy check on FileStat and DirTreeStat
+    sample = tmp_path / "skew.bin"
+    sample.write_bytes(b"clock-skew")
+    st = sample.stat()
+    neg_skew_ns = st.st_mtime_ns - 500_000_000  # observed 0.5s BEFORE mtime (NFS skew)
+    skew_fstat = FileStat.capture(sample, observed_at_ns=neg_skew_ns)
+    assert skew_fstat.racy is True
+    assert skew_fstat.check(sample) is Freshness.STALE
+
+    tree = tmp_path / "tree_subdirs"
+    (tree / "sub_a").mkdir(parents=True)
+    (tree / "file.txt").write_bytes(b"123")
+    tree_st = (tree / "file.txt").stat()
+    racy_dir = DirTreeStat.capture(
+        tree, observed_at_ns=tree_st.st_mtime_ns - 100_000_000
+    )
+    assert racy_dir.racy is True
+    assert racy_dir.check(tree) is Freshness.STALE
+
+    # 2. DirTreeStat tracks empty subdirectories & legacy witness_json defaults subdirs=()
+    safe_ns = max(tree.stat().st_mtime_ns, tree_st.st_mtime_ns) + 10_000_000_000
+    clean_dir = DirTreeStat.capture(tree, observed_at_ns=safe_ns)
+    assert clean_dir.racy is False
+    assert [rel for rel, _ in clean_dir.subdirs] == ["sub_a"]
+    assert clean_dir.check(tree) is Freshness.FRESH
+
+    # Adding an empty subdirectory changes witness -> STALE
+    (tree / "empty_added").mkdir()
+    assert clean_dir.check(tree) is Freshness.STALE
+    updated_dir = DirTreeStat.capture(
+        tree,
+        observed_at_ns=max(s.stat().st_mtime_ns for s in [tree, tree / "empty_added"])
+        + 10_000_000_000,
+    )
+    assert [rel for rel, _ in updated_dir.subdirs] == ["empty_added", "sub_a"]
+    assert updated_dir.check(tree) is Freshness.FRESH
+    # Removing empty subdirectory -> STALE
+    (tree / "empty_added").rmdir()
+    assert updated_dir.check(tree) is Freshness.STALE
+
+    # Backward-compatible deserialization when legacy witness_json omits 'subdirs'
+    import json
+    from consist.location import deserialize_witness_json, serialize_witness_json
+
+    raw_clean_dict = json.loads(serialize_witness_json(clean_dir) or "{}")
+    raw_clean_dict.pop("subdirs", None)
+    legacy_parsed = deserialize_witness_json(json.dumps(raw_clean_dict))
+    assert isinstance(legacy_parsed, DirTreeStat)
+    assert legacy_parsed.subdirs == ()
+
+    # Symlinked file or directory inside tree (including nested subdirs) causes DirTreeStat.check -> STALE
+    outside = tmp_path / "outside_target.txt"
+    outside.write_bytes(b"secret")
+    sym_tree = tmp_path / "sym_tree"
+    (sym_tree / "nested" / "empty_leaf").mkdir(parents=True)
+    (sym_tree / "real.txt").write_bytes(b"ok")
+    sym_safe_ns = (
+        max(
+            (sym_tree / "real.txt").stat().st_mtime_ns,
+            (sym_tree / "nested" / "empty_leaf").stat().st_mtime_ns,
+        )
+        + 10_000_000_000
+    )
+    sym_stat = DirTreeStat.capture(sym_tree, observed_at_ns=sym_safe_ns)
+    assert [rel for rel, _ in sym_stat.subdirs] == ["nested", "nested/empty_leaf"]
+    assert sym_stat.check(sym_tree) is Freshness.FRESH
+    (sym_tree / "nested" / "empty_leaf").rmdir()
+    assert sym_stat.check(sym_tree) is Freshness.STALE
+    (sym_tree / "nested" / "empty_leaf").mkdir()
+    sym_stat = DirTreeStat.capture(
+        sym_tree,
+        observed_at_ns=(sym_tree / "nested" / "empty_leaf").stat().st_mtime_ns
+        + 10_000_000_000,
+    )
+    assert sym_stat.check(sym_tree) is Freshness.FRESH
+    (sym_tree / "nested" / "linked.txt").symlink_to(outside)
+    assert sym_stat.check(sym_tree) is Freshness.STALE
+    (sym_tree / "nested" / "linked.txt").unlink()
+    outside_dir = tmp_path / "outside_dir"
+    outside_dir.mkdir()
+    (sym_tree / "nested" / "linked_dir").symlink_to(outside_dir)
+    assert sym_stat.check(sym_tree) is Freshness.STALE
+
+    # 3. lookup_live_ledger verifies ledger.db_uid == ref.db_uid on instance_key AND db_uri
+    class _DummyLedger:
+        def __init__(self, db_uid: str) -> None:
+            self.db_uid = db_uid
+
+    dummy = _DummyLedger(db_uid="uid-actual")
+    inst_key = "test-inst-uid-guard"
+    db_file = tmp_path / "test-uid-guard.duckdb"
+    db_uri = db_file.resolve().as_uri()
+    register_live_ledger(dummy, instance_key=inst_key, db_path=db_file)
+    try:
+        # Matching db_uid resolves via both instance_key and fallback db_uri
+        assert (
+            lookup_live_ledger(
+                LedgerRef(db_uid="uid-actual", instance_key=inst_key, db_uri=db_uri)
+            )
+            is dummy
+        )
+        assert (
+            lookup_live_ledger(
+                LedgerRef(db_uid="uid-actual", instance_key="stale-inst", db_uri=db_uri)
+            )
+            is dummy
+        )
+        # Mismatched db_uid MUST return None on both instance_key and db_uri lookups!
+        assert (
+            lookup_live_ledger(
+                LedgerRef(db_uid="uid-wrong", instance_key=inst_key, db_uri=db_uri)
+            )
+            is None
+        )
+        assert (
+            lookup_live_ledger(
+                LedgerRef(db_uid="uid-wrong", instance_key="stale-inst", db_uri=db_uri)
+            )
+            is None
+        )
+    finally:
+        unregister_live_ledger(dummy, instance_key=inst_key, db_path=db_file)
+
+
+def test_phase1_digest_blosc2_logical_bytes_expectation_and_symlink_manifest(
+    tmp_path: Path,
+) -> None:
+    from consist.digest import _reject_manifest_symlink_components
+
+    # 1. blosc2:header:v1 has content_pure=False
+    assert SchemeRegistry.get("blosc2:header:v1").content_pure is False
+
+    # 2. compare under Contract.LOGICAL_DATA matches identical whole-file Kind.BYTES without re-parsing
+    d_same = Digest("sha256:file", "a" * 64)
+    assert compare(
+        Identity(d_same),
+        Identity(d_same),
+        Contract.LOGICAL_DATA,
+    ) == Verdict(Agreement.MATCH, "sha256:file", (), True)
+    assert compare(
+        Identity(d_same),
+        Identity(d_same),
+        Contract.LOGICAL_DATA,
+        driver_a="json",
+        driver_b="json",
+    ) == Verdict(Agreement.MATCH, "sha256:file", (), True)
+    # Member driver does NOT short-circuit on container bytes
+    v_member = compare(
+        Identity(d_same),
+        Identity(d_same),
+        Contract.LOGICAL_DATA,
+        driver_a="member",
+        driver_b="member",
+    )
+    assert v_member.agreement is Agreement.UNKNOWN
+
+    # 3. Expectation.digests normalized to frozenset, participates in eq/hash, rejects all-HISTORICAL
+    d1 = Digest("sha256:file", "1" * 64)
+    d2 = Digest("ctd1:sha256", "2" * 64)
+    d_hist = Digest("legacy-v1:unverified", "9" * 64)
+    exp_a = Expectation(
+        accepts_kinds=frozenset({Kind.BYTES, Kind.LOGICAL}),
+        digests=[d1, d2],
+    )
+    exp_b = Expectation(
+        accepts_kinds=frozenset({Kind.BYTES, Kind.LOGICAL}),
+        digests=[d2, d1],
+    )
+    exp_c = Expectation(
+        accepts_kinds=frozenset({Kind.BYTES, Kind.LOGICAL}),
+        digests=[d1],
+    )
+    assert isinstance(exp_a.digests, frozenset)
+    assert exp_a == exp_b
+    assert hash(exp_a) == hash(exp_b)
+    assert exp_a != exp_c
+
+    with pytest.raises(ValueError, match="HISTORICAL"):
+        Expectation(
+            accepts_kinds=frozenset({Kind.BYTES}),
+            digests=[d_hist],
+        )
+
+    # 4. _reject_manifest_symlink_components allows ancestor symlink (like macOS /var -> /private/var)
+    # while rejecting symlink at root or any descendant
+    real_parent = tmp_path / "real_parent"
+    real_dir = real_parent / "manifest_dir"
+    (real_dir / "sub").mkdir(parents=True)
+    (real_dir / "sub" / "data.bin").write_bytes(b"ok")
+
+    sym_parent = tmp_path / "sym_parent"
+    sym_parent.symlink_to(real_parent)
+    resolved_via_sym_parent = _reject_manifest_symlink_components(
+        sym_parent / "manifest_dir",
+        label="root",
+    )
+    assert resolved_via_sym_parent == real_dir.resolve()
+    assert build_manifest_v1(sym_parent / "manifest_dir") == build_manifest_v1(real_dir)
+
+    # Symlink at root itself raises ValueError
+    sym_root = tmp_path / "sym_manifest_dir"
+    sym_root.symlink_to(real_dir)
+    with pytest.raises(ValueError, match="symlink"):
+        _reject_manifest_symlink_components(sym_root, label="root")
+
+    # Symlink inside canonical_root raises ValueError
+    ext_file = tmp_path / "ext.bin"
+    ext_file.write_bytes(b"ext")
+    (real_dir / "sub" / "bad_link.bin").symlink_to(ext_file)
+    with pytest.raises(ValueError, match="symlink"):
+        _reject_manifest_symlink_components(
+            real_dir / "sub" / "bad_link.bin", label="entry"
+        )
+
+
+def test_phase1_meta_preserved_keys_and_artifact_surface(tmp_path: Path) -> None:
+    from datetime import datetime, timezone
+    import sys
+    import uuid
+    from pydantic import TypeAdapter
+
+    from consist.artifact import (
+        ArchivedOutputs,
+        Artifact,
+        ArtifactAccessibility,
+        ArtifactLocationStatus,
+        HintLedger,
+    )
+    from consist.meta import (
+        PRESERVED_SYSTEM_META_KEYS,
+        SYSTEM_META_KEYS,
+        merge_artifact_output_meta,
+        preserve_system_artifact_meta,
+        strip_system_meta,
+    )
+
+    # 1. SYSTEM_META_KEYS vs PRESERVED_SYSTEM_META_KEYS and pure-dict helpers
+    assert {"_dlt_table_name", "is_ingested", "schema_id"} <= SYSTEM_META_KEYS
+    assert "recovery_roots" not in SYSTEM_META_KEYS
+    assert "facet" not in SYSTEM_META_KEYS
+    assert "schema_profile" not in SYSTEM_META_KEYS
+    assert "output_set_key" not in SYSTEM_META_KEYS
+    assert "facet" in PRESERVED_SYSTEM_META_KEYS
+    assert "schema_profile" in PRESERVED_SYSTEM_META_KEYS
+    assert "output_set_key" in PRESERVED_SYSTEM_META_KEYS
+    assert "manifest_artifact_id" in PRESERVED_SYSTEM_META_KEYS
+    assert "recovery_roots" in PRESERVED_SYSTEM_META_KEYS
+    assert "is_ingested" not in PRESERVED_SYSTEM_META_KEYS
+    assert "_dlt_table_name" not in PRESERVED_SYSTEM_META_KEYS
+    assert "dlt_table_name" not in PRESERVED_SYSTEM_META_KEYS
+
+    stripped = strip_system_meta(
+        {
+            "is_ingested": True,
+            "_dlt_table_name": "t1",
+            "_dlt_load_id": "l1",
+            "schema_id": "s1",
+            "recovery_roots": ["/archive/root1"],
+            "facet": {"zone": 1},
+            "user_k": "v",
+        }
+    )
+    assert dict(stripped) == {
+        "recovery_roots": ["/archive/root1"],
+        "facet": {"zone": 1},
+        "user_k": "v",
+    }
+
+    existing = {
+        "user_old": 1,
+        "facet": {"mode": "transit"},
+        "output_set_key": "skims",
+        "output_set_custom": "grp",
+        "file_bundle_part": 2,
+        "recovery_roots": ["/arch"],
+        "_dlt_table_name": "skims_tbl",
+        "_dlt_load_id": "l2",
+        "directory_manifest": {"entries": []},
+        "is_ingested": True,
+    }
+    replaced = merge_artifact_output_meta(existing, {"user_new": 2}, merge=False)
+    assert replaced == {
+        "user_new": 2,
+        "facet": {"mode": "transit"},
+        "output_set_key": "skims",
+        "output_set_custom": "grp",
+        "file_bundle_part": 2,
+        "recovery_roots": ["/arch"],
+    }
+    merged = merge_artifact_output_meta(existing, {"user_new": 2}, merge=True)
+    assert merged["user_old"] == 1
+    assert merged["user_new"] == 2
+    assert preserve_system_artifact_meta({"schema_summary": {"cols": 3}}, {"a": 1}) == {
+        "a": 1,
+        "schema_summary": {"cols": 3},
+    }
+    assert "consist.artifact" not in consist.meta.__dict__.values()
+
+    # 2. HintLedger returns () when requested anchors do NOT match (no unsafe fallback!)
+    d_hint = Digest("sha256:file", "a" * 64)
+    d_other = Digest("sha256:file", "b" * 64)
+    obs_hint = Observation(
+        location=Location(uri="workspace://hint.parquet"),
+        identity=Identity(d_hint),
+        access_driver="parquet",
+        witness=None,
+        basis="computed",
+        site="local",
+    )
+    hl = HintLedger((obs_hint,))
+    assert hl.memoized_candidates(d_other) == ()
+    assert hl.candidates_for((str(d_other),)) == ()
+    assert len(hl.memoized_candidates(d_hint)) == 1
+    assert len(hl.candidates_for((str(d_hint),))) == 1
+
+    # 3. Artifact Phase 1 surface: parent_artifact_id, created_at, weak tracker binding,
+    # compatibility properties, accessibility, as_df, Pydantic TypeAdapter, and pickle
+    from consist.digest import file_sha256
+
+    pq_path = tmp_path / "trips.parquet"
+    df_expected = pd.DataFrame({"trip_id": [10, 20], "dist": [1.5, 3.0]})
+    df_expected.to_parquet(pq_path, index=False)
+
+    parent_id = uuid.uuid4()
+    ts = datetime(2026, 11, 10, 12, 0, 0, tzinfo=timezone.utc)
+    obs_pq = Observation(
+        location=Location(uri=pq_path.resolve().as_uri(), member=None),
+        identity=Identity(Digest("sha256:file", file_sha256(pq_path))),
+        access_driver="parquet",
+        witness=FileStat.capture(
+            pq_path,
+            observed_at_ns=pq_path.stat().st_mtime_ns + 5_000_000_000,
+        ),
+        basis="computed",
+        site="local",
+    )
+    obs_hot = Observation(
+        location=Location(uri="db://global_tables/trips", member=None),
+        identity=obs_pq.identity,
+        access_driver="duckdb_table",
+        witness=None,
+        basis="computed",
+        site="local",
+    )
+    art = Artifact(
+        id=uuid.uuid4(),
+        key="trips",
+        driver="parquet",
+        identity=obs_pq.identity,
+        parent_artifact_id=parent_id,
+        created_at=ts,
+        meta=FrozenMeta(
+            {"recovery_roots": ["/archive/r1", "/archive/r2", "/archive/r1"]}
+        ),
+        hints=(obs_pq, obs_hot),
+    )
+    assert art.hash == str(art.anchor)
+    assert art.parent_artifact_id == parent_id
+    assert art.created_at == ts
+    assert art.created_at_iso == ts.isoformat()
+    assert art.primary_location == obs_pq.location
+    assert art.recovery_roots == ["/archive/r1", "/archive/r2"]
+    with pytest.warns(DeprecationWarning):
+        assert art.container_uri == pq_path.resolve().as_uri()
+    assert art.member is None
+    assert art.is_ingested is True
+    assert art.with_hints((obs_pq,)).is_ingested is False
+
+    # Also verify member/table_path/array_path on h5_table & zarr drivers
+    obs_member = Observation(
+        location=Location(uri="workspace://pipeline.h5", member="/trips"),
+        identity=Identity(Digest("ctd1:sha256", "d" * 64)),
+        access_driver="h5_table",
+        witness=None,
+        basis="computed",
+        site="local",
+    )
+    art_h5 = Artifact(
+        id=uuid.uuid4(),
+        key="trips_h5",
+        driver="h5_table",
+        identity=obs_member.identity,
+        hints=(obs_member,),
+    )
+    assert art_h5.member == "/trips"
+    with pytest.warns(DeprecationWarning):
+        assert art_h5.table_path == "/trips"
+    with pytest.warns(DeprecationWarning):
+        assert art_h5.array_path is None
+
+    # Weak tracker registry keyed by Artifact.id keeps Artifact frozen & picklable
+    class _DummyTracker:
+        pass
+
+    trk = _DummyTracker()
+    art.bind_tracker(trk)
+    assert art.resolve_bound_tracker() is trk
+    unpickled = pickle.loads(pickle.dumps(art))
+    assert unpickled == art
+    assert unpickled.resolve_bound_tracker() is trk
+
+    # with_meta preserves system meta (e.g. recovery_roots) when merge=False
+    art2 = art.with_meta({"note": "updated"}, merge=False)
+    assert art2.meta["note"] == "updated"
+    assert art2.recovery_roots == ["/archive/r1", "/archive/r2"]
+    assert art2.is_ingested is True
+    art3 = art2.with_schema("schema_xyz")
+    assert art3.schema_id == "schema_xyz"
+
+    # accessibility & as_df via hint resolution
+    acc = art.accessibility()
+    assert isinstance(acc, ArtifactAccessibility)
+    assert acc.accessible is True
+    assert acc.status == "primary"
+    assert acc.best_location is not None
+    assert isinstance(acc.locations[0], ArtifactLocationStatus)
+    pd.testing.assert_frame_equal(art.as_df(), df_expected)
+
+    archived_info = ArchivedOutputs(paths={"trips": pq_path}, outputs={"trips": art})
+    assert archived_info["trips"] == pq_path
+    assert archived_info.outputs["trips"] == art
+    assert len(archived_info) == 1
+
+    # Strict Pydantic v2 JSON + Python round-trip preserving origin, per-hint identity,
+    # migrated_v1 basis, empty hints when origin is present, and recovery_roots
+    adapter = TypeAdapter(Artifact)
+
+    def _assert_full_roundtrip(target: Artifact) -> None:
+        for restored in (
+            adapter.validate_json(adapter.dump_json(target)),
+            adapter.validate_python(adapter.dump_python(target, mode="json")),
+        ):
+            assert restored == target
+            assert (
+                restored.id,
+                restored.key,
+                restored.driver,
+                restored.identity,
+                restored.recorded_anchor,
+                restored.origin,
+                restored.run_id,
+                restored.parent_artifact_id,
+                restored.schema_id,
+                restored.created_at,
+                restored.meta,
+                restored.hints,
+            ) == (
+                target.id,
+                target.key,
+                target.driver,
+                target.identity,
+                target.recorded_anchor,
+                target.origin,
+                target.run_id,
+                target.parent_artifact_id,
+                target.schema_id,
+                target.created_at,
+                target.meta,
+                target.hints,
+            )
+
+    _assert_full_roundtrip(art)
+
+    art_origin_only = Artifact(
+        id=uuid.uuid4(),
+        key="ledger_backed",
+        driver="parquet",
+        identity=obs_pq.identity,
+        origin=LedgerRef(
+            db_uid="uid-123",
+            instance_key="inst-456",
+            db_uri="file:///tmp/provenance.duckdb",
+        ),
+        run_id="run_1",
+        schema_id="sch_1",
+        created_at=ts,
+        meta=FrozenMeta(
+            {"recovery_roots": ["/recovery/a"], "_dlt_custom": "kept_on_v2"}
+        ),
+        hints=(),
+    )
+    _assert_full_roundtrip(art_origin_only)
+
+    hist_id = Identity(Digest("legacy-v1:unverified", "9" * 64))
+    promoted_obs_id = Identity(
+        Digest("sha256:file", "8" * 64),
+        claims=(Digest("ctd1:sha256", "7" * 64),),
+    )
+    art_asserted_promo = Artifact(
+        id=uuid.uuid4(),
+        key="promoted_hist",
+        driver="parquet",
+        identity=hist_id,
+        hints=(
+            Observation(
+                location=Location(uri="workspace://restored.parquet"),
+                identity=promoted_obs_id,
+                access_driver="parquet",
+                witness=None,
+                basis="migrated_v1",
+                site="cluster_a",
+                scope_key="lustre",
+                mount_instance_id="mnt-1",
+                observed_at_ns=42,
+            ),
+        ),
+    )
+    assert art_asserted_promo.hints[0].identity != art_asserted_promo.identity
+    _assert_full_roundtrip(art_asserted_promo)
+    assert sys.modules.get("consist.artifact") is not None

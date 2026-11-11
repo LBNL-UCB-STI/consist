@@ -4,12 +4,14 @@ import base64
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import tempfile
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
+from urllib.parse import unquote, urlparse
 import uuid
 
 from consist.digest import (
@@ -18,12 +20,6 @@ from consist.digest import (
     Kind,
     canonical_json_str,
     digest_bytes,
-)
-from consist.engine import (
-    _build_path_observation,
-    _normalize_mounts,
-    resolve_uri_to_path,
-    verify_path_digest,
 )
 from consist.location import (
     DirTreeStat,
@@ -41,7 +37,9 @@ from consist.location import (
     serialize_witness_json,
 )
 from consist.meta import strip_system_meta
-from consist.store.ledger import StoreLedger
+
+if TYPE_CHECKING:
+    from consist.store.ledger import DigestBasis, StoreLedger
 
 SCHEMA_VERSION = 2
 
@@ -51,9 +49,12 @@ _RUN_FIELD_ORDER: tuple[str, ...] = (
     "description",
     "year",
     "iteration",
+    "stage",
+    "phase",
     "parent_run_id",
     "status",
     "code_hash",
+    "git_hash",
     "config_hash",
     "input_hash",
     "signature",
@@ -64,6 +65,7 @@ _RUN_FIELD_ORDER: tuple[str, ...] = (
     "started_at",
     "ended_at",
     "created_at",
+    "updated_at",
 )
 
 _INTERNAL_RUN_CONFIG_KEY = "_consist_manifest_config"
@@ -99,7 +101,7 @@ def _normalize_cache_status(
     raw_cache_status: Any,
     *,
     has_historical_binding: bool = False,
-) -> str:
+) -> Literal["live", "historical", "ineligible"]:
     if has_historical_binding:
         return "historical"
     norm = str(raw_cache_status or "").strip().lower()
@@ -119,16 +121,66 @@ def _format_ts(val: Any) -> str | None:
 
 
 def _parse_ts(val: Any) -> datetime | None:
-    if val is None:
-        return None
     if isinstance(val, datetime):
         return val
-    if isinstance(val, str) and val.strip():
+    if isinstance(val, str) and (s := val.strip()):
         try:
-            return datetime.fromisoformat(val.strip().replace("Z", "+00:00"))
+            return datetime.fromisoformat(s.replace("Z", "+00:00"))
         except ValueError:
             return None
     return None
+
+
+def _has_dotdot_segment(raw_path: str) -> bool:
+    if ".." in PurePosixPath(raw_path).parts:
+        return True
+    if "\\" in raw_path and ".." in PureWindowsPath(raw_path).parts:
+        return True
+    return False
+
+
+def _validate_manifest_uri_and_mounts(
+    uri: str,
+    *,
+    mounts: Mapping[str, Mount],
+    member: str | None = None,
+) -> None:
+    raw = uri.strip()
+    if not raw:
+        return
+    if member is not None and _has_dotdot_segment(member):
+        raise ValueError(
+            f"Manifest location member contains '..' path traversal: {member!r}"
+        )
+
+    if raw.startswith("file://"):
+        parsed = urlparse(raw)
+        raw_path_str = unquote(parsed.path)
+        if _has_dotdot_segment(raw_path_str):
+            raise ValueError(
+                f"Manifest location URI contains '..' path traversal: {uri!r}"
+            )
+        return
+
+    if "://" in raw:
+        scheme, rel_part = raw.split("://", 1)
+        if _has_dotdot_segment(rel_part):
+            raise ValueError(
+                f"Manifest location URI contains '..' path traversal: {uri!r}"
+            )
+        mount = mounts.get(scheme)
+        if mount is not None:
+            mount_root = mount.root.expanduser().resolve()
+            clean_rel = rel_part.lstrip("/")
+            resolved = (mount_root / clean_rel).resolve() if clean_rel else mount_root
+            if not resolved.is_relative_to(mount_root):
+                raise ValueError(
+                    f"Manifest location URI {uri!r} escapes mount root {mount_root}"
+                )
+        return
+
+    if _has_dotdot_segment(raw):
+        raise ValueError(f"Manifest location URI contains '..' path traversal: {uri!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +253,7 @@ class ManifestArtifactEntry:
     claims: tuple[str, ...] = ()
     recorded_anchor: str | None = None
     run_id: str | None = None
+    parent_artifact_id: str | None = None
     schema_id: str | None = None
     contract_scheme: str | None = None
     sig_scheme: str | None = None
@@ -252,6 +305,8 @@ class ManifestArtifactEntry:
             "locations": [loc.to_dict() for loc in self.locations],
             "manifest_body_b64": self.manifest_body_b64,
         }
+        if self.parent_artifact_id is not None:
+            payload["parent_artifact_id"] = self.parent_artifact_id
         if self.direction is not None:
             payload["direction"] = self.direction
         if self.promotion_basis is not None:
@@ -293,6 +348,11 @@ class ManifestArtifactEntry:
             ),
             run_id=(
                 str(payload["run_id"]) if payload.get("run_id") is not None else None
+            ),
+            parent_artifact_id=(
+                str(payload["parent_artifact_id"])
+                if payload.get("parent_artifact_id") is not None
+                else None
             ),
             schema_id=(
                 str(payload["schema_id"])
@@ -402,6 +462,11 @@ def _convert_v1_artifact_dict(
     slot = str(art_dict.get("slot") or key)
     role = str(art_dict.get("role") or slot)
     run_id = str(art_dict["run_id"]) if art_dict.get("run_id") is not None else None
+    parent_artifact_id = (
+        str(art_dict["parent_artifact_id"])
+        if art_dict.get("parent_artifact_id") is not None
+        else None
+    )
     raw_meta = art_dict.get("meta")
     meta_map: dict[str, Any] = dict(raw_meta) if isinstance(raw_meta, Mapping) else {}
     schema_id = (
@@ -529,7 +594,7 @@ def _convert_v1_artifact_dict(
 
     locations: list[ManifestLocationEntry] = []
     container_uri = art_dict.get("container_uri")
-    table_path = art_dict.get("table_path")
+    table_path = art_dict.get("table_path") or art_dict.get("array_path")
     member = (
         str(table_path)
         if (table_path is not None and str(table_path).strip())
@@ -581,8 +646,12 @@ def _convert_v1_artifact_dict(
         claims=tuple(claims_list),
         recorded_anchor=None,
         run_id=run_id,
+        parent_artifact_id=parent_artifact_id,
         schema_id=schema_id,
-        meta=_strip_system_meta(meta_map),
+        meta=strip_system_meta(
+            meta_map,
+            extra_keys=(_INTERNAL_RUN_CONFIG_KEY, "recovery_roots"),
+        ),
         locations=tuple(locations),
         manifest_body_b64=manifest_body_b64,
     )
@@ -676,6 +745,13 @@ class RunManifest:
             )
 
         # Legacy v1 consist.json conversion
+        raw_top_facet = payload.get("facet")
+        if isinstance(raw_top_facet, Mapping) and raw_top_facet:
+            existing_meta = _coerce_json_dict(run_map.get("meta"))
+            if "facet" not in existing_meta:
+                existing_meta["facet"] = dict(raw_top_facet)
+                run_map["meta"] = existing_meta
+
         raw_inputs = payload.get("inputs") or ()
         raw_outputs = payload.get("outputs") or ()
         inputs_v2 = tuple(
@@ -723,10 +799,14 @@ def _normalize_run_dict(
     else:
         tags_list = []
 
-    code_hash = raw_run.get("code_hash")
-    if code_hash is None and raw_run.get("git_hash") is not None:
-        code_hash = raw_run.get("git_hash")
+    git_hash = str(raw_run["git_hash"]) if raw_run.get("git_hash") is not None else None
+    code_hash = (
+        str(raw_run["code_hash"]) if raw_run.get("code_hash") is not None else git_hash
+    )
+    if git_hash is None:
+        git_hash = code_hash
 
+    raw_status = str(raw_run.get("status") or "").strip() or None
     return {
         "id": str(raw_run.get("id") or ""),
         "model_name": str(raw_run.get("model_name") or "default"),
@@ -735,9 +815,12 @@ def _normalize_run_dict(
         "iteration": (
             int(raw_run["iteration"]) if raw_run.get("iteration") is not None else None
         ),
+        "stage": str(raw_run["stage"]) if raw_run.get("stage") is not None else None,
+        "phase": str(raw_run["phase"]) if raw_run.get("phase") is not None else None,
         "parent_run_id": raw_run.get("parent_run_id"),
-        "status": str(raw_run.get("status") or "completed"),
+        "status": raw_status,
         "code_hash": code_hash,
+        "git_hash": git_hash,
         "config_hash": raw_run.get("config_hash"),
         "input_hash": raw_run.get("input_hash"),
         "signature": raw_run.get("signature"),
@@ -751,6 +834,7 @@ def _normalize_run_dict(
         "started_at": _format_ts(raw_run.get("started_at")),
         "ended_at": _format_ts(raw_run.get("ended_at")),
         "created_at": _format_ts(raw_run.get("created_at")),
+        "updated_at": _format_ts(raw_run.get("updated_at")),
     }
 
 
@@ -778,7 +862,7 @@ def write_run_manifest(
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp_name, target)
-    except Exception:
+    except BaseException:
         Path(tmp_name).unlink(missing_ok=True)
         raise
     return target
@@ -812,130 +896,136 @@ def export_run_manifest(
     path: str | Path | None = None,
 ) -> RunManifest:
     """Export a deterministic v2 `RunManifest` for `run_id` from `ledger`."""
-    con = ledger.connection
-    run_row = con.execute(
-        "SELECT id, model_name, description, year, iteration, parent_run_id, status, "
-        "code_hash, config_hash, input_hash, signature, signature_scheme, "
-        "cache_status, tags, meta, started_at, ended_at, created_at "
-        "FROM run WHERE id = ?",
-        [run_id],
-    ).fetchone()
-    if run_row is None:
-        raise KeyError(f"Run {run_id!r} not found in StoreLedger")
+    with ledger.exec_cursor() as cur:
+        run_row = cur.execute(
+            "SELECT id, model_name, description, year, iteration, stage, phase, "
+            "parent_run_id, status, code_hash, git_hash, config_hash, input_hash, "
+            "signature, signature_scheme, cache_status, tags, meta, "
+            "started_at, ended_at, created_at, updated_at "
+            "FROM main.run WHERE id = ?",
+            [run_id],
+        ).fetchone()
+        if run_row is None:
+            raise KeyError(f"Run {run_id!r} not found in StoreLedger")
 
-    (
-        r_id,
-        model_name,
-        description,
-        year,
-        iteration,
-        parent_run_id,
-        status,
-        code_hash,
-        config_hash,
-        input_hash,
-        signature,
-        signature_scheme,
-        cache_status,
-        raw_tags,
-        raw_meta,
-        started_at,
-        ended_at,
-        created_at,
-    ) = run_row
+        (
+            r_id,
+            model_name,
+            description,
+            year,
+            iteration,
+            stage,
+            phase,
+            parent_run_id,
+            status,
+            code_hash,
+            git_hash,
+            config_hash,
+            input_hash,
+            signature,
+            signature_scheme,
+            cache_status,
+            raw_tags,
+            raw_meta,
+            started_at,
+            ended_at,
+            created_at,
+            updated_at,
+        ) = run_row
 
-    parsed_meta = _coerce_json_dict(raw_meta)
+        parsed_meta = _coerce_json_dict(raw_meta)
 
-    config_dict: dict[str, Any] = {}
-    if isinstance(parsed_meta.get(_INTERNAL_RUN_CONFIG_KEY), Mapping):
-        config_dict = dict(parsed_meta.pop(_INTERNAL_RUN_CONFIG_KEY))
-    elif isinstance(parsed_meta.get("config"), Mapping):
-        config_dict = dict(parsed_meta["config"])
+        config_dict: dict[str, Any] = {}
+        if isinstance(parsed_meta.get(_INTERNAL_RUN_CONFIG_KEY), Mapping):
+            config_dict = dict(parsed_meta.pop(_INTERNAL_RUN_CONFIG_KEY))
+        elif isinstance(parsed_meta.get("config"), Mapping):
+            config_dict = dict(parsed_meta["config"])
 
-    binding_rows = con.execute(
-        "SELECT rb.direction, rb.occurrence_index, rb.slot, rb.ordinal, "
-        "rb.artifact_id, rb.role, rb.anchor, rb.contract_scheme, rb.sig_scheme, rb.sig_hex, "
-        "a.key, a.driver, a.anchor AS art_anchor, a.run_id AS art_run_id, a.schema_id, a.meta "
-        "FROM run_binding rb "
-        "LEFT JOIN artifact a ON a.id = rb.artifact_id "
-        "WHERE rb.run_id = ? "
-        "ORDER BY rb.direction, rb.occurrence_index, rb.ordinal, rb.slot",
-        [run_id],
-    ).fetchall()
+        binding_rows = cur.execute(
+            "SELECT rb.direction, rb.occurrence_index, rb.slot, rb.ordinal, "
+            "rb.artifact_id, rb.role, rb.anchor, rb.contract_scheme, rb.sig_scheme, rb.sig_hex, "
+            "a.key, a.driver, a.anchor AS art_anchor, a.run_id AS art_run_id, "
+            "a.parent_artifact_id, a.schema_id, a.meta "
+            "FROM main.run_binding rb "
+            "LEFT JOIN main.artifact a ON a.id = rb.artifact_id "
+            "WHERE rb.run_id = ? "
+            "ORDER BY rb.direction, rb.occurrence_index, rb.ordinal, rb.slot",
+            [run_id],
+        ).fetchall()
 
-    resolved_bindings: list[tuple[Any, Identity, str, str | None, list[str]]] = []
-    all_effective_anchors: set[str] = set()
-    all_recorded_anchors: set[str] = set()
-    all_lookup_anchors: set[str] = set()
+        resolved_bindings: list[tuple[Any, Identity, str, str | None, list[str]]] = []
+        all_effective_anchors: set[str] = set()
+        all_recorded_anchors: set[str] = set()
+        all_lookup_anchors: set[str] = set()
 
-    for brow in binding_rows:
-        rb_anchor = brow[6]
-        art_anchor = brow[12]
-        base_anchor_str = str(art_anchor if art_anchor is not None else rb_anchor)
-        effective_identity, recorded_anchor_opt, verified_anchor_opt = (
-            ledger.resolve_effective_identity(base_anchor_str)
-        )
-        effective_anchor_str = str(effective_identity.anchor)
-        recorded_anchor_str = (
-            str(recorded_anchor_opt) if recorded_anchor_opt is not None else None
-        )
-        lookup_anchors = [effective_anchor_str]
-        if recorded_anchor_str and recorded_anchor_str not in lookup_anchors:
-            lookup_anchors.append(recorded_anchor_str)
-            all_recorded_anchors.add(recorded_anchor_str)
-        if (
-            verified_anchor_opt is not None
-            and str(verified_anchor_opt) not in lookup_anchors
-        ):
-            lookup_anchors.append(str(verified_anchor_opt))
-
-        all_effective_anchors.add(effective_anchor_str)
-        all_lookup_anchors.update(lookup_anchors)
-        resolved_bindings.append(
-            (
-                brow,
-                effective_identity,
-                effective_anchor_str,
-                recorded_anchor_str,
-                lookup_anchors,
+        for brow in binding_rows:
+            rb_anchor = brow[6]
+            art_anchor = brow[12]
+            base_anchor_str = str(art_anchor if art_anchor is not None else rb_anchor)
+            effective_identity, recorded_anchor_opt, verified_anchor_opt = (
+                ledger.resolve_effective_identity(base_anchor_str)
             )
-        )
-
-    content_by_anchor: dict[str, tuple[str | None, str | None]] = {}
-    manifest_by_anchor: dict[str, tuple[str | None, str | None, bytes | None]] = {}
-    if all_effective_anchors:
-        eff_list = sorted(all_effective_anchors)
-        eff_placeholders = ", ".join("?" for _ in eff_list)
-        for crow in con.execute(
-            f"SELECT anchor, repr_kind, schema_id FROM content WHERE anchor IN ({eff_placeholders})",
-            eff_list,
-        ).fetchall():
-            content_by_anchor[str(crow[0])] = (
-                str(crow[1]) if crow[1] is not None else None,
-                str(crow[2]) if crow[2] is not None else None,
+            effective_anchor_str = str(effective_identity.anchor)
+            recorded_anchor_str = (
+                str(recorded_anchor_opt) if recorded_anchor_opt is not None else None
             )
-        for mrow in con.execute(
-            f"SELECT anchor, format, policy_sha256, body FROM content_manifest WHERE anchor IN ({eff_placeholders})",
-            eff_list,
-        ).fetchall():
-            manifest_by_anchor[str(mrow[0])] = (
-                str(mrow[1]) if mrow[1] is not None else None,
-                str(mrow[2]) if mrow[2] is not None else None,
-                bytes(mrow[3]) if mrow[3] is not None else None,
+            lookup_anchors = [effective_anchor_str]
+            if recorded_anchor_str and recorded_anchor_str not in lookup_anchors:
+                lookup_anchors.append(recorded_anchor_str)
+                all_recorded_anchors.add(recorded_anchor_str)
+            if (
+                verified_anchor_opt is not None
+                and str(verified_anchor_opt) not in lookup_anchors
+            ):
+                lookup_anchors.append(str(verified_anchor_opt))
+
+            all_effective_anchors.add(effective_anchor_str)
+            all_lookup_anchors.update(lookup_anchors)
+            resolved_bindings.append(
+                (
+                    brow,
+                    effective_identity,
+                    effective_anchor_str,
+                    recorded_anchor_str,
+                    lookup_anchors,
+                )
             )
 
-    promotion_by_recorded: dict[str, tuple[str | None, str | None]] = {}
-    if all_recorded_anchors:
-        rec_list = sorted(all_recorded_anchors)
-        rec_placeholders = ", ".join("?" for _ in rec_list)
-        for prow in con.execute(
-            f"SELECT historical_anchor, basis, asserted_by FROM anchor_promotion WHERE historical_anchor IN ({rec_placeholders})",
-            rec_list,
-        ).fetchall():
-            promotion_by_recorded[str(prow[0])] = (
-                str(prow[1]) if prow[1] is not None else None,
-                str(prow[2]) if prow[2] is not None else None,
-            )
+        content_by_anchor: dict[str, tuple[str | None, str | None]] = {}
+        manifest_by_anchor: dict[str, tuple[str | None, str | None, bytes | None]] = {}
+        if all_effective_anchors:
+            eff_list = sorted(all_effective_anchors)
+            eff_placeholders = ", ".join("?" for _ in eff_list)
+            for crow in cur.execute(
+                f"SELECT anchor, repr_kind, schema_id FROM main.content WHERE anchor IN ({eff_placeholders})",
+                eff_list,
+            ).fetchall():
+                content_by_anchor[str(crow[0])] = (
+                    str(crow[1]) if crow[1] is not None else None,
+                    str(crow[2]) if crow[2] is not None else None,
+                )
+            for mrow in cur.execute(
+                f"SELECT anchor, format, policy_sha256, body FROM main.content_manifest WHERE anchor IN ({eff_placeholders})",
+                eff_list,
+            ).fetchall():
+                manifest_by_anchor[str(mrow[0])] = (
+                    str(mrow[1]) if mrow[1] is not None else None,
+                    str(mrow[2]) if mrow[2] is not None else None,
+                    bytes(mrow[3]) if mrow[3] is not None else None,
+                )
+
+        promotion_by_recorded: dict[str, tuple[str | None, str | None]] = {}
+        if all_recorded_anchors:
+            rec_list = sorted(all_recorded_anchors)
+            rec_placeholders = ", ".join("?" for _ in rec_list)
+            for prow in cur.execute(
+                f"SELECT historical_anchor, basis, asserted_by FROM main.anchor_promotion WHERE historical_anchor IN ({rec_placeholders})",
+                rec_list,
+            ).fetchall():
+                promotion_by_recorded[str(prow[0])] = (
+                    str(prow[1]) if prow[1] is not None else None,
+                    str(prow[2]) if prow[2] is not None else None,
+                )
 
     locs_by_anchor: dict[str, list[dict[str, Any]]] = {}
     if all_lookup_anchors:
@@ -970,6 +1060,7 @@ def export_run_manifest(
             art_driver,
             _art_anchor,
             art_run_id,
+            art_parent_id,
             art_schema_id,
             art_raw_meta,
         ) = brow
@@ -1069,6 +1160,9 @@ def export_run_manifest(
             claims=claims,
             recorded_anchor=recorded_anchor_str,
             run_id=str(art_run_id) if art_run_id is not None else None,
+            parent_artifact_id=(
+                str(art_parent_id) if art_parent_id is not None else None
+            ),
             schema_id=effective_schema_id,
             contract_scheme=(
                 str(contract_scheme) if contract_scheme is not None else None
@@ -1103,9 +1197,12 @@ def export_run_manifest(
             "description": description,
             "year": year,
             "iteration": iteration,
+            "stage": stage,
+            "phase": phase,
             "parent_run_id": parent_run_id,
             "status": status,
             "code_hash": code_hash,
+            "git_hash": git_hash,
             "config_hash": config_hash,
             "input_hash": input_hash,
             "signature": signature,
@@ -1116,6 +1213,7 @@ def export_run_manifest(
             "started_at": started_at,
             "ended_at": ended_at,
             "created_at": created_at,
+            "updated_at": updated_at,
         },
         has_historical_binding=has_hist,
     )
@@ -1138,38 +1236,66 @@ def _discover_candidate_paths(
     mount_map: Mapping[str, Mount],
     reobserve_roots: Sequence[Path],
 ) -> list[tuple[Path, str | None]]:
+    from consist.engine import resolve_uri_to_path
+
     candidates: list[tuple[Path, str | None]] = []
     seen: set[tuple[Path, str | None]] = set()
 
-    def _add(p: Path, member: str | None) -> None:
+    def _add(p: Path, member: str | None, *, confine_root: Path | None = None) -> None:
         try:
             resolved = p.expanduser().resolve()
         except OSError:
             return
+        if confine_root is not None and not resolved.is_relative_to(confine_root):
+            raise ValueError(f"Candidate path {p} escapes root {confine_root}")
         key = (resolved, member)
         if key not in seen and resolved.exists():
             seen.add(key)
             candidates.append(key)
 
     for loc in entry.locations:
-        resolved_uri_path, _matched_mount = resolve_uri_to_path(
+        _validate_manifest_uri_and_mounts(
+            loc.uri,
+            mounts=mount_map,
+            member=loc.member,
+        )
+        resolved_uri_path, matched_mount = resolve_uri_to_path(
             loc.uri, mounts=mount_map
         )
         if resolved_uri_path is not None:
-            _add(resolved_uri_path, loc.member)
+            mount_confine = (
+                matched_mount.root.expanduser().resolve()
+                if matched_mount is not None
+                and "://" in loc.uri
+                and not loc.uri.startswith("file://")
+                else None
+            )
+            _add(resolved_uri_path, loc.member, confine_root=mount_confine)
         rel_part = (
-            loc.uri.split("://", 1)[1] if "://" in loc.uri else loc.uri.lstrip("/")
+            loc.uri.split("://", 1)[1].lstrip("/")
+            if "://" in loc.uri
+            else loc.uri.lstrip("/")
         )
         base_name = Path(rel_part).name
         for root in reobserve_roots:
-            if rel_part:
-                _add(root / rel_part, loc.member)
+            resolved_root = root.expanduser().resolve()
+            if (
+                rel_part
+                and not Path(loc.uri).is_absolute()
+                and not loc.uri.startswith("file://")
+            ):
+                _add(resolved_root / rel_part, loc.member, confine_root=resolved_root)
             if base_name:
-                _add(root / base_name, loc.member)
+                _add(resolved_root / base_name, loc.member, confine_root=resolved_root)
 
     if not candidates and reobserve_roots:
+        if _has_dotdot_segment(entry.key):
+            raise ValueError(
+                f"Manifest artifact key contains '..' path traversal: {entry.key!r}"
+            )
         for root in reobserve_roots:
-            _add(root / entry.key, None)
+            resolved_root = root.expanduser().resolve()
+            _add(resolved_root / entry.key, None, confine_root=resolved_root)
 
     return candidates
 
@@ -1183,8 +1309,14 @@ def import_run_manifest(
     _verified_path_cache: dict[tuple[Path, str | None, str], Witness] | None = None,
 ) -> RunManifest:
     """Import a `RunManifest` (v2 or legacy v1) into `ledger` and optionally re-observe surviving files."""
+    from consist.engine import (
+        _build_path_observation,
+        _normalize_mounts,
+        resolve_uri_to_path,
+        verify_path_digest,
+    )
+
     manifest = load_run_manifest(source)
-    con = ledger.connection
     mount_map = _normalize_mounts(mounts)
     if mount_map:
         ledger.mounts.update(mount_map)
@@ -1206,16 +1338,71 @@ def import_run_manifest(
     if not run_id:
         raise ValueError("RunManifest.run['id'] must be a non-empty string")
 
+    # Pre-validate all entry URIs, keys, and embedded manifest bodies before opening transaction
+    decoded_manifest_bodies: dict[int, tuple[bytes, list[Any]]] = {}
+    for entry_idx, entry in enumerate((*manifest.inputs, *manifest.outputs)):
+        if _has_dotdot_segment(entry.key):
+            raise ValueError(
+                f"Manifest artifact key contains '..' path traversal: {entry.key!r}"
+            )
+        for loc in entry.locations:
+            _validate_manifest_uri_and_mounts(
+                loc.uri,
+                mounts=effective_mounts,
+                member=loc.member,
+            )
+        if entry.manifest_body_b64 is not None:
+            anchor_digest = Digest.parse(entry.anchor)
+            if not (
+                anchor_digest.scheme == "sha256:manifest-v1"
+                or anchor_digest.scheme.startswith("sha256:manifest-v1+p:")
+            ):
+                raise ValueError(
+                    f"manifest_body_b64 is only valid for sha256:manifest-v1 schemes, "
+                    f"got {anchor_digest.scheme!r} on artifact {entry.artifact_id!r}"
+                )
+            try:
+                body_bytes = base64.b64decode(
+                    entry.manifest_body_b64.encode("ascii"),
+                    validate=True,
+                )
+            except (ValueError, UnicodeEncodeError) as exc:
+                raise ValueError(
+                    f"Invalid base64 manifest_body_b64 for artifact {entry.artifact_id!r}"
+                ) from exc
+            actual_body_hex = hashlib.sha256(body_bytes).hexdigest()
+            if actual_body_hex != anchor_digest.hex:
+                raise ValueError(
+                    f"Manifest body SHA-256 mismatch for artifact {entry.artifact_id!r}: "
+                    f"expected {anchor_digest.hex}, got {actual_body_hex}"
+                )
+            try:
+                parsed_body = json.loads(body_bytes.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError) as exc:
+                raise ValueError(
+                    f"Invalid UTF-8 JSON manifest_body_b64 for artifact {entry.artifact_id!r}"
+                ) from exc
+            if not isinstance(parsed_body, Mapping) or not isinstance(
+                parsed_body.get("entries"), list
+            ):
+                raise ValueError(
+                    f"Invalid manifest_body_b64 payload for artifact {entry.artifact_id!r}: "
+                    "expected JSON mapping with list 'entries'"
+                )
+            decoded_manifest_bodies[entry_idx] = (
+                body_bytes,
+                parsed_body["entries"],
+            )
+
     stored_run_meta = dict(r.get("meta") or {})
     if manifest.config:
         stored_run_meta[_INTERNAL_RUN_CONFIG_KEY] = dict(manifest.config)
 
-    tags_json = canonical_json_str(list(r.get("tags") or []))
-    meta_json = canonical_json_str(stored_run_meta)
     now_dt = datetime.now(timezone.utc)
     started_at = _parse_ts(r.get("started_at"))
     ended_at = _parse_ts(r.get("ended_at"))
     created_at = _parse_ts(r.get("created_at")) or started_at or now_dt
+    updated_at = _parse_ts(r.get("updated_at")) or ended_at or created_at
 
     has_historical_binding = any(
         Digest.parse(e.anchor).kind is Kind.HISTORICAL
@@ -1229,66 +1416,49 @@ def import_run_manifest(
     verified_cache = _verified_path_cache if _verified_path_cache is not None else {}
     site_ctx = SiteContext.detect(mounts=effective_mounts)
 
-    con.execute("BEGIN TRANSACTION")
-    try:
-        con.execute(
-            "INSERT INTO run ("
-            "id, model_name, description, year, iteration, parent_run_id, status, "
-            "code_hash, config_hash, input_hash, signature, signature_scheme, "
-            "cache_status, tags, meta, started_at, ended_at, created_at"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT (id) DO UPDATE SET "
-            "model_name = EXCLUDED.model_name, "
-            "description = EXCLUDED.description, "
-            "year = EXCLUDED.year, "
-            "iteration = EXCLUDED.iteration, "
-            "parent_run_id = EXCLUDED.parent_run_id, "
-            "status = EXCLUDED.status, "
-            "code_hash = EXCLUDED.code_hash, "
-            "config_hash = EXCLUDED.config_hash, "
-            "input_hash = EXCLUDED.input_hash, "
-            "signature = EXCLUDED.signature, "
-            "signature_scheme = EXCLUDED.signature_scheme, "
-            "cache_status = EXCLUDED.cache_status, "
-            "tags = EXCLUDED.tags, "
-            "meta = EXCLUDED.meta, "
-            "started_at = EXCLUDED.started_at, "
-            "ended_at = EXCLUDED.ended_at",
-            [
-                run_id,
-                str(r.get("model_name") or "default"),
-                r.get("description"),
-                r.get("year"),
-                r.get("iteration"),
-                r.get("parent_run_id"),
-                str(r.get("status") or "completed"),
-                r.get("code_hash"),
-                r.get("config_hash"),
-                r.get("input_hash"),
-                r.get("signature"),
-                str(r.get("signature_scheme") or "sig-v2"),
-                effective_cache_status,
-                tags_json,
-                meta_json,
-                started_at,
-                ended_at,
-                created_at,
-            ],
+    with ledger.transaction() as cur:
+        ledger.record_run(
+            run_id=run_id,
+            model_name=str(r.get("model_name") or "default"),
+            status=str(r.get("status") or "completed"),
+            cache_status=effective_cache_status,
+            description=r.get("description"),
+            year=int(r["year"]) if r.get("year") is not None else None,
+            iteration=int(r["iteration"]) if r.get("iteration") is not None else None,
+            stage=str(r["stage"]) if r.get("stage") is not None else None,
+            phase=str(r["phase"]) if r.get("phase") is not None else None,
+            parent_run_id=r.get("parent_run_id"),
+            code_hash=r.get("code_hash"),
+            git_hash=r.get("git_hash"),
+            config_hash=r.get("config_hash"),
+            input_hash=r.get("input_hash"),
+            signature=r.get("signature"),
+            signature_scheme=str(r.get("signature_scheme") or "sig-v2"),
+            tags=list(r.get("tags") or []),
+            meta=stored_run_meta,
+            started_at=started_at,
+            ended_at=ended_at,
+            created_at=created_at,
+            updated_at=updated_at,
         )
 
         # Ensure idempotency when re-importing a manifest with modified bindings
-        con.execute("DELETE FROM run_binding WHERE run_id = ?", [run_id])
+        cur.execute("DELETE FROM main.run_binding WHERE run_id = ?", [run_id])
 
+        flat_entry_idx = 0
         for list_direction, entries in (
             ("input", manifest.inputs),
             ("output", manifest.outputs),
         ):
             occ_by_dir: dict[str, int] = {}
             for entry in entries:
-                effective_dir = (
+                this_entry_idx = flat_entry_idx
+                flat_entry_idx += 1
+
+                effective_dir: Literal["input", "output", "depends_on"] = (
                     "depends_on"
                     if list_direction == "input" and entry.direction == "depends_on"
-                    else list_direction
+                    else ("input" if list_direction == "input" else "output")
                 )
                 occ_idx = occ_by_dir.get(effective_dir, 0)
                 occ_by_dir[effective_dir] = occ_idx + 1
@@ -1305,10 +1475,15 @@ def import_run_manifest(
                     if anchor_digest.kind is not Kind.HISTORICAL
                     else Identity(anchor=anchor_digest)
                 )
+                body_info = decoded_manifest_bodies.get(this_entry_idx)
+                anchor_basis: DigestBasis = "trusted_foreign"
                 ledger.record_identity(
                     identity,
                     repr_kind=entry.repr_kind,
                     schema_id=entry.schema_id,
+                    basis="trusted_foreign",
+                    anchor_basis=anchor_basis,
+                    source="consist.store.manifest",
                 )
 
                 recorded_digest: Digest | None = None
@@ -1320,6 +1495,8 @@ def import_run_manifest(
                             Identity(anchor=rec_d),
                             repr_kind="historical",
                             schema_id=entry.schema_id,
+                            basis="trusted_foreign",
+                            source="consist.store.manifest",
                         )
                         raw_promo_basis = entry.promotion_basis or "v1_fast_recomputed"
                         promo_basis_lit: Any = (
@@ -1332,31 +1509,23 @@ def import_run_manifest(
                             anchor_digest,
                             basis=promo_basis_lit,
                             asserted_by=entry.promotion_asserted_by
-                            or "consist.manifest",
+                            or "consist.store.manifest",
                         )
 
-                if entry.manifest_body_b64 is not None:
-                    body_bytes = base64.b64decode(
-                        entry.manifest_body_b64.encode("ascii")
+                if body_info is not None:
+                    body_bytes_val, entries_list = body_info
+                    entry_count = len(entries_list)
+                    total_bytes = sum(
+                        int(e.get("size") or 0)
+                        for e in entries_list
+                        if isinstance(e, Mapping)
                     )
-                    try:
-                        parsed_body = json.loads(body_bytes.decode("utf-8"))
-                        entries_list = parsed_body.get("entries") or []
-                        entry_count = len(entries_list)
-                        total_bytes = sum(
-                            int(e.get("size") or 0)
-                            for e in entries_list
-                            if isinstance(e, Mapping)
-                        )
-                    except (ValueError, UnicodeDecodeError):
-                        entry_count = 0
-                        total_bytes = len(body_bytes)
                     ledger.record_content_manifest(
                         anchor_digest,
                         format=entry.manifest_format or "manifest-v1",
                         entry_count=entry_count,
                         total_bytes=total_bytes,
-                        body=body_bytes,
+                        body=body_bytes_val,
                         policy_sha256=entry.manifest_policy_sha256,
                     )
 
@@ -1370,6 +1539,7 @@ def import_run_manifest(
                     driver=entry.driver,
                     anchor=stored_art_anchor,
                     run_id=entry.run_id,
+                    parent_artifact_id=entry.parent_artifact_id,
                     schema_id=entry.schema_id,
                     meta=entry.meta,
                 )
@@ -1390,23 +1560,25 @@ def import_run_manifest(
                 fresh_imported_paths: set[tuple[Path, str | None]] = set()
                 for loc in entry.locations:
                     witness_obj = deserialize_witness_json(loc.witness_json)
+                    obs_basis = (
+                        loc.basis
+                        if loc.basis
+                        in (
+                            "computed",
+                            "derived",
+                            "implied",
+                            "declared",
+                            "trusted_foreign",
+                            "migrated_v1",
+                        )
+                        else "trusted_foreign"
+                    )
                     obs = Observation(
                         location=Location(uri=loc.uri, member=loc.member),
                         identity=identity,
                         access_driver=loc.access_driver,
                         witness=witness_obj,
-                        basis=(
-                            loc.basis
-                            if loc.basis
-                            in (
-                                "computed",
-                                "derived",
-                                "implied",
-                                "declared",
-                                "trusted_foreign",
-                            )
-                            else "computed"
-                        ),
+                        basis=obs_basis,
                         site=loc.site,
                         scope_key=loc.scope_key,
                         mount_instance_id=loc.mount_instance_id,
@@ -1435,8 +1607,6 @@ def import_run_manifest(
                         mount_map=effective_mounts,
                         reobserve_roots=roots,
                     ):
-                        if (cand_path, cand_member) in fresh_imported_paths:
-                            continue
                         cache_key = (cand_path, cand_member, str(anchor_digest))
                         cached_witness = verified_cache.get(cache_key)
                         if cached_witness is not None:
@@ -1453,30 +1623,61 @@ def import_run_manifest(
                             if matched and live_witness is not None:
                                 verified_cache[cache_key] = live_witness
                         if matched and live_witness is not None:
-                            live_obs = _build_path_observation(
-                                cand_path,
-                                identity=identity,
-                                driver=entry.driver,
-                                witness=live_witness,
+                            ledger.record_content_digest(
+                                anchor_digest,
+                                anchor_digest,
                                 basis="computed",
-                                member=cand_member,
-                                site_context=site_ctx,
-                                mounts=effective_mounts,
-                                observed_at_ns=time.time_ns(),
+                                source="consist.store.manifest",
                             )
-                            ledger.record_observation(
-                                live_obs,
-                                repr_kind=None,
-                            )
-        con.execute("COMMIT")
-    except Exception:
-        try:
-            con.execute("ROLLBACK")
-        except Exception:
-            pass
-        raise
+                            if (cand_path, cand_member) not in fresh_imported_paths:
+                                live_obs = _build_path_observation(
+                                    cand_path,
+                                    identity=identity,
+                                    driver=entry.driver,
+                                    witness=live_witness,
+                                    basis="computed",
+                                    member=cand_member,
+                                    site_context=site_ctx,
+                                    mounts=effective_mounts,
+                                    observed_at_ns=time.time_ns(),
+                                )
+                                ledger.record_observation(
+                                    live_obs,
+                                    repr_kind=None,
+                                )
 
     return manifest
+
+
+def _manifest_status_rank(status_val: Any) -> int:
+    norm = str(status_val or "").strip().lower()
+    if norm in ("completed", "failed"):
+        return 2
+    if norm == "running":
+        return 1
+    return 0
+
+
+def _manifest_ts_epoch(val: Any) -> float:
+    dt = _parse_ts(val)
+    if dt is None:
+        return float("-inf")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def _manifest_selection_key(
+    manifest: RunManifest,
+) -> tuple[int, float, float, float, int]:
+    r = manifest.run
+    return (
+        _manifest_status_rank(r.get("status")),
+        _manifest_ts_epoch(r.get("ended_at") or r.get("updated_at")),
+        _manifest_ts_epoch(r.get("started_at") or r.get("created_at")),
+        _manifest_ts_epoch(r.get("updated_at")),
+        len(manifest.inputs) + len(manifest.outputs),
+    )
 
 
 def rebuild_store_from_manifests(
@@ -1487,57 +1688,72 @@ def rebuild_store_from_manifests(
     reobserve_roots: Sequence[str | Path] | None = None,
 ) -> list[RunManifest]:
     """Reconstruct or populate a v2 `StoreLedger` at `db_path` from `consist.json` snapshots."""
-    discovered_files: list[Path] = []
-    seen_files: set[Path] = set()
-    search_roots: list[Path] = []
+    from consist.store.ledger import StoreLedger
 
+    raw_files: list[Path] = []
+    search_roots: list[Path] = []
     for raw_dir in snapshot_dirs:
         root_dir = Path(raw_dir).expanduser().resolve()
         if not root_dir.exists():
             continue
         if root_dir.is_file():
-            if root_dir not in seen_files:
-                seen_files.add(root_dir)
-                discovered_files.append(root_dir)
-            if root_dir.parent not in search_roots:
-                search_roots.append(root_dir.parent)
-            continue
-
-        search_roots.append(root_dir)
-        candidates = sorted(
-            {
-                *root_dir.rglob("consist.json"),
-                *root_dir.rglob("consist_runs/*.json"),
-            }
-        )
-        for cand in candidates:
-            resolved_cand = cand.resolve()
-            if resolved_cand not in seen_files and resolved_cand.is_file():
-                seen_files.add(resolved_cand)
-                discovered_files.append(resolved_cand)
+            raw_files.append(root_dir)
+            search_roots.append(root_dir.parent)
+        else:
+            search_roots.append(root_dir)
+            raw_files.extend(
+                sorted(
+                    {
+                        *root_dir.rglob("consist.json"),
+                        *root_dir.rglob("consist_runs/*.json"),
+                    }
+                )
+            )
+    discovered_files = [
+        p for p in dict.fromkeys(c.resolve() for c in raw_files) if p.is_file()
+    ]
+    search_roots = list(dict.fromkeys(search_roots))
 
     effective_reobserve = (
         list(reobserve_roots) if reobserve_roots is not None else search_roots
     )
-    imported_by_run_id: dict[str, RunManifest] = {}
+
+    grouped_by_run_id: dict[str, list[tuple[RunManifest, Path]]] = {}
+    run_id_order: list[str] = []
+    for json_file in discovered_files:
+        loaded = load_run_manifest(json_file)
+        run_id = str(loaded.run.get("id") or "")
+        if not run_id:
+            continue
+        if run_id not in grouped_by_run_id:
+            grouped_by_run_id[run_id] = []
+            run_id_order.append(run_id)
+        grouped_by_run_id[run_id].append((loaded, json_file))
+
+    imported_manifests: list[RunManifest] = []
     verified_path_cache: dict[tuple[Path, str | None, str], Witness] = {}
 
     with StoreLedger(Path(db_path).expanduser(), mounts=mounts) as ledger:
-        for json_file in discovered_files:
-            loaded = load_run_manifest(json_file)
-            run_id = str(loaded.run.get("id") or "")
-            if not run_id or run_id in imported_by_run_id:
-                continue
+        for run_id in run_id_order:
+            candidates_for_run = grouped_by_run_id[run_id]
+            winning_manifest, _winning_path = max(
+                candidates_for_run,
+                key=lambda pair: _manifest_selection_key(pair[0]),
+            )
+            parent_dirs: list[Path] = []
+            for _cand_manifest, cand_file in candidates_for_run:
+                if cand_file.parent not in parent_dirs:
+                    parent_dirs.append(cand_file.parent)
             imported = import_run_manifest(
                 ledger,
-                loaded,
-                reobserve_roots=[json_file.parent, *effective_reobserve],
+                winning_manifest,
+                reobserve_roots=[*parent_dirs, *effective_reobserve],
                 mounts=mounts,
                 _verified_path_cache=verified_path_cache,
             )
-            imported_by_run_id[run_id] = imported
+            imported_manifests.append(imported)
 
-    return list(imported_by_run_id.values())
+    return imported_manifests
 
 
 __all__ = [

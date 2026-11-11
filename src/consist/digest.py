@@ -1724,6 +1724,7 @@ class Agreement(Enum):
     MISMATCH = "mismatch"
     DISAGREE = "mismatch"
     UNKNOWN = "unknown"
+    UNVERIFIABLE = "unverifiable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1786,6 +1787,7 @@ _BUILTIN_SCHEME_SPECS: tuple[SchemeSpec, ...] = (
         kind=Kind.CONTAINER,
         applies_to=frozenset({"blosc2", "zarr", "file", "tree"}),
         cost_rank=15,
+        content_pure=False,
     ),
     SchemeSpec(
         name="sha256:manifest-v1",
@@ -2028,24 +2030,23 @@ class Identity:
         nxt = Identity(anchor=self.anchor, claims=(*self.claims, d))
         return self if nxt.claims == self.claims else nxt
 
-    @staticmethod
-    def refines(old: Identity, new: Identity) -> bool:
-        """Return True iff `new` has the same anchor as `old` and preserves all of `old`'s digests."""
-        if not isinstance(old, Identity) or not isinstance(new, Identity):
+    def refines(self, other: Identity) -> bool:
+        """Return True iff `self` has the same anchor as `other` and carries all of `other`'s digests."""
+        if not isinstance(self, Identity) or not isinstance(other, Identity):
             raise TypeError("Identity.refines requires two Identity instances")
-        if old.anchor != new.anchor:
+        if self.anchor != other.anchor:
             return False
-        new_by_scheme = new.by_scheme()
+        self_by_scheme = self.by_scheme()
         return all(
-            new_by_scheme.get(scheme) == digest
-            for scheme, digest in old.by_scheme().items()
+            self_by_scheme.get(scheme) == digest
+            for scheme, digest in other.by_scheme().items()
         )
 
 
 def refines(a: Identity | SchemeSpec, b: Identity | SchemeSpec) -> bool:
-    """Return True if `b` refines `a` (for `Identity`) or scheme `a` refines scheme `b` (for `SchemeSpec`)."""
+    """Return True iff `a` refines `b` (`a` carries stronger or equal proof than `b`)."""
     if isinstance(a, Identity) and isinstance(b, Identity):
-        return Identity.refines(a, b)
+        return a.refines(b)
     if isinstance(a, SchemeSpec) and isinstance(b, SchemeSpec):
         if Kind.HISTORICAL in (a.kind, b.kind):
             return False
@@ -2070,16 +2071,25 @@ class Expectation:
         {Kind.BYTES, Kind.CONTAINER, Kind.LOGICAL, Kind.SEMANTIC, Kind.FILTERED}
     )
     pinned_schemes: frozenset[str] = frozenset()
-    digests: frozenset[Digest] = field(default=frozenset(), compare=False)
+    digests: frozenset[Digest] = field(default=frozenset())
     basis: tuple[tuple[str, str], ...] = field(default=(), compare=False)
 
     def __post_init__(self) -> None:
         raw_first = tuple(self.accepts_kinds or ())
+        extra_digests = frozenset(
+            d if isinstance(d, Digest) else Digest.parse(str(d))
+            for d in (self.digests or ())
+        )
         if raw_first and all(isinstance(item, Digest) for item in raw_first):
-            extracted_digests: frozenset[Digest] = frozenset(
-                item for item in raw_first if isinstance(item, Digest)
+            extracted_digests: frozenset[Digest] = (
+                frozenset(item for item in raw_first if isinstance(item, Digest))
+                | extra_digests
             )
             non_hist = [d for d in extracted_digests if d.kind is not Kind.HISTORICAL]
+            if extracted_digests and not non_hist:
+                raise ValueError(
+                    "Expectation.digests cannot contain exclusively Kind.HISTORICAL digests"
+                )
             kinds = (
                 frozenset(d.kind for d in non_hist)
                 if non_hist
@@ -2115,14 +2125,11 @@ class Expectation:
                 raise ValueError(
                     "Expectation cannot pin a Kind.HISTORICAL digest scheme"
                 )
-            object.__setattr__(
-                self,
-                "digests",
-                frozenset(
-                    d if isinstance(d, Digest) else Digest.parse(str(d))
-                    for d in (self.digests or ())
-                ),
-            )
+            if extra_digests and all(d.kind is Kind.HISTORICAL for d in extra_digests):
+                raise ValueError(
+                    "Expectation.digests cannot contain exclusively Kind.HISTORICAL digests"
+                )
+            object.__setattr__(self, "digests", extra_digests)
         object.__setattr__(self, "accepts_kinds", kinds)
         object.__setattr__(self, "pinned_schemes", pinned)
         object.__setattr__(
@@ -2189,6 +2196,21 @@ class Verdict:
         return self.needed
 
 
+def _identity_scheme_domain(
+    scheme_map: Mapping[str, Digest],
+    explicit_driver: str | None,
+) -> frozenset[str]:
+    if explicit_driver is not None:
+        return frozenset({explicit_driver})
+    domains = [SchemeRegistry.get(s).applies_to for s in scheme_map]
+    if not domains:
+        return frozenset()
+    common = domains[0]
+    for dom in domains[1:]:
+        common = common & dom
+    return common
+
+
 def compare(
     a: Identity,
     b: Identity,
@@ -2216,6 +2238,8 @@ def compare(
 
     norm_driver_a = driver_a.strip().lower() if isinstance(driver_a, str) else None
     norm_driver_b = driver_b.strip().lower() if isinstance(driver_b, str) else None
+    domain_a = _identity_scheme_domain(map_a, norm_driver_a)
+    domain_b = _identity_scheme_domain(map_b, norm_driver_b)
 
     all_scheme_names = {
         *(spec.name for spec in SchemeRegistry.all_specs()),
@@ -2228,12 +2252,36 @@ def compare(
             spec
             for s in all_scheme_names
             if (spec := SchemeRegistry.get(s)).kind in contract.accepts_kinds
+            and (spec.content_pure or spec.name in contract.pinned_schemes)
             and (not contract.pinned_schemes or spec.name in contract.pinned_schemes)
-            and (norm_driver_a is None or norm_driver_a in spec.applies_to)
-            and (norm_driver_b is None or norm_driver_b in spec.applies_to)
+            and bool(spec.applies_to & domain_a)
+            and bool(spec.applies_to & domain_b)
         ),
         key=lambda s: (s.cost_rank, s.name),
     )
+
+    if (
+        contract == Contract.LOGICAL_DATA
+        and norm_driver_a != "member"
+        and norm_driver_b != "member"
+    ):
+        shared_domain = domain_a & domain_b
+        if shared_domain:
+            byte_matches = sorted(
+                (
+                    SchemeRegistry.get(s)
+                    for s in agree_schemes
+                    if (bspec := SchemeRegistry.get(s)).kind is Kind.BYTES
+                    and bspec.content_pure
+                    and bool(bspec.applies_to & shared_domain)
+                ),
+                key=lambda s: (s.cost_rank, s.name),
+            )
+            if byte_matches:
+                return Verdict(Agreement.MATCH, byte_matches[0].name, (), True)
+
+    if not candidates:
+        return Verdict(Agreement.UNVERIFIABLE, None, (), False)
 
     first_mismatch: str | None = None
     for spec in candidates:
@@ -2251,19 +2299,34 @@ def compare(
         for spec in candidates
         if spec.name not in map_a or spec.name not in map_b
     )
-    return Verdict(Agreement.UNKNOWN, None, needed, bool(candidates))
+    return Verdict(Agreement.UNKNOWN, None, needed, True)
 
 
 # --- v2 Digest Helpers for `sha256:manifest-v1`, `ctd1:sha256`, and Logical Matrices ---
 
 
-def _reject_manifest_symlink_components(path: Path, *, label: str) -> None:
-    candidate = Path(path).expanduser().absolute()
-    for p in reversed((candidate, *candidate.parents)):
-        if p.is_symlink():
-            raise ValueError(
-                f"directory artifact {label} cannot traverse a symlink: {p}"
-            )
+def _reject_manifest_symlink_components(path: Path, *, label: str) -> Path:
+    raw_path = Path(path).expanduser()
+    if raw_path.is_symlink():
+        raise ValueError(
+            f"directory artifact {label} cannot traverse a symlink: {raw_path}"
+        )
+    canonical_root = raw_path.parent.resolve() / raw_path.name
+    if canonical_root.is_symlink():
+        raise ValueError(
+            f"directory artifact {label} cannot traverse a symlink: {canonical_root}"
+        )
+    if canonical_root.is_dir():
+        for dirpath, dirnames, filenames in os.walk(
+            canonical_root, topdown=True, followlinks=False
+        ):
+            for name in (*dirnames, *filenames):
+                entry = Path(dirpath) / name
+                if entry.is_symlink():
+                    raise ValueError(
+                        f"directory artifact cannot contain a symlink: {entry}"
+                    )
+    return canonical_root
 
 
 def build_manifest_v1(
@@ -2277,8 +2340,7 @@ def build_manifest_v1(
     Produces byte-for-byte identical canonical JSON and `tree_hash` to
     `consist.core.directory_artifacts.build_directory_manifest`.
     """
-    root_path = Path(root).expanduser().absolute()
-    _reject_manifest_symlink_components(root_path, label="root")
+    root_path = _reject_manifest_symlink_components(Path(root), label="root")
     if not root_path.is_dir():
         raise ValueError(f"directory artifact root must be a directory: {root_path}")
 

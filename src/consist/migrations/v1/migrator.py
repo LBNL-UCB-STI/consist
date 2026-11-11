@@ -1345,8 +1345,7 @@ def apply_migration(
         now_utc = datetime.now(timezone.utc)
         now_ns = time.time_ns()
 
-        con.begin()
-        try:
+        with ledger.transaction() as tx_cur:
             # 2. Record content (which also records primary content_digest when verifiable),
             #    content_manifest, artifact, artifact_migration_audit, and observations.
             for idx, art in enumerate(artifacts):
@@ -1397,8 +1396,8 @@ def apply_migration(
                     created_at=art.created_at or now_utc,
                 )
 
-                con.execute(
-                    "INSERT INTO artifact_migration_audit "
+                tx_cur.execute(
+                    "INSERT INTO main.artifact_migration_audit "
                     "(artifact_id, v1_row_json, outcome, basis) "
                     "VALUES (?, ?, ?, ?) "
                     "ON CONFLICT (artifact_id) DO UPDATE SET "
@@ -1621,11 +1620,6 @@ def apply_migration(
                     art_rec = art_by_id[art_id]
                     if norm_dir == "input" and art_rec.run_id == run_id:
                         _insert_binding("output", art_id)
-
-            con.commit()
-        except Exception:
-            con.rollback()
-            raise
 
 
 def verify_migration(
