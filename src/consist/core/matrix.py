@@ -18,14 +18,12 @@ from __future__ import annotations
 
 import logging
 from importlib import import_module
+from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, List, Optional
+import uuid
 
 import pandas as pd
-from sqlmodel import select, col
-
-from consist.models.artifact import Artifact
-from consist.models.run import Run
 
 _UNSET = object()
 xr: Any = _UNSET
@@ -128,56 +126,77 @@ class MatrixViewFactory:
         xr_module = _get_xr()
         if xr_module is None:
             raise ImportError("xarray is required.")
-        if not self.tracker.engine:
+        if self.tracker.ledger is None or self.tracker.db is None:
             raise RuntimeError("Database connection required.")
 
         # 1. Query Metadata
-        query = (
-            select(
-                Artifact.container_uri,
-                col(Run.id).label("run_id"),
-                Run.year,
-                Run.iteration,
-            )
-            .join(Run, col(Artifact.run_id) == col(Run.id))
-            .where(Artifact.key == concept_key)
-            .order_by(col(Run.year), col(Run.iteration))
-        )
+        conditions = ["a.key = ?"]
+        params: list[Any] = [concept_key]
         if run_ids:
-            query = query.where(col(Run.id).in_(run_ids))
+            placeholders = ", ".join("?" for _ in run_ids)
+            conditions.append(f"r.id IN ({placeholders})")
+            params.extend(run_ids)
         if parent_id:
-            query = query.where(Run.parent_run_id == parent_id)
+            conditions.append("r.parent_run_id = ?")
+            params.append(parent_id)
         if model:
-            query = query.where(Run.model_name == model)
+            conditions.append("r.model_name = ?")
+            params.append(model)
         if status:
-            query = query.where(Run.status == status)
-        df = pd.read_sql(query, self.tracker.engine)
+            conditions.append("r.status = ?")
+            params.append(status)
+
+        where_sql = " AND ".join(conditions)
+        sql = (
+            "SELECT CAST(a.id AS VARCHAR) AS artifact_id, "
+            "r.id AS run_id, r.year AS year, r.iteration AS iteration "
+            "FROM main.artifact a JOIN main.run r ON a.run_id = r.id "
+            f"WHERE {where_sql} "
+            "ORDER BY r.year, r.iteration"
+        )
+        df = self.tracker.query_df(sql, params)
         if df.empty:
             return xr_module.Dataset()
 
         # 2. Lazy Open & Stack
         datasets = []
         for _, row in df.iterrows():
-            container_uri = str(row["container_uri"])
+            artifact_id_str = str(row["artifact_id"])
+            artifact = self.tracker.db.get_artifact(uuid.UUID(artifact_id_str))
+            if artifact is None:
+                continue
+            loc = artifact.primary_location
+            container_uri = loc.uri if loc is not None else ""
             try:
-                path = self.tracker.resolve_uri(container_uri)
+                resolved = artifact.locate(
+                    mounts=self.tracker.mounts, verify_on_stale=False
+                )
+                if resolved is not None:
+                    path = str(resolved)
+                elif container_uri:
+                    path = self.tracker.resolve_uri(container_uri)
+                else:
+                    raise FileNotFoundError(
+                        f"No resolvable path for matrix artifact {artifact_id_str}"
+                    )
 
-                ds = xr_module.open_zarr(path, consolidated=False)
+                ds = xr_module.open_zarr(Path(path), consolidated=False)
                 if variables:
                     ds = ds[variables]
 
+                year_val = int(row["year"]) if pd.notna(row["year"]) else 0
+                iter_val = int(row["iteration"]) if pd.notna(row["iteration"]) else 0
+
                 # FIX: Stack along 'run_id' dimension.
                 # Treat 'year' and 'iteration' as metadata (coords) for that run.
-                ds = ds.assign_coords(
-                    {"year": row["year"] or 0, "iteration": row["iteration"] or 0}
-                )
+                ds = ds.assign_coords({"year": year_val, "iteration": iter_val})
                 # Expand run_id to be the primary concatenation dimension
                 ds = ds.expand_dims(run_id=[row["run_id"]])
 
                 datasets.append(ds)
             except Exception as e:
                 logging.warning(
-                    f"[Consist Warning] Failed to load matrix {container_uri}: {e}"
+                    f"[Consist Warning] Failed to load matrix {container_uri or artifact_id_str}: {e}"
                 )
                 continue
 

@@ -1,29 +1,30 @@
 """
-Database models for runs and run-level snapshots in the Consist main database.
+Domain models for runs and run-level snapshots in Consist.
 
-These tables form the core provenance ledger: runs, run↔artifact links, and
-in-memory snapshot helpers used to serialize full run records.
+These Pydantic models represent runs, operational receipts, Coupler snapshots,
+and human-readable per-run JSON snapshots (`consist.json`).
 """
 
 from __future__ import annotations
 
+import json
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Sequence
 
-from pydantic import BaseModel, ConfigDict, Field as PydanticField, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
-from sqlalchemy import Column, DateTime, Index, JSON, String
-from sqlmodel import Field, SQLModel
+from consist.artifact import ArchivedOutputs, Artifact
 from consist.core.materialize_options import (
     VALID_MATERIALIZE_DB_FALLBACK as _VALID_MATERIALIZE_DB_FALLBACK,
     VALID_MATERIALIZE_ON_MISSING as _VALID_MATERIALIZE_ON_MISSING,
     normalize_materialize_output_keys,
     validate_materialize_option,
 )
-from consist.models.artifact import Artifact, UUIDType
+from consist.location import Location, Observation
 
 UTC = timezone.utc
 
@@ -59,13 +60,9 @@ def resolve_canonical_run_meta_field(
     return meta_value if isinstance(meta_value, str) else None
 
 
-class RunArtifactLink(SQLModel, table=True):
+class RunArtifactLink(BaseModel):
     """
-    Link table that records run inputs/outputs in the main Consist database.
-
-    Each row connects a ``Run`` to an ``Artifact`` and records whether the artifact
-    was an input or output. This enables lineage queries and run reconstruction in
-    DuckDB without re-reading JSON snapshots.
+    Data transfer object connecting a ``Run`` to an ``Artifact`` with directionality.
 
     Attributes:
         run_id (str): The ID of the associated run.
@@ -75,18 +72,15 @@ class RunArtifactLink(SQLModel, table=True):
                             rather than explicitly logged. Defaults to False.
     """
 
-    __tablename__ = "run_artifact_link"
+    model_config = ConfigDict(validate_assignment=True)
 
-    run_id: str = Field(primary_key=True, sa_column_kwargs={"autoincrement": False})
-    artifact_id: uuid.UUID = Field(
-        primary_key=True, sa_type=UUIDType, sa_column_kwargs={"autoincrement": False}
-    )
-
+    run_id: str
+    artifact_id: uuid.UUID
     direction: str  # "input" or "output"
     is_implicit: bool = Field(default=False)
 
 
-class RunBindingInvocation(SQLModel, table=True):
+class RunBindingInvocation(BaseModel):
     """Immutable evidence for one resolved-binding execution attempt.
 
     A cache hit reuses a producer ``Run`` and therefore cannot safely store
@@ -95,72 +89,44 @@ class RunBindingInvocation(SQLModel, table=True):
     the canonical resolved binding as distinct durable facts.
     """
 
-    __tablename__ = "run_binding_invocation"
+    model_config = ConfigDict(validate_assignment=True)
 
-    id: uuid.UUID = Field(
-        default_factory=uuid.uuid4,
-        primary_key=True,
-        sa_type=UUIDType,
-        sa_column_kwargs={"autoincrement": False},
-    )
-    requested_run_id: str = Field(index=True)
-    execution_run_id: str = Field(index=True)
-    cache_source_run_id: Optional[str] = Field(default=None, index=True)
-    cache_outcome: str = Field(index=True)
+    id: uuid.UUID = Field(default_factory=uuid.uuid4)
+    requested_run_id: str
+    execution_run_id: str
+    cache_source_run_id: Optional[str] = Field(default=None)
+    cache_outcome: str
     binding_json: str
-    created_at: datetime = Field(
-        default_factory=lambda: datetime.now(UTC),
-        sa_type=DateTime,
-    )
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 CouplerSnapshotPhase = Literal["init", "pre", "post"]
 
 
-class RunCouplerSnapshot(SQLModel, table=True):
+class RunCouplerSnapshot(BaseModel):
     """
     Normalized relational snapshot of ScenarioContext.coupler bindings at a
     specific run boundary.
     """
 
-    __tablename__ = "run_coupler_snapshot"
-    __table_args__ = (
-        Index(
-            "ix_run_coupler_snapshot_scenario_ordinal",
-            "scenario_run_id",
-            "step_ordinal",
-            "phase",
-        ),
-        Index(
-            "ix_run_coupler_snapshot_scenario_role",
-            "scenario_run_id",
-            "role_key",
-        ),
-    )
+    model_config = ConfigDict(validate_assignment=True)
 
-    run_id: str = Field(
-        primary_key=True, index=True, sa_column_kwargs={"autoincrement": False}
-    )
-    phase: str = Field(primary_key=True, index=True)
-    role_key: str = Field(primary_key=True, index=True)
-    scenario_run_id: str = Field(index=True)
-    step_ordinal: int = Field(default=0, index=True)
-    artifact_id: uuid.UUID = Field(
-        sa_type=UUIDType, index=True, sa_column_kwargs={"autoincrement": False}
-    )
-    producer_run_id: Optional[str] = Field(default=None, index=True)
-    updated_at: datetime = Field(
-        default_factory=lambda: datetime.now(UTC),
-        sa_type=DateTime,
-    )
+    run_id: str
+    phase: str
+    role_key: str
+    scenario_run_id: str
+    step_ordinal: int = Field(default=0)
+    artifact_id: uuid.UUID
+    producer_run_id: Optional[str] = Field(default=None)
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
-class Run(SQLModel, table=True):
+class Run(BaseModel):
     """
-    Primary run table in the Consist database.
+    Primary run domain model in Consist.
 
     Each run captures execution metadata (status, timing, identity hashes, tags)
-    and links to artifacts through ``run_artifact_link``. Full configuration details
+    and links to artifacts through `StoreLedger`. Full configuration details
     live in the JSON run snapshot on disk, while the database stores hashes and
     a queryable subset of metadata for caching and discovery.
 
@@ -184,37 +150,28 @@ class Run(SQLModel, table=True):
         updated_at (datetime): The timestamp when the run record was last updated.
     """
 
-    __tablename__ = "run"
+    model_config = ConfigDict(validate_assignment=True, arbitrary_types_allowed=True)
 
-    id: str = Field(primary_key=True, sa_column_kwargs={"autoincrement": False})
-    parent_run_id: Optional[str] = Field(
-        default=None,
-        sa_column=Column(
-            String,
-            nullable=True,
-            index=True,
-        ),
-    )
+    id: str
+    parent_run_id: Optional[str] = Field(default=None)
 
     # State
-    status: str = Field(default="running", index=True)
+    status: str = Field(default="running")
 
     # Context
-    model_name: str = Field(index=True)
+    model_name: str
     description: Optional[str] = Field(
         default=None,
         description="Human-readable description of the run's purpose or outcome",
     )
-    year: Optional[int] = Field(default=None, index=True)
-    iteration: Optional[int] = Field(default=None, index=True)
-    stage: Optional[str] = Field(default=None, index=True)
-    phase: Optional[str] = Field(default=None, index=True)
+    year: Optional[int] = Field(default=None)
+    iteration: Optional[int] = Field(default=None)
+    stage: Optional[str] = Field(default=None)
+    phase: Optional[str] = Field(default=None)
 
     # Tags (for filtering and categorization)
-    # Note: DuckDB supports arrays natively. For SQLite compatibility, this would need JSON storage.
     tags: List[str] = Field(
         default_factory=list,
-        sa_column=Column(JSON),  # Using JSON for broader DB compatibility
         description="List of string labels for categorization and filtering",
     )
 
@@ -222,42 +179,64 @@ class Run(SQLModel, table=True):
     # These fields are crucial for Consist's Merkle DAG caching strategy, forming the "signature"
     # that determines run uniqueness and cache hits.
     config_hash: Optional[str] = Field(
-        index=True, description="SHA256 hash of the canonicalized run configuration."
+        default=None,
+        description="SHA256 hash of the canonicalized run configuration.",
     )
     git_hash: Optional[str] = Field(
-        description="Git commit hash of the code version at the time of the run."
+        default=None,
+        description="Git commit hash of the code version at the time of the run.",
     )
     input_hash: Optional[str] = Field(
         default=None,
-        index=True,
         description="SHA256 hash derived from the provenance IDs of input artifacts.",
     )
     signature: Optional[str] = Field(
         default=None,
-        index=True,
         description="Composite hash (SHA256) of code, config, and input hashes, defining the unique identity for caching.",
     )
 
     # Metadata
-    # Uses SQLAlchemy's JSON type for efficient persistence of arbitrary JSON structures.
-    meta: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    meta: Dict[str, Any] = Field(default_factory=dict)
 
     # Timing
-    started_at: datetime = Field(
+    started_at: Optional[datetime] = Field(
         default_factory=lambda: datetime.now(UTC),
-        sa_type=DateTime,
     )
-    ended_at: Optional[datetime] = Field(default=None, sa_type=DateTime)
+    ended_at: Optional[datetime] = Field(default=None)
 
     # Audit (record timestamps, distinct from execution timing)
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC),
-        sa_type=DateTime,
     )
-    updated_at: datetime = Field(
+    updated_at: Optional[datetime] = Field(
         default_factory=lambda: datetime.now(UTC),
-        sa_type=DateTime,
     )
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _coerce_tags(cls, value: Any) -> List[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return [str(item) for item in parsed]
+            return []
+        if isinstance(value, (list, tuple)):
+            return [str(item) for item in value]
+        return list(value)
+
+    @field_validator("meta", mode="before")
+    @classmethod
+    def _coerce_meta(cls, value: Any) -> Dict[str, Any]:
+        if value is None:
+            return {}
+        if isinstance(value, str):
+            parsed = json.loads(value)
+            return dict(parsed) if isinstance(parsed, dict) else {}
+        if isinstance(value, dict):
+            return dict(value)
+        return dict(value)
 
     @property
     def is_cache_hit(self) -> bool:
@@ -379,7 +358,7 @@ class Run(SQLModel, table=True):
             summary["input_identity"] = input_identity
         return summary
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         status_icon = (
             "🟢"
             if self.status == "completed"
@@ -537,8 +516,8 @@ class RunArtifacts(BaseModel):
         artifacts.inputs['config'] -> Artifact(...)
     """
 
-    inputs: Dict[str, Artifact] = PydanticField(default_factory=dict)
-    outputs: Dict[str, Artifact] = PydanticField(default_factory=dict)
+    inputs: dict[str, Artifact] = Field(default_factory=dict)
+    outputs: dict[str, Artifact] = Field(default_factory=dict)
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -551,7 +530,7 @@ class RunResult(BaseModel):
     """
 
     run: Run
-    outputs: Dict[str, Artifact] = PydanticField(default_factory=dict)
+    outputs: dict[str, Artifact] = Field(default_factory=dict)
     cache_hit: bool = False
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -653,10 +632,10 @@ class _PendingOutputMetaEntry:
 
     meta: Dict[str, Any]
     merge: bool = True
-    applied_object_ids: set[int] = field(default_factory=set)
+    applied_artifact_ids: set[uuid.UUID] = field(default_factory=set)
 
 
-class ConsistRecord(SQLModel):
+class ConsistRecord(BaseModel):
     """
     A comprehensive record of a run, acting as the primary log entry.
 
@@ -664,8 +643,8 @@ class ConsistRecord(SQLModel):
     run itself, its input and output artifacts, and a snapshot of the configuration used.
     It represents the "log as truth" by providing a complete, self-contained
     description of what happened during the run. Consist serializes this model to
-    JSON in ``consist_runs/<run_id>.json``; the database stores a summarized view
-    (run row + artifact links + optional facets) for querying.
+    JSON in ``consist.json``; the database stores a summarized view
+    (run row + artifact bindings + optional facets) for querying.
 
     Attributes:
         run (Run): The core `Run` object containing the execution's metadata and state.
@@ -674,18 +653,19 @@ class ConsistRecord(SQLModel):
         config (dict[str, object]): A snapshot of the configuration dictionary used for this run.
     """
 
+    model_config = ConfigDict(validate_assignment=True, arbitrary_types_allowed=True)
+
     run: Run
-    inputs: List[Artifact] = PydanticField(default_factory=list)
-    outputs: List[Artifact] = PydanticField(default_factory=list)
+    inputs: List[Artifact] = Field(default_factory=list)
+    outputs: List[Artifact] = Field(default_factory=list)
 
     # Cache Detection State
-    cached_run: Optional[Run] = None  # NEW: Stores the potential cache hit
+    cached_run: Optional[Run] = None
 
-    config: Dict[str, Any] = PydanticField(default_factory=dict)
+    config: Dict[str, Any] = Field(default_factory=dict)
 
-    # Optional, minimal, queryable config facet (not persisted to Run table).
-    # This is included in the per-run `consist.json` snapshot for inspection/debugging.
-    facet: Dict[str, Any] = PydanticField(default_factory=dict)
+    # Optional, minimal, queryable config facet included in per-run `consist.json`.
+    facet: Dict[str, Any] = Field(default_factory=dict)
 
     _pending_output_meta: Dict[str, _PendingOutputMetaEntry] = PrivateAttr(
         default_factory=dict
@@ -694,30 +674,86 @@ class ConsistRecord(SQLModel):
 
     def sync_output_artifact(
         self,
+        artifact: Optional[Artifact] = None,
         *,
         key: Optional[str] = None,
         artifact_id: str | uuid.UUID | None = None,
         meta: Optional[Dict[str, Any]] = None,
+        hints: Optional[Sequence[Observation]] = None,
         abs_path: Optional[str] = None,
         preserve_existing_abs_path: bool = False,
     ) -> List[Artifact]:
-        """Synchronize ``meta`` and/or ``abs_path`` across matching recorded outputs."""
+        """Replace matching recorded output ``Artifact`` instances with updated immutable copies."""
         matched: List[Artifact] = []
-        target_id = str(artifact_id) if artifact_id is not None else None
-        for recorded in self.outputs:
-            matches_key = key is not None and recorded.key == key
-            matches_id = (
-                target_id is not None
-                and recorded.id is not None
-                and str(recorded.id) == target_id
+        updated_outputs: List[Artifact] = []
+        effective_id = (
+            artifact_id
+            if artifact_id is not None
+            else (artifact.id if (artifact is not None and key is None) else None)
+        )
+        effective_key = (
+            key
+            if key is not None
+            else (
+                artifact.key
+                if (artifact is not None and effective_id is None)
+                else None
             )
+        )
+        target_id = str(effective_id) if effective_id is not None else None
+
+        for recorded in self.outputs:
+            matches_key = effective_key is not None and recorded.key == effective_key
+            matches_id = target_id is not None and str(recorded.id) == target_id
             if not (matches_key or matches_id):
+                updated_outputs.append(recorded)
                 continue
+
+            bound_tracker = recorded.resolve_bound_tracker()
+            candidate = artifact if artifact is not None else recorded
             if meta is not None:
-                recorded.meta = dict(meta)
+                candidate = candidate.with_meta(meta, merge=False)
+            if hints is not None:
+                candidate = candidate.with_hints(hints)
             if abs_path is not None and (
-                not preserve_existing_abs_path or recorded.abs_path is None
+                not preserve_existing_abs_path
+                or candidate.locate(verify_on_stale=False) is None
             ):
-                recorded.abs_path = abs_path
-            matched.append(recorded)
+                resolved_abs = Path(abs_path).expanduser().resolve()
+                obs = Observation(
+                    location=Location(
+                        uri=resolved_abs.as_uri(),
+                        member=candidate.member,
+                    ),
+                    identity=candidate.identity,
+                    access_driver=candidate.driver,
+                    basis="derived",
+                    site="local",
+                    observed_at_ns=time.time_ns(),
+                )
+                candidate = candidate.with_hints((*candidate.hints, obs))
+
+            if bound_tracker is not None:
+                candidate.bind_tracker(bound_tracker)
+            matched.append(candidate)
+            updated_outputs.append(candidate)
+
+        if matched:
+            self.outputs = updated_outputs
         return matched
+
+
+__all__ = [
+    "ArchivedOutputs",
+    "CanonicalRunMetaField",
+    "ConsistRecord",
+    "CouplerSnapshotPhase",
+    "Run",
+    "RunArtifactLink",
+    "RunArtifacts",
+    "RunBindingInvocation",
+    "RunCouplerSnapshot",
+    "RunResult",
+    "resolve_canonical_run_meta_field",
+    "resolve_run_result_output",
+]

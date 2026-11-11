@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any, Protocol, runtime_checkable
 
+from consist.artifact import Artifact
 from consist.digest import build_manifest_v1, canonical_json_sha256, file_sha256
+from consist.location import lookup_live_ledger
 
-if TYPE_CHECKING:
-    from consist.models.artifact import Artifact
+
+@runtime_checkable
+class _HasExecCursor(Protocol):
+    def exec_cursor(self) -> Any: ...
 
 
 _MANIFEST_VERSION = 1
@@ -182,10 +187,55 @@ def validate_shapefile_bundle_destination(
     return True
 
 
+def _artifact_tree_hex(artifact: Artifact) -> str | None:
+    if isinstance(artifact, Artifact):
+        anchor = artifact.identity.anchor
+        if anchor.scheme == "legacy-v1:unverified" and anchor.hex == "0" * 64:
+            return None
+        return anchor.hex
+    raw_hash = artifact.hash
+    if isinstance(raw_hash, str) and raw_hash:
+        return raw_hash.rsplit(":", 1)[-1]
+    return None
+
+
+def _lookup_ledger_manifest(artifact: Artifact) -> dict[str, Any] | None:
+    if not isinstance(artifact, Artifact):
+        return None
+    anchor = artifact.identity.anchor
+    if anchor.scheme != "sha256:manifest-v1":
+        return None
+    ledger = lookup_live_ledger(artifact.origin)
+    if not isinstance(ledger, _HasExecCursor):
+        return None
+    try:
+        with ledger.exec_cursor() as cur:
+            row = cur.execute(
+                "SELECT body FROM main.content_manifest WHERE anchor = ? AND format = 'manifest-v1'",
+                [str(anchor)],
+            ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        parsed = json.loads(bytes(row[0]).decode("utf-8"))
+        if isinstance(parsed, Mapping):
+            return {**dict(parsed), "tree_hash": anchor.hex}
+    except Exception:
+        return None
+    return None
+
+
 def is_directory_artifact(artifact: Artifact) -> bool:
     """Return whether ``artifact`` carries immutable directory-artifact metadata."""
     meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
-    return meta.get("directory_artifact") is True
+    if meta.get("directory_artifact") is True:
+        return True
+    if is_file_bundle_artifact(artifact) or meta.get("artifact_set") is True:
+        return False
+    return (
+        isinstance(artifact, Artifact)
+        and artifact.identity.anchor.scheme == "sha256:manifest-v1"
+        and artifact.driver in {"directory", "zarr"}
+    )
 
 
 def is_file_bundle_artifact(artifact: Artifact) -> bool:
@@ -299,6 +349,8 @@ def get_validated_directory_manifest(artifact: Artifact) -> dict[str, Any] | Non
     """
     meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
     raw_manifest = meta.get("directory_manifest")
+    if raw_manifest is None and is_directory_artifact(artifact):
+        raw_manifest = _lookup_ledger_manifest(artifact)
     if raw_manifest is None:
         if meta.get("directory_artifact") is True:
             raise ValueError("directory artifact is missing a valid directory_manifest")
@@ -306,11 +358,8 @@ def get_validated_directory_manifest(artifact: Artifact) -> dict[str, Any] | Non
     if not isinstance(raw_manifest, Mapping):
         raise ValueError("directory artifact is missing a valid directory_manifest")
     normalized = validate_directory_manifest(raw_manifest)
-    if (
-        isinstance(artifact.hash, str)
-        and artifact.hash
-        and artifact.hash != normalized["tree_hash"]
-    ):
+    artifact_hex = _artifact_tree_hex(artifact)
+    if artifact_hex is not None and artifact_hex != normalized["tree_hash"]:
         raise ValueError(
             "directory artifact hash does not match directory_manifest.tree_hash"
         )
@@ -321,12 +370,15 @@ def require_directory_artifact_manifest(artifact: Artifact) -> dict[str, Any]:
     """Return validated directory manifest for ``artifact`` or raise ``ValueError``."""
     meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
     manifest = meta.get("directory_manifest")
+    if manifest is None:
+        manifest = _lookup_ledger_manifest(artifact)
     if not isinstance(manifest, Mapping):
         raise ValueError(
             f"directory artifact {artifact.key!r} has no persisted manifest"
         )
     normalized = validate_directory_manifest(manifest)
-    if artifact.hash != normalized["tree_hash"]:
+    artifact_hex = _artifact_tree_hex(artifact)
+    if artifact_hex != normalized["tree_hash"]:
         raise ValueError(
             f"directory artifact {artifact.key!r} manifest does not match artifact identity"
         )
@@ -342,7 +394,11 @@ def require_shapefile_bundle_metadata(
     meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
     fallback: str | None = None
     if fallback_uri_name:
-        uri = artifact.container_uri or ""
+        if isinstance(artifact, Artifact):
+            loc = artifact.primary_location
+            uri = loc.uri if loc is not None else ""
+        else:
+            uri = artifact.container_uri or ""
         uri_path = uri.split("://", 1)[-1] if "://" in uri else uri
         fallback = Path(uri_path).name or None
     entry = file_bundle_entry_name(artifact, fallback=fallback)
@@ -351,14 +407,17 @@ def require_shapefile_bundle_metadata(
             f"shapefile bundle artifact {artifact.key!r} has no valid entry"
         )
     manifest = (
-        meta.get("file_bundle_manifest") or meta.get("directory_manifest")
+        meta.get("file_bundle_manifest")
+        or meta.get("directory_manifest")
+        or _lookup_ledger_manifest(artifact)
         if fallback_uri_name
         else meta.get("file_bundle_manifest")
     )
     if not isinstance(manifest, Mapping):
         raise ValueError(f"shapefile bundle artifact {artifact.key!r} has no manifest")
     normalized = validate_directory_manifest(manifest)
-    if artifact.hash != normalized["tree_hash"]:
+    artifact_hex = _artifact_tree_hex(artifact)
+    if artifact_hex != normalized["tree_hash"]:
         raise ValueError(
             f"shapefile bundle artifact {artifact.key!r} manifest does not match artifact identity"
         )
@@ -376,7 +435,11 @@ def is_valid_directory_artifact_tree(path: Path, artifact: Artifact) -> bool | N
         invalid manifest.
     """
     meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
-    if meta.get("directory_artifact") is True and "directory_manifest" not in meta:
+    if (
+        meta.get("directory_artifact") is True
+        and "directory_manifest" not in meta
+        and _lookup_ledger_manifest(artifact) is None
+    ):
         return False
     try:
         manifest = get_validated_directory_manifest(artifact)

@@ -40,12 +40,7 @@ def normalize_facet_like(
     """Normalize a facet payload (Pydantic model or mapping) to JSON-safe dict."""
     del identity
     if isinstance(facet, BaseModel):
-        normalized = (
-            facet.model_dump(mode="json")
-            if hasattr(facet, "model_dump")
-            else facet.model_dump()
-        )
-        return normalize_json(normalized)
+        return normalize_json(facet.model_dump(mode="json"))
     return normalize_json(facet)
 
 
@@ -76,7 +71,7 @@ def flatten_facet_values(
     def walk(prefix: str, value: Any) -> None:
         if isinstance(value, dict):
             for k, v in value.items():
-                key_part = str(k).replace(".", "\\.")
+                key_part = str(k).replace("\\", "\\\\").replace(".", "\\.")
                 new_prefix = f"{prefix}.{key_part}" if prefix else key_part
                 walk(new_prefix, v)
             return

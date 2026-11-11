@@ -11,6 +11,7 @@ import shutil
 import tempfile
 from types import MappingProxyType
 import uuid
+import warnings
 import weakref
 from pathlib import Path
 from typing import (
@@ -29,14 +30,14 @@ from typing import (
     TYPE_CHECKING,
     Tuple,
     Type,
+    TypeVar,
     Union,
     cast,
 )
-from sqlalchemy.sql import Executable
 
 import pandas as pd
 from pydantic import BaseModel
-from sqlmodel import SQLModel, Session
+from sqlmodel import SQLModel
 
 from consist.core.artifact_schemas import ArtifactSchemaManager
 from consist.core.artifact_facets import ArtifactFacetManager
@@ -92,13 +93,14 @@ from consist.core.gtfs import (
 )
 from consist.digest import normalize_json
 from consist.core.indexing import IndexBySpec
+from consist.artifact import ArchivedOutputs, Artifact
 from consist.core.persistence import (
     ArtifactSchemaSelection,
     DatabaseManager,
     ProvenanceWriter,
     SchemaProfileSource,
 )
-from consist.core.views import ViewFactory, ViewRegistry
+from consist.core.views import ViewFactory
 from consist.core.ingestion import ingest_artifact
 from consist.core.lineage import LineageService
 from consist.core.materialize import (
@@ -117,8 +119,9 @@ from consist.core.queries import RunQueryService
 from consist.core.settings import ConsistSettings
 from consist.core.stores import HotDataStore, MetadataStore
 from consist.core.workflow import OutputCapture, ScenarioContext
+from consist.location import SiteContext
+from consist.meta import merge_artifact_output_meta
 from consist.models.gtfs import GTFS_SCHEMAS
-from consist.models.artifact import Artifact, ArchivedOutputs, set_tracker_ref
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
 from consist.models.run import (
     ConsistRecord,
@@ -128,6 +131,8 @@ from consist.models.run import (
     RunBindingInvocation,
     RunResult,
 )
+from consist.protocols import ParameterizedSQLProtocol
+from consist.store.detect import ConsistError
 from consist.types import (
     BuiltinSchemaLiteral,
     ArtifactRef,
@@ -158,8 +163,16 @@ if TYPE_CHECKING:
     )
     from consist.core.step_context import StepContext
     from consist.runset import RunSet
+    from consist.store.ledger import StoreLedger
     from ibis.backends.duckdb import Backend as IbisDuckDBBackend
     from ibis.expr.types import Table as IbisTable
+
+_QueryModelT = TypeVar("_QueryModelT")
+
+
+class DeprecatedViewsError(ConsistError, NotImplementedError):
+    """Raised when deprecated SQLModel ORM view helpers (`view` / `register_views`) are called."""
+
 
 AccessMode = Literal["standard", "analysis", "read_only"]
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -256,6 +269,7 @@ class Tracker:
         schemas: Optional[List[Type[SQLModel]]] = None,
         builtin_schemas: Optional[Iterable[BuiltinSchemaLiteral]] = None,
         access_mode: AccessMode = "standard",
+        read_only: bool = False,
         run_subdir_fn: Optional[Callable[[Run], str]] = None,
         allow_external_paths: Optional[bool] = None,
         openlineage_enabled: bool = False,
@@ -336,10 +350,13 @@ class Tracker:
             if scheme and os.fspath(root)
         }
         self.run_dir = self.fs.run_dir
+        self.site_context: SiteContext = SiteContext.detect(mounts=self.mounts)
         self.openlineage_enabled = openlineage_enabled
         self.openlineage_namespace = openlineage_namespace
 
-        self.access_mode = access_mode
+        self.read_only = bool(read_only or access_mode == "read_only")
+        self.access_mode: AccessMode = "read_only" if self.read_only else access_mode
+        self.auto_migrate = auto_migrate
         self._run_subdir_fn = run_subdir_fn
         self._cache_epoch = cache_epoch
         if allow_external_paths is None:
@@ -441,15 +458,21 @@ class Tracker:
 
         if effective_db_path:
             try:
+                ledger_mounts: dict[str, str | Path] = {
+                    "workspace": self.run_dir,
+                    **self.archive_mounts,
+                    **self.mounts,
+                }
                 metadata_db = DatabaseManager(
                     effective_db_path,
                     lock_retries=self._db_lock_retries,
                     lock_base_sleep_seconds=self._db_lock_base_sleep_seconds,
                     lock_max_sleep_seconds=self._db_lock_max_sleep_seconds,
-                    read_only=(self.access_mode == "read_only"),
+                    read_only=self.read_only,
                     skip_schema_init=db_skip_schema_init,
                     auto_migrate=auto_migrate,
-                    mounts=self.mounts,
+                    mounts=ledger_mounts,
+                    site=self.site_context.site,
                 )
                 self.metadata_store = MetadataStore(db=metadata_db)
                 self.hot_data_store = HotDataStore(
@@ -492,7 +515,6 @@ class Tracker:
         self._archive_service = TrackerArchiveService(self)
         self._config_plan_service = TrackerConfigPlanService(self)
 
-        self.views = ViewRegistry(self)
         # Store registered schemas by class name for cross-session lookup.
         # When ingest() is called in a different Python session, it can look up
         # a schema by the artifact's schema_name (e.g., "MyDataSchema") if the
@@ -520,9 +542,6 @@ class Tracker:
             logging.warning(
                 "[Consist] Schemas provided but no database configured. Views will not be created."
             )
-        if self.metadata_store and self.access_mode != "read_only":
-            for schema in registered_schemas:
-                self.view(schema)
 
         # In-Memory State (The Source of Truth)
         self.current_consist: Optional[ConsistRecord] = None
@@ -579,7 +598,7 @@ class Tracker:
                     namespace=namespace,
                     path=self.fs.run_dir / "openlineage.jsonl",
                 ),
-                schema_resolver=schema_resolver,
+                schema_resolver=cast(Any, schema_resolver),
                 run_lookup=self._run_lookup,
                 run_facet_resolver=self._openlineage_run_facet,
             )
@@ -660,28 +679,47 @@ class Tracker:
         self._compat_db_path = normalized
 
     @property
-    def engine(self):
-        """
-        Return the SQLAlchemy engine used by this tracker.
-
-        This is a single-store compatibility alias. New code should prefer
-        explicit ``metadata_store`` / ``hot_data_store`` ownership boundaries.
-
-        Returns
-        -------
-        Optional[Engine]
-            The SQLAlchemy engine if a database is configured, otherwise ``None``.
-        """
-        hot_store = self._compat_attr("hot_data_store")
-        if hot_store is not None:
-            return hot_store.engine
+    def ledger(self) -> Optional["StoreLedger"]:
+        """Return the underlying ``StoreLedger`` when a database is configured."""
         metadata_store = self._compat_attr("metadata_store")
         if metadata_store is not None:
-            return metadata_store.engine
+            return metadata_store.ledger
+        hot_store = self._compat_attr("hot_data_store")
+        if hot_store is not None:
+            return hot_store.ledger
         db = self._compat_attr("_compat_db")
         if db is None:
             return None
-        return db.engine
+        return db.ledger
+
+    @property
+    def store(self) -> Optional["StoreLedger"]:
+        """Return the underlying ``StoreLedger`` (alias for ``tracker.ledger``)."""
+        return self.ledger
+
+    def query_df(
+        self,
+        sql: str | ParameterizedSQLProtocol,
+        params: Sequence[Any] | Mapping[str, Any] | None = None,
+    ) -> pd.DataFrame:
+        """Execute a read-only SQL query against the tracker's ``StoreLedger`` and return a DataFrame."""
+        db = self.db
+        if db is None:
+            raise RuntimeError("Database connection required.")
+        return db.query_df(sql, params)
+
+    def query_rows(
+        self,
+        sql: str | ParameterizedSQLProtocol,
+        params: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        model: Type[_QueryModelT],
+    ) -> List[_QueryModelT]:
+        """Execute a read-only SQL query and hydrate each row into ``model``."""
+        db = self.db
+        if db is None:
+            raise RuntimeError("Database connection required.")
+        return db.query_rows(sql, params, model=model)
 
     @property
     def registered_schemas(self) -> Mapping[str, Type[SQLModel]]:
@@ -740,30 +778,29 @@ class Tracker:
             schemas=user_schemas if user_schemas else None,
             builtin_schemas=list(self.builtin_schemas or []),
             access_mode=self.access_mode,
+            read_only=bool(self._compat_attr("read_only")),
             run_subdir_fn=self._run_subdir_fn,
             allow_external_paths=self.allow_external_paths,
             openlineage_enabled=self.openlineage_enabled,
             openlineage_namespace=self.openlineage_namespace,
             db_skip_schema_init=self.db_skip_schema_init,
             local_snapshot=self._compat_attr("local_snapshot") or False,
+            auto_migrate=self._compat_attr("auto_migrate"),
         )
 
     def close(self) -> None:
         """
-        Dispose database engines and clean up any temporary local snapshot directory.
+        Close the ``StoreLedger`` connection and clean up any temporary local snapshot directory.
         """
         from consist.integrations.ibis import close_tracker_ibis_connection
 
         close_tracker_ibis_connection(self)
-        hot_store = self._compat_attr("hot_data_store")
-        if hot_store is not None:
-            hot_store.dispose_engine()
         metadata_store = self._compat_attr("metadata_store")
         if metadata_store is not None and metadata_store.db is not None:
-            metadata_store.db.engine.dispose()
+            metadata_store.db.dispose()
         compat_db = self._compat_attr("_compat_db")
-        if compat_db is not None and compat_db.engine is not None:
-            compat_db.engine.dispose()
+        if compat_db is not None:
+            compat_db.dispose()
         snapshot_finalizer = self._compat_attr("_snapshot_finalizer")
         if snapshot_finalizer is not None:
             snapshot_finalizer.detach()
@@ -1107,10 +1144,8 @@ class Tracker:
     def _coerce_facet_mapping(self, obj: Any, label: str) -> Dict[str, Any]:
         if obj is None:
             raise ValueError(f"facet_from requires a {label} to extract from.")
-        if hasattr(obj, "model_dump"):
+        if isinstance(obj, BaseModel):
             return obj.model_dump(mode="json")
-        if hasattr(obj, "dict") and hasattr(obj, "json"):
-            return obj.dict()
         if isinstance(obj, Mapping):
             return dict(obj)
         raise ValueError(f"Tracker {label} must be a mapping or Pydantic model.")
@@ -1546,9 +1581,11 @@ class Tracker:
         self.begin_run(run_id=run_id, model=model, **kwargs)
         try:
             yield self
-            self.end_run(status="completed")
+            if self.current_consist is not None:
+                self.end_run(status="completed")
         except Exception as e:
-            self.end_run(status="failed", error=e)
+            if self.current_consist is not None:
+                self.end_run(status="failed", error=e)
             raise
 
     def run(
@@ -2540,31 +2577,6 @@ class Tracker:
 
         return RunSet.from_query(self, label=label, **filters)
 
-    def run_query(self, query: Executable) -> list:
-        """
-        Execute a SQLModel/SQLAlchemy query via the metadata store.
-
-        Parameters
-        ----------
-        query : Executable
-            Query object (``select``, ``text``, etc.).
-
-        Returns
-        -------
-        list
-            Results of the executed query.
-
-        Raises
-        ------
-        RuntimeError
-            If no database is configured for this tracker.
-        """
-        metadata_store = self.metadata_store
-        if metadata_store is None:
-            raise RuntimeError("Database connection required.")
-        with Session(metadata_store.engine) as session:
-            return session.exec(cast(Any, query)).all()
-
     def find_latest_run(
         self,
         *,
@@ -2926,8 +2938,10 @@ class Tracker:
             file_schema_sample_rows=file_schema_sample_rows,
             **meta_payload,
         )
-        if schema is not None:
-            self.ingest(art, df, schema=schema)
+        if schema is not None and self.db is not None:
+            ingested = self.ingest(art, df, schema=schema)
+            if isinstance(ingested, Artifact):
+                art = ingested
         return art
 
     def log_artifacts(
@@ -3686,7 +3700,7 @@ class Tracker:
         if resolved_schema is None:
             schema_name = (
                 artifact.meta.get("schema_name")
-                if isinstance(artifact.meta, dict)
+                if isinstance(artifact.meta, MappingABC)
                 else None
             )
             if isinstance(schema_name, str):
@@ -3933,7 +3947,7 @@ class Tracker:
                             )
                             continue
                     rows = list(spec.materialize_rows(target_run.id))
-                    self.ingest(
+                    selected_service_artifact = self.ingest(
                         selected_service_artifact,
                         data=rows,
                         schema=spec.schema,
@@ -4115,7 +4129,7 @@ class Tracker:
         )
 
     def _ingest_cache_hit(self, table_name: str, content_hash: str) -> bool:
-        config_plan_service = getattr(self, "_config_plan_service", None)
+        config_plan_service = self._compat_attr("_config_plan_service")
         if config_plan_service is None:
             # Compatibility fallback for legacy/partial Tracker stubs that are
             # constructed via ``Tracker.__new__`` in focused unit tests.
@@ -4127,34 +4141,29 @@ class Tracker:
 
     def view(self, model: Type[SQLModel], key: Optional[str] = None) -> Type[SQLModel]:
         """
-        Create/register a hybrid view for a given SQLModel schema.
-
-        Parameters
-        ----------
-        model : Type[SQLModel]
-            SQLModel schema defining the logical columns for the concept.
-        key : Optional[str], optional
-            Override the concept key (defaults to `model.__tablename__`).
-
-        Returns
-        -------
-        Type[SQLModel]
-            The dynamic SQLModel view class exposed via `tracker.views`.
-
-        Raises
-        ------
-        RuntimeError
-            If the tracker has no database configured.
+        Deprecated stub for legacy SQLModel ORM view registration.
         """
-        if not self.db:
-            raise RuntimeError("Database required to create views.")
+        _ = (model, key)
+        msg = (
+            "Tracker.view(...) and SQLModel ORM hybrid views were removed in Consist v0.5.0. "
+            "Use tracker.create_view(view_name, concept_key) with tracker.query_df(...) / "
+            "tracker.query_rows(..., model=...), or consist.ibis_view(tracker, model) instead."
+        )
+        warnings.warn(msg, DeprecationWarning, stacklevel=2)
+        raise DeprecatedViewsError(msg)
 
-        # 1. Register metadata (so __getattr__ works later)
-        self.views.register(model, key)
-
-        # 2. Trigger immediate creation/refresh
-        # This returns the dynamic class
-        return getattr(self.views, model.__name__)
+    def register_views(self, *models: Type[SQLModel]) -> None:
+        """
+        Deprecated stub for legacy bulk SQLModel ORM view registration.
+        """
+        _ = models
+        msg = (
+            "Tracker.register_views(...) was removed in Consist v0.5.0. "
+            "Use tracker.create_view(view_name, concept_key) with tracker.query_df(...) / "
+            "tracker.query_rows(..., model=...), or consist.ibis_view(tracker, model) instead."
+        )
+        warnings.warn(msg, DeprecationWarning, stacklevel=2)
+        raise DeprecatedViewsError(msg)
 
     def create_view(self, view_name: str, concept_key: str) -> Any:
         """
@@ -5342,7 +5351,7 @@ class Tracker:
             run_id=run_id, phase=phase, must_exist=must_exist
         )
         for artifact in artifacts.values():
-            set_tracker_ref(artifact, self)
+            artifact.bind_tracker(self)
         return artifacts
 
     def diff_coupler_snapshots(
@@ -5766,12 +5775,7 @@ class Tracker:
         return self._history_service.load_input_bundle(run_id)
 
     def _resolve_cached_artifact_abs_path(self, artifact: Artifact) -> None:
-        if artifact.abs_path:
-            return
-        try:
-            artifact.abs_path = self.resolve_uri(artifact.container_uri)
-        except Exception:
-            return
+        artifact.bind_tracker(self)
 
     def _auto_capture_output_artifact(self, f_path: Path) -> Artifact | None:
         key = f_path.stem
@@ -5866,10 +5870,12 @@ class Tracker:
             self.current_consist.run.meta = {}
 
         normalized = normalize_json(kwargs)
-        for field in ("stage", "phase"):
-            value = normalized.get(field)
-            if isinstance(value, str) or value is None:
-                setattr(self.current_consist.run, field, value)
+        stage_val = normalized.get("stage")
+        if "stage" in normalized and (isinstance(stage_val, str) or stage_val is None):
+            self.current_consist.run.stage = stage_val
+        phase_val = normalized.get("phase")
+        if "phase" in normalized and (isinstance(phase_val, str) or phase_val is None):
+            self.current_consist.run.phase = phase_val
         self.current_consist.run.meta.update(normalized)
 
         # 2. Persist
@@ -5943,17 +5949,26 @@ class Tracker:
         if self.is_cached:
             return
 
-        from consist.models.artifact import merge_artifact_output_meta
-
-        for art in self.current_consist.outputs:
+        for art in list(self.current_consist.outputs):
             if art.key == key:
-                existing_art_meta = dict(art.meta) if isinstance(art.meta, dict) else {}
-                art.meta = merge_artifact_output_meta(
+                existing_art_meta = (
+                    dict(art.meta) if isinstance(art.meta, MappingABC) else {}
+                )
+                merged_meta = merge_artifact_output_meta(
                     existing_art_meta, normalized, merge=merge
                 )
-                entry.applied_object_ids.add(id(art))
+                updated_art = art.with_meta(dict(merged_meta), merge=False)
+                updated_art.bind_tracker(self)
+                self.current_consist.sync_output_artifact(
+                    key=key,
+                    artifact_id=art.id,
+                    meta=dict(merged_meta),
+                )
+                entry.applied_artifact_ids.add(updated_art.id)
                 if self.db is not None:
-                    self.db.update_artifact_meta(art, dict(art.meta))
+                    self.db.update_artifact_meta(
+                        updated_art, dict(merged_meta), merge=False
+                    )
                 self._flush_json()
 
     set_pending_output_meta = set_output_meta
@@ -6133,8 +6148,9 @@ class Tracker:
             return None
         artifact = outputs.get(key) if key else next(iter(outputs.values()))
         if artifact:
-            self._resolve_cached_artifact_abs_path(artifact)
-            set_tracker_ref(artifact, self)
+            if artifact.origin is None and self.ledger is not None:
+                artifact = replace(artifact, origin=self.ledger.ref)
+            artifact.bind_tracker(self)
         return artifact
 
 
@@ -6196,4 +6212,4 @@ _TRACKER_WRAPPER_DOCS = {
 }
 
 for _name, _source in _TRACKER_WRAPPER_DOCS.items():
-    getattr(Tracker, _name).__doc__ = _source.__doc__
+    Tracker.__dict__[_name].__doc__ = _source.__doc__

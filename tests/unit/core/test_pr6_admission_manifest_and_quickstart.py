@@ -250,8 +250,9 @@ def test_ghost_mode_lazy_caching_and_downstream_behavior(
     assert counts == {"a": 1, "b": 1, "c": 1}
 
     # Delete A's bulky intermediate output on disk ("Ghost Mode")
-    res_a1.outputs["a_out"].path.unlink()
-    assert not res_a1.outputs["a_out"].path.exists()
+    a_out_source = res_a1.outputs["a_out"].path
+    a_out_source.unlink()
+    assert not a_out_source.exists()
     assert res_b1.outputs["b_out"].path.exists()
 
     # 1. Rerun A -> B -> C unchanged: all three hit cache, none execute!

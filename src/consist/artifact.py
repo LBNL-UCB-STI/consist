@@ -87,6 +87,16 @@ class _TrackerMountsProtocol(Protocol):
 
 
 @runtime_checkable
+class _TrackerRunDirProtocol(Protocol):
+    run_dir: Any
+
+
+@runtime_checkable
+class _TrackerArchiveMountsProtocol(Protocol):
+    archive_mounts: Mapping[str, Any]
+
+
+@runtime_checkable
 class _LedgerLocationsProtocol(Protocol):
     mounts: Mapping[str, Any]
 
@@ -507,9 +517,16 @@ class Artifact:
             if explicit_tracker is not None
             else self.resolve_bound_tracker()
         )
+        if trk is None:
+            return None
+        merged: dict[str, Any] = {}
+        if isinstance(trk, _TrackerRunDirProtocol) and trk.run_dir:
+            merged["workspace"] = trk.run_dir
+        if isinstance(trk, _TrackerArchiveMountsProtocol) and trk.archive_mounts:
+            merged.update(trk.archive_mounts)
         if isinstance(trk, _TrackerMountsProtocol) and trk.mounts:
-            return trk.mounts
-        return None
+            merged.update(trk.mounts)
+        return merged or None
 
     @property
     def anchor(self) -> Digest:
@@ -531,13 +548,21 @@ class Artifact:
         """Resolve and return the verified local filesystem `Path` for this artifact."""
         from consist.engine import locate
 
-        return locate(self, mounts=self._effective_tracker_mounts()).path
+        return locate(
+            self,
+            mounts=self._effective_tracker_mounts(),
+            verify_on_stale=(self.driver != "artifact_set"),
+        ).path
 
     def as_path(self, tracker: Any = None) -> Path:
         """Resolve and return the local filesystem `Path`, using `tracker`'s mounts when provided."""
         from consist.engine import locate
 
-        return locate(self, mounts=self._effective_tracker_mounts(tracker)).path
+        return locate(
+            self,
+            mounts=self._effective_tracker_mounts(tracker),
+            verify_on_stale=(self.driver != "artifact_set"),
+        ).path
 
     def locate(
         self,
@@ -550,9 +575,13 @@ class Artifact:
         """Resolve and return a verified local filesystem `Path` for this artifact, or `None` if not found."""
         from consist.engine import locate
 
-        effective_mounts = (
-            mounts if mounts is not None else self._effective_tracker_mounts()
-        )
+        base_mounts = self._effective_tracker_mounts()
+        if mounts is None:
+            effective_mounts = base_mounts
+        elif isinstance(mounts, Mapping) and base_mounts is not None:
+            effective_mounts = {**base_mounts, **mounts}
+        else:
+            effective_mounts = mounts
         try:
             return locate(
                 self,
@@ -915,35 +944,63 @@ class Artifact:
         )
 
     def _first_candidate_location(self) -> tuple[str | None, str | None]:
-        from consist.engine import locate
+        candidates: list[tuple[int, int, int, int, int, str, str | None]] = []
+        seq = 0
 
-        try:
-            resolved = locate(
-                self,
-                mounts=self._effective_tracker_mounts(),
-                verify_on_stale=False,
+        def _push(
+            uri: str,
+            member: str | None,
+            basis: str,
+            observed_at_ns: int,
+        ) -> None:
+            nonlocal seq
+            if not uri:
+                return
+            if uri.startswith("db://"):
+                scheme_rank = 2
+            elif uri.startswith("file://"):
+                scheme_rank = 1
+            else:
+                scheme_rank = 0
+            is_derived = 1 if basis == "derived" else 0
+            has_no_ts = 0 if observed_at_ns > 0 else 1
+            candidates.append(
+                (scheme_rank, is_derived, has_no_ts, observed_at_ns, seq, uri, member)
             )
-            return resolved.uri, resolved.member
-        except Exception:
-            pass
-        if self.hints:
-            first_loc = self.hints[0].location
-            return first_loc.uri, first_loc.member
+            seq += 1
+
+        for obs in self.hints:
+            _push(
+                obs.location.uri,
+                obs.location.member,
+                obs.basis,
+                int(obs.observed_at_ns or 0),
+            )
+
         led = lookup_live_ledger(self.origin)
-        if isinstance(led, _CandidateLedgerProtocol):
-            cands = led.memoized_candidates(self.identity.anchor, limit=1)
-            if cands:
-                return cands[0].location.uri, cands[0].location.member
         if isinstance(led, _LedgerLocationsProtocol):
-            rows = led.locate_current([self.identity.anchor], include_evicted=True)
-            if rows:
-                mem = (
-                    str(rows[0]["member"])
-                    if rows[0].get("member") is not None
-                    else None
+            anchors = [self.identity.anchor]
+            if self.recorded_anchor is not None:
+                anchors.append(self.recorded_anchor)
+            for row in led.locate_current(anchors, include_evicted=True):
+                raw_uri = str(row.get("uri") or "")
+                raw_mem = str(row["member"]) if row.get("member") is not None else None
+                raw_basis = str(row.get("basis") or "declared")
+                raw_ts = int(row.get("observed_at_ns") or 0)
+                _push(raw_uri, raw_mem, raw_basis, raw_ts)
+        elif isinstance(led, _CandidateLedgerProtocol):
+            for obs in led.memoized_candidates(self.identity.anchor, limit=4):
+                _push(
+                    obs.location.uri,
+                    obs.location.member,
+                    obs.basis,
+                    int(obs.observed_at_ns or 0),
                 )
-                return str(rows[0]["uri"]), mem
-        return None, None
+
+        if not candidates:
+            return None, None
+        best = min(candidates)
+        return best[5], best[6]
 
     @property
     def container_uri(self) -> str:
@@ -1190,7 +1247,7 @@ class Artifact:
                         )
                     )
 
-        if not hints and origin is None and value.get("container_uri"):
+        if not hints and value.get("container_uri"):
             raw_member = (
                 value.get("member")
                 or value.get("table_path")

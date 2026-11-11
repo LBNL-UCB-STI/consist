@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Callable, Optional, List
+from typing import Any, Callable, Optional, List, cast
 
-from consist.models.artifact import Artifact
+from consist.artifact import Artifact
 from consist.models.run import Run
 from consist.core.openlineage import OpenLineageEmitter
 
@@ -27,18 +27,22 @@ class LifecycleEmitter:
     def emit_start(self, run: Run) -> None:
         if not self._openlineage:
             return
-        self._openlineage.emit_start(run, inputs=self._input_resolver(), outputs=[])
+        self._openlineage.emit_start(
+            run, inputs=cast(Any, self._input_resolver()), outputs=[]
+        )
 
     def emit_complete(self, run: Run, outputs: List[Artifact]) -> None:
         if not self._openlineage:
             return
         self._openlineage.emit_complete(
-            run, inputs=self._input_resolver(), outputs=outputs
+            run,
+            inputs=cast(Any, self._input_resolver()),
+            outputs=cast(Any, outputs),
         )
 
     def emit_failed(self, run: Run, error: Exception) -> None:
         if not self._openlineage:
             return
         self._openlineage.emit_fail(
-            run, error, inputs=self._input_resolver(), outputs=[]
+            run, error, inputs=cast(Any, self._input_resolver()), outputs=[]
         )

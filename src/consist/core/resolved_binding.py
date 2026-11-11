@@ -118,23 +118,32 @@ class ArtifactIdentity:
     @classmethod
     def from_artifact(cls, artifact: Any) -> "ArtifactIdentity":
         """Return a strict identity only when persisted semantics prove it."""
-        from consist.artifact import Artifact as V2Artifact
-        from consist.digest import Kind
+        from consist.artifact import Artifact
+        from consist.core.directory_artifacts import (
+            is_directory_artifact,
+            is_file_bundle_artifact,
+        )
 
-        if isinstance(artifact, V2Artifact):
+        if isinstance(artifact, Artifact):
             if not artifact.identity.verifiable:
                 raise ValueError(
                     "artifact has an unverified historical anchor and does not declare a trusted immutable identity"
                 )
             anchor = artifact.identity.anchor
-            if anchor.kind == Kind.CONTAINER or anchor.scheme in (
+            if anchor.scheme in (
                 "sha256:manifest-v1",
                 "sha256:dir_manifest",
-            ):
+            ) and not is_file_bundle_artifact(artifact):
                 return cls.parse(f"sha256:manifest-v1:{anchor.hex}")
-            if anchor.kind == Kind.BYTES or anchor.scheme == "sha256:file":
+            if (
+                anchor.scheme == "sha256:file"
+                and not is_file_bundle_artifact(artifact)
+                and not is_directory_artifact(artifact)
+            ):
                 return cls.parse(f"sha256:file:{anchor.hex}")
-            return cls.parse(f"sha256:file:{anchor.hex}")
+            raise ValueError(
+                f"Unsupported strict-binding identity scheme: {anchor.scheme!r}"
+            )
 
         meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
         if meta.get("v2_historical_unverified") is True:
@@ -613,14 +622,17 @@ _COMPOUND_ARCHIVE_EXTENSIONS = frozenset(
 
 def _extract_artifact_suffix(artifact: Any) -> str:
     """Return the file extension(s) from an artifact's URI or path."""
-    from consist.artifact import Artifact as V2Artifact
+    from consist.artifact import Artifact
 
-    if isinstance(artifact, V2Artifact):
-        candidates: tuple[str | None, ...] = tuple(
-            obs.location.uri for obs in artifact.hints if obs.location.uri
-        )
+    if isinstance(artifact, Artifact):
+        prim = artifact.primary_location
+        hint_uris = [obs.location.uri for obs in artifact.hints if obs.location.uri]
+        if prim is not None and prim.uri not in hint_uris:
+            hint_uris.insert(0, prim.uri)
+        candidates: tuple[str | None, ...] = tuple(hint_uris)
     else:
-        candidates = (artifact.container_uri, artifact.abs_path)
+        prim = artifact.primary_location
+        candidates = (prim.uri if prim is not None else None,)
     for candidate in candidates:
         if not candidate:
             continue
@@ -693,15 +705,20 @@ class ResolvedBindingBuilder:
         preserve_suffix: bool = True,
     ) -> "ResolvedBindingBuilder":
         """Bind a locally tracked artifact after deriving its trusted identity."""
-        from consist.artifact import Artifact as V2Artifact
-        from consist.core.directory_artifacts import build_directory_manifest
+        from consist.artifact import Artifact
+        from consist.core.directory_artifacts import (
+            build_directory_manifest,
+            get_validated_directory_manifest,
+        )
 
         identity = ArtifactIdentity.from_artifact(artifact)
-        manifest = artifact.meta.get("directory_manifest")
+        manifest: Any = get_validated_directory_manifest(artifact)
+        if not isinstance(manifest, Mapping) and isinstance(artifact.meta, Mapping):
+            manifest = artifact.meta.get("directory_manifest")
         if (
             identity.kind == "manifest-v1"
             and not isinstance(manifest, Mapping)
-            and isinstance(artifact, V2Artifact)
+            and isinstance(artifact, Artifact)
         ):
             located = artifact.locate()
             if located is not None and located.is_dir():

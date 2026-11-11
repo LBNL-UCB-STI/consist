@@ -29,11 +29,9 @@ from typing import (
 )
 
 from pydantic import ConfigDict, Field as PydanticField
-from sqlmodel import select
 
-from consist.core.run_ordering import recent_run_order_by
-from consist.models.artifact import Artifact
-from consist.models.run import Run, RunResult
+from consist.artifact import Artifact
+from consist.models.run import RunResult
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
@@ -203,35 +201,39 @@ def compare_with_baseline(
         return None
 
     try:
-        with tracker.db.session_scope() as session:
-            stmt = (
-                select(Run)
-                .where(Run.model_name == model_name)
-                .where(Run.status == "completed")
-                .where(Run.id != current_run_id)
-                .order_by(*recent_run_order_by())
-                .limit(1)
-            )
-            baseline_run = session.exec(stmt).first()
-            if not baseline_run:
-                return None
+        raw_candidates = tracker.find_runs(
+            model=model_name,
+            status="completed",
+            limit=5,
+        )
+        candidates = (
+            list(raw_candidates.values())
+            if isinstance(raw_candidates, Mapping)
+            else list(raw_candidates)
+        )
+        baseline_run = next(
+            (r for r in candidates if r.id != current_run_id),
+            None,
+        )
+        if not baseline_run:
+            return None
 
-            baseline_id = baseline_run.id
-            baseline_meta = baseline_run.meta or {}
-            raw_cmd_meta = baseline_meta.get("command")
-            baseline_cmd_meta: dict[str, Any] = (
-                raw_cmd_meta if isinstance(raw_cmd_meta, dict) else {}
-            )
-            baseline_command = baseline_cmd_meta.get("argv", [])
-            baseline_duration = baseline_cmd_meta.get("duration")
-            if (
-                baseline_duration is None
-                and baseline_run.ended_at
-                and baseline_run.started_at
-            ):
-                baseline_duration = (
-                    baseline_run.ended_at - baseline_run.started_at
-                ).total_seconds()
+        baseline_id = baseline_run.id
+        baseline_meta = baseline_run.meta or {}
+        raw_cmd_meta = baseline_meta.get("command")
+        baseline_cmd_meta: dict[str, Any] = (
+            dict(raw_cmd_meta) if isinstance(raw_cmd_meta, Mapping) else {}
+        )
+        baseline_command = baseline_cmd_meta.get("argv", [])
+        baseline_duration = baseline_cmd_meta.get("duration")
+        if (
+            baseline_duration is None
+            and baseline_run.ended_at
+            and baseline_run.started_at
+        ):
+            baseline_duration = (
+                baseline_run.ended_at - baseline_run.started_at
+            ).total_seconds()
     except Exception as exc:
         logger.debug("Error querying baseline run: %s", exc)
         return None
@@ -301,7 +303,10 @@ def _safe_stream_write(stream: Any, chunk: bytes) -> None:
     if stream is None or not chunk:
         return
     try:
-        buf = getattr(stream, "buffer", None)
+        try:
+            buf = stream.buffer
+        except AttributeError:
+            buf = None
         if buf is not None:
             buf.write(chunk)
             buf.flush()
@@ -533,13 +538,10 @@ def execute_command(
     # Log declared inputs
     logged_inputs: dict[str, Artifact] = {}
     for k, p in resolved_inputs.items():
-        computed_hash = tracker.identity.compute_file_checksum(p)
         art = tracker.log_artifact(
             p,
             key=k,
             direction="input",
-            content_hash=computed_hash,
-            force_hash_override=True,
         )
         logged_inputs[k] = art
 

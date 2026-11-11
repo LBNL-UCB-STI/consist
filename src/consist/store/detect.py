@@ -33,6 +33,25 @@ class ConsistError(RuntimeError):
 class IncompatibleSchemaError(ConsistError):
     """Raised when a Consist database uses an incompatible or newer schema version."""
 
+    def __init__(
+        self,
+        message_or_path: Path | str,
+        state: SchemaState | None = None,
+        message: str | None = None,
+    ) -> None:
+        if state is None and message is None:
+            self.db_path: Path | None = None
+            self.state: SchemaState | None = None
+            super().__init__(str(message_or_path))
+        else:
+            self.db_path = Path(message_or_path)
+            self.state = state
+            super().__init__(
+                message
+                if message is not None
+                else f"Cannot open database {self.db_path}: schema state is {state.value if state is not None else 'unknown'!r}"
+            )
+
 
 class SchemaState(enum.Enum):
     """Startup schema state of a Consist DuckDB database path."""
@@ -147,7 +166,7 @@ def detect_schema(db_path: Path | str) -> SchemaState:
     path = Path(db_path)
     if _migration_workdir(path).exists():
         return SchemaState.INTERRUPTED
-    if not path.exists():
+    if not path.exists() or path.stat().st_size == 0:
         return SchemaState.ABSENT
 
     # Check in-process open ledgers first so opening a 2nd Tracker in the same process

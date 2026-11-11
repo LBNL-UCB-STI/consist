@@ -130,14 +130,19 @@ def test_coupler_path_resolves_v2_artifact_with_tracker_mounts(tmp_path: Path) -
 def test_standalone_coupler_supports_unmaterialized_paths_and_existing_files(
     tmp_path: Path,
 ) -> None:
+    from consist.digest import Kind
+
     nonexistent = tmp_path / "does_not_exist.parquet"
     csv_path = tmp_path / "table.csv"
     csv_path.write_text("col1,col2\n10,20\n", encoding="utf-8")
 
     coupler = Coupler()
     r1 = coupler.set_from_artifact("out", nonexistent)
-    assert r1 == nonexistent
-    assert coupler.path("out") == nonexistent
+    assert isinstance(r1, V2Artifact)
+    assert r1.identity.anchor.kind is Kind.HISTORICAL
+    assert r1.hints[0].basis == "declared"
+    assert not nonexistent.exists()
+    assert coupler.require("out") == r1
 
     r2 = coupler.set("out", csv_path)
     assert isinstance(r2, V2Artifact)
@@ -151,6 +156,8 @@ def test_standalone_coupler_supports_unmaterialized_paths_and_existing_files(
 
 
 def test_legacy_artifact_as_df_without_tracker(tmp_path: Path) -> None:
+    from dataclasses import replace
+
     pq_path = tmp_path / "standalone.parquet"
     expected = pd.DataFrame({"id": [1, 2], "val": [3.5, 4.5]})
     expected.to_parquet(pq_path)
@@ -166,9 +173,9 @@ def test_legacy_artifact_as_df_without_tracker(tmp_path: Path) -> None:
         execution_options=ExecutionOptions(inject_context=False),
     )
     art = res.outputs["table"]
-    # Detach tracker reference to verify direct local file fallback
-    object.__setattr__(art, "_tracker", None)
-    loaded = art.as_df()
+    assert isinstance(art, V2Artifact)
+    detached = replace(art, origin=None)
+    loaded = detached.as_df()
     pd.testing.assert_frame_equal(loaded, expected)
 
 
@@ -716,3 +723,717 @@ def test_decision_d1_directory_and_compound_extensions_change_signature(
         outputs={"archive": tmp_path / "data.json.gz"},
     )
     assert res_csv_gz.run.config_hash != res_json_gz.run.config_hash
+
+
+def test_phase3_coupler_set_persists_to_store_ledger_and_snapshots(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "coupler_ledger.duckdb"
+    tracker = Tracker(run_dir=tmp_path / "runs", db_path=db_path)
+    seed_csv = tmp_path / "seed_pop.csv"
+    seed_csv.write_text("hh_id,persons\n1,3\n2,4\n", encoding="utf-8")
+
+    init_coupler = Coupler(tracker=tracker)
+    seeded_init = init_coupler.set("seed_table", seed_csv)
+    assert isinstance(seeded_init, V2Artifact)
+
+    with tracker.scenario("sc_coupler_persist", coupler=init_coupler) as sc:
+        sc_run_id = sc.run_id
+        seeded = sc.coupler.set("households", seed_csv)
+        assert isinstance(seeded, V2Artifact)
+        assert tracker.ledger is not None
+        loaded = tracker.ledger.load_artifact(seeded.id)
+        assert loaded is not None
+        assert loaded.identity.anchor == seeded.identity.anchor
+        locs = tracker.ledger.locate_current([seeded.identity.anchor])
+        assert len(locs) >= 1
+
+        synthetic_path = tmp_path / "synthetic_future.parquet"
+        hist_art = sc.coupler.set_from_artifact("future_skims", synthetic_path)
+        assert isinstance(hist_art, V2Artifact)
+        assert hist_art.identity.verifiable is False
+        assert not synthetic_path.exists()
+
+        with sc.trace("consume_coupler_step"):
+            pass
+
+    assert tracker.db is not None
+    snapshots = tracker.db.get_coupler_snapshots(scenario_run_id=sc_run_id, phase=None)
+    assert any(s.phase == "init" and s.role_key == "seed_table" for s in snapshots)
+    assert any(s.phase == "post" and s.role_key == "households" for s in snapshots)
+    tracker.close()
+
+
+def test_phase3_output_artifact_spec_and_artifact_vs_dataframe_injection(
+    tmp_path: Path,
+) -> None:
+    from consist.core.run_invocation import OutputArtifactSpec
+
+    tracker = Tracker(run_dir=tmp_path / "runs", db_path=tmp_path / "spec.duckdb")
+    out_pq = tmp_path / "out_spec.parquet"
+
+    def produce(cleaned: Path) -> None:
+        pd.DataFrame({"x": [10, 20], "y": [1.5, 2.5]}).to_parquet(cleaned, index=False)
+
+    prod_res = tracker.run(
+        fn=produce,
+        outputs={
+            "cleaned": OutputArtifactSpec(
+                path=out_pq,
+                facet={"region": "bay_area", "year": 2026},
+                facet_index=True,
+                meta={"custom_tag": "v1"},
+            )
+        },
+    )
+    art = prod_res.outputs["cleaned"]
+    assert isinstance(art, V2Artifact)
+    assert art.meta["custom_tag"] == "v1"
+    assert art.meta["facet"]["region"] == "bay_area"
+
+    seen: dict[str, object] = {}
+
+    def consume(
+        as_art: V2Artifact,
+        as_df: pd.DataFrame,
+        as_path: Path,
+        untyped,
+    ) -> None:
+        seen["as_art"] = as_art
+        seen["as_df"] = as_df
+        seen["as_path"] = as_path
+        seen["untyped"] = untyped
+
+    tracker.run(
+        fn=consume,
+        inputs={
+            "as_art": art,
+            "as_df": art,
+            "as_path": art,
+            "untyped": art,
+        },
+    )
+    assert isinstance(seen["as_art"], V2Artifact)
+    assert isinstance(seen["as_df"], pd.DataFrame)
+    assert list(seen["as_df"]["x"]) == [10, 20]
+    assert isinstance(seen["as_path"], Path)
+    assert seen["as_path"] == out_pq.resolve()
+    assert isinstance(seen["untyped"], V2Artifact)
+    tracker.close()
+
+
+def test_phase3_trace_cache_hit_preserves_outputs_and_validates_policy(
+    tmp_path: Path,
+) -> None:
+    tracker = Tracker(run_dir=tmp_path / "runs", db_path=tmp_path / "trace_hit.duckdb")
+    in_csv = tmp_path / "in.csv"
+    in_csv.write_text("v\n1\n2\n", encoding="utf-8")
+    out_pq = tmp_path / "trace_out.parquet"
+    exec_count = 0
+
+    with tracker.trace(
+        "trace_step",
+        inputs={"raw": in_csv},
+        outputs={"out": out_pq},
+        config={"factor": 3},
+    ) as t1:
+        assert not t1.is_cached
+        exec_count += 1
+        pd.DataFrame({"v": [3, 6]}).to_parquet(out_pq, index=False)
+
+    assert exec_count == 1
+    assert tracker.last_run is not None
+    assert tracker.last_run.run.status == "completed"
+    first_out_id = tracker.last_run.outputs[0].id
+
+    # Second identical trace hits cache cleanly and preserves outputs
+    with tracker.trace(
+        "trace_step",
+        inputs={"raw": in_csv},
+        outputs={"out": out_pq},
+        config={"factor": 3},
+    ) as t2:
+        assert t2.is_cached
+        assert t2.current_consist is not None
+        assert [a.id for a in t2.current_consist.outputs] == [first_out_id]
+
+    # Delete cached output on disk: lazy hits cache, eager misses and re-executes
+    out_pq.unlink()
+    with tracker.trace(
+        "trace_step",
+        inputs={"raw": in_csv},
+        outputs={"out": out_pq},
+        config={"factor": 3},
+        validate_cached_outputs="lazy",
+    ) as t3:
+        assert t3.is_cached
+
+    with tracker.trace(
+        "trace_step",
+        inputs={"raw": in_csv},
+        outputs={"out": out_pq},
+        config={"factor": 3},
+        validate_cached_outputs="eager",
+    ) as t4:
+        assert not t4.is_cached
+        exec_count += 1
+        pd.DataFrame({"v": [3, 6]}).to_parquet(out_pq, index=False)
+
+    assert exec_count == 2
+    tracker.close()
+
+
+def test_phase3_query_df_query_rows_deprecated_views_and_dbless_log_dataframe(
+    tmp_path: Path,
+) -> None:
+    from dataclasses import dataclass
+    from pydantic import BaseModel
+    from sqlmodel import Field, SQLModel
+
+    class TripSchema(SQLModel, table=True):
+        __tablename__ = "phase3_trip_schema"
+        trip_id: int = Field(primary_key=True)
+        miles: float
+
+    # 1. DB-less log_dataframe(..., schema=...) attaches schema metadata in memory without raising
+    dbless_tracker = Tracker(run_dir=tmp_path / "dbless_runs")
+    with dbless_tracker.start_run("dbless_df_run", model="demo"):
+        df_art = dbless_tracker.log_dataframe(
+            pd.DataFrame({"trip_id": [1, 2], "miles": [4.5, 9.0]}),
+            key="trips",
+            schema=TripSchema,
+        )
+        assert isinstance(df_art, V2Artifact)
+        assert df_art.meta["schema_name"] == "TripSchema"
+        loaded_df = df_art.as_df()
+        assert list(loaded_df["trip_id"]) == [1, 2]
+
+    # 2. StoreLedger query_df / query_rows + deprecation stubs
+    tracker = Tracker(run_dir=tmp_path / "runs", db_path=tmp_path / "queries.duckdb")
+    with tracker.start_run(
+        "q_run_1",
+        model="sim",
+        config={"alpha": 7},
+        facet={"alpha": 7},
+        facet_index=True,
+    ):
+        pass
+
+    @dataclass(frozen=True)
+    class _ParamSQL:
+        sql: str
+        params: tuple[object, ...]
+
+    class _RunProjection(BaseModel):
+        id: str
+        model_name: str
+
+    df_res = tracker.query_df(
+        "SELECT id, model_name FROM main.run WHERE id = ?",
+        ["q_run_1"],
+    )
+    assert list(df_res["id"]) == ["q_run_1"]
+
+    rows_res = tracker.query_rows(
+        _ParamSQL(
+            sql="SELECT id, model_name FROM main.run WHERE model_name = ?",
+            params=("sim",),
+        ),
+        model=_RunProjection,
+    )
+    assert len(rows_res) == 1
+    assert rows_res[0].id == "q_run_1"
+
+    with pytest.raises(ValueError, match="SELECT"):
+        tracker.query_df("DELETE FROM main.run")
+
+    with pytest.raises(ConsistError, match="create_view"):
+        tracker.register_views()
+    with pytest.raises(ConsistError, match="create_view"):
+        tracker.view("trips")
+
+    tracker.close()
+
+
+def test_phase3_dlt_ingest_records_ctd1_and_db_location_without_meta_pollution(
+    tmp_path: Path,
+) -> None:
+    from sqlmodel import Field, SQLModel
+
+    class HouseholdRow(SQLModel, table=True):
+        __tablename__ = "phase3_households"
+        hh_id: int = Field(primary_key=True)
+        income: int
+
+    tracker = Tracker(run_dir=tmp_path / "runs", db_path=tmp_path / "ingest.duckdb")
+    pq_file = tmp_path / "households.parquet"
+    pd.DataFrame({"hh_id": [1, 2], "income": [50000, 80000]}).to_parquet(
+        pq_file, index=False
+    )
+
+    with tracker.start_run("ingest_run", model="ingest_demo"):
+        art = tracker.log_artifact(pq_file, key="phase3_households", direction="output")
+        ingested = tracker.ingest(art, schema=HouseholdRow)
+        assert isinstance(ingested, V2Artifact)
+        assert "_dlt_table_name" not in ingested.meta
+        assert "dlt_table_name" not in ingested.meta
+        assert "is_ingested" not in ingested.meta
+        assert ingested.is_ingested is True
+        assert any(
+            d.scheme == "ctd1:sha256"
+            for d in (ingested.identity.anchor, *ingested.identity.claims)
+        )
+        assert any(
+            h.location.uri == "db://global_tables/phase3_households"
+            for h in ingested.hints
+        )
+
+    assert tracker.ledger is not None
+    db_locs = tracker.ledger.locate_current([ingested.identity.anchor])
+    assert any(r["uri"] == "db://global_tables/phase3_households" for r in db_locs)
+    df_hot = tracker.query_df(
+        "SELECT hh_id, income FROM global_tables.phase3_households ORDER BY hh_id"
+    )
+    assert list(df_hot["hh_id"]) == [1, 2]
+    tracker.close()
+
+
+def test_phase3_auto_migrate_and_ibis_cursor_isolation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import duckdb
+    from consist.integrations.ibis import ibis_connection
+    from consist.store.detect import DatabaseMigrationRequired
+    from tests.helpers.v1_db_builder import create_v1_schema
+
+    v1_db = tmp_path / "legacy_v1.duckdb"
+    with duckdb.connect(str(v1_db)) as con:
+        create_v1_schema(con)
+
+    # Default opens raise DatabaseMigrationRequired
+    with pytest.raises(DatabaseMigrationRequired):
+        Tracker(run_dir=tmp_path / "runs1", db_path=v1_db)
+
+    # read_only=True always raises DatabaseMigrationRequired even if auto_migrate=True
+    with pytest.raises(DatabaseMigrationRequired):
+        Tracker(
+            run_dir=tmp_path / "runs2",
+            db_path=v1_db,
+            read_only=True,
+            auto_migrate=True,
+        )
+
+    # auto_migrate="quick" via CONSIST_AUTO_MIGRATE env var upgrades cleanly to Schema v2
+    monkeypatch.setenv("CONSIST_AUTO_MIGRATE", "quick")
+    tracker = Tracker(run_dir=tmp_path / "runs3", db_path=v1_db)
+    assert tracker.ledger is not None
+
+    try:
+        import ibis as _ibis  # noqa: F401
+    except ImportError:
+        tracker.close()
+        return
+
+    backend = ibis_connection(tracker)
+    backend.disconnect()
+    # Disconnecting the Ibis backend closes only the cloned cursor, not StoreLedger's connection!
+    check_df = tracker.query_df("SELECT 1 AS ok")
+    assert int(check_df.iloc[0]["ok"]) == 1
+    tracker.close()
+
+
+def test_phase3_runset_snapshot_output_sets_and_command_exec(
+    tmp_path: Path,
+) -> None:
+    import sys
+    from consist.core.output_sets import OutputSet
+    from consist.core.run_options import ExecutionOptions
+    from consist.runset import RunSet
+
+    tracker = Tracker(
+        run_dir=tmp_path / "runs", db_path=tmp_path / "phase3_full.duckdb"
+    )
+
+    for yr, seed in ((2025, 1), (2030, 2)):
+        tracker.run(
+            fn=lambda: None,
+            name=f"sim_{yr}",
+            model="sim_model",
+            year=yr,
+            config={"seed": seed, "scenario_tag": "baseline"},
+            facet={"seed": seed, "scenario_tag": "baseline"},
+            facet_index=True,
+        )
+
+    rs = RunSet.from_query(tracker, label="base", model="sim_model")
+    assert len(rs) == 2
+    assert list(rs.filter(seed=2).runs[0].id for _ in [0]) == [
+        rs.filter(year=2030)[0].id
+    ]
+    frame = rs.to_frame()
+    assert set(frame["seed"].tolist()) == {1, 2}
+
+    def emit_set(ctx) -> None:
+        out_dir = ctx.run_dir / "annual"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "annual_2025.csv").write_text("y,v\n2025,10\n", encoding="utf-8")
+        (out_dir / "annual_2030.csv").write_text("y,v\n2030,20\n", encoding="utf-8")
+
+    set_res = tracker.run(
+        fn=emit_set,
+        output_sets={"annual": OutputSet(root="annual", include="annual_*.csv")},
+        execution_options=ExecutionOptions(inject_context="ctx"),
+    )
+    parent = set_res.outputs["annual"]
+    assert parent.path.is_dir()
+    children = tracker.get_child_artifacts(parent)
+    assert len(children) == 2
+
+    cmd_out = tmp_path / "cmd_out.txt"
+    exec_res = tracker.exec(
+        name="cmd_step",
+        argv=[
+            sys.executable,
+            "-c",
+            f"from pathlib import Path; Path({str(cmd_out)!r}).write_text('done\\n')",
+        ],
+        outputs={"out": cmd_out},
+        stream_output=False,
+    )
+    assert exec_res.run is not None
+    assert exec_res.run.status == "completed"
+    assert exec_res.outputs["out"].path.read_text(encoding="utf-8") == "done\n"
+
+    snap_dest = tmp_path / "snapshots" / "backup.duckdb"
+    snapped = tracker.snapshot_db(snap_dest)
+    assert snapped.exists()
+    ro_tracker = Tracker(run_dir=tmp_path / "runs_ro", db_path=snapped, read_only=True)
+    assert len(ro_tracker.find_runs(model="sim_model")) == 2
+    ro_tracker.close()
+    tracker.close()
+
+
+def test_phase3_audit_artifact_kv_and_dbless_facet_runset_types(
+    tmp_path: Path,
+) -> None:
+    """Audit A.1 & A.8: artifact_kv queries work without value_json and DB-less RunSet keeps int vs float."""
+    tracker = Tracker(run_dir=tmp_path / "runs", db_path=tmp_path / "ledger.duckdb")
+    csv_path = tmp_path / "runs" / "metrics.csv"
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    csv_path.write_text("a,b\n1,2\n", encoding="utf-8")
+
+    with tracker.start_run("kv_run", model="kv_model"):
+        art = tracker.log_artifact(
+            csv_path,
+            key="metrics",
+            direction="output",
+            facet={"year": 2030, "ratio": 0.25, "flag": True, "label": "v1"},
+            facet_index=True,
+        )
+
+    assert tracker.db is not None
+    kv_rows = tracker.db.get_artifact_kv(art.id)
+    assert {r.key_path for r in kv_rows} >= {"year", "ratio", "flag", "label"}
+    bulk = tracker.db.get_artifact_kv_values_bulk(
+        artifact_ids=[art.id],
+        key_paths=["year", "ratio", "label"],
+    )
+    assert bulk[art.id]["year"]["value"] == 2030
+    assert bulk[art.id]["ratio"]["value"] == 0.25
+    assert bulk[art.id]["label"]["value"] == "v1"
+    tracker.close()
+
+    # DB-less Tracker (db_path=None): persist_facet populates run.meta["facet"] and RunSet preserves int
+    dbless = Tracker(run_dir=tmp_path / "runs_dbless", db_path=None)
+    res1 = dbless.run(
+        fn=lambda: None,
+        name="step_1",
+        model="dbless_m",
+        facet={"seed": 42, "lr": 0.05},
+    )
+    res2 = dbless.run(
+        fn=lambda: None,
+        name="step_2",
+        model="dbless_m",
+        facet={"seed": 99, "lr": 0.1},
+    )
+    assert res1.run.meta.get("facet") == {"seed": 42, "lr": 0.05}
+    from consist.runset import RunSet
+
+    rs = RunSet(runs=[res1.run, res2.run], label="dbless", _tracker=dbless)
+    filtered = rs.filter(seed=42)
+    assert [r.id for r in filtered.runs] == [res1.run.id]
+    by_seed = rs.split_by("seed")
+    assert list(by_seed.keys()) == [42, 99]
+    assert all(type(k) is int for k in by_seed.keys())
+    facet_vals = rs._load_facet_values(["seed", "lr"])
+    assert type(facet_vals[res1.run.id]["seed"]) is int
+    assert facet_vals[res1.run.id]["seed"] == 42
+    assert type(facet_vals[res1.run.id]["lr"]) is float
+
+
+def test_phase3_audit_primary_location_ingest_db_hydration_and_archive_move(
+    tmp_path: Path,
+) -> None:
+    """Audit A.2, A.4, A.5, A.7, A.11, A.12: canonical URI priority, DB recovery, archive move, JSON reload."""
+    import json
+    from consist.models.run import ConsistRecord
+    from consist.types import ExecutionOptions
+
+    run_dir = tmp_path / "workspace"
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    tracker = Tracker(
+        run_dir=run_dir,
+        db_path=tmp_path / "ledger.duckdb",
+        mounts={},
+        archive_mounts={"cold_archive": str(archive_dir)},
+    )
+
+    with tracker.start_run("prod_ingested", model="m"):
+        p_file = run_dir / "trips.parquet"
+        p_file.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"trip_id": [1, 2], "dist": [3.5, 7.0]}).to_parquet(
+            p_file, index=False
+        )
+        out_art = tracker.log_artifact(p_file, key="trips", direction="output")
+
+    # Post-hoc ingest updates Coupler + last_run consist.json and preserves workspace:// primary_location
+    coupler = Coupler(tracker=tracker)
+    coupler.set("trips", out_art)
+    ingested_art = tracker.ingest(out_art)
+    assert coupler.require("trips").is_ingested is True
+    assert ingested_art.primary_location is not None
+    assert ingested_art.primary_location.uri.startswith("workspace://")
+
+    run_json_path = run_dir / "consist_runs" / "prod_ingested.json"
+    reloaded_rec = ConsistRecord.model_validate_json(
+        run_json_path.read_text(encoding="utf-8")
+    )
+    assert reloaded_rec.outputs[0].is_ingested is True
+
+    # ConsistRecord JSON reload when "locations" is empty and "origin" is present still preserves container_uri
+    raw_payload = json.loads(run_json_path.read_text(encoding="utf-8"))
+    raw_payload["outputs"][0]["locations"] = []
+    reloaded_empty_locs = ConsistRecord.model_validate(raw_payload)
+    assert reloaded_empty_locs.outputs[0].primary_location is not None
+    assert reloaded_empty_locs.outputs[0].primary_location.uri.startswith(
+        "workspace://"
+    )
+
+    # Delete cold parquet file on disk; primary_location stays workspace:// so hydrate_run_outputs recovers from DB!
+    p_file.unlink()
+    reloaded_from_db = tracker.get_artifact(ingested_art.id)
+    assert reloaded_from_db is not None
+    assert reloaded_from_db.primary_location is not None
+    assert reloaded_from_db.primary_location.uri.startswith("workspace://")
+
+    hydrated = tracker.hydrate_run_outputs(
+        "prod_ingested",
+        target_root=run_dir / "recovered_ws",
+    )
+    assert hydrated["trips"].status == "materialized_from_db"
+    assert hydrated["trips"].path is not None and hydrated["trips"].path.exists()
+
+    # Requested input staging of ingested missing-on-disk parquet succeeds without false sha256:file mismatch
+    staged_dest = run_dir / "staged_inputs" / "trips.parquet"
+
+    def _consume_staged() -> None:
+        assert staged_dest.exists()
+        df_back = pd.read_parquet(staged_dest)
+        assert list(df_back["trip_id"]) == [1, 2]
+
+    tracker.run(
+        fn=_consume_staged,
+        name="consume_ingested_staged",
+        inputs={"trips": reloaded_from_db},
+        execution_options=ExecutionOptions(
+            input_materialization="requested",
+            input_paths={"trips": staged_dest},
+        ),
+    )
+
+    # Archive move preserves workspace:// primary_location and Artifact.locate(mounts=tracker.mounts) still finds archive!
+    with tracker.start_run("prod_arch", model="m_arch"):
+        f_arch = run_dir / "sub" / "report.txt"
+        f_arch.parent.mkdir(parents=True, exist_ok=True)
+        f_arch.write_text("archived payload\n", encoding="utf-8")
+        arch_art = tracker.log_artifact(f_arch, key="report", direction="output")
+
+    tracker.archive_run_outputs("prod_arch", archive_dir, mode="move")
+    assert not f_arch.exists()
+    arch_reloaded = tracker.get_artifact(arch_art.id)
+    assert arch_reloaded is not None
+    arch_reloaded.bind_tracker(tracker)
+    assert arch_reloaded.primary_location is not None
+    assert arch_reloaded.primary_location.uri.startswith("workspace://")
+    located_arch = arch_reloaded.locate(mounts=tracker.mounts)
+    assert located_arch is not None and located_arch.exists()
+    tracker.close()
+
+    # Read-only StoreLedger rejects dlt ingestion with PermissionError (and Tracker read_only rejects via RuntimeError)
+    from consist.integrations.dlt_loader import ingest_artifact
+
+    ro_tracker = Tracker(
+        run_dir=run_dir, db_path=tmp_path / "ledger.duckdb", read_only=True
+    )
+    with pytest.raises(RuntimeError, match="read_only"):
+        ro_tracker.ingest(ingested_art, data=[{"trip_id": 3, "dist": 1.0}])
+    assert ro_tracker.ledger is not None
+    ro_run = ro_tracker.get_run("prod_ingested")
+    assert ro_run is not None
+    with pytest.raises(PermissionError, match="read-only"):
+        ingest_artifact(
+            ingested_art,
+            ro_run,
+            data_iterable=[{"trip_id": 3, "dist": 1.0}],
+            ledger=ro_tracker.ledger,
+        )
+    ro_tracker.close()
+
+
+def test_phase3_audit_identity_domain_separation_directory_hydration_and_zero_byte_db(
+    tmp_path: Path,
+) -> None:
+    """Audit A.3, A.6, A.9, A.10, A.14, B.1: strict scheme separation, dir manifest hydration, 0-byte DB, seal tx, lazy imports."""
+    import subprocess
+    import sys
+    import uuid
+    from consist.artifact import Artifact
+    from consist.core.identity import CodeIdentityDescriptor, IdentityManager
+    from consist.core.resolved_binding import ArtifactIdentity, ResolvedBindingBuilder
+    from consist.core.run_resolution import InputBindingRole
+    from consist.digest import Digest, Identity
+    from consist.engine import seal
+    from consist.store.detect import IncompatibleSchemaError, SchemaState, detect_schema
+    from consist.store.ledger import StoreLedger
+
+    # 1. Zero-byte DB handling
+    empty_db = tmp_path / "zero_byte.duckdb"
+    empty_db.touch()
+    assert empty_db.stat().st_size == 0
+    assert detect_schema(empty_db) is SchemaState.ABSENT
+    with pytest.raises(IncompatibleSchemaError, match="0-byte"):
+        StoreLedger(empty_db, read_only=True)
+    rw_ledger = StoreLedger(empty_db, read_only=False)
+    assert rw_ledger.schema_state is SchemaState.V2
+    rw_ledger.close()
+
+    # 2. ArtifactIdentity.from_artifact domain separation (even with identical 64-char hex)
+    ctd_art = Artifact(
+        id=uuid.uuid4(),
+        key="tbl",
+        driver="parquet",
+        identity=Identity(anchor=Digest("ctd1:sha256", "a" * 64)),
+    )
+    blake_art = Artifact(
+        id=uuid.uuid4(),
+        key="raw",
+        driver="csv",
+        identity=Identity(anchor=Digest("blake3:file", "a" * 64)),
+    )
+    sha_art = Artifact(
+        id=uuid.uuid4(),
+        key="raw_sha",
+        driver="csv",
+        identity=Identity(anchor=Digest("sha256:file", "a" * 64)),
+    )
+    with pytest.raises(ValueError, match="Unsupported strict-binding identity scheme"):
+        ArtifactIdentity.from_artifact(ctd_art)
+    with pytest.raises(ValueError, match="Unsupported strict-binding identity scheme"):
+        ArtifactIdentity.from_artifact(blake_art)
+    assert str(ArtifactIdentity.from_artifact(sha_art)) == f"sha256:file:{'a' * 64}"
+
+    idm = IdentityManager(project_root=str(tmp_path))
+    code_desc = CodeIdentityDescriptor(version=1, mode="repo_git", digest="c" * 64)
+    role_0 = [InputBindingRole(kind="named", role="inp", input_index=0)]
+    act_ctd = idm.compute_action_input_identity(
+        inputs=[ctd_art], binding_roles=role_0, code_identity=code_desc
+    )
+    act_blake = idm.compute_action_input_identity(
+        inputs=[blake_art], binding_roles=role_0, code_identity=code_desc
+    )
+    act_sha = idm.compute_action_input_identity(
+        inputs=[sha_art], binding_roles=role_0, code_identity=code_desc
+    )
+    assert act_ctd.bindings[0].value == f"ctd1:sha256:{'a' * 64}"
+    assert act_blake.bindings[0].value == f"blake3:file:{'a' * 64}"
+    assert act_sha.bindings[0].value == f"sha256:file:{'a' * 64}"
+    assert len({act_ctd.value, act_blake.value, act_sha.value}) == 3
+
+    # 3. Directory manifest hydration + ResolvedBindingBuilder.bind_tracked_artifact + seal() inside transaction + dotted facets
+    tracker = Tracker(run_dir=tmp_path / "ws", db_path=tmp_path / "dir_test.duckdb")
+    zarr_dir = tmp_path / "ws" / "bundle_dir"
+    zarr_dir.mkdir(parents=True, exist_ok=True)
+    (zarr_dir / "part_0.txt").write_text("hello\n", encoding="utf-8")
+    (zarr_dir / "part_1.txt").write_text("world\n", encoding="utf-8")
+
+    with tracker.start_run(
+        "dir_run",
+        model="dir_m",
+        facet={"a.b": {"c.d": 7}, "top.dot": 11, "str_num": "7"},
+    ):
+        dir_art = tracker.log_artifact(zarr_dir, key="bundle", direction="output")
+        # Exercise engine.seal() multi-output occurrence_index inside active ledger
+        extra_p = tmp_path / "ws" / "extra.txt"
+        extra_p.write_text("extra\n", encoding="utf-8")
+        assert tracker.ledger is not None
+        sealed = seal(
+            {"extra": extra_p},
+            ledger=tracker.ledger,
+            run_id="dir_run",
+        )
+        assert "extra" in sealed
+
+    assert tracker.ledger is not None
+    # Literal dotted keys in nested & top-level facet filters + numeric value_type guard
+    matched_runs = tracker.ledger.find_runs(
+        model="dir_m",
+        facet={"a.b": {"c.d": 7}, "top.dot": 11},
+    )
+    assert [r.id for r in matched_runs] == ["dir_run"]
+    assert tracker.ledger.find_runs(model="dir_m", facet={"str_num": 7}) == []
+
+    # Hydrate directory artifact to new workspace and verify detached artifact preserves directory_manifest
+    import shutil
+
+    hyd_dir = tracker.hydrate_run_outputs(
+        "dir_run", target_root=tmp_path / "ws" / "hydrated_dir_ws"
+    )
+    assert hyd_dir["bundle"].status == "materialized_directory_from_filesystem"
+    detached_dir = hyd_dir["bundle"].artifact
+    assert "directory_manifest" in detached_dir.meta
+
+    # Even after cold directory is removed on disk, ResolvedBindingBuilder resolves directory_manifest from StoreLedger content_manifest
+    shutil.rmtree(zarr_dir)
+    reloaded_dir = tracker.get_artifact(dir_art.id)
+    assert reloaded_dir is not None
+    assert "directory_manifest" not in reloaded_dir.meta
+    binding = (
+        ResolvedBindingBuilder(
+            step_name="consume_dir",
+            step_contract_identity=f"sha256:step-v1:{'d' * 64}",
+        )
+        .bind_tracked_artifact(parameter="bundle", artifact=reloaded_dir)
+        .freeze()
+    )
+    assert binding.inputs["bundle"].artifact.directory_manifest is not None
+    tracker.close()
+
+    # 4. Lazy heavy optional imports in dlt_loader
+    lazy_check = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys, consist.integrations.dlt_loader; "
+                "loaded = [m for m in ('zarr', 'xarray', 'h5py', 'geopandas') if m in sys.modules]; "
+                "assert not loaded, f'Eagerly imported: {loaded}'"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert lazy_check.returncode == 0, lazy_check.stderr

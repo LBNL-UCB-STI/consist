@@ -7,16 +7,40 @@ from typing import (
     Mapping,
     Optional,
     Protocol,
+    Sequence,
     TYPE_CHECKING,
+    TypeVar,
+    Union,
     runtime_checkable,
 )
 
-from consist.types import ArtifactRef
-from consist.types import OutputPathRef
-from consist.types import OutputSet
+from consist.types import (
+    ArtifactRef,
+    OutputArtifactSpec,
+    OutputPathRef,
+    OutputSet,
+)
 
 if TYPE_CHECKING:
+    import pandas as pd
+
+    from consist.artifact import Artifact
+    from consist.location import Location
     from consist.models.run import Run
+    from consist.store.ledger import StoreLedger
+
+_RowModelT = TypeVar("_RowModelT")
+
+
+@runtime_checkable
+class ParameterizedSQLProtocol(Protocol):
+    """Structural protocol for parameterized DuckDB SQL query objects."""
+
+    @property
+    def sql(self) -> str: ...
+
+    @property
+    def params(self) -> Sequence[Any]: ...
 
 
 @runtime_checkable
@@ -25,7 +49,10 @@ class ArtifactLike(Protocol):
     def path(self) -> Path: ...
 
     @property
-    def container_uri(self) -> str: ...
+    def primary_location(self) -> Optional["Location"]: ...
+
+    @property
+    def member(self) -> Optional[str]: ...
 
 
 @runtime_checkable
@@ -33,7 +60,7 @@ class ArtifactRecordLike(ArtifactLike, Protocol):
     """
     Structural type for persisted Consist artifact records.
 
-    ``ArtifactLike`` is the narrow path/container contract used by lightweight
+    ``ArtifactLike`` is the narrow path/location contract used by lightweight
     integrations. This richer protocol captures the stable fields expected by
     loaders, identity helpers, and schema-aware workflows.
     """
@@ -45,10 +72,7 @@ class ArtifactRecordLike(ArtifactLike, Protocol):
     def key(self) -> str: ...
 
     @property
-    def table_path(self) -> Optional[str]: ...
-
-    @property
-    def array_path(self) -> Optional[str]: ...
+    def hash(self) -> str: ...
 
     @property
     def meta(self) -> Mapping[str, Any]: ...
@@ -56,13 +80,32 @@ class ArtifactRecordLike(ArtifactLike, Protocol):
     @property
     def driver(self) -> str: ...
 
+
+@runtime_checkable
+class LedgerProviderLike(Protocol):
+    """Protocol for persistence services exposing a single `StoreLedger`."""
+
     @property
-    def abs_path(self) -> Optional[str]: ...
+    def ledger(self) -> Optional["StoreLedger"]: ...
+
+    def query_df(
+        self,
+        sql: Union[str, ParameterizedSQLProtocol],
+        params: Optional[Union[Sequence[Any], Mapping[str, Any]]] = None,
+    ) -> "pd.DataFrame": ...
+
+    def query_rows(
+        self,
+        sql: Union[str, ParameterizedSQLProtocol],
+        params: Optional[Union[Sequence[Any], Mapping[str, Any]]] = None,
+        *,
+        model: type[_RowModelT],
+    ) -> list[_RowModelT]: ...
 
 
 @runtime_checkable
 class RunResultLike(Protocol):
-    outputs: Mapping[str, ArtifactLike]
+    outputs: Mapping[str, "Artifact"]
     cache_hit: bool
 
 
@@ -78,7 +121,12 @@ class ScenarioLike(Protocol):
         fn: Optional[Callable[..., object]] = None,
         name: Optional[str] = None,
         *,
-        outputs: Optional[list[str]] = None,
+        outputs: Optional[
+            Union[
+                list[str],
+                Mapping[str, Union[OutputPathRef, OutputArtifactSpec, OutputSet]],
+            ]
+        ] = None,
         output_paths: Optional[Mapping[str, OutputPathRef]] = None,
         output_sets: Optional[Mapping[str, OutputSet]] = None,
         runtime_kwargs: Optional[Mapping[str, object]] = None,
@@ -91,16 +139,19 @@ class ScenarioLike(Protocol):
 
 @runtime_checkable
 class TrackerLike(Protocol):
+    @property
+    def ledger(self) -> Optional["StoreLedger"]: ...
+
     def log_output(
         self, path: ArtifactRef, key: Optional[str] = None, **metadata: object
-    ) -> ArtifactLike: ...
+    ) -> "Artifact": ...
 
     def log_input(
         self, path: ArtifactRef, key: Optional[str] = None, **metadata: object
-    ) -> ArtifactLike: ...
+    ) -> "Artifact": ...
 
     def log_artifacts(
         self, outputs: Mapping[str, ArtifactRef], **metadata: object
-    ) -> Mapping[str, ArtifactLike]: ...
+    ) -> Mapping[str, "Artifact"]: ...
 
     def scenario(self, name: str, **kwargs: object) -> ScenarioLike: ...

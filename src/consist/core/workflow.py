@@ -26,7 +26,7 @@ from typing import (
     Tuple,
 )
 
-from consist.models.artifact import Artifact, set_tracker_ref
+from consist.artifact import Artifact
 from consist.models.run import (
     ConsistRecord,
     RunResult,
@@ -58,11 +58,12 @@ from consist.core.resolved_binding import (
     step_contract_identity,
 )
 from consist.core.run_invocation import (
+    infer_dataframe_annotated_parameters,
     infer_path_annotated_parameters,
     resolve_run_invocation,
 )
 from consist.core.run_options import resolve_trace_output_policy
-from consist.digest import normalize_json
+from consist.digest import _LegacyModelDictable, _ModelDumpable, normalize_json
 from consist.types import (
     ArtifactRef,
     BindingResult,
@@ -957,13 +958,20 @@ class ScenarioContext:
                 phase="init", run_id=self.run_id, step_ordinal=0
             )
 
+    def _bind_artifact_to_tracker(self, art: Artifact) -> Artifact:
+        if art.origin is None and self.tracker.ledger is not None:
+            art = replace(art, origin=self.tracker.ledger.ref)
+        art.bind_tracker(self.tracker)
+        return art
+
     def _classify_coupler_artifact_scheme(
         self,
         artifact: Artifact,
         effective_remappable_schemes: Mapping[str, Path],
     ) -> Literal["workspace_managed", "external_mount"]:
         """Classify artifact container URI as workspace-managed or external mount."""
-        uri = artifact.container_uri
+        prim = artifact.primary_location
+        uri = prim.uri if prim is not None else ""
         if not uri:
             return "workspace_managed"
         if "://" not in uri:
@@ -997,17 +1005,13 @@ class ScenarioContext:
         validate_content_hash: Literal["never", "if-present", "always"],
     ) -> MaterializedArtifact:
         """Check for local artifact presence or recover into tracker.run_dir."""
-        existing_path: Optional[Path] = None
-        try:
-            candidate = Path(self.tracker.resolve_uri(art.container_uri))
-            if candidate.exists():
-                existing_path = candidate
-        except (ValueError, RuntimeError, OSError, TypeError):
-            pass
-
-        if existing_path is None and art.abs_path:
+        existing_path: Optional[Path] = art.locate(
+            ledger=self.tracker.ledger,
+            mounts=self.tracker.mounts,
+        )
+        if existing_path is None and art.primary_location is not None:
             try:
-                candidate = Path(art.abs_path)
+                candidate = Path(self.tracker.resolve_uri(art.primary_location.uri))
                 if candidate.exists():
                     existing_path = candidate
             except (ValueError, RuntimeError, OSError, TypeError):
@@ -1015,10 +1019,9 @@ class ScenarioContext:
 
         if existing_path is not None:
             resolved_existing = existing_path.resolve()
-            detached = art.model_copy(deep=True)
-            detached.abs_path = str(resolved_existing)
+            bound_existing = self._bind_artifact_to_tracker(art)
             return MaterializedArtifact(
-                artifact=detached,
+                artifact=bound_existing,
                 key=key,
                 path=resolved_existing,
                 source_path=None,
@@ -1040,10 +1043,9 @@ class ScenarioContext:
                 scheme_prefixes=effective_remappable_schemes,
             )
 
-        detached_missing = art.model_copy(deep=True)
-        detached_missing.abs_path = None
+        bound_missing = self._bind_artifact_to_tracker(art)
         return MaterializedArtifact(
-            artifact=detached_missing,
+            artifact=bound_missing,
             key=key,
             path=None,
             source_path=None,
@@ -1196,9 +1198,12 @@ class ScenarioContext:
 
         if target_root is None and not prune_unrecoverable:
             if artifacts:
-                for art in artifacts.values():
-                    set_tracker_ref(art, self.tracker)
-                self.coupler.update(artifacts)
+                bound_map = {
+                    k: self._bind_artifact_to_tracker(art)
+                    for k, art in artifacts.items()
+                }
+                self.coupler.update(bound_map)
+                artifacts = bound_map
             if restored_step_ordinal > 0:
                 if phase == "pre":
                     effective_ordinal = max(0, restored_step_ordinal - 1)
@@ -1266,15 +1271,19 @@ class ScenarioContext:
                 art, effective_remappable_schemes
             )
             if scheme_classification == "external_mount":
-                set_tracker_ref(art, self.tracker)
-                restored_artifacts[key] = art
-                self.coupler.set(key, art)
+                bound_art = self._bind_artifact_to_tracker(art)
+                restored_artifacts[key] = bound_art
+                self.coupler.set(key, bound_art)
+                located_ext = bound_art.locate(
+                    ledger=self.tracker.ledger,
+                    mounts=self.tracker.mounts,
+                )
                 outcomes[key] = MaterializedArtifact(
-                    artifact=art,
+                    artifact=bound_art,
                     key=key,
-                    path=art.as_path(self.tracker),
+                    path=located_ext,
                     source_path=None,
-                    target_path=art.as_path(self.tracker),
+                    target_path=located_ext,
                     status="preserved_existing",
                     resolvable=True,
                 )
@@ -1305,11 +1314,10 @@ class ScenarioContext:
 
             if outcome.resolvable:
                 hydrated_art = outcome.artifact
-                if outcome.path is not None:
-                    hydrated_art.abs_path = str(outcome.path)
-                meta = dict(hydrated_art.meta or {})
+                meta = dict(hydrated_art.meta)
 
-                uri = hydrated_art.container_uri
+                prim = hydrated_art.primary_location
+                uri = prim.uri if prim is not None else ""
                 if (
                     not uri
                     or uri.startswith("workspace://")
@@ -1332,8 +1340,8 @@ class ScenarioContext:
                 )
                 if recovery_roots or "recovery_roots" in meta:
                     meta["recovery_roots"] = recovery_roots
-                hydrated_art.meta = meta
-                set_tracker_ref(hydrated_art, self.tracker)
+                hydrated_art = hydrated_art.with_meta(meta, merge=False)
+                hydrated_art = self._bind_artifact_to_tracker(hydrated_art)
 
                 restored_artifacts[key] = hydrated_art
                 self.coupler.set(key, hydrated_art)
@@ -1343,8 +1351,7 @@ class ScenarioContext:
                         self.coupler.pop(key, None)
                     pruned_keys_list.append(key)
                 else:
-                    unresolvable_art = outcome.artifact
-                    set_tracker_ref(unresolvable_art, self.tracker)
+                    unresolvable_art = self._bind_artifact_to_tracker(outcome.artifact)
                     restored_artifacts[key] = unresolvable_art
                     self.coupler.set(key, unresolvable_art)
 
@@ -1393,9 +1400,10 @@ class ScenarioContext:
         if result is None:
             return None
         matched_run_id, matched_ordinal, artifacts = result
-        for art in artifacts.values():
-            set_tracker_ref(art, self.tracker)
-        return (matched_run_id, matched_ordinal, artifacts)
+        bound_artifacts = {
+            k: self._bind_artifact_to_tracker(art) for k, art in artifacts.items()
+        }
+        return (matched_run_id, matched_ordinal, bound_artifacts)
 
     def _coerce_keys(self, value: Optional[Iterable[str] | str]) -> List[str]:
         if value is None:
@@ -1879,7 +1887,10 @@ class ScenarioContext:
         ):
             invocation_inputs = step_def.inputs
 
-        has_path_annotated_params = bool(infer_path_annotated_parameters(fn))
+        has_annotated_binding_params = bool(
+            infer_path_annotated_parameters(fn)
+            or infer_dataframe_annotated_parameters(fn)
+        )
         requested_input_binding = (
             execution_options.input_binding
             if (
@@ -1909,7 +1920,7 @@ class ScenarioContext:
         if requested_input_binding in {"loaded", "paths"} or (
             requested_input_binding is None
             and explicit_load_inputs is None
-            and has_path_annotated_params
+            and has_annotated_binding_params
         ):
             invocation_inputs = self._promote_inputs_for_binding(
                 invocation_inputs,
@@ -2078,7 +2089,7 @@ class ScenarioContext:
         promoted_inputs = self._promote_inputs_for_binding(
             resolved_inputs,
             resolved_input_binding
-            if resolved_input_binding != "none" or not has_path_annotated_params
+            if resolved_input_binding != "none" or not has_annotated_binding_params
             else "paths",
         )
         resolved_inputs = self._resolve_inputs(
@@ -2413,10 +2424,14 @@ class ScenarioContext:
                 self._record_step_in_parent(record.run, record.inputs, record.outputs)
 
     def _coerce_mapping(self, obj: Any, label: str) -> Dict[str, Any]:
-        if hasattr(obj, "model_dump"):
-            return obj.model_dump(mode="json")
-        if hasattr(obj, "dict") and hasattr(obj, "json"):
-            return obj.dict()
+        if isinstance(obj, _ModelDumpable):
+            dumped = obj.model_dump(mode="json")
+            if isinstance(dumped, Mapping):
+                return dict(dumped)
+        if isinstance(obj, _LegacyModelDictable):
+            dumped = obj.dict()
+            if isinstance(dumped, Mapping):
+                return dict(dumped)
         if isinstance(obj, Mapping):
             return dict(obj)
         raise ValueError(

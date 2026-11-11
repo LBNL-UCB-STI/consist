@@ -1,62 +1,62 @@
 """
 Consist dlt (Data Load Tool) Integration Module
 
-This module provides the integration layer between Consist and the `dlt` library,
-facilitating the robust and efficient ingestion of artifact data into the DuckDB database.
-It is responsible for materializing various data formats (e.g., Pandas DataFrames,
-Parquet, CSV, Zarr metadata) and ensuring that Consist's system-level provenance columns
-(such as `consist_run_id`, `consist_artifact_id`) are correctly injected into the data.
-
-Key functionalities include:
--   **Dynamic Schema Extension**: User-defined `SQLModel` schemas are dynamically extended
-    with Consist's provenance-tracking system columns.
--   **Flexible Ingestion Strategies**: Supports different data ingestion mechanisms,
-    including vectorized loading (for Pandas DataFrames, PyArrow tables) and streaming
-    for large datasets.
--   **Format-Specific Handlers**: Contains specialized functions for processing and
-    preparing data from common file formats like Parquet, CSV, and extracting
-    structural metadata from Zarr archives.
--   **dlt Pipeline Integration**: Leverages the `dlt` pipeline for robust data loading,
-    automatic schema inference, and optional strict validation, ensuring data quality
-    and consistency.
+Provides the integration layer between Consist and ``dlt`` over a single shared
+``StoreLedger`` DuckDB connection, injecting Consist provenance system columns
+(``consist_run_id``, ``consist_artifact_id``, ``consist_year``, ``consist_iteration``).
 """
 
+from __future__ import annotations
+
 import importlib
+import json
 import logging
+import os
+from pathlib import Path
 import random
 import time
-import uuid
-import pandas as pd
 from typing import (
-    Optional,
+    TYPE_CHECKING,
+    Annotated,
     Any,
+    Dict,
     Iterable,
     Iterator,
-    Union,
-    Type,
+    Optional,
+    Protocol,
     Set,
-    Dict,
     Tuple,
+    Type,
+    Union,
+    cast,
     get_args,
     get_origin,
-    cast,
+    runtime_checkable,
 )
+import uuid
+
+import duckdb
+import pandas as pd
 from sqlalchemy import JSON, inspect as sa_inspect
 from sqlmodel import SQLModel
-from consist.models.artifact import Artifact
-from consist.models.run import Run
-from consist.core.netcdf_utils import resolve_netcdf_engine
+
+from consist.artifact import Artifact
 from consist.core.gtfs import load_gtfs_member_df
+from consist.core.netcdf_utils import resolve_netcdf_engine
+from consist.location import lookup_live_ledger_by_path
+from consist.models.run import Run
+from consist.store.detect import ConsistError
 from consist.tools.file_batches import yield_file_batches
 from consist.types import DriverType
 
-# Optional dependency: `dlt` is only required when using ingestion helpers.
+if TYPE_CHECKING:
+    from consist.store.ledger import StoreLedger
+
 try:
     import dlt
 except ImportError:
     dlt = None
 
-# Robust imports
 try:
     import pyarrow as pa
     import pyarrow.parquet as pq
@@ -64,31 +64,50 @@ except ImportError:
     pa = None
     pq = None
 
-try:
-    zarr = importlib.import_module("zarr")
-except ImportError:
-    zarr = None
 
-try:
-    xr = importlib.import_module("xarray")
-except ImportError:
-    xr = None
+def _get_zarr() -> Any:
+    try:
+        return importlib.import_module("zarr")
+    except ImportError:
+        return None
 
-try:
-    import h5py
-except ImportError:
-    h5py = None
 
-try:
-    openmatrix = importlib.import_module("openmatrix")
-except ImportError:
-    openmatrix = None
+def _get_xarray() -> Any:
+    try:
+        return importlib.import_module("xarray")
+    except ImportError:
+        return None
 
-try:
-    geopandas = importlib.import_module("geopandas")
-except ImportError:
-    geopandas = None
 
+def _get_h5py() -> Any:
+    try:
+        return importlib.import_module("h5py")
+    except ImportError:
+        return None
+
+
+def _get_openmatrix() -> Any:
+    try:
+        return importlib.import_module("openmatrix")
+    except ImportError:
+        return None
+
+
+def _get_geopandas() -> Any:
+    try:
+        return importlib.import_module("geopandas")
+    except ImportError:
+        return None
+
+
+_DLT_EXCLUDED_SYSTEM_COLS: frozenset[str] = frozenset(
+    {
+        "consist_artifact_id",
+        "consist_run_id",
+        "consist_year",
+        "consist_iteration",
+    }
+)
 
 _RETRYABLE_DUCKDB_LOCK_MARKERS = (
     "database is locked",
@@ -96,6 +115,11 @@ _RETRYABLE_DUCKDB_LOCK_MARKERS = (
     "conflicting lock is held",
     "io error",
 )
+
+
+@runtime_checkable
+class _HasMatrixAttrs(Protocol):
+    attrs: Any
 
 
 def _is_retryable_duckdb_lock_error(exc: Exception) -> bool:
@@ -113,7 +137,8 @@ def _retry_sleep(
     time.sleep(delay)
 
 
-def _open_netcdf_dataset(path: str, engine: Optional[str]):
+def _open_netcdf_dataset(path: str, engine: Optional[str]) -> Any:
+    xr = _get_xarray()
     if xr is None:
         raise ImportError("xarray is required to open NetCDF datasets")
     if engine:
@@ -131,7 +156,7 @@ def _retry_pipeline_load(
     lock_base_sleep_seconds: float,
     lock_max_sleep_seconds: float,
     exc: Exception,
-):
+) -> Any:
     retries = max(1, int(retries))
     for attempt in range(retries):
         if attempt == retries - 1:
@@ -157,47 +182,17 @@ def _retry_pipeline_load(
 
 
 def _json_dumps(value: Dict[str, Any]) -> str:
-    import json
-
     return json.dumps(value, default=str)
 
 
 def _handle_zarr_metadata(path: str) -> Iterable[Dict[str, Any]]:
-    """
-    Extracts and yields structural metadata from a Zarr or NetCDF-like array store.
-
-    Instead of yielding raw pixel or array data, this handler focuses on providing
-    metadata such as variable names, dimensions, shapes, data types, and attributes.
-    This is particularly useful for cataloging and understanding the structure of
-    large multi-dimensional datasets without ingesting their entire contents.
-
-    Parameters
-    ----------
-    path : str
-        The file system path to the Zarr store (directory).
-
-    Yields
-    ------
-    Dict[str, Any]
-        A dictionary representing the metadata for each data variable and coordinate
-        within the Zarr store. Each dictionary includes keys like 'variable_name',
-        'variable_type' (data or coordinate), 'dims', 'shape', 'dtype', and 'attributes'.
-
-    Raises
-    ------
-    ImportError
-        If `xarray` or `zarr` libraries are not installed.
-    ValueError
-        If an error occurs during the extraction of Zarr metadata from the specified path.
-    """
-    if not xr:
+    """Extract and yield structural metadata from a Zarr array store."""
+    xr = _get_xarray()
+    if xr is None or _get_zarr() is None:
         raise ImportError("xarray and zarr are required for Zarr ingestion.")
 
     try:
-        # Open consolidated=False to be safe with basic zarr stores
         ds = xr.open_zarr(path, consolidated=False)
-
-        # 1. Yield Data Variables
         for var_name, da in ds.data_vars.items():
             yield {
                 "variable_name": var_name,
@@ -207,8 +202,6 @@ def _handle_zarr_metadata(path: str) -> Iterable[Dict[str, Any]]:
                 "dtype": str(da.dtype),
                 "attributes": da.attrs,
             }
-
-        # 2. Yield Coordinates
         for coord_name, da in ds.coords.items():
             yield {
                 "variable_name": coord_name,
@@ -223,33 +216,8 @@ def _handle_zarr_metadata(path: str) -> Iterable[Dict[str, Any]]:
 
 
 def _handle_netcdf_metadata(path: str) -> Iterable[Dict[str, Any]]:
-    """
-    Extracts and yields structural metadata from a NetCDF file.
-
-    Instead of yielding raw pixel or array data, this handler focuses on providing
-    metadata such as variable names, dimensions, shapes, data types, and attributes.
-    This follows the same metadata-only strategy as Zarr ingestion.
-
-    Parameters
-    ----------
-    path : str
-        The file system path to the NetCDF file.
-
-    Yields
-    ------
-    Dict[str, Any]
-        A dictionary representing the metadata for each data variable and coordinate
-        within the NetCDF file. Each dictionary includes keys like 'variable_name',
-        'variable_type' (data or coordinate), 'dims', 'shape', 'dtype', and 'attributes'.
-
-    Raises
-    ------
-    ImportError
-        If `xarray` is not installed.
-    ValueError
-        If an error occurs during the extraction of NetCDF metadata from the specified path.
-    """
-    if not xr:
+    """Extract and yield structural metadata from a NetCDF file."""
+    if _get_xarray() is None:
         raise ImportError(
             "xarray is required for NetCDF ingestion (pip install xarray netCDF4 h5netcdf)"
         )
@@ -257,8 +225,6 @@ def _handle_netcdf_metadata(path: str) -> Iterable[Dict[str, Any]]:
     try:
         engine = resolve_netcdf_engine()
         ds = _open_netcdf_dataset(path, engine)
-
-        # 1. Yield Data Variables
         for var_name, da in ds.data_vars.items():
             yield {
                 "variable_name": var_name,
@@ -268,8 +234,6 @@ def _handle_netcdf_metadata(path: str) -> Iterable[Dict[str, Any]]:
                 "dtype": str(da.dtype),
                 "attributes": _json_dumps(dict(da.attrs)) if da.attrs else "{}",
             }
-
-        # 2. Yield Coordinates
         for coord_name, da in ds.coords.items():
             yield {
                 "variable_name": coord_name,
@@ -284,54 +248,27 @@ def _handle_netcdf_metadata(path: str) -> Iterable[Dict[str, Any]]:
 
 
 def _handle_openmatrix_metadata(path: str) -> Iterable[Dict[str, Any]]:
-    """
-    Extracts and yields structural metadata from an OpenMatrix (OMX) file.
-
-    Instead of yielding raw matrix data, this handler focuses on providing
-    metadata such as matrix names, dimensions, shapes, data types, and attributes.
-    This follows the same metadata-only strategy as Zarr and NetCDF ingestion.
-
-    The function attempts to use the `openmatrix` library for proper OMX convention
-    handling, and falls back to `h5py` for basic HDF5 access if openmatrix is unavailable.
-
-    Parameters
-    ----------
-    path : str
-        The file system path to the OpenMatrix file.
-
-    Yields
-    ------
-    Dict[str, Any]
-        A dictionary representing the metadata for each matrix within the OMX file.
-        Each dictionary includes keys like 'matrix_name', 'shape', 'dtype', 'n_rows',
-        'n_cols', and 'attributes'.
-
-    Raises
-    ------
-    ImportError
-        If neither `openmatrix` nor `h5py` is installed.
-    ValueError
-        If an error occurs during the extraction of OMX metadata from the specified path.
-    """
+    """Extract and yield structural metadata from an OpenMatrix (OMX) file."""
+    openmatrix = _get_openmatrix()
+    h5py = _get_h5py()
     if openmatrix:
         try:
-            # Use openmatrix library for convention-aware handling
             with openmatrix.open_file(path, mode="r") as f:
-                # List matrices
                 matrix_names = f.list_matrices()
                 for matrix_name in matrix_names:
                     matrix = f[matrix_name]
+                    attrs_json = (
+                        _json_dumps(dict(matrix.attrs))
+                        if isinstance(matrix, _HasMatrixAttrs)
+                        else "{}"
+                    )
                     yield {
                         "matrix_name": matrix_name,
                         "shape": list(matrix.shape),
                         "dtype": str(matrix.dtype),
                         "n_rows": matrix.shape[0] if len(matrix.shape) >= 1 else None,
                         "n_cols": matrix.shape[1] if len(matrix.shape) >= 2 else None,
-                        "attributes": (
-                            _json_dumps(dict(matrix.attrs))
-                            if hasattr(matrix, "attrs")
-                            else "{}"
-                        ),
+                        "attributes": attrs_json,
                     }
             return
         except Exception as e:
@@ -344,7 +281,6 @@ def _handle_openmatrix_metadata(path: str) -> Iterable[Dict[str, Any]]:
                 e,
             )
 
-    # Fallback to h5py for basic HDF5 access
     if not h5py:
         raise ImportError(
             "h5py or openmatrix is required for OpenMatrix (pip install h5py openmatrix)"
@@ -354,10 +290,9 @@ def _handle_openmatrix_metadata(path: str) -> Iterable[Dict[str, Any]]:
     try:
         with h5py_mod.File(path, "r") as f:
 
-            def walk_matrices(group, prefix=""):
+            def walk_matrices(group: Any, prefix: str = "") -> Iterable[Dict[str, Any]]:
                 for key, item in group.items():
                     if isinstance(item, h5py_mod.Dataset):
-                        # This is a matrix dataset
                         yield {
                             "matrix_name": key,
                             "path": prefix + "/" + key if prefix else "/" + key,
@@ -383,7 +318,6 @@ def _handle_openmatrix_metadata(path: str) -> Iterable[Dict[str, Any]]:
 def _format_spatial_crs(crs: Any) -> str | None:
     if crs is None:
         return None
-
     try:
         pyproj = importlib.import_module("pyproj")
         normalized_crs = pyproj.CRS.from_user_input(crs)
@@ -398,28 +332,8 @@ def _format_spatial_crs(crs: Any) -> str | None:
 def _handle_spatial_metadata(
     path: str, driver: str = "geojson"
 ) -> Iterable[Dict[str, Any]]:
-    """
-    Extracts and yields basic metadata from spatial files.
-
-    Parameters
-    ----------
-    path : str
-        Path to a spatial file (GeoJSON, GeoParquet, Shapefile, GeoPackage).
-    driver : str
-        Spatial driver name that selects the appropriate geopandas reader.
-
-    Yields
-    ------
-    Dict[str, Any]
-        A dictionary containing bounds, CRS, geometry types, and column info.
-
-    Raises
-    ------
-    ImportError
-        If geopandas is not installed.
-    ValueError
-        If metadata extraction fails.
-    """
+    """Extract and yield basic metadata from spatial files."""
+    geopandas = _get_geopandas()
     if geopandas is None:
         raise ImportError(
             "geopandas is required for spatial ingestion. "
@@ -450,41 +364,10 @@ def _handle_spatial_metadata(
 
 
 def _handle_parquet_path(path: str, ctx: Dict[str, Any]) -> Tuple[Any, bool]:
-    """
-    Handles ingestion of Parquet files, providing a streaming or vectorized data source
-    suitable for `dlt` ingestion, with Consist system context injection.
-
-    This function attempts to use `pyarrow` for efficient batch-wise streaming if available,
-    falling back to `pandas` for full file loading. It injects Consist's provenance-related
-    columns into each data batch or DataFrame before yielding it.
-
-    Parameters
-    ----------
-    path : str
-        The file system path to the Parquet file.
-    ctx : Dict[str, Any]
-        A dictionary containing Consist system context values (e.g., `consist_run_id`,
-        `consist_artifact_id`) to be injected as new columns into the data.
-
-    Returns
-    -------
-    Tuple[Any, bool]
-        A tuple where:
-        - The first element is the data source: either a Pandas DataFrame (for full load)
-          or a generator yielding Pandas DataFrames (for streaming batches).
-        - The second element is a boolean: `True` if the source is vectorized (DataFrame
-          or batch generator), `False` otherwise (not applicable here).
-
-    Raises
-    ------
-    ImportError
-        If neither `Pandas` nor `PyArrow` is available in the environment, which are
-        required for processing Parquet files.
-    """
     if pa and pq:
         pq_mod = pq
 
-        def parquet_stream():
+        def parquet_stream() -> Iterator[pd.DataFrame]:
             pf = pq_mod.ParquetFile(path)
             for batch in pf.iter_batches():
                 df_batch = batch.to_pandas()
@@ -494,49 +377,19 @@ def _handle_parquet_path(path: str, ctx: Dict[str, Any]) -> Tuple[Any, bool]:
                 yield df_batch
 
         return parquet_stream(), True
-    elif pd:
+    if pd:
         df = pd.read_parquet(path)
         for k, v in ctx.items():
             if v is not None:
                 df[k] = v
         return df, True
-    else:
-        raise ImportError(f"Pandas or PyArrow required for Parquet: {path}")
+    raise ImportError(f"Pandas or PyArrow required for Parquet: {path}")
 
 
 def _handle_csv_path(path: str, ctx: Dict[str, Any]) -> Tuple[Any, bool]:
-    """
-    Handles ingestion of CSV files, providing a streaming data source
-    suitable for `dlt` ingestion, with Consist system context injection.
-
-    This function reads CSV files in chunks using `pandas.read_csv` and injects
-    Consist's provenance-related columns into each DataFrame chunk before yielding it.
-
-    Parameters
-    ----------
-    path : str
-        The file system path to the CSV file.
-    ctx : Dict[str, Any]
-        A dictionary containing Consist system context values (e.g., `consist_run_id`,
-        `consist_artifact_id`) to be injected as new columns into the data.
-
-    Returns
-    -------
-    Tuple[Any, bool]
-        A tuple where:
-        - The first element is the data source: a generator yielding Pandas DataFrames (chunks).
-        - The second element is a boolean: `True` indicating that the source
-          effectively operates in a vectorized, chunked manner.
-
-    Raises
-    ------
-    ImportError
-        If `Pandas` is not available in the environment, which is required for
-        processing CSV files.
-    """
     if pd:
 
-        def csv_stream():
+        def csv_stream() -> Iterator[pd.DataFrame]:
             for df_batch in pd.read_csv(path, chunksize=100_000):
                 for k, v in ctx.items():
                     if v is not None:
@@ -544,65 +397,50 @@ def _handle_csv_path(path: str, ctx: Dict[str, Any]) -> Tuple[Any, bool]:
                 yield df_batch
 
         return csv_stream(), True
-    else:
-        raise ImportError(f"Pandas required for CSV: {path}")
+    raise ImportError(f"Pandas required for CSV: {path}")
+
+
+def _schema_model_table_name(schema_model: Optional[Type[SQLModel]]) -> Optional[str]:
+    if schema_model is None:
+        return None
+    for cls in schema_model.__mro__:
+        if "__tablename__" in cls.__dict__ and isinstance(
+            cls.__dict__["__tablename__"], str
+        ):
+            return cls.__dict__["__tablename__"]
+    return None
+
+
+def _is_additive_schema_model(schema_model: Optional[Type[SQLModel]]) -> bool:
+    if schema_model is None:
+        return False
+    for cls in schema_model.__mro__:
+        if "__consist_additive_schema__" in cls.__dict__:
+            return bool(cls.__dict__["__consist_additive_schema__"])
+    return False
+
+
+def _reset_search_path(con: duckdb.DuckDBPyConnection) -> None:
+    try:
+        con.execute("SET search_path = 'main'")
+    except duckdb.Error:
+        pass
 
 
 def ingest_artifact(
-    artifact: "Artifact",
-    run_context: "Run",
-    db_path: str,
-    data_iterable: Optional[Union[Iterable[Any], str, pd.DataFrame]] = None,
+    artifact: Artifact,
+    run_context: Run,
+    db_path: str | os.PathLike[str] | None = None,
+    data_iterable: Optional[Union[Iterable[Any], str, Path, pd.DataFrame]] = None,
     schema_model: Optional[Type[SQLModel]] = None,
     lock_retries: int = 20,
     lock_base_sleep_seconds: float = 0.1,
     lock_max_sleep_seconds: float = 2.0,
+    *,
+    ledger: Optional[StoreLedger] = None,
 ) -> Tuple[Any, str]:
     """
-    Ingests artifact data into a DuckDB database using the `dlt` (Data Load Tool) library.
-
-    This function supports various data sources (file paths, Pandas DataFrames, iterables of dicts)
-    and automatically injects Consist's provenance system columns (`consist_run_id`,
-    `consist_artifact_id`, `consist_year`, `consist_iteration`) into the data. It leverages
-    `dlt` for robust schema handling, including inference and optional strict validation
-    based on a provided `SQLModel`.
-
-    Parameters
-    ----------
-    artifact : Artifact
-        The Consist `Artifact` object representing the data to be ingested. Its driver
-        information is used to determine the appropriate data handler.
-    run_context : Run
-        The `Run` object providing the context (ID, year, iteration) for provenance tracking.
-    db_path : str
-        The file system path to the DuckDB database where the data will be loaded.
-    data_iterable : Optional[Union[Iterable[Any], str, pd.DataFrame]], optional
-        The data to ingest. Can be:
-        - A file path (str) to a Parquet, CSV, HDF5, JSON, or Zarr file.
-        - A Pandas DataFrame (will be treated as a single batch).
-        - An iterable (e.g., list of dicts, generator) where each item represents a row.
-        If `None`, it implies the data should be read directly from the `artifact`'s URI.
-    schema_model : Optional[Type[SQLModel]], optional
-        An optional `SQLModel` class that defines the expected schema for the data.
-        If provided, `dlt` will use this for strict validation and schema management.
-        If `None`, `dlt` will infer the schema.
-
-    Returns
-    -------
-    Tuple[dlt.LoadInfo, str]
-        A tuple containing:
-        - `dlt.LoadInfo`: An object providing detailed information about the data loading process.
-        - `str`: The actual normalized table name where the data was loaded in the database.
-
-    Raises
-    ------
-    ValueError
-        If no data is provided for ingestion, if the artifact driver is unsupported,
-        or if a `schema_model` is provided but a schema contract violation occurs
-        (e.g., new columns found in strict mode).
-    ImportError
-        If a required library for a specific driver (e.g., `pyarrow` for Parquet,
-        `tables` for HDF5, `xarray`/`zarr` for Zarr) is not installed.
+    Ingest artifact data into DuckDB ``global_tables`` using ``dlt`` over ``StoreLedger``.
     """
     if dlt is None:
         raise ImportError(
@@ -610,21 +448,39 @@ def ingest_artifact(
             'Install with `pip install "consist[ingest]"`.'
         )
 
-    # 1. Resolve Data Source (Streaming Batches)
+    resolved_ledger = ledger
+    if (
+        resolved_ledger is None
+        and db_path is not None
+        and os.fspath(db_path) != ":memory:"
+    ):
+        resolved_ledger = lookup_live_ledger_by_path(Path(db_path))
+
+    if resolved_ledger is not None:
+        if resolved_ledger.read_only:
+            raise PermissionError("Cannot ingest into a read-only StoreLedger")
+        if resolved_ledger._tx_depth != 0:
+            raise ConsistError(
+                "Cannot run dlt ingestion inside an active StoreLedger.transaction(); "
+                "run ingestion outside transaction boundaries (ledger._tx_depth == 0)."
+            )
+
     data_source: Iterable[Any]
-    if isinstance(data_iterable, str):
-        file_path = data_iterable
+    if isinstance(data_iterable, (str, Path)):
+        file_path = os.fspath(data_iterable)
 
         if artifact.driver == "parquet":
-            data_source = _yield_parquet_batches(file_path)
+            data_source = yield_file_batches(file_path, driver="parquet")
 
         elif artifact.driver == "csv":
-            data_source = _yield_csv_batches(file_path)
+            data_source = yield_file_batches(file_path, driver="csv")
 
         elif artifact.driver in DriverType.table_path_drivers():
-            table_path = artifact.table_path
+            table_path = artifact.member
             if not table_path:
-                raise ValueError(f"Artifact '{artifact.key}' missing 'table_path'.")
+                raise ValueError(
+                    f"Artifact '{artifact.key}' missing member/table_path."
+                )
             if artifact.driver == "h5_table":
                 data_source = _yield_h5_batches(file_path, table_path)
             else:
@@ -643,41 +499,32 @@ def ingest_artifact(
             data_source = _handle_openmatrix_metadata(file_path)
 
         elif artifact.driver == "geoparquet":
-            spatial_mode = None
-            if isinstance(artifact.meta, dict):
-                spatial_mode = artifact.meta.get("spatial_ingest_mode")
-
+            spatial_mode = artifact.meta.get("spatial_ingest_mode")
             if spatial_mode == "wkt":
                 raise ValueError(
                     "GeoParquet does not support spatial_ingest_mode='wkt'. "
                     "Use the default metadata ingestion or convert geometry to WKT before logging."
                 )
-
             data_source = _handle_spatial_metadata(file_path, artifact.driver)
 
         elif artifact.driver in {"geojson", "shapefile", "geopackage"}:
-            spatial_mode = None
-            if isinstance(artifact.meta, dict):
-                spatial_mode = artifact.meta.get("spatial_ingest_mode")
-
+            spatial_mode = artifact.meta.get("spatial_ingest_mode")
             if spatial_mode == "wkt":
+                geopandas = _get_geopandas()
                 if geopandas is None:
                     raise ImportError(
                         "geopandas is required for spatial ingestion. "
                         'Install with `pip install "consist[spatial]"`.'
                     )
-
                 gdf = geopandas.read_file(file_path)
                 geometry_name = gdf.geometry.name
                 if not geometry_name:
                     raise ValueError(
                         "Spatial ingest mode 'wkt' requires geometry data."
                     )
-
                 wkt_column = "geometry_wkt"
                 if wkt_column in gdf.columns:
                     wkt_column = f"{wkt_column}_1"
-
                 table_df = gdf.copy()
                 table_df[wkt_column] = table_df.geometry.to_wkt()
                 table_df = table_df.drop(columns=[geometry_name])
@@ -689,59 +536,31 @@ def ingest_artifact(
             raise ValueError(f"Ingestion not supported for driver: {artifact.driver}")
 
     elif data_iterable is not None:
-        # User passed explicit data object
         if isinstance(data_iterable, pd.DataFrame):
-            # Treat single DataFrame as a list containing one batch for vectorization
             data_source = [data_iterable]
         else:
-            # Assume list of dicts or generator
             data_source = data_iterable
     else:
         raise ValueError("No data provided for ingestion.")
 
-    # 2. Configure dlt Pipeline
-    schema_table_name = (
-        getattr(schema_model, "__tablename__", None)
-        if schema_model is not None
-        else None
-    )
+    schema_table_name = _schema_model_table_name(schema_model)
     desired_table_name = str(schema_table_name or artifact.key)
 
-    pipeline_uid = uuid.uuid4().hex[:8]
-    pipeline = dlt.pipeline(
-        pipeline_name=f"consist_ingest_{pipeline_uid}",
-        destination=dlt.destinations.duckdb(f"{db_path}"),
-        dataset_name="global_tables",
-    )
-
-    # 3. Validation Setup
-    additive_schema = bool(getattr(schema_model, "__consist_additive_schema__", False))
+    additive_schema = _is_additive_schema_model(schema_model)
     allowed_keys: Optional[Set[str]] = None
     if schema_model and not additive_schema:
         allowed_keys = set(schema_model.model_fields.keys())
-        allowed_keys.update(
-            {
-                "consist_run_id",
-                "consist_artifact_id",
-                "consist_year",
-                "consist_iteration",
-            }
-        )
+        allowed_keys.update(_DLT_EXCLUDED_SYSTEM_COLS)
 
-    # 4. Enrich Rows (Vectorized & Scalar support)
     def _enrich_rows(source: Iterable[Any]) -> Iterator[Any]:
         for item in source:
-            # PATH A: Vectorized (Pandas DataFrame)
             if isinstance(item, pd.DataFrame):
                 batch = item.copy(deep=False)
-
-                # Vectorized Assignment
                 batch["consist_run_id"] = run_context.id
                 batch["consist_artifact_id"] = str(artifact.id)
                 batch["consist_year"] = run_context.year
                 batch["consist_iteration"] = run_context.iteration
 
-                # Vectorized Strict Mode Check
                 if allowed_keys:
                     current_cols = set(batch.columns)
                     extra_cols = current_cols - allowed_keys
@@ -758,28 +577,26 @@ def ingest_artifact(
                         )
                 yield batch
 
-            # PATH B: Scalar (Dictionary)
             elif isinstance(item, dict):
-                item["consist_run_id"] = run_context.id
-                item["consist_artifact_id"] = str(artifact.id)
-                item["consist_year"] = run_context.year
-                item["consist_iteration"] = run_context.iteration
+                row_copy = dict(item)
+                row_copy["consist_run_id"] = run_context.id
+                row_copy["consist_artifact_id"] = str(artifact.id)
+                row_copy["consist_year"] = run_context.year
+                row_copy["consist_iteration"] = run_context.iteration
 
                 if allowed_keys:
-                    current_keys = set(item.keys())
+                    current_keys = set(row_copy.keys())
                     extra_cols = current_keys - allowed_keys
                     if extra_cols:
                         raise ValueError(
                             f"Schema Contract Violation: Found undefined columns {extra_cols} "
                             f"in artifact '{artifact.key}'."
                         )
-                yield item
+                yield row_copy
 
             else:
                 yield item
 
-    # 5. Define Resource
-    # Always hint system columns so dlt creates them even if values are NULL
     system_columns = {
         "consist_run_id": {"data_type": "text", "nullable": True},
         "consist_artifact_id": {"data_type": "text", "nullable": True},
@@ -788,7 +605,6 @@ def ingest_artifact(
     }
 
     schema_contract = None
-    columns = system_columns
     if schema_model:
         schema_contract = {
             "tables": "evolve",
@@ -798,7 +614,6 @@ def ingest_artifact(
         columns = _sqlmodel_to_dlt_columns(schema_model)
         columns.update(system_columns)
     else:
-        # Loose Mode: Hint system columns, allow everything else to evolve
         columns = system_columns
 
     enriched_rows = _enrich_rows(data_source)
@@ -811,21 +626,47 @@ def ingest_artifact(
         schema_contract=schema_contract,
     )
 
-    # 6. Run with retries for transient DuckDB file lock conflicts.
-    # If load fails after extraction/normalization, retry pipeline.load() so we
-    # do not depend on replaying the original input iterator.
-    try:
-        info = pipeline.run(resource)
-    except Exception as exc:
-        if not _is_retryable_duckdb_lock_error(exc):
-            raise
-        info = _retry_pipeline_load(
-            pipeline,
-            retries=lock_retries,
-            lock_base_sleep_seconds=lock_base_sleep_seconds,
-            lock_max_sleep_seconds=lock_max_sleep_seconds,
-            exc=exc,
+    pipeline_uid = uuid.uuid4().hex[:8]
+    if resolved_ledger is not None:
+        with resolved_ledger._lock:
+            if resolved_ledger.read_only:
+                raise PermissionError("Cannot ingest into a read-only StoreLedger")
+            if resolved_ledger._tx_depth != 0:
+                raise ConsistError(
+                    "Cannot run dlt ingestion inside an active StoreLedger.transaction()"
+                )
+            destination = dlt.destinations.duckdb(
+                credentials=resolved_ledger.connection
+            )
+            pipeline = dlt.pipeline(
+                pipeline_name=f"consist_ingest_{pipeline_uid}",
+                destination=destination,
+                dataset_name="global_tables",
+            )
+            try:
+                info = pipeline.run(resource)
+            finally:
+                _reset_search_path(resolved_ledger.connection)
+    else:
+        if db_path is None:
+            raise ValueError("Either ledger or db_path is required for dlt ingestion.")
+        pipeline = dlt.pipeline(
+            pipeline_name=f"consist_ingest_{pipeline_uid}",
+            destination=dlt.destinations.duckdb(os.fspath(db_path)),
+            dataset_name="global_tables",
         )
+        try:
+            info = pipeline.run(resource)
+        except Exception as exc:
+            if not _is_retryable_duckdb_lock_error(exc):
+                raise
+            info = _retry_pipeline_load(
+                pipeline,
+                retries=lock_retries,
+                lock_base_sleep_seconds=lock_base_sleep_seconds,
+                lock_max_sleep_seconds=lock_max_sleep_seconds,
+                exc=exc,
+            )
 
     real_table_name = pipeline.default_schema.naming.normalize_table_identifier(
         str(desired_table_name)
@@ -834,24 +675,7 @@ def ingest_artifact(
 
 
 def _sqlmodel_to_dlt_columns(model: Type[SQLModel]) -> Dict[str, Dict[str, Any]]:
-    """
-    Converts a SQLModel class definition into a `dlt` columns dictionary.
-
-    This function inspects the fields of a given `SQLModel` class and translates
-    them into a format suitable for `dlt`'s schema definition. It infers `dlt`
-    data types based on Python types and determines nullability.
-
-    Parameters
-    ----------
-    model : Type[SQLModel]
-        The `SQLModel` class to convert.
-
-    Returns
-    -------
-    Dict[str, Dict[str, Any]]
-        A dictionary where keys are column names and values are dictionaries
-        containing `dlt` column properties (e.g., `data_type`, `nullable`).
-    """
+    """Convert a SQLModel class definition into a ``dlt`` columns dictionary."""
 
     def _normalize_types(annotation: Any) -> set[Any]:
         origin = get_origin(annotation)
@@ -859,7 +683,7 @@ def _sqlmodel_to_dlt_columns(model: Type[SQLModel]) -> Dict[str, Dict[str, Any]]
             return {annotation}
         if origin in {list, dict, tuple}:
             return {origin}
-        if getattr(origin, "__name__", "") == "Annotated":
+        if origin is Annotated:
             args = get_args(annotation)
             return _normalize_types(args[0]) if args else {annotation}
         args = get_args(annotation)
@@ -896,35 +720,7 @@ def _sqlmodel_to_dlt_columns(model: Type[SQLModel]) -> Dict[str, Dict[str, Any]]
     return columns
 
 
-# --- Generators ---
-
-
 def _yield_h5_batches(path: str, key: str) -> Iterable[pd.DataFrame]:
-    """
-    Generator that yields Pandas DataFrames in chunks from an HDF5 table.
-
-    This function provides a memory-efficient way to process large HDF5 tables
-    by reading them in smaller batches, which can then be ingested by `dlt`.
-
-    Parameters
-    ----------
-    path : str
-        The file system path to the HDF5 file.
-    key : str
-        The HDF5 key (path within the HDF5 file) to the table to be read.
-
-    Yields
-    ------
-    pd.DataFrame
-        A chunk of the HDF5 table as a Pandas DataFrame.
-
-    Raises
-    ------
-    ImportError
-        If `PyTables` (the `tables` library) is not installed.
-    KeyError
-        If the specified `key` (table path) is not found within the HDF5 file.
-    """
     from importlib.util import find_spec
 
     if find_spec("tables") is None:
@@ -935,50 +731,3 @@ def _yield_h5_batches(path: str, key: str) -> Iterable[pd.DataFrame]:
         iterator = pd.read_hdf(path, key=key, chunksize=50000, iterator=True)
         for chunk in iterator:
             yield chunk
-
-
-def _yield_parquet_batches(path: str) -> Iterable[pd.DataFrame]:
-    """
-    Generator that yields Pandas DataFrames in batches from a Parquet file.
-
-    This function provides a memory-efficient way to process large Parquet files
-    by reading them in smaller batches using `pyarrow`, which are then converted
-    to Pandas DataFrames for ingestion by `dlt`.
-
-    Parameters
-    ----------
-    path : str
-        The file system path to the Parquet file.
-
-    Yields
-    ------
-    pd.DataFrame
-        A batch of the Parquet file as a Pandas DataFrame.
-
-    Raises
-    ------
-    ImportError
-        If `pyarrow` library is not installed.
-    """
-    yield from yield_file_batches(path, driver="parquet")
-
-
-def _yield_csv_batches(path: str) -> Iterable[pd.DataFrame]:
-    """
-    Generator that yields Pandas DataFrames in chunks from a CSV file.
-
-    This function provides a memory-efficient way to process large CSV files
-    by reading them in smaller chunks using `pandas.read_csv`'s `chunksize`
-    parameter, which can then be ingested by `dlt`.
-
-    Parameters
-    ----------
-    path : str
-        The file system path to the CSV file.
-
-    Yields
-    ------
-    pd.DataFrame
-        A chunk of the CSV file as a Pandas DataFrame.
-    """
-    yield from yield_file_batches(path, driver="csv")

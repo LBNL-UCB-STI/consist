@@ -3,8 +3,8 @@ from __future__ import annotations
 import uuid
 from typing import Any, Dict, Iterable, List, Optional, TYPE_CHECKING, Union
 
+from consist.artifact import Artifact
 from consist.core._tracker_service_base import _TrackerServiceBase
-from consist.models.artifact import Artifact, set_tracker_ref
 from consist.models.run import Run
 
 if TYPE_CHECKING:
@@ -43,7 +43,7 @@ class TrackerArtifactQueryService(_TrackerServiceBase):
         if self.db:
             artifact = self.db.get_artifact(key_or_id, run_id=run_id)
             if artifact is not None:
-                set_tracker_ref(artifact, self._tracker)
+                artifact.bind_tracker(self._tracker)
             return artifact
         return None
 
@@ -61,16 +61,16 @@ class TrackerArtifactQueryService(_TrackerServiceBase):
         Returns
         -------
         List[Artifact]
-            Artifacts with the same ``content_id`` as the target artifact.
+            Artifacts sharing the same primary anchor as the target artifact.
         """
         if not self.db:
             return []
         target = self._resolve_artifact_ref(artifact)
-        if target is None or target.content_id is None:
+        if target is None:
             return []
-        artifacts = self.db.find_artifacts_by_content_id(target.content_id)
+        artifacts = self.db.find_artifacts_by_anchor(target.identity.anchor)
         for item in artifacts:
-            set_tracker_ref(item, self._tracker)
+            item.bind_tracker(self._tracker)
         return artifacts
 
     def find_runs_producing_same_content(
@@ -87,14 +87,16 @@ class TrackerArtifactQueryService(_TrackerServiceBase):
         Returns
         -------
         List[str]
-            Run ids linked to output artifacts sharing the same ``content_id``.
+            Run ids linked to output artifacts sharing the same primary anchor.
         """
         if not self.db:
             return []
         target = self._resolve_artifact_ref(artifact)
-        if target is None or target.content_id is None:
+        if target is None:
             return []
-        return self.db.find_runs_producing_content(target.content_id)
+        return [
+            run.id for run in self.db.find_runs_producing_anchor(target.identity.anchor)
+        ]
 
     def get_child_artifacts(
         self, parent: Union[Artifact, str, uuid.UUID]
@@ -119,7 +121,7 @@ class TrackerArtifactQueryService(_TrackerServiceBase):
             return []
         artifacts = self.db.get_child_artifacts(target.id)
         for artifact in artifacts:
-            set_tracker_ref(artifact, self._tracker)
+            artifact.bind_tracker(self._tracker)
         return artifacts
 
     def get_parent_artifact(
@@ -145,7 +147,7 @@ class TrackerArtifactQueryService(_TrackerServiceBase):
             return None
         artifact = self.db.get_parent_artifact(target.id)
         if artifact is not None:
-            set_tracker_ref(artifact, self._tracker)
+            artifact.bind_tracker(self._tracker)
         return artifact
 
     def select_artifact_schema_for_artifact(
@@ -209,13 +211,13 @@ class TrackerArtifactQueryService(_TrackerServiceBase):
         Optional[Artifact]
             Matching artifact, or ``None`` when nothing matches.
         """
+        eff_member = table_path if table_path is not None else array_path
         if self.current_consist:
             for art in self.current_consist.inputs + self.current_consist.outputs:
-                if art.container_uri != uri:
+                loc = art.primary_location
+                if (loc.uri if loc is not None else "") != uri:
                     continue
-                if table_path is not None and art.table_path != table_path:
-                    continue
-                if array_path is not None and art.array_path != array_path:
+                if eff_member is not None and art.member != eff_member:
                     continue
                 return art
 
@@ -224,7 +226,7 @@ class TrackerArtifactQueryService(_TrackerServiceBase):
                 uri, table_path=table_path, array_path=array_path
             )
             if artifact is not None:
-                set_tracker_ref(artifact, self._tracker)
+                artifact.bind_tracker(self._tracker)
             return artifact
 
         return None
@@ -266,7 +268,7 @@ class TrackerArtifactQueryService(_TrackerServiceBase):
             creator=creator_id, consumer=consumer_id, key=key, limit=limit
         )
         for artifact in artifacts:
-            set_tracker_ref(artifact, self._tracker)
+            artifact.bind_tracker(self._tracker)
         return artifacts
 
     @staticmethod
@@ -383,7 +385,7 @@ class TrackerArtifactQueryService(_TrackerServiceBase):
             limit=limit,
         )
         for artifact in artifacts:
-            set_tracker_ref(artifact, self._tracker)
+            artifact.bind_tracker(self._tracker)
         return artifacts
 
     def get_artifact_kv(

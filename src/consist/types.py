@@ -33,7 +33,7 @@ from pydantic import BaseModel
 from sqlmodel import SQLModel
 
 if TYPE_CHECKING:  # pragma: no cover
-    from consist.models.artifact import Artifact
+    from consist.artifact import Artifact
     from consist.models.run import RunResult
 
 FacetDict: TypeAlias = Mapping[str, Any]
@@ -82,7 +82,7 @@ class BindingResult:
     def artifact_for(self, name: str) -> "Artifact":
         """Return the bound ``Artifact`` for ``name``."""
         value = self.input_for(name)
-        from consist.models.artifact import Artifact
+        from consist.artifact import Artifact
         from consist.models.run import RunResult, resolve_run_result_output
 
         if isinstance(value, Artifact):

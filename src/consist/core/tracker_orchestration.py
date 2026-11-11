@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping as MappingABC
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import inspect
 import logging
 from pathlib import Path
@@ -35,7 +35,7 @@ import warnings
 import pandas as pd
 from pydantic import BaseModel
 
-from consist.artifact import MissingOutputError
+from consist.artifact import Artifact, MissingOutputError
 from consist.core.decorators import get_callable_name, get_required_runtime_kwargs
 from consist.core.error_messages import format_problem_cause_fix
 from consist.core.output_sets import register_output_sets, validate_cached_output_sets
@@ -43,6 +43,7 @@ from consist.core.output_sets import build_output_set_captures_identity
 from consist.core.run_invocation import (
     DeclaredOutputSpec,
     build_declared_outputs_identity,
+    infer_dataframe_annotated_parameters,
     infer_path_annotated_parameters,
     prepare_declared_output_targets,
     resolve_run_invocation,
@@ -53,7 +54,7 @@ from consist.core.run_options import (
 )
 from consist.core.run_resolution import InputBindingRole, build_input_binding_roles
 from consist.core.workflow import RunContext
-from consist.models.artifact import Artifact, get_tracker_ref, set_tracker_ref
+from consist.meta import merge_artifact_output_meta
 from consist.models.run import RunResult
 from consist.types import (
     ArtifactRef,
@@ -883,12 +884,10 @@ class RunTraceCoordinator:
             return outputs_map
 
         for key, art in outputs_map.items():
-            if art.abs_path is not None:
-                current_consist.sync_output_artifact(
-                    key=key,
-                    abs_path=art.abs_path,
-                    preserve_existing_abs_path=True,
-                )
+            current_consist.sync_output_artifact(
+                key=key,
+                artifact_id=art.id,
+            )
 
         archived = (
             tracker._archive_service.archive_current_run_outputs_for_completion_policy(
@@ -922,15 +921,11 @@ class RunTraceCoordinator:
 
         refreshed_outputs: Dict[str, Artifact] = {}
         for key, art in outputs_map.items():
-            synced = synced_by_key.get(key)
-            if synced is not None:
-                art.meta = dict(synced.meta or {})
-                if (
-                    effective_policy.mode == "move" or art.abs_path is None
-                ) and synced.abs_path is not None:
-                    art.abs_path = synced.abs_path
-            set_tracker_ref(art, tracker)
-            refreshed_outputs[key] = art
+            synced = synced_by_key.get(key, art)
+            if synced.origin is None and tracker.ledger is not None:
+                synced = replace(synced, origin=tracker.ledger.ref)
+            synced.bind_tracker(tracker)
+            refreshed_outputs[key] = synced
 
         tracker._flush_json()
         return refreshed_outputs
@@ -1027,16 +1022,19 @@ class RunTraceCoordinator:
             if not candidates:
                 continue
 
-            unapplied = [c for c in candidates if id(c) not in entry.applied_object_ids]
+            unapplied = [
+                c for c in candidates if c.id not in entry.applied_artifact_ids
+            ]
             if not unapplied:
                 pending_meta_by_key.pop(key, None)
                 continue
 
             primary_art = unapplied[-1]
             existing_meta = (
-                dict(primary_art.meta) if isinstance(primary_art.meta, dict) else {}
+                dict(primary_art.meta)
+                if isinstance(primary_art.meta, MappingABC)
+                else {}
             )
-            from consist.models.artifact import merge_artifact_output_meta
 
             merged_meta = merge_artifact_output_meta(
                 existing_meta,
@@ -1044,10 +1042,19 @@ class RunTraceCoordinator:
                 merge=entry.merge,
             )
 
-            for candidate in candidates:
-                candidate.meta = dict(merged_meta)
+            updated_primary = primary_art.with_meta(dict(merged_meta), merge=False)
+            updated_primary.bind_tracker(tracker)
+            current_consist.sync_output_artifact(
+                key=key,
+                artifact_id=primary_art.id,
+                meta=dict(merged_meta),
+            )
+            if key in outputs_map:
+                outputs_map[key] = updated_primary
             if tracker.db is not None:
-                tracker.db.update_artifact_meta(primary_art, dict(merged_meta))
+                tracker.db.update_artifact_meta(
+                    updated_primary, dict(merged_meta), merge=False
+                )
             pending_meta_by_key.pop(key, None)
             updated_any = True
 
@@ -1171,9 +1178,18 @@ class RunTraceCoordinator:
                             ref_path,
                         )
                     continue
-                log_kwargs: Dict[str, Any] = {}
-                if profile_file_schema is not None:
-                    log_kwargs["profile_file_schema"] = profile_file_schema
+                log_kwargs: Dict[str, Any]
+                if spec.artifact_spec is not None:
+                    log_kwargs = dict(
+                        _output_spec_log_kwargs(
+                            spec.artifact_spec,
+                            default_profile_file_schema=profile_file_schema,
+                        )
+                    )
+                else:
+                    log_kwargs = {}
+                    if profile_file_schema is not None:
+                        log_kwargs["profile_file_schema"] = profile_file_schema
                 if spec.is_dir or ref_path.is_dir():
                     log_kwargs["directory_artifact"] = True
                 if (
@@ -1182,6 +1198,17 @@ class RunTraceCoordinator:
                     and role in tracker.current_consist._pending_output_meta
                 ):
                     pending_entry = tracker.current_consist._pending_output_meta[role]
+                    if (
+                        not pending_entry.merge
+                        and spec.artifact_spec is not None
+                        and spec.artifact_spec.meta
+                    ):
+                        for meta_key in spec.artifact_spec.meta.keys():
+                            if meta_key not in (
+                                "directory_artifact",
+                                "directory_allow_extra_files",
+                            ):
+                                log_kwargs.pop(meta_key, None)
                     for dir_flag in (
                         "directory_artifact",
                         "directory_allow_extra_files",
@@ -1633,6 +1660,7 @@ class RunTraceCoordinator:
             p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
         )
         path_annotated_params = infer_path_annotated_parameters(fn_callable)
+        dataframe_annotated_params = infer_dataframe_annotated_parameters(fn_callable)
         call_kwargs: Dict[str, Any] = {}
 
         declared_target_paths: Dict[str, Path] = {}
@@ -1670,21 +1698,44 @@ class RunTraceCoordinator:
                             param_name,
                         )
                     artifact = input_artifacts_by_key[param_name]
-                    if get_tracker_ref(artifact) is None:
-                        set_tracker_ref(artifact, tracker)
+                    if artifact.origin is None and tracker.ledger is not None:
+                        artifact = replace(artifact, origin=tracker.ledger.ref)
+                    artifact.bind_tracker(tracker)
                     use_paths_binding = input_binding == "paths" or (
                         not explicit_input_binding_requested
                         and param_name in path_annotated_params
+                    )
+                    use_loaded_binding = (
+                        input_binding == "loaded" and explicit_input_binding_requested
+                    ) or (
+                        not explicit_input_binding_requested
+                        and param_name in dataframe_annotated_params
                     )
                     if use_paths_binding:
                         if (
                             requested_input_paths
                             and param_name in requested_input_paths
                         ):
-                            artifact_path = Path(requested_input_paths[param_name])
+                            artifact_path: Optional[Path] = Path(
+                                requested_input_paths[param_name]
+                            )
                         else:
-                            artifact_path = artifact.path
-                        if not artifact_path.exists():
+                            effective_mounts = {
+                                **tracker.archive_mounts,
+                                **tracker.mounts,
+                                "workspace": tracker.run_dir,
+                            }
+                            artifact_path = artifact.locate(
+                                ledger=tracker.ledger,
+                                mounts=effective_mounts,
+                                verify_on_stale=False,
+                            )
+                            if artifact_path is None and artifact.hints:
+                                artifact_path = replace(artifact, origin=None).locate(
+                                    mounts=effective_mounts,
+                                    verify_on_stale=False,
+                                )
+                        if artifact_path is None or not artifact_path.exists():
                             origin_detail = (
                                 f" (key={artifact.key!r}, produced by run {artifact.run_id!r})"
                                 if artifact.run_id
@@ -1711,13 +1762,13 @@ class RunTraceCoordinator:
                                 )
                             )
                         call_kwargs[param_name] = artifact_path
-                    else:
+                    elif use_loaded_binding:
                         if artifact.driver in DriverType.tabular_drivers():
-                            from consist.api import load_df
-
-                            call_kwargs[param_name] = load_df(artifact, tracker=tracker)
+                            call_kwargs[param_name] = artifact.as_df(tracker=tracker)
                         else:
                             call_kwargs[param_name] = tracker.load(artifact)
+                    else:
+                        call_kwargs[param_name] = artifact
                     continue
             if param_name in declared_target_paths:
                 call_kwargs[param_name] = declared_target_paths[param_name]
@@ -2335,6 +2386,7 @@ class RunTraceCoordinator:
         ) = self._resolve_cache_hydration_targets(
             tracker=tracker,
             cache_hydration=cache_hydration,
+            validate_cached_outputs=resolved_invocation.validate_cached_outputs,
             output_paths=resolved_invocation.output_paths,
             output_sets=resolved_invocation.output_sets,
             declared_output_specs=resolved_invocation.declared_output_specs,
@@ -2417,7 +2469,7 @@ class RunTraceCoordinator:
                         ingest=config_plan_ingest,
                         profile_schema=config_plan_profile_schema,
                     )
-                if capture_dir is not None:
+                if capture_dir is not None and not active_tracker.is_cached:
                     with active_tracker.capture_outputs(
                         capture_dir,
                         pattern=capture_pattern,
@@ -2429,43 +2481,72 @@ class RunTraceCoordinator:
                 failed = True
                 raise
             finally:
-                self._log_declared_output_paths(
-                    tracker=tracker,
-                    resolved_name=resolved_name,
-                    output_paths=resolved_invocation.output_paths,
-                    output_base_dir=output_base_dir,
-                    profile_file_schema=None,
-                    on_missing_outputs=(
-                        (lambda _subject, _missing: None)
-                        if failed
-                        else _handle_missing_outputs
-                    ),
-                )
-                if not failed:
-                    if resolved_invocation.declared_output_specs:
-                        self._log_declared_output_specs(
-                            tracker=tracker,
-                            resolved_name=resolved_name,
-                            declared_output_specs=resolved_invocation.declared_output_specs,
-                            output_base_dir=output_base_dir,
-                            profile_file_schema=None,
-                            output_missing=output_missing,
+                if active_tracker.is_cached:
+                    if not failed:
+                        expected_keys: list[str] = list(
+                            resolved_invocation.outputs or []
                         )
+                        if resolved_invocation.output_paths:
+                            for key in resolved_invocation.output_paths.keys():
+                                if key not in expected_keys:
+                                    expected_keys.append(str(key))
+                        if resolved_invocation.declared_output_specs:
+                            for key in resolved_invocation.declared_output_specs.keys():
+                                if key not in expected_keys:
+                                    expected_keys.append(str(key))
+                        if expected_keys:
+                            logged_outputs = {
+                                artifact.key: artifact
+                                for artifact in current_consist.outputs
+                            }
+                            missing_keys = [
+                                output_key
+                                for output_key in expected_keys
+                                if output_key not in logged_outputs
+                            ]
+                            _handle_missing_outputs(
+                                f"Cache hit for run {resolved_name!r}", missing_keys
+                            )
+                else:
+                    self._log_declared_output_paths(
+                        tracker=tracker,
+                        resolved_name=resolved_name,
+                        output_paths=resolved_invocation.output_paths,
+                        output_base_dir=output_base_dir,
+                        profile_file_schema=None,
+                        on_missing_outputs=(
+                            (lambda _subject, _missing: None)
+                            if failed
+                            else _handle_missing_outputs
+                        ),
+                    )
+                    if not failed:
+                        if resolved_invocation.declared_output_specs:
+                            self._log_declared_output_specs(
+                                tracker=tracker,
+                                resolved_name=resolved_name,
+                                declared_output_specs=resolved_invocation.declared_output_specs,
+                                output_base_dir=output_base_dir,
+                                profile_file_schema=None,
+                                output_missing=output_missing,
+                            )
 
-                    if (
-                        resolved_invocation.outputs
-                        and not resolved_invocation.declared_output_specs
-                    ):
-                        logged_outputs = {
-                            artifact.key: artifact
-                            for artifact in current_consist.outputs
-                        }
-                        missing_keys = [
-                            output_key
-                            for output_key in resolved_invocation.outputs
-                            if output_key not in logged_outputs
-                        ]
-                        _handle_missing_outputs(f"Run {resolved_name!r}", missing_keys)
+                        if (
+                            resolved_invocation.outputs
+                            and not resolved_invocation.declared_output_specs
+                        ):
+                            logged_outputs = {
+                                artifact.key: artifact
+                                for artifact in current_consist.outputs
+                            }
+                            missing_keys = [
+                                output_key
+                                for output_key in resolved_invocation.outputs
+                                if output_key not in logged_outputs
+                            ]
+                            _handle_missing_outputs(
+                                f"Run {resolved_name!r}", missing_keys
+                            )
 
             trace_outputs_map = {
                 artifact.key: artifact

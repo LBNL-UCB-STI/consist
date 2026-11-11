@@ -20,9 +20,8 @@ from typing import (
     cast,
 )
 
-from consist.artifact import Artifact as V2Artifact
+from consist.artifact import Artifact
 from consist.core.error_messages import format_problem_cause_fix
-from consist.models.artifact import Artifact, set_tracker_ref
 from consist.models.run import Run, RunResult, resolve_run_result_output
 from consist.types import ArtifactRef, RunInputRef
 
@@ -31,74 +30,6 @@ if TYPE_CHECKING:
 
 
 UTC = timezone.utc
-
-
-def convert_v2_artifact_to_legacy(
-    tracker: "Tracker",
-    v2_art: V2Artifact,
-    key_override: Optional[str] = None,
-) -> Artifact:
-    """Bridge a ``consist.artifact.Artifact`` into a ``consist.models.artifact.Artifact``."""
-    effective_key = key_override or v2_art.key or "artifact"
-    located = v2_art.locate(mounts=tracker.mounts or None)
-    resolved_abs: Optional[str] = str(located) if located is not None else None
-    hint_uri: Optional[str] = (
-        v2_art.hints[0].location.uri
-        if (v2_art.hints and v2_art.hints[0].location.uri)
-        else None
-    )
-    if hint_uri is not None and not hint_uri.startswith("file://"):
-        container_uri = hint_uri
-    elif resolved_abs is not None:
-        container_uri = tracker.fs.virtualize_path(resolved_abs)
-    elif hint_uri is not None:
-        container_uri = hint_uri
-    else:
-        container_uri = f"inputs://{effective_key}"
-
-    meta_dict: Dict[str, Any] = dict(v2_art.meta)
-    anchor = v2_art.identity.anchor
-    meta_dict["v2_identity_anchor"] = str(anchor)
-    if not v2_art.identity.verifiable:
-        meta_dict["v2_historical_unverified"] = True
-        meta_dict.pop("hash_semantics", None)
-        meta_dict.pop("content_identity", None)
-    else:
-        meta_dict["v2_historical_unverified"] = False
-        if (
-            anchor.scheme.startswith("sha256:manifest-v1")
-            or anchor.scheme == "sha256:dir_manifest"
-        ):
-            meta_dict["directory_artifact"] = True
-            meta_dict["directory_manifest"] = {
-                "version": 1,
-                "tree_hash": anchor.hex,
-            }
-            meta_dict["content_identity"] = f"sha256:manifest-v1:{anchor.hex}"
-        elif anchor.scheme == "sha256:file":
-            meta_dict["hash_semantics"] = {
-                "version": 1,
-                "algorithm": "sha256",
-                "kind": "file",
-                "digest_contract": "raw_file_bytes",
-                "source": "computed_full",
-            }
-            meta_dict["content_identity"] = f"sha256:file:{anchor.hex}"
-        else:
-            meta_dict["content_identity"] = str(anchor)
-
-    legacy = Artifact(
-        id=v2_art.id,
-        key=effective_key,
-        container_uri=container_uri,
-        driver=v2_art.driver,
-        hash=anchor.hex,
-        run_id=v2_art.run_id,
-        meta=meta_dict,
-        abs_path=resolved_abs,
-    )
-    set_tracker_ref(legacy, tracker)
-    return legacy
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,8 +112,6 @@ def resolve_input_reference_configured(
 ) -> ArtifactRef:
     if isinstance(ref, Artifact):
         return ref
-    if isinstance(ref, V2Artifact):
-        return convert_v2_artifact_to_legacy(tracker, ref, key_override=key)
     if isinstance(ref, RunResult):
         return resolve_run_result_output(ref)
 
@@ -190,13 +119,8 @@ def resolve_input_reference_configured(
         if string_ref_resolver is not None:
             resolved_ref = string_ref_resolver(ref)
             if resolved_ref is not None:
-                if isinstance(resolved_ref, V2Artifact):
-                    return convert_v2_artifact_to_legacy(
-                        tracker, resolved_ref, key_override=key
-                    )
                 return resolved_ref
-            else:
-                ref_str = ref
+            ref_str = ref
         else:
             ref_str = ref
     elif isinstance(ref, Path):
@@ -319,10 +243,7 @@ def preview_run_artifact_dir(
 
 def resolve_output_path(tracker: "Tracker", ref: ArtifactRef, base_dir: Path) -> Path:
     if isinstance(ref, Artifact):
-        raw = ref.path or tracker.resolve_uri(ref.container_uri)
-        return Path(raw)
-    if isinstance(ref, V2Artifact):
-        located = ref.locate(mounts=tracker.mounts)
+        located = ref.locate(ledger=tracker.ledger, mounts=tracker.mounts)
         if located is not None:
             return located
         if ref.primary_location is not None:

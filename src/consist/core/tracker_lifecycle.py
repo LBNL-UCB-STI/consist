@@ -16,7 +16,17 @@ from collections.abc import Mapping as MappingABC
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Union, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Sequence,
+    Union,
+    cast,
+)
 
 from pydantic import BaseModel
 
@@ -45,8 +55,13 @@ from consist.core.validation import (
     validate_run_meta,
     validate_run_strings,
 )
-from consist.digest import normalize_json
-from consist.models.artifact import Artifact
+from consist.artifact import (
+    _ARRAY_MEMBER_DRIVERS,
+    _TABLE_MEMBER_DRIVERS,
+    Artifact,
+)
+from consist.core.identity import compute_sig_v2
+from consist.digest import Kind, normalize_json
 from consist.models.run import ConsistRecord, Run, RunBindingInvocation
 from consist.types import (
     ArtifactRef,
@@ -137,6 +152,50 @@ def _normalize_identity_inputs(hash_inputs: HashInputs) -> Optional[list[Any]]:
                 )
             )
     return items
+
+
+def _artifact_selector_dict(artifact: Artifact) -> Dict[str, Any]:
+    member = artifact.member
+    drv = artifact.driver.strip().lower()
+    return {
+        "driver": artifact.driver,
+        "table_path": member if drv in _TABLE_MEMBER_DRIVERS else None,
+        "array_path": member if drv in _ARRAY_MEMBER_DRIVERS else None,
+    }
+
+
+def _compute_fallback_sig_v2(
+    *,
+    code_hash: Optional[str],
+    config_hash: Optional[str],
+    inputs: List[Artifact],
+    input_binding_roles: Optional[Sequence[Any]],
+) -> Optional[tuple[str, str]]:
+    if any(inp.identity.anchor.kind is Kind.HISTORICAL for inp in inputs):
+        return None
+    slot_ordinals: Dict[str, int] = {}
+    slot_anchors: list[tuple[str, int, str]] = []
+    if input_binding_roles is not None and len(input_binding_roles) == len(inputs):
+        for role_entry in input_binding_roles:
+            inp = inputs[role_entry.input_index]
+            raw_slot = (
+                f"depends_on:{role_entry.role}"
+                if role_entry.kind == "depends_on"
+                else str(role_entry.role)
+            )
+            ordinal = slot_ordinals.get(raw_slot, 0)
+            slot_ordinals[raw_slot] = ordinal + 1
+            slot_anchors.append((raw_slot, ordinal, str(inp.identity.anchor)))
+    else:
+        for inp in inputs:
+            raw_slot = str(inp.key)
+            ordinal = slot_ordinals.get(raw_slot, 0)
+            slot_ordinals[raw_slot] = ordinal + 1
+            slot_anchors.append((raw_slot, ordinal, str(inp.identity.anchor)))
+    try:
+        return compute_sig_v2(code_hash, config_hash, slot_anchors)
+    except ValueError:
+        return None
 
 
 class RunLifecycleCoordinator:
@@ -583,18 +642,6 @@ class RunLifecycleCoordinator:
 
         with _track_begin_run_phase("input_binding.total"):
             if inputs:
-                from consist.artifact import Artifact as V2Artifact
-                from consist.core.run_resolution import convert_v2_artifact_to_legacy
-
-                normalized_inputs: list[Any] = []
-                for raw_item in inputs:
-                    if isinstance(raw_item, V2Artifact):
-                        normalized_inputs.append(
-                            convert_v2_artifact_to_legacy(tracker, raw_item)
-                        )
-                    else:
-                        normalized_inputs.append(raw_item)
-                inputs = normalized_inputs
                 known_latest_by_index: Dict[int, Optional[Artifact]] = {}
                 if tracker.db:
                     lookup_by_index: Dict[
@@ -668,6 +715,7 @@ class RunLifecycleCoordinator:
                 ],
             }
 
+        fallback_sig_v2: Optional[tuple[str, str]] = None
         if strict_binding_context is not None:
             with _track_begin_run_phase("input_signature.strict"):
                 strict_binding_context = _validate_strict_binding_invocation_context(
@@ -704,6 +752,15 @@ class RunLifecycleCoordinator:
                         signature_lookup=tracker._resolve_run_signature,
                     )
                 )
+                if any(
+                    inp.identity.anchor.kind is Kind.HISTORICAL
+                    for inp in current_consist.inputs
+                ) or any(
+                    binding.mode == "historical-v1"
+                    for binding in action_identity.bindings
+                ):
+                    run.meta["cache_ineligible_reason"] = "historical_unverified_input"
+                    run.meta["cache_status"] = "historical"
                 run.input_hash = action_identity.value
                 run.signature = tracker.identity.calculate_run_signature(
                     code_hash=git_hash,
@@ -721,15 +778,9 @@ class RunLifecycleCoordinator:
                         {
                             **binding.as_payload(),
                             "artifact_id": str(ordinary_inputs[role.input_index].id),
-                            "selector": {
-                                "driver": ordinary_inputs[role.input_index].driver,
-                                "table_path": ordinary_inputs[
-                                    role.input_index
-                                ].table_path,
-                                "array_path": ordinary_inputs[
-                                    role.input_index
-                                ].array_path,
-                            },
+                            "selector": _artifact_selector_dict(
+                                ordinary_inputs[role.input_index]
+                            ),
                             "evidence": binding.as_evidence_payload(),
                         }
                         for role, binding in zip(
@@ -770,6 +821,7 @@ class RunLifecycleCoordinator:
                             run.meta["cache_ineligible_reason"] = (
                                 "historical_unverified_input"
                             )
+                            run.meta["cache_status"] = "historical"
                         run.meta["input_identity"] = {
                             "mode": "action-v2",
                             "version": 2,
@@ -780,17 +832,9 @@ class RunLifecycleCoordinator:
                                     "artifact_id": str(
                                         current_consist.inputs[role.input_index].id
                                     ),
-                                    "selector": {
-                                        "driver": current_consist.inputs[
-                                            role.input_index
-                                        ].driver,
-                                        "table_path": current_consist.inputs[
-                                            role.input_index
-                                        ].table_path,
-                                        "array_path": current_consist.inputs[
-                                            role.input_index
-                                        ].array_path,
-                                    },
+                                    "selector": _artifact_selector_dict(
+                                        current_consist.inputs[role.input_index]
+                                    ),
                                     "evidence": binding.as_evidence_payload(),
                                 }
                                 for role, binding in zip(
@@ -801,12 +845,23 @@ class RunLifecycleCoordinator:
                             ],
                         }
                     if any(
-                        isinstance(inp.meta, MappingABC)
-                        and inp.meta.get("v2_historical_unverified") is True
+                        inp.identity.anchor.kind is Kind.HISTORICAL
+                        or (
+                            isinstance(inp.meta, MappingABC)
+                            and inp.meta.get("v2_historical_unverified") is True
+                        )
                         for inp in current_consist.inputs
                     ):
                         run.meta["cache_ineligible_reason"] = (
                             "historical_unverified_input"
+                        )
+                        run.meta["cache_status"] = "historical"
+                    else:
+                        fallback_sig_v2 = _compute_fallback_sig_v2(
+                            code_hash=git_hash,
+                            config_hash=config_hash,
+                            inputs=current_consist.inputs,
+                            input_binding_roles=input_binding_roles,
                         )
                     run.input_hash = input_hash
                     run.signature = tracker.identity.calculate_run_signature(
@@ -865,6 +920,18 @@ class RunLifecycleCoordinator:
                         git_h,
                         signature=run.signature,
                     )
+                    if (
+                        fallback_sig_v2 is not None
+                        and fallback_sig_v2[1] != run.signature
+                        and tracker.db is not None
+                    ):
+                        seen_cand_ids = {c.id for c in cached_candidates}
+                        for extra_cand in tracker.db.find_runs_by_signature(
+                            fallback_sig_v2[1]
+                        ):
+                            if extra_cand.id not in seen_cand_ids:
+                                cached_candidates.append(extra_cand)
+                                seen_cand_ids.add(extra_cand.id)
                     _log_timing("find_matching_run", t0)
                     local_candidate = tracker._local_cache_index.get(cache_key)
                     if local_candidate and all(
@@ -886,6 +953,17 @@ class RunLifecycleCoordinator:
                                 git_hash=git_h,
                                 signature=run.signature,
                             )
+                            if (
+                                cached_run is None
+                                and fallback_sig_v2 is not None
+                                and fallback_sig_v2[1] != run.signature
+                                and tracker.db is not None
+                            ):
+                                cached_run = tracker.db.find_cached_run(
+                                    fallback_sig_v2[1],
+                                    model_name=model,
+                                    signature_scheme="sig-v2",
+                                )
                         _log_timing("find_matching_run", t0)
 
             cache_admitted = False

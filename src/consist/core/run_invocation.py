@@ -29,6 +29,8 @@ from typing import (
     get_type_hints,
 )
 
+import pandas as pd
+
 from consist.core.error_messages import format_problem_cause_fix
 from consist.core.metadata_resolver import MetadataResolver, ResolvedStepIdentity
 from consist.core.run_options import merge_run_options
@@ -41,6 +43,7 @@ from consist.types import (
     FacetLike,
     InputBindingMode,
     IdentityInputs,
+    OutputArtifactSpec,
     OutputPolicyOptions,
     OutputPathRef,
     OutputSet,
@@ -57,12 +60,13 @@ class DeclaredOutputSpec:
     role: str
     raw_value: Union[str, Path]
     is_dir: bool
+    artifact_spec: Optional[OutputArtifactSpec] = None
 
 
 def normalize_declared_outputs_mapping(
     outputs: Mapping[str, Any],
 ) -> Dict[str, DeclaredOutputSpec]:
-    """Validate and normalize an ``outputs={role: path}`` mapping."""
+    """Validate and normalize an ``outputs={role: path | OutputArtifactSpec}`` mapping."""
     specs: Dict[str, DeclaredOutputSpec] = {}
     for raw_role, raw_target in outputs.items():
         if (
@@ -80,34 +84,48 @@ def normalize_declared_outputs_mapping(
                     fix="Use clean string role keys such as outputs={'cleaned': out_path}.",
                 )
             )
-        if not isinstance(raw_target, (str, Path, os.PathLike)):
+        artifact_spec: Optional[OutputArtifactSpec] = None
+        path_target: Any = raw_target
+        if isinstance(raw_target, OutputArtifactSpec):
+            artifact_spec = raw_target
+            path_target = raw_target.path
+        if not isinstance(path_target, (str, Path, os.PathLike)):
             raise TypeError(
                 format_problem_cause_fix(
                     problem=(
-                        f"outputs[{raw_role!r}] must be a str or Path. "
-                        f"Received {type(raw_target).__name__}."
+                        f"outputs[{raw_role!r}] must be a str, Path, or OutputArtifactSpec "
+                        f"with a filesystem path/URI. Received {type(raw_target).__name__}."
                     ),
                     cause=(
                         "Symmetric outputs={role: path} mappings require filesystem "
-                        "paths or URI strings."
+                        "paths, URI strings, or OutputArtifactSpec instances."
                     ),
                     fix=(
-                        f"Pass a Path or path string for outputs[{raw_role!r}], e.g. "
+                        f"Pass a Path, path string, or OutputArtifactSpec for outputs[{raw_role!r}], e.g. "
                         f"outputs={{'{raw_role}': Path('out.parquet')}}."
                     ),
                 )
             )
-        raw_str = raw_target if isinstance(raw_target, str) else os.fspath(raw_target)
+        raw_str = (
+            path_target if isinstance(path_target, str) else os.fspath(path_target)
+        )
         is_dir = isinstance(raw_str, str) and raw_str.endswith(("/", "\\"))
+        if (
+            artifact_spec is not None
+            and isinstance(artifact_spec.meta, Mapping)
+            and artifact_spec.meta.get("directory_artifact") is True
+        ):
+            is_dir = True
         normalized_value: Union[str, Path] = (
-            raw_target
-            if isinstance(raw_target, (str, Path))
-            else Path(os.fspath(raw_target))
+            path_target
+            if isinstance(path_target, (str, Path))
+            else Path(os.fspath(path_target))
         )
         specs[raw_role] = DeclaredOutputSpec(
             role=raw_role,
             raw_value=normalized_value,
             is_dir=is_dir,
+            artifact_spec=artifact_spec,
         )
     return specs
 
@@ -304,6 +322,123 @@ def infer_path_annotated_parameters(fn: Any) -> frozenset[str]:
     return result
 
 
+_DATAFRAME_ANNOTATION_STRINGS = frozenset(
+    {
+        "DataFrame",
+        "pd.DataFrame",
+        "pandas.DataFrame",
+        "pandas.core.frame.DataFrame",
+    }
+)
+
+
+def _annotation_is_dataframe_type(annotation: Any) -> bool:
+    if annotation is inspect.Parameter.empty or annotation is None:
+        return False
+    if annotation is pd.DataFrame:
+        return True
+    if isinstance(annotation, type) and issubclass(annotation, pd.DataFrame):
+        return True
+    origin = get_origin(annotation)
+    if origin is pd.DataFrame:
+        return True
+    if isinstance(origin, type) and issubclass(origin, pd.DataFrame):
+        return True
+    if origin is Union or origin is types.UnionType:
+        non_none_args = [arg for arg in get_args(annotation) if arg is not type(None)]
+        return bool(non_none_args) and all(
+            _annotation_is_dataframe_type(arg) for arg in non_none_args
+        )
+    if isinstance(annotation, str):
+        cleaned = annotation.strip()
+        if cleaned.startswith("Optional[") and cleaned.endswith("]"):
+            inner = cleaned[len("Optional[") : -1].strip()
+            return _annotation_is_dataframe_type(inner)
+        if cleaned.startswith("typing.Optional[") and cleaned.endswith("]"):
+            inner = cleaned[len("typing.Optional[") : -1].strip()
+            return _annotation_is_dataframe_type(inner)
+        if "|" in cleaned:
+            parts = [
+                part.strip()
+                for part in cleaned.split("|")
+                if part.strip() not in {"None", "NoneType"}
+            ]
+            return bool(parts) and all(
+                _annotation_is_dataframe_type(part) for part in parts
+            )
+        return cleaned in _DATAFRAME_ANNOTATION_STRINGS
+    return False
+
+
+_DATAFRAME_ANNOTATION_CACHE: weakref.WeakKeyDictionary[Any, frozenset[str]] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def infer_dataframe_annotated_parameters(fn: Any) -> frozenset[str]:
+    """
+    Return the parameter names of ``fn`` whose type annotations are ``pd.DataFrame``
+    (or ``Optional[pd.DataFrame]`` / ``pd.DataFrame | None``).
+    """
+    if fn is None or not callable(fn):
+        return frozenset()
+    try:
+        cached = _DATAFRAME_ANNOTATION_CACHE.get(fn)
+        if cached is not None:
+            return cached
+    except TypeError:
+        pass
+
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return frozenset()
+
+    eligible_params = [
+        (param_name, param.annotation)
+        for param_name, param in sig.parameters.items()
+        if param.kind
+        not in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        )
+        and param.annotation is not inspect.Parameter.empty
+    ]
+    if not eligible_params:
+        result: frozenset[str] = frozenset()
+        try:
+            _DATAFRAME_ANNOTATION_CACHE[fn] = result
+        except TypeError:
+            pass
+        return result
+
+    matched: set[str] = set()
+    unresolved_string_params: list[tuple[str, str]] = []
+    for param_name, annotation in eligible_params:
+        if _annotation_is_dataframe_type(annotation):
+            matched.add(param_name)
+        elif isinstance(annotation, str):
+            unresolved_string_params.append((param_name, annotation))
+
+    if unresolved_string_params:
+        try:
+            resolved_hints = get_type_hints(fn)
+        except Exception:
+            resolved_hints = {}
+        for param_name, _ in unresolved_string_params:
+            if param_name in resolved_hints and _annotation_is_dataframe_type(
+                resolved_hints[param_name]
+            ):
+                matched.add(param_name)
+
+    result = frozenset(matched)
+    try:
+        _DATAFRAME_ANNOTATION_CACHE[fn] = result
+    except TypeError:
+        pass
+    return result
+
+
 @dataclass(frozen=True, slots=True)
 class ResolvedRunInvocation:
     """
@@ -442,7 +577,11 @@ class ResolvedRunInvocation:
         """Return declared outputs in the shape expected when delegating to ``Tracker.run``/``trace``."""
         if self.declared_output_specs is not None:
             return {
-                role: spec.raw_value
+                role: (
+                    spec.artifact_spec
+                    if spec.artifact_spec is not None
+                    else spec.raw_value
+                )
                 for role, spec in self.declared_output_specs.items()
             }
         return self.outputs

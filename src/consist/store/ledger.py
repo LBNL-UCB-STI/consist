@@ -343,6 +343,22 @@ class StoreLedger:
                 raise FileNotFoundError(
                     f"Database file does not exist for read-only access: {self.db_path}"
                 )
+            if (
+                self.read_only
+                and self.db_path.exists()
+                and self.db_path.stat().st_size == 0
+            ):
+                raise IncompatibleSchemaError(
+                    self.db_path,
+                    SchemaState.ABSENT,
+                    f"Cannot open empty 0-byte database in read_only mode: {self.db_path}",
+                )
+            if (
+                not self.read_only
+                and self.db_path.exists()
+                and self.db_path.stat().st_size == 0
+            ):
+                self.db_path.unlink()
             if self.db_path.exists() and self.db_path.stat().st_size > 0:
                 state = detect_schema(self.db_path)
                 if state is SchemaState.V1:
@@ -1685,54 +1701,72 @@ class StoreLedger:
 
         if facet:
 
-            def _add_facet_clause(key_path: str, val: Any) -> None:
+            def _add_facet_clause(
+                key_path: str,
+                val: Any,
+                *,
+                alt_escaped_key: str | None = None,
+            ) -> None:
+                if alt_escaped_key is not None and alt_escaped_key != key_path:
+                    key_pred = "(kv.key = ? OR kv.key = ?)"
+                    key_params: list[Any] = [key_path, alt_escaped_key]
+                else:
+                    key_pred = "kv.key = ?"
+                    key_params = [key_path]
+
                 if isinstance(val, bool):
                     clauses.append(
                         "EXISTS (SELECT 1 FROM main.run_config_kv kv "
-                        "WHERE kv.run_id = r.id AND kv.key = ? AND kv.value_bool = ?)"
+                        f"WHERE kv.run_id = r.id AND {key_pred} "
+                        "AND kv.value_type = 'bool' AND kv.value_bool = ?)"
                     )
-                    params.extend([key_path, val])
+                    params.extend([*key_params, val])
                 elif isinstance(val, (int, float)):
                     clauses.append(
                         "EXISTS (SELECT 1 FROM main.run_config_kv kv "
-                        "WHERE kv.run_id = r.id AND kv.key = ? AND kv.value_num = ?)"
+                        f"WHERE kv.run_id = r.id AND {key_pred} "
+                        "AND kv.value_type IN ('int', 'float') AND kv.value_num = ?)"
                     )
-                    params.extend([key_path, float(val)])
+                    params.extend([*key_params, float(val)])
                 elif val is None:
                     clauses.append(
                         "EXISTS (SELECT 1 FROM main.run_config_kv kv "
-                        "WHERE kv.run_id = r.id AND kv.key = ? AND kv.value_type = 'null')"
+                        f"WHERE kv.run_id = r.id AND {key_pred} AND kv.value_type = 'null')"
                     )
-                    params.append(key_path)
+                    params.extend(key_params)
                 elif isinstance(val, str):
                     clauses.append(
                         "EXISTS (SELECT 1 FROM main.run_config_kv kv "
-                        "WHERE kv.run_id = r.id AND kv.key = ? AND kv.value_str = ?)"
+                        f"WHERE kv.run_id = r.id AND {key_pred} "
+                        "AND kv.value_type = 'str' AND kv.value_str = ?)"
                     )
-                    params.extend([key_path, val])
+                    params.extend([*key_params, val])
                 else:
                     unfrozen = FrozenMeta({"v": val}).to_dict()["v"]
                     clauses.append(
                         "EXISTS (SELECT 1 FROM main.run_config_kv kv "
-                        "WHERE kv.run_id = r.id AND kv.key = ? "
+                        f"WHERE kv.run_id = r.id AND {key_pred} "
                         "AND kv.value_type = 'json' AND kv.value_json = CAST(? AS JSON))"
                     )
                     params.extend(
                         [
-                            key_path,
+                            *key_params,
                             json.dumps(unfrozen, sort_keys=True, separators=(",", ":")),
                         ]
                     )
 
             for f_key, f_val in facet.items():
                 key_str = str(f_key)
+                escaped_seg = key_str.replace("\\", "\\\\").replace(".", "\\.")
                 if isinstance(f_val, Mapping):
                     for sr in flatten_facet_values(
                         facet_dict=FrozenMeta(f_val).to_dict(),
                         include_json_leaves=True,
                     ):
                         full_key = (
-                            f"{key_str}.{sr.key_path}" if key_str else sr.key_path
+                            f"{escaped_seg}.{sr.key_path}"
+                            if escaped_seg
+                            else sr.key_path
                         )
                         if sr.value_type == "null":
                             _add_facet_clause(full_key, None)
@@ -1745,7 +1779,7 @@ class StoreLedger:
                         else:
                             _add_facet_clause(full_key, sr.value_json)
                 else:
-                    _add_facet_clause(key_str, f_val)
+                    _add_facet_clause(key_str, f_val, alt_escaped_key=escaped_seg)
 
         where_sql = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         sql = (

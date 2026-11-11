@@ -1,41 +1,44 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+import json
 import logging
 from typing import (
     TYPE_CHECKING,
     Any,
     Dict,
-    Optional,
+    List,
     Literal,
+    Optional,
     Type,
-    cast,
     get_args,
     get_origin,
 )
 
+from consist.artifact import Artifact
+from consist.core.stores import get_hot_data_ledger
 from consist.digest import canonical_json_sha256
-from consist.models.artifact import Artifact
+from consist.meta import strip_system_meta
 from consist.models.run import Run
 from consist.types import DriverType
 
 if TYPE_CHECKING:
-    from sqlalchemy.engine import Engine
+    from sqlmodel import SQLModel
+
     from consist.core.persistence import DatabaseManager
     from consist.core.tracker import Tracker
-    from sqlmodel import SQLModel
+    from consist.store.ledger import StoreLedger
 
 
 def _schema_view_name(
     *,
     run_id: str,
-    container_uri: str,
-    table_path: Optional[str],
-    array_path: Optional[str],
+    primary_uri: str,
+    member: Optional[str],
 ) -> str:
     base = {
-        "container_uri": container_uri,
-        "table_path": table_path,
-        "array_path": array_path,
+        "container_uri": primary_uri,
+        "member": member,
     }
     digest = canonical_json_sha256(base)[:12]
     safe_run = "".join(ch for ch in run_id if ch.isalnum() or ch == "_")
@@ -44,16 +47,157 @@ def _schema_view_name(
     return f"consist_tmp_{safe_run}_{digest}"
 
 
+def _json_size_bytes(obj: Any) -> int:
+    return len(
+        json.dumps(
+            obj,
+            sort_keys=True,
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+
+
+def _profile_duckdb_table_on_ledger(
+    *,
+    ledger: StoreLedger,
+    table_schema: str,
+    table_name: str,
+    source: str = "duckdb",
+    sample_rows: Optional[int] = None,
+) -> Any:
+    from consist.tools.schema_profile import (
+        MAX_FIELDS,
+        MAX_INLINE_PROFILE_BYTES,
+        MAX_SCHEMA_JSON_BYTES,
+        PROFILE_VERSION,
+        SchemaFieldProfile,
+        SchemaProfileResult,
+    )
+
+    with ledger.exec_cursor() as cur:
+        rows = cur.execute(
+            "SELECT column_name, data_type, is_nullable, ordinal_position "
+            "FROM information_schema.columns "
+            "WHERE table_catalog = current_database() "
+            "AND table_schema = ? AND table_name = ? "
+            "ORDER BY ordinal_position",
+            [table_schema, table_name],
+        ).fetchall()
+
+    fields: List[SchemaFieldProfile] = []
+    for col_name, data_type, is_nullable, ordinal in rows:
+        fields.append(
+            SchemaFieldProfile(
+                name=str(col_name),
+                logical_type=str(data_type).lower(),
+                nullable=str(is_nullable).upper() == "YES",
+                ordinal_position=int(ordinal),
+            )
+        )
+
+    truncated_flags: Dict[str, Any] = {
+        "fields": False,
+        "schema_json": False,
+        "inline_profile": False,
+    }
+    field_rows = [f.to_row() for f in fields]
+    hash_obj: Dict[str, Any] = {
+        "profile_version": PROFILE_VERSION,
+        "source": source,
+        "table_schema": table_schema,
+        "table_name": table_name,
+        "sample_rows": sample_rows,
+        "fields": field_rows,
+    }
+    schema_id = canonical_json_sha256(hash_obj)
+    summary = {
+        "profile_version": PROFILE_VERSION,
+        "schema_id": schema_id,
+        "source": source,
+        "table_schema": table_schema,
+        "table_name": table_name,
+        "sample_rows": sample_rows,
+        "n_columns": len(fields),
+        "truncated": truncated_flags,
+    }
+
+    profile_obj: Dict[str, Any] = dict(hash_obj)
+    if len(fields) > MAX_FIELDS:
+        truncated_flags["fields"] = True
+        profile_obj["fields"] = []
+
+    schema_json: Optional[Dict[str, Any]] = profile_obj
+    if _json_size_bytes(profile_obj) > MAX_SCHEMA_JSON_BYTES:
+        truncated_flags["schema_json"] = True
+        schema_json = None
+
+    inline_profile_json: Optional[Dict[str, Any]] = profile_obj
+    if schema_json is None or _json_size_bytes(profile_obj) > MAX_INLINE_PROFILE_BYTES:
+        truncated_flags["inline_profile"] = True
+        inline_profile_json = None
+
+    return SchemaProfileResult(
+        schema_id=schema_id,
+        summary=summary,
+        schema_json=schema_json,
+        inline_profile_json=inline_profile_json,
+        fields=fields,
+    )
+
+
+def _extract_model_table_name(schema_model: Type[Any]) -> str:
+    for cls in schema_model.__mro__:
+        raw_table = cls.__dict__.get("__tablename__")
+        if isinstance(raw_table, str) and raw_table:
+            return raw_table
+    return schema_model.__name__
+
+
+def _resolve_fk_target(field_info: Any) -> Optional[str]:
+    try:
+        raw_fk = field_info.foreign_key
+    except AttributeError:
+        raw_fk = None
+    if isinstance(raw_fk, str) and raw_fk:
+        return raw_fk
+
+    try:
+        sa_column = field_info.sa_column
+    except AttributeError:
+        sa_column = None
+    if sa_column is None:
+        return None
+    fk_set = sa_column.foreign_keys if hasattr_sa_foreign_keys(sa_column) else None
+    if not fk_set:
+        return None
+    for fk in fk_set:
+        try:
+            target = fk.target_fullname
+            if target:
+                return str(target)
+        except AttributeError:
+            pass
+    return None
+
+
+def hasattr_sa_foreign_keys(sa_column: Any) -> bool:
+    try:
+        _ = sa_column.foreign_keys
+        return True
+    except AttributeError:
+        return False
+
+
 class ArtifactSchemaManager:
     """
-    Handles schema discovery and persistence for artifacts.
+    Handles schema discovery and persistence for artifacts on ``StoreLedger``.
 
-    This keeps schema-specific logic out of `Tracker` to avoid it becoming a god class.
     The manager:
     - profiles an ingested DuckDB table (post-dlt "ground truth")
     - persists a deduped schema blob + normalized per-field rows
     - records per-artifact observations for historical/audit use
-    - stores a small pointer/summary in `Artifact.meta`
+    - returns updated immutable ``Artifact`` handles carrying ``schema_id`` and summary metadata
     """
 
     def __init__(self, tracker: Tracker):
@@ -63,50 +207,25 @@ class ArtifactSchemaManager:
         metadata_store = self.tracker.metadata_store
         if metadata_store is not None:
             return metadata_store.db
-        # Compatibility alias for single-store mode while migration is in progress.
         return self.tracker.db
 
-    def _hot_engine(self) -> Engine | None:
-        hot_data_store = self.tracker.hot_data_store
-        if hot_data_store is not None:
-            return hot_data_store.engine
-        # Compatibility alias for single-store mode while migration is in progress.
-        return self.tracker.engine
+    def _hot_ledger(self) -> StoreLedger | None:
+        return get_hot_data_ledger(self.tracker)
 
     def _type_annotation_to_logical_type(self, annotation: Any) -> str:
         """
         Convert a Python type annotation to a logical_type string for schema storage.
-
-        This reverses the mapping in parse_duckdb_type() by converting Python/Pydantic
-        type annotations to the canonical string format (e.g., "varchar", "integer").
-
-        Parameters
-        ----------
-        annotation : Any
-            The type annotation from a SQLModel field (e.g., str, Optional[int], etc.)
-
-        Returns
-        -------
-        str
-            A canonical logical_type string (e.g., "varchar", "integer", "boolean")
         """
-        # Handle Optional types: Optional[X] is Union[X, None], so unwrap it
         origin = get_origin(annotation)
         if origin is type(None):
-            # NoneType itself
             return "varchar"
 
-        # Check if this is Optional (Union with None)
         if origin is not None:
             args = get_args(annotation)
-            # Optional[X] has args (X, NoneType)
             non_none_types = [arg for arg in args if arg is not type(None)]
             if non_none_types:
-                annotation = non_none_types[0]
-                # Recursively process the unwrapped type
-                return self._type_annotation_to_logical_type(annotation)
+                return self._type_annotation_to_logical_type(non_none_types[0])
 
-        # Map Python builtins and common types to logical_type strings
         type_mapping = {
             str: "varchar",
             int: "integer",
@@ -114,25 +233,16 @@ class ArtifactSchemaManager:
             bool: "boolean",
             bytes: "blob",
         }
-
-        # Check exact type match first
         if annotation in type_mapping:
             return type_mapping[annotation]
 
-        # Check string representation for typing constructs and special cases
         type_str = str(annotation).lower()
-
-        # Handle datetime types
         if "datetime.datetime" in type_str or "datetime" in type_str:
             return "timestamp"
         if "datetime.date" in type_str or "date" in type_str:
             return "date"
-
-        # Handle Decimal/Numeric
         if "decimal" in type_str or "numeric" in type_str:
             return "decimal(18, 2)"
-
-        # Default to varchar for unknown types (conservative fallback)
         return "varchar"
 
     def profile_user_provided_schema(
@@ -142,48 +252,12 @@ class ArtifactSchemaManager:
         run: Run,
         schema_model: Type[SQLModel],
         source: str = "user_provided",
-    ) -> None:
+    ) -> Artifact:
         """
-        Store a user-provided SQLModel schema as an artifact profile.
-
-        When users manually define a SQLModel class for an artifact (e.g., to add
-        FK constraints, indexes, or refined type information), this method converts
-        that model into an ArtifactSchema record. The schema is marked with source
-        "user_provided" so it can be preferred during export.
-
-        This enables a workflow where:
-        1. User profiles artifact file: profile_file_schema=True
-        2. User exports SQLModel stub from file profile
-        3. User manually edits stub (add FK, indexes, enums, etc.)
-        4. User passes edited schema back to log_artifact(schema=MySchema)
-        5. The edited schema becomes the preferred schema for export
-
-        Parameters
-        ----------
-        artifact : Artifact
-            The artifact being associated with this schema.
-        run : Run
-            The run context.
-        schema_model : Type[SQLModel]
-            The user-provided SQLModel class to store. Field types are extracted
-            from the class definition and converted to canonical logical_type strings.
-        source : str, default "user_provided"
-            Source label for the schema observation record.
-
-        Notes
-        -----
-        - The schema_id is computed as a hash of the normalized field definitions
-        - Field ordinal positions are preserved from the model definition order
-        - All fields are assumed nullable unless explicitly marked as required
-        - The schema is stored deduped: if two artifacts have identical schemas,
-          they share the same ArtifactSchema row
-        - LIMITATION: SQLAlchemy sa_column overrides (e.g., Column("PNUM", ...))
-          are not extracted; the persisted schema uses field names only. If you need
-          actual database column names, pass the schema explicitly to ingest().
+        Store a user-provided SQLModel/Pydantic schema as an artifact profile and return
+        the updated ``Artifact`` (attaching schema metadata in memory even when ``db_path=None``).
         """
         metadata_db = self._metadata_db()
-        if metadata_db is None:
-            return
 
         try:
             from consist.models.artifact_schema import (
@@ -193,60 +267,31 @@ class ArtifactSchemaManager:
                 ArtifactSchemaRelation,
             )
 
-            # 1. Extract fields from the SQLModel class
-            fields = []
+            fields: list[ArtifactSchemaField] = []
             relations: list[dict[str, str]] = []
-            table_name = (
-                getattr(schema_model, "__tablename__", None) or schema_model.__name__
-            )
+            table_name = _extract_model_table_name(schema_model)
 
-            # model_fields is a dict of field_name -> FieldInfo from Pydantic
-            if schema_model.model_fields:
-
-                def _resolve_fk_target(field_info: Any) -> Optional[str]:
-                    raw_fk = getattr(field_info, "foreign_key", None)
-                    if raw_fk:
-                        return str(raw_fk)
-                    sa_column = getattr(field_info, "sa_column", None)
-                    if sa_column is None:
-                        return None
-                    fk_set = getattr(sa_column, "foreign_keys", None)
-                    if not fk_set:
-                        return None
-                    for fk in fk_set:
-                        target = getattr(fk, "target_fullname", None)
-                        if target:
-                            return str(target)
-                        target_col = getattr(fk, "column", None)
-                        if target_col is not None:
-                            return str(target_col)
+            def _split_fk_target(target: str) -> Optional[tuple[str, str]]:
+                parts = [part for part in str(target).split(".") if part]
+                if len(parts) < 2:
                     return None
+                return ".".join(parts[:-1]), parts[-1]
 
-                def _split_fk_target(target: str) -> Optional[tuple[str, str]]:
-                    parts = [part for part in str(target).split(".") if part]
-                    if len(parts) < 2:
-                        return None
-                    return ".".join(parts[:-1]), parts[-1]
-
+            if schema_model.model_fields:
                 for ordinal, (field_name, field_info) in enumerate(
                     schema_model.model_fields.items(), start=1
                 ):
-                    # Extract the type annotation from the field
-                    annotation = getattr(field_info, "annotation", None)
-                    if annotation is None:
-                        annotation = str
-
-                    # Convert Python type to logical_type string
+                    annotation = (
+                        field_info.annotation
+                        if field_info.annotation is not None
+                        else str
+                    )
                     logical_type = self._type_annotation_to_logical_type(annotation)
-
-                    # Determine if field is nullable (default: True for safety)
-                    # If required=True in the field, then it's not nullable
-                    is_required = getattr(field_info, "is_required", lambda: False)()
-                    nullable = not is_required
+                    nullable = not bool(field_info.is_required())
 
                     fields.append(
                         ArtifactSchemaField(
-                            schema_id="",  # Will be set below after computing schema_id
+                            schema_id="",
                             ordinal_position=ordinal,
                             name=field_name,
                             logical_type=logical_type,
@@ -270,12 +315,6 @@ class ArtifactSchemaManager:
                                 }
                             )
 
-            # 2. Compute schema_id by hashing the normalized field definitions.
-            # IMPORTANT: We do NOT include "source" in the hash. This ensures that
-            # identical schemas (same fields, types, nullability) from different sources
-            # (file, duckdb, user_provided) get the SAME schema_id and automatically dedupe.
-            # The "source" is tracked separately in ArtifactSchemaObservation, allowing us
-            # to know which sources observed which schema without preventing deduplication.
             field_rows = [
                 {
                     "name": f.name,
@@ -300,11 +339,21 @@ class ArtifactSchemaManager:
                 "relations": sorted_relations,
             }
             schema_id = canonical_json_sha256(hash_obj)
+            summary_payload: Dict[str, Any] = {
+                "table_name": table_name,
+                "n_columns": len(fields),
+                "profile_version": 1,
+            }
+            meta_updates: Dict[str, Any] = {
+                "schema_name": schema_model.__name__,
+                "schema_summary": summary_payload,
+            }
 
-            # 3. Create ArtifactSchema and ArtifactSchemaField rows.
-            # NOTE: We do NOT include "source" in summary_json. The schema_id dedupes
-            # across sources, so multiple sources may observe the same schema.
-            # The authoritative source information is in ArtifactSchemaObservation.source.
+            if metadata_db is None:
+                return artifact.with_schema(
+                    schema_id, summary=summary_payload
+                ).with_meta(meta_updates, merge=True)
+
             schema_row = ArtifactSchema(
                 id=schema_id,
                 profile_version=1,
@@ -321,9 +370,6 @@ class ArtifactSchemaManager:
                 },
                 profile_json=hash_obj,
             )
-
-            # TODO: Keep a single normalized intermediate and avoid rebuilding these
-            # field rows after schema_id is known if this path remains hot.
             field_rows_with_schema_id = [
                 ArtifactSchemaField(
                     schema_id=schema_id,
@@ -337,7 +383,6 @@ class ArtifactSchemaManager:
                 )
                 for f in fields
             ]
-
             relation_rows = [
                 ArtifactSchemaRelation(
                     schema_id=schema_id,
@@ -350,23 +395,7 @@ class ArtifactSchemaManager:
                 for rel in sorted_relations
             ]
 
-            # 4. Persist schema rows, observation, and artifact metadata together.
-            # Explicitly ensure schema_name is persisted so that ingest() can look it up
-            # by name from the tracker's registered schemas. This enables the workflow
-            # where log_artifact(..., schema=MySchema) is later followed by ingest()
-            # without needing to pass the schema again (as long as it's registered with Tracker).
-            # NOTE: We do NOT include "source" in schema_summary. Source attribution lives
-            # exclusively in ArtifactSchemaObservation.source.
-            meta_updates: Dict[str, Any] = {
-                "schema_id": schema_id,
-                "schema_name": schema_model.__name__,  # Explicit: persisted for ingest() lookup
-                "schema_summary": {
-                    "table_name": table_name,
-                    "n_columns": len(fields),
-                    "profile_version": 1,
-                },
-            }
-            metadata_db.persist_artifact_schema_profile(
+            updated = metadata_db.persist_artifact_schema_profile(
                 artifact=artifact,
                 schema=schema_row,
                 fields=field_rows_with_schema_id,
@@ -380,13 +409,13 @@ class ArtifactSchemaManager:
                 ),
                 meta_updates=meta_updates,
             )
-
             logging.info(
                 "[Consist] Stored user-provided schema for artifact=%s (schema_id=%s, source=%s)",
                 artifact.key,
                 schema_id,
                 source,
             )
+            return updated
 
         except Exception as e:
             logging.warning(
@@ -394,6 +423,7 @@ class ArtifactSchemaManager:
                 artifact.key,
                 e,
             )
+            return artifact
 
     def profile_ingested_table(
         self,
@@ -403,19 +433,14 @@ class ArtifactSchemaManager:
         table_schema: str,
         table_name: str,
         source: str = "duckdb",
-    ) -> None:
+    ) -> Artifact:
         """
-        Profile a materialized (ingested) DuckDB table and persist schema records.
-
-        Notes
-        -----
-        This is intended to capture the post-ingest schema (after dlt normalization),
-        rather than file-side dtypes.
+        Profile a materialized (ingested) DuckDB table on ``StoreLedger`` and persist schema records.
         """
         metadata_db = self._metadata_db()
-        hot_engine = self._hot_engine()
-        if metadata_db is None or hot_engine is None:
-            return
+        hot_ledger = self._hot_ledger()
+        if metadata_db is None or hot_ledger is None:
+            return artifact
 
         try:
             from consist.models.artifact_schema import (
@@ -423,10 +448,9 @@ class ArtifactSchemaManager:
                 ArtifactSchemaField,
                 ArtifactSchemaObservation,
             )
-            from consist.tools.schema_profile import profile_duckdb_table
 
-            result = profile_duckdb_table(
-                engine=hot_engine,
+            result = _profile_duckdb_table_on_ledger(
+                ledger=hot_ledger,
                 table_schema=table_schema,
                 table_name=table_name,
                 source=source,
@@ -462,25 +486,26 @@ class ArtifactSchemaManager:
                 for f in result.fields
             ]
 
-            metadata_db.upsert_artifact_schema(schema_row, field_rows, [])
-            metadata_db.insert_artifact_schema_observation(
-                ArtifactSchemaObservation(
-                    artifact_id=artifact.id,
-                    schema_id=result.schema_id,
-                    run_id=run.id,
-                    source=result.summary.get("source", source),
-                    sample_rows=result.summary.get("sample_rows"),
-                )
-            )
-
             meta_updates: Dict[str, Any] = {
-                "schema_id": result.schema_id,
                 "schema_summary": result.summary,
             }
             if result.inline_profile_json is not None:
                 meta_updates["schema_profile"] = result.inline_profile_json
 
-            metadata_db.update_artifact_meta(artifact, meta_updates)
+            return metadata_db.persist_artifact_schema_profile(
+                artifact=artifact,
+                schema=schema_row,
+                fields=field_rows,
+                relations=[],
+                observation=ArtifactSchemaObservation(
+                    artifact_id=artifact.id,
+                    schema_id=result.schema_id,
+                    run_id=run.id,
+                    source=result.summary.get("source", source),
+                    sample_rows=result.summary.get("sample_rows"),
+                ),
+                meta_updates=meta_updates,
+            )
 
         except Exception as e:
             logging.warning(
@@ -490,6 +515,7 @@ class ArtifactSchemaManager:
                 table_name,
                 e,
             )
+            return artifact
 
     def profile_file_artifact(
         self,
@@ -501,44 +527,17 @@ class ArtifactSchemaManager:
         sample_rows: Optional[int],
         reuse_if_unchanged: bool = False,
         source: str = "file",
-    ) -> None:
+    ) -> Artifact:
         """
-        Profile a file-based artifact and persist schema records.
-
-        Notes
-        -----
-        This is intended to capture a lightweight file schema snapshot without ingestion.
-
-        Parameters
-        ----------
-        artifact : Artifact
-            Artifact being profiled.
-        run : Run
-            Run context for the schema observation.
-        resolved_path : str
-            Resolved filesystem path to the artifact.
-        driver : str
-            File format driver (e.g., "csv", "parquet").
-        sample_rows : Optional[int]
-            Maximum rows to sample when inferring schema.
-        reuse_if_unchanged : bool, default False
-            If True, reuse a prior schema observation when the artifact content
-            identity matches. This prefers ``artifact.content_id`` and falls back
-            to hash-based lookup for legacy rows.
-        source : str, default "file"
-            Source label for the schema observation.
-
-        Returns
-        -------
-        None
+        Profile a file-based artifact and persist schema records on ``StoreLedger``.
         """
         metadata_db = self._metadata_db()
         if metadata_db is None:
-            return
+            return artifact
 
         try:
-            if isinstance(artifact.meta, dict) and artifact.meta.get("schema_id"):
-                return
+            if artifact.schema_id:
+                return artifact
             from consist.models.artifact_schema import (
                 ArtifactSchema,
                 ArtifactSchemaField,
@@ -548,60 +547,43 @@ class ArtifactSchemaManager:
                 MAX_INLINE_PROFILE_BYTES,
                 profile_file_schema,
             )
-            import json
 
             def _is_inline_profile(obj: Any) -> bool:
                 if obj is None:
                     return False
-                return (
-                    len(
-                        json.dumps(
-                            obj,
-                            sort_keys=True,
-                            ensure_ascii=True,
-                            separators=(",", ":"),
-                        ).encode("utf-8")
-                    )
-                    <= MAX_INLINE_PROFILE_BYTES
-                )
+                return _json_size_bytes(obj) <= MAX_INLINE_PROFILE_BYTES
 
-            table_path = None
+            table_path: Optional[str] = None
             if driver in DriverType.table_path_drivers():
-                table_path = artifact.table_path
+                table_path = artifact.member
                 if not table_path:
                     logging.warning(
-                        "[Consist] Missing table_path for %s schema profile: %s",
+                        "[Consist] Missing member/table_path for %s schema profile: %s",
                         driver,
                         artifact.key,
                     )
-                    return
+                    return artifact
 
             if reuse_if_unchanged:
-                prior_obs = None
-                # Prefer content identity when available, but still fall back to
-                # hash-based lookup when the matching schema observation lives on a
-                # legacy row that has not been backfilled with content_id yet.
-                if artifact.content_id is not None:
-                    prior_obs = metadata_db.find_schema_observation_for_content_id(
-                        artifact.content_id
-                    )
-                if prior_obs is None and artifact.hash:
-                    prior_obs = metadata_db.find_schema_observation_for_hash(
-                        cast(str, artifact.hash)
-                    )
-                if prior_obs is not None:
+                prior_pair = metadata_db.find_schema_observation_for_anchor(
+                    artifact.identity.anchor
+                )
+                if prior_pair is not None:
+                    prior_obs, _prior_summary = prior_pair
                     schema_bundle = metadata_db.get_artifact_schema(
-                        schema_id=prior_obs.schema_id, backfill_ordinals=False
+                        schema_id=prior_obs.schema_id,
+                        backfill_ordinals=False,
                     )
                     if schema_bundle is not None:
                         schema_row, _fields = schema_bundle
-                        meta_updates: Dict[str, Any] = {
-                            "schema_id": schema_row.id,
-                            "schema_summary": schema_row.summary_json,
-                        }
+                        meta_updates: Dict[str, Any] = {}
+                        if isinstance(schema_row.summary_json, Mapping):
+                            meta_updates["schema_summary"] = dict(
+                                schema_row.summary_json
+                            )
                         if _is_inline_profile(schema_row.profile_json):
                             meta_updates["schema_profile"] = schema_row.profile_json
-                        metadata_db.persist_artifact_schema_observation_bundle(
+                        return metadata_db.persist_artifact_schema_observation_bundle(
                             artifact=artifact,
                             observation=ArtifactSchemaObservation(
                                 artifact_id=artifact.id,
@@ -612,8 +594,9 @@ class ArtifactSchemaManager:
                             ),
                             meta_updates=meta_updates,
                         )
-                        return
 
+            primary_loc = artifact.primary_location
+            primary_uri = primary_loc.uri if primary_loc is not None else resolved_path
             result = profile_file_schema(
                 path=resolved_path,
                 driver=driver,
@@ -622,9 +605,8 @@ class ArtifactSchemaManager:
                 source=source,
                 view_name=_schema_view_name(
                     run_id=str(run.id),
-                    container_uri=artifact.container_uri,
-                    table_path=table_path,
-                    array_path=artifact.array_path,
+                    primary_uri=primary_uri,
+                    member=artifact.member,
                 ),
             )
             truncated = result.summary.get("truncated") or {}
@@ -656,14 +638,20 @@ class ArtifactSchemaManager:
                 for f in result.fields
             ]
 
-            meta_updates: Dict[str, Any] = {
-                "schema_id": result.schema_id,
-                "schema_summary": result.summary,
-            }
-            if result.inline_profile_json is not None:
-                meta_updates["schema_profile"] = result.inline_profile_json
+            cleaned_updates = dict(
+                strip_system_meta(
+                    {
+                        "schema_summary": result.summary,
+                        **(
+                            {"schema_profile": result.inline_profile_json}
+                            if result.inline_profile_json is not None
+                            else {}
+                        ),
+                    }
+                )
+            )
 
-            metadata_db.persist_artifact_schema_profile(
+            return metadata_db.persist_artifact_schema_profile(
                 artifact=artifact,
                 schema=schema_row,
                 fields=field_rows,
@@ -675,7 +663,7 @@ class ArtifactSchemaManager:
                     source=result.summary.get("source", source),
                     sample_rows=result.summary.get("sample_rows"),
                 ),
-                meta_updates=meta_updates,
+                meta_updates=cleaned_updates,
             )
 
         except Exception as e:
@@ -685,3 +673,4 @@ class ArtifactSchemaManager:
                 resolved_path,
                 e,
             )
+            return artifact

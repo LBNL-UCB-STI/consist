@@ -5,40 +5,32 @@ import logging
 import os
 from pathlib import Path
 import tempfile
-from typing import Any, Dict, Iterator, List, Optional, Sequence, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Sequence
 import uuid
 
 from consist.core._performance_attribution import _track_begin_run_phase
-from consist.models.artifact_facet import ArtifactFacet
-from consist.models.artifact_kv import ArtifactKV
 
 if TYPE_CHECKING:
+    from consist.artifact import Artifact
     from consist.core.tracker import Tracker
-    from consist.models.artifact import Artifact
     from consist.models.run import ConsistRecord, RunBindingInvocation
     from consist.models.run import Run as RunModel
 
 
 class ProvenanceWriter:
     """
-    Persistence-side helper for run JSON snapshots and artifact DB sync.
+    Persistence-side helper for run JSON snapshots and artifact ``StoreLedger`` sync.
 
-    This keeps write-heavy provenance plumbing out of ``Tracker`` while leaving
+    Keeps write-heavy provenance plumbing out of ``Tracker`` while leaving
     the tracker as the composition root and lifecycle orchestrator.
     """
 
-    def __init__(self, tracker: "Tracker"):
+    def __init__(self, tracker: Tracker) -> None:
         self._tracker = tracker
         self._artifact_batch_depth = 0
         self._batch_pending_json_flush = False
-        self._batch_pending_artifacts: list[tuple["Artifact", str]] = []
-        self._batch_pending_artifact_facet_bundles: list[
-            tuple[
-                "Artifact",
-                ArtifactFacet,
-                Dict[str, Any],
-                Optional[List[ArtifactKV]],
-            ]
+        self._batch_pending_artifacts: list[
+            tuple[Artifact, str, str | None, str | None, int, bool | None]
         ] = []
 
     def _cleanup_temp_path(self, temp_path: Path) -> None:
@@ -53,7 +45,6 @@ class ProvenanceWriter:
         if is_outermost:
             self._batch_pending_json_flush = False
             self._batch_pending_artifacts = []
-            self._batch_pending_artifact_facet_bundles = []
         self._artifact_batch_depth += 1
         try:
             yield
@@ -64,12 +55,8 @@ class ProvenanceWriter:
 
             pending_json_flush = self._batch_pending_json_flush
             pending_artifacts = list(self._batch_pending_artifacts)
-            pending_artifact_facet_bundles = list(
-                self._batch_pending_artifact_facet_bundles
-            )
             self._batch_pending_json_flush = False
             self._batch_pending_artifacts = []
-            self._batch_pending_artifact_facet_bundles = []
 
             if pending_json_flush:
                 with _track_begin_run_phase("input_binding.batch_flush_json"):
@@ -77,11 +64,6 @@ class ProvenanceWriter:
             if pending_artifacts:
                 with _track_begin_run_phase("input_binding.batch_sync_artifacts"):
                     self._sync_artifacts_now(pending_artifacts)
-            if pending_artifact_facet_bundles:
-                with _track_begin_run_phase("input_binding.batch_persist_facets"):
-                    self._persist_artifact_facet_bundles_now(
-                        pending_artifact_facet_bundles
-                    )
 
     def flush_json(self) -> None:
         if self._artifact_batch_depth > 0:
@@ -95,10 +77,10 @@ class ProvenanceWriter:
             return
         self._write_record_json(tracker.current_consist)
 
-    def flush_record_json(self, record: "ConsistRecord") -> None:
+    def flush_record_json(self, record: ConsistRecord) -> None:
         self._write_record_json(record)
 
-    def _write_record_json(self, record: "ConsistRecord") -> None:
+    def _write_record_json(self, record: ConsistRecord) -> None:
         tracker = self._tracker
         json_str = record.model_dump_json(indent=2)
 
@@ -138,9 +120,9 @@ class ProvenanceWriter:
 
     def sync_run(
         self,
-        run: "RunModel",
+        run: RunModel,
         *,
-        binding_invocation: "RunBindingInvocation | None" = None,
+        binding_invocation: RunBindingInvocation | None = None,
         require_success: bool = False,
     ) -> None:
         tracker = self._tracker
@@ -158,11 +140,11 @@ class ProvenanceWriter:
 
     def sync_run_with_links(
         self,
-        run: "RunModel",
+        run: RunModel,
         *,
         artifact_ids: list[uuid.UUID],
         direction: str = "output",
-        binding_invocation: "RunBindingInvocation | None" = None,
+        binding_invocation: RunBindingInvocation | None = None,
         require_success: bool = False,
     ) -> None:
         tracker = self._tracker
@@ -182,13 +164,19 @@ class ProvenanceWriter:
 
     def sync_artifact(
         self,
-        artifact: "Artifact",
+        artifact: Artifact,
         direction: str,
         *,
+        slot: str | None = None,
+        role: str | None = None,
+        ordinal: int = 0,
+        facet_index: bool | None = None,
         profile_label: Optional[str] = None,
     ) -> None:
         if self._artifact_batch_depth > 0:
-            self._batch_pending_artifacts.append((artifact, direction))
+            self._batch_pending_artifacts.append(
+                (artifact, direction, slot, role, ordinal, facet_index)
+            )
             return
 
         tracker = self._tracker
@@ -198,6 +186,10 @@ class ProvenanceWriter:
                     artifact,
                     tracker.current_consist.run.id,
                     direction,
+                    slot=slot,
+                    role=role,
+                    ordinal=ordinal,
+                    facet_index=facet_index,
                     profile_label=profile_label,
                 )
             except Exception as e:
@@ -205,47 +197,58 @@ class ProvenanceWriter:
 
     def sync_artifact_with_facet_bundle(
         self,
-        artifact: "Artifact",
+        artifact: Artifact,
         direction: str,
         *,
-        facet: ArtifactFacet,
-        meta_updates: Dict[str, Any],
-        kv_rows: Optional[List[ArtifactKV]] = None,
-    ) -> None:
-        if self._artifact_batch_depth > 0:
-            self._batch_pending_artifacts.append((artifact, direction))
-            self._batch_pending_artifact_facet_bundles.append(
-                (artifact, facet, meta_updates, kv_rows)
-            )
-            return
-
-        tracker = self._tracker
-        if tracker.db and tracker.current_consist:
-            try:
-                tracker.db.sync_artifact_with_facet_bundle(
-                    artifact,
-                    tracker.current_consist.run.id,
-                    direction,
-                    facet=facet,
-                    meta_updates=meta_updates,
-                    kv_rows=kv_rows,
-                )
-            except Exception as e:
-                logging.warning("Database sync failed: %s", e)
+        meta_updates: Dict[str, Any] | None = None,
+        index_kv: bool | None = None,
+        profile_label: Optional[str] = None,
+    ) -> Artifact:
+        updated = (
+            artifact.with_meta(meta_updates, merge=True) if meta_updates else artifact
+        )
+        bound = artifact.resolve_bound_tracker()
+        if bound is not None:
+            updated.bind_tracker(bound)
+        self.sync_artifact(
+            updated,
+            direction,
+            facet_index=index_kv,
+            profile_label=profile_label,
+        )
+        return updated
 
     def _sync_artifacts_now(
-        self, artifacts_with_direction: Sequence[tuple["Artifact", str]]
+        self,
+        artifacts_with_direction: Sequence[
+            tuple[Artifact, str, str | None, str | None, int, bool | None]
+        ],
     ) -> None:
         tracker = self._tracker
         if not tracker.db or not tracker.current_consist:
             return
 
         run_id = tracker.current_consist.run.id
-        artifacts_by_direction: Dict[str, List["Artifact"]] = {}
-        for artifact, direction in artifacts_with_direction:
-            artifacts_by_direction.setdefault(direction, []).append(artifact)
+        grouped_simple: Dict[str, List[Artifact]] = {}
+        custom_entries: list[
+            tuple[Artifact, str, str | None, str | None, int, bool | None]
+        ] = []
+        for (
+            artifact,
+            direction,
+            slot,
+            role,
+            ordinal,
+            facet_index,
+        ) in artifacts_with_direction:
+            if slot is None and role is None and ordinal == 0 and facet_index is None:
+                grouped_simple.setdefault(direction, []).append(artifact)
+            else:
+                custom_entries.append(
+                    (artifact, direction, slot, role, ordinal, facet_index)
+                )
 
-        for direction, artifacts in artifacts_by_direction.items():
+        for direction, artifacts in grouped_simple.items():
             try:
                 tracker.db.sync_artifacts(
                     artifacts=artifacts,
@@ -255,23 +258,23 @@ class ProvenanceWriter:
             except Exception as e:
                 logging.warning("Database sync failed: %s", e)
 
-    def _persist_artifact_facet_bundles_now(
-        self,
-        artifact_facet_bundles: Sequence[
-            tuple["Artifact", ArtifactFacet, Dict[str, Any], Optional[List[ArtifactKV]]]
-        ],
-    ) -> None:
-        tracker = self._tracker
-        if not tracker.db:
-            return
-
-        for artifact, facet, meta_updates, kv_rows in artifact_facet_bundles:
+        for (
+            artifact,
+            direction,
+            slot,
+            role,
+            ordinal,
+            facet_index,
+        ) in custom_entries:
             try:
-                tracker.db.persist_artifact_facet_bundle(
-                    artifact=artifact,
-                    facet=facet,
-                    meta_updates=meta_updates,
-                    kv_rows=kv_rows,
+                tracker.db.sync_artifact(
+                    artifact,
+                    run_id,
+                    direction,
+                    slot=slot,
+                    role=role,
+                    ordinal=ordinal,
+                    facet_index=facet_index,
                 )
             except Exception as e:
                 logging.warning("Database sync failed: %s", e)

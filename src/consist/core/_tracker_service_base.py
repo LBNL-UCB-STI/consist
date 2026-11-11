@@ -34,4 +34,4 @@ class _TrackerServiceBase:
         # Transitional compatibility shim for extracted service code. This keeps
         # method bodies stable while logic moves out of Tracker, but it should
         # not be mistaken for a hard service contract.
-        return getattr(self._tracker, name)
+        return object.__getattribute__(self._tracker, name)

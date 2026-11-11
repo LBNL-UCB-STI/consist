@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal, Mapping, Optional, Sequence, TYPE_CHECKING, Union
 
+from consist.artifact import Artifact
 from consist.core._tracker_service_base import _TrackerServiceBase
 from consist.core.materialize import (
     build_allowed_materialization_roots,
@@ -19,7 +20,6 @@ from consist.core.materialize_options import (
     normalize_materialize_output_keys,
     validate_materialize_option,
 )
-from consist.models.artifact import Artifact
 
 if TYPE_CHECKING:
     from consist.core.materialize import (
@@ -465,10 +465,14 @@ class TrackerRecoveryService(_TrackerServiceBase):
         strict_tree_keys = {
             key
             for key, artifact in requested_outputs.items()
-            if isinstance(artifact.meta, dict)
-            and (
-                artifact.meta.get("directory_artifact") is True
-                or artifact.meta.get("file_bundle_artifact") is True
+            if artifact.driver in ("directory", "zarr")
+            or artifact.identity.anchor.scheme.startswith("sha256:manifest")
+            or (
+                isinstance(artifact.meta, Mapping)
+                and (
+                    artifact.meta.get("directory_artifact") is True
+                    or artifact.meta.get("file_bundle_artifact") is True
+                )
             )
         }
         normalized_destinations = {

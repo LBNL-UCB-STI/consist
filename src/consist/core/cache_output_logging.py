@@ -2,7 +2,7 @@ import logging
 from pathlib import Path
 from typing import Optional, Protocol, runtime_checkable
 
-from consist.models.artifact import Artifact
+from consist.artifact import Artifact
 from consist.models.run import ConsistRecord
 from consist.types import ArtifactRef
 
@@ -66,7 +66,11 @@ def maybe_return_cached_output_or_demote_cache_hit(
 
     # Artifact inputs: allow "same artifact" relog, otherwise demote.
     if isinstance(path, Artifact):
-        if path.id == cached.id or path.container_uri == cached.container_uri:
+        path_loc = path.primary_location
+        cached_loc = cached.primary_location
+        if path.id == cached.id or (
+            path_loc is not None and cached_loc is not None and path_loc == cached_loc
+        ):
             return cached
         _demote_cache_hit(
             record,
@@ -81,9 +85,16 @@ def maybe_return_cached_output_or_demote_cache_hit(
             run_dir=tracker.run_dir,
             resolve_uri=tracker.resolve_uri,
         )
-        cached_abs = Path(
-            cached.abs_path or tracker.resolve_uri(cached.container_uri)
-        ).resolve()
+        located = cached.locate(verify_on_stale=False)
+        if located is not None:
+            cached_abs = located.resolve()
+        else:
+            cached_loc = cached.primary_location
+            if cached_loc is None or not cached_loc.uri:
+                raise ValueError(
+                    f"cached artifact key={lookup_key!r} has no primary location"
+                )
+            cached_abs = Path(tracker.resolve_uri(cached_loc.uri)).resolve()
 
         # Placeholder path => treat as "re-log by key" (common cache-agnostic pattern).
         if not candidate_abs.exists():

@@ -2,6 +2,16 @@ import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Optional, Union, cast
+from urllib.parse import unquote, urlparse
+
+from consist.artifact import Artifact
+
+
+def _artifact_uri(artifact: Any) -> str:
+    if isinstance(artifact, Artifact):
+        loc = artifact.primary_location
+        return loc.uri if loc is not None else ""
+    return str(artifact.container_uri)
 
 
 def resolve_historical_artifact_path(
@@ -44,7 +54,7 @@ def resolve_historical_artifact_path(
         return None
     return Path(
         fs.resolve_historical_path(
-            artifact.container_uri,
+            _artifact_uri(artifact),
             original_run_dir,
             mounts_snapshot=mounts_snapshot,
             artifact_mount_root=artifact_mount_root,
@@ -121,7 +131,8 @@ class FileSystemManager:
                     ) from exc
                 path_str = str(resolved)
             elif scheme == "file":
-                path_str = rel_path
+                parsed_path = unquote(urlparse(uri).path)
+                path_str = parsed_path if parsed_path else rel_path
 
         # 2. Check relative run paths
         elif uri.startswith("./"):

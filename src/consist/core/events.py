@@ -1,7 +1,7 @@
 import logging
 from typing import Callable, List
 from consist.models.run import Run
-from consist.models.artifact import Artifact
+from consist.artifact import Artifact
 
 
 class EventManager:

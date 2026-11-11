@@ -86,12 +86,47 @@ class StepContext:
             return self.runtime_state
         return self.consist_state
 
+    def _lookup_field_attr(self, key: str) -> Optional[object]:
+        if key == "func_name":
+            return self.func_name
+        if key == "model":
+            return self.model
+        if key == "year":
+            return self.year
+        if key == "iteration":
+            return self.iteration
+        if key == "phase":
+            return self.phase
+        if key == "stage":
+            return self.stage
+        if key == "consist_settings":
+            return self.consist_settings
+        if key == "consist_workspace":
+            return self.consist_workspace
+        if key == "consist_state":
+            return self.consist_state
+        if key == "runtime_settings":
+            return self.runtime_settings
+        if key == "runtime_workspace":
+            return self.runtime_workspace
+        if key == "runtime_state":
+            return self.runtime_state
+        if key == "runtime_kwargs":
+            return self.runtime_kwargs
+        if key == "settings":
+            return self.settings
+        if key == "workspace":
+            return self.workspace
+        if key == "state":
+            return self.state
+        return self.__dict__.get(key)
+
     def __getitem__(self, key: str) -> Optional[object]:
         """Allow dict-style access for convenience."""
         runtime_value = self.get_runtime(key, default=None)
         if runtime_value is not None:
             return runtime_value
-        return cast(Optional[object], getattr(self, key, None))
+        return self._lookup_field_attr(key)
 
     def get(
         self, key: str, default: _DefaultT | None = None
@@ -99,14 +134,20 @@ class StepContext:
         """Dict-style get with default."""
         value = self.get_runtime(key, default=None)
         if value is None:
-            value = cast(Optional[object], getattr(self, key, None))
+            value = self._lookup_field_attr(key)
         return default if value is None else value
 
     def get_runtime(
         self, name: str, default: _DefaultT | None = None
     ) -> object | _DefaultT | None:
         """Fetch workflow runtime values with explicit precedence."""
-        runtime_attr = getattr(self, f"runtime_{name}", None)
+        if name == "settings" and self.runtime_settings is not None:
+            return self.runtime_settings
+        if name == "workspace" and self.runtime_workspace is not None:
+            return self.runtime_workspace
+        if name == "state" and self.runtime_state is not None:
+            return self.runtime_state
+        runtime_attr = self.__dict__.get(f"runtime_{name}")
         if runtime_attr is not None:
             return cast(object, runtime_attr)
         if name in self.runtime_kwargs:

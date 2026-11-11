@@ -7,8 +7,8 @@ from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence
 
 import pandas as pd
 
+from consist.artifact import Artifact
 from consist.core._tracker_service_base import _TrackerServiceBase
-from consist.models.artifact import Artifact, set_tracker_ref
 from consist.models.run import ConsistRecord, Run, RunArtifacts, RunResult
 
 
@@ -38,7 +38,8 @@ class TrackerHistoryService(_TrackerServiceBase):
             Resolved historical filesystem path.
         """
         if not run:
-            return Path(self.resolve_uri(artifact.container_uri))
+            loc = artifact.primary_location
+            return Path(self.resolve_uri(loc.uri if loc is not None else ""))
 
         resolved = self.fs.resolve_historical_artifact_path(
             artifact, run, fallback_to_current_uri=True
@@ -318,7 +319,11 @@ class TrackerHistoryService(_TrackerServiceBase):
                     str(artifact.id),
                 ),
             )[0]
-            resolved = Path(self.resolve_uri(selected.container_uri))
+            located = selected.locate(mounts=self.mounts)
+            if located is not None and located.exists():
+                return located
+            loc = selected.primary_location
+            resolved = Path(self.resolve_uri(loc.uri if loc is not None else ""))
             if resolved.exists():
                 return resolved
 
@@ -364,20 +369,11 @@ class TrackerHistoryService(_TrackerServiceBase):
             if cached is not None:
                 return cached
 
-        raw_list = self.db.get_artifacts_for_run(run_id)
-
-        inputs = {}
-        outputs = {}
-
-        for artifact, direction in raw_list:
-            if direction == "input":
-                inputs[artifact.key] = artifact
-            elif direction == "output":
-                outputs[artifact.key] = artifact
-
-        artifacts = RunArtifacts(inputs=inputs, outputs=outputs)
-        for artifact in itertools.chain(inputs.values(), outputs.values()):
-            set_tracker_ref(artifact, self._tracker)
+        artifacts = self.db.get_artifacts_for_run(run_id)
+        for artifact in itertools.chain(
+            artifacts.inputs.values(), artifacts.outputs.values()
+        ):
+            artifact.bind_tracker(self._tracker)
         if run_id != current_run_id:
             self._run_artifacts_cache[run_id] = artifacts
             if len(self._run_artifacts_cache) > self._run_artifacts_cache_max_entries:
@@ -429,12 +425,16 @@ class TrackerHistoryService(_TrackerServiceBase):
             outputs = outputs_by_run_id.get(run_id, {})
             resolved_for_run: dict[str, Path] = {}
             for key, artifact in outputs.items():
-                set_tracker_ref(artifact, self._tracker)
-                primary_path = Path(self.resolve_uri(artifact.container_uri))
+                artifact.bind_tracker(self._tracker)
+                loc = artifact.primary_location
+                primary_path = Path(
+                    self.resolve_uri(loc.uri if loc is not None else "")
+                )
                 resolved_path = primary_path
                 if not primary_path.exists():
-                    if artifact.abs_path and Path(artifact.abs_path).exists():
-                        resolved_path = Path(artifact.abs_path)
+                    located = artifact.locate(mounts=self.mounts)
+                    if located is not None and located.exists():
+                        resolved_path = located
                     elif run is not None:
                         resolved_path = self.resolve_historical_path(artifact, run)
                 if existing_only and not resolved_path.exists():
@@ -501,9 +501,13 @@ class TrackerHistoryService(_TrackerServiceBase):
         if validation_policy == "strict":
             missing_paths: list[str] = []
             for key, artifact in selected_outputs.items():
-                if artifact.meta.get("is_ingested", False):
+                if artifact.is_ingested:
                     continue
-                resolved = Path(self.resolve_uri(artifact.container_uri))
+                located = artifact.locate(mounts=self.mounts)
+                if located is not None and located.exists():
+                    continue
+                loc = artifact.primary_location
+                resolved = Path(self.resolve_uri(loc.uri if loc is not None else ""))
                 if not resolved.exists():
                     missing_paths.append(f"{key!r} -> {resolved!s}")
             if missing_paths:

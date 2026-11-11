@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import builtins
 from dataclasses import dataclass, replace
+import hashlib
 import os
 from pathlib import Path
 import stat
@@ -14,28 +15,70 @@ from typing import (
     Optional,
     Protocol,
     TYPE_CHECKING,
-    Union,
     runtime_checkable,
 )
+from urllib.parse import unquote, urlparse
 import uuid
 import warnings
 
-from consist.artifact import Artifact as V2Artifact
+from consist.artifact import Artifact
 from consist.core.validation import validate_artifact_key
-from consist.engine import observe
-from consist.models.artifact import Artifact as LegacyArtifact
+from consist.digest import Digest, Identity
+from consist.engine import observe, resolve_uri_to_path
+from consist.location import (
+    _SUFFIX_DRIVERS,
+    Location,
+    Observation,
+    SiteContext,
+    normalize_mounts,
+)
 from consist.protocols import ArtifactLike
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
 
-Artifact = LegacyArtifact
-CouplerArtifact = Union[V2Artifact, LegacyArtifact]
+CouplerArtifact = Artifact
 
 
 @runtime_checkable
 class _UriResolverProtocol(Protocol):
     def resolve_uri(self, uri: str) -> str: ...
+
+
+@runtime_checkable
+class _ArtifactSyncDbProtocol(Protocol):
+    @property
+    def ledger(self) -> Any: ...
+
+    def sync_artifact(
+        self,
+        artifact: Artifact,
+        run_id: Optional[str] = None,
+    ) -> None: ...
+
+
+@runtime_checkable
+class _WritableTrackerProtocol(Protocol):
+    @property
+    def db(self) -> Any: ...
+
+    @property
+    def read_only(self) -> bool: ...
+
+    @property
+    def access_mode(self) -> str: ...
+
+
+@runtime_checkable
+class _PathAndUriLike(Protocol):
+    @property
+    def key(self) -> str: ...
+
+    @property
+    def path(self) -> Optional[Path]: ...
+
+    @property
+    def container_uri(self) -> str: ...
 
 
 def _normalize_namespace(namespace: str) -> str:
@@ -46,6 +89,66 @@ def _normalize_namespace(namespace: str) -> str:
         raise ValueError("Coupler namespace cannot be empty.")
     validate_artifact_key(normalized)
     return normalized
+
+
+def _infer_lexical_driver(path: Path, *, is_dir: bool) -> str:
+    """Infer an artifact driver purely from path syntax without touching disk."""
+    suffix = path.suffix.lower()
+    if is_dir or suffix == ".zarr":
+        return "zarr" if suffix == ".zarr" else "directory"
+    if suffix in (".h5", ".hdf5", ".hdf"):
+        return "hdf5"
+    return _SUFFIX_DRIVERS.get(suffix, "file")
+
+
+def _lexical_uri_for_synthetic_path(
+    raw_str: str,
+    mounts: Optional[Mapping[str, Any]],
+) -> tuple[str, Path, bool]:
+    """Construct `(uri, lexical_path, is_dir_hint)` without filesystem stat/realpath."""
+    is_dir_hint = raw_str.endswith(("/", os.sep))
+    has_scheme = "://" in raw_str and not (len(raw_str) >= 2 and raw_str[1] == ":")
+    if has_scheme:
+        if raw_str.startswith("file://"):
+            lexical_path = Path(unquote(urlparse(raw_str).path))
+        else:
+            lexical_path = Path(raw_str.split("://", 1)[1])
+        return (raw_str, lexical_path, is_dir_hint)
+
+    trimmed = (
+        raw_str.rstrip("/\\")
+        if is_dir_hint and len(raw_str.rstrip("/\\")) > 0
+        else raw_str
+    )
+    lexical_path = Path(trimmed)
+    norm_mounts = normalize_mounts(mounts)
+    if norm_mounts and lexical_path.is_absolute():
+        abs_str = os.path.normpath(str(lexical_path))
+        best_mount_name: str | None = None
+        best_rel: str | None = None
+        best_len = -1
+        for mount in norm_mounts.values():
+            root_str = os.path.normpath(os.path.expanduser(str(mount.root)))
+            prefix = root_str if root_str.endswith(os.sep) else f"{root_str}{os.sep}"
+            if abs_str == root_str:
+                if len(root_str) > best_len:
+                    best_len = len(root_str)
+                    best_mount_name = mount.name
+                    best_rel = ""
+            elif abs_str.startswith(prefix):
+                if len(root_str) > best_len:
+                    best_len = len(root_str)
+                    best_mount_name = mount.name
+                    best_rel = abs_str[len(prefix) :].replace(os.sep, "/")
+        if best_mount_name is not None and best_rel is not None:
+            uri = (
+                f"{best_mount_name}://{best_rel}"
+                if best_rel
+                else f"{best_mount_name}://"
+            )
+            return (uri, lexical_path, is_dir_hint)
+
+    return (str(lexical_path), lexical_path, is_dir_hint)
 
 
 class CouplerView:
@@ -230,15 +333,16 @@ class Coupler:
     Coupler is intentionally small:
     - It stores the "latest Artifact for a semantic key" in-memory.
 
-    It does not log artifacts, infer inputs/outputs, or mutate Artifacts as a side effect
-    of reads. Keep provenance operations on the Tracker.
+    When bound to a writable ``Tracker``, ``set()`` observes filesystem paths via
+    ``consist.engine.observe`` and immediately persists the resulting ``Artifact``
+    and ``Observation`` into ``StoreLedger``.
     """
 
     def __init__(self, tracker: Optional["Tracker"] = None) -> None:
         self._tracker: Optional["Tracker"] = None
         self._artifacts: MutableMapping[str, Any] = {}
-        self._history: MutableMapping[str, list[CouplerArtifact]] = {}
-        self._stat_cache: dict[tuple[str, int, int, int], V2Artifact] = {}
+        self._history: MutableMapping[str, list[Any]] = {}
+        self._stat_cache: dict[tuple[str, int, int, int], Artifact] = {}
         self._declared_outputs: MutableMapping[str, DeclaredOutput] = {}
         self._warn_undefined = False
         self._undefined_keys: builtins.set[str] = builtins.set()
@@ -256,6 +360,36 @@ class Coupler:
             couplers = value.__dict__.get("_couplers")
             if couplers is not None:
                 couplers.add(self)
+            for key, existing in list(self._artifacts.items()):
+                if isinstance(existing, Artifact):
+                    updated = self._persist_or_bind(existing)
+                    self._artifacts[key] = updated
+                    hist = self._history.get(key)
+                    if hist and hist[-1] is existing:
+                        hist[-1] = updated
+
+    def _writable_db(self) -> Optional[_ArtifactSyncDbProtocol]:
+        trk = self._tracker
+        if trk is None or not isinstance(trk, _WritableTrackerProtocol):
+            return None
+        if trk.read_only or trk.access_mode != "standard":
+            return None
+        db = trk.db
+        if isinstance(db, _ArtifactSyncDbProtocol):
+            return db
+        return None
+
+    def _persist_or_bind(self, artifact: Artifact) -> Artifact:
+        db = self._writable_db()
+        if db is not None:
+            ledger_ref = db.ledger.ref
+            if artifact.origin != ledger_ref:
+                db.sync_artifact(artifact, run_id=None)
+                artifact = replace(artifact, origin=ledger_ref)
+            return artifact
+        if self._tracker is not None:
+            artifact.bind_tracker(self._tracker)
+        return artifact
 
     def _validate_artifact_key(self, key: str) -> None:
         validate_artifact_key(key)
@@ -287,18 +421,34 @@ class Coupler:
     def _extract_tracker_mounts(self) -> Optional[Mapping[str, Any]]:
         if self._tracker is None:
             return None
+        merged: dict[str, Any] = {}
+        run_dir = self._tracker.__dict__.get("run_dir")
+        if run_dir:
+            merged["workspace"] = run_dir
+        archive_mounts = self._tracker.__dict__.get("archive_mounts")
+        if isinstance(archive_mounts, Mapping) and archive_mounts:
+            merged.update(archive_mounts)
         mounts = self._tracker.__dict__.get("mounts")
-        if isinstance(mounts, Mapping):
-            return mounts
+        if isinstance(mounts, Mapping) and mounts:
+            merged.update(mounts)
+        return merged or None
+
+    def _extract_tracker_site_context(self) -> Optional[SiteContext]:
+        if self._tracker is None:
+            return None
+        site_ctx = self._tracker.__dict__.get("site_context")
+        if isinstance(site_ctx, SiteContext):
+            return site_ctx
         return None
 
-    def _coerce_artifact(self, key: str, value: Any) -> Optional[CouplerArtifact]:
+    def _coerce_artifact(self, key: str, value: Any) -> Any:
         if value is None:
             return None
-        if isinstance(value, (V2Artifact, LegacyArtifact)):
-            return value
+        if isinstance(value, Artifact):
+            return self._persist_or_bind(value)
         if isinstance(value, (str, Path, os.PathLike)):
             mounts = self._extract_tracker_mounts()
+            site_ctx = self._extract_tracker_site_context()
             if (
                 isinstance(value, str)
                 and "://" in value
@@ -321,15 +471,30 @@ class Coupler:
                 )
                 cached = self._stat_cache.get(cache_key)
                 if cached is not None:
-                    return (
-                        cached
-                        if cached.key == key
-                        else replace(cached, id=uuid.uuid4(), key=key)
-                    )
-                observed = observe(resolved_path, key=key, mounts=mounts)
-                self._stat_cache[cache_key] = observed
-                return observed
-            return observe(resolved_path, key=key, mounts=mounts)
+                    if cached.key == key:
+                        persisted_cached = self._persist_or_bind(cached)
+                        self._stat_cache[cache_key] = persisted_cached
+                        return persisted_cached
+                    rekeyed = replace(cached, id=uuid.uuid4(), key=key, origin=None)
+                    return self._persist_or_bind(rekeyed)
+                observed = observe(
+                    resolved_path,
+                    key=key,
+                    mounts=mounts,
+                    site_context=site_ctx,
+                )
+                persisted = self._persist_or_bind(observed)
+                self._stat_cache[cache_key] = persisted
+                return persisted
+            observed = observe(
+                resolved_path,
+                key=key,
+                mounts=mounts,
+                site_context=site_ctx,
+            )
+            return self._persist_or_bind(observed)
+        if isinstance(value, (ArtifactLike, _PathAndUriLike)):
+            return value
         raise TypeError(
             f"Coupler.set({key!r}, ...) expected an Artifact or path, "
             f"got {type(value).__name__}: {value!r}"
@@ -344,14 +509,64 @@ class Coupler:
             self._history.setdefault(key, []).append(stored)
         return stored
 
+    def replace_artifact_by_id(self, updated: Artifact) -> bool:
+        """Replace in-memory entries whose `id` matches `updated.id` without appending duplicate history."""
+        changed = False
+        for k, cur in list(self._artifacts.items()):
+            if isinstance(cur, Artifact) and cur.id == updated.id:
+                self._artifacts[k] = updated
+                changed = True
+        for k, hist in self._history.items():
+            for idx, cur in enumerate(hist):
+                if isinstance(cur, Artifact) and cur.id == updated.id:
+                    hist[idx] = updated
+                    changed = True
+        return changed
+
     def set_from_artifact(self, key: str, value: Any) -> Any:
         """
-        Store an artifact, artifact-like object, or unverified path directly under `key`.
+        Store an artifact, artifact-like object, or synthetic/unmaterialized path under `key`.
 
-        Unlike `set()`, this method does not auto-observe or hash local paths on disk,
-        making it suitable for storing synthetic or unmaterialized paths in tests.
+        Unlike `set()`, `str | Path` inputs are wrapped in a `Kind.HISTORICAL`
+        (`basis="declared"`) `Artifact` without disk I/O.
         """
-        stored = self._store_artifact(key, value)
+        self._validate_artifact_key(key)
+        if value is None:
+            return self._store_artifact(key, None, validate_key=False)
+        if isinstance(value, Artifact):
+            coerced: Any = self._persist_or_bind(value)
+        elif isinstance(value, (str, Path, os.PathLike)):
+            raw_str = os.fspath(value)
+            mounts = self._extract_tracker_mounts()
+            site_ctx = self._extract_tracker_site_context()
+            uri, lexical_path, is_dir_hint = _lexical_uri_for_synthetic_path(
+                raw_str, mounts
+            )
+            driver = _infer_lexical_driver(lexical_path, is_dir=is_dir_hint)
+            anchor = Digest(
+                "legacy-v1:unverified",
+                hashlib.sha256(uri.encode("utf-8")).hexdigest(),
+            )
+            identity = Identity(anchor=anchor)
+            obs = Observation(
+                location=Location(uri=uri),
+                identity=identity,
+                access_driver=driver,
+                witness=None,
+                basis="declared",
+                site=site_ctx.site if site_ctx is not None else "local",
+            )
+            synthetic = Artifact(
+                id=uuid.uuid4(),
+                key=key,
+                driver=driver,
+                identity=identity,
+                hints=(obs,),
+            )
+            coerced = self._persist_or_bind(synthetic)
+        else:
+            coerced = value
+        stored = self._store_artifact(key, coerced, validate_key=False)
         if stored is not None:
             self._history.setdefault(key, []).append(stored)
         return stored
@@ -362,12 +577,12 @@ class Coupler:
         self._history.clear()
         self._stat_cache.clear()
 
-    def history(self, key: str) -> tuple[CouplerArtifact, ...]:
+    def history(self, key: str) -> tuple[Any, ...]:
         """Return the chronological history of artifacts stored for ``key``."""
         self._validate_artifact_key(key)
         return tuple(self._history.get(key, ()))
 
-    def previous(self, key: str) -> Optional[CouplerArtifact]:
+    def previous(self, key: str) -> Optional[Any]:
         """Return the previous artifact stored for ``key`` before the current one, or ``None``."""
         self._validate_artifact_key(key)
         hist = self._history.get(key, ())
@@ -509,8 +724,8 @@ class Coupler:
                 raise KeyError(f"Missing artifact for key {key!r}.")
             coupler_key = f"{prefix}{key}"
             artifact = artifacts[key]
-            self.set(coupler_key, artifact)
-            collected[coupler_key] = artifact
+            stored = self.set(coupler_key, artifact)
+            collected[coupler_key] = stored
         return collected
 
     def describe_outputs(self) -> dict[str, str]:
@@ -528,31 +743,35 @@ class Coupler:
 
     def path(self, key: str, *, required: bool = True) -> Optional[Path]:
         """
-        Resolve an artifact's URI to an absolute host path.
+        Resolve an artifact's URI to an absolute or declared host path.
 
         This does not mutate the Artifact; it only returns a resolved Path.
         """
         artifact = self.require(key) if required else self.get(key)
         if not artifact:
             return None
-        if isinstance(artifact, V2Artifact):
-            if self.tracker is not None:
-                mounts = self._extract_tracker_mounts()
-                located = artifact.locate(mounts=mounts)
-                if located is not None:
-                    return located
-                prim = artifact.primary_location
-                if prim is not None and isinstance(self.tracker, _UriResolverProtocol):
-                    return Path(self.tracker.resolve_uri(prim.uri))
+        if isinstance(artifact, Artifact):
+            mounts = self._extract_tracker_mounts()
+            located = artifact.locate(mounts=mounts)
+            if located is not None:
+                return located
+            prim = artifact.primary_location
+            if prim is not None:
+                if prim.uri.startswith("file://"):
+                    return Path(unquote(urlparse(prim.uri).path))
+                if "://" in prim.uri and not (
+                    len(prim.uri) >= 2 and prim.uri[1] == ":"
+                ):
+                    resolved_p, _ = resolve_uri_to_path(prim.uri, mounts)
+                    if resolved_p is not None:
+                        return resolved_p
+                    if self.tracker is not None and isinstance(
+                        self.tracker, _UriResolverProtocol
+                    ):
+                        return Path(self.tracker.resolve_uri(prim.uri))
+                else:
+                    return Path(prim.uri)
             return artifact.path
-        if isinstance(artifact, LegacyArtifact):
-            if not self.tracker:
-                raise RuntimeError(
-                    f"Cannot resolve path for {key!r}: no tracker attached to Coupler."
-                )
-            if isinstance(self.tracker, _UriResolverProtocol):
-                return Path(self.tracker.resolve_uri(artifact.container_uri))
-            return Path(artifact.container_uri)
         if isinstance(artifact, (Path, str)):
             if (
                 self.tracker is not None
@@ -561,13 +780,23 @@ class Coupler:
             ):
                 return Path(self.tracker.resolve_uri(str(artifact)))
             return Path(artifact)
-        if isinstance(artifact, ArtifactLike):
-            if artifact.path is not None:
-                return Path(artifact.path)
+        if isinstance(artifact, _PathAndUriLike):
             if artifact.container_uri:
                 if self.tracker is not None and isinstance(
                     self.tracker, _UriResolverProtocol
                 ):
                     return Path(self.tracker.resolve_uri(artifact.container_uri))
+                if artifact.path is not None:
+                    return Path(artifact.path)
                 return Path(artifact.container_uri)
+            if artifact.path is not None:
+                return Path(artifact.path)
+        if isinstance(artifact, ArtifactLike):
+            if artifact.primary_location is not None:
+                uri = artifact.primary_location.uri
+                if self.tracker is not None and isinstance(
+                    self.tracker, _UriResolverProtocol
+                ):
+                    return Path(self.tracker.resolve_uri(uri))
+            return Path(artifact.path)
         return None

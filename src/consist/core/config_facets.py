@@ -12,7 +12,6 @@ from consist.core.facet_common import (
     normalize_facet_like,
 )
 from consist.core.persistence import DatabaseManager
-from consist.models.config_facet import ConfigFacet
 from consist.models.run import Run
 from consist.models.run_config_kv import RunConfigKV
 from consist.types import FacetLike, HasConsistFacet
@@ -26,7 +25,7 @@ class ConfigFacetManager:
     Persist and index configuration facets for runs.
 
     Facets capture structured run inputs/configuration via Pydantic models or dicts,
-    and allow indexed querying via KV tables.
+    and allow indexed querying via KV views (`main.run_config_kv`).
     """
 
     def __init__(
@@ -124,7 +123,7 @@ class ConfigFacetManager:
         max_kv_rows: int = 500,
     ) -> None:
         """
-        Persist facet JSON and optional KV representation to the database.
+        Persist facet JSON onto ``run.meta`` and index into ``StoreLedger`` (``run.facet_kv``).
 
         Parameters
         ----------
@@ -145,9 +144,6 @@ class ConfigFacetManager:
         max_kv_rows : int, default 500
             Row limit before skipping KV indexing.
         """
-        if not self._db:
-            return
-
         canonical, facet_id = canonical_facet_json_and_id(
             facet_dict=facet_dict,
         )
@@ -160,24 +156,18 @@ class ConfigFacetManager:
             )
             return
 
-        facet_row = ConfigFacet(
-            id=facet_id,
-            namespace=model,
-            schema_name=schema_name,
-            schema_version=(
-                str(schema_version) if schema_version is not None else None
-            ),
-            facet_json=facet_dict,
-        )
-
+        run.meta["facet"] = facet_dict
         run.meta["config_facet_id"] = facet_id
         run.meta["config_facet_namespace"] = model
+        run.meta["facet_namespace"] = model
         run.meta["config_facet_schema"] = schema_name
+        run.meta["config_facet_schema_name"] = schema_name
         if schema_version is not None:
             run.meta["config_facet_schema_version"] = schema_version
+            run.meta["facet_schema_version"] = str(schema_version)
 
-        kv_rows: Optional[List[RunConfigKV]] = None
-        if index_kv:
+        effective_index_kv = bool(index_kv)
+        if effective_index_kv:
             kv_rows = self.flatten_facet_to_kv_rows(
                 run_id=run.id,
                 facet_id=facet_id,
@@ -190,12 +180,15 @@ class ConfigFacetManager:
                     run.id,
                     len(kv_rows),
                 )
-                kv_rows = None
+                effective_index_kv = False
 
-        self._db.persist_config_facet_bundle(
-            facet=facet_row,
-            kv_rows=kv_rows,
-        )
+        if not effective_index_kv:
+            run.meta["config_facet_index"] = False
+        else:
+            run.meta.pop("config_facet_index", None)
+
+        if self._db is not None:
+            self._db.sync_run(run)
 
     def flatten_facet_to_kv_rows(
         self,

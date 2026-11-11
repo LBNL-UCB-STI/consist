@@ -411,14 +411,64 @@ class RunSet:
     ) -> Dict[str, Dict[str, object | None]]:
         if not self.runs or self._tracker is None:
             return {}
-        queries = self._tracker.queries
 
         run_ids = [run.id for run in self.runs]
         run_model_by_id = {run.id: run.model_name for run in self.runs}
-        rows = queries.get_run_config_kv_for_runs(
-            run_ids,
-            keys=sorted(fields) if fields else None,
-        )
+        ledger = self._tracker.ledger
+        rows: List[RunConfigKV] = []
+        if ledger is not None:
+            params: List[Any] = [run_ids]
+            sql = (
+                "SELECT run_id, facet_id, namespace, key, value_type, "
+                "value_str, value_num, value_bool, value_json, created_at "
+                "FROM main.run_config_kv "
+                "WHERE run_id IN (SELECT UNNEST(?))"
+            )
+            if fields:
+                sql += " AND key IN (SELECT UNNEST(?))"
+                params.append(sorted(fields))
+            sql += " ORDER BY run_id ASC, namespace ASC, key ASC"
+            rows = ledger.query_rows(sql, params, model=RunConfigKV)
+        else:
+            from consist.core.facet_common import flatten_facet_values
+
+            values_from_meta: Dict[str, Dict[str, object | None]] = {}
+            for run in self.runs:
+                meta = run.meta if isinstance(run.meta, dict) else {}
+                if meta.get("config_facet_index") is False:
+                    continue
+                facet = meta.get("facet")
+                if not isinstance(facet, dict) or not facet:
+                    continue
+                flat = flatten_facet_values(
+                    facet_dict=dict(facet),
+                    include_json_leaves=True,
+                )
+                flat_map: Dict[str, object | None] = {}
+                for fv in flat:
+                    if fv.value_type == "bool":
+                        flat_map[fv.key_path] = fv.value_bool
+                    elif fv.value_type == "int":
+                        flat_map[fv.key_path] = (
+                            int(fv.value_num) if fv.value_num is not None else None
+                        )
+                    elif fv.value_type == "float":
+                        flat_map[fv.key_path] = fv.value_num
+                    elif fv.value_type == "str":
+                        flat_map[fv.key_path] = fv.value_str
+                    elif fv.value_type == "json":
+                        flat_map[fv.key_path] = fv.value_json
+                    else:
+                        flat_map[fv.key_path] = None
+                filtered = (
+                    {k: v for k, v in flat_map.items() if k in fields}
+                    if fields
+                    else flat_map
+                )
+                if filtered:
+                    values_from_meta[run.id] = filtered
+            return values_from_meta
+
         if not rows:
             return {}
 

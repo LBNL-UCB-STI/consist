@@ -1,69 +1,54 @@
 """
-Database model for flattened config facet keys in the Consist main database.
-
-This table provides a fast, typed index for filtering runs by config values.
+Data transfer model for flattened config facet keys projected by `main.run_config_kv`.
 """
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
-from sqlalchemy import Column, DateTime, JSON, String
-from sqlmodel import Field, SQLModel
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 UTC = timezone.utc
 
 
-class RunConfigKV(SQLModel, table=True):
+class RunConfigKV(BaseModel):
     """
-    Query index table for config facets in the Consist database.
+    Row DTO for the `run_config_kv` view in `StoreLedger`.
 
-    Each row represents a single flattened key from a config facet, stored in a typed column
-    to support fast filtering. This table powers ``find_runs_by_facet_kv`` and related
-    search helpers.
+    Each row represents a single flattened key from a run's `facet_kv` JSON column.
     """
 
-    __tablename__ = "run_config_kv"
+    model_config = ConfigDict(validate_assignment=True)
 
-    run_id: str = Field(
-        primary_key=True,
-        sa_column_kwargs={"autoincrement": False},
-        index=True,
-    )
-
-    facet_id: str = Field(
-        primary_key=True,
-        sa_column_kwargs={"autoincrement": False},
-        index=True,
-    )
-
+    run_id: str
+    facet_id: str
     namespace: str = Field(
-        primary_key=True,
-        index=True,
         description="Model namespace (defaults to model_name).",
     )
-
     key: str = Field(
-        primary_key=True,
-        index=True,
         description="Flattened dotted key (e.g. 'household_sample_size').",
     )
-
     value_type: str = Field(
         description="One of: str|int|float|bool|json|null",
     )
-
-    value_str: Optional[str] = Field(
-        default=None, sa_column=Column(String, nullable=True)
-    )
-    value_num: Optional[float] = Field(default=None, nullable=True)
-    value_bool: Optional[bool] = Field(default=None, nullable=True)
-    value_json: Optional[Dict[str, Any]] = Field(
-        default=None, sa_column=Column(JSON, nullable=True)
-    )
-
+    value_str: Optional[str] = Field(default=None)
+    value_num: Optional[float] = Field(default=None)
+    value_bool: Optional[bool] = Field(default=None)
+    value_json: Optional[Any] = Field(default=None)
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC),
-        sa_type=DateTime,
     )
+
+    @field_validator("value_json", mode="before")
+    @classmethod
+    def _coerce_value_json(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except ValueError:
+                return value
+        return value

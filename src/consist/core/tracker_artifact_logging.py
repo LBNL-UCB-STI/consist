@@ -7,22 +7,23 @@ persistence calls, and optional facet/schema profiling side effects.
 
 from __future__ import annotations
 
+from dataclasses import replace
 import logging
-import uuid
 from pathlib import Path
-from typing import Any, Dict, Literal, Optional, TYPE_CHECKING, Type, Union
+from typing import TYPE_CHECKING, Any, Dict, Literal, Optional, Type, Union
+import uuid
 
 from sqlmodel import SQLModel
 
+from consist.artifact import Artifact
+from consist.core._performance_attribution import _track_begin_run_phase
 from consist.core.cache_output_logging import (
     maybe_return_cached_output_or_demote_cache_hit,
 )
-from consist.core._performance_attribution import _track_begin_run_phase
 from consist.core.directory_artifacts import (
     build_directory_manifest,
     build_shapefile_bundle_manifest,
 )
-from consist.models.artifact import Artifact, set_tracker_ref
 from consist.types import ArtifactRef, FacetLike, HasFacetSchemaVersion
 
 if TYPE_CHECKING:
@@ -86,22 +87,24 @@ class ArtifactLoggingCoordinator:
             index_kv=facet_index,
         )
 
-    def apply_inherited_run_metadata(self, artifact: Artifact) -> None:
+    def apply_inherited_run_metadata(self, artifact: Artifact) -> Artifact:
         """Mirror standard run metadata onto a newly logged artifact."""
         tracker = self._tracker
         if tracker.current_consist is None:
-            return
+            return artifact
         run_ctx = tracker.current_consist.run
         inherited_fields = {
             "year": run_ctx.year,
             "iteration": run_ctx.iteration,
             "tags": run_ctx.tags or [],
         }
-        if artifact.meta is None:
-            artifact.meta = {}
+        updates: Dict[str, Any] = {}
         for inherited_key, inherited_value in inherited_fields.items():
             if inherited_value is not None and inherited_key not in artifact.meta:
-                artifact.meta[inherited_key] = inherited_value
+                updates[inherited_key] = inherited_value
+        if not updates:
+            return artifact
+        return artifact.with_meta(updates, merge=True)
 
     def attach_logged_artifact(
         self,
@@ -112,7 +115,7 @@ class ArtifactLoggingCoordinator:
     ) -> None:
         """Attach a logged artifact to the active run state and optional coupler."""
         tracker = self._tracker
-        set_tracker_ref(artifact, tracker)
+        artifact.bind_tracker(tracker)
         if tracker.current_consist is None:
             return
         if direction == "input":
@@ -125,6 +128,32 @@ class ArtifactLoggingCoordinator:
             and artifact.key
         ):
             tracker._active_coupler.set(artifact.key, artifact)
+
+    def _replace_in_active_run(
+        self,
+        artifact: Artifact,
+        *,
+        direction: str,
+    ) -> None:
+        tracker = self._tracker
+        artifact.bind_tracker(tracker)
+        if tracker.current_consist is None:
+            return
+        if direction == "input":
+            tracker.current_consist.inputs = [
+                artifact if item.id == artifact.id else item
+                for item in tracker.current_consist.inputs
+            ]
+        else:
+            tracker.current_consist.outputs = [
+                artifact if item.id == artifact.id else item
+                for item in tracker.current_consist.outputs
+            ]
+            if tracker._active_coupler is not None and artifact.key:
+                existing = tracker._active_coupler.get(artifact.key)
+                if existing is not None and existing.id == artifact.id:
+                    tracker._active_coupler.set(artifact.key, artifact)
+        tracker._flush_json()
 
     def log_artifact(
         self,
@@ -306,6 +335,23 @@ class ArtifactLoggingCoordinator:
                 strict_schema=strict_schema,
                 **meta,
             )
+
+        if isinstance(path, Artifact) and direction == "output":
+            producing_run_id = artifact_obj.run_id
+            if producing_run_id is None:
+                artifact_obj = replace(artifact_obj, run_id=run_id)
+            elif producing_run_id != run_id:
+                logging.warning(
+                    "[Consist] log_artifact received an Artifact with run_id=%s but is logging it as output of run_id=%s (artifact key=%s id=%s).",
+                    producing_run_id,
+                    run_id,
+                    artifact_obj.key,
+                    artifact_obj.id,
+                )
+
+        with _track_begin_run_phase("input_binding.apply_inherited_metadata"):
+            artifact_obj = self.apply_inherited_run_metadata(artifact_obj)
+
         with _track_begin_run_phase("input_binding.prepare_facet"):
             prepared_artifact_facet_bundle = self.prepare_artifact_facet_bundle(
                 artifact=artifact_obj,
@@ -313,21 +359,12 @@ class ArtifactLoggingCoordinator:
                 facet_schema_version=facet_schema_version,
                 facet_index=facet_index,
             )
-
-        if isinstance(path, Artifact) and direction == "output":
-            producing_run_id = artifact_obj.run_id
-            if producing_run_id is None:
-                artifact_obj.run_id = run_id
-            elif producing_run_id != run_id:
-                logging.warning(
-                    "[Consist] log_artifact received an Artifact with run_id=%s but is logging it as output of run_id=%s (artifact key=%s id=%s).",
-                    producing_run_id,
-                    run_id,
-                    getattr(artifact_obj, "key", None),
-                    getattr(artifact_obj, "id", None),
+            if prepared_artifact_facet_bundle is not None:
+                artifact_obj = artifact_obj.with_meta(
+                    prepared_artifact_facet_bundle.meta_updates,
+                    merge=True,
                 )
-        with _track_begin_run_phase("input_binding.apply_inherited_metadata"):
-            self.apply_inherited_run_metadata(artifact_obj)
+
         with _track_begin_run_phase("input_binding.attach_logged_artifact"):
             self.attach_logged_artifact(
                 artifact=artifact_obj,
@@ -339,12 +376,15 @@ class ArtifactLoggingCoordinator:
         # before DB synchronization side effects occur.
         tracker._flush_json()
         if prepared_artifact_facet_bundle is not None:
-            tracker.persistence.sync_artifact_with_facet_bundle(
+            artifact_obj = tracker.persistence.sync_artifact_with_facet_bundle(
                 artifact_obj,
                 direction,
-                facet=prepared_artifact_facet_bundle.facet,
-                meta_updates=prepared_artifact_facet_bundle.meta_updates,
-                kv_rows=prepared_artifact_facet_bundle.kv_rows,
+                meta_updates=None,
+                index_kv=prepared_artifact_facet_bundle.index_kv,
+                profile_label=self._sync_profile_label(
+                    artifact=artifact_obj,
+                    direction=direction,
+                ),
             )
         else:
             tracker._sync_artifact_to_db(
@@ -372,30 +412,43 @@ class ArtifactLoggingCoordinator:
             and tracker.current_consist is not None
         ):
             try:
-                if isinstance(artifact_obj.meta, dict) and artifact_obj.meta.get(
-                    "schema_id"
-                ):
+                if artifact_obj.schema_id or artifact_obj.meta.get("schema_id"):
                     return artifact_obj
-                resolved_path = artifact_obj.abs_path or tracker.resolve_uri(
-                    artifact_obj.container_uri
+                resolved_path_obj = artifact_obj.locate(
+                    mounts=tracker.mounts, verify_on_stale=False
                 )
-                if resolved_path:
-                    resolved_driver = artifact_obj.driver
-                    if resolved_driver not in ("csv", "parquet", "gtfs", "h5_table"):
-                        return artifact_obj
-                    tracker.artifact_schemas.profile_file_artifact(
-                        artifact=artifact_obj,
-                        run=tracker.current_consist.run,
-                        resolved_path=str(resolved_path),
-                        driver=resolved_driver,
-                        sample_rows=sample_rows,
-                        source="file",
-                        reuse_if_unchanged=profile_mode == "if_changed",
+                resolved_path_str: str | None = (
+                    str(resolved_path_obj) if resolved_path_obj is not None else None
+                )
+                if (
+                    resolved_path_str is None
+                    and artifact_obj.primary_location is not None
+                ):
+                    resolved_path_str = tracker.resolve_uri(
+                        artifact_obj.primary_location.uri
                     )
+                if resolved_path_str:
+                    resolved_driver = artifact_obj.driver
+                    if resolved_driver in ("csv", "parquet", "gtfs", "h5_table"):
+                        artifact_obj = tracker.artifact_schemas.profile_file_artifact(
+                            artifact=artifact_obj,
+                            run=tracker.current_consist.run,
+                            resolved_path=resolved_path_str,
+                            driver=resolved_driver,
+                            sample_rows=sample_rows,
+                            source="file",
+                            reuse_if_unchanged=profile_mode == "if_changed",
+                        )
+                        self._replace_in_active_run(artifact_obj, direction=direction)
             except FileNotFoundError:
+                loc_uri = (
+                    artifact_obj.primary_location.uri
+                    if artifact_obj.primary_location is not None
+                    else artifact_obj.key
+                )
                 logging.warning(
                     "[Consist] File schema capture skipped; file not found: %s",
-                    artifact_obj.container_uri,
+                    loc_uri,
                 )
 
         if (
@@ -404,16 +457,17 @@ class ArtifactLoggingCoordinator:
             and tracker.current_consist is not None
         ):
             try:
-                tracker.artifact_schemas.profile_user_provided_schema(
+                artifact_obj = tracker.artifact_schemas.profile_user_provided_schema(
                     artifact=artifact_obj,
                     run=tracker.current_consist.run,
                     schema_model=schema,
                     source="user_provided",
                 )
+                self._replace_in_active_run(artifact_obj, direction=direction)
             except Exception as exc:
                 logging.warning(
                     "[Consist] Failed to store user-provided schema for artifact=%s: %s",
-                    getattr(artifact_obj, "key", None),
+                    artifact_obj.key,
                     exc,
                 )
 

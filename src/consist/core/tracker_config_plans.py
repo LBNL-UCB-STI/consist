@@ -13,11 +13,14 @@ from typing import (
     Iterable,
     Mapping,
     Optional,
+    Protocol,
     TYPE_CHECKING,
     Union,
     cast,
+    runtime_checkable,
 )
 
+from consist.artifact import Artifact
 from consist.core._tracker_service_base import _TrackerServiceBase
 from consist.core.config_canonicalization import (
     CanonicalConfig,
@@ -34,9 +37,30 @@ from consist.digest import normalize_json
 from consist.models.run import Run
 
 if TYPE_CHECKING:
-    from consist.core.tracker import Tracker
-    from consist.models.artifact import Artifact
     from consist.core.step_context import StepContext
+    from consist.core.tracker import Tracker
+
+
+@runtime_checkable
+class _SupportsBuildFacet(Protocol):
+    def build_facet(
+        self, canonical: CanonicalConfig, *, facet_spec: Dict[str, Any]
+    ) -> Any: ...
+
+
+@runtime_checkable
+class _SupportsBundleArtifact(Protocol):
+    def bundle_artifact(
+        self, canonical: CanonicalConfig, *, run: Run, tracker: "Tracker"
+    ) -> Any: ...
+
+
+def _resolve_adapter_version(adapter: ConfigAdapter) -> Optional[str]:
+    try:
+        raw = object.__getattribute__(adapter, "adapter_version")
+    except AttributeError:
+        return None
+    return str(raw) if raw is not None else None
 
 
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -79,8 +103,11 @@ class TrackerConfigPlanService(_TrackerServiceBase):
     def _adapter_accepts_options(
         self, adapter: ConfigAdapter, method_name: str
     ) -> bool:
-        method = getattr(adapter, method_name, None)
-        if method is None:
+        try:
+            method = object.__getattribute__(adapter, method_name)
+        except AttributeError:
+            return False
+        if not callable(method):
             return False
         try:
             signature = inspect.signature(method)
@@ -235,7 +262,7 @@ class TrackerConfigPlanService(_TrackerServiceBase):
 
         contribution = ConfigContribution(
             identity=result.identity,
-            adapter_version=getattr(adapter, "adapter_version", None),
+            adapter_version=_resolve_adapter_version(adapter),
             artifacts=result.artifacts,
             ingestables=result.ingestables,
             meta={
@@ -332,7 +359,7 @@ class TrackerConfigPlanService(_TrackerServiceBase):
         )
         facet_data = None
         if facet_spec is not None:
-            if hasattr(adapter, "build_facet"):
+            if isinstance(adapter, _SupportsBuildFacet):
                 facet_data = adapter.build_facet(canonical, facet_spec=facet_spec)
                 if facet_data is not None:
                     facet_data = normalize_json(facet_data)
@@ -343,7 +370,7 @@ class TrackerConfigPlanService(_TrackerServiceBase):
 
         plan = ConfigPlan(
             adapter_name=adapter.model_name,
-            adapter_version=getattr(adapter, "adapter_version", None),
+            adapter_version=_resolve_adapter_version(adapter),
             canonical=canonical,
             artifacts=result.artifacts,
             ingestables=result.ingestables,
@@ -435,12 +462,13 @@ class TrackerConfigPlanService(_TrackerServiceBase):
                         )
                     value = mapping_value[part]
                     continue
-                if not hasattr(value, part):
+                try:
+                    value = object.__getattribute__(value, part)
+                except AttributeError as exc:
                     raise ValueError(
                         f"Missing runtime attribute {part!r} while resolving "
                         f"config_dirs_from={path!r}."
-                    )
-                value = getattr(value, part)
+                    ) from exc
             return value
 
         def _resolve_dirs(ctx: "StepContext") -> Iterable[Union[str, Path]]:
@@ -537,9 +565,8 @@ class TrackerConfigPlanService(_TrackerServiceBase):
         artifacts = list(plan.artifacts)
         adapter_ref = adapter or plan.adapter
         if adapter_ref is not None and (options is None or options.bundle):
-            bundle_artifact = getattr(adapter_ref, "bundle_artifact", None)
-            if callable(bundle_artifact):
-                bundle_spec = bundle_artifact(
+            if isinstance(adapter_ref, _SupportsBundleArtifact):
+                bundle_spec = adapter_ref.bundle_artifact(
                     plan.canonical, run=target_run, tracker=self._tracker
                 )
                 if bundle_spec is not None:
@@ -654,13 +681,16 @@ class TrackerConfigPlanService(_TrackerServiceBase):
                         artifact.key,
                     )
                 rows = spec.materialize_rows(run.id)
-                self.ingest(
+                artifact = self.tracker.ingest(
                     artifact,
                     data=rows,
                     schema=spec.schema,
                     run=run,
                     profile_schema=profile_schema,
                 )
+                target_key = source_key if source_key is not None else artifact.key
+                if target_key in artifacts_by_key:
+                    artifacts_by_key[target_key] = artifact
 
         return artifacts_by_key
 
@@ -669,16 +699,17 @@ class TrackerConfigPlanService(_TrackerServiceBase):
         if store is not None:
             return store.ingest_cache_hit(table_name, content_hash)
 
-        if self.engine is None:
+        ledger = self.tracker.ledger
+        if ledger is None:
             return False
         if not _is_safe_identifier(table_name):
             return False
         table_ref = f"{_quote_ident('global_tables')}.{_quote_ident(table_name)}"
         try:
-            with self.engine.begin() as connection:
-                result = connection.exec_driver_sql(
+            with ledger.exec_cursor() as cur:
+                result = cur.execute(
                     f"SELECT 1 FROM {table_ref} WHERE content_hash = ? LIMIT 1",
-                    (content_hash,),
+                    [content_hash],
                 ).fetchone()
             return result is not None
         except Exception:

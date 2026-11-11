@@ -27,7 +27,11 @@ from typing import (
 )
 from pathlib import Path
 
-from consist.types import CodeIdentityMode
+from consist.artifact import (
+    Artifact,
+    _ARRAY_MEMBER_DRIVERS,
+    _TABLE_MEMBER_DRIVERS,
+)
 from consist.core.resolved_binding import ArtifactIdentity
 from consist.digest import (
     Digest,
@@ -37,6 +41,7 @@ from consist.digest import (
     file_sha256,
     normalize_json,
 )
+from consist.types import CodeIdentityMode
 
 # Try importing git lazily on first use, handle error if missing (optional dependency)
 _UNSET = object()
@@ -55,7 +60,6 @@ def _get_git() -> Optional[ModuleType]:
 
 if TYPE_CHECKING:
     from consist.core.run_resolution import InputBindingRole
-    from consist.models.artifact import Artifact
     from consist.types import HashInput
 
 
@@ -605,10 +609,12 @@ class IdentityManager:
     @staticmethod
     def _input_selector(artifact: "Artifact") -> dict[str, str | None]:
         """Return the part of an artifact reference that changes input meaning."""
+        drv = artifact.driver.strip().lower()
+        member = artifact.member
         return {
             "driver": artifact.driver,
-            "table_path": artifact.table_path,
-            "array_path": artifact.array_path,
+            "table_path": member if drv in _TABLE_MEMBER_DRIVERS else None,
+            "array_path": member if drv in _ARRAY_MEMBER_DRIVERS else None,
         }
 
     def _compute_legacy_input_signature(
@@ -619,12 +625,17 @@ class IdentityManager:
         signature_lookup: Optional[Callable[[str], Optional[str]]],
     ) -> str:
         """Build conservative provenance evidence for untrusted action inputs."""
+        selector = self._input_selector(artifact)
+        table_path = selector["table_path"]
+        array_path = selector["array_path"]
+        loc = artifact.primary_location
+        container_uri = loc.uri if loc is not None else ""
         if artifact.run_id:
             sig_parts = [f"driver:{artifact.driver}", f"key:{artifact.key}"]
-            if artifact.table_path:
-                sig_parts.append(f"table_path:{artifact.table_path}")
-            if artifact.array_path:
-                sig_parts.append(f"array_path:{artifact.array_path}")
+            if table_path:
+                sig_parts.append(f"table_path:{table_path}")
+            if array_path:
+                sig_parts.append(f"array_path:{array_path}")
             producer_signature = (
                 signature_lookup(artifact.run_id) if signature_lookup else None
             )
@@ -638,17 +649,17 @@ class IdentityManager:
 
         if not path_resolver:
             raise ValueError(
-                f"Cannot hash raw artifact '{artifact.container_uri}' without a path_resolver."
+                f"Cannot hash raw artifact '{container_uri}' without a path_resolver."
             )
-        file_hash = self.compute_file_checksum(path_resolver(artifact.container_uri))
+        file_hash = self.compute_file_checksum(path_resolver(container_uri))
         sig_parts = [
             f"driver:{artifact.driver}",
-            f"container_uri:{artifact.container_uri}",
+            f"container_uri:{container_uri}",
         ]
-        if artifact.table_path:
-            sig_parts.append(f"table_path:{artifact.table_path}")
-        if artifact.array_path:
-            sig_parts.append(f"array_path:{artifact.array_path}")
+        if table_path:
+            sig_parts.append(f"table_path:{table_path}")
+        if array_path:
+            sig_parts.append(f"array_path:{array_path}")
         sig_parts.append(f"file:{file_hash}")
         return "|".join(sig_parts)
 
@@ -658,6 +669,15 @@ class IdentityManager:
         meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
         semantics = meta.get("hash_semantics")
         if not isinstance(semantics, Mapping):
+            from consist.location import DirTreeStat, FileStat
+
+            for obs in artifact.hints:
+                if obs.basis == "declared":
+                    return "caller_supplied_hash"
+                if isinstance(obs.witness, FileStat):
+                    return "fast_file_observation"
+                if isinstance(obs.witness, DirTreeStat):
+                    return "fast_directory_observation"
             return "missing_hash_semantics"
         if semantics.get("source") == "caller_supplied":
             return "caller_supplied_hash"
@@ -723,7 +743,7 @@ class IdentityManager:
                 value = (
                     str(anchor_str)
                     if isinstance(anchor_str, str) and anchor_str
-                    else f"sha256:historical-v1:{artifact.hash or ('0' * 64)}"
+                    else str(artifact.identity.anchor)
                 )
                 mode: Literal["content-v1", "legacy-provenance-v1", "historical-v1"] = (
                     "historical-v1"
@@ -735,13 +755,18 @@ class IdentityManager:
                     mode = "content-v1"
                     fallback_reason = None
                 except ValueError:
-                    value = self._compute_legacy_input_signature(
-                        artifact,
-                        path_resolver=path_resolver,
-                        signature_lookup=signature_lookup,
-                    )
-                    mode = "legacy-provenance-v1"
-                    fallback_reason = self._action_binding_fallback_reason(artifact)
+                    if artifact.identity.verifiable:
+                        value = str(artifact.identity.anchor)
+                        mode = "content-v1"
+                        fallback_reason = None
+                    else:
+                        value = self._compute_legacy_input_signature(
+                            artifact,
+                            path_resolver=path_resolver,
+                            signature_lookup=signature_lookup,
+                        )
+                        mode = "legacy-provenance-v1"
+                        fallback_reason = self._action_binding_fallback_reason(artifact)
             binding = ActionBindingIdentity(
                 kind=role.kind,
                 role=role.role,

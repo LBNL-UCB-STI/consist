@@ -1,73 +1,59 @@
 """
-Database model for flattened artifact facet keys in the Consist main database.
-
-This table stores typed scalar facet leaves for fast artifact filtering.
+Data transfer model for flattened artifact facet keys projected by `main.artifact_kv`.
 """
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
-from sqlalchemy import Column, DateTime, JSON, String
-from sqlmodel import Field, SQLModel
-
-from consist.models.artifact import UUIDType
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 UTC = timezone.utc
 
 
-class ArtifactKV(SQLModel, table=True):
+class ArtifactKV(BaseModel):
     """
-    Query index table for artifact facets.
+    Row DTO for the `artifact_kv` view in `StoreLedger`.
 
     Each row represents a scalar leaf from an artifact facet payload.
     """
 
-    __tablename__ = "artifact_kv"
+    model_config = ConfigDict(validate_assignment=True)
 
-    artifact_id: uuid.UUID = Field(
-        primary_key=True,
-        sa_type=UUIDType,
-        sa_column_kwargs={"autoincrement": False},
-        index=True,
-    )
-
-    facet_id: str = Field(
-        primary_key=True,
-        sa_column_kwargs={"autoincrement": False},
-        index=True,
-    )
-
+    artifact_id: uuid.UUID
+    facet_id: str
     key_path: str = Field(
-        primary_key=True,
-        index=True,
         description="Flattened dotted key path.",
     )
-
     namespace: Optional[str] = Field(
         default=None,
-        index=True,
         description="Optional namespace for the indexed facet.",
     )
-
     value_type: str = Field(
         description="One of: str|int|float|bool|null",
     )
-
-    value_str: Optional[str] = Field(
-        default=None, sa_column=Column(String, nullable=True)
-    )
-    value_num: Optional[float] = Field(default=None, nullable=True)
-    value_bool: Optional[bool] = Field(default=None, nullable=True)
-    value_json: Optional[Dict[str, Any]] = Field(
+    value_str: Optional[str] = Field(default=None)
+    value_num: Optional[float] = Field(default=None)
+    value_bool: Optional[bool] = Field(default=None)
+    value_json: Optional[Any] = Field(
         default=None,
-        sa_column=Column(JSON, nullable=True),
         description="Reserved for future compatibility.",
     )
-
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC),
-        sa_type=DateTime,
     )
+
+    @field_validator("value_json", mode="before")
+    @classmethod
+    def _coerce_value_json(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except ValueError:
+                return value
+        return value

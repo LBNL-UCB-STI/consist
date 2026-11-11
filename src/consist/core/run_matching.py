@@ -74,16 +74,15 @@ def _candidate_matches_target(run: Run, target: RunMatchTarget) -> bool:
     if not _matches_run_scope(run, target.run_scope):
         return False
 
-    field_names = (
-        "model",
-        "status",
-        "year",
-        "iteration",
-        "stage",
-        "phase",
+    expected_pairs = (
+        ("model", target.model),
+        ("status", target.status),
+        ("year", target.year),
+        ("iteration", target.iteration),
+        ("stage", target.stage),
+        ("phase", target.phase),
     )
-    for field_name in field_names:
-        expected = getattr(target, field_name)
+    for field_name, expected in expected_pairs:
         actual = _candidate_value(run, field_name)
         if not _values_match(actual, expected):
             return False

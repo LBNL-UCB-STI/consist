@@ -6,7 +6,7 @@ from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from consist.models.artifact import Artifact
+from consist.artifact import Artifact
 
 ContainerRecoveryUnit = Literal["parent_file", "derived_children"]
 ChildRecoveryPolicy = Literal["descriptive_only", "independent"]

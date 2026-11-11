@@ -8,13 +8,23 @@ import re
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Iterator, Literal, Mapping, Protocol, Sequence, cast
+from typing import (
+    Any,
+    Callable,
+    Iterator,
+    Literal,
+    Mapping,
+    Protocol,
+    Sequence,
+    cast,
+    runtime_checkable,
+)
 
 from sqlmodel import SQLModel
 
+from consist.artifact import Artifact
 from consist.core.artifacts import _infer_driver_from_path
 from consist.digest import file_sha256
-from consist.models.artifact import Artifact
 from consist.types import (
     EnumCapture,
     FacetLike,
@@ -28,6 +38,11 @@ from consist.types import (
 
 _OUTPUT_SET_MANIFEST_VERSION = 1
 _SAFE_KEY_RE = re.compile(r"[^A-Za-z0-9_]+")
+
+
+@runtime_checkable
+class _HasCurrentConsist(Protocol):
+    current_consist: Any
 
 
 class OutputSetTracker(Protocol):
@@ -392,13 +407,16 @@ def build_output_set_manifest(
             config=config,
         )
         artifact = artifacts_by_relative_path.get(member.relative_path)
+        artifact_loc = artifact.primary_location if artifact is not None else None
         manifest_members.append(
             {
                 "key": _member_key(key, member.relative_path),
                 "artifact_id": str(artifact.id) if artifact is not None else None,
                 "relative_path": member.relative_path,
                 "uri": (
-                    artifact.container_uri if artifact is not None else str(member.path)
+                    artifact_loc.uri
+                    if artifact_loc is not None and artifact_loc.uri
+                    else str(member.path)
                 ),
                 "driver": (
                     artifact.driver
@@ -551,11 +569,21 @@ def register_output_sets(
             members=members,
             manifest_artifact_id=str(manifest_artifact.id),
         )
+        updated_parent = parent.with_meta(updates, merge=True)
         if tracker.db is not None:
-            tracker.db.update_artifact_meta(parent, updates, raise_on_error=True)
+            db_updated = tracker.db.update_artifact_meta(
+                parent, updates, raise_on_error=True
+            )
+            if isinstance(db_updated, Artifact):
+                updated_parent = db_updated.bind_tracker(tracker)
         else:
-            parent.meta.update(updates)
-        registered[key] = parent
+            updated_parent.bind_tracker(tracker)
+        if (
+            isinstance(tracker, _HasCurrentConsist)
+            and tracker.current_consist is not None
+        ):
+            tracker.current_consist.sync_output_artifact(updated_parent)
+        registered[key] = updated_parent
     return registered
 
 

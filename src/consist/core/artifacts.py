@@ -1,11 +1,14 @@
-import copy
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 import hashlib
 import logging
-import uuid
-from collections.abc import Mapping
-from dataclasses import dataclass
-from datetime import datetime, timezone
+import os
 from pathlib import Path
+import re
+import time
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -13,14 +16,18 @@ from typing import (
     List,
     Literal,
     Optional,
+    Protocol,
     Type,
     TypeAlias,
     Union,
+    runtime_checkable,
 )
+import uuid
 
 from sqlmodel import SQLModel
 
-from consist.core.admission import hash_semantics_for_new_artifact
+from consist.artifact import Artifact
+from consist.core.cache_output_logging import _demote_cache_hit
 from consist.core.container_policy import (
     ChildRecoveryPolicy,
     ContainerRecoveryUnit,
@@ -28,15 +35,30 @@ from consist.core.container_policy import (
 )
 from consist.core.drivers import ARRAY_DRIVERS, TABLE_DRIVERS
 from consist.core.logical_array_identity import open_h5py_read_only
-from consist.core.cache_output_logging import _demote_cache_hit
-from consist.core.resolved_binding import ArtifactIdentity
 from consist.core.validation import validate_artifact_key
-from consist.models.artifact import Artifact
+from consist.digest import (
+    Digest,
+    Identity,
+    build_manifest_v1,
+    canonical_json_str,
+)
+from consist.engine import virtualize_path as _engine_virtualize_path
+from consist.location import (
+    DirTreeStat,
+    FileStat,
+    Freshness,
+    Location,
+    MemberOf,
+    Observation,
+    ObservationBasis,
+    Witness,
+)
+from consist.meta import EMPTY_META, FrozenMeta, merge_artifact_output_meta
 from consist.types import (
     ArtifactRef,
+    FacetLike,
     H5ChildSelectionMode,
     H5ChildSpec,
-    FacetLike,
 )
 
 if TYPE_CHECKING:
@@ -46,6 +68,41 @@ if TYPE_CHECKING:
 ContainerPolicyMetaValue: TypeAlias = (
     ContainerRecoveryUnit | ChildRecoveryPolicy | Mapping[str, object]
 )
+
+_HEX64_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+@runtime_checkable
+class _HasDtypeAndShape(Protocol):
+    dtype: Any
+    shape: Any
+
+
+@runtime_checkable
+class _HasKeys(Protocol):
+    def keys(self) -> Any: ...
+    def __getitem__(self, key: Any) -> Any: ...
+
+
+@runtime_checkable
+class _HasLedger(Protocol):
+    @property
+    def ledger(self) -> Any: ...
+
+
+@runtime_checkable
+class _HasMounts(Protocol):
+    mounts: Any
+
+
+@runtime_checkable
+class _HasRunDir(Protocol):
+    run_dir: Any
+
+
+@runtime_checkable
+class _HasArchiveMounts(Protocol):
+    archive_mounts: Any
 
 
 @dataclass(slots=True)
@@ -63,6 +120,83 @@ class _ContentHashState:
     caller_supplied_override_applied: bool = False
 
 
+def _normalize_64hex(raw: Optional[str]) -> str:
+    if not isinstance(raw, str) or not raw.strip():
+        return "0" * 64
+    cleaned = raw.strip()
+    if _HEX64_RE.fullmatch(cleaned):
+        return cleaned.lower()
+    tail = cleaned.rsplit(":", 1)[-1]
+    if _HEX64_RE.fullmatch(tail):
+        return tail.lower()
+    return hashlib.sha256(cleaned.encode("utf-8")).hexdigest()
+
+
+def _matches_artifact_hash(artifact: Artifact, candidate: Optional[str]) -> bool:
+    if not isinstance(candidate, str) or not candidate:
+        return False
+    if artifact.hash == candidate:
+        return True
+    cand_tail = candidate.rsplit(":", 1)[-1].lower()
+    return artifact.identity.anchor.hex == cand_tail
+
+
+def _capture_witness(
+    path: Optional[Path],
+    *,
+    member: Optional[str],
+) -> Optional[Witness]:
+    if path is None:
+        return None
+    now_ns = time.time_ns()
+    try:
+        if not path.exists():
+            return None
+        if path.is_dir():
+            return DirTreeStat.capture(path, observed_at_ns=now_ns)
+        if member is not None:
+            return MemberOf.capture(path, member=member, observed_at_ns=now_ns)
+        return FileStat.capture(path, observed_at_ns=now_ns)
+    except OSError:
+        return None
+
+
+def _record_manifest_if_writable(
+    tracker: Any,
+    anchor: Digest,
+    manifest: Mapping[str, Any],
+) -> None:
+    if not isinstance(tracker, _HasLedger):
+        return
+    ledger = tracker.ledger
+    if ledger is None or ledger.read_only:
+        return
+    try:
+        raw_entries = manifest.get("entries", [])
+        entries = list(raw_entries) if isinstance(raw_entries, Sequence) else []
+        body_payload = {
+            "version": manifest.get("version", 1),
+            "entries": entries,
+        }
+        body_bytes = canonical_json_str(body_payload).encode("utf-8")
+        total_bytes = sum(
+            int(item.get("size", 0)) for item in entries if isinstance(item, Mapping)
+        )
+        ledger.record_content_manifest(
+            anchor=str(anchor),
+            format="manifest-v1",
+            entry_count=len(entries),
+            total_bytes=total_bytes,
+            body=body_bytes,
+        )
+    except Exception as exc:
+        logging.debug(
+            "[Consist] Failed to persist content manifest for %s: %s",
+            anchor,
+            exc,
+        )
+
+
 def _infer_driver_from_path(path: Path) -> str:
     driver = ARRAY_DRIVERS.resolve_driver(path)
     if driver:
@@ -70,6 +204,11 @@ def _infer_driver_from_path(path: Path) -> str:
     driver = TABLE_DRIVERS.resolve_driver(path)
     if driver:
         return driver
+    try:
+        if path.is_dir():
+            return "directory"
+    except OSError:
+        pass
     suffixes = [suffix.lower() for suffix in path.suffixes]
     suffix = suffixes[-1].lstrip(".") if suffixes else ""
     if suffix == "shp":
@@ -84,16 +223,16 @@ def _infer_driver_from_path(path: Path) -> str:
 
 
 def _resolve_h5_dataset(obj: Any) -> Optional[Any]:
-    if hasattr(obj, "dtype") and hasattr(obj, "shape"):
+    if isinstance(obj, _HasDtypeAndShape):
         return obj
-    if hasattr(obj, "keys"):
+    if isinstance(obj, _HasKeys):
         preferred = ("table", "block0_values", "values")
         for key in preferred:
             try:
                 candidate = obj[key]
             except Exception:
                 continue
-            if hasattr(candidate, "dtype") and hasattr(candidate, "shape"):
+            if isinstance(candidate, _HasDtypeAndShape):
                 return candidate
 
         for key in obj.keys():
@@ -101,7 +240,7 @@ def _resolve_h5_dataset(obj: Any) -> Optional[Any]:
                 candidate = obj[key]
             except Exception:
                 continue
-            if hasattr(candidate, "dtype") and hasattr(candidate, "shape"):
+            if isinstance(candidate, _HasDtypeAndShape):
                 return candidate
     return None
 
@@ -193,10 +332,6 @@ def _container_policy_updates(
     return updates
 
 
-def _clone_artifact_for_meta_update(artifact: Artifact) -> Artifact:
-    return copy.deepcopy(artifact)
-
-
 def _list_h5_dataset_names(
     path_obj: Path,
     *,
@@ -236,6 +371,182 @@ class ArtifactManager:
 
     def __init__(self, tracker: "Tracker"):
         self.tracker = tracker
+
+    def _ledger_ref(self) -> Any:
+        if isinstance(self.tracker, _HasLedger) and self.tracker.ledger is not None:
+            return self.tracker.ledger.ref
+        return None
+
+    def _site_name(self) -> str:
+        return "local"
+
+    def _effective_mounts(self) -> dict[str, Any]:
+        mounts: dict[str, Any] = {}
+        if isinstance(self.tracker, _HasRunDir) and self.tracker.run_dir:
+            mounts["workspace"] = self.tracker.run_dir
+        if isinstance(self.tracker, _HasArchiveMounts) and isinstance(
+            self.tracker.archive_mounts, Mapping
+        ):
+            mounts.update(self.tracker.archive_mounts)
+        if isinstance(self.tracker, _HasMounts) and isinstance(
+            self.tracker.mounts, Mapping
+        ):
+            mounts.update(self.tracker.mounts)
+        return mounts
+
+    def _build_identity_and_basis(
+        self,
+        *,
+        driver: str,
+        member: Optional[str],
+        path_for_stat: Optional[Path],
+        content_hash: Optional[str],
+        validate_content_hash: bool,
+        meta: Mapping[str, Any],
+        compute_default_hash: Callable[[], Optional[str]],
+        validate_disk_hash: Callable[[], None],
+    ) -> tuple[Identity, ObservationBasis]:
+        hashing_strategy_raw = self.tracker.identity.hashing_strategy
+        hashing_strategy = (
+            hashing_strategy_raw if isinstance(hashing_strategy_raw, str) else "full"
+        )
+
+        if meta.get("directory_artifact") is True and isinstance(
+            meta.get("directory_manifest"), Mapping
+        ):
+            manifest = meta["directory_manifest"]
+            tree_hex = _normalize_64hex(
+                str(manifest.get("tree_hash") or content_hash or "")
+            )
+            anchor = Digest("sha256:manifest-v1", tree_hex)
+            _record_manifest_if_writable(self.tracker, anchor, manifest)
+            return Identity(anchor=anchor), "computed"
+
+        if meta.get("file_bundle_artifact") is True and isinstance(
+            meta.get("file_bundle_manifest"), Mapping
+        ):
+            manifest = meta["file_bundle_manifest"]
+            tree_hex = _normalize_64hex(
+                str(manifest.get("tree_hash") or content_hash or "")
+            )
+            anchor = Digest("sha256:manifest-v1", tree_hex)
+            _record_manifest_if_writable(self.tracker, anchor, manifest)
+            return Identity(anchor=anchor), "computed"
+
+        if driver == "artifact_set" or meta.get("artifact_set") is True:
+            raw_set_hash = content_hash or compute_default_hash()
+            anchor = Digest("core_state/v1:sha256", _normalize_64hex(raw_set_hash))
+            return Identity(anchor=anchor), "computed"
+
+        if (
+            driver == "h5_table"
+            and isinstance(content_hash, str)
+            and _HEX64_RE.fullmatch(content_hash)
+        ):
+            anchor = Digest("ctd1:sha256", content_hash.lower())
+            return Identity(anchor=anchor), "computed"
+
+        if isinstance(content_hash, str) and ":" in content_hash:
+            try:
+                parsed = Digest.parse(content_hash)
+                if member is not None and parsed.scheme in {
+                    "sha256:file",
+                    "blake3:file",
+                }:
+                    parsed = Digest("legacy-v1:unverified", parsed.hex)
+                if validate_content_hash:
+                    validate_disk_hash()
+                return (
+                    Identity(anchor=parsed),
+                    "computed" if validate_content_hash else "declared",
+                )
+            except ValueError:
+                pass
+
+        if content_hash is not None:
+            if validate_content_hash:
+                validate_disk_hash()
+                if (
+                    member is None
+                    and hashing_strategy != "fast"
+                    and path_for_stat is not None
+                    and path_for_stat.is_file()
+                    and _HEX64_RE.fullmatch(content_hash)
+                ):
+                    return (
+                        Identity(anchor=Digest("sha256:file", content_hash.lower())),
+                        "computed",
+                    )
+                return (
+                    Identity(
+                        anchor=Digest(
+                            "legacy-v1:unverified", _normalize_64hex(content_hash)
+                        )
+                    ),
+                    "computed",
+                )
+            return (
+                Identity(
+                    anchor=Digest(
+                        "legacy-v1:unverified", _normalize_64hex(content_hash)
+                    )
+                ),
+                "declared",
+            )
+
+        if member is None and hashing_strategy != "fast" and path_for_stat is not None:
+            try:
+                is_reg_file = path_for_stat.is_file()
+                is_dir_path = path_for_stat.is_dir()
+            except OSError:
+                is_reg_file = False
+                is_dir_path = False
+
+            if is_reg_file:
+                computed = compute_default_hash()
+                if isinstance(computed, str) and _HEX64_RE.fullmatch(computed):
+                    return (
+                        Identity(anchor=Digest("sha256:file", computed.lower())),
+                        "computed",
+                    )
+                return (
+                    Identity(
+                        anchor=Digest(
+                            "legacy-v1:unverified", _normalize_64hex(computed)
+                        )
+                    ),
+                    "computed",
+                )
+
+            if is_dir_path:
+                try:
+                    dir_manifest = build_manifest_v1(path_for_stat)
+                    tree_hex = str(dir_manifest["tree_hash"])
+                    anchor = Digest("sha256:manifest-v1", tree_hex)
+                    _record_manifest_if_writable(self.tracker, anchor, dir_manifest)
+                    return Identity(anchor=anchor), "computed"
+                except (OSError, ValueError):
+                    computed = compute_default_hash()
+                    return (
+                        Identity(
+                            anchor=Digest(
+                                "legacy-v1:unverified", _normalize_64hex(computed)
+                            )
+                        ),
+                        "computed",
+                    )
+
+        computed = compute_default_hash()
+        exists_on_disk = False
+        if path_for_stat is not None:
+            try:
+                exists_on_disk = path_for_stat.exists()
+            except OSError:
+                exists_on_disk = False
+        return (
+            Identity(anchor=Digest("legacy-v1:unverified", _normalize_64hex(computed))),
+            "computed" if exists_on_disk else "declared",
+        )
 
     def create_artifact(
         self,
@@ -317,10 +628,8 @@ class ArtifactManager:
         Artifact
             A hydrated Artifact instance ready for persistence or chaining.
         """
-        if "table_path" in meta:
-            meta.pop("table_path")
-        if "array_path" in meta:
-            meta.pop("array_path")
+        meta.pop("table_path", None)
+        meta.pop("array_path", None)
         if "recovery_roots" in meta:
             meta["recovery_roots"] = self.tracker.fs.normalize_recovery_roots(
                 meta["recovery_roots"]
@@ -328,121 +637,26 @@ class ArtifactManager:
         meta.pop("hash_semantics", None)
         meta.pop("content_identity", None)
         meta.pop("observation_identity", None)
-        artifact_obj = None
-        is_new_artifact = False
-        resolved_abs_path = None
+
+        resolved_abs_path: Optional[str] = None
         mount_scheme: Optional[str] = None
         mount_root: Optional[str] = None
-        # Shared mutable state for nested helpers in this single create call.
         hash_state = _ContentHashState(effective_hash=content_hash)
 
         is_output_reuse = direction == "output" and reuse_if_unchanged
-
-        def _warn_output_reuse_deprecated() -> None:
-            if not is_output_reuse:
-                return
+        if is_output_reuse:
             logging.warning(
                 "[Consist] reuse_if_unchanged on outputs is deprecated; "
                 "a new artifact row is always created now and identical bytes share "
-                "identity via ArtifactContent (content_id)."
+                "verified content identity."
             )
             if reuse_scope == "any_uri":
                 logging.warning(
                     "[Consist] reuse_scope='any_uri' is ignored for outputs; "
-                    "content_id equality governs deduplication instead."
+                    "content identity equality governs deduplication instead."
                 )
 
-        def _clone_artifact(
-            artifact: Artifact,
-            *,
-            driver_override: Optional[str],
-            table_path_override: Optional[str],
-            array_path_override: Optional[str],
-            parent_artifact_id_override: Optional[uuid.UUID],
-        ) -> Artifact:
-            updates: dict[str, Any] = {}
-            if driver_override:
-                updates["driver"] = driver_override
-            if table_path_override is not None:
-                updates["table_path"] = table_path_override
-            if array_path_override is not None:
-                updates["array_path"] = array_path_override
-            if parent_artifact_id_override is not None:
-                updates["parent_artifact_id"] = parent_artifact_id_override
-            return artifact.model_copy(deep=True, update=updates or None)
-
-        def _attach_content_id(artifact: Artifact) -> None:
-            if artifact.content_id is not None:
-                return
-            effective_driver = driver or artifact.driver
-            content_identity = artifact.meta.get("content_identity")
-            if (
-                not isinstance(content_identity, str)
-                or effective_driver is None
-                or self.tracker.db is None
-            ):
-                return
-            try:
-                content_row = self.tracker.db.get_or_create_artifact_content(
-                    content_hash=content_identity,
-                    driver=effective_driver,
-                )
-                artifact.content_id = content_row.id
-            except Exception as exc:
-                logging.warning(
-                    "[Consist] Failed to record artifact content identity for %s: %s",
-                    artifact.key,
-                    exc,
-                )
-
-        def _record_identity_evidence(artifact: Artifact) -> None:
-            """Persist only identities that the logged semantics can prove."""
-            try:
-                artifact.meta["content_identity"] = str(
-                    ArtifactIdentity.from_artifact(artifact)
-                )
-                artifact.meta.pop("observation_identity", None)
-                return
-            except ValueError:
-                artifact.meta.pop("content_identity", None)
-
-            semantics = artifact.meta.get("hash_semantics")
-            hash_value = artifact.hash
-            if not isinstance(semantics, Mapping) or not isinstance(hash_value, str):
-                artifact.meta.pop("observation_identity", None)
-                return
-            if semantics == {
-                "version": 1,
-                "algorithm": "sha256",
-                "kind": "file",
-                "digest_contract": "file_metadata",
-                "source": "computed_fast",
-            }:
-                artifact.meta["observation_identity"] = f"stat-v1:file:{hash_value}"
-                return
-            if (
-                semantics
-                == {
-                    "version": 1,
-                    "algorithm": "sha256",
-                    "kind": "directory",
-                    "digest_contract": "legacy_directory_metadata",
-                    "source": "computed_fast_directory",
-                }
-                and resolved_abs_path
-            ):
-                artifact.meta["observation_identity"] = (
-                    self.tracker.identity.compute_fast_directory_observation(
-                        resolved_abs_path
-                    )
-                )
-                return
-            artifact.meta.pop("observation_identity", None)
-
-        def _compute_content_hash(
-            *,
-            raise_on_error: bool,
-        ) -> Optional[str]:
+        def _compute_content_hash(*, raise_on_error: bool) -> Optional[str]:
             if hash_state.computed_hash is not None or hash_state.attempted_compute:
                 return hash_state.computed_hash
             if not resolved_abs_path:
@@ -479,170 +693,397 @@ class ArtifactManager:
             if not validate_content_hash or hash_state.effective_hash is None:
                 return
             computed = _compute_content_hash(raise_on_error=True)
-            if computed != hash_state.effective_hash:
+            expected_tail = hash_state.effective_hash.rsplit(":", 1)[-1]
+            if computed != hash_state.effective_hash and computed != expected_tail:
                 raise ValueError(
                     f"content_hash does not match on-disk data for {resolved_abs_path}."
                 )
 
-        def _apply_content_hash_override(artifact: Artifact) -> None:
-            if hash_state.effective_hash is None:
-                return
-            _validate_content_hash()
-            existing_hash = artifact.hash
-            if existing_hash == hash_state.effective_hash:
-                return
-            if existing_hash and not force_hash_override:
-                logging.warning(
-                    "[Consist Warning] Ignoring content_hash override for artifact key=%s uri=%s "
-                    "(existing hash differs). Use force_hash_override=True to override.",
-                    artifact.key,
-                    artifact.container_uri,
+        def _clone_and_update_existing(
+            existing: Artifact,
+            *,
+            key_override: Optional[str],
+            driver_override: Optional[str],
+            table_path_override: Optional[str],
+            array_path_override: Optional[str],
+            parent_id_override: Optional[uuid.UUID],
+            meta_updates: dict[str, Any],
+        ) -> Artifact:
+            eff_key = key_override if key_override is not None else existing.key
+            validate_artifact_key(eff_key)
+            eff_driver = (
+                driver_override if driver_override is not None else existing.driver
+            )
+            eff_member = (
+                table_path_override
+                if table_path_override is not None
+                else (
+                    array_path_override
+                    if array_path_override is not None
+                    else existing.member
                 )
-                return
-            artifact.hash = hash_state.effective_hash
-            hash_state.caller_supplied_override_applied = True
+            )
+            eff_parent_id = (
+                parent_id_override
+                if parent_id_override is not None
+                else existing.parent_artifact_id
+            )
+            eff_id = existing.id
+            eff_run_id = existing.run_id
+            eff_created_at = existing.created_at
+            eff_identity = existing.identity
+            eff_hints = list(existing.hints)
 
-        _warn_output_reuse_deprecated()
+            primary_loc = existing.primary_location
+            base_uri = primary_loc.uri if primary_loc is not None else ""
 
-        from consist.artifact import Artifact as V2Artifact
-        from consist.core.run_resolution import convert_v2_artifact_to_legacy
+            if hash_state.effective_hash is not None:
+                _validate_content_hash()
+                if not _matches_artifact_hash(existing, hash_state.effective_hash):
+                    if not force_hash_override:
+                        logging.warning(
+                            "[Consist Warning] Ignoring content_hash override for artifact key=%s uri=%s "
+                            "(existing hash differs). Use force_hash_override=True to override.",
+                            eff_key,
+                            base_uri,
+                        )
+                    else:
+                        path_obj = (
+                            Path(resolved_abs_path) if resolved_abs_path else None
+                        )
+                        eff_identity, new_basis = self._build_identity_and_basis(
+                            driver=eff_driver,
+                            member=eff_member,
+                            path_for_stat=path_obj,
+                            content_hash=hash_state.effective_hash,
+                            validate_content_hash=validate_content_hash,
+                            meta=meta_updates,
+                            compute_default_hash=_ensure_content_hash,
+                            validate_disk_hash=_validate_content_hash,
+                        )
+                        eff_id = uuid.uuid4()
+                        eff_run_id = None
+                        eff_created_at = datetime.now(timezone.utc)
+                        if base_uri:
+                            obs = Observation(
+                                location=Location(uri=base_uri, member=eff_member),
+                                identity=eff_identity,
+                                access_driver=eff_driver,
+                                witness=_capture_witness(path_obj, member=eff_member),
+                                basis=new_basis,
+                                site=self._site_name(),
+                            )
+                            eff_hints = [obs]
 
-        if isinstance(path, V2Artifact):
-            path = convert_v2_artifact_to_legacy(self.tracker, path, key_override=key)
+            if (
+                eff_member != existing.member or eff_driver != existing.driver
+            ) and base_uri:
+                path_obj = Path(resolved_abs_path) if resolved_abs_path else None
+                obs = Observation(
+                    location=Location(uri=base_uri, member=eff_member),
+                    identity=eff_identity,
+                    access_driver=eff_driver,
+                    witness=_capture_witness(path_obj, member=eff_member),
+                    basis=eff_hints[0].basis if eff_hints else "declared",
+                    site=self._site_name(),
+                )
+                eff_hints = [
+                    obs,
+                    *(h for h in eff_hints if h.place_key != obs.place_key),
+                ]
+
+            merged_meta = dict(existing.meta)
+            if meta_updates:
+                merged_meta = merge_artifact_output_meta(
+                    merged_meta, meta_updates, merge=True
+                )
+            if schema is not None:
+                merged_meta["schema_name"] = schema.__name__
+                if strict_schema:
+                    merged_meta["has_strict_schema"] = True
+                else:
+                    merged_meta.pop("has_strict_schema", None)
+            if mount_scheme and "mount_scheme" not in merged_meta:
+                merged_meta["mount_scheme"] = mount_scheme
+            if mount_root and "mount_root" not in merged_meta:
+                merged_meta["mount_root"] = mount_root
+
+            eff_hints = [
+                h
+                if h.identity.anchor == eff_identity.anchor
+                else replace(
+                    h,
+                    identity=eff_identity,
+                    basis="declared" if not eff_identity.verifiable else h.basis,
+                )
+                for h in eff_hints
+            ]
+            origin_ref = self._ledger_ref() or existing.origin
+            rebuilt = Artifact(
+                id=eff_id,
+                key=eff_key,
+                identity=eff_identity,
+                driver=eff_driver,
+                run_id=eff_run_id,
+                parent_artifact_id=eff_parent_id,
+                schema_id=existing.schema_id,
+                created_at=eff_created_at,
+                meta=FrozenMeta(merged_meta) if merged_meta else EMPTY_META,
+                origin=origin_ref,
+                hints=tuple(eff_hints),
+            )
+            return rebuilt.bind_tracker(self.tracker)
+
+        if not isinstance(path, (Artifact, str, Path, os.PathLike)):
+            from consist.models.artifact import Artifact as _LegacyModelArtifact
+
+            if isinstance(path, _LegacyModelArtifact):
+                legacy_path = path.abs_path or self.tracker.resolve_uri(
+                    path.container_uri
+                )
+                legacy_meta = {**dict(path.meta or {}), **meta}
+                return self.create_artifact(
+                    legacy_path,
+                    run_id=run_id if run_id is not None else path.run_id,
+                    key=key if key is not None else path.key,
+                    direction=direction,
+                    schema=schema,
+                    driver=driver if driver is not None else path.driver,
+                    table_path=table_path
+                    if table_path is not None
+                    else path.table_path,
+                    array_path=array_path
+                    if array_path is not None
+                    else path.array_path,
+                    content_hash=content_hash
+                    if content_hash is not None
+                    else path.hash,
+                    force_hash_override=force_hash_override,
+                    validate_content_hash=validate_content_hash,
+                    reuse_if_unchanged=reuse_if_unchanged,
+                    reuse_scope=reuse_scope,
+                    parent_artifact_id=(
+                        parent_artifact_id
+                        if parent_artifact_id is not None
+                        else path.parent_artifact_id
+                    ),
+                    strict_schema=strict_schema,
+                    **legacy_meta,
+                )
 
         if isinstance(path, Artifact):
             source_artifact = path
-            resolved_abs_path = source_artifact.abs_path or self.tracker.resolve_uri(
-                source_artifact.container_uri
+            located = source_artifact.locate(
+                mounts=self._effective_mounts(),
+                verify_on_stale=False,
             )
-            if key is None:
-                key = source_artifact.key
-            if key is not None:
-                validate_artifact_key(key)
-            artifact_obj = _clone_artifact(
+            if located is not None:
+                resolved_abs_path = str(located)
+            elif source_artifact.primary_location is not None:
+                try:
+                    resolved_abs_path = self.tracker.resolve_uri(
+                        source_artifact.primary_location.uri
+                    )
+                except Exception:
+                    resolved_abs_path = None
+            return _clone_and_update_existing(
                 source_artifact,
+                key_override=key,
                 driver_override=driver,
                 table_path_override=table_path,
                 array_path_override=array_path,
-                parent_artifact_id_override=parent_artifact_id,
+                parent_id_override=parent_artifact_id,
+                meta_updates=meta,
             )
-            _apply_content_hash_override(artifact_obj)
-            if meta:
-                artifact_obj.meta.update(meta)
-        else:
-            if key is None:
-                raise ValueError("Argument 'key' required when 'path' is a path-like.")
-            validate_artifact_key(key)
 
-            resolved_abs_path = str(Path(path).resolve())
-            container_uri = self.tracker.fs.virtualize_path(resolved_abs_path)
+        if key is None:
+            raise ValueError("Argument 'key' required when 'path' is a path-like.")
+        validate_artifact_key(key)
 
-            if "://" in container_uri:
-                scheme = container_uri.split("://", 1)[0]
-                if scheme in self.tracker.mounts:
-                    mount_scheme = scheme
-                    mount_root = str(Path(self.tracker.mounts[scheme]).resolve())
+        if isinstance(path, str) and path.startswith("db://"):
+            container_uri = path
+            effective_member = table_path if table_path is not None else array_path
+            resolved_driver = driver if driver is not None else "db"
+            anchor_val = (
+                hash_state.effective_hash
+                if hash_state.effective_hash is not None
+                else hashlib.sha256(
+                    f"{container_uri}|{effective_member or ''}".encode("utf-8")
+                ).hexdigest()
+            )
+            if (
+                hash_state.effective_hash is not None
+                and ":" in hash_state.effective_hash
+            ):
+                db_anchor = Digest.parse(hash_state.effective_hash)
+                db_basis: ObservationBasis = "computed"
+            elif hash_state.effective_hash is not None:
+                db_anchor = Digest("ctd1:sha256", anchor_val)
+                db_basis = "computed"
+            else:
+                db_anchor = Digest("legacy-v1:unverified", anchor_val)
+                db_basis = "declared"
+            db_identity = Identity(anchor=db_anchor)
+            merged_db_meta = dict(meta)
+            if schema is not None:
+                merged_db_meta["schema_name"] = schema.__name__
+                if strict_schema:
+                    merged_db_meta["has_strict_schema"] = True
+                else:
+                    merged_db_meta.pop("has_strict_schema", None)
+            db_obs = Observation(
+                location=Location(uri=container_uri, member=effective_member),
+                identity=db_identity,
+                access_driver=resolved_driver,
+                witness=None,
+                basis=db_basis,
+                site=self._site_name(),
+            )
+            return Artifact(
+                id=uuid.uuid4(),
+                key=key,
+                identity=db_identity,
+                driver=resolved_driver,
+                run_id=run_id,
+                parent_artifact_id=parent_artifact_id,
+                created_at=datetime.now(timezone.utc),
+                meta=FrozenMeta(merged_db_meta) if merged_db_meta else EMPTY_META,
+                origin=self._ledger_ref(),
+                hints=(db_obs,),
+            ).bind_tracker(self.tracker)
 
-            if driver is None:
+        path_obj = Path(path).expanduser().resolve()
+        resolved_abs_path = str(path_obj)
+        mounts_map = self._effective_mounts()
+        container_uri, matched_mount = _engine_virtualize_path(path_obj, mounts_map)
+
+        if matched_mount is not None and matched_mount.name != "workspace":
+            mount_scheme = matched_mount.name
+            mount_root = str(matched_mount.root.resolve())
+
+        if driver is None:
+            if meta.get("directory_artifact") is True:
+                driver = "directory"
+            else:
                 driver = _infer_driver_from_path(Path(path))
 
-            if direction == "input" and self.tracker.db:
-                parent = known_latest_artifact_at_uri
-                if not latest_artifact_lookup_done:
-                    parent = self.tracker.db.find_latest_artifact_at_uri(
-                        container_uri,
-                        driver=driver,
-                        table_path=table_path,
-                        array_path=array_path,
-                    )
-                if parent:
-                    should_reuse = True
-                    if driver in {"h5", "hdf5"}:
-                        if hash_state.effective_hash is None:
-                            _ensure_content_hash()
-                        should_reuse = (
-                            hash_state.effective_hash is not None
-                            and parent.hash == hash_state.effective_hash
-                        )
-                    elif driver in {"h5_table", "gtfs"}:
-                        should_reuse = (
-                            hash_state.effective_hash is not None
-                            and parent.hash == hash_state.effective_hash
-                        )
-
-                    if should_reuse:
-                        artifact_obj = _clone_artifact(
-                            parent,
-                            driver_override=driver,
-                            table_path_override=table_path,
-                            array_path_override=array_path,
-                            parent_artifact_id_override=parent_artifact_id,
-                        )
-                        _apply_content_hash_override(artifact_obj)
-                        if meta:
-                            artifact_obj.meta.update(meta)
-
-            if artifact_obj is None:
-                if hash_state.effective_hash is not None and validate_content_hash:
-                    _validate_content_hash()
-                elif hash_state.effective_hash is None:
-                    _ensure_content_hash()
-
-                artifact_obj = Artifact(
-                    key=key,
-                    container_uri=container_uri,
+        precomputed_identity_and_basis: Optional[tuple[Identity, ObservationBasis]] = (
+            None
+        )
+        if direction == "input" and self.tracker.db:
+            parent = known_latest_artifact_at_uri
+            if not latest_artifact_lookup_done:
+                parent = self.tracker.db.find_latest_artifact_at_uri(
+                    container_uri,
                     driver=driver,
                     table_path=table_path,
                     array_path=array_path,
-                    hash=hash_state.effective_hash,
-                    run_id=run_id,
-                    parent_artifact_id=parent_artifact_id,
-                    meta=meta,
                 )
-                is_new_artifact = True
+            if parent is not None:
+                should_reuse = True
+                if driver in {"h5", "hdf5"}:
+                    if hash_state.effective_hash is None:
+                        computed_h5 = _compute_content_hash(raise_on_error=False)
+                        should_reuse = _matches_artifact_hash(parent, computed_h5)
+                    else:
+                        should_reuse = _matches_artifact_hash(
+                            parent, hash_state.effective_hash
+                        )
+                elif driver in {"h5_table", "gtfs"}:
+                    should_reuse = _matches_artifact_hash(
+                        parent, hash_state.effective_hash
+                    )
+                elif hash_state.effective_hash is None and path_obj.exists():
+                    effective_member_check = (
+                        table_path if table_path is not None else array_path
+                    )
+                    has_fresh_witness = parent.identity.verifiable and any(
+                        h.location.uri == container_uri
+                        and h.location.member == effective_member_check
+                        and isinstance(h.witness, (FileStat, DirTreeStat))
+                        and h.witness.check(path_obj) is Freshness.FRESH
+                        for h in parent.hints
+                    )
+                    if has_fresh_witness:
+                        should_reuse = True
+                    else:
+                        precomputed_identity_and_basis = self._build_identity_and_basis(
+                            driver=driver,
+                            member=effective_member_check,
+                            path_for_stat=path_obj,
+                            content_hash=None,
+                            validate_content_hash=False,
+                            meta=meta,
+                            compute_default_hash=lambda: _compute_content_hash(
+                                raise_on_error=False
+                            ),
+                            validate_disk_hash=_validate_content_hash,
+                        )
+                        should_reuse = (
+                            precomputed_identity_and_basis[0].anchor
+                            == parent.identity.anchor
+                        )
 
-        if artifact_obj.hash and hash_state.effective_hash is None:
-            hash_state.effective_hash = artifact_obj.hash
+                if should_reuse:
+                    return _clone_and_update_existing(
+                        parent,
+                        key_override=key,
+                        driver_override=driver,
+                        table_path_override=table_path,
+                        array_path_override=array_path,
+                        parent_id_override=parent_artifact_id,
+                        meta_updates=meta,
+                    )
 
-        if schema:
-            artifact_obj.meta["schema_name"] = schema.__name__
+        effective_member = table_path if table_path is not None else array_path
+        if precomputed_identity_and_basis is not None:
+            identity, basis = precomputed_identity_and_basis
+        else:
+            identity, basis = self._build_identity_and_basis(
+                driver=driver,
+                member=effective_member,
+                path_for_stat=path_obj,
+                content_hash=hash_state.effective_hash,
+                validate_content_hash=validate_content_hash,
+                meta=meta,
+                compute_default_hash=_ensure_content_hash,
+                validate_disk_hash=_validate_content_hash,
+            )
+
+        merged_meta = dict(meta)
+        if schema is not None:
+            merged_meta["schema_name"] = schema.__name__
             if strict_schema:
-                artifact_obj.meta["has_strict_schema"] = True
+                merged_meta["has_strict_schema"] = True
             else:
-                artifact_obj.meta.pop("has_strict_schema", None)
+                merged_meta.pop("has_strict_schema", None)
+        if mount_scheme and "mount_scheme" not in merged_meta:
+            merged_meta["mount_scheme"] = mount_scheme
+        if mount_root and "mount_root" not in merged_meta:
+            merged_meta["mount_root"] = mount_root
 
-        if artifact_obj.meta is None:
-            artifact_obj.meta = {}
-        if is_new_artifact and artifact_obj.hash is not None and resolved_abs_path:
-            artifact_obj.meta["hash_semantics"] = hash_semantics_for_new_artifact(
-                path=Path(resolved_abs_path),
-                hashing_strategy=self.tracker.identity.hashing_strategy,
-                source=("caller_supplied" if content_hash is not None else "computed"),
-            )
-        elif hash_state.caller_supplied_override_applied:
-            artifact_obj.meta["hash_semantics"] = hash_semantics_for_new_artifact(
-                path=None,
-                hashing_strategy=self.tracker.identity.hashing_strategy,
-                source="caller_supplied",
-            )
-            if not is_new_artifact:
-                # Reused artifacts may already be linked to completed runs. A
-                # caller-supplied override is a distinct, untrusted observation,
-                # so it must not rewrite that persisted artifact's identity.
-                artifact_obj.id = uuid.uuid4()
-                artifact_obj.content_id = None
-                artifact_obj.run_id = None
-                artifact_obj.created_at = datetime.now(timezone.utc)
-        if mount_scheme and "mount_scheme" not in artifact_obj.meta:
-            artifact_obj.meta["mount_scheme"] = mount_scheme
-        if mount_root and "mount_root" not in artifact_obj.meta:
-            artifact_obj.meta["mount_root"] = mount_root
+        obs = Observation(
+            location=Location(uri=container_uri, member=effective_member),
+            identity=identity,
+            access_driver=driver,
+            witness=_capture_witness(path_obj, member=effective_member),
+            basis=basis,
+            site=self._site_name(),
+        )
 
-        _record_identity_evidence(artifact_obj)
-        _attach_content_id(artifact_obj)
-
-        artifact_obj.abs_path = resolved_abs_path
-        return artifact_obj
+        artifact_obj = Artifact(
+            id=uuid.uuid4(),
+            key=key,
+            identity=identity,
+            driver=driver,
+            run_id=run_id,
+            parent_artifact_id=parent_artifact_id,
+            created_at=datetime.now(timezone.utc),
+            meta=FrozenMeta(merged_meta) if merged_meta else EMPTY_META,
+            origin=self._ledger_ref(),
+            hints=(obs,),
+        )
+        return artifact_obj.bind_tracker(self.tracker)
 
     def scan_h5_container(
         self,
@@ -734,7 +1175,7 @@ class ArtifactManager:
                                         )
                             table_art = self.create_artifact(
                                 str(path_obj),
-                                run_id=container.run_id,  # FIX: Inherit Run ID
+                                run_id=container.run_id,
                                 key=table_key,
                                 direction=direction,
                                 driver="h5_table",
@@ -783,54 +1224,6 @@ class ArtifactManager:
         """
         Log an HDF5 file and optionally discover its internal tables.
 
-        Parameters
-        ----------
-        path : Union[str, Path]
-            Path to the HDF5 file.
-        key : Optional[str], optional
-            Semantic name for the container. If not provided, uses the file stem.
-        direction : str, default "output"
-            Whether this is an "input" or "output" artifact.
-        discover_tables : bool, default True
-            If True, scan the file and create child artifacts for each table/dataset.
-        table_filter : Optional[Union[Callable[[str], bool], List[str]]], optional
-            Filter which tables to log. Can be:
-            - A callable that takes a table name and returns True to include
-            - A list of table names to include (exact match)
-            If None, all tables are included.
-        hash_tables : {"always", "if_unchanged", "never"}, default "if_unchanged"
-            Controls whether per-table hashes are computed. When set to
-            ``"if_unchanged"``, Consist prefers content identity to decide whether
-            the container is unchanged: if ``prior_container.content_id`` equals the
-            new container's ``content_id``, table hashing is performed even if one
-            side is missing a file hash. If content identity is unavailable,
-            legacy hash-based behavior is used as a fallback.
-        table_hash_chunk_rows : Optional[int], optional
-            Rows per chunk when hashing tables (defaults to dataset chunking or 1024).
-        child_specs : Optional[Mapping[str, H5ChildSpec]], optional
-            Optional per-dataset semantic customization keyed by HDF5 dataset path.
-            Keys may be written with or without a leading ``/``.
-        child_selection : {"all", "include_only"}, default "all"
-            Whether discovered tables are all eligible for logging or restricted
-            to the dataset paths listed in ``child_specs``.
-        container_recovery_unit : {"parent_file", "derived_children"}, optional
-            Recovery authority for the HDF5 container. Use ``"parent_file"`` when
-            verified recovery roots apply to the whole H5 file.
-        child_recovery_policy : {"descriptive_only", "independent"}, optional
-            Recovery policy for child ``h5_table`` artifacts. Use
-            ``"descriptive_only"`` when children are lineage/schema records and
-            not independently recoverable.
-        representation_policy : Optional[Mapping[str, Any]], optional
-            Optional policy metadata for derived physical representations such
-            as future parquet inspection caches.
-        **meta : Any
-            Additional metadata for the container artifact.
-
-        Returns
-        -------
-        tuple[Artifact, List[Artifact]]
-            A tuple of (container_artifact, list_of_table_artifacts).
-
         Raises
         ------
         RuntimeError
@@ -859,13 +1252,12 @@ class ArtifactManager:
             if child_specs is not None
             else None
         )
-        prior_container = None
+        prior_container: Optional[Artifact] = None
         if self.tracker.db:
             try:
-                resolved_abs_path = str(path_obj.resolve())
-                container_uri = self.tracker.fs.virtualize_path(resolved_abs_path)
-                # Include inputs so we can compare against the last observed file hash,
-                # even when the container was logged as an input (run_id=None).
+                container_uri, _ = _engine_virtualize_path(
+                    path_obj.resolve(), self._effective_mounts()
+                )
                 prior_container = self.tracker.db.find_latest_artifact_at_uri(
                     container_uri, driver="h5", include_inputs=True
                 )
@@ -895,32 +1287,33 @@ class ArtifactManager:
             elif hash_tables == "if_unchanged":
                 if prior_container is None:
                     should_hash_tables = True
+                elif (
+                    prior_container.identity.verifiable
+                    and container.identity.verifiable
+                ):
+                    should_hash_tables = (
+                        prior_container.identity.anchor == container.identity.anchor
+                    )
+                    if not should_hash_tables:
+                        skip_reason = "content_identity_changed"
+                elif prior_container.hash and container.hash:
+                    should_hash_tables = prior_container.hash == container.hash
+                    if not should_hash_tables:
+                        skip_reason = "file_hash_changed"
                 else:
-                    # Prefer content identity when available. This allows table hashing
-                    # to proceed even if a file hash is missing on one side.
-                    if (
-                        getattr(prior_container, "content_id", None) is not None
-                        and getattr(container, "content_id", None) is not None
-                    ):
-                        should_hash_tables = (
-                            prior_container.content_id == container.content_id
-                        )
-                        if not should_hash_tables:
-                            skip_reason = "content_identity_changed"
-                    elif prior_container.hash and container.hash:
-                        # Fallback to legacy hash equality when content identity is not available.
-                        should_hash_tables = prior_container.hash == container.hash
-                        if not should_hash_tables:
-                            skip_reason = "file_hash_changed"
-                    else:
-                        skip_reason = "file_hash_unavailable"
+                    skip_reason = "file_hash_unavailable"
 
-            container.meta["table_hashes_checked"] = should_hash_tables
+            container_meta_updates: dict[str, Any] = {
+                "table_hashes_checked": should_hash_tables
+            }
             if not should_hash_tables and hash_tables != "always":
                 if hash_tables == "never":
-                    container.meta["table_hashes_skip_reason"] = "disabled"
+                    container_meta_updates["table_hashes_skip_reason"] = "disabled"
                 elif prior_container is not None and skip_reason is not None:
-                    container.meta["table_hashes_skip_reason"] = skip_reason
+                    container_meta_updates["table_hashes_skip_reason"] = skip_reason
+            container = container.with_meta(
+                container_meta_updates, merge=True
+            ).bind_tracker(self.tracker)
 
             if discover_tables:
                 include_only_paths = (
@@ -961,18 +1354,16 @@ class ArtifactManager:
                         if artifact.id != container.id
                         and (
                             artifact.parent_artifact_id == container.id
-                            or (
-                                isinstance(artifact.meta, dict)
-                                and artifact.meta.get("parent_id") == str(container.id)
-                            )
+                            or artifact.meta.get("parent_id") == str(container.id)
                         )
-                        and artifact.table_path is not None
-                        and filter_fn(artifact.table_path)
+                        and artifact.driver == "h5_table"
+                        and artifact.member is not None
+                        and filter_fn(artifact.member)
                     ]
                     cached_child_paths = {
-                        _normalize_h5_child_path(artifact.table_path)
+                        _normalize_h5_child_path(artifact.member)
                         for artifact in cached_children
-                        if artifact.table_path is not None
+                        if artifact.member is not None
                     }
                     requested_child_paths = set(
                         _list_h5_dataset_names(path_obj, filter_fn=filter_fn)
@@ -982,10 +1373,15 @@ class ArtifactManager:
                         reusing_cached_children = True
                         policy_updates = _container_policy_updates(meta)
                         if policy_updates:
-                            container.meta.update(policy_updates)
+                            container = container.with_meta(
+                                policy_updates, merge=True
+                            ).bind_tracker(self.tracker)
+                            self.tracker._artifact_logging._replace_in_active_run(
+                                container, direction=direction
+                            )
                             if self.tracker.db is not None:
                                 self.tracker.db.update_artifact_meta(
-                                    _clone_artifact_for_meta_update(container),
+                                    container,
                                     dict(policy_updates),
                                     raise_on_error=True,
                                 )
@@ -1005,6 +1401,9 @@ class ArtifactManager:
                             is_container=True,
                             **meta,
                         )
+                        container = container.with_meta(
+                            container_meta_updates, merge=True
+                        ).bind_tracker(self.tracker)
 
                 if not table_artifacts:
                     scanned_children = self.scan_h5_container(
@@ -1019,21 +1418,28 @@ class ArtifactManager:
                     )
 
                     for table_artifact, prepared_bundle in scanned_children:
-                        self.tracker._artifact_logging.apply_inherited_run_metadata(
-                            table_artifact
+                        table_artifact = (
+                            self.tracker._artifact_logging.apply_inherited_run_metadata(
+                                table_artifact
+                            )
                         )
+                        if prepared_bundle is not None:
+                            table_artifact = table_artifact.with_meta(
+                                prepared_bundle.meta_updates,
+                                merge=True,
+                            )
+                        table_artifact.bind_tracker(self.tracker)
                         self.tracker._artifact_logging.attach_logged_artifact(
                             artifact=table_artifact,
                             direction=direction,
                             register_with_coupler=False,
                         )
                         if prepared_bundle is not None:
-                            self.tracker.persistence.sync_artifact_with_facet_bundle(
+                            table_artifact = self.tracker.persistence.sync_artifact_with_facet_bundle(
                                 table_artifact,
                                 direction,
-                                facet=prepared_bundle.facet,
-                                meta_updates=prepared_bundle.meta_updates,
-                                kv_rows=prepared_bundle.kv_rows,
+                                meta_updates=None,
+                                index_kv=prepared_bundle.index_kv,
                             )
                         else:
                             self.tracker.persistence.sync_artifact(
@@ -1045,10 +1451,16 @@ class ArtifactManager:
                 if reusing_cached_children:
                     return container, table_artifacts
 
-            container.meta["table_count"] = len(table_artifacts)
-            container.meta["table_ids"] = [str(t.id) for t in table_artifacts]
-
-            self.tracker.persistence.flush_json()
+            container = container.with_meta(
+                {
+                    "table_count": len(table_artifacts),
+                    "table_ids": [str(t.id) for t in table_artifacts],
+                },
+                merge=True,
+            ).bind_tracker(self.tracker)
+            self.tracker._artifact_logging._replace_in_active_run(
+                container, direction=direction
+            )
             self.tracker.persistence.sync_artifact(container, direction)
 
             return container, table_artifacts
@@ -1073,44 +1485,6 @@ class ArtifactManager:
     ) -> Artifact:
         """
         Log a single HDF5 table as an artifact without scanning the container.
-
-        Parameters
-        ----------
-        path : Union[str, Path]
-            Path to the HDF5 file.
-        table_path : str
-            Internal HDF5 dataset path (e.g., "/households").
-        key : Optional[str], optional
-            Artifact key; defaults to "<file_stem>_<table_path>".
-        direction : str, default "output"
-            Whether this is an "input" or "output" artifact.
-        parent : Optional[Artifact], optional
-            Optional container artifact to link via parent_id.
-        hash_table : bool, default True
-            Whether to compute a per-table hash.
-        table_hash_chunk_rows : Optional[int], optional
-            Rows per chunk when hashing tables (defaults to dataset chunking or 1024).
-        profile_file_schema : bool, default False
-            Whether to profile and persist a lightweight schema for the table.
-            Use "if_changed" to skip profiling when matching content identity already
-            has a stored schema (prefers content_id; falls back to hash for legacy rows).
-        file_schema_sample_rows : Optional[int], optional
-            Maximum rows to sample when profiling the schema.
-        description : Optional[str], optional
-            Optional description stored in the child artifact metadata.
-        facet : Optional[Any], optional
-            Optional artifact facet payload for the child artifact.
-        facet_schema_version : Optional[Union[str, int]], optional
-            Optional artifact facet schema version.
-        facet_index : bool, default False
-            Whether to index scalar child artifact facet fields for querying.
-        **meta : Any
-            Additional metadata for the table artifact.
-
-        Returns
-        -------
-        Artifact
-            The logged table artifact.
         """
         if not self.tracker.current_consist:
             raise RuntimeError("Cannot log artifact outside of a run context.")
@@ -1169,13 +1543,19 @@ class ArtifactManager:
             parent_artifact_id=parent_artifact_id,
             **table_meta,
         )
+        artifact = self.tracker._artifact_logging.apply_inherited_run_metadata(artifact)
         prepared_bundle = self.tracker._artifact_logging.prepare_artifact_facet_bundle(
             artifact=artifact,
             facet=facet,
             facet_schema_version=facet_schema_version,
             facet_index=facet_index,
         )
-        self.tracker._artifact_logging.apply_inherited_run_metadata(artifact)
+        if prepared_bundle is not None:
+            artifact = artifact.with_meta(
+                prepared_bundle.meta_updates,
+                merge=True,
+            )
+        artifact.bind_tracker(self.tracker)
         self.tracker._artifact_logging.attach_logged_artifact(
             artifact=artifact,
             direction=direction,
@@ -1184,12 +1564,11 @@ class ArtifactManager:
 
         self.tracker._flush_json()
         if prepared_bundle is not None:
-            self.tracker.persistence.sync_artifact_with_facet_bundle(
+            artifact = self.tracker.persistence.sync_artifact_with_facet_bundle(
                 artifact,
                 direction,
-                facet=prepared_bundle.facet,
-                meta_updates=prepared_bundle.meta_updates,
-                kv_rows=prepared_bundle.kv_rows,
+                meta_updates=None,
+                index_kv=prepared_bundle.index_kv,
             )
         else:
             self.tracker.persistence.sync_artifact(artifact, direction)
@@ -1200,16 +1579,20 @@ class ArtifactManager:
             and self.tracker.current_consist is not None
         ):
             try:
-                if isinstance(artifact.meta, dict) and artifact.meta.get("schema_id"):
+                if artifact.schema_id or artifact.meta.get("schema_id"):
                     return artifact
-                resolved_path = artifact.abs_path or self.tracker.resolve_uri(
-                    artifact.container_uri
+                located = artifact.locate(
+                    mounts=self._effective_mounts(),
+                    verify_on_stale=False,
                 )
+                resolved_path = str(located) if located is not None else None
+                if resolved_path is None and path_obj.exists():
+                    resolved_path = str(path_obj.resolve())
                 if resolved_path:
                     self.tracker.artifact_schemas.profile_file_artifact(
                         artifact=artifact,
                         run=self.tracker.current_consist.run,
-                        resolved_path=str(resolved_path),
+                        resolved_path=resolved_path,
                         driver="h5_table",
                         sample_rows=(
                             self.tracker.settings.schema_sample_rows
@@ -1219,10 +1602,18 @@ class ArtifactManager:
                         source="file",
                         reuse_if_unchanged=profile_file_schema == "if_changed",
                     )
+                    if self.tracker.db is not None:
+                        refreshed = self.tracker.db.get_artifact(artifact.id)
+                        if refreshed is not None:
+                            artifact = refreshed.bind_tracker(self.tracker)
+                            self.tracker._artifact_logging._replace_in_active_run(
+                                artifact, direction=direction
+                            )
             except FileNotFoundError:
+                loc = artifact.primary_location
                 logging.warning(
                     "[Consist] File schema capture skipped; file not found: %s",
-                    artifact.container_uri,
+                    loc.uri if loc is not None else str(path_obj),
                 )
 
         return artifact

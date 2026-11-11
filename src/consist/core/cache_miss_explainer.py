@@ -4,7 +4,11 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional, Protocol, Sequence, runtime_checkable
 
-from consist.models.artifact import Artifact
+from consist.artifact import (
+    Artifact,
+    _ARRAY_MEMBER_DRIVERS,
+    _TABLE_MEMBER_DRIVERS,
+)
 from consist.models.run import Run, RunArtifacts
 
 
@@ -53,6 +57,11 @@ class CacheMissExplainerContext(Protocol):
     ) -> Optional[dict[str, Any]]: ...
 
     def get_artifacts_for_run(self, run_id: str) -> RunArtifacts: ...
+
+
+@runtime_checkable
+class _HasResolveRunSignature(Protocol):
+    def _resolve_run_signature(self, run_id: str) -> Optional[str]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -328,7 +337,11 @@ def _safe_get_run_artifacts(
         artifacts = tracker.get_artifacts_for_run(run_id)
     except Exception:
         return None
-    if getattr(artifacts, "inputs", None) is not None:
+    try:
+        inputs = artifacts.inputs
+    except AttributeError:
+        return None
+    if inputs is not None:
         return artifacts
     return None
 
@@ -361,13 +374,10 @@ def _current_input_artifacts(tracker: CacheMissExplainerContext) -> dict[str, Ar
 def _resolve_run_signature(
     tracker: CacheMissExplainerContext, run_id: Optional[str]
 ) -> Optional[str]:
-    if not run_id:
-        return None
-    resolver = getattr(tracker, "_resolve_run_signature", None)
-    if resolver is None:
+    if not run_id or not isinstance(tracker, _HasResolveRunSignature):
         return None
     try:
-        signature = resolver(run_id)
+        signature = tracker._resolve_run_signature(run_id)
     except Exception:
         return None
     if isinstance(signature, str):
@@ -376,10 +386,22 @@ def _resolve_run_signature(
 
 
 def _artifact_content_id(artifact: Artifact) -> Optional[str]:
-    content_id = artifact.content_id
-    if content_id is None:
-        return None
-    return str(content_id)
+    if artifact.identity.verifiable:
+        return str(artifact.identity.anchor)
+    return None
+
+
+def _artifact_uri(artifact: Artifact) -> str:
+    loc = artifact.primary_location
+    return loc.uri if loc is not None else ""
+
+
+def _artifact_member_paths(artifact: Artifact) -> tuple[Optional[str], Optional[str]]:
+    drv = artifact.driver.strip().lower()
+    member = artifact.member
+    table_path = member if drv in _TABLE_MEMBER_DRIVERS else None
+    array_path = member if drv in _ARRAY_MEMBER_DRIVERS else None
+    return table_path, array_path
 
 
 def _artifact_change_labels(
@@ -405,13 +427,10 @@ def _artifact_change_labels(
     if _artifact_content_id(current) != _artifact_content_id(candidate):
         labels.append("artifact_content_id_changed")
 
-    if current.container_uri != candidate.container_uri:
+    if _artifact_uri(current) != _artifact_uri(candidate):
         labels.append("input_location_changed")
 
-    if (
-        current.table_path != candidate.table_path
-        or current.array_path != candidate.array_path
-    ):
+    if _artifact_member_paths(current) != _artifact_member_paths(candidate):
         labels.append("container_member_changed")
 
     return labels
@@ -471,13 +490,15 @@ def _build_input_details(
                 candidate_artifact
             )
         if "input_location_changed" in labels:
-            change_entry["current_container_uri"] = current_artifact.container_uri
-            change_entry["candidate_container_uri"] = candidate_artifact.container_uri
+            change_entry["current_container_uri"] = _artifact_uri(current_artifact)
+            change_entry["candidate_container_uri"] = _artifact_uri(candidate_artifact)
         if "container_member_changed" in labels:
-            change_entry["current_table_path"] = current_artifact.table_path
-            change_entry["candidate_table_path"] = candidate_artifact.table_path
-            change_entry["current_array_path"] = current_artifact.array_path
-            change_entry["candidate_array_path"] = candidate_artifact.array_path
+            curr_tbl, curr_arr = _artifact_member_paths(current_artifact)
+            cand_tbl, cand_arr = _artifact_member_paths(candidate_artifact)
+            change_entry["current_table_path"] = curr_tbl
+            change_entry["candidate_table_path"] = cand_tbl
+            change_entry["current_array_path"] = curr_arr
+            change_entry["candidate_array_path"] = cand_arr
         input_changes.append(change_entry)
 
     if input_changes:
@@ -709,7 +730,10 @@ def _config_facet_diff(
     current_consist = tracker.current_consist
     left_facet = {}
     if current_consist is not None:
-        facet = getattr(current_consist, "facet", None)
+        try:
+            facet = current_consist.facet
+        except AttributeError:
+            facet = None
         if isinstance(facet, dict):
             left_facet = facet
     right_facet = _safe_get_config_values(tracker, candidate.id)
@@ -1003,11 +1027,13 @@ def _best_candidate(run: Run, candidates: Sequence[Run]) -> tuple[Run | None, in
     best_score = -1
     best_created_at = None
 
+    run_components = _component_names(run)
     for candidate in candidates:
+        cand_components = _component_names(candidate)
         score = sum(
             1
             for field in _COMPONENT_FIELDS
-            if getattr(run, field) == getattr(candidate, field)
+            if run_components[field] == cand_components[field]
         )
         created_at = candidate.created_at
         if score > best_score:

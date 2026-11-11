@@ -1,22 +1,11 @@
 """
-The `models` module defines the core data structures and database models
-used by Consist for tracking runs, artifacts, and their relationships.
+The `models` module defines the core domain data structures and adapter models
+used by Consist for tracking runs, artifacts, schemas, and their relationships.
 """
 
 from __future__ import annotations
 
-from consist.models.artifact import Artifact, ArchivedOutputs
-from consist.models.artifact_facet import ArtifactFacet
-from consist.models.artifact_kv import ArtifactKV
-from consist.models.artifact_schema import (
-    ArtifactSchema,
-    ArtifactSchemaField,
-    ArtifactSchemaObservation,
-    ArtifactSchemaRelation,
-)
-from consist.models.config_facet import ConfigFacet
-from consist.models.run import CouplerSnapshotPhase, Run, RunCouplerSnapshot
-from consist.models.run_config_kv import RunConfigKV
+from consist.artifact import ArchivedOutputs, Artifact
 from consist.models.activitysim import (
     ActivitySimCoefficientsCache,
     ActivitySimCoefficientTemplateRefsCache,
@@ -25,6 +14,13 @@ from consist.models.activitysim import (
     ActivitySimProbabilitiesCache,
     ActivitySimProbabilitiesEntriesCache,
     ActivitySimProbabilitiesMetaEntriesCache,
+)
+from consist.models.artifact_kv import ArtifactKV
+from consist.models.artifact_schema import (
+    ArtifactSchema,
+    ArtifactSchemaField,
+    ArtifactSchemaObservation,
+    ArtifactSchemaRelation,
 )
 from consist.models.beam import BeamConfigCache, BeamConfigIngestRunLink
 from consist.models.gtfs import (
@@ -46,17 +42,26 @@ from consist.models.gtfs import (
     GtfsTransfers,
     GtfsTrips,
 )
+from consist.models.run import (
+    ConsistRecord,
+    CouplerSnapshotPhase,
+    Run,
+    RunArtifactLink,
+    RunArtifacts,
+    RunBindingInvocation,
+    RunCouplerSnapshot,
+    RunResult,
+)
+from consist.models.run_config_kv import RunConfigKV
 
 __all__ = [
     "Artifact",
     "ArchivedOutputs",
     "ArtifactSchema",
-    "ArtifactFacet",
     "ArtifactKV",
     "ArtifactSchemaField",
     "ArtifactSchemaObservation",
     "ArtifactSchemaRelation",
-    "ConfigFacet",
     "ActivitySimConstantsCache",
     "ActivitySimCoefficientsCache",
     "ActivitySimCoefficientTemplateRefsCache",
@@ -66,6 +71,7 @@ __all__ = [
     "ActivitySimConfigIngestRunLink",
     "BeamConfigCache",
     "BeamConfigIngestRunLink",
+    "ConsistRecord",
     "GtfsSchema",
     "GtfsAgency",
     "GtfsStops",
@@ -84,7 +90,11 @@ __all__ = [
     "GTFS_SCHEMA_BY_TABLE_NAME",
     "GTFS_TABLE_NAMES",
     "Run",
+    "RunArtifactLink",
+    "RunArtifacts",
+    "RunBindingInvocation",
     "RunConfigKV",
     "RunCouplerSnapshot",
+    "RunResult",
     "CouplerSnapshotPhase",
 ]

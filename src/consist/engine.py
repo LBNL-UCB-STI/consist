@@ -2400,13 +2400,14 @@ def seal(
         next_occurrence_idx = 0
         if ledger is not None and run_id is not None and not ledger.read_only:
             with ledger.exec_cursor() as cur:
-                row = cur.execute(
-                    "SELECT COALESCE(MAX(occurrence_index) + 1, 0) "
+                occ_rows = cur.execute(
+                    "SELECT occurrence_index "
                     "FROM main.run_binding WHERE run_id = ? AND direction = 'output'",
                     [run_id],
-                ).fetchone()
-            if row is not None and row[0] is not None:
-                next_occurrence_idx = int(row[0])
+                ).fetchall()
+            next_occurrence_idx = (
+                max((int(r[0]) for r in occ_rows if r[0] is not None), default=-1) + 1
+            )
 
         for idx, work in enumerate(completed_work):
             po = work.po

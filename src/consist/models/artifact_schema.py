@@ -1,25 +1,23 @@
 """
-Database models for artifact schema profiling in the Consist main database.
+Domain models for artifact schema profiling in Consist.
 
-These tables store deduplicated schema profiles and normalized per-field rows
-to support fast schema queries and reuse across artifacts.
+These Pydantic DTOs represent deduplicated schema profiles, normalized per-field
+rows, observations, and foreign-key relations stored in `StoreLedger`.
 """
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import Column, DateTime, Integer, JSON, String
-from sqlmodel import Field, SQLModel
-
-from consist.models.artifact import UUIDType
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 UTC = timezone.utc
 
 
-class ArtifactSchema(SQLModel, table=True):
+class ArtifactSchema(BaseModel):
     """
     Deduplicated schema/profile record stored in the Consist database.
 
@@ -29,10 +27,9 @@ class ArtifactSchema(SQLModel, table=True):
     schema profile JSON.
     """
 
-    __tablename__ = "artifact_schema"
+    model_config = ConfigDict(validate_assignment=True)
 
     id: str = Field(
-        sa_column=Column(String, primary_key=True, nullable=False),
         description="SHA256 of canonicalized schema profile JSON.",
     )
     profile_version: int = Field(
@@ -40,21 +37,38 @@ class ArtifactSchema(SQLModel, table=True):
     )
     summary_json: Dict[str, Any] = Field(
         default_factory=dict,
-        sa_column=Column(JSON, nullable=False),
         description="Small, always-present schema summary (safe to query/display).",
     )
     profile_json: Optional[Dict[str, Any]] = Field(
         default=None,
-        sa_column=Column(JSON, nullable=True),
         description="Full schema profile JSON (may be omitted when too large).",
     )
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC),
-        sa_type=DateTime,
     )
 
+    @field_validator("summary_json", mode="before")
+    @classmethod
+    def _coerce_summary_json(cls, value: Any) -> Dict[str, Any]:
+        if value is None:
+            return {}
+        if isinstance(value, str):
+            parsed = json.loads(value)
+            return dict(parsed) if isinstance(parsed, dict) else {}
+        return dict(value)
 
-class ArtifactSchemaField(SQLModel, table=True):
+    @field_validator("profile_json", mode="before")
+    @classmethod
+    def _coerce_profile_json(cls, value: Any) -> Optional[Dict[str, Any]]:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            parsed = json.loads(value)
+            return dict(parsed) if isinstance(parsed, dict) else None
+        return dict(value)
+
+
+class ArtifactSchemaField(BaseModel):
     """
     Normalized per-field schema rows for a deduplicated `ArtifactSchema`.
 
@@ -62,35 +76,50 @@ class ArtifactSchemaField(SQLModel, table=True):
     without parsing the JSON profile payload.
     """
 
-    __tablename__ = "artifact_schema_field"
+    model_config = ConfigDict(validate_assignment=True)
 
     schema_id: str = Field(
-        primary_key=True,
-        foreign_key="artifact_schema.id",
-        description="FK to ArtifactSchema.id (schema hash).",
+        description="Reference to ArtifactSchema.id (schema hash).",
     )
     ordinal_position: Optional[int] = Field(
         default=None,
-        sa_column=Column(Integer, nullable=True),
         description="1-based ordinal position in source table when known.",
     )
-    name: str = Field(primary_key=True, index=True, description="Column/field name.")
-    logical_type: str = Field(index=True, description="Portable logical type string.")
+    name: str = Field(description="Column/field name.")
+    logical_type: str = Field(description="Portable logical type string.")
     nullable: bool = Field(default=True)
     stats_json: Optional[Dict[str, Any]] = Field(
         default=None,
-        sa_column=Column(JSON, nullable=True),
         description="Optional stats (min/max/unique count, etc.).",
     )
-    is_enum: bool = Field(default=False, index=True)
+    is_enum: bool = Field(default=False)
     enum_values_json: Optional[List[str]] = Field(
         default=None,
-        sa_column=Column(JSON, nullable=True),
         description="Optional enum values (may be truncated).",
     )
 
+    @field_validator("stats_json", mode="before")
+    @classmethod
+    def _coerce_stats_json(cls, value: Any) -> Optional[Dict[str, Any]]:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            parsed = json.loads(value)
+            return dict(parsed) if isinstance(parsed, dict) else None
+        return dict(value)
 
-class ArtifactSchemaObservation(SQLModel, table=True):
+    @field_validator("enum_values_json", mode="before")
+    @classmethod
+    def _coerce_enum_values(cls, value: Any) -> Optional[List[str]]:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            parsed = json.loads(value)
+            return [str(v) for v in parsed] if isinstance(parsed, list) else None
+        return [str(v) for v in value]
+
+
+class ArtifactSchemaObservation(BaseModel):
     """
     Time-stamped observation linking an Artifact to a schema profile.
 
@@ -98,50 +127,33 @@ class ArtifactSchemaObservation(SQLModel, table=True):
     particular schema hash, optionally tied to a run for provenance.
     """
 
-    __tablename__ = "artifact_schema_observation"
+    model_config = ConfigDict(validate_assignment=True)
 
-    id: uuid.UUID = Field(
-        default_factory=uuid.uuid4,
-        primary_key=True,
-        sa_type=UUIDType,
-        sa_column_kwargs={"autoincrement": False},
-    )
-    artifact_id: uuid.UUID = Field(
-        foreign_key="artifact.id",
-        index=True,
-        sa_type=UUIDType,
-        sa_column_kwargs={"autoincrement": False},
-    )
-    schema_id: str = Field(foreign_key="artifact_schema.id", index=True)
+    id: uuid.UUID = Field(default_factory=uuid.uuid4)
+    artifact_id: uuid.UUID
+    schema_id: str
     run_id: Optional[str] = Field(
         default=None,
-        sa_column=Column(String, nullable=True, index=True),
         description="Associated run id when available.",
     )
     source: str = Field(
-        index=True,
         description="Source of schema observation (duckdb|file|dlt|...).",
     )
     sample_rows: Optional[int] = Field(default=None)
     observed_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC),
-        index=True,
-        sa_type=DateTime,
     )
 
 
-class ArtifactSchemaRelation(SQLModel, table=True):
+class ArtifactSchemaRelation(BaseModel):
     """Relational metadata (foreign keys) for a deduped ArtifactSchema."""
 
-    __tablename__ = "artifact_schema_relation"
+    model_config = ConfigDict(validate_assignment=True)
 
     schema_id: str = Field(
-        primary_key=True,
-        foreign_key="artifact_schema.id",
         description="Hash of the source schema.",
     )
     from_field: str = Field(
-        primary_key=True,
         description="Local column name holding the foreign key.",
     )
     to_table: str = Field(
