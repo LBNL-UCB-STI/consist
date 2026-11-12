@@ -4,7 +4,6 @@ from unittest.mock import patch
 
 import pandas as pd
 from pydantic import BaseModel
-from sqlmodel import select
 from typer.testing import CliRunner
 
 import consist
@@ -203,7 +202,7 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
     assert summary_output.exists(), "Legacy analysis should produce summary"
 
     # === Verify DB state after first execution ===
-    runs = consist.run_query(select(Run), tracker=tracker)
+    runs = tracker.query_rows("SELECT * FROM main.run", model=Run)
     assert len(runs) == 3, "Should have 3 task runs"
 
     # Find the runs by model name
@@ -221,8 +220,8 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
     assert "cache_hit" not in analyze_run.meta or analyze_run.meta["cache_hit"] is False
 
     # Verify artifacts were logged
-    artifacts = consist.run_query(select(Artifact), tracker=tracker)
-    artifact_keys = {a.key for a in artifacts}
+    artifacts_df = tracker.query_df("SELECT key FROM main.artifact")
+    artifact_keys = set(artifacts_df["key"].tolist())
     assert any("cleaned" in k for k in artifact_keys)
     assert any("analysis" in k for k in artifact_keys)
 
@@ -255,9 +254,6 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
     )
     assert by_mode["strict"].id == "manual_config_demo"
 
-    if tracker.db:
-        tracker.db.session.commit() if hasattr(tracker.db, "session") else None
-
     # === Second execution: same inputs should hit cache ===
     cleaned_result_2 = tracker.run(
         fn=clean_data,
@@ -276,8 +272,10 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
     )
 
     # Check cache hit metadata
-    runs = consist.run_query(
-        select(Run).where(Run.model_name == "clean_data"), tracker=tracker
+    runs = tracker.query_rows(
+        "SELECT * FROM main.run WHERE model_name = ? ORDER BY created_at",
+        ["clean_data"],
+        model=Run,
     )
     assert len(runs) == 2, "Should have original run + cache hit run"
 
@@ -307,8 +305,10 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
     )
 
     # Should be a new execution (different config = different signature)
-    runs = consist.run_query(
-        select(Run).where(Run.model_name == "clean_data"), tracker=tracker
+    runs = tracker.query_rows(
+        "SELECT * FROM main.run WHERE model_name = ? ORDER BY created_at",
+        ["clean_data"],
+        model=Run,
     )
     # Should have 3 runs: original + cache hit + new config
     assert len(runs) == 3, "Should have original run + cache hit + new config run"
@@ -356,8 +356,10 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
     )
 
     # Both should execute (overwrite mode)
-    overwrite_runs = consist.run_query(
-        select(Run).where(Run.model_name == "clean_data_overwrite"), tracker=tracker
+    overwrite_runs = tracker.query_rows(
+        "SELECT * FROM main.run WHERE model_name = ?",
+        ["clean_data_overwrite"],
+        model=Run,
     )
     # Should have 2 executions even with same inputs
     assert len(overwrite_runs) == 2
@@ -447,8 +449,10 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
     )
 
     # Should be a new run (different input)
-    clean_runs = consist.run_query(
-        select(Run).where(Run.model_name == "clean_data"), tracker=tracker
+    clean_runs = tracker.query_rows(
+        "SELECT * FROM main.run WHERE model_name = ?",
+        ["clean_data"],
+        model=Run,
     )
     # Should have original, new config, and modified input = 3 runs
     assert len(clean_runs) == 4, (

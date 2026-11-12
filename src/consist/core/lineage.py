@@ -55,7 +55,7 @@ def build_lineage_tree(
         Lineage tree rooted at the requested artifact, or None if lineage
         cannot be resolved (e.g., no DB configured or artifact missing).
     """
-    if not tracker.engine:
+    if not tracker.db:
         return None
 
     start_artifact = tracker.get_artifact(key_or_id=artifact_key_or_id)

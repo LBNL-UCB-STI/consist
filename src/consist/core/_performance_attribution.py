@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import ContextManager, Iterator, Protocol
+from typing import ContextManager, Iterator
+from typing_extensions import Protocol
 
 
 class PhaseProfiler(Protocol):

@@ -4,7 +4,6 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
-from sqlmodel import Session, select
 
 from consist.models.artifact import Artifact
 
@@ -133,19 +132,15 @@ class TestCreatedAtIso:
         parsed_dt = datetime.fromisoformat(iso_string)
         assert abs((parsed_dt - artifact.created_at).total_seconds()) < 0.001
 
-    def test_created_at_iso_from_database_roundtrip(
-        self, tracker, engine, run_dir: Path
-    ):
+    def test_created_at_iso_from_database_roundtrip(self, tracker, run_dir: Path):
         test_file = run_dir / "artifact_db.csv"
         test_file.write_text("test\n")
 
         with tracker.start_run("run_iso_db", "test_model"):
-            tracker.log_artifact(str(test_file), key="test_artifact_db")
+            logged = tracker.log_artifact(str(test_file), key="test_artifact_db")
 
-        with Session(engine) as session:
-            artifact = session.exec(
-                select(Artifact).where(Artifact.key == "test_artifact_db")
-            ).one()
+        artifact = tracker.get_artifact(logged.id)
+        assert artifact is not None
 
         iso_string = artifact.created_at_iso
         assert isinstance(iso_string, str)
@@ -168,9 +163,7 @@ class TestGetArtifactByUri:
         assert found.container_uri == uri
         assert found.key == "find_me"
 
-    def test_get_artifact_by_uri_finds_in_database(
-        self, tracker, engine, run_dir: Path
-    ):
+    def test_get_artifact_by_uri_finds_in_database(self, tracker, run_dir: Path):
         test_file = run_dir / "db_search.csv"
         test_file.write_text("data\n")
 

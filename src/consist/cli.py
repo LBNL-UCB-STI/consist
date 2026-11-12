@@ -37,6 +37,7 @@ from typing import (
     Iterable,
     Iterator,
     List,
+    NoReturn,
     Optional,
     Mapping,
     Tuple,
@@ -55,16 +56,20 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.tree import Tree
 from rich.text import Text
-from sqlalchemy import and_, or_
-from sqlmodel import Session, col, select
-
 from consist import Tracker
 from consist.admission import AdmissionReport, check_artifact_identity
 from consist.core.gtfs import GTFS_CORE_TABLE_NAMES, discover_gtfs_members
 from consist.core.db_snapshot import snapshot_sidecar_path
 from consist.core.maintenance import DatabaseMaintenance
-from consist.core.persistence import DatabaseManager
-from consist.core.run_ordering import recent_run_order_by
+from consist.core.persistence import (
+    DatabaseManager,
+    DatabaseMigrationRequired,
+    IncompatibleSchemaError,
+    close_tracked_relation_tokens,
+    extract_tracked_relation_tokens,
+    lookup_live_db_by_path,
+)
+from consist.core.run_ordering import RECENT_RUN_ORDER_BY_SQL
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
 from consist.tools import queries
 
@@ -335,12 +340,82 @@ def find_db_path(explicit_path: Optional[str] = None) -> str:
     return "provenance.duckdb"
 
 
+_DUCKDB_LOCK_PID_RE = re.compile(r"\bPID\s*[:=]?\s*(\d+)\b", re.IGNORECASE)
+
+
+def _is_duckdb_lock_error(exc: BaseException) -> bool:
+    if not isinstance(exc, duckdb.IOException):
+        return False
+    msg = str(exc).lower()
+    return (
+        "lock" in msg
+        or "conflicting" in msg
+        or "resource temporarily unavailable" in msg
+    )
+
+
+def _handle_db_open_error(
+    exc: BaseException,
+    *,
+    db_path: str | Path,
+    run_dir: Optional[Path] = None,
+) -> NoReturn:
+    """Render actionable CLI guidance for v1 migration or DuckDB file-lock errors."""
+    if isinstance(exc, DatabaseMigrationRequired):
+        _print_cli_error(
+            f"{exc}\n\n"
+            f"Run `consist migrate {db_path}` "
+            "to upgrade this database to Consist Schema v2.",
+            title="Database migration required",
+        )
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR) from exc
+
+    if _is_duckdb_lock_error(exc):
+        match = _DUCKDB_LOCK_PID_RE.search(str(exc))
+        pid_clause = (
+            f" by active writer PID {match.group(1)}"
+            if match is not None
+            else " by another active writer process"
+        )
+        json_hint = (
+            run_dir if run_dir is not None else Path("./runs")
+        ) / "consist.json"
+        _print_cli_error(
+            f"Database '{db_path}' is currently locked{pid_clause}.\n"
+            f"{exc}\n\n"
+            f"• Inspect live per-run metadata snapshots directly at '{json_hint}'\n"
+            "• Or export a read-only database copy from the active run via "
+            "`tracker.snapshot_db(...)` and pass `--db-path <snapshot.duckdb>`.",
+            title="Database locked",
+        )
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR) from exc
+
+    _print_cli_error(str(exc))
+    raise typer.Exit(CLI_EXIT_RUNTIME_ERROR) from exc
+
+
+def _require_db(tracker: Tracker) -> DatabaseManager:
+    db = tracker.db
+    if not isinstance(db, DatabaseManager):
+        console.print(
+            "[red]Runtime error: tracker has no configured database manager.[/red]"
+        )
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
+    return db
+
+
+def _close_relation_connection(relation: duckdb.DuckDBPyRelation) -> None:
+    close_tracked_relation_tokens(extract_tracked_relation_tokens(relation))
+
+
 def get_tracker(
     db_path: Optional[str] = None,
     *,
     run_dir: Optional[Path | str] = None,
     mounts: Optional[Dict[str, str]] = None,
     create_if_missing: bool = False,
+    read_only: bool = True,
+    auto_close: bool = True,
 ) -> Tracker:
     """Initializes and returns a Tracker instance."""
     resolved_path = find_db_path(db_path)
@@ -366,11 +441,39 @@ def get_tracker(
     tracker_mounts = dict(mounts or {})
     if run_dir is not None and "workspace" not in tracker_mounts:
         tracker_mounts["workspace"] = str(tracker_run_dir.expanduser().resolve())
-    return Tracker(
-        run_dir=tracker_run_dir,
-        db_path=resolved_path,
-        mounts=tracker_mounts or None,
-    )
+
+    effective_read_only = False if create_if_missing else bool(read_only)
+    preexisting_db = lookup_live_db_by_path(resolved_path)
+    if (
+        effective_read_only
+        and isinstance(preexisting_db, DatabaseManager)
+        and not preexisting_db._closed
+        and not preexisting_db.read_only
+    ):
+        # DuckDB forbids opening a read_only=True connection in the same OS process
+        # as an already-open writable DatabaseManager (e.g. CliRunner tests).
+        effective_read_only = False
+
+    try:
+        tracker = Tracker(
+            run_dir=tracker_run_dir,
+            db_path=resolved_path,
+            mounts=tracker_mounts or None,
+            read_only=effective_read_only,
+        )
+    except (
+        DatabaseMigrationRequired,
+        IncompatibleSchemaError,
+        duckdb.IOException,
+    ) as exc:
+        _handle_db_open_error(exc, db_path=resolved_path, run_dir=tracker_run_dir)
+
+    if auto_close:
+        click_ctx = click.get_current_context(silent=True)
+        if click_ctx is not None:
+            click_ctx.call_on_close(tracker.close)
+
+    return tracker
 
 
 def _parse_role_path_mappings(
@@ -489,26 +592,46 @@ def admission_doctor(
         raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
 
 
-@contextmanager
-def _tracker_session(tracker: Tracker) -> Iterator[Session]:
-    db = getattr(tracker, "db", None)
+def _default_maintenance_service(
+    db_path: Optional[str],
+    *,
+    read_only: bool = True,
+) -> DatabaseMaintenance:
+    tracker = get_tracker(db_path, read_only=read_only)
+    db = tracker.db
     if not isinstance(db, DatabaseManager):
-        with Session(tracker.engine) as session:
-            yield session
-        return
-    with db.session_scope() as session:
-        yield session
-
-
-def _maintenance_service(db_path: Optional[str]) -> DatabaseMaintenance:
-    tracker = get_tracker(db_path)
-    db = getattr(tracker, "db", None)
-    if not isinstance(db, DatabaseManager):
+        tracker.close()
         console.print(
             "[red]Runtime error: tracker has no configured database manager.[/red]"
         )
         raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
     return DatabaseMaintenance(db=db, run_dir=Path(tracker.run_dir))
+
+
+_maintenance_service = _default_maintenance_service
+
+
+@contextmanager
+def _managed_maintenance_service(
+    db_path: Optional[str],
+    *,
+    read_only: bool = True,
+) -> Iterator[DatabaseMaintenance]:
+    if _maintenance_service is not _default_maintenance_service:
+        yield _maintenance_service(db_path)
+        return
+
+    svc = _default_maintenance_service(db_path, read_only=read_only)
+    try:
+        yield svc
+    except (
+        DatabaseMigrationRequired,
+        IncompatibleSchemaError,
+        duckdb.IOException,
+    ) as exc:
+        _handle_db_open_error(exc, db_path=svc.db.db_path, run_dir=svc.run_dir)
+    finally:
+        svc.db.close()
 
 
 def _resolve_snapshot_sidecar_path(db: DatabaseManager, snapshot_path: Path) -> Path:
@@ -523,7 +646,8 @@ def db_inspect(
     db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
 ) -> None:
     """Inspect database state and snapshot parity."""
-    report = _maintenance_service(db_path).inspect()
+    with _managed_maintenance_service(db_path, read_only=True) as maintenance:
+        report = maintenance.inspect()
     if json_output:
         output_json(asdict(report))
         return
@@ -566,7 +690,8 @@ def db_doctor(
     db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
 ) -> None:
     """Run read-only integrity diagnostics."""
-    report = _maintenance_service(db_path).doctor()
+    with _managed_maintenance_service(db_path, read_only=True) as maintenance:
+        report = maintenance.doctor()
     if json_output:
         output_json(asdict(report))
         return
@@ -613,10 +738,10 @@ def db_snapshot(
     db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
 ) -> None:
     """Create a database snapshot and metadata sidecar."""
-    maintenance = _maintenance_service(db_path)
     checkpoint = not no_checkpoint
-    snapshot_path = maintenance.snapshot(out_path, checkpoint=checkpoint)
-    sidecar_path = _resolve_snapshot_sidecar_path(maintenance.db, snapshot_path)
+    with _managed_maintenance_service(db_path, read_only=no_checkpoint) as maintenance:
+        snapshot_path = maintenance.snapshot(out_path, checkpoint=checkpoint)
+        sidecar_path = _resolve_snapshot_sidecar_path(maintenance.db, snapshot_path)
 
     if json_output:
         output_json(
@@ -655,8 +780,8 @@ def db_rebuild(
     ),
 ) -> None:
     """Rebuild DB run/artifact/link rows from JSON snapshots."""
-    maintenance = _maintenance_service(db_path)
-    result = maintenance.rebuild_from_json(json_dir, dry_run=dry_run, mode=mode)
+    with _managed_maintenance_service(db_path, read_only=dry_run) as maintenance:
+        result = maintenance.rebuild_from_json(json_dir, dry_run=dry_run, mode=mode)
     if json_output:
         output_json(asdict(result))
         return
@@ -689,8 +814,8 @@ def db_compact(
     ),
 ) -> None:
     """Run VACUUM on the database."""
-    maintenance = _maintenance_service(db_path)
-    maintenance.compact()
+    with _managed_maintenance_service(db_path, read_only=False) as maintenance:
+        maintenance.compact()
     if json_output:
         output_json({"compacted": True})
         return
@@ -731,15 +856,15 @@ def db_export(
     ),
 ) -> None:
     """Export run lineage into a standalone shard database."""
-    maintenance = _maintenance_service(db_path)
-    result = maintenance.export(
-        run_id,
-        out_path,
-        include_data=include_data,
-        include_snapshots=include_snapshots,
-        include_children=not no_children,
-        dry_run=dry_run,
-    )
+    with _managed_maintenance_service(db_path, read_only=True) as maintenance:
+        result = maintenance.export(
+            run_id,
+            out_path,
+            include_data=include_data,
+            include_snapshots=include_snapshots,
+            include_children=not no_children,
+            dry_run=dry_run,
+        )
     if json_output:
         output_json(asdict(result))
         return
@@ -785,17 +910,23 @@ def db_merge(
     ),
 ) -> None:
     """Merge a shard database into the current provenance database."""
-    maintenance = _maintenance_service(db_path)
-    try:
-        result = maintenance.merge(
-            shard_path,
-            conflict=conflict,
-            include_snapshots=include_snapshots,
-            dry_run=dry_run,
-        )
-    except ValueError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(CLI_EXIT_USAGE_ERROR) from exc
+    with _managed_maintenance_service(db_path, read_only=dry_run) as maintenance:
+        try:
+            result = maintenance.merge(
+                shard_path,
+                conflict=conflict,
+                include_snapshots=include_snapshots,
+                dry_run=dry_run,
+            )
+        except (
+            DatabaseMigrationRequired,
+            IncompatibleSchemaError,
+            duckdb.IOException,
+        ) as exc:
+            _handle_db_open_error(exc, db_path=shard_path, run_dir=maintenance.run_dir)
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(CLI_EXIT_USAGE_ERROR) from exc
 
     if json_output:
         output_json(asdict(result))
@@ -884,58 +1015,57 @@ def db_purge(
         )
         raise typer.Exit(CLI_EXIT_USAGE_ERROR)
 
-    maintenance = _maintenance_service(db_path)
     include_children = not no_children
+    with _managed_maintenance_service(db_path, read_only=dry_run) as maintenance:
+        if not dry_run and not yes:
+            preview = maintenance.plan_purge(run_id, include_children=include_children)
+            scoped_ingested_rows = sum(
+                count
+                for table, count in preview.ingested_data.items()
+                if preview.ingested_table_modes.get(table) in {"run_scoped", "run_link"}
+            )
+            scope_fields = [
+                f"runs={len(preview.run_ids)}",
+                f"snapshots={len(preview.json_files)}",
+                f"orphaned_artifacts={len(preview.orphaned_artifact_ids)}",
+                (
+                    f"disk_files=enabled({len(preview.disk_files)})"
+                    if delete_files
+                    else "disk_files=disabled"
+                ),
+                (
+                    f"unsafe_targets={len(preview.unsafe_json_files) + len(preview.unsafe_disk_files)}"
+                ),
+                (
+                    f"ingested_global=enabled(rows~{scoped_ingested_rows})"
+                    if delete_ingested_data
+                    else "ingested_global=preserve"
+                ),
+                (
+                    "prune_cache=enabled"
+                    if prune_cache and delete_ingested_data
+                    else "prune_cache=noop"
+                    if prune_cache and not delete_ingested_data
+                    else "prune_cache=disabled"
+                ),
+            ]
+            confirmed = typer.confirm(
+                "Confirm purge scope: " + ", ".join(scope_fields) + "?",
+                default=False,
+            )
+            if not confirmed:
+                console.print("Purge cancelled.")
+                raise typer.Exit(CLI_EXIT_SUCCESS)
 
-    if not dry_run and not yes:
-        preview = maintenance.plan_purge(run_id, include_children=include_children)
-        scoped_ingested_rows = sum(
-            count
-            for table, count in preview.ingested_data.items()
-            if preview.ingested_table_modes.get(table) in {"run_scoped", "run_link"}
+        result = maintenance.purge(
+            run_id,
+            include_children=include_children,
+            delete_files=delete_files,
+            delete_ingested_data=delete_ingested_data,
+            prune_cache=prune_cache,
+            dry_run=dry_run,
+            unsafe_delete_targets=cast(Any, unsafe_delete_targets),
         )
-        scope_fields = [
-            f"runs={len(preview.run_ids)}",
-            f"snapshots={len(preview.json_files)}",
-            f"orphaned_artifacts={len(preview.orphaned_artifact_ids)}",
-            (
-                f"disk_files=enabled({len(preview.disk_files)})"
-                if delete_files
-                else "disk_files=disabled"
-            ),
-            (
-                f"unsafe_targets={len(preview.unsafe_json_files) + len(preview.unsafe_disk_files)}"
-            ),
-            (
-                f"ingested_global=enabled(rows~{scoped_ingested_rows})"
-                if delete_ingested_data
-                else "ingested_global=preserve"
-            ),
-            (
-                "prune_cache=enabled"
-                if prune_cache and delete_ingested_data
-                else "prune_cache=noop"
-                if prune_cache and not delete_ingested_data
-                else "prune_cache=disabled"
-            ),
-        ]
-        confirmed = typer.confirm(
-            "Confirm purge scope: " + ", ".join(scope_fields) + "?",
-            default=False,
-        )
-        if not confirmed:
-            console.print("Purge cancelled.")
-            raise typer.Exit(CLI_EXIT_SUCCESS)
-
-    result = maintenance.purge(
-        run_id,
-        include_children=include_children,
-        delete_files=delete_files,
-        delete_ingested_data=delete_ingested_data,
-        prune_cache=prune_cache,
-        dry_run=dry_run,
-        unsafe_delete_targets=cast(Any, unsafe_delete_targets),
-    )
     if json_output:
         output_json(asdict(result))
         return
@@ -990,12 +1120,14 @@ def db_fix_status(
     ),
 ) -> None:
     """Fix an incorrect run status in-place."""
-    maintenance = _maintenance_service(db_path)
-    try:
-        updated_run = maintenance.fix_status(run_id, status, reason=reason, force=force)
-    except ValueError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(CLI_EXIT_USAGE_ERROR) from exc
+    with _managed_maintenance_service(db_path, read_only=False) as maintenance:
+        try:
+            updated_run = maintenance.fix_status(
+                run_id, status, reason=reason, force=force
+            )
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(CLI_EXIT_USAGE_ERROR) from exc
 
     payload = {
         "id": updated_run.id,
@@ -1112,25 +1244,22 @@ def _run_has_mount_metadata(run: "Run") -> bool:
 def _get_artifact_run_for_mount_inference(
     tracker: Tracker, artifact: "Artifact", preferred_run_id: Optional[str] = None
 ) -> Tuple[Optional["Run"], bool]:
-    from consist.models.run import RunArtifactLink
-
     preferred_run = (
         tracker.get_run(preferred_run_id) if preferred_run_id is not None else None
     )
     if preferred_run is not None and _run_has_mount_metadata(preferred_run):
         return preferred_run, False
 
-    if artifact.id is not None:
-        with _tracker_session(tracker) as session:
-            links = list(
-                session.exec(
-                    select(RunArtifactLink).where(
-                        RunArtifactLink.artifact_id == artifact.id
-                    )
-                ).all()
-            )
+    if artifact.id is not None and tracker.db is not None:
+        link_rows = tracker.db.fetchall(
+            "SELECT DISTINCT run_id FROM run_artifact_link WHERE artifact_id = ?",
+            [str(artifact.id)],
+        )
+        link_run_ids = [str(row[0]) for row in link_rows if row[0]]
         linked_runs = [
-            run for link in links if (run := tracker.get_run(link.run_id)) is not None
+            run
+            for link_run_id in link_run_ids
+            if (run := tracker.get_run(link_run_id)) is not None
         ]
         linked_runs_with_mounts = [
             run for run in linked_runs if _run_has_mount_metadata(run)
@@ -1169,7 +1298,7 @@ def _get_artifact_run_for_mount_inference(
             return leaf_runs[0], False
         if len(linked_runs_with_mounts) == 1:
             return linked_runs_with_mounts[0], False
-        if len(links) > 1:
+        if len(link_run_ids) > 1:
             return None, True
 
     if preferred_run is not None:
@@ -1437,6 +1566,7 @@ def schema_capture_file(
         resolved_db_path,
         run_dir=run_dir,
         mounts=mount_overrides or None,
+        read_only=False,
     )
     if artifact_id is not None:
         artifact = tracker.get_artifact(artifact_id)
@@ -1651,7 +1781,7 @@ def schema_apply_fks(
     db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
 ) -> None:
     """Best-effort application of physical foreign key constraints."""
-    tracker = get_tracker(db_path)
+    tracker = get_tracker(db_path, read_only=False)
     if not tracker.db:
         _print_cli_error("Tracker database not initialized.")
         raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
@@ -1732,7 +1862,7 @@ def views_create(
     ),
 ) -> None:
     """Create a selector-driven grouped hybrid view across many artifacts."""
-    tracker = get_tracker(db_path)
+    tracker = get_tracker(db_path, read_only=False)
     try:
         tracker.create_grouped_view(
             view_name=view_name,
@@ -1760,13 +1890,12 @@ def views_create(
     console.print(f"[green]Created grouped view '{view_name}'.[/green]")
 
 
-def _collect_scenario_run_ids(session: Session, scenario_id: str) -> List[str]:
+def _collect_scenario_run_ids(tracker: Tracker, scenario_id: str) -> List[str]:
     """Collect all transitive member run IDs belonging to a scenario."""
-    from consist.models.run import Run, RunCouplerSnapshot
-
+    db = _require_db(tracker)
     discovered_ids: set[str] = set()
 
-    header_run = session.get(Run, scenario_id)
+    header_run = db.get_run(scenario_id)
     if header_run is not None and isinstance(header_run.meta, dict):
         steps = header_run.meta.get("steps")
         if isinstance(steps, list):
@@ -1780,50 +1909,51 @@ def _collect_scenario_run_ids(session: Session, scenario_id: str) -> List[str]:
                     discovered_ids.add(step_id)
 
     try:
-        snapshots = session.exec(
-            select(RunCouplerSnapshot).where(
-                col(RunCouplerSnapshot.scenario_run_id) == scenario_id
-            )
-        ).all()
-        for snap in snapshots:
-            if snap.run_id and snap.run_id != scenario_id:
-                discovered_ids.add(snap.run_id)
-            if snap.producer_run_id and snap.producer_run_id != scenario_id:
-                discovered_ids.add(snap.producer_run_id)
-    except Exception:
+        snapshot_rows = db.fetchall(
+            "SELECT run_id, producer_run_id FROM run_coupler_snapshot "
+            "WHERE scenario_run_id = ?",
+            [scenario_id],
+        )
+        for run_id_val, producer_run_id_val in snapshot_rows:
+            if run_id_val and str(run_id_val) != scenario_id:
+                discovered_ids.add(str(run_id_val))
+            if producer_run_id_val and str(producer_run_id_val) != scenario_id:
+                discovered_ids.add(str(producer_run_id_val))
+    except duckdb.Error:
         pass
 
     try:
-        meta_candidates = session.exec(
-            select(Run).where(
-                col(Run.id) != scenario_id,
-                col(Run.meta).is_not(None),
-            )
-        ).all()
-        for candidate in meta_candidates:
-            if (
-                isinstance(candidate.meta, dict)
-                and candidate.meta.get("scenario_id") == scenario_id
-            ):
-                discovered_ids.add(candidate.id)
-    except Exception:
+        meta_rows = db.fetchall(
+            "SELECT id FROM run "
+            "WHERE id <> ? AND meta IS NOT NULL "
+            "AND json_extract_string(meta, '$.scenario_id') = ?",
+            [scenario_id, scenario_id],
+        )
+        for (candidate_id,) in meta_rows:
+            if candidate_id and str(candidate_id) != scenario_id:
+                discovered_ids.add(str(candidate_id))
+    except duckdb.Error:
         pass
 
-    direct_children = session.exec(
-        select(Run.id).where(col(Run.parent_run_id) == scenario_id)
-    ).all()
-    for child_id in direct_children:
-        if child_id and child_id != scenario_id:
+    direct_children = db.fetchall(
+        "SELECT id FROM run WHERE parent_run_id = ?",
+        [scenario_id],
+    )
+    for (child_id,) in direct_children:
+        if child_id and str(child_id) != scenario_id:
             discovered_ids.add(str(child_id))
 
     visited: set[str] = {scenario_id, *discovered_ids}
     frontier: set[str] = set(discovered_ids)
     while frontier:
-        next_children = session.exec(
-            select(Run.id).where(col(Run.parent_run_id).in_(sorted(frontier)))
-        ).all()
+        ordered_frontier = sorted(frontier)
+        placeholders = ", ".join("?" for _ in ordered_frontier)
+        next_children = db.fetchall(
+            f"SELECT id FROM run WHERE parent_run_id IN ({placeholders})",
+            ordered_frontier,
+        )
         next_frontier: set[str] = set()
-        for child_id in next_children:
+        for (child_id,) in next_children:
             if not child_id:
                 continue
             child_str = str(child_id)
@@ -1836,27 +1966,15 @@ def _collect_scenario_run_ids(session: Session, scenario_id: str) -> List[str]:
     return sorted(discovered_ids)
 
 
-def _get_scenario_member_runs(session: Session, scenario_id: str) -> List["Run"]:
+def _get_scenario_member_runs(tracker: Tracker, scenario_id: str) -> List["Run"]:
     """Fetch all transitive member Run rows for a scenario in chronological order."""
-    from consist.models.run import Run
-
-    run_ids = _collect_scenario_run_ids(session, scenario_id)
-    if not run_ids:
-        return []
-    stmt = (
-        select(Run)
-        .where(col(Run.id).in_(run_ids))
-        .order_by(
-            col(Run.created_at).asc(),
-            col(Run.started_at).asc(),
-            col(Run.id).asc(),
-        )
-    )
-    return list(session.exec(stmt).all())
+    db = _require_db(tracker)
+    run_ids = _collect_scenario_run_ids(tracker, scenario_id)
+    return db.get_runs_by_ids_chronological(run_ids)
 
 
 def _query_runs_with_scenario(
-    session: Session,
+    tracker: Tracker,
     *,
     limit: int = 10,
     model_name: Optional[str] = None,
@@ -1866,9 +1984,9 @@ def _query_runs_with_scenario(
 ) -> List["Run"]:
     """Query runs with optional scenario membership filtering."""
     if scenario_id is not None:
-        scenario_run_ids = _collect_scenario_run_ids(session, scenario_id)
+        scenario_run_ids = _collect_scenario_run_ids(tracker, scenario_id)
         return queries.get_runs(
-            session,
+            tracker,
             limit=limit,
             model_name=model_name,
             tags=tags,
@@ -1876,7 +1994,7 @@ def _query_runs_with_scenario(
             run_ids=scenario_run_ids,
         )
     return queries.get_runs(
-        session,
+        tracker,
         limit=limit,
         model_name=model_name,
         tags=tags,
@@ -1914,48 +2032,47 @@ def _render_runs_table(
     scenario_id: Optional[str] = None,
 ) -> None:
     """Shared logic for displaying runs."""
-    with _tracker_session(tracker) as session:
-        results = _query_runs_with_scenario(
-            session,
-            limit=limit,
-            model_name=model_name,
-            tags=tags,
-            status=status,
-            scenario_id=scenario_id,
+    results = _query_runs_with_scenario(
+        tracker,
+        limit=limit,
+        model_name=model_name,
+        tags=tags,
+        status=status,
+        scenario_id=scenario_id,
+    )
+
+    title_parts = ["Recent Runs"]
+    if scenario_id:
+        title_parts.append(f"in scenario [cyan]{scenario_id}[/cyan]")
+    if model_name:
+        title_parts.append(f"for model [green]{model_name}[/green]")
+    if tags:
+        title_parts.append(f"with tags [yellow]{', '.join(tags)}[/yellow]")
+    if status:
+        title_parts.append(f"with status [bold]{status}[/bold]")
+
+    table = Table(title=" ".join(title_parts))
+    table.add_column("ID", style="cyan")
+    table.add_column("Model", style="green")
+    table.add_column("Status")
+    table.add_column("Tags", style="yellow")
+    table.add_column("Created", style="dim")
+    table.add_column("Duration (s)", style="magenta")
+
+    for run in results:
+        status_style = "green" if run.status == "completed" else "red"
+        duration = f"{run.duration_seconds:.2f}" if run.duration_seconds else "N/A"
+        tags_str = ", ".join(run.tags) if run.tags else ""
+        table.add_row(
+            run.id,
+            run.model_name,
+            f"[{status_style}]{run.status}[/]",
+            tags_str,
+            run.created_at.strftime("%Y-%m-%d %H:%M"),
+            duration,
         )
 
-        title_parts = ["Recent Runs"]
-        if scenario_id:
-            title_parts.append(f"in scenario [cyan]{scenario_id}[/cyan]")
-        if model_name:
-            title_parts.append(f"for model [green]{model_name}[/green]")
-        if tags:
-            title_parts.append(f"with tags [yellow]{', '.join(tags)}[/yellow]")
-        if status:
-            title_parts.append(f"with status [bold]{status}[/bold]")
-
-        table = Table(title=" ".join(title_parts))
-        table.add_column("ID", style="cyan")
-        table.add_column("Model", style="green")
-        table.add_column("Status")
-        table.add_column("Tags", style="yellow")
-        table.add_column("Created", style="dim")
-        table.add_column("Duration (s)", style="magenta")
-
-        for run in results:
-            status_style = "green" if run.status == "completed" else "red"
-            duration = f"{run.duration_seconds:.2f}" if run.duration_seconds else "N/A"
-            tags_str = ", ".join(run.tags) if run.tags else ""
-            table.add_row(
-                run.id,
-                run.model_name,
-                f"[{status_style}]{run.status}[/]",
-                tags_str,
-                run.created_at.strftime("%Y-%m-%d %H:%M"),
-                duration,
-            )
-
-        console.print(table)
+    console.print(table)
 
 
 def _artifact_meta_value(artifact: "Artifact", key: str) -> Any:
@@ -2244,143 +2361,85 @@ def _render_summary(summary_data: Dict[str, Any]) -> None:
 
 
 def _iter_artifact_rows(
-    session: Session,
+    db: DatabaseManager,
     *,
     batch_size: int = 1000,
     run_ids: Optional[Sequence[str]] = None,
     outputs_only: bool = False,
 ) -> Iterable["Artifact"]:
-    from consist.models.artifact import Artifact
-    from consist.models.run import RunArtifactLink
-
     scoped_run_ids: Optional[List[str]] = None
     if run_ids is not None:
         scoped_run_ids = list(run_ids)
         if not scoped_run_ids:
             return
 
-    last_created = None
-    last_id = None
-    while True:
-        stmt = (
-            select(Artifact)
-            .order_by(col(Artifact.created_at), col(Artifact.id))
-            .limit(batch_size)
-        )
-        if scoped_run_ids is not None or outputs_only:
-            link_subq = select(RunArtifactLink.artifact_id)
-            if scoped_run_ids is not None:
-                link_subq = link_subq.where(
-                    col(RunArtifactLink.run_id).in_(scoped_run_ids)
-                )
-            if outputs_only:
-                link_subq = link_subq.where(col(RunArtifactLink.direction) == "output")
-            if scoped_run_ids is not None:
-                stmt = stmt.where(
-                    or_(
-                        col(Artifact.id).in_(link_subq),
-                        col(Artifact.run_id).in_(scoped_run_ids),
-                    )
-                )
-            else:
-                stmt = stmt.where(
-                    or_(
-                        col(Artifact.id).in_(link_subq),
-                        col(Artifact.run_id).is_not(None),
-                    )
-                )
-
-        if last_created is not None and last_id is not None:
-            stmt = stmt.where(
-                or_(
-                    col(Artifact.created_at) > last_created,
-                    and_(
-                        col(Artifact.created_at) == last_created,
-                        col(Artifact.id) > last_id,
-                    ),
-                )
-            )
-
-        batch = session.exec(cast(Any, stmt)).all()
-        if not batch:
-            break
-        for artifact in batch:
-            yield artifact
-        last_id = batch[-1].id
-        last_created = batch[-1].created_at
+    yield from db.iter_artifacts_for_rebuild(
+        scoped_run_ids=scoped_run_ids,
+        outputs_only=outputs_only,
+        batch_size=batch_size,
+    )
 
 
 def _render_scenarios(tracker: Tracker, limit: int = 20) -> None:
     """Shared logic for displaying scenario overview (scenarios are parent runs)."""
-    with _tracker_session(tracker) as session:
-        from consist.models.run import Run
-        from sqlmodel import func
+    db = _require_db(tracker)
+    non_root_ids: set[str] = set()
+    candidate_ids: set[str] = set()
+    fallback_stats: Dict[str, Tuple[int, Any, Any]] = {}
 
-        non_root_ids: set[str] = set()
-        candidate_ids: set[str] = set()
-        fallback_stats: Dict[str, Tuple[int, Any, Any]] = {}
+    child_rows = db.fetchall("SELECT id FROM run WHERE parent_run_id IS NOT NULL")
+    for (cid,) in child_rows:
+        if cid:
+            non_root_ids.add(str(cid))
 
-        child_ids = session.exec(
-            select(Run.id).where(col(Run.parent_run_id).is_not(None))
-        ).all()
-        for cid in child_ids:
-            if cid:
-                non_root_ids.add(str(cid))
+    parent_rows = db.fetchall(
+        "SELECT parent_run_id, COUNT(id), MIN(created_at), MAX(created_at) "
+        "FROM run WHERE parent_run_id IS NOT NULL GROUP BY parent_run_id"
+    )
+    for row in parent_rows:
+        sc_id = str(row[0])
+        candidate_ids.add(sc_id)
+        fallback_stats[sc_id] = (int(row[1]), row[2], row[3])
 
-        parent_rows = session.exec(
-            select(
-                col(Run.parent_run_id).label("scenario_id"),
-                func.count(col(Run.id)).label("run_count"),
-                func.min(col(Run.created_at)).label("first_run"),
-                func.max(col(Run.created_at)).label("last_run"),
-            )
-            .where(col(Run.parent_run_id).is_not(None))
-            .group_by(col(Run.parent_run_id))
-        ).all()
-        for row in parent_rows:
-            sc_id = str(row[0])
-            candidate_ids.add(sc_id)
-            fallback_stats[sc_id] = (int(row[1]), row[2], row[3])
+    header_rows = db.fetchall(
+        "SELECT id, created_at FROM run "
+        "WHERE model_name = 'scenario' AND parent_run_id IS NULL"
+    )
+    for header_id, header_created_at in header_rows:
+        sc_id = str(header_id)
+        candidate_ids.add(sc_id)
+        if sc_id not in fallback_stats:
+            fallback_stats[sc_id] = (0, header_created_at, header_created_at)
 
-        header_runs = session.exec(
-            select(Run).where(
-                col(Run.model_name) == "scenario",
-                col(Run.parent_run_id).is_(None),
-            )
-        ).all()
-        for header in header_runs:
-            candidate_ids.add(header.id)
-            if header.id not in fallback_stats:
-                fallback_stats[header.id] = (0, header.created_at, header.created_at)
+    meta_rows = db.fetchall(
+        "SELECT id, model_name, json_extract_string(meta, '$.scenario_id') "
+        "FROM run WHERE meta IS NOT NULL"
+    )
+    for run_id_val, model_name_val, meta_sc_id in meta_rows:
+        if isinstance(meta_sc_id, str) and meta_sc_id:
+            if str(model_name_val) != "scenario":
+                non_root_ids.add(str(run_id_val))
+            candidate_ids.add(meta_sc_id)
 
-        meta_runs = session.exec(select(Run).where(col(Run.meta).is_not(None))).all()
-        for run_row in meta_runs:
-            if isinstance(run_row.meta, dict):
-                meta_sc_id = run_row.meta.get("scenario_id")
-                if isinstance(meta_sc_id, str) and meta_sc_id:
-                    if run_row.model_name != "scenario":
-                        non_root_ids.add(run_row.id)
-                    candidate_ids.add(meta_sc_id)
+    root_scenario_ids = sorted(candidate_ids - non_root_ids)
+    scenario_rows: List[Tuple[str, int, Any, Any]] = []
+    for scenario_id in root_scenario_ids:
+        member_runs = _get_scenario_member_runs(tracker, scenario_id)
+        if member_runs:
+            run_count = len(member_runs)
+            first_run = min(r.created_at for r in member_runs)
+            last_run = max(r.created_at for r in member_runs)
+            scenario_rows.append((scenario_id, run_count, first_run, last_run))
+        elif scenario_id in fallback_stats:
+            run_count, first_run, last_run = fallback_stats[scenario_id]
+            scenario_rows.append((scenario_id, run_count, first_run, last_run))
 
-        root_scenario_ids = sorted(candidate_ids - non_root_ids)
-        scenario_rows: List[Tuple[str, int, Any, Any]] = []
-        for scenario_id in root_scenario_ids:
-            member_runs = _get_scenario_member_runs(session, scenario_id)
-            if member_runs:
-                run_count = len(member_runs)
-                first_run = min(r.created_at for r in member_runs)
-                last_run = max(r.created_at for r in member_runs)
-                scenario_rows.append((scenario_id, run_count, first_run, last_run))
-            elif scenario_id in fallback_stats:
-                run_count, first_run, last_run = fallback_stats[scenario_id]
-                scenario_rows.append((scenario_id, run_count, first_run, last_run))
+    scenario_rows.sort(key=lambda item: (item[3], item[0]), reverse=True)
+    scenario_rows = scenario_rows[:limit]
 
-        scenario_rows.sort(key=lambda item: (item[3], item[0]), reverse=True)
-        scenario_rows = scenario_rows[:limit]
-
-        if not scenario_rows:
-            console.print("[yellow]No scenarios found.[/yellow]")
-            return
+    if not scenario_rows:
+        console.print("[yellow]No scenarios found.[/yellow]")
+        return
 
     table = Table(title="Scenarios")
     table.add_column("Scenario ID", style="cyan")
@@ -2413,57 +2472,31 @@ def search(
         raise typer.BadParameter(
             f"Query must be 1-{MAX_SEARCH_QUERY_LENGTH} characters."
         )
-    escaped_query = _escape_like_pattern(query)
+    db = _require_db(tracker)
+    results = db.search_runs(query, limit=limit)
 
-    with _tracker_session(tracker) as session:
-        from consist.models.run import Run
-        from sqlmodel import select, or_, col
+    if not results:
+        console.print(f"[yellow]No runs found matching '{query}'[/yellow]")
+        return
 
-        # Search in multiple fields
-        search_query = (
-            select(Run)
-            .where(
-                or_(
-                    col(Run.id).contains(escaped_query, escape=LIKE_ESCAPE_CHAR),
-                    col(Run.model_name).contains(
-                        escaped_query, escape=LIKE_ESCAPE_CHAR
-                    ),
-                    col(Run.tags).contains(escaped_query, escape=LIKE_ESCAPE_CHAR),
-                    col(Run.parent_run_id).contains(
-                        escaped_query, escape=LIKE_ESCAPE_CHAR
-                    )
-                    if escaped_query
-                    else False,
-                )
-            )
-            .order_by(*recent_run_order_by())
-            .limit(limit)
+    table = Table(title=f"Search Results: '{query}'")
+    table.add_column("ID", style="cyan")
+    table.add_column("Model", style="green")
+    table.add_column("Scenario", style="yellow")
+    table.add_column("Status")
+    table.add_column("Created", style="dim")
+
+    for run in results:
+        status_style = "green" if run.status == "completed" else "red"
+        table.add_row(
+            run.id,
+            run.model_name,
+            run.parent_run_id or "-",
+            f"[{status_style}]{run.status}[/]",
+            run.created_at.strftime("%Y-%m-%d %H:%M"),
         )
 
-        results = session.exec(search_query).all()
-
-        if not results:
-            console.print(f"[yellow]No runs found matching '{query}'[/yellow]")
-            return
-
-        table = Table(title=f"Search Results: '{query}'")
-        table.add_column("ID", style="cyan")
-        table.add_column("Model", style="green")
-        table.add_column("Scenario", style="yellow")
-        table.add_column("Status")
-        table.add_column("Created", style="dim")
-
-        for run in results:
-            status_style = "green" if run.status == "completed" else "red"
-            table.add_row(
-                run.id,
-                run.model_name,
-                run.parent_run_id or "-",
-                f"[{status_style}]{run.status}[/]",
-                run.created_at.strftime("%Y-%m-%d %H:%M"),
-            )
-
-        console.print(table)
+    console.print(table)
 
 
 @app.command()
@@ -2523,175 +2556,168 @@ def validate(
         resolved_db_path,
         run_dir=run_dir,
         mounts=mount_overrides or None,
+        read_only=not fix,
     )
-    from consist.models.artifact import Artifact
-    from consist.models.run import Run
+    db = _require_db(tracker)
 
-    with _tracker_session(tracker) as session:
-        target_run_ids: Optional[List[str]] = None
-        if scenario_id is not None:
-            member_ids = _collect_scenario_run_ids(session, scenario_id)
-            header_run = session.get(Run, scenario_id)
-            if not member_ids and header_run is None:
-                console.print(f"[red]No runs found for scenario '{scenario_id}'[/red]")
-                raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
-            target_run_ids = (
-                [scenario_id, *member_ids] if header_run is not None else member_ids
-            )
-        elif run_id is not None:
-            run_row = session.get(Run, run_id)
-            if run_row is None:
-                console.print(f"[red]Run with ID '{run_id}' not found.[/red]")
-                raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
-            target_run_ids = [run_id]
-        elif latest:
-            latest_run = session.exec(
-                select(Run).order_by(*recent_run_order_by()).limit(1)
-            ).first()
-            if latest_run is None:
-                console.print("[yellow]No runs found in the database.[/yellow]")
-                return
-            root_scenario_id: Optional[str] = None
-            if isinstance(latest_run.meta, dict):
-                meta_scenario = latest_run.meta.get("scenario_id")
-                if isinstance(meta_scenario, str) and meta_scenario:
-                    root_scenario_id = meta_scenario
-            if root_scenario_id is None and latest_run.parent_run_id:
-                visited: set[str] = {latest_run.id}
-                current_parent_id: Optional[str] = latest_run.parent_run_id
-                while current_parent_id and current_parent_id not in visited:
-                    visited.add(current_parent_id)
-                    root_scenario_id = current_parent_id
-                    parent_row = session.get(Run, current_parent_id)
-                    if parent_row is None:
+    target_run_ids: Optional[List[str]] = None
+    if scenario_id is not None:
+        member_ids = _collect_scenario_run_ids(tracker, scenario_id)
+        header_run = db.get_run(scenario_id)
+        if not member_ids and header_run is None:
+            console.print(f"[red]No runs found for scenario '{scenario_id}'[/red]")
+            raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
+        target_run_ids = (
+            [scenario_id, *member_ids] if header_run is not None else member_ids
+        )
+    elif run_id is not None:
+        run_row = db.get_run(run_id)
+        if run_row is None:
+            console.print(f"[red]Run with ID '{run_id}' not found.[/red]")
+            raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
+        target_run_ids = [run_id]
+    elif latest:
+        latest_runs = queries.get_runs(tracker, limit=1)
+        latest_run = latest_runs[0] if latest_runs else None
+        if latest_run is None:
+            console.print("[yellow]No runs found in the database.[/yellow]")
+            return
+        root_scenario_id: Optional[str] = None
+        if isinstance(latest_run.meta, dict):
+            meta_scenario = latest_run.meta.get("scenario_id")
+            if isinstance(meta_scenario, str) and meta_scenario:
+                root_scenario_id = meta_scenario
+        if root_scenario_id is None and latest_run.parent_run_id:
+            visited: set[str] = {latest_run.id}
+            current_parent_id: Optional[str] = latest_run.parent_run_id
+            while current_parent_id and current_parent_id not in visited:
+                visited.add(current_parent_id)
+                root_scenario_id = current_parent_id
+                parent_row = db.get_run(current_parent_id)
+                if parent_row is None:
+                    break
+                if isinstance(parent_row.meta, dict):
+                    parent_meta_scenario = parent_row.meta.get("scenario_id")
+                    if isinstance(parent_meta_scenario, str) and parent_meta_scenario:
+                        root_scenario_id = parent_meta_scenario
                         break
-                    if isinstance(parent_row.meta, dict):
-                        parent_meta_scenario = parent_row.meta.get("scenario_id")
-                        if (
-                            isinstance(parent_meta_scenario, str)
-                            and parent_meta_scenario
-                        ):
-                            root_scenario_id = parent_meta_scenario
-                            break
-                    current_parent_id = parent_row.parent_run_id
-            if (
-                root_scenario_id is None
-                and latest_run.model_name == "scenario"
-                and latest_run.parent_run_id is None
-            ):
-                root_scenario_id = latest_run.id
+                current_parent_id = parent_row.parent_run_id
+        if (
+            root_scenario_id is None
+            and latest_run.model_name == "scenario"
+            and latest_run.parent_run_id is None
+        ):
+            root_scenario_id = latest_run.id
 
-            if root_scenario_id is not None:
-                member_ids = _collect_scenario_run_ids(session, root_scenario_id)
-                target_run_ids = (
-                    [root_scenario_id, *member_ids] if member_ids else [latest_run.id]
-                )
-            else:
-                target_run_ids = [latest_run.id]
-
-        missing = []
-        missing_ids: List[uuid.UUID] = []
-        batch_size = 1000
-        if env_batch_size := os.getenv("CONSIST_VALIDATE_BATCH_SIZE"):
-            try:
-                batch_size = max(1, int(env_batch_size))
-            except ValueError:
-                batch_size = 1000
-
-        if target_run_ids is None and not outputs_only:
-            artifact_iter = _iter_artifact_rows(session, batch_size=batch_size)
-        else:
-            artifact_iter = _iter_artifact_rows(
-                session,
-                batch_size=batch_size,
-                run_ids=target_run_ids,
-                outputs_only=outputs_only,
+        if root_scenario_id is not None:
+            member_ids = _collect_scenario_run_ids(tracker, root_scenario_id)
+            target_run_ids = (
+                [root_scenario_id, *member_ids] if member_ids else [latest_run.id]
             )
+        else:
+            target_run_ids = [latest_run.id]
 
-        for artifact in artifact_iter:
-            original_mounts = dict(tracker.mounts)
-            try:
-                _ensure_tracker_mounts_for_artifact(
+    missing: List[Tuple[str, str, Optional[str]]] = []
+    missing_artifacts: List["Artifact"] = []
+    batch_size = 1000
+    if env_batch_size := os.getenv("CONSIST_VALIDATE_BATCH_SIZE"):
+        try:
+            batch_size = max(1, int(env_batch_size))
+        except ValueError:
+            batch_size = 1000
+
+    if target_run_ids is None and not outputs_only:
+        artifact_iter = _iter_artifact_rows(db, batch_size=batch_size)
+    else:
+        artifact_iter = _iter_artifact_rows(
+            db,
+            batch_size=batch_size,
+            run_ids=target_run_ids,
+            outputs_only=outputs_only,
+        )
+
+    for artifact in artifact_iter:
+        original_mounts = dict(tracker.mounts)
+        try:
+            _ensure_tracker_mounts_for_artifact(
+                tracker,
+                artifact,
+                trust_db=trust_db,
+                archive_base=run_dir,
+            )
+            uri = artifact.container_uri
+            found = False
+            if uri.startswith("./"):
+                resolution_bases, _ = _build_relative_resolution_bases_for_uri(
                     tracker,
-                    artifact,
+                    container_uri=uri,
+                    run_id=artifact.run_id,
+                    db_path=resolved_db_path,
+                    run_dir=run_dir,
                     trust_db=trust_db,
-                    archive_base=run_dir,
                 )
-                uri = artifact.container_uri
-                found = False
-                if uri.startswith("./"):
-                    resolution_bases, _ = _build_relative_resolution_bases_for_uri(
-                        tracker,
-                        container_uri=uri,
-                        run_id=artifact.run_id,
-                        db_path=resolved_db_path,
-                        run_dir=run_dir,
-                        trust_db=trust_db,
-                    )
-                    if resolution_bases:
-                        for _, base_dir in resolution_bases:
-                            candidate = (base_dir / uri[2:]).resolve()
-                            if candidate.exists():
-                                found = True
-                                break
-                if not found:
-                    for _, candidate in _artifact_recovery_candidate_paths(
-                        tracker, artifact, trust_db=trust_db
-                    ):
+                if resolution_bases:
+                    for _, base_dir in resolution_bases:
+                        candidate = (base_dir / uri[2:]).resolve()
                         if candidate.exists():
                             found = True
                             break
-                if found:
-                    continue
-                try:
-                    abs_path = tracker.resolve_uri(uri)
-                    if not Path(abs_path).exists():
-                        missing.append((artifact.key, uri, artifact.run_id))
-                        missing_ids.append(artifact.id)
-                except (
-                    AttributeError,
-                    NotImplementedError,
-                    OSError,
-                    RuntimeError,
-                    TypeError,
-                    ValueError,
+            if not found:
+                for _, candidate in _artifact_recovery_candidate_paths(
+                    tracker, artifact, trust_db=trust_db
                 ):
+                    if candidate.exists():
+                        found = True
+                        break
+            if found:
+                continue
+            try:
+                abs_path = tracker.resolve_uri(uri)
+                if not Path(abs_path).exists():
                     missing.append((artifact.key, uri, artifact.run_id))
-                    missing_ids.append(artifact.id)
-            finally:
-                _set_tracker_mounts(tracker, original_mounts)
+                    missing_artifacts.append(artifact)
+            except (
+                AttributeError,
+                NotImplementedError,
+                OSError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+            ):
+                missing.append((artifact.key, uri, artifact.run_id))
+                missing_artifacts.append(artifact)
+        finally:
+            _set_tracker_mounts(tracker, original_mounts)
 
-        if not missing:
-            console.print("[green]✓ All artifacts validated successfully[/green]")
-            return
+    if not missing:
+        console.print("[green]✓ All artifacts validated successfully[/green]")
+        return
 
-        if fix and missing_ids:
-            updates = (
-                select(Artifact)
-                .where(col(Artifact.id).in_(set(missing_ids)))
-                .order_by(col(Artifact.created_at))
-            )
-            for artifact in session.exec(cast(Any, updates)).all():
-                current_meta = dict(artifact.meta or {})
-                current_meta["missing_on_disk"] = True
-                artifact.meta = current_meta
-                session.add(artifact)
-            session.commit()
+    if fix and missing_artifacts:
+        meta_updates: Dict[uuid.UUID, Dict[str, Any]] = {}
+        for artifact in missing_artifacts:
+            if artifact.id in meta_updates:
+                continue
+            current_meta = dict(artifact.meta or {})
+            current_meta["missing_on_disk"] = True
+            meta_updates[artifact.id] = current_meta
+            artifact.meta = current_meta
+        db.replace_artifacts_meta_bulk(meta_updates, require_all=False)
 
-        console.print(f"[yellow]⚠ Found {len(missing)} missing artifacts:[/yellow]\n")
+    console.print(f"[yellow]⚠ Found {len(missing)} missing artifacts:[/yellow]\n")
 
-        table = Table()
-        table.add_column("Key", style="yellow")
-        table.add_column("URI", style="dim")
-        table.add_column("Run ID", style="cyan")
+    table = Table()
+    table.add_column("Key", style="yellow")
+    table.add_column("URI", style="dim")
+    table.add_column("Run ID", style="cyan")
 
-        for key, uri, run_id in missing[:50]:  # Limit display
-            table.add_row(key, uri, run_id or "-")
+    for key, uri, missing_run_id in missing[:50]:  # Limit display
+        table.add_row(key, uri, missing_run_id or "-")
 
-        console.print(table)
+    console.print(table)
 
-        if len(missing) > 50:
-            console.print(f"\n[dim]... and {len(missing) - 50} more[/dim]")
+    if len(missing) > 50:
+        console.print(f"\n[dim]... and {len(missing) - 50} more[/dim]")
 
 
 @app.command()
@@ -2711,32 +2737,30 @@ def scenario(
 ) -> None:
     """Show all runs in a scenario."""
     tracker = get_tracker(db_path)
+    results = _get_scenario_member_runs(tracker, scenario_id)
 
-    with _tracker_session(tracker) as session:
-        results = _get_scenario_member_runs(session, scenario_id)
+    if not results:
+        console.print(f"[red]No runs found for scenario '{scenario_id}'[/red]")
+        raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
 
-        if not results:
-            console.print(f"[red]No runs found for scenario '{scenario_id}'[/red]")
-            raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
+    table = Table(title=f"Runs in Scenario: [cyan]{scenario_id}[/cyan]")
+    table.add_column("Run ID", style="cyan")
+    table.add_column("Model", style="green")
+    table.add_column("Year", style="yellow")
+    table.add_column("Status")
+    table.add_column("Created", style="dim")
 
-        table = Table(title=f"Runs in Scenario: [cyan]{scenario_id}[/cyan]")
-        table.add_column("Run ID", style="cyan")
-        table.add_column("Model", style="green")
-        table.add_column("Year", style="yellow")
-        table.add_column("Status")
-        table.add_column("Created", style="dim")
+    for run in results:
+        status_style = "green" if run.status == "completed" else "red"
+        table.add_row(
+            run.id,
+            run.model_name,
+            str(run.year) if run.year else "-",
+            f"[{status_style}]{run.status}[/]",
+            run.created_at.strftime("%Y-%m-%d %H:%M"),
+        )
 
-        for run in results:
-            status_style = "green" if run.status == "completed" else "red"
-            table.add_row(
-                run.id,
-                run.model_name,
-                str(run.year) if run.year else "-",
-                f"[{status_style}]{run.status}[/]",
-                run.created_at.strftime("%Y-%m-%d %H:%M"),
-            )
-
-        console.print(table)
+    console.print(table)
 
 
 @app.command()
@@ -2768,17 +2792,16 @@ def runs(
     """
     tracker = get_tracker(db_path)
     if json_output:
-        with _tracker_session(tracker) as session:
-            results = _query_runs_with_scenario(
-                session,
-                limit=limit,
-                model_name=model_name,
-                tags=tag,
-                status=status,
-                scenario_id=scenario,
-            )
-            output_json(_serialize_runs_json(results))
-            return
+        results = _query_runs_with_scenario(
+            tracker,
+            limit=limit,
+            model_name=model_name,
+            tags=tag,
+            status=status,
+            scenario_id=scenario,
+        )
+        output_json(_serialize_runs_json(results))
+        return
 
     if scenario is not None:
         _render_runs_table(
@@ -3698,8 +3721,7 @@ def summary(
 ) -> None:
     """Displays a high-level summary of the provenance database."""
     tracker = get_tracker(db_path)
-    with _tracker_session(tracker) as session:
-        summary_data = queries.get_summary(session)
+    summary_data = queries.get_summary(tracker)
 
     _render_summary(summary_data)
     if summary_data["total_runs"] == 0:
@@ -3788,102 +3810,106 @@ def preview(
     if data is None:
         raise typer.Exit(CLI_EXIT_RUNTIME_ERROR)
 
-    preview_label = f"Preview: {artifact_key} [dim]({artifact.driver})[/dim]"
-    if artifact.driver == "gtfs" and artifact.table_path:
-        preview_label = (
-            f"Preview: {artifact_key} [dim](gtfs:{artifact.table_path})[/dim]"
-        )
-    console.print(preview_label)
+    try:
+        preview_label = f"Preview: {artifact_key} [dim]({artifact.driver})[/dim]"
+        if artifact.driver == "gtfs" and artifact.table_path:
+            preview_label = (
+                f"Preview: {artifact_key} [dim](gtfs:{artifact.table_path})[/dim]"
+            )
+        console.print(preview_label)
 
-    if isinstance(data, duckdb.DuckDBPyRelation):
-        df = data.limit(n_rows).df()
-    elif isinstance(data, pd.DataFrame):
-        df = data.head(n_rows)
-    else:
-        df = None
-
-    if df is not None:
-        table = Table()
-
-        # Use pandas types to set column styles
-        for col_name in df.columns:
-            style = "cyan"
-            if pd.api.types.is_numeric_dtype(df[col_name]):
-                style = "magenta"
-            elif pd.api.types.is_datetime64_any_dtype(df[col_name]):
-                style = "green"
-            table.add_column(str(col_name), style=style)
-
-        for row in df.itertuples(index=False, name=None):
-            table.add_row(*[str(item) for item in row])
-
-        console.print(table)
-        return
-
-    xr = _optional_xarray()
-    if xr is not None and isinstance(data, (xr.Dataset, xr.DataArray)):
-        ds: xr.Dataset
-        if isinstance(data, xr.DataArray):
-            ds = data.to_dataset(name=str(data.name) if data.name else "data")
+        if isinstance(data, duckdb.DuckDBPyRelation):
+            df = data.limit(n_rows).df()
+        elif isinstance(data, pd.DataFrame):
+            df = data.head(n_rows)
         else:
-            ds = data
+            df = None
 
-        dims_table = Table(title="Dimensions")
-        dims_table.add_column("Dim", style="cyan")
-        dims_table.add_column("Size", style="magenta")
-        for dim_name, dim_size in ds.sizes.items():
-            dims_table.add_row(str(dim_name), str(dim_size))
-        console.print(dims_table)
+        if df is not None:
+            table = Table()
 
-        if not ds.data_vars:
-            console.print("[yellow]No data variables found.[/yellow]")
+            # Use pandas types to set column styles
+            for col_name in df.columns:
+                style = "cyan"
+                if pd.api.types.is_numeric_dtype(df[col_name]):
+                    style = "magenta"
+                elif pd.api.types.is_datetime64_any_dtype(df[col_name]):
+                    style = "green"
+                table.add_column(str(col_name), style=style)
+
+            for row in df.itertuples(index=False, name=None):
+                table.add_row(*[str(item) for item in row])
+
+            console.print(table)
             return
 
-        vars_table = Table(title="Data Variables")
-        vars_table.add_column("Name", style="cyan")
-        vars_table.add_column("Dtype", style="magenta")
-        vars_table.add_column("Dims", style="green")
-        vars_table.add_column("Shape", style="yellow")
-
-        for var_name, da in ds.data_vars.items():
-            vars_table.add_row(
-                str(var_name),
-                str(da.dtype),
-                ", ".join(map(str, da.dims)),
-                str(tuple(int(x) for x in da.shape)),
-            )
-        console.print(vars_table)
-
-        # Best-effort sample values from the first variable.
-        first_name = next(iter(ds.data_vars))
-        da0 = ds[first_name]
-        indexers: Dict[str, Any] = {}
-        for i, dim in enumerate(da0.dims):
-            if i == 0:
-                indexers[dim] = slice(0, min(n_rows, int(da0.sizes[dim])))
+        xr = _optional_xarray()
+        if xr is not None and isinstance(data, (xr.Dataset, xr.DataArray)):
+            ds: xr.Dataset
+            if isinstance(data, xr.DataArray):
+                ds = data.to_dataset(name=str(data.name) if data.name else "data")
             else:
-                indexers[dim] = 0
-        try:
-            sample = da0.isel(indexers).values
-            console.print(
-                Panel(
-                    str(sample),
-                    title=f"Sample: {first_name} (isel {indexers})",
-                    border_style="dim",
-                )
-            )
-        except Exception:
-            console.print(
-                f"[yellow]Could not materialize sample values for '{first_name}'.[/yellow]"
-            )
-        return
+                ds = data
 
-    console.print(
-        f"[yellow]Preview not implemented for loaded type: {type(data).__name__}[/yellow]"
-    )
-    console.print(
-        "[dim]Hint: load programmatically via `consist.load(artifact, tracker=...)`[/dim]"
-    )
+            dims_table = Table(title="Dimensions")
+            dims_table.add_column("Dim", style="cyan")
+            dims_table.add_column("Size", style="magenta")
+            for dim_name, dim_size in ds.sizes.items():
+                dims_table.add_row(str(dim_name), str(dim_size))
+            console.print(dims_table)
+
+            if not ds.data_vars:
+                console.print("[yellow]No data variables found.[/yellow]")
+                return
+
+            vars_table = Table(title="Data Variables")
+            vars_table.add_column("Name", style="cyan")
+            vars_table.add_column("Dtype", style="magenta")
+            vars_table.add_column("Dims", style="green")
+            vars_table.add_column("Shape", style="yellow")
+
+            for var_name, da in ds.data_vars.items():
+                vars_table.add_row(
+                    str(var_name),
+                    str(da.dtype),
+                    ", ".join(map(str, da.dims)),
+                    str(tuple(int(x) for x in da.shape)),
+                )
+            console.print(vars_table)
+
+            # Best-effort sample values from the first variable.
+            first_name = next(iter(ds.data_vars))
+            da0 = ds[first_name]
+            indexers: Dict[str, Any] = {}
+            for i, dim in enumerate(da0.dims):
+                if i == 0:
+                    indexers[dim] = slice(0, min(n_rows, int(da0.sizes[dim])))
+                else:
+                    indexers[dim] = 0
+            try:
+                sample = da0.isel(indexers).values
+                console.print(
+                    Panel(
+                        str(sample),
+                        title=f"Sample: {first_name} (isel {indexers})",
+                        border_style="dim",
+                    )
+                )
+            except Exception:
+                console.print(
+                    f"[yellow]Could not materialize sample values for '{first_name}'.[/yellow]"
+                )
+            return
+
+        console.print(
+            f"[yellow]Preview not implemented for loaded type: {type(data).__name__}[/yellow]"
+        )
+        console.print(
+            "[dim]Hint: load programmatically via `consist.load(artifact, tracker=...)`[/dim]"
+        )
+    finally:
+        if isinstance(data, duckdb.DuckDBPyRelation):
+            _close_relation_connection(data)
 
 
 class ConsistShell(cmd.Cmd):
@@ -3948,6 +3974,13 @@ class ConsistShell(cmd.Cmd):
         "schema",
         "views",
         "db",
+    )
+    _SHELL_MUTATING_ROOT_COMMANDS: Tuple[str, ...] = (
+        "db",
+        "views",
+        "schema",
+        "exec",
+        "init",
     )
     _SCHEMA_STUB_COMPLETION_FLAGS: Tuple[str, ...] = (
         "--artifact-id",
@@ -4106,6 +4139,19 @@ class ConsistShell(cmd.Cmd):
         if args[0] == "shell":
             _print_cli_error("Already inside Consist shell.")
             return
+        is_mutating = args[0] in self._SHELL_MUTATING_ROOT_COMMANDS or (
+            args[0] == "validate" and self._has_option(args, "--fix")
+        )
+        suspended_read_only_tracker = False
+        if (
+            is_mutating
+            and self.db_path
+            and self.tracker.db is not None
+            and not self.tracker.db._closed
+            and self.tracker.db.read_only
+        ):
+            self.tracker.close()
+            suspended_read_only_tracker = True
         try:
             prepared = self._prepare_cli_args(args)
             app(args=prepared, prog_name="consist", standalone_mode=False)
@@ -4115,6 +4161,15 @@ class ConsistShell(cmd.Cmd):
             _print_cli_error(exc.format_message())
         except Exception as exc:
             _print_cli_error(str(exc))
+        finally:
+            if suspended_read_only_tracker and self.db_path:
+                self.tracker = get_tracker(
+                    self.db_path,
+                    run_dir=self.run_dir,
+                    mounts=self.mount_overrides or None,
+                    read_only=True,
+                    auto_close=False,
+                )
 
     def _invoke_cli_command(self, command_name: str, arg: str) -> None:
         command_args = [command_name, *self._safe_split(arg)]
@@ -4170,33 +4225,29 @@ class ConsistShell(cmd.Cmd):
 
     def _recent_run_ids(self, limit: int = _PICKER_LIMIT) -> List[str]:
         try:
-            from consist.models.run import Run
-
-            with _tracker_session(self.tracker) as session:
-                statement = select(Run.id).order_by(*recent_run_order_by()).limit(limit)
-                return [
-                    str(run_id) for run_id in session.exec(statement).all() if run_id
-                ]
+            db = _require_db(self.tracker)
+            rows = db.fetchall(
+                f"SELECT id FROM run ORDER BY {RECENT_RUN_ORDER_BY_SQL} LIMIT ?",
+                [int(limit)],
+            )
+            return [str(run_id) for (run_id,) in rows if run_id]
         except Exception:
             return []
 
     def _recent_artifact_keys(self, limit: int = _PICKER_LIMIT) -> List[str]:
         try:
-            from consist.models.artifact import Artifact
-
-            with _tracker_session(self.tracker) as session:
-                statement = (
-                    select(Artifact.key)
-                    .order_by(col(Artifact.created_at).desc())
-                    .limit(limit)
-                )
-                seen: set[str] = set()
-                keys: List[str] = []
-                for key in session.exec(statement).all():
-                    if isinstance(key, str) and key and key not in seen:
-                        seen.add(key)
-                        keys.append(key)
-                return keys
+            db = _require_db(self.tracker)
+            rows = db.fetchall(
+                "SELECT key FROM artifact ORDER BY created_at DESC LIMIT ?",
+                [int(limit)],
+            )
+            seen: set[str] = set()
+            keys: List[str] = []
+            for (key,) in rows:
+                if isinstance(key, str) and key and key not in seen:
+                    seen.add(key)
+                    keys.append(key)
+            return keys
         except Exception:
             return []
 
@@ -4341,19 +4392,10 @@ class ConsistShell(cmd.Cmd):
             return None
 
         try:
-            from consist.models.artifact import Artifact
-
-            with _tracker_session(self.tracker) as session:
-                # Intentional hash usage: this command is explicitly a hash-prefix
-                # lookup UX, so ``content_id`` would be the wrong identifier here.
-                statement = select(Artifact).where(
-                    col(Artifact.hash).is_not(None),
-                    col(Artifact.hash).startswith(candidate),
-                )
-                if run_id is not None:
-                    statement = statement.where(col(Artifact.run_id) == run_id)
-                statement = statement.order_by(col(Artifact.created_at).desc()).limit(6)
-                matches = session.exec(statement).all()
+            db = _require_db(self.tracker)
+            matches = db.find_artifacts_by_digest_prefix(
+                candidate, run_id=run_id, limit=6
+            )
         except Exception as exc:
             _print_cli_error(f"Failed hash lookup: {exc}")
             return None
@@ -4636,16 +4678,15 @@ class ConsistShell(cmd.Cmd):
                     raise ValueError(f"Unexpected argument: {token}")
 
             if json_output:
-                with _tracker_session(self.tracker) as session:
-                    results = _query_runs_with_scenario(
-                        session,
-                        limit=limit,
-                        model_name=model_name,
-                        tags=tags if tags else None,
-                        status=status,
-                        scenario_id=scenario,
-                    )
-                    payload = _serialize_runs_json(results)
+                results = _query_runs_with_scenario(
+                    self.tracker,
+                    limit=limit,
+                    model_name=model_name,
+                    tags=tags if tags else None,
+                    status=status,
+                    scenario_id=scenario,
+                )
+                payload = _serialize_runs_json(results)
                 output_json(payload)
                 return
 
@@ -4662,15 +4703,14 @@ class ConsistShell(cmd.Cmd):
                 _render_runs_table(
                     self.tracker, limit, model_name, tags if tags else None, status
                 )
-            with _tracker_session(self.tracker) as session:
-                cached_runs = _query_runs_with_scenario(
-                    session,
-                    limit=limit,
-                    model_name=model_name,
-                    tags=tags if tags else None,
-                    status=status,
-                    scenario_id=scenario,
-                )
+            cached_runs = _query_runs_with_scenario(
+                self.tracker,
+                limit=limit,
+                model_name=model_name,
+                tags=tags if tags else None,
+                status=status,
+                scenario_id=scenario,
+            )
             self._last_run_ids = [
                 str(run.id) for run in cached_runs if run.id is not None
             ]
@@ -4957,48 +4997,54 @@ class ConsistShell(cmd.Cmd):
             if data is None:
                 return
 
-            console.print(f"Preview: {artifact.key} [dim]({artifact.driver})[/dim]")
+            try:
+                console.print(f"Preview: {artifact.key} [dim]({artifact.driver})[/dim]")
 
-            if isinstance(data, duckdb.DuckDBPyRelation):
-                df = data.limit(n_rows).df()
-            elif isinstance(data, pd.DataFrame):
-                df = data.head(n_rows)
-            else:
-                df = None
-
-            if df is not None:
-                table = Table()
-                for col_name in df.columns:
-                    style = "cyan"
-                    if pd.api.types.is_numeric_dtype(df[col_name]):
-                        style = "magenta"
-                    elif pd.api.types.is_datetime64_any_dtype(df[col_name]):
-                        style = "green"
-                    table.add_column(str(col_name), style=style)
-                for row in df.itertuples(index=False, name=None):
-                    table.add_row(*[str(item) for item in row])
-                console.print(table)
-                return
-
-            xr = _optional_xarray()
-            if xr is not None and isinstance(data, (xr.Dataset, xr.DataArray)):
-                ds: xr.Dataset
-                if isinstance(data, xr.DataArray):
-                    ds = data.to_dataset(name=str(data.name) if data.name else "data")
+                if isinstance(data, duckdb.DuckDBPyRelation):
+                    df = data.limit(n_rows).df()
+                elif isinstance(data, pd.DataFrame):
+                    df = data.head(n_rows)
                 else:
-                    ds = data
+                    df = None
 
-                dims_table = Table(title="Dimensions")
-                dims_table.add_column("Dim", style="cyan")
-                dims_table.add_column("Size", style="magenta")
-                for dim_name, dim_size in ds.sizes.items():
-                    dims_table.add_row(str(dim_name), str(dim_size))
-                console.print(dims_table)
-                return
+                if df is not None:
+                    table = Table()
+                    for col_name in df.columns:
+                        style = "cyan"
+                        if pd.api.types.is_numeric_dtype(df[col_name]):
+                            style = "magenta"
+                        elif pd.api.types.is_datetime64_any_dtype(df[col_name]):
+                            style = "green"
+                        table.add_column(str(col_name), style=style)
+                    for row in df.itertuples(index=False, name=None):
+                        table.add_row(*[str(item) for item in row])
+                    console.print(table)
+                    return
 
-            console.print(
-                f"[yellow]Preview not implemented for loaded type: {type(data).__name__}[/yellow]"
-            )
+                xr = _optional_xarray()
+                if xr is not None and isinstance(data, (xr.Dataset, xr.DataArray)):
+                    ds: xr.Dataset
+                    if isinstance(data, xr.DataArray):
+                        ds = data.to_dataset(
+                            name=str(data.name) if data.name else "data"
+                        )
+                    else:
+                        ds = data
+
+                    dims_table = Table(title="Dimensions")
+                    dims_table.add_column("Dim", style="cyan")
+                    dims_table.add_column("Size", style="magenta")
+                    for dim_name, dim_size in ds.sizes.items():
+                        dims_table.add_row(str(dim_name), str(dim_size))
+                    console.print(dims_table)
+                    return
+
+                console.print(
+                    f"[yellow]Preview not implemented for loaded type: {type(data).__name__}[/yellow]"
+                )
+            finally:
+                if isinstance(data, duckdb.DuckDBPyRelation):
+                    _close_relation_connection(data)
         except Exception as exc:
             _print_cli_error(str(exc))
 
@@ -5104,53 +5150,59 @@ class ConsistShell(cmd.Cmd):
             if data is None:
                 return
 
-            console.print(f"Schema: {artifact.key} [dim]({artifact.driver})[/dim]")
+            try:
+                console.print(f"Schema: {artifact.key} [dim]({artifact.driver})[/dim]")
 
-            if isinstance(data, duckdb.DuckDBPyRelation):
-                df = data.limit(1).df()
-            elif isinstance(data, pd.DataFrame):
-                df = data
-            else:
-                df = None
-
-            if df is not None:
-                table = Table()
-                table.add_column("Column", style="cyan")
-                table.add_column("Dtype", style="magenta")
-                for col_name, dtype in df.dtypes.items():
-                    table.add_row(str(col_name), str(dtype))
-                console.print(table)
                 if isinstance(data, duckdb.DuckDBPyRelation):
-                    row = data.count("*").fetchone()
-                    count = row[0] if row is not None else 0
-                    console.print(
-                        f"[dim]{int(count)} rows × {int(len(df.columns))} columns[/dim]"
-                    )
+                    df = data.limit(1).df()
+                elif isinstance(data, pd.DataFrame):
+                    df = data
                 else:
-                    console.print(
-                        f"[dim]{int(df.shape[0])} rows × {int(df.shape[1])} columns[/dim]"
-                    )
-                return
+                    df = None
 
-            xr = _optional_xarray()
-            if xr is not None and isinstance(data, (xr.Dataset, xr.DataArray)):
-                ds: xr.Dataset
-                if isinstance(data, xr.DataArray):
-                    ds = data.to_dataset(name=getattr(data, "name", None) or "data")
-                else:
-                    ds = data
+                if df is not None:
+                    table = Table()
+                    table.add_column("Column", style="cyan")
+                    table.add_column("Dtype", style="magenta")
+                    for col_name, dtype in df.dtypes.items():
+                        table.add_row(str(col_name), str(dtype))
+                    console.print(table)
+                    if isinstance(data, duckdb.DuckDBPyRelation):
+                        row = data.count("*").fetchone()
+                        count = row[0] if row is not None else 0
+                        console.print(
+                            f"[dim]{int(count)} rows × {int(len(df.columns))} columns[/dim]"
+                        )
+                    else:
+                        console.print(
+                            f"[dim]{int(df.shape[0])} rows × {int(df.shape[1])} columns[/dim]"
+                        )
+                    return
 
-                dims_table = Table(title="Dimensions")
-                dims_table.add_column("Dim", style="cyan")
-                dims_table.add_column("Size", style="magenta")
-                for dim_name, dim_size in ds.sizes.items():
-                    dims_table.add_row(str(dim_name), str(dim_size))
-                console.print(dims_table)
-                return
+                xr = _optional_xarray()
+                if xr is not None and isinstance(data, (xr.Dataset, xr.DataArray)):
+                    ds: xr.Dataset
+                    if isinstance(data, xr.DataArray):
+                        ds = data.to_dataset(
+                            name=str(data.name) if data.name else "data"
+                        )
+                    else:
+                        ds = data
 
-            console.print(
-                f"[yellow]Schema not implemented for loaded type: {type(data).__name__}[/yellow]"
-            )
+                    dims_table = Table(title="Dimensions")
+                    dims_table.add_column("Dim", style="cyan")
+                    dims_table.add_column("Size", style="magenta")
+                    for dim_name, dim_size in ds.sizes.items():
+                        dims_table.add_row(str(dim_name), str(dim_size))
+                    console.print(dims_table)
+                    return
+
+                console.print(
+                    f"[yellow]Schema not implemented for loaded type: {type(data).__name__}[/yellow]"
+                )
+            finally:
+                if isinstance(data, duckdb.DuckDBPyRelation):
+                    _close_relation_connection(data)
             if artifact.driver in {"h5", "hdf5"} or type(data).__name__ == "HDFStore":
                 console.print(
                     "[yellow]Container-level HDF5 schema is not supported. Try "
@@ -5202,19 +5254,26 @@ class ConsistShell(cmd.Cmd):
                 return
 
             export_selector: Dict[str, Any] = {"artifact_id": str(artifact.id)}
-            resolver = getattr(
-                self.tracker, "select_artifact_schema_for_artifact", None
-            )
-            if callable(resolver):
-                selection = resolver(
+            selection: Any = None
+            try:
+                selection = self.tracker.select_artifact_schema_for_artifact(
                     artifact_id=str(artifact.id),
                     source=source,
                     strict_source=source is not None,
                 )
-                schema_id = getattr(selection, "schema_id", None)
-                selected_source = getattr(selection, "source", None)
-                candidate_count = getattr(selection, "candidate_count", None)
-                selection_rule = getattr(selection, "selection_rule", None)
+            except AttributeError:
+                selection = None
+            if selection is not None:
+                try:
+                    schema_id = selection.schema_id
+                    selected_source = selection.source
+                    candidate_count = selection.candidate_count
+                    selection_rule = selection.selection_rule
+                except AttributeError:
+                    schema_id = None
+                    selected_source = None
+                    candidate_count = None
+                    selection_rule = None
                 if (
                     isinstance(schema_id, str)
                     and isinstance(selected_source, str)
@@ -5241,7 +5300,7 @@ class ConsistShell(cmd.Cmd):
             print(code)
         except KeyError:
             console.print("[red]Captured schema not found for this artifact.[/red]")
-            resolved_artifact_id = getattr(artifact, "id", None)
+            resolved_artifact_id = artifact.id if artifact is not None else None
             if resolved_artifact_id:
                 console.print(
                     "[yellow]Try `consist schema capture-file --artifact-id "
@@ -5255,8 +5314,7 @@ class ConsistShell(cmd.Cmd):
     def do_summary(self, arg: str) -> None:
         """Display database summary. Usage: summary"""
         try:
-            with _tracker_session(self.tracker) as session:
-                summary_data = queries.get_summary(session)
+            summary_data = queries.get_summary(self.tracker)
             _render_summary(summary_data)
         except Exception as exc:
             _print_cli_error(str(exc))
@@ -5523,8 +5581,10 @@ def shell(
         resolved_db_path,
         run_dir=run_dir,
         mounts=mount_overrides or None,
+        read_only=True,
+        auto_close=False,
     )
-    resolved_db_path = getattr(tracker, "db_path", None)
+    resolved_db_path = tracker.db_path
     if not isinstance(resolved_db_path, str) or not resolved_db_path:
         resolved_db_path = find_db_path(db_path)
     console.print(f"[green]✓ Loaded database: {resolved_db_path}[/green]")
@@ -5533,13 +5593,17 @@ def shell(
             f"{name}={path}" for name, path in mount_overrides.items()
         )
         console.print(f"[dim]Using mount override(s): {mounts_text}[/dim]")
-    ConsistShell(
+    shell_instance = ConsistShell(
         tracker,
         trust_db=trust_db,
         db_path=resolved_db_path,
         run_dir=run_dir,
         mount_overrides=mount_overrides,
-    ).cmdloop()
+    )
+    try:
+        shell_instance.cmdloop()
+    finally:
+        shell_instance.tracker.close()
 
 
 def _render_dry_run_plan(plan: Dict[str, Any]) -> None:

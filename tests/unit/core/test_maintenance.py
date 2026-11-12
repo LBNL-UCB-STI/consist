@@ -9,7 +9,6 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
-from sqlmodel import select
 
 from consist.core.maintenance import DatabaseMaintenance
 from consist.core.persistence import DatabaseManager
@@ -27,7 +26,7 @@ def maintenance(tmp_path: Path) -> Iterator[DatabaseMaintenance]:
     try:
         yield manager
     finally:
-        db.engine.dispose()
+        db.close()
 
 
 def _run(**kwargs: Any) -> Run:
@@ -36,20 +35,62 @@ def _run(**kwargs: Any) -> Run:
     return Run(**kwargs)
 
 
+def _seed_db(
+    db: DatabaseManager,
+    *,
+    runs: list[Run] | None = None,
+    artifacts: list[Artifact] | None = None,
+    links: list[RunArtifactLink] | None = None,
+    run_kv: list[RunConfigKV] | None = None,
+    artifact_kv: list[ArtifactKV] | None = None,
+    schemas: list[ArtifactSchema] | None = None,
+    observations: list[ArtifactSchemaObservation] | None = None,
+) -> None:
+    for r in runs or []:
+        db.sync_run(r)
+    art_by_id: dict[uuid.UUID, Artifact] = {}
+    for a in artifacts or []:
+        db.upsert_artifact(a)
+        art_by_id[a.id] = a
+    for lnk in links or []:
+        art = art_by_id.get(lnk.artifact_id) or db.get_artifact(lnk.artifact_id)
+        if art is not None:
+            db.sync_artifact(art, run_id=lnk.run_id, direction=lnk.direction)
+        else:
+            db.execute(
+                "INSERT INTO run_artifact_link (run_id, artifact_id, direction, role, is_implicit) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [
+                    lnk.run_id,
+                    lnk.artifact_id,
+                    lnk.direction,
+                    lnk.role or "",
+                    bool(lnk.is_implicit),
+                ],
+            )
+    if run_kv:
+        db.insert_run_config_kv_bulk(run_kv)
+    if artifact_kv:
+        db.insert_artifact_kv_bulk(artifact_kv)
+    for s in schemas or []:
+        db.upsert_artifact_schema(s, [])
+    for obs in observations or []:
+        db.insert_artifact_schema_observation(obs)
+
+
 def test_expand_run_ids_recursive_and_cycle_safe(
     maintenance: DatabaseMaintenance,
 ) -> None:
-    with maintenance.db.session_scope() as session:
-        session.add_all(
-            [
-                _run(id="root", model_name="demo"),
-                _run(id="child_a", model_name="demo", parent_run_id="root"),
-                _run(id="child_b", model_name="demo", parent_run_id="child_a"),
-                _run(id="cycle_1", model_name="demo", parent_run_id="cycle_2"),
-                _run(id="cycle_2", model_name="demo", parent_run_id="cycle_1"),
-            ]
-        )
-        session.commit()
+    _seed_db(
+        maintenance.db,
+        runs=[
+            _run(id="root", model_name="demo"),
+            _run(id="child_a", model_name="demo", parent_run_id="root"),
+            _run(id="child_b", model_name="demo", parent_run_id="child_a"),
+            _run(id="cycle_1", model_name="demo", parent_run_id="cycle_2"),
+            _run(id="cycle_2", model_name="demo", parent_run_id="cycle_1"),
+        ],
+    )
 
     expanded = maintenance._expand_run_ids(["root", "cycle_1"])
 
@@ -68,88 +109,77 @@ def test_find_orphaned_artifacts_linked_only_to_selected_runs(
     shared = uuid.uuid4()
     retained = uuid.uuid4()
 
-    with maintenance.db.session_scope() as session:
-        session.add_all(
-            [
-                _run(id="purge_one", model_name="demo"),
-                _run(id="purge_two", model_name="demo"),
-                _run(id="keep", model_name="demo"),
-            ]
-        )
-        session.add_all(
-            [
-                Artifact(
-                    id=orphan_single,
-                    key="orphan_single",
-                    container_uri="outputs://orphan_single.parquet",
-                    driver="parquet",
-                ),
-                Artifact(
-                    id=orphan_multi,
-                    key="orphan_multi",
-                    container_uri="outputs://orphan_multi.parquet",
-                    driver="parquet",
-                ),
-                Artifact(
-                    id=shared,
-                    key="shared",
-                    container_uri="outputs://shared.parquet",
-                    driver="parquet",
-                ),
-                Artifact(
-                    id=retained,
-                    key="retained",
-                    container_uri="outputs://retained.parquet",
-                    driver="parquet",
-                ),
-            ]
-        )
-        session.add_all(
-            [
-                RunArtifactLink(
-                    run_id="purge_one", artifact_id=orphan_single, direction="output"
-                ),
-                RunArtifactLink(
-                    run_id="purge_one", artifact_id=orphan_multi, direction="output"
-                ),
-                RunArtifactLink(
-                    run_id="purge_two", artifact_id=orphan_multi, direction="input"
-                ),
-                RunArtifactLink(
-                    run_id="purge_one", artifact_id=shared, direction="output"
-                ),
-                RunArtifactLink(run_id="keep", artifact_id=shared, direction="input"),
-                RunArtifactLink(
-                    run_id="keep", artifact_id=retained, direction="output"
-                ),
-            ]
-        )
-        session.commit()
+    _seed_db(
+        maintenance.db,
+        runs=[
+            _run(id="purge_one", model_name="demo"),
+            _run(id="purge_two", model_name="demo"),
+            _run(id="keep", model_name="demo"),
+        ],
+        artifacts=[
+            Artifact(
+                id=orphan_single,
+                key="orphan_single",
+                container_uri="outputs://orphan_single.parquet",
+                driver="parquet",
+            ),
+            Artifact(
+                id=orphan_multi,
+                key="orphan_multi",
+                container_uri="outputs://orphan_multi.parquet",
+                driver="parquet",
+            ),
+            Artifact(
+                id=shared,
+                key="shared",
+                container_uri="outputs://shared.parquet",
+                driver="parquet",
+            ),
+            Artifact(
+                id=retained,
+                key="retained",
+                container_uri="outputs://retained.parquet",
+                driver="parquet",
+            ),
+        ],
+        links=[
+            RunArtifactLink(
+                run_id="purge_one", artifact_id=orphan_single, direction="output"
+            ),
+            RunArtifactLink(
+                run_id="purge_one", artifact_id=orphan_multi, direction="output"
+            ),
+            RunArtifactLink(
+                run_id="purge_two", artifact_id=orphan_multi, direction="input"
+            ),
+            RunArtifactLink(run_id="purge_one", artifact_id=shared, direction="output"),
+            RunArtifactLink(run_id="keep", artifact_id=shared, direction="input"),
+            RunArtifactLink(run_id="keep", artifact_id=retained, direction="output"),
+        ],
+    )
 
     orphaned = maintenance._find_orphaned_artifacts(["purge_one", "purge_two"])
     assert set(orphaned) == {orphan_single, orphan_multi}
 
 
 def test_discover_global_tables_from_schema(maintenance: DatabaseMaintenance) -> None:
-    with maintenance.db.engine.begin() as conn:
-        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
-        conn.exec_driver_sql("CREATE TABLE global_tables.z_rows (id INTEGER)")
-        conn.exec_driver_sql("CREATE TABLE global_tables.a_rows (id INTEGER)")
-        conn.exec_driver_sql("CREATE TABLE local_rows (id INTEGER)")
+    with maintenance.db.transaction() as cur:
+        cur.execute("CREATE SCHEMA IF NOT EXISTS global_tables")
+        cur.execute("CREATE TABLE global_tables.z_rows (id INTEGER)")
+        cur.execute("CREATE TABLE global_tables.a_rows (id INTEGER)")
+        cur.execute("CREATE TABLE local_rows (id INTEGER)")
 
     assert maintenance._discover_global_tables() == ["a_rows", "z_rows"]
 
 
 def test_classify_global_table_modes(maintenance: DatabaseMaintenance) -> None:
-    with maintenance.db.engine.begin() as conn:
-        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
-        conn.exec_driver_sql(
+    with maintenance.db.transaction() as cur:
+        cur.execute("CREATE SCHEMA IF NOT EXISTS global_tables")
+        cur.execute(
             "CREATE TABLE global_tables.run_scoped_table (consist_run_id VARCHAR)"
         )
-        conn.exec_driver_sql(
-            "CREATE TABLE global_tables.run_link_table (run_id VARCHAR)"
-        )
-        conn.exec_driver_sql(
+        cur.execute("CREATE TABLE global_tables.run_link_table (run_id VARCHAR)")
+        cur.execute(
             "CREATE TABLE global_tables.unscoped_cache_table (content_hash VARCHAR)"
         )
 
@@ -167,9 +197,9 @@ def test_classify_global_table_modes(maintenance: DatabaseMaintenance) -> None:
 def test_resolve_global_table_filter_sql_run_scoped(
     maintenance: DatabaseMaintenance, table_alias: str, expected_column: str
 ) -> None:
-    with maintenance.db.engine.begin() as conn:
-        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
-        conn.exec_driver_sql(
+    with maintenance.db.transaction() as cur:
+        cur.execute("CREATE SCHEMA IF NOT EXISTS global_tables")
+        cur.execute(
             "CREATE TABLE global_tables.scoped_filter_table (consist_run_id VARCHAR)"
         )
 
@@ -186,11 +216,9 @@ def test_resolve_global_table_filter_sql_run_scoped(
 def test_resolve_global_table_filter_sql_run_link(
     maintenance: DatabaseMaintenance, table_alias: str, expected_column: str
 ) -> None:
-    with maintenance.db.engine.begin() as conn:
-        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
-        conn.exec_driver_sql(
-            "CREATE TABLE global_tables.link_filter_table (run_id VARCHAR)"
-        )
+    with maintenance.db.transaction() as cur:
+        cur.execute("CREATE SCHEMA IF NOT EXISTS global_tables")
+        cur.execute("CREATE TABLE global_tables.link_filter_table (run_id VARCHAR)")
 
     sql = maintenance._resolve_global_table_filter_sql(
         "link_filter_table", ["run_1", "run_2"], table_alias=table_alias
@@ -202,9 +230,9 @@ def test_resolve_global_table_filter_sql_run_link(
 def test_resolve_global_table_filter_sql_unscoped_cache_returns_none(
     maintenance: DatabaseMaintenance,
 ) -> None:
-    with maintenance.db.engine.begin() as conn:
-        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
-        conn.exec_driver_sql(
+    with maintenance.db.transaction() as cur:
+        cur.execute("CREATE SCHEMA IF NOT EXISTS global_tables")
+        cur.execute(
             "CREATE TABLE global_tables.cache_filter_table (content_hash VARCHAR)"
         )
 
@@ -227,9 +255,9 @@ def test_classify_global_table_rejects_invalid_identifiers(
 def test_resolve_global_table_filter_sql_rejects_invalid_alias(
     maintenance: DatabaseMaintenance, bad_alias: str
 ) -> None:
-    with maintenance.db.engine.begin() as conn:
-        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
-        conn.exec_driver_sql(
+    with maintenance.db.transaction() as cur:
+        cur.execute("CREATE SCHEMA IF NOT EXISTS global_tables")
+        cur.execute(
             "CREATE TABLE global_tables.alias_validation_table (consist_run_id VARCHAR)"
         )
 
@@ -244,11 +272,9 @@ def test_resolve_global_table_filter_sql_empty_run_ids_is_non_destructive(
     maintenance: DatabaseMaintenance, table_name: str
 ) -> None:
     column = "consist_run_id" if "scoped" in table_name else "run_id"
-    with maintenance.db.engine.begin() as conn:
-        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
-        conn.exec_driver_sql(
-            f"CREATE TABLE global_tables.{table_name} ({column} VARCHAR)"
-        )
+    with maintenance.db.transaction() as cur:
+        cur.execute("CREATE SCHEMA IF NOT EXISTS global_tables")
+        cur.execute(f"CREATE TABLE global_tables.{table_name} ({column} VARCHAR)")
 
     sql = maintenance._resolve_global_table_filter_sql(table_name, [])
 
@@ -258,10 +284,10 @@ def test_resolve_global_table_filter_sql_empty_run_ids_is_non_destructive(
 def test_build_intersection_column_list_returns_shared_columns_in_target_order(
     maintenance: DatabaseMaintenance,
 ) -> None:
-    with maintenance.db.engine.begin() as conn:
-        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS source_schema")
-        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS target_schema")
-        conn.exec_driver_sql(
+    with maintenance.db.transaction() as cur:
+        cur.execute("CREATE SCHEMA IF NOT EXISTS source_schema")
+        cur.execute("CREATE SCHEMA IF NOT EXISTS target_schema")
+        cur.execute(
             """
             CREATE TABLE source_schema.shared_table (
                 source_only INTEGER,
@@ -271,7 +297,7 @@ def test_build_intersection_column_list_returns_shared_columns_in_target_order(
             )
             """
         )
-        conn.exec_driver_sql(
+        cur.execute(
             """
             CREATE TABLE target_schema.shared_table (
                 target_only INTEGER,
@@ -294,10 +320,10 @@ def test_build_intersection_column_list_returns_shared_columns_in_target_order(
 def test_build_intersection_column_list_excludes_source_only_and_target_only_columns(
     maintenance: DatabaseMaintenance,
 ) -> None:
-    with maintenance.db.engine.begin() as conn:
-        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS source_drift")
-        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS target_drift")
-        conn.exec_driver_sql(
+    with maintenance.db.transaction() as cur:
+        cur.execute("CREATE SCHEMA IF NOT EXISTS source_drift")
+        cur.execute("CREATE SCHEMA IF NOT EXISTS target_drift")
+        cur.execute(
             """
             CREATE TABLE source_drift.drift_table (
                 id INTEGER,
@@ -307,7 +333,7 @@ def test_build_intersection_column_list_excludes_source_only_and_target_only_col
             )
             """
         )
-        conn.exec_driver_sql(
+        cur.execute(
             """
             CREATE TABLE target_drift.drift_table (
                 target_only_a INTEGER,
@@ -330,9 +356,9 @@ def test_build_intersection_column_list_excludes_source_only_and_target_only_col
 def test_build_intersection_column_list_same_source_and_target_schema(
     maintenance: DatabaseMaintenance,
 ) -> None:
-    with maintenance.db.engine.begin() as conn:
-        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS same_schema")
-        conn.exec_driver_sql(
+    with maintenance.db.transaction() as cur:
+        cur.execute("CREATE SCHEMA IF NOT EXISTS same_schema")
+        cur.execute(
             """
             CREATE TABLE same_schema.same_table (
                 first_col INTEGER,
@@ -359,15 +385,15 @@ def test_build_intersection_column_list_missing_tables_returns_empty_list(
     maintenance: DatabaseMaintenance, create_source: bool, create_target: bool
 ) -> None:
     table_name = f"missing_table_{int(create_source)}_{int(create_target)}"
-    with maintenance.db.engine.begin() as conn:
-        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS source_missing")
-        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS target_missing")
+    with maintenance.db.transaction() as cur:
+        cur.execute("CREATE SCHEMA IF NOT EXISTS source_missing")
+        cur.execute("CREATE SCHEMA IF NOT EXISTS target_missing")
         if create_source:
-            conn.exec_driver_sql(
+            cur.execute(
                 f"CREATE TABLE source_missing.{table_name} (shared_col INTEGER)"
             )
         if create_target:
-            conn.exec_driver_sql(
+            cur.execute(
                 f"CREATE TABLE target_missing.{table_name} (shared_col INTEGER)"
             )
 
@@ -410,49 +436,50 @@ def test_inspect_reports_expected_counts_and_global_sizes(
     linked_artifact_id = uuid.uuid4()
     orphaned_artifact_id = uuid.uuid4()
 
-    with maintenance.db.session_scope() as session:
-        session.add_all(
-            [
-                _run(
-                    id="run_completed",
-                    model_name="demo",
-                    status="completed",
-                    ended_at=now,
-                ),
-                _run(
-                    id="run_running_zombie",
-                    model_name="demo",
-                    status="running",
-                    ended_at=now,
-                ),
-                _run(id="run_failed", model_name="demo", status="failed", ended_at=now),
-                Artifact(
-                    id=linked_artifact_id,
-                    key="linked_artifact",
-                    container_uri="outputs://linked.parquet",
-                    driver="parquet",
-                ),
-                Artifact(
-                    id=orphaned_artifact_id,
-                    key="orphaned_artifact",
-                    container_uri="outputs://orphaned.parquet",
-                    driver="parquet",
-                ),
-                RunArtifactLink(
-                    run_id="run_completed",
-                    artifact_id=linked_artifact_id,
-                    direction="output",
-                ),
-            ]
-        )
-        session.commit()
+    _seed_db(
+        maintenance.db,
+        runs=[
+            _run(
+                id="run_completed",
+                model_name="demo",
+                status="completed",
+                ended_at=now,
+            ),
+            _run(
+                id="run_running_zombie",
+                model_name="demo",
+                status="running",
+                ended_at=now,
+            ),
+            _run(id="run_failed", model_name="demo", status="failed", ended_at=now),
+        ],
+        artifacts=[
+            Artifact(
+                id=linked_artifact_id,
+                key="linked_artifact",
+                container_uri="outputs://linked.parquet",
+                driver="parquet",
+            ),
+            Artifact(
+                id=orphaned_artifact_id,
+                key="orphaned_artifact",
+                container_uri="outputs://orphaned.parquet",
+                driver="parquet",
+            ),
+        ],
+        links=[
+            RunArtifactLink(
+                run_id="run_completed",
+                artifact_id=linked_artifact_id,
+                direction="output",
+            ),
+        ],
+    )
 
-    with maintenance.db.engine.begin() as conn:
-        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
-        conn.exec_driver_sql(
-            "CREATE TABLE global_tables.sample_global (consist_run_id VARCHAR)"
-        )
-        conn.exec_driver_sql(
+    with maintenance.db.transaction() as cur:
+        cur.execute("CREATE SCHEMA IF NOT EXISTS global_tables")
+        cur.execute("CREATE TABLE global_tables.sample_global (consist_run_id VARCHAR)")
+        cur.execute(
             """
             INSERT INTO global_tables.sample_global (consist_run_id)
             VALUES ('run_completed'), ('run_running_zombie'), ('run_failed')
@@ -475,14 +502,13 @@ def test_inspect_reports_expected_counts_and_global_sizes(
 def test_inspect_json_db_parity_true_with_snapshot_files(
     maintenance: DatabaseMaintenance,
 ) -> None:
-    with maintenance.db.session_scope() as session:
-        session.add_all(
-            [
-                _run(id="run_a", model_name="demo"),
-                _run(id="run_b", model_name="demo"),
-            ]
-        )
-        session.commit()
+    _seed_db(
+        maintenance.db,
+        runs=[
+            _run(id="run_a", model_name="demo"),
+            _run(id="run_b", model_name="demo"),
+        ],
+    )
 
     snapshot_dir = maintenance.run_dir / "consist_runs"
     snapshot_dir.mkdir(parents=True, exist_ok=True)
@@ -504,9 +530,7 @@ def test_inspect_json_db_parity_true_with_snapshot_files(
 def test_inspect_json_db_parity_false_with_mismatched_snapshot_ids(
     maintenance: DatabaseMaintenance,
 ) -> None:
-    with maintenance.db.session_scope() as session:
-        session.add(_run(id="run_only_in_db", model_name="demo"))
-        session.commit()
+    _seed_db(maintenance.db, runs=[_run(id="run_only_in_db", model_name="demo")])
 
     snapshot_dir = maintenance.run_dir / "consist_runs"
     snapshot_dir.mkdir(parents=True, exist_ok=True)
@@ -530,54 +554,53 @@ def test_doctor_reports_invariant_violations(maintenance: DatabaseMaintenance) -
     missing_producer_artifact = uuid.uuid4()
     produced_artifact = uuid.uuid4()
 
-    with maintenance.db.session_scope() as session:
-        session.add_all(
-            [
-                _run(
-                    id="zombie_run", model_name="demo", status="running", ended_at=now
-                ),
-                _run(
-                    id="completed_missing_end",
-                    model_name="demo",
-                    status="completed",
-                    ended_at=None,
-                ),
-                _run(
-                    id="failed_missing_end",
-                    model_name="demo",
-                    status="failed",
-                    ended_at=None,
-                ),
-                _run(
-                    id="valid_parent",
-                    model_name="demo",
-                    status="completed",
-                    ended_at=now,
-                ),
-                _run(
-                    id="dangling_child",
-                    model_name="demo",
-                    status="completed",
-                    parent_run_id="missing_parent",
-                    ended_at=now,
-                ),
-                Artifact(
-                    id=missing_producer_artifact,
-                    key="missing_producer",
-                    container_uri="outputs://missing_producer.parquet",
-                    driver="parquet",
-                    run_id="missing_run",
-                ),
-                Artifact(
-                    id=produced_artifact,
-                    key="produced",
-                    container_uri="outputs://produced.parquet",
-                    driver="parquet",
-                    run_id="valid_parent",
-                ),
-            ]
-        )
-        session.commit()
+    _seed_db(
+        maintenance.db,
+        runs=[
+            _run(id="zombie_run", model_name="demo", status="running", ended_at=now),
+            _run(
+                id="completed_missing_end",
+                model_name="demo",
+                status="completed",
+                ended_at=None,
+            ),
+            _run(
+                id="failed_missing_end",
+                model_name="demo",
+                status="failed",
+                ended_at=None,
+            ),
+            _run(
+                id="valid_parent",
+                model_name="demo",
+                status="completed",
+                ended_at=now,
+            ),
+            _run(
+                id="dangling_child",
+                model_name="demo",
+                status="completed",
+                parent_run_id="missing_parent",
+                ended_at=now,
+            ),
+        ],
+        artifacts=[
+            Artifact(
+                id=missing_producer_artifact,
+                key="missing_producer",
+                container_uri="outputs://missing_producer.parquet",
+                driver="parquet",
+                run_id="missing_run",
+            ),
+            Artifact(
+                id=produced_artifact,
+                key="produced",
+                container_uri="outputs://produced.parquet",
+                driver="parquet",
+                run_id="valid_parent",
+            ),
+        ],
+    )
 
     report = maintenance.doctor()
 
@@ -658,28 +681,24 @@ def test_snapshot_writes_audit_log_entry(maintenance: DatabaseMaintenance) -> No
 def test_global_table_row_counts_full_and_filtered_behavior(
     maintenance: DatabaseMaintenance,
 ) -> None:
-    with maintenance.db.engine.begin() as conn:
-        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
-        conn.exec_driver_sql(
-            "CREATE TABLE global_tables.scoped_counts (consist_run_id VARCHAR)"
-        )
-        conn.exec_driver_sql("CREATE TABLE global_tables.link_counts (run_id VARCHAR)")
-        conn.exec_driver_sql(
-            "CREATE TABLE global_tables.cache_counts (content_hash VARCHAR)"
-        )
-        conn.exec_driver_sql(
+    with maintenance.db.transaction() as cur:
+        cur.execute("CREATE SCHEMA IF NOT EXISTS global_tables")
+        cur.execute("CREATE TABLE global_tables.scoped_counts (consist_run_id VARCHAR)")
+        cur.execute("CREATE TABLE global_tables.link_counts (run_id VARCHAR)")
+        cur.execute("CREATE TABLE global_tables.cache_counts (content_hash VARCHAR)")
+        cur.execute(
             """
             INSERT INTO global_tables.scoped_counts (consist_run_id)
             VALUES ('run_1'), ('run_1'), ('run_2')
             """
         )
-        conn.exec_driver_sql(
+        cur.execute(
             """
             INSERT INTO global_tables.link_counts (run_id)
             VALUES ('run_1'), ('run_3')
             """
         )
-        conn.exec_driver_sql(
+        cur.execute(
             """
             INSERT INTO global_tables.cache_counts (content_hash)
             VALUES ('hash_a'), ('hash_b')
@@ -719,43 +738,38 @@ def test_plan_purge_includes_children_and_global_table_candidates(
     root_snapshot.write_text("{}", encoding="utf-8")
     child_snapshot.write_text("{}", encoding="utf-8")
 
-    with maintenance.db.session_scope() as session:
-        session.add_all(
-            [
-                _run(id="root", model_name="demo"),
-                _run(
-                    id="child",
-                    model_name="demo",
-                    parent_run_id="root",
-                    meta={"_physical_run_dir": str(child_run_dir)},
-                ),
-                _run(id="keep", model_name="demo"),
-            ]
-        )
-        session.commit()
+    _seed_db(
+        maintenance.db,
+        runs=[
+            _run(id="root", model_name="demo"),
+            _run(
+                id="child",
+                model_name="demo",
+                parent_run_id="root",
+                meta={"_physical_run_dir": str(child_run_dir)},
+            ),
+            _run(id="keep", model_name="demo"),
+        ],
+    )
 
-    with maintenance.db.engine.begin() as conn:
-        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
-        conn.exec_driver_sql(
-            "CREATE TABLE global_tables.scoped_table (consist_run_id VARCHAR)"
-        )
-        conn.exec_driver_sql("CREATE TABLE global_tables.link_table (run_id VARCHAR)")
-        conn.exec_driver_sql(
-            "CREATE TABLE global_tables.cache_table (content_hash VARCHAR)"
-        )
-        conn.exec_driver_sql(
+    with maintenance.db.transaction() as cur:
+        cur.execute("CREATE SCHEMA IF NOT EXISTS global_tables")
+        cur.execute("CREATE TABLE global_tables.scoped_table (consist_run_id VARCHAR)")
+        cur.execute("CREATE TABLE global_tables.link_table (run_id VARCHAR)")
+        cur.execute("CREATE TABLE global_tables.cache_table (content_hash VARCHAR)")
+        cur.execute(
             """
             INSERT INTO global_tables.scoped_table (consist_run_id)
             VALUES ('root'), ('child'), ('keep')
             """
         )
-        conn.exec_driver_sql(
+        cur.execute(
             """
             INSERT INTO global_tables.link_table (run_id)
             VALUES ('child'), ('keep')
             """
         )
-        conn.exec_driver_sql(
+        cur.execute(
             """
             INSERT INTO global_tables.cache_table (content_hash)
             VALUES ('hash_a'), ('hash_b')
@@ -767,7 +781,7 @@ def test_plan_purge_includes_children_and_global_table_candidates(
     assert plan.run_ids == ["root", "child"]
     assert plan.child_run_ids == ["child"]
     assert plan.orphaned_artifact_ids == []
-    assert plan.json_files == [root_snapshot]
+    assert [p.resolve() for p in plan.json_files] == [root_snapshot.resolve()]
     assert plan.disk_files == []
     assert plan.unsafe_json_files == [child_snapshot.resolve()]
     assert plan.unsafe_disk_files == []
@@ -788,15 +802,16 @@ def test_resolve_artifact_disk_paths_workspace_relative(
     artifact_path.parent.mkdir(parents=True, exist_ok=True)
     artifact_path.write_text("artifact", encoding="utf-8")
 
-    with maintenance.db.session_scope() as session:
-        session.add(
+    _seed_db(
+        maintenance.db,
+        runs=[
             _run(
                 id="workspace_run",
                 model_name="demo",
                 meta={"_physical_run_dir": str(run_workspace)},
             )
-        )
-        session.add(
+        ],
+        artifacts=[
             Artifact(
                 id=artifact_id,
                 key="workspace_artifact",
@@ -804,8 +819,8 @@ def test_resolve_artifact_disk_paths_workspace_relative(
                 driver="txt",
                 run_id="workspace_run",
             )
-        )
-        session.commit()
+        ],
+    )
 
     resolved_paths = maintenance._resolve_artifact_disk_paths([artifact_id])
 
@@ -826,34 +841,33 @@ def test_resolve_artifact_disk_paths_mounted_uri_from_run_and_artifact_metadata(
     run_mount_file.write_text("run", encoding="utf-8")
     artifact_mount_file.write_text("artifact", encoding="utf-8")
 
-    with maintenance.db.session_scope() as session:
-        session.add(
+    _seed_db(
+        maintenance.db,
+        runs=[
             _run(
                 id="mount_run",
                 model_name="demo",
                 meta={"mounts": {"inputs": str(run_mount_root)}},
             )
-        )
-        session.add_all(
-            [
-                Artifact(
-                    id=run_mount_artifact_id,
-                    key="run_mount_artifact",
-                    container_uri="inputs://dataset/run_mount.csv",
-                    driver="csv",
-                    run_id="mount_run",
-                ),
-                Artifact(
-                    id=artifact_mount_artifact_id,
-                    key="artifact_mount_artifact",
-                    container_uri="inputs://dataset/artifact_mount.csv",
-                    driver="csv",
-                    run_id="mount_run",
-                    meta={"mount_root": str(artifact_mount_root)},
-                ),
-            ]
-        )
-        session.commit()
+        ],
+        artifacts=[
+            Artifact(
+                id=run_mount_artifact_id,
+                key="run_mount_artifact",
+                container_uri="inputs://dataset/run_mount.csv",
+                driver="csv",
+                run_id="mount_run",
+            ),
+            Artifact(
+                id=artifact_mount_artifact_id,
+                key="artifact_mount_artifact",
+                container_uri="inputs://dataset/artifact_mount.csv",
+                driver="csv",
+                run_id="mount_run",
+                meta={"mount_root": str(artifact_mount_root)},
+            ),
+        ],
+    )
 
     resolved_paths = maintenance._resolve_artifact_disk_paths(
         [run_mount_artifact_id, artifact_mount_artifact_id]
@@ -871,9 +885,10 @@ def test_purge_dry_run_makes_no_db_changes(maintenance: DatabaseMaintenance) -> 
     snapshot_path.parent.mkdir(parents=True, exist_ok=True)
     snapshot_path.write_text("{}", encoding="utf-8")
 
-    with maintenance.db.session_scope() as session:
-        session.add(_run(id="dry_run_target", model_name="demo"))
-        session.add(
+    _seed_db(
+        maintenance.db,
+        runs=[_run(id="dry_run_target", model_name="demo")],
+        artifacts=[
             Artifact(
                 id=artifact_id,
                 key="dry_artifact",
@@ -881,15 +896,15 @@ def test_purge_dry_run_makes_no_db_changes(maintenance: DatabaseMaintenance) -> 
                 driver="parquet",
                 run_id="dry_run_target",
             )
-        )
-        session.add(
+        ],
+        links=[
             RunArtifactLink(
                 run_id="dry_run_target",
                 artifact_id=artifact_id,
                 direction="output",
             )
-        )
-        session.commit()
+        ],
+    )
 
     result = maintenance.purge(
         "dry_run_target",
@@ -902,11 +917,10 @@ def test_purge_dry_run_makes_no_db_changes(maintenance: DatabaseMaintenance) -> 
     assert result.executed is False
     assert result.plan.run_ids == ["dry_run_target"]
     assert snapshot_path.exists()
-    with maintenance.db.session_scope() as session:
-        assert session.get(Run, "dry_run_target") is not None
-        assert session.get(Artifact, artifact_id) is not None
-        links = session.exec(select(RunArtifactLink)).all()
-        assert len(links) == 1
+    assert maintenance.db.get_run("dry_run_target") is not None
+    assert maintenance.db.get_artifact(artifact_id) is not None
+    links = maintenance.db.fetchall("SELECT run_id, artifact_id FROM run_artifact_link")
+    assert len(links) == 1
 
 
 def test_purge_delete_files_removes_files_and_directories(
@@ -923,43 +937,44 @@ def test_purge_delete_files_removes_files_and_directories(
     file_path.write_text("file", encoding="utf-8")
     nested_path.write_text("nested", encoding="utf-8")
 
-    with maintenance.db.session_scope() as session:
-        session.add(
+    _seed_db(
+        maintenance.db,
+        runs=[
             _run(
                 id="purge_delete_files_run",
                 model_name="demo",
                 meta={"_physical_run_dir": str(run_workspace)},
             )
-        )
-        session.add_all(
-            [
-                Artifact(
-                    id=file_artifact_id,
-                    key="delete_file_artifact",
-                    container_uri="./outputs/delete_me.txt",
-                    driver="txt",
-                    run_id="purge_delete_files_run",
-                ),
-                Artifact(
-                    id=dir_artifact_id,
-                    key="delete_dir_artifact",
-                    container_uri="./outputs/delete_dir",
-                    driver="other",
-                    run_id="purge_delete_files_run",
-                ),
-                RunArtifactLink(
-                    run_id="purge_delete_files_run",
-                    artifact_id=file_artifact_id,
-                    direction="output",
-                ),
-                RunArtifactLink(
-                    run_id="purge_delete_files_run",
-                    artifact_id=dir_artifact_id,
-                    direction="output",
-                ),
-            ]
-        )
-        session.commit()
+        ],
+        artifacts=[
+            Artifact(
+                id=file_artifact_id,
+                key="delete_file_artifact",
+                container_uri="./outputs/delete_me.txt",
+                driver="txt",
+                run_id="purge_delete_files_run",
+            ),
+            Artifact(
+                id=dir_artifact_id,
+                key="delete_dir_artifact",
+                container_uri="./outputs/delete_dir",
+                driver="other",
+                run_id="purge_delete_files_run",
+            ),
+        ],
+        links=[
+            RunArtifactLink(
+                run_id="purge_delete_files_run",
+                artifact_id=file_artifact_id,
+                direction="output",
+            ),
+            RunArtifactLink(
+                run_id="purge_delete_files_run",
+                artifact_id=dir_artifact_id,
+                direction="output",
+            ),
+        ],
+    )
 
     result = maintenance.purge(
         "purge_delete_files_run",
@@ -986,9 +1001,10 @@ def test_purge_delete_files_rejects_file_uri_outside_run_dir(
     outside_file = tmp_path / "outside.txt"
     outside_file.write_text("outside", encoding="utf-8")
 
-    with maintenance.db.session_scope() as session:
-        session.add(_run(id="unsafe_file_uri_run", model_name="demo"))
-        session.add(
+    _seed_db(
+        maintenance.db,
+        runs=[_run(id="unsafe_file_uri_run", model_name="demo")],
+        artifacts=[
             Artifact(
                 id=artifact_id,
                 key="unsafe_file_uri_artifact",
@@ -996,15 +1012,15 @@ def test_purge_delete_files_rejects_file_uri_outside_run_dir(
                 driver="txt",
                 run_id="unsafe_file_uri_run",
             )
-        )
-        session.add(
+        ],
+        links=[
             RunArtifactLink(
                 run_id="unsafe_file_uri_run",
                 artifact_id=artifact_id,
                 direction="output",
             )
-        )
-        session.commit()
+        ],
+    )
 
     plan = maintenance.plan_purge("unsafe_file_uri_run", include_children=False)
     assert plan.disk_files == []
@@ -1029,9 +1045,10 @@ def test_purge_delete_files_rejects_absolute_path_outside_run_dir(
     outside_file = tmp_path / "absolute-outside.txt"
     outside_file.write_text("outside", encoding="utf-8")
 
-    with maintenance.db.session_scope() as session:
-        session.add(_run(id="unsafe_absolute_run", model_name="demo"))
-        session.add(
+    _seed_db(
+        maintenance.db,
+        runs=[_run(id="unsafe_absolute_run", model_name="demo")],
+        artifacts=[
             Artifact(
                 id=artifact_id,
                 key="unsafe_absolute_artifact",
@@ -1039,15 +1056,15 @@ def test_purge_delete_files_rejects_absolute_path_outside_run_dir(
                 driver="txt",
                 run_id="unsafe_absolute_run",
             )
-        )
-        session.add(
+        ],
+        links=[
             RunArtifactLink(
                 run_id="unsafe_absolute_run",
                 artifact_id=artifact_id,
                 direction="output",
             )
-        )
-        session.commit()
+        ],
+    )
 
     plan = maintenance.plan_purge("unsafe_absolute_run", include_children=False)
     assert plan.disk_files == []
@@ -1073,15 +1090,16 @@ def test_purge_delete_files_rejects_snapshot_outside_run_dir(
     snapshot_path.parent.mkdir(parents=True, exist_ok=True)
     snapshot_path.write_text("{}", encoding="utf-8")
 
-    with maintenance.db.session_scope() as session:
-        session.add(
+    _seed_db(
+        maintenance.db,
+        runs=[
             _run(
                 id="unsafe_snapshot_run",
                 model_name="demo",
                 meta={"_physical_run_dir": str(outside_workspace)},
             )
-        )
-        session.commit()
+        ],
+    )
 
     plan = maintenance.plan_purge("unsafe_snapshot_run", include_children=False)
     assert plan.json_files == []
@@ -1111,43 +1129,44 @@ def test_purge_delete_files_skip_mode_deletes_safe_targets_and_reports_unsafe(
     safe_file.write_text("safe", encoding="utf-8")
     unsafe_file.write_text("unsafe", encoding="utf-8")
 
-    with maintenance.db.session_scope() as session:
-        session.add(
+    _seed_db(
+        maintenance.db,
+        runs=[
             _run(
                 id="skip_mode_run",
                 model_name="demo",
                 meta={"_physical_run_dir": str(run_workspace)},
             )
-        )
-        session.add_all(
-            [
-                Artifact(
-                    id=safe_artifact_id,
-                    key="safe_artifact",
-                    container_uri="./outputs/safe.txt",
-                    driver="txt",
-                    run_id="skip_mode_run",
-                ),
-                Artifact(
-                    id=unsafe_artifact_id,
-                    key="unsafe_artifact",
-                    container_uri=unsafe_file.resolve().as_uri(),
-                    driver="txt",
-                    run_id="skip_mode_run",
-                ),
-                RunArtifactLink(
-                    run_id="skip_mode_run",
-                    artifact_id=safe_artifact_id,
-                    direction="output",
-                ),
-                RunArtifactLink(
-                    run_id="skip_mode_run",
-                    artifact_id=unsafe_artifact_id,
-                    direction="output",
-                ),
-            ]
-        )
-        session.commit()
+        ],
+        artifacts=[
+            Artifact(
+                id=safe_artifact_id,
+                key="safe_artifact",
+                container_uri="./outputs/safe.txt",
+                driver="txt",
+                run_id="skip_mode_run",
+            ),
+            Artifact(
+                id=unsafe_artifact_id,
+                key="unsafe_artifact",
+                container_uri=unsafe_file.resolve().as_uri(),
+                driver="txt",
+                run_id="skip_mode_run",
+            ),
+        ],
+        links=[
+            RunArtifactLink(
+                run_id="skip_mode_run",
+                artifact_id=safe_artifact_id,
+                direction="output",
+            ),
+            RunArtifactLink(
+                run_id="skip_mode_run",
+                artifact_id=unsafe_artifact_id,
+                direction="output",
+            ),
+        ],
+    )
 
     result = maintenance.purge(
         "skip_mode_run",
@@ -1179,146 +1198,149 @@ def test_purge_executes_core_deletes_and_ingested_skip(
     root_snapshot.write_text("{}", encoding="utf-8")
     child_snapshot.write_text("{}", encoding="utf-8")
 
-    with maintenance.db.session_scope() as session:
-        session.add_all(
-            [
-                _run(id="purge_root", model_name="demo"),
-                _run(id="purge_child", model_name="demo", parent_run_id="purge_root"),
-                _run(id="keep_run", model_name="demo"),
-                Artifact(
-                    id=orphan_root_id,
-                    key="orphan_root",
-                    container_uri="outputs://orphan_root.parquet",
-                    driver="parquet",
-                    run_id="purge_root",
-                ),
-                Artifact(
-                    id=orphan_child_id,
-                    key="orphan_child",
-                    container_uri="outputs://orphan_child.parquet",
-                    driver="parquet",
-                    run_id="purge_child",
-                ),
-                Artifact(
-                    id=shared_id,
-                    key="shared",
-                    container_uri="outputs://shared.parquet",
-                    driver="parquet",
-                    run_id="purge_root",
-                ),
-                Artifact(
-                    id=keep_id,
-                    key="keep",
-                    container_uri="outputs://keep.parquet",
-                    driver="parquet",
-                    run_id="keep_run",
-                ),
-                RunArtifactLink(
-                    run_id="purge_root",
-                    artifact_id=orphan_root_id,
-                    direction="output",
-                ),
-                RunArtifactLink(
-                    run_id="purge_child",
-                    artifact_id=orphan_child_id,
-                    direction="output",
-                ),
-                RunArtifactLink(
-                    run_id="purge_root",
-                    artifact_id=shared_id,
-                    direction="output",
-                ),
-                RunArtifactLink(
-                    run_id="keep_run", artifact_id=shared_id, direction="input"
-                ),
-                RunArtifactLink(
-                    run_id="keep_run", artifact_id=keep_id, direction="output"
-                ),
-                RunConfigKV(
-                    run_id="purge_root",
-                    facet_id="facet_1",
-                    namespace="demo",
-                    key="a",
-                    value_type="str",
-                    value_str="purge",
-                ),
-                RunConfigKV(
-                    run_id="keep_run",
-                    facet_id="facet_1",
-                    namespace="demo",
-                    key="a",
-                    value_type="str",
-                    value_str="keep",
-                ),
-                ArtifactKV(
-                    artifact_id=orphan_root_id,
-                    facet_id="facet_a",
-                    key_path="k",
-                    namespace="demo",
-                    value_type="str",
-                    value_str="orphan_root",
-                ),
-                ArtifactKV(
-                    artifact_id=orphan_child_id,
-                    facet_id="facet_a",
-                    key_path="k",
-                    namespace="demo",
-                    value_type="str",
-                    value_str="orphan_child",
-                ),
-                ArtifactKV(
-                    artifact_id=shared_id,
-                    facet_id="facet_a",
-                    key_path="k",
-                    namespace="demo",
-                    value_type="str",
-                    value_str="shared",
-                ),
-                ArtifactSchema(id="schema_1", summary_json={}),
-                ArtifactSchemaObservation(
-                    artifact_id=orphan_root_id,
-                    schema_id="schema_1",
-                    run_id="purge_root",
-                    source="file",
-                ),
-                ArtifactSchemaObservation(
-                    artifact_id=orphan_child_id,
-                    schema_id="schema_1",
-                    run_id="purge_child",
-                    source="file",
-                ),
-                ArtifactSchemaObservation(
-                    artifact_id=shared_id,
-                    schema_id="schema_1",
-                    run_id="keep_run",
-                    source="file",
-                ),
-            ]
-        )
-        session.commit()
+    _seed_db(
+        maintenance.db,
+        runs=[
+            _run(id="purge_root", model_name="demo"),
+            _run(id="purge_child", model_name="demo", parent_run_id="purge_root"),
+            _run(id="keep_run", model_name="demo"),
+        ],
+        artifacts=[
+            Artifact(
+                id=orphan_root_id,
+                key="orphan_root",
+                container_uri="outputs://orphan_root.parquet",
+                driver="parquet",
+                run_id="purge_root",
+            ),
+            Artifact(
+                id=orphan_child_id,
+                key="orphan_child",
+                container_uri="outputs://orphan_child.parquet",
+                driver="parquet",
+                run_id="purge_child",
+            ),
+            Artifact(
+                id=shared_id,
+                key="shared",
+                container_uri="outputs://shared.parquet",
+                driver="parquet",
+                run_id="purge_root",
+            ),
+            Artifact(
+                id=keep_id,
+                key="keep",
+                container_uri="outputs://keep.parquet",
+                driver="parquet",
+                run_id="keep_run",
+            ),
+        ],
+        links=[
+            RunArtifactLink(
+                run_id="purge_root",
+                artifact_id=orphan_root_id,
+                direction="output",
+            ),
+            RunArtifactLink(
+                run_id="purge_child",
+                artifact_id=orphan_child_id,
+                direction="output",
+            ),
+            RunArtifactLink(
+                run_id="purge_root",
+                artifact_id=shared_id,
+                direction="output",
+            ),
+            RunArtifactLink(
+                run_id="keep_run", artifact_id=shared_id, direction="input"
+            ),
+            RunArtifactLink(run_id="keep_run", artifact_id=keep_id, direction="output"),
+        ],
+        run_kv=[
+            RunConfigKV(
+                run_id="purge_root",
+                facet_id="facet_1",
+                namespace="demo",
+                key="a",
+                value_type="str",
+                value_str="purge",
+            ),
+            RunConfigKV(
+                run_id="keep_run",
+                facet_id="facet_1",
+                namespace="demo",
+                key="a",
+                value_type="str",
+                value_str="keep",
+            ),
+        ],
+        artifact_kv=[
+            ArtifactKV(
+                artifact_id=orphan_root_id,
+                facet_id="facet_a",
+                key_path="k",
+                namespace="demo",
+                value_type="str",
+                value_str="orphan_root",
+            ),
+            ArtifactKV(
+                artifact_id=orphan_child_id,
+                facet_id="facet_a",
+                key_path="k",
+                namespace="demo",
+                value_type="str",
+                value_str="orphan_child",
+            ),
+            ArtifactKV(
+                artifact_id=shared_id,
+                facet_id="facet_a",
+                key_path="k",
+                namespace="demo",
+                value_type="str",
+                value_str="shared",
+            ),
+        ],
+        schemas=[ArtifactSchema(id="schema_1", summary_json={})],
+        observations=[
+            ArtifactSchemaObservation(
+                artifact_id=orphan_root_id,
+                schema_id="schema_1",
+                run_id="purge_root",
+                source="file",
+            ),
+            ArtifactSchemaObservation(
+                artifact_id=orphan_child_id,
+                schema_id="schema_1",
+                run_id="purge_child",
+                source="file",
+            ),
+            ArtifactSchemaObservation(
+                artifact_id=shared_id,
+                schema_id="schema_1",
+                run_id="keep_run",
+                source="file",
+            ),
+        ],
+    )
 
-    with maintenance.db.engine.begin() as conn:
-        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
-        conn.exec_driver_sql(
-            "CREATE TABLE global_tables.scoped_delete (consist_run_id VARCHAR)"
-        )
-        conn.exec_driver_sql("CREATE TABLE global_tables.link_delete (run_id VARCHAR)")
-        conn.exec_driver_sql(
-            "CREATE TABLE global_tables.cache_delete (content_hash VARCHAR)"
-        )
-        conn.exec_driver_sql(
+    with maintenance.db.transaction() as cur:
+        cur.execute("CREATE SCHEMA IF NOT EXISTS global_tables")
+        cur.execute("CREATE TABLE global_tables.scoped_delete (consist_run_id VARCHAR)")
+        cur.execute("CREATE TABLE global_tables.link_delete (run_id VARCHAR)")
+        cur.execute("CREATE TABLE global_tables.cache_delete (content_hash VARCHAR)")
+        cur.execute(
             """
             INSERT INTO global_tables.scoped_delete (consist_run_id)
             VALUES ('purge_root'), ('purge_child'), ('keep_run')
             """
         )
-        conn.exec_driver_sql(
+        cur.execute(
             """
             INSERT INTO global_tables.link_delete (run_id)
             VALUES ('purge_root'), ('keep_run')
             """
         )
-        conn.exec_driver_sql(
+        cur.execute(
             """
             INSERT INTO global_tables.cache_delete (content_hash)
             VALUES ('hash_a'), ('hash_b')
@@ -1337,41 +1359,46 @@ def test_purge_executes_core_deletes_and_ingested_skip(
     assert result.ingested_data_skipped is True
     assert not root_snapshot.exists()
     assert not child_snapshot.exists()
-    with maintenance.db.session_scope() as session:
-        assert session.get(Run, "purge_root") is None
-        assert session.get(Run, "purge_child") is None
-        assert session.get(Run, "keep_run") is not None
-        assert session.get(Artifact, orphan_root_id) is None
-        assert session.get(Artifact, orphan_child_id) is None
-        shared = session.get(Artifact, shared_id)
-        assert shared is not None
-        assert shared.run_id is None
-        assert session.get(Artifact, keep_id) is not None
+    assert maintenance.db.get_run("purge_root") is None
+    assert maintenance.db.get_run("purge_child") is None
+    assert maintenance.db.get_run("keep_run") is not None
+    assert maintenance.db.get_artifact(orphan_root_id) is None
+    assert maintenance.db.get_artifact(orphan_child_id) is None
+    shared = maintenance.db.get_artifact(shared_id)
+    assert shared is not None
+    assert shared.run_id is None
+    assert maintenance.db.get_artifact(keep_id) is not None
 
-        remaining_links = session.exec(select(RunArtifactLink)).all()
-        assert {(row.run_id, row.artifact_id) for row in remaining_links} == {
-            ("keep_run", shared_id),
-            ("keep_run", keep_id),
-        }
-        remaining_run_kv = session.exec(select(RunConfigKV)).all()
-        assert [row.run_id for row in remaining_run_kv] == ["keep_run"]
-        remaining_artifact_kv = session.exec(select(ArtifactKV)).all()
-        assert {row.artifact_id for row in remaining_artifact_kv} == {shared_id}
-        remaining_observations = session.exec(select(ArtifactSchemaObservation)).all()
-        assert len(remaining_observations) == 1
-        assert remaining_observations[0].artifact_id == shared_id
-        assert remaining_observations[0].run_id == "keep_run"
+    remaining_links = maintenance.db.fetchall(
+        "SELECT run_id, artifact_id FROM run_artifact_link"
+    )
+    assert {(row[0], uuid.UUID(str(row[1]))) for row in remaining_links} == {
+        ("keep_run", shared_id),
+        ("keep_run", keep_id),
+    }
+    remaining_run_kv = maintenance.db.fetchall("SELECT run_id FROM run_config_kv")
+    assert [row[0] for row in remaining_run_kv] == ["keep_run"]
+    remaining_artifact_kv = maintenance.db.fetchall(
+        "SELECT artifact_id FROM artifact_kv"
+    )
+    assert {uuid.UUID(str(row[0])) for row in remaining_artifact_kv} == {shared_id}
+    remaining_observations = maintenance.db.query_rows(
+        "SELECT * FROM artifact_schema_observation",
+        model=ArtifactSchemaObservation,
+    )
+    assert len(remaining_observations) == 1
+    assert remaining_observations[0].artifact_id == shared_id
+    assert remaining_observations[0].run_id == "keep_run"
 
-    with maintenance.db.engine.begin() as conn:
-        scoped_rows = conn.exec_driver_sql(
-            "SELECT consist_run_id FROM global_tables.scoped_delete ORDER BY consist_run_id"
-        ).fetchall()
-        link_rows = conn.exec_driver_sql(
-            "SELECT run_id FROM global_tables.link_delete ORDER BY run_id"
-        ).fetchall()
-        cache_rows = conn.exec_driver_sql(
-            "SELECT content_hash FROM global_tables.cache_delete ORDER BY content_hash"
-        ).fetchall()
+    scoped_rows = maintenance.db.fetchall(
+        "SELECT consist_run_id FROM global_tables.scoped_delete ORDER BY consist_run_id"
+    )
+    link_rows = maintenance.db.fetchall(
+        "SELECT run_id FROM global_tables.link_delete ORDER BY run_id"
+    )
+    cache_rows = maintenance.db.fetchall(
+        "SELECT content_hash FROM global_tables.cache_delete ORDER BY content_hash"
+    )
 
     assert [row[0] for row in scoped_rows] == ["keep_run", "purge_child", "purge_root"]
     assert [row[0] for row in link_rows] == ["keep_run", "purge_root"]
@@ -1381,37 +1408,32 @@ def test_purge_executes_core_deletes_and_ingested_skip(
 def test_purge_deletes_global_rows_when_requested(
     maintenance: DatabaseMaintenance,
 ) -> None:
-    with maintenance.db.session_scope() as session:
-        session.add_all(
-            [
-                _run(id="purge_target", model_name="demo"),
-                _run(id="keep_target", model_name="demo"),
-            ]
-        )
-        session.commit()
+    _seed_db(
+        maintenance.db,
+        runs=[
+            _run(id="purge_target", model_name="demo"),
+            _run(id="keep_target", model_name="demo"),
+        ],
+    )
 
-    with maintenance.db.engine.begin() as conn:
-        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
-        conn.exec_driver_sql(
-            "CREATE TABLE global_tables.scoped_prune (consist_run_id VARCHAR)"
-        )
-        conn.exec_driver_sql("CREATE TABLE global_tables.link_prune (run_id VARCHAR)")
-        conn.exec_driver_sql(
-            "CREATE TABLE global_tables.cache_prune (content_hash VARCHAR)"
-        )
-        conn.exec_driver_sql(
+    with maintenance.db.transaction() as cur:
+        cur.execute("CREATE SCHEMA IF NOT EXISTS global_tables")
+        cur.execute("CREATE TABLE global_tables.scoped_prune (consist_run_id VARCHAR)")
+        cur.execute("CREATE TABLE global_tables.link_prune (run_id VARCHAR)")
+        cur.execute("CREATE TABLE global_tables.cache_prune (content_hash VARCHAR)")
+        cur.execute(
             """
             INSERT INTO global_tables.scoped_prune (consist_run_id)
             VALUES ('purge_target'), ('keep_target')
             """
         )
-        conn.exec_driver_sql(
+        cur.execute(
             """
             INSERT INTO global_tables.link_prune (run_id)
             VALUES ('purge_target'), ('keep_target')
             """
         )
-        conn.exec_driver_sql(
+        cur.execute(
             """
             INSERT INTO global_tables.cache_prune (content_hash)
             VALUES ('cache_a'), ('cache_b')
@@ -1428,16 +1450,15 @@ def test_purge_deletes_global_rows_when_requested(
 
     assert result.executed is True
     assert result.ingested_data_skipped is False
-    with maintenance.db.engine.begin() as conn:
-        scoped_rows = conn.exec_driver_sql(
-            "SELECT consist_run_id FROM global_tables.scoped_prune ORDER BY consist_run_id"
-        ).fetchall()
-        link_rows = conn.exec_driver_sql(
-            "SELECT run_id FROM global_tables.link_prune ORDER BY run_id"
-        ).fetchall()
-        cache_rows = conn.exec_driver_sql(
-            "SELECT content_hash FROM global_tables.cache_prune ORDER BY content_hash"
-        ).fetchall()
+    scoped_rows = maintenance.db.fetchall(
+        "SELECT consist_run_id FROM global_tables.scoped_prune ORDER BY consist_run_id"
+    )
+    link_rows = maintenance.db.fetchall(
+        "SELECT run_id FROM global_tables.link_prune ORDER BY run_id"
+    )
+    cache_rows = maintenance.db.fetchall(
+        "SELECT content_hash FROM global_tables.cache_prune ORDER BY content_hash"
+    )
 
     assert [row[0] for row in scoped_rows] == ["keep_target"]
     assert [row[0] for row in link_rows] == ["keep_target"]
@@ -1447,30 +1468,27 @@ def test_purge_deletes_global_rows_when_requested(
 def test_purge_prune_cache_noops_without_derivable_reference_path(
     maintenance: DatabaseMaintenance,
 ) -> None:
-    with maintenance.db.session_scope() as session:
-        session.add_all(
-            [
-                _run(id="purge_target", model_name="demo"),
-                _run(id="keep_target", model_name="demo"),
-            ]
-        )
-        session.commit()
+    _seed_db(
+        maintenance.db,
+        runs=[
+            _run(id="purge_target", model_name="demo"),
+            _run(id="keep_target", model_name="demo"),
+        ],
+    )
 
-    with maintenance.db.engine.begin() as conn:
-        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
-        conn.exec_driver_sql(
-            "CREATE TABLE global_tables.link_without_hash (run_id VARCHAR)"
-        )
-        conn.exec_driver_sql(
+    with maintenance.db.transaction() as cur:
+        cur.execute("CREATE SCHEMA IF NOT EXISTS global_tables")
+        cur.execute("CREATE TABLE global_tables.link_without_hash (run_id VARCHAR)")
+        cur.execute(
             "CREATE TABLE global_tables.cache_no_derivation (content_hash VARCHAR)"
         )
-        conn.exec_driver_sql(
+        cur.execute(
             """
             INSERT INTO global_tables.link_without_hash (run_id)
             VALUES ('purge_target'), ('keep_target')
             """
         )
-        conn.exec_driver_sql(
+        cur.execute(
             """
             INSERT INTO global_tables.cache_no_derivation (content_hash)
             VALUES ('cache_only_purge'), ('cache_keep')
@@ -1486,17 +1504,16 @@ def test_purge_prune_cache_noops_without_derivable_reference_path(
         dry_run=False,
     )
 
-    with maintenance.db.engine.begin() as conn:
-        link_rows = conn.exec_driver_sql(
-            "SELECT run_id FROM global_tables.link_without_hash ORDER BY run_id"
-        ).fetchall()
-        cache_rows = conn.exec_driver_sql(
-            """
-            SELECT content_hash
-            FROM global_tables.cache_no_derivation
-            ORDER BY content_hash
-            """
-        ).fetchall()
+    link_rows = maintenance.db.fetchall(
+        "SELECT run_id FROM global_tables.link_without_hash ORDER BY run_id"
+    )
+    cache_rows = maintenance.db.fetchall(
+        """
+        SELECT content_hash
+        FROM global_tables.cache_no_derivation
+        ORDER BY content_hash
+        """
+    )
 
     assert [row[0] for row in link_rows] == ["keep_target"]
     assert [row[0] for row in cache_rows] == ["cache_keep", "cache_only_purge"]
@@ -1505,18 +1522,17 @@ def test_purge_prune_cache_noops_without_derivable_reference_path(
 def test_purge_prune_cache_without_delete_ingested_data_is_noop(
     maintenance: DatabaseMaintenance,
 ) -> None:
-    with maintenance.db.session_scope() as session:
-        session.add_all(
-            [
-                _run(id="purge_target", model_name="demo"),
-                _run(id="keep_target", model_name="demo"),
-            ]
-        )
-        session.commit()
+    _seed_db(
+        maintenance.db,
+        runs=[
+            _run(id="purge_target", model_name="demo"),
+            _run(id="keep_target", model_name="demo"),
+        ],
+    )
 
-    with maintenance.db.engine.begin() as conn:
-        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
-        conn.exec_driver_sql(
+    with maintenance.db.transaction() as cur:
+        cur.execute("CREATE SCHEMA IF NOT EXISTS global_tables")
+        cur.execute(
             """
             CREATE TABLE global_tables.link_with_hash (
                 run_id VARCHAR,
@@ -1524,16 +1540,14 @@ def test_purge_prune_cache_without_delete_ingested_data_is_noop(
             )
             """
         )
-        conn.exec_driver_sql(
-            "CREATE TABLE global_tables.cache_safe_noop (content_hash VARCHAR)"
-        )
-        conn.exec_driver_sql(
+        cur.execute("CREATE TABLE global_tables.cache_safe_noop (content_hash VARCHAR)")
+        cur.execute(
             """
             INSERT INTO global_tables.link_with_hash (run_id, content_hash)
             VALUES ('purge_target', 'cache_only_purge'), ('keep_target', 'cache_keep')
             """
         )
-        conn.exec_driver_sql(
+        cur.execute(
             """
             INSERT INTO global_tables.cache_safe_noop (content_hash)
             VALUES ('cache_only_purge'), ('cache_keep')
@@ -1550,21 +1564,20 @@ def test_purge_prune_cache_without_delete_ingested_data_is_noop(
     )
 
     assert result.ingested_data_skipped is True
-    with maintenance.db.engine.begin() as conn:
-        link_rows = conn.exec_driver_sql(
-            """
-            SELECT run_id, content_hash
-            FROM global_tables.link_with_hash
-            ORDER BY run_id
-            """
-        ).fetchall()
-        cache_rows = conn.exec_driver_sql(
-            """
-            SELECT content_hash
-            FROM global_tables.cache_safe_noop
-            ORDER BY content_hash
-            """
-        ).fetchall()
+    link_rows = maintenance.db.fetchall(
+        """
+        SELECT run_id, content_hash
+        FROM global_tables.link_with_hash
+        ORDER BY run_id
+        """
+    )
+    cache_rows = maintenance.db.fetchall(
+        """
+        SELECT content_hash
+        FROM global_tables.cache_safe_noop
+        ORDER BY content_hash
+        """
+    )
 
     assert [(row[0], row[1]) for row in link_rows] == [
         ("keep_target", "cache_keep"),
@@ -1577,9 +1590,10 @@ def test_purge_prune_cache_without_delete_ingested_data_is_noop(
 def test_fix_status_running_to_terminal_sets_end_time_and_reason(
     maintenance: DatabaseMaintenance, new_status: str
 ) -> None:
-    with maintenance.db.session_scope() as session:
-        session.add(_run(id=f"run_{new_status}", model_name="demo", status="running"))
-        session.commit()
+    _seed_db(
+        maintenance.db,
+        runs=[_run(id=f"run_{new_status}", model_name="demo", status="running")],
+    )
 
     updated = maintenance.fix_status(
         f"run_{new_status}", new_status, reason=f"mark_{new_status}"
@@ -1598,16 +1612,17 @@ def test_fix_status_terminal_to_running_clears_ended_at(
     maintenance: DatabaseMaintenance,
 ) -> None:
     now = datetime.now(timezone.utc)
-    with maintenance.db.session_scope() as session:
-        session.add(
+    _seed_db(
+        maintenance.db,
+        runs=[
             _run(
                 id="run_terminal",
                 model_name="demo",
                 status="completed",
                 ended_at=now,
             )
-        )
-        session.commit()
+        ],
+    )
 
     updated = maintenance.fix_status("run_terminal", "running", reason=None, force=True)
 
@@ -1619,16 +1634,17 @@ def test_fix_status_terminal_to_running_requires_force(
     maintenance: DatabaseMaintenance,
 ) -> None:
     now = datetime.now(timezone.utc)
-    with maintenance.db.session_scope() as session:
-        session.add(
+    _seed_db(
+        maintenance.db,
+        runs=[
             _run(
                 id="run_terminal_requires_force",
                 model_name="demo",
                 status="completed",
                 ended_at=now,
             )
-        )
-        session.commit()
+        ],
+    )
 
     with pytest.raises(ValueError, match="Use --force"):
         maintenance.fix_status(
@@ -1642,9 +1658,10 @@ def test_fix_status_terminal_to_running_requires_force(
 def test_fix_status_invalid_status_raises_value_error(
     maintenance: DatabaseMaintenance,
 ) -> None:
-    with maintenance.db.session_scope() as session:
-        session.add(_run(id="run_bad_status", model_name="demo", status="running"))
-        session.commit()
+    _seed_db(
+        maintenance.db,
+        runs=[_run(id="run_bad_status", model_name="demo", status="running")],
+    )
 
     with pytest.raises(ValueError, match="Invalid status"):
         maintenance.fix_status("run_bad_status", "queued", reason=None)
@@ -1664,143 +1681,150 @@ def test_export_copies_core_global_rows_and_snapshots(tmp_path: Path) -> None:
     child_artifact_id = uuid.uuid4()
     other_artifact_id = uuid.uuid4()
     try:
-        with maintenance.db.session_scope() as session:
-            session.add_all(
-                [
-                    _run(id="root_run", model_name="demo"),
-                    _run(id="child_run", model_name="demo", parent_run_id="root_run"),
-                    _run(id="other_run", model_name="demo"),
-                    Artifact(
-                        id=root_artifact_id,
-                        key="root_output",
-                        container_uri="outputs://root.parquet",
-                        driver="parquet",
-                        run_id="root_run",
-                    ),
-                    Artifact(
-                        id=child_artifact_id,
-                        key="child_output",
-                        container_uri="outputs://child.parquet",
-                        driver="parquet",
-                        run_id="child_run",
-                    ),
-                    Artifact(
-                        id=other_artifact_id,
-                        key="other_output",
-                        container_uri="outputs://other.parquet",
-                        driver="parquet",
-                        run_id="other_run",
-                    ),
-                    RunArtifactLink(
-                        run_id="root_run",
-                        artifact_id=root_artifact_id,
-                        direction="output",
-                    ),
-                    RunArtifactLink(
-                        run_id="child_run",
-                        artifact_id=child_artifact_id,
-                        direction="output",
-                    ),
-                    RunArtifactLink(
-                        run_id="other_run",
-                        artifact_id=other_artifact_id,
-                        direction="output",
-                    ),
-                    RunConfigKV(
-                        run_id="root_run",
-                        facet_id="facet_a",
-                        namespace="demo",
-                        key="param",
-                        value_type="str",
-                        value_str="root",
-                    ),
-                    RunConfigKV(
-                        run_id="child_run",
-                        facet_id="facet_a",
-                        namespace="demo",
-                        key="param",
-                        value_type="str",
-                        value_str="child",
-                    ),
-                    RunConfigKV(
-                        run_id="other_run",
-                        facet_id="facet_a",
-                        namespace="demo",
-                        key="param",
-                        value_type="str",
-                        value_str="other",
-                    ),
-                    ArtifactKV(
-                        artifact_id=root_artifact_id,
-                        facet_id="facet_a",
-                        key_path="k",
-                        namespace="demo",
-                        value_type="str",
-                        value_str="root",
-                    ),
-                    ArtifactKV(
-                        artifact_id=child_artifact_id,
-                        facet_id="facet_a",
-                        key_path="k",
-                        namespace="demo",
-                        value_type="str",
-                        value_str="child",
-                    ),
-                    ArtifactKV(
-                        artifact_id=other_artifact_id,
-                        facet_id="facet_a",
-                        key_path="k",
-                        namespace="demo",
-                        value_type="str",
-                        value_str="other",
-                    ),
-                    ArtifactSchema(id="schema_export", summary_json={}),
-                    ArtifactSchemaObservation(
-                        artifact_id=root_artifact_id,
-                        schema_id="schema_export",
-                        run_id="root_run",
-                        source="file",
-                    ),
-                    ArtifactSchemaObservation(
-                        artifact_id=child_artifact_id,
-                        schema_id="schema_export",
-                        run_id="child_run",
-                        source="file",
-                    ),
-                    ArtifactSchemaObservation(
-                        artifact_id=other_artifact_id,
-                        schema_id="schema_export",
-                        run_id="other_run",
-                        source="file",
-                    ),
-                ]
-            )
-            session.commit()
+        _seed_db(
+            maintenance.db,
+            runs=[
+                _run(id="root_run", model_name="demo"),
+                _run(id="child_run", model_name="demo", parent_run_id="root_run"),
+                _run(id="other_run", model_name="demo"),
+            ],
+            artifacts=[
+                Artifact(
+                    id=root_artifact_id,
+                    key="root_output",
+                    container_uri="outputs://root.parquet",
+                    driver="parquet",
+                    run_id="root_run",
+                ),
+                Artifact(
+                    id=child_artifact_id,
+                    key="child_output",
+                    container_uri="outputs://child.parquet",
+                    driver="parquet",
+                    run_id="child_run",
+                ),
+                Artifact(
+                    id=other_artifact_id,
+                    key="other_output",
+                    container_uri="outputs://other.parquet",
+                    driver="parquet",
+                    run_id="other_run",
+                ),
+            ],
+            links=[
+                RunArtifactLink(
+                    run_id="root_run",
+                    artifact_id=root_artifact_id,
+                    direction="output",
+                ),
+                RunArtifactLink(
+                    run_id="child_run",
+                    artifact_id=child_artifact_id,
+                    direction="output",
+                ),
+                RunArtifactLink(
+                    run_id="other_run",
+                    artifact_id=other_artifact_id,
+                    direction="output",
+                ),
+            ],
+            run_kv=[
+                RunConfigKV(
+                    run_id="root_run",
+                    facet_id="facet_a",
+                    namespace="demo",
+                    key="param",
+                    value_type="str",
+                    value_str="root",
+                ),
+                RunConfigKV(
+                    run_id="child_run",
+                    facet_id="facet_a",
+                    namespace="demo",
+                    key="param",
+                    value_type="str",
+                    value_str="child",
+                ),
+                RunConfigKV(
+                    run_id="other_run",
+                    facet_id="facet_a",
+                    namespace="demo",
+                    key="param",
+                    value_type="str",
+                    value_str="other",
+                ),
+            ],
+            artifact_kv=[
+                ArtifactKV(
+                    artifact_id=root_artifact_id,
+                    facet_id="facet_a",
+                    key_path="k",
+                    namespace="demo",
+                    value_type="str",
+                    value_str="root",
+                ),
+                ArtifactKV(
+                    artifact_id=child_artifact_id,
+                    facet_id="facet_a",
+                    key_path="k",
+                    namespace="demo",
+                    value_type="str",
+                    value_str="child",
+                ),
+                ArtifactKV(
+                    artifact_id=other_artifact_id,
+                    facet_id="facet_a",
+                    key_path="k",
+                    namespace="demo",
+                    value_type="str",
+                    value_str="other",
+                ),
+            ],
+            schemas=[ArtifactSchema(id="schema_export", summary_json={})],
+            observations=[
+                ArtifactSchemaObservation(
+                    artifact_id=root_artifact_id,
+                    schema_id="schema_export",
+                    run_id="root_run",
+                    source="file",
+                ),
+                ArtifactSchemaObservation(
+                    artifact_id=child_artifact_id,
+                    schema_id="schema_export",
+                    run_id="child_run",
+                    source="file",
+                ),
+                ArtifactSchemaObservation(
+                    artifact_id=other_artifact_id,
+                    schema_id="schema_export",
+                    run_id="other_run",
+                    source="file",
+                ),
+            ],
+        )
 
-        with maintenance.db.engine.begin() as conn:
-            conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
-            conn.exec_driver_sql(
+        with maintenance.db.transaction() as cur:
+            cur.execute("CREATE SCHEMA IF NOT EXISTS global_tables")
+            cur.execute(
                 "CREATE TABLE global_tables.scoped_export (consist_run_id VARCHAR)"
             )
-            conn.exec_driver_sql(
-                "CREATE TABLE global_tables.link_export (run_id VARCHAR)"
-            )
-            conn.exec_driver_sql(
+            cur.execute("CREATE TABLE global_tables.link_export (run_id VARCHAR)")
+            cur.execute(
                 "CREATE TABLE global_tables.cache_export (content_hash VARCHAR)"
             )
-            conn.exec_driver_sql(
+            cur.execute(
                 """
                 INSERT INTO global_tables.scoped_export (consist_run_id)
                 VALUES ('root_run'), ('child_run'), ('other_run')
                 """
             )
-            conn.exec_driver_sql(
+            cur.execute(
                 """
                 INSERT INTO global_tables.link_export (run_id)
                 VALUES ('child_run'), ('other_run')
                 """
             )
-            conn.exec_driver_sql(
+            cur.execute(
                 """
                 INSERT INTO global_tables.cache_export (content_hash)
                 VALUES ('hash_a'), ('hash_b')
@@ -1833,31 +1857,20 @@ def test_export_copies_core_global_rows_and_snapshots(tmp_path: Path) -> None:
 
         shard_db = DatabaseManager(str(shard_path))
         try:
-            with shard_db.engine.begin() as conn:
-                run_count = conn.exec_driver_sql(
-                    'SELECT COUNT(*) FROM "run"'
-                ).fetchone()
-                artifact_count = conn.exec_driver_sql(
-                    'SELECT COUNT(*) FROM "artifact"'
-                ).fetchone()
-                link_count = conn.exec_driver_sql(
-                    'SELECT COUNT(*) FROM "run_artifact_link"'
-                ).fetchone()
-                run_config_count = conn.exec_driver_sql(
-                    "SELECT COUNT(*) FROM run_config_kv"
-                ).fetchone()
-                artifact_kv_count = conn.exec_driver_sql(
-                    "SELECT COUNT(*) FROM artifact_kv"
-                ).fetchone()
-                observation_count = conn.exec_driver_sql(
-                    "SELECT COUNT(*) FROM artifact_schema_observation"
-                ).fetchone()
-                scoped_count = conn.exec_driver_sql(
-                    "SELECT COUNT(*) FROM global_tables.scoped_export"
-                ).fetchone()
-                link_table_count = conn.exec_driver_sql(
-                    "SELECT COUNT(*) FROM global_tables.link_export"
-                ).fetchone()
+            run_count = shard_db.fetchone('SELECT COUNT(*) FROM "run"')
+            artifact_count = shard_db.fetchone('SELECT COUNT(*) FROM "artifact"')
+            link_count = shard_db.fetchone('SELECT COUNT(*) FROM "run_artifact_link"')
+            run_config_count = shard_db.fetchone("SELECT COUNT(*) FROM run_config_kv")
+            artifact_kv_count = shard_db.fetchone("SELECT COUNT(*) FROM artifact_kv")
+            observation_count = shard_db.fetchone(
+                "SELECT COUNT(*) FROM artifact_schema_observation"
+            )
+            scoped_count = shard_db.fetchone(
+                "SELECT COUNT(*) FROM global_tables.scoped_export"
+            )
+            link_table_count = shard_db.fetchone(
+                "SELECT COUNT(*) FROM global_tables.link_export"
+            )
             assert int(run_count[0] if run_count else 0) == 2
             assert int(artifact_count[0] if artifact_count else 0) == 2
             assert int(link_count[0] if link_count else 0) == 2
@@ -1867,37 +1880,41 @@ def test_export_copies_core_global_rows_and_snapshots(tmp_path: Path) -> None:
             assert int(scoped_count[0] if scoped_count else 0) == 2
             assert int(link_table_count[0] if link_table_count else 0) == 1
         finally:
-            shard_db.engine.dispose()
+            shard_db.close()
 
         shard_snapshot_dir = shard_path.parent / "shard_snapshots"
         assert (shard_snapshot_dir / "root_run.json").exists()
         assert (shard_snapshot_dir / "child_run.json").exists()
     finally:
-        db.engine.dispose()
+        db.close()
 
 
 def test_detach_temporary_database_clears_transaction(tmp_path: Path) -> None:
     db = DatabaseManager(str(tmp_path / "detach_source.duckdb"))
     maintenance = DatabaseMaintenance(db=db, run_dir=tmp_path / "runs_source")
-    shard_db = DatabaseManager(str(tmp_path / "detach_shard.duckdb"))
+    shard_path = tmp_path / "detach_shard.duckdb"
+    shard_db = DatabaseManager(str(shard_path))
+    shard_db.close()
     try:
-        with db.engine.connect() as conn:
-            conn.exec_driver_sql(
-                f"ATTACH {maintenance._quote_sql_string_literal(str(shard_db.db_path))} "
-                f"AS {maintenance._quote_ident('shard_export')}"
-            )
-            conn.commit()
-            with conn.begin():
-                conn.exec_driver_sql(
-                    "CREATE TABLE IF NOT EXISTS shard_export.temp_table (id INTEGER)"
-                )
+        conn = db.connection
+        conn.execute(
+            f"ATTACH {maintenance._quote_sql_string_literal(str(shard_path))} "
+            f"AS {maintenance._quote_ident('shard_export')}"
+        )
+        conn.execute("BEGIN TRANSACTION")
+        conn.execute("CREATE TABLE IF NOT EXISTS shard_export.temp_table (id INTEGER)")
 
-            maintenance._detach_temporary_database(conn, "shard_export")
+        maintenance._detach_temporary_database(conn, "shard_export")
 
-            assert not conn.in_transaction()
+        attached = [
+            row[0]
+            for row in conn.execute(
+                "SELECT database_name FROM duckdb_databases()"
+            ).fetchall()
+        ]
+        assert "shard_export" not in attached
     finally:
-        shard_db.engine.dispose()
-        db.engine.dispose()
+        db.close()
 
 
 def test_export_no_children_only_copies_requested_run(tmp_path: Path) -> None:
@@ -1906,38 +1923,41 @@ def test_export_no_children_only_copies_requested_run(tmp_path: Path) -> None:
     root_artifact_id = uuid.uuid4()
     child_artifact_id = uuid.uuid4()
     try:
-        with maintenance.db.session_scope() as session:
-            session.add_all(
-                [
-                    _run(id="root_run", model_name="demo"),
-                    _run(id="child_run", model_name="demo", parent_run_id="root_run"),
-                    Artifact(
-                        id=root_artifact_id,
-                        key="root_output",
-                        container_uri="outputs://root.parquet",
-                        driver="parquet",
-                        run_id="root_run",
-                    ),
-                    Artifact(
-                        id=child_artifact_id,
-                        key="child_output",
-                        container_uri="outputs://child.parquet",
-                        driver="parquet",
-                        run_id="child_run",
-                    ),
-                    RunArtifactLink(
-                        run_id="root_run",
-                        artifact_id=root_artifact_id,
-                        direction="output",
-                    ),
-                    RunArtifactLink(
-                        run_id="child_run",
-                        artifact_id=child_artifact_id,
-                        direction="output",
-                    ),
-                ]
-            )
-            session.commit()
+        _seed_db(
+            maintenance.db,
+            runs=[
+                _run(id="root_run", model_name="demo"),
+                _run(id="child_run", model_name="demo", parent_run_id="root_run"),
+            ],
+            artifacts=[
+                Artifact(
+                    id=root_artifact_id,
+                    key="root_output",
+                    container_uri="outputs://root.parquet",
+                    driver="parquet",
+                    run_id="root_run",
+                ),
+                Artifact(
+                    id=child_artifact_id,
+                    key="child_output",
+                    container_uri="outputs://child.parquet",
+                    driver="parquet",
+                    run_id="child_run",
+                ),
+            ],
+            links=[
+                RunArtifactLink(
+                    run_id="root_run",
+                    artifact_id=root_artifact_id,
+                    direction="output",
+                ),
+                RunArtifactLink(
+                    run_id="child_run",
+                    artifact_id=child_artifact_id,
+                    direction="output",
+                ),
+            ],
+        )
 
         shard_path = tmp_path / "exported_no_children.duckdb"
         result = maintenance.export(
@@ -1953,19 +1973,14 @@ def test_export_no_children_only_copies_requested_run(tmp_path: Path) -> None:
 
         shard_db = DatabaseManager(str(shard_path))
         try:
-            with shard_db.engine.begin() as conn:
-                run_count = conn.exec_driver_sql(
-                    'SELECT COUNT(*) FROM "run"'
-                ).fetchone()
-                artifact_count = conn.exec_driver_sql(
-                    'SELECT COUNT(*) FROM "artifact"'
-                ).fetchone()
+            run_count = shard_db.fetchone('SELECT COUNT(*) FROM "run"')
+            artifact_count = shard_db.fetchone('SELECT COUNT(*) FROM "artifact"')
             assert int(run_count[0] if run_count else 0) == 1
             assert int(artifact_count[0] if artifact_count else 0) == 1
         finally:
-            shard_db.engine.dispose()
+            shard_db.close()
     finally:
-        db.engine.dispose()
+        db.close()
 
 
 def test_export_dry_run_previews_without_writes(tmp_path: Path) -> None:
@@ -1973,9 +1988,10 @@ def test_export_dry_run_previews_without_writes(tmp_path: Path) -> None:
     maintenance = DatabaseMaintenance(db=db, run_dir=tmp_path / "runs_source")
     artifact_id = uuid.uuid4()
     try:
-        with maintenance.db.session_scope() as session:
-            session.add(_run(id="root_run", model_name="demo"))
-            session.add(
+        _seed_db(
+            maintenance.db,
+            runs=[_run(id="root_run", model_name="demo")],
+            artifacts=[
                 Artifact(
                     id=artifact_id,
                     key="root_output",
@@ -1983,31 +1999,31 @@ def test_export_dry_run_previews_without_writes(tmp_path: Path) -> None:
                     driver="parquet",
                     run_id="root_run",
                 )
-            )
-            session.add(
+            ],
+            links=[
                 RunArtifactLink(
                     run_id="root_run",
                     artifact_id=artifact_id,
                     direction="output",
                 )
-            )
-            session.commit()
+            ],
+        )
 
-        with maintenance.db.engine.begin() as conn:
-            conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
-            conn.exec_driver_sql(
+        with maintenance.db.transaction() as cur:
+            cur.execute("CREATE SCHEMA IF NOT EXISTS global_tables")
+            cur.execute(
                 "CREATE TABLE global_tables.scoped_export_preview (consist_run_id VARCHAR)"
             )
-            conn.exec_driver_sql(
+            cur.execute(
                 "CREATE TABLE global_tables.cache_export_preview (content_hash VARCHAR)"
             )
-            conn.exec_driver_sql(
+            cur.execute(
                 """
                 INSERT INTO global_tables.scoped_export_preview (consist_run_id)
                 VALUES ('root_run')
                 """
             )
-            conn.exec_driver_sql(
+            cur.execute(
                 """
                 INSERT INTO global_tables.cache_export_preview (content_hash)
                 VALUES ('cache_a')
@@ -2035,10 +2051,9 @@ def test_export_dry_run_previews_without_writes(tmp_path: Path) -> None:
         assert not shard_path.exists()
         assert not (shard_path.parent / "shard_snapshots").exists()
         assert not (maintenance.run_dir / ".consist_audit.log").exists()
-        with maintenance.db.session_scope() as session:
-            assert session.get(Run, "root_run") is not None
+        assert maintenance.db.get_run("root_run") is not None
     finally:
-        db.engine.dispose()
+        db.close()
 
 
 def test_merge_happy_path_and_conflict_skip_policy(tmp_path: Path) -> None:
@@ -2052,15 +2067,16 @@ def test_merge_happy_path_and_conflict_skip_policy(tmp_path: Path) -> None:
     )
     artifact_id = uuid.uuid4()
     try:
-        with source_db.session_scope() as session:
-            session.add(
+        _seed_db(
+            source_db,
+            runs=[
                 _run(
                     id="merge_run",
                     model_name="source_model",
                     meta={"_physical_run_dir": str(source_maintenance.run_dir)},
                 )
-            )
-            session.add(
+            ],
+            artifacts=[
                 Artifact(
                     id=artifact_id,
                     key="merge_artifact",
@@ -2068,15 +2084,15 @@ def test_merge_happy_path_and_conflict_skip_policy(tmp_path: Path) -> None:
                     driver="parquet",
                     run_id="merge_run",
                 )
-            )
-            session.add(
+            ],
+            links=[
                 RunArtifactLink(
                     run_id="merge_run",
                     artifact_id=artifact_id,
                     direction="output",
                 )
-            )
-            session.add(
+            ],
+            run_kv=[
                 RunConfigKV(
                     run_id="merge_run",
                     facet_id="facet_a",
@@ -2085,8 +2101,8 @@ def test_merge_happy_path_and_conflict_skip_policy(tmp_path: Path) -> None:
                     value_type="str",
                     value_str="merge",
                 )
-            )
-            session.add(
+            ],
+            artifact_kv=[
                 ArtifactKV(
                     artifact_id=artifact_id,
                     facet_id="facet_a",
@@ -2095,33 +2111,31 @@ def test_merge_happy_path_and_conflict_skip_policy(tmp_path: Path) -> None:
                     value_type="str",
                     value_str="merge",
                 )
-            )
-            session.add(ArtifactSchema(id="schema_merge", summary_json={}))
-            session.add(
+            ],
+            schemas=[ArtifactSchema(id="schema_merge", summary_json={})],
+            observations=[
                 ArtifactSchemaObservation(
                     artifact_id=artifact_id,
                     schema_id="schema_merge",
                     run_id="merge_run",
                     source="file",
                 )
-            )
-            session.commit()
+            ],
+        )
 
-        with source_db.engine.begin() as conn:
-            conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
-            conn.exec_driver_sql(
+        with source_db.transaction() as cur:
+            cur.execute("CREATE SCHEMA IF NOT EXISTS global_tables")
+            cur.execute(
                 "CREATE TABLE global_tables.scoped_merge (consist_run_id VARCHAR)"
             )
-            conn.exec_driver_sql(
-                "CREATE TABLE global_tables.cache_merge (content_hash VARCHAR)"
-            )
-            conn.exec_driver_sql(
+            cur.execute("CREATE TABLE global_tables.cache_merge (content_hash VARCHAR)")
+            cur.execute(
                 """
                 INSERT INTO global_tables.scoped_merge (consist_run_id)
                 VALUES ('merge_run')
                 """
             )
-            conn.exec_driver_sql(
+            cur.execute(
                 """
                 INSERT INTO global_tables.cache_merge (content_hash)
                 VALUES ('cache_only')
@@ -2153,28 +2167,22 @@ def test_merge_happy_path_and_conflict_skip_policy(tmp_path: Path) -> None:
         assert merge_result.conflicts_detected == []
         assert merge_result.snapshots_merged == 1
 
-        with target_db.session_scope() as session:
-            merged_run = session.get(Run, "merge_run")
-            assert merged_run is not None
-            assert merged_run.model_name == "source_model"
+        merged_run = target_db.get_run("merge_run")
+        assert merged_run is not None
+        assert merged_run.model_name == "source_model"
 
-        with target_db.engine.begin() as conn:
-            scoped_count = conn.exec_driver_sql(
-                "SELECT COUNT(*) FROM global_tables.scoped_merge"
-            ).fetchone()
-            run_config_count = conn.exec_driver_sql(
-                "SELECT COUNT(*) FROM run_config_kv"
-            ).fetchone()
-            artifact_kv_count = conn.exec_driver_sql(
-                "SELECT COUNT(*) FROM artifact_kv"
-            ).fetchone()
-            observation_count = conn.exec_driver_sql(
-                "SELECT COUNT(*) FROM artifact_schema_observation"
-            ).fetchone()
-            assert int(scoped_count[0] if scoped_count else 0) == 1
-            assert int(run_config_count[0] if run_config_count else 0) == 1
-            assert int(artifact_kv_count[0] if artifact_kv_count else 0) == 1
-            assert int(observation_count[0] if observation_count else 0) == 1
+        scoped_count = target_db.fetchone(
+            "SELECT COUNT(*) FROM global_tables.scoped_merge"
+        )
+        run_config_count = target_db.fetchone("SELECT COUNT(*) FROM run_config_kv")
+        artifact_kv_count = target_db.fetchone("SELECT COUNT(*) FROM artifact_kv")
+        observation_count = target_db.fetchone(
+            "SELECT COUNT(*) FROM artifact_schema_observation"
+        )
+        assert int(scoped_count[0] if scoped_count else 0) == 1
+        assert int(run_config_count[0] if run_config_count else 0) == 1
+        assert int(artifact_kv_count[0] if artifact_kv_count else 0) == 1
+        assert int(observation_count[0] if observation_count else 0) == 1
 
         conflict_result = target_maintenance.merge(
             shard_path,
@@ -2185,22 +2193,17 @@ def test_merge_happy_path_and_conflict_skip_policy(tmp_path: Path) -> None:
         assert conflict_result.runs_skipped == ["merge_run"]
         assert conflict_result.conflicts_detected == ["merge_run"]
 
-        with target_db.engine.begin() as conn:
-            run_config_count = conn.exec_driver_sql(
-                "SELECT COUNT(*) FROM run_config_kv"
-            ).fetchone()
-            artifact_kv_count = conn.exec_driver_sql(
-                "SELECT COUNT(*) FROM artifact_kv"
-            ).fetchone()
-            observation_count = conn.exec_driver_sql(
-                "SELECT COUNT(*) FROM artifact_schema_observation"
-            ).fetchone()
-            assert int(run_config_count[0] if run_config_count else 0) == 1
-            assert int(artifact_kv_count[0] if artifact_kv_count else 0) == 1
-            assert int(observation_count[0] if observation_count else 0) == 1
+        run_config_count = target_db.fetchone("SELECT COUNT(*) FROM run_config_kv")
+        artifact_kv_count = target_db.fetchone("SELECT COUNT(*) FROM artifact_kv")
+        observation_count = target_db.fetchone(
+            "SELECT COUNT(*) FROM artifact_schema_observation"
+        )
+        assert int(run_config_count[0] if run_config_count else 0) == 1
+        assert int(artifact_kv_count[0] if artifact_kv_count else 0) == 1
+        assert int(observation_count[0] if observation_count else 0) == 1
     finally:
-        source_db.engine.dispose()
-        target_db.engine.dispose()
+        source_db.close()
+        target_db.close()
 
 
 def test_merge_dry_run_previews_without_writes(tmp_path: Path) -> None:
@@ -2215,38 +2218,41 @@ def test_merge_dry_run_previews_without_writes(tmp_path: Path) -> None:
     conflict_artifact_id = uuid.uuid4()
     new_artifact_id = uuid.uuid4()
     try:
-        with source_db.session_scope() as session:
-            session.add_all(
-                [
-                    _run(id="conflict_run", model_name="source_model"),
-                    _run(id="new_run", model_name="source_model"),
-                    Artifact(
-                        id=conflict_artifact_id,
-                        key="conflict_artifact",
-                        container_uri="outputs://conflict.parquet",
-                        driver="parquet",
-                        run_id="conflict_run",
-                    ),
-                    Artifact(
-                        id=new_artifact_id,
-                        key="new_artifact",
-                        container_uri="outputs://new.parquet",
-                        driver="parquet",
-                        run_id="new_run",
-                    ),
-                    RunArtifactLink(
-                        run_id="conflict_run",
-                        artifact_id=conflict_artifact_id,
-                        direction="output",
-                    ),
-                    RunArtifactLink(
-                        run_id="new_run",
-                        artifact_id=new_artifact_id,
-                        direction="output",
-                    ),
-                ]
-            )
-            session.commit()
+        _seed_db(
+            source_db,
+            runs=[
+                _run(id="conflict_run", model_name="source_model"),
+                _run(id="new_run", model_name="source_model"),
+            ],
+            artifacts=[
+                Artifact(
+                    id=conflict_artifact_id,
+                    key="conflict_artifact",
+                    container_uri="outputs://conflict.parquet",
+                    driver="parquet",
+                    run_id="conflict_run",
+                ),
+                Artifact(
+                    id=new_artifact_id,
+                    key="new_artifact",
+                    container_uri="outputs://new.parquet",
+                    driver="parquet",
+                    run_id="new_run",
+                ),
+            ],
+            links=[
+                RunArtifactLink(
+                    run_id="conflict_run",
+                    artifact_id=conflict_artifact_id,
+                    direction="output",
+                ),
+                RunArtifactLink(
+                    run_id="new_run",
+                    artifact_id=new_artifact_id,
+                    direction="output",
+                ),
+            ],
+        )
 
         shard_path = tmp_path / "merge_dry_run_shard.duckdb"
         source_maintenance.export(
@@ -2261,9 +2267,10 @@ def test_merge_dry_run_previews_without_writes(tmp_path: Path) -> None:
         shard_snapshot_dir.mkdir(parents=True, exist_ok=True)
         (shard_snapshot_dir / "new_run.json").write_text("{}", encoding="utf-8")
 
-        with target_db.session_scope() as session:
-            session.add(_run(id="conflict_run", model_name="target_model"))
-            session.commit()
+        _seed_db(
+            target_db,
+            runs=[_run(id="conflict_run", model_name="target_model")],
+        )
 
         merge_result = target_maintenance.merge(
             shard_path,
@@ -2277,20 +2284,19 @@ def test_merge_dry_run_previews_without_writes(tmp_path: Path) -> None:
         assert merge_result.artifacts_merged == 1
         assert merge_result.snapshots_merged == 1
 
-        with target_db.session_scope() as session:
-            assert session.get(Run, "new_run") is None
-            persisted_conflict = session.get(Run, "conflict_run")
-            assert persisted_conflict is not None
-            assert persisted_conflict.model_name == "target_model"
-            assert session.get(Artifact, new_artifact_id) is None
+        assert target_db.get_run("new_run") is None
+        persisted_conflict = target_db.get_run("conflict_run")
+        assert persisted_conflict is not None
+        assert persisted_conflict.model_name == "target_model"
+        assert target_db.get_artifact(new_artifact_id) is None
 
         assert not (
             target_maintenance.run_dir / "consist_runs" / "new_run.json"
         ).exists()
         assert not (target_maintenance.run_dir / ".consist_audit.log").exists()
     finally:
-        source_db.engine.dispose()
-        target_db.engine.dispose()
+        source_db.close()
+        target_db.close()
 
 
 def test_merge_tolerates_target_side_schema_drift_on_aux_tables(tmp_path: Path) -> None:
@@ -2304,9 +2310,10 @@ def test_merge_tolerates_target_side_schema_drift_on_aux_tables(tmp_path: Path) 
     )
     artifact_id = uuid.uuid4()
     try:
-        with source_db.session_scope() as session:
-            session.add(_run(id="drift_run", model_name="source_model"))
-            session.add(
+        _seed_db(
+            source_db,
+            runs=[_run(id="drift_run", model_name="source_model")],
+            artifacts=[
                 Artifact(
                     id=artifact_id,
                     key="drift_artifact",
@@ -2314,15 +2321,15 @@ def test_merge_tolerates_target_side_schema_drift_on_aux_tables(tmp_path: Path) 
                     driver="parquet",
                     run_id="drift_run",
                 )
-            )
-            session.add(
+            ],
+            links=[
                 RunArtifactLink(
                     run_id="drift_run",
                     artifact_id=artifact_id,
                     direction="output",
                 )
-            )
-            session.add(
+            ],
+            run_kv=[
                 RunConfigKV(
                     run_id="drift_run",
                     facet_id="facet_a",
@@ -2331,8 +2338,8 @@ def test_merge_tolerates_target_side_schema_drift_on_aux_tables(tmp_path: Path) 
                     value_type="str",
                     value_str="drift",
                 )
-            )
-            session.add(
+            ],
+            artifact_kv=[
                 ArtifactKV(
                     artifact_id=artifact_id,
                     facet_id="facet_a",
@@ -2341,8 +2348,8 @@ def test_merge_tolerates_target_side_schema_drift_on_aux_tables(tmp_path: Path) 
                     value_type="str",
                     value_str="drift",
                 )
-            )
-            session.commit()
+            ],
+        )
 
         shard_path = tmp_path / "merge_drift_shard.duckdb"
         source_maintenance.export(
@@ -2352,13 +2359,9 @@ def test_merge_tolerates_target_side_schema_drift_on_aux_tables(tmp_path: Path) 
             include_snapshots=False,
         )
 
-        with target_db.engine.begin() as conn:
-            conn.exec_driver_sql(
-                "ALTER TABLE run_config_kv ADD COLUMN target_extra VARCHAR"
-            )
-            conn.exec_driver_sql(
-                "ALTER TABLE artifact_kv ADD COLUMN target_extra VARCHAR"
-            )
+        with target_db.transaction() as cur:
+            cur.execute("ALTER TABLE run_config_kv ADD COLUMN target_extra VARCHAR")
+            cur.execute("ALTER TABLE artifact_kv ADD COLUMN target_extra VARCHAR")
 
         merge_result = target_maintenance.merge(
             shard_path,
@@ -2367,22 +2370,21 @@ def test_merge_tolerates_target_side_schema_drift_on_aux_tables(tmp_path: Path) 
         )
         assert merge_result.runs_merged == ["drift_run"]
 
-        with target_db.engine.begin() as conn:
-            run_config_row = conn.exec_driver_sql(
-                """
-                SELECT run_id, value_str, target_extra
-                FROM run_config_kv
-                WHERE run_id = 'drift_run'
-                """
-            ).fetchone()
-            artifact_kv_row = conn.exec_driver_sql(
-                """
-                SELECT CAST(artifact_id AS VARCHAR), value_str, target_extra
-                FROM artifact_kv
-                WHERE CAST(artifact_id AS VARCHAR) = ?
-                """,
-                (str(artifact_id),),
-            ).fetchone()
+        run_config_row = target_db.fetchone(
+            """
+            SELECT run_id, value_str, target_extra
+            FROM run_config_kv
+            WHERE run_id = 'drift_run'
+            """
+        )
+        artifact_kv_row = target_db.fetchone(
+            """
+            SELECT CAST(artifact_id AS VARCHAR), value_str, target_extra
+            FROM artifact_kv
+            WHERE CAST(artifact_id AS VARCHAR) = ?
+            """,
+            [str(artifact_id)],
+        )
 
         assert run_config_row is not None
         assert run_config_row[0] == "drift_run"
@@ -2393,8 +2395,8 @@ def test_merge_tolerates_target_side_schema_drift_on_aux_tables(tmp_path: Path) 
         assert artifact_kv_row[1] == "drift"
         assert artifact_kv_row[2] is None
     finally:
-        source_db.engine.dispose()
-        target_db.engine.dispose()
+        source_db.close()
+        target_db.close()
 
 
 def _snapshot_payload(
@@ -2437,9 +2439,7 @@ def test_rebuild_from_json_happy_path_and_idempotent_run_counting(
     maintenance: DatabaseMaintenance, tmp_path: Path
 ) -> None:
     existing_run = _run(id="existing_run", model_name="demo")
-    with maintenance.db.session_scope() as session:
-        session.add(existing_run)
-        session.commit()
+    _seed_db(maintenance.db, runs=[existing_run])
 
     artifact_id = uuid.uuid4()
     json_dir = tmp_path / "rebuild_snapshots"
@@ -2463,13 +2463,12 @@ def test_rebuild_from_json_happy_path_and_idempotent_run_counting(
     assert result.artifacts_inserted == 1
     assert result.errors == []
     assert result.dry_run is False
-    with maintenance.db.session_scope() as session:
-        assert session.get(Run, "new_run") is not None
-        assert session.get(Artifact, artifact_id) is not None
-        links = session.exec(select(RunArtifactLink)).all()
-        assert {(row.run_id, row.artifact_id) for row in links} == {
-            ("new_run", artifact_id)
-        }
+    assert maintenance.db.get_run("new_run") is not None
+    assert maintenance.db.get_artifact(artifact_id) is not None
+    links = maintenance.db.fetchall("SELECT run_id, artifact_id FROM run_artifact_link")
+    assert {(row[0], uuid.UUID(str(row[1]))) for row in links} == {
+        ("new_run", artifact_id)
+    }
 
 
 def test_rebuild_from_json_dry_run_does_not_write(
@@ -2493,9 +2492,8 @@ def test_rebuild_from_json_dry_run_does_not_write(
     assert result.runs_inserted == 1
     assert result.runs_already_present == 0
     assert result.artifacts_inserted == 1
-    with maintenance.db.session_scope() as session:
-        assert session.get(Run, "dry_run_rebuild") is None
-        assert session.get(Artifact, artifact_id) is None
+    assert maintenance.db.get_run("dry_run_rebuild") is None
+    assert maintenance.db.get_artifact(artifact_id) is None
     assert not (maintenance.run_dir / ".consist_audit.log").exists()
 
 
@@ -2517,8 +2515,7 @@ def test_rebuild_from_json_collects_malformed_errors(
     assert result.runs_already_present == 0
     assert len(result.errors) == 1
     assert "bad.json" in result.errors[0]
-    with maintenance.db.session_scope() as session:
-        assert session.get(Run, "good_run") is not None
+    assert maintenance.db.get_run("good_run") is not None
 
 
 def test_rebuild_from_json_full_mode_populates_run_config_kv(
@@ -2543,12 +2540,8 @@ def test_rebuild_from_json_full_mode_populates_run_config_kv(
     result = maintenance.rebuild_from_json(json_dir, dry_run=False, mode="full")
 
     assert result.errors == []
-    with maintenance.db.session_scope() as session:
-        rows = session.exec(
-            select(RunConfigKV)
-            .where(RunConfigKV.run_id == "full_run")
-            .order_by(RunConfigKV.key)
-        ).all()
+    rows = maintenance.db.get_run_config_kv("full_run")
+    rows.sort(key=lambda r: r.key)
 
     assert [row.key for row in rows] == ["alpha", "nested.flag", "nested.items"]
     assert all(row.facet_id == "facet_run_id" for row in rows)
@@ -2582,8 +2575,7 @@ def test_rebuild_from_json_restores_canonical_stage_phase(
     result = maintenance.rebuild_from_json(json_dir, dry_run=False)
 
     assert result.errors == []
-    with maintenance.db.session_scope() as session:
-        restored = session.get(Run, "stage_phase_run")
+    restored = maintenance.db.get_run("stage_phase_run")
 
     assert restored is not None
     assert restored.stage == "supply_demand_loop"
@@ -2623,15 +2615,15 @@ def test_rebuild_from_json_full_mode_populates_artifact_schema_observation(
     result = maintenance.rebuild_from_json(json_dir, dry_run=False, mode="full")
 
     assert result.errors == []
-    with maintenance.db.session_scope() as session:
-        schema_row = session.get(ArtifactSchema, schema_id)
-        observations = session.exec(
-            select(ArtifactSchemaObservation).where(
-                ArtifactSchemaObservation.run_id == "schema_run",
-                ArtifactSchemaObservation.artifact_id == artifact_id,
-                ArtifactSchemaObservation.schema_id == schema_id,
-            )
-        ).all()
+    schema_bundle = maintenance.db.get_artifact_schema(schema_id=schema_id)
+    assert schema_bundle is not None
+    schema_row, _ = schema_bundle
+    observations = maintenance.db.query_rows(
+        "SELECT * FROM artifact_schema_observation "
+        "WHERE run_id = ? AND artifact_id = ? AND schema_id = ?",
+        ["schema_run", artifact_id, schema_id],
+        model=ArtifactSchemaObservation,
+    )
 
     assert schema_row is not None
     assert schema_row.summary_json["source"] == "file"
@@ -2670,19 +2662,13 @@ def test_rebuild_from_json_full_mode_is_idempotent_for_optional_rows(
 
     assert first.errors == []
     assert second.errors == []
-    with maintenance.db.session_scope() as session:
-        run_kv_rows = session.exec(
-            select(RunConfigKV).where(RunConfigKV.run_id == "idempotent_run")
-        ).all()
-        artifact_kv_rows = session.exec(
-            select(ArtifactKV).where(ArtifactKV.artifact_id == artifact_id)
-        ).all()
-        observation_rows = session.exec(
-            select(ArtifactSchemaObservation).where(
-                ArtifactSchemaObservation.run_id == "idempotent_run",
-                ArtifactSchemaObservation.artifact_id == artifact_id,
-            )
-        ).all()
+    run_kv_rows = maintenance.db.get_run_config_kv("idempotent_run")
+    artifact_kv_rows = maintenance.db.get_artifact_kv(artifact_id)
+    observation_rows = maintenance.db.query_rows(
+        "SELECT * FROM artifact_schema_observation WHERE run_id = ? AND artifact_id = ?",
+        ["idempotent_run", artifact_id],
+        model=ArtifactSchemaObservation,
+    )
 
     assert len(run_kv_rows) == 2
     assert len(artifact_kv_rows) == 2
@@ -2716,27 +2702,26 @@ def test_rebuild_from_json_minimal_mode_does_not_populate_optional_tables(
     result = maintenance.rebuild_from_json(json_dir, dry_run=False, mode="minimal")
 
     assert result.errors == []
-    with maintenance.db.session_scope() as session:
-        assert session.get(Run, "minimal_run") is not None
-        assert session.get(Artifact, artifact_id) is not None
-        assert session.exec(select(RunConfigKV)).all() == []
-        assert session.exec(select(ArtifactKV)).all() == []
-        assert session.exec(select(ArtifactSchema)).all() == []
-        assert session.exec(select(ArtifactSchemaObservation)).all() == []
+    assert maintenance.db.get_run("minimal_run") is not None
+    assert maintenance.db.get_artifact(artifact_id) is not None
+    assert maintenance.db.fetchall("SELECT * FROM run_config_kv") == []
+    assert maintenance.db.fetchall("SELECT * FROM artifact_kv") == []
+    assert maintenance.db.fetchall("SELECT * FROM artifact_schema") == []
+    assert maintenance.db.fetchall("SELECT * FROM artifact_schema_observation") == []
 
 
 def test_compact_runs_vacuum_and_writes_audit(maintenance: DatabaseMaintenance) -> None:
     with patch.object(
         maintenance.db,
-        "execute_with_retry",
-        wraps=maintenance.db.execute_with_retry,
+        "execute",
+        wraps=maintenance.db.execute,
     ) as wrapped_execute:
         maintenance.compact()
 
-    called_operation_names = [
-        call.kwargs.get("operation_name") for call in wrapped_execute.call_args_list
+    executed_sql = [
+        str(call.args[0]) for call in wrapped_execute.call_args_list if call.args
     ]
-    assert "maintenance_compact" in called_operation_names
+    assert "VACUUM" in executed_sql
     audit_log = maintenance.run_dir / ".consist_audit.log"
     assert audit_log.exists()
     assert "\tcompact\t" in audit_log.read_text(encoding="utf-8")

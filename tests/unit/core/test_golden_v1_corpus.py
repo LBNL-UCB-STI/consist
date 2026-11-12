@@ -269,6 +269,7 @@ def test_golden_ctd1_duckdb_vs_parquet_and_arrow_parity(tmp_path: Path) -> None:
             data=df.to_dict(orient="records"),
             schema=GoldenTrip,
         )
+    tracker.close()
 
     with duckdb.connect(str(tmp_path / "provenance.duckdb"), read_only=True) as con:
         rel = con.sql(

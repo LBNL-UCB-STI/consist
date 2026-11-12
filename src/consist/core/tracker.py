@@ -29,14 +29,14 @@ from typing import (
     TYPE_CHECKING,
     Tuple,
     Type,
+    TypeVar,
     Union,
     cast,
 )
-from sqlalchemy.sql import Executable
 
 import pandas as pd
 from pydantic import BaseModel
-from sqlmodel import SQLModel, Session
+from sqlmodel import SQLModel
 
 from consist.core.artifact_schemas import ArtifactSchemaManager
 from consist.core.artifact_facets import ArtifactFacetManager
@@ -98,7 +98,7 @@ from consist.core.persistence import (
     ProvenanceWriter,
     SchemaProfileSource,
 )
-from consist.core.views import ViewFactory, ViewRegistry
+from consist.core.views import ViewFactory
 from consist.core.ingestion import ingest_artifact
 from consist.core.lineage import LineageService
 from consist.core.materialize import (
@@ -142,6 +142,7 @@ from consist.types import (
     OutputPolicyOptions,
     OutputPathRef,
     OutputSet,
+    ParameterizedSQL,
     RunCompletionArchivePolicy,
     RunInputRef,
 )
@@ -162,6 +163,7 @@ if TYPE_CHECKING:
     from ibis.expr.types import Table as IbisTable
 
 AccessMode = Literal["standard", "analysis", "read_only"]
+_QueryModelT = TypeVar("_QueryModelT")
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _RAW_STRICT_BINDING_CONTROL_KEYS = frozenset(
     {
@@ -256,6 +258,7 @@ class Tracker:
         schemas: Optional[List[Type[SQLModel]]] = None,
         builtin_schemas: Optional[Iterable[BuiltinSchemaLiteral]] = None,
         access_mode: AccessMode = "standard",
+        read_only: bool = False,
         run_subdir_fn: Optional[Callable[[Run], str]] = None,
         allow_external_paths: Optional[bool] = None,
         openlineage_enabled: bool = False,
@@ -338,7 +341,8 @@ class Tracker:
         self.openlineage_enabled = openlineage_enabled
         self.openlineage_namespace = openlineage_namespace
 
-        self.access_mode = access_mode
+        self.read_only = bool(read_only or access_mode == "read_only")
+        self.access_mode: AccessMode = "read_only" if self.read_only else access_mode
         self._run_subdir_fn = run_subdir_fn
         self._cache_epoch = cache_epoch
         if allow_external_paths is None:
@@ -442,11 +446,11 @@ class Tracker:
             try:
                 metadata_db = DatabaseManager(
                     effective_db_path,
+                    read_only=self.read_only,
+                    skip_schema_init=db_skip_schema_init,
                     lock_retries=self._db_lock_retries,
                     lock_base_sleep_seconds=self._db_lock_base_sleep_seconds,
                     lock_max_sleep_seconds=self._db_lock_max_sleep_seconds,
-                    read_only=(self.access_mode == "read_only"),
-                    skip_schema_init=db_skip_schema_init,
                 )
                 self.metadata_store = MetadataStore(db=metadata_db)
                 self.hot_data_store = HotDataStore(
@@ -489,7 +493,6 @@ class Tracker:
         self._archive_service = TrackerArchiveService(self)
         self._config_plan_service = TrackerConfigPlanService(self)
 
-        self.views = ViewRegistry(self)
         # Store registered schemas by class name for cross-session lookup.
         # When ingest() is called in a different Python session, it can look up
         # a schema by the artifact's schema_name (e.g., "MyDataSchema") if the
@@ -517,9 +520,6 @@ class Tracker:
             logging.warning(
                 "[Consist] Schemas provided but no database configured. Views will not be created."
             )
-        if self.metadata_store and self.access_mode != "read_only":
-            for schema in registered_schemas:
-                self.view(schema)
 
         # In-Memory State (The Source of Truth)
         self.current_consist: Optional[ConsistRecord] = None
@@ -582,6 +582,7 @@ class Tracker:
             )
 
         self.events = EventManager()
+        self._run_signature_cache: Dict[str, str] = {}
         if openlineage_emitter:
             from consist.core.lifecycle import LifecycleEmitter
 
@@ -618,6 +619,10 @@ class Tracker:
                 "cannot be reassigned independently of metadata_store."
             )
         self._compat_db = value
+        try:
+            self._run_signature_cache.clear()
+        except AttributeError:
+            pass
 
     @property
     def db_path(self) -> str | None:
@@ -656,29 +661,91 @@ class Tracker:
             )
         self._compat_db_path = normalized
 
-    @property
-    def engine(self):
-        """
-        Return the SQLAlchemy engine used by this tracker.
-
-        This is a single-store compatibility alias. New code should prefer
-        explicit ``metadata_store`` / ``hot_data_store`` ownership boundaries.
-
-        Returns
-        -------
-        Optional[Engine]
-            The SQLAlchemy engine if a database is configured, otherwise ``None``.
-        """
-        hot_store = self._compat_attr("hot_data_store")
-        if hot_store is not None:
-            return hot_store.engine
-        metadata_store = self._compat_attr("metadata_store")
-        if metadata_store is not None:
-            return metadata_store.engine
-        db = self._compat_attr("_compat_db")
+    def query_df(
+        self,
+        sql: str | ParameterizedSQL,
+        params: Optional[Sequence[Any] | Mapping[str, Any]] = None,
+    ) -> pd.DataFrame:
+        """Execute a validated read-only SQL query and return a DataFrame."""
+        db = self.db
         if db is None:
-            return None
-        return db.engine
+            raise RuntimeError("Database connection required.")
+        return db.query_df(sql, params)
+
+    def query_rows(
+        self,
+        sql: str | ParameterizedSQL,
+        params: Optional[Sequence[Any] | Mapping[str, Any]] = None,
+        *,
+        model: Optional[Type[_QueryModelT]] = None,
+    ) -> List[Any]:
+        """Execute a validated read-only SQL query and return rows or validated models."""
+        db = self.db
+        if db is None:
+            raise RuntimeError("Database connection required.")
+        return db.query_rows(sql, params, model=model)
+
+    def config_run_query(
+        self,
+        table: Type[BaseModel] | str,
+        *,
+        link_table: Type[BaseModel] | str,
+        table_name: Optional[str] = None,
+        columns: Optional[Iterable[Any]] = None,
+        where: Optional[Any] = None,
+        join_on: Optional[Iterable[str]] = None,
+    ):
+        """Build a parameterized DuckDB SQL query joining a config cache table to its run-link table."""
+        return self.queries.config_run_query(
+            table,
+            link_table=link_table,
+            table_name=table_name,
+            columns=columns,
+            where=where,
+            join_on=join_on,
+        )
+
+    def config_run_rows(
+        self,
+        table: Type[BaseModel] | str,
+        *,
+        link_table: Type[BaseModel] | str,
+        table_name: Optional[str] = None,
+        columns: Optional[Iterable[Any]] = None,
+        where: Optional[Any] = None,
+        join_on: Optional[Iterable[str]] = None,
+    ) -> list[Any]:
+        """Execute a config-to-run join query on the tracker database and return hydrated rows."""
+        return self.queries.config_run_rows(
+            table,
+            link_table=link_table,
+            table_name=table_name,
+            columns=columns,
+            where=where,
+            join_on=join_on,
+        )
+
+    def pivot_facets(
+        self,
+        *,
+        namespace: Optional[str] = None,
+        keys: Iterable[str],
+        value_column: str = "value_num",
+        value_columns: Optional[Mapping[str, str]] = None,
+        label_prefix: str = "",
+        label_map: Optional[Mapping[str, str]] = None,
+        run_id_label: str = "run_id",
+    ):
+        """Build a parameterized DuckDB SQL query pivoting ``main.run_config_kv`` keys into columns."""
+        return self.queries.pivot_facets(
+            namespace=namespace,
+            keys=keys,
+            value_column=value_column,
+            value_columns=value_columns,
+            label_prefix=label_prefix,
+            label_map=label_map,
+            run_id_label=run_id_label,
+        )
 
     @property
     def registered_schemas(self) -> Mapping[str, Type[SQLModel]]:
@@ -737,6 +804,7 @@ class Tracker:
             schemas=user_schemas if user_schemas else None,
             builtin_schemas=list(self.builtin_schemas or []),
             access_mode=self.access_mode,
+            read_only=bool(self._compat_attr("read_only")),
             run_subdir_fn=self._run_subdir_fn,
             allow_external_paths=self.allow_external_paths,
             openlineage_enabled=self.openlineage_enabled,
@@ -747,20 +815,20 @@ class Tracker:
 
     def close(self) -> None:
         """
-        Dispose database engines and clean up any temporary local snapshot directory.
+        Close database connections and clean up any temporary local snapshot directory.
         """
         from consist.integrations.ibis import close_tracker_ibis_connection
 
         close_tracker_ibis_connection(self)
         hot_store = self._compat_attr("hot_data_store")
         if hot_store is not None:
-            hot_store.dispose_engine()
+            hot_store.close()
         metadata_store = self._compat_attr("metadata_store")
-        if metadata_store is not None and metadata_store.db is not None:
-            metadata_store.db.engine.dispose()
+        if metadata_store is not None:
+            metadata_store.close()
         compat_db = self._compat_attr("_compat_db")
-        if compat_db is not None and compat_db.engine is not None:
-            compat_db.engine.dispose()
+        if compat_db is not None:
+            compat_db.close()
         snapshot_finalizer = self._compat_attr("_snapshot_finalizer")
         if snapshot_finalizer is not None:
             snapshot_finalizer.detach()
@@ -1080,26 +1148,63 @@ class Tracker:
 
         return code
 
+    def _cache_run_signature(self, run_id: str, signature: Optional[str]) -> None:
+        if not signature:
+            return
+        cache = self._compat_attr("_run_signature_cache")
+        if not isinstance(cache, dict):
+            return
+        if len(cache) >= 4096 and run_id not in cache:
+            cache.pop(next(iter(cache)))
+        cache[run_id] = signature
+
     def _resolve_run_signature(self, run_id: str) -> Optional[str]:
         """
         Internal helper to look up a run's signature (Merkle identity) via the database.
         Used by IdentityManager to stabilize input hashes against ephemeral Run IDs.
         """
-        # 1. Check active run (unlikely for inputs, but good for completeness)
         if self.current_consist and self.current_consist.run.id == run_id:
             return self.current_consist.run.signature
-        # 2. Check Database
+        cache = self._compat_attr("_run_signature_cache")
+        if isinstance(cache, dict) and run_id in cache:
+            return cache[run_id]
         if self.db:
-            run = self.db.get_run(run_id)
-            if run:
-                return run.signature
+            fetched = self.db.get_run_signatures([run_id])
+            sig = fetched.get(run_id)
+            if sig is not None:
+                self._cache_run_signature(run_id, sig)
+                return sig
         return None
 
     def _prefetch_run_signatures(self, inputs: Iterable[Artifact]) -> None:
         """
         Warm the run-signature cache for input artifacts in bulk to reduce DB chatter.
         """
-        return
+        if not self.db:
+            return
+        cache = self._compat_attr("_run_signature_cache")
+        if not isinstance(cache, dict):
+            self._run_signature_cache = {}
+            cache = self._run_signature_cache
+        active_id = (
+            self.current_consist.run.id if self.current_consist is not None else None
+        )
+        missing_ids: list[str] = []
+        seen: set[str] = set()
+        for art in inputs:
+            if not isinstance(art, Artifact):
+                continue
+            rid = art.run_id
+            if not rid or rid == active_id or rid in cache or rid in seen:
+                continue
+            seen.add(rid)
+            missing_ids.append(rid)
+        if not missing_ids:
+            return
+        fetched = self.db.get_run_signatures(missing_ids)
+        for rid, sig in fetched.items():
+            if sig is not None:
+                self._cache_run_signature(rid, sig)
 
     def _coerce_facet_mapping(self, obj: Any, label: str) -> Dict[str, Any]:
         if obj is None:
@@ -2422,6 +2527,7 @@ class Tracker:
         limit: int = 100,
         index_by: Optional[Union[str, IndexBySpec]] = None,
         name: Optional[str] = None,
+        offset: int = 0,
     ) -> Union[List[Run], Dict[Hashable, Run]]:
         """
         Retrieve runs matching the specified criteria.
@@ -2486,6 +2592,7 @@ class Tracker:
             limit=limit,
             index_by=index_by,
             name=name,
+            offset=offset,
         )
 
     def find_run(self, **kwargs) -> Run:
@@ -2537,30 +2644,34 @@ class Tracker:
 
         return RunSet.from_query(self, label=label, **filters)
 
-    def run_query(self, query: Executable) -> list:
+    def run_query(
+        self,
+        query: str | ParameterizedSQL,
+        params: Optional[Sequence[Any] | Mapping[str, Any]] = None,
+    ) -> list[Any]:
         """
-        Execute a SQLModel/SQLAlchemy query via the metadata store.
+        Execute a validated read-only DuckDB SQL query via the metadata store.
 
         Parameters
         ----------
-        query : Executable
-            Query object (``select``, ``text``, etc.).
+        query : str | ParameterizedSQL
+            Read-only ``SELECT`` / ``WITH ... SELECT`` SQL string or ``ParameterizedSQL``.
+        params : Optional[Sequence[Any] | Mapping[str, Any]], optional
+            Optional positional or named query parameters.
 
         Returns
         -------
-        list
-            Results of the executed query.
+        list[Any]
+            Scalar values (for single-column queries) or tuples (for multi-column queries).
 
         Raises
         ------
         RuntimeError
             If no database is configured for this tracker.
+        ValueError
+            If the SQL statement is not a single read-only ``SELECT`` query.
         """
-        metadata_store = self.metadata_store
-        if metadata_store is None:
-            raise RuntimeError("Database connection required.")
-        with Session(metadata_store.engine) as session:
-            return session.exec(cast(Any, query)).all()
+        return self.query_rows(query, params)
 
     def find_latest_run(
         self,
@@ -4112,7 +4223,7 @@ class Tracker:
         )
 
     def _ingest_cache_hit(self, table_name: str, content_hash: str) -> bool:
-        config_plan_service = getattr(self, "_config_plan_service", None)
+        config_plan_service = self._compat_attr("_config_plan_service")
         if config_plan_service is None:
             # Compatibility fallback for legacy/partial Tracker stubs that are
             # constructed via ``Tracker.__new__`` in focused unit tests.
@@ -4122,42 +4233,11 @@ class Tracker:
 
     # --- View Factory ---
 
-    def view(self, model: Type[SQLModel], key: Optional[str] = None) -> Type[SQLModel]:
-        """
-        Create/register a hybrid view for a given SQLModel schema.
-
-        Parameters
-        ----------
-        model : Type[SQLModel]
-            SQLModel schema defining the logical columns for the concept.
-        key : Optional[str], optional
-            Override the concept key (defaults to `model.__tablename__`).
-
-        Returns
-        -------
-        Type[SQLModel]
-            The dynamic SQLModel view class exposed via `tracker.views`.
-
-        Raises
-        ------
-        RuntimeError
-            If the tracker has no database configured.
-        """
-        if not self.db:
-            raise RuntimeError("Database required to create views.")
-
-        # 1. Register metadata (so __getattr__ works later)
-        self.views.register(model, key)
-
-        # 2. Trigger immediate creation/refresh
-        # This returns the dynamic class
-        return getattr(self.views, model.__name__)
-
     def create_view(self, view_name: str, concept_key: str) -> Any:
         """
         Create a named hybrid view over a registered concept.
 
-        This is a lower-level helper than `Tracker.view(...)`. It is useful when you
+        It is useful when you
         want to create multiple named views over the same concept key, or when you
         want explicit control over the view name.
 
@@ -5950,7 +6030,7 @@ class Tracker:
                 )
                 entry.applied_object_ids.add(id(art))
                 if self.db is not None:
-                    self.db.update_artifact_meta(art, dict(art.meta))
+                    self.db.update_artifact_meta(art, dict(art.meta), replace=not merge)
                 self._flush_json()
 
     set_pending_output_meta = set_output_meta

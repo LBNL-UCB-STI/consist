@@ -1,15 +1,12 @@
 from pathlib import Path
 
 import pytest
-from sqlmodel import Session, select
 
 from consist.core.config_canonicalization import (
     ArtifactSpec,
     CanonicalConfigIdentity,
     ConfigContribution,
 )
-from consist.models.artifact import Artifact
-from consist.models.run import Run, RunArtifactLink
 from consist.types import ExecutionOptions
 
 
@@ -67,12 +64,10 @@ def test_log_artifacts_batches_flush_and_db_sync(tracker, run_dir: Path, monkeyp
 
     assert [art.key for art in tracker.last_run.outputs] == ["first", "second"]
 
-    with Session(tracker.engine) as session:
-        links = session.exec(
-            select(RunArtifactLink).where(
-                RunArtifactLink.run_id == "run_batch_log_artifacts"
-            )
-        ).all()
+    links = tracker.db.fetchall(
+        "SELECT artifact_id, direction FROM run_artifact_link WHERE run_id = ?",
+        ["run_batch_log_artifacts"],
+    )
     assert len(links) == 2
 
 
@@ -209,12 +204,10 @@ def test_begin_run_inputs_batch_flush_and_db_sync(tracker, run_dir: Path, monkey
 
     tracker.end_run()
 
-    with Session(tracker.engine) as session:
-        links = session.exec(
-            select(RunArtifactLink).where(
-                RunArtifactLink.run_id == "run_batch_begin_inputs"
-            )
-        ).all()
+    links = tracker.db.fetchall(
+        "SELECT artifact_id, direction FROM run_artifact_link WHERE run_id = ?",
+        ["run_batch_begin_inputs"],
+    )
     assert len(links) == 2
 
 
@@ -257,13 +250,13 @@ def test_begin_run_existing_artifact_input_preserves_parent_and_link(
 
     tracker.end_run()
 
-    with Session(tracker.engine) as session:
-        links = session.exec(
-            select(RunArtifactLink).where(RunArtifactLink.run_id == "consumer_run")
-        ).all()
+    links = tracker.db.fetchall(
+        "SELECT artifact_id, direction FROM run_artifact_link WHERE run_id = ?",
+        ["consumer_run"],
+    )
     assert len(links) == 1
-    assert links[0].artifact_id == upstream.id
-    assert links[0].direction == "input"
+    assert str(links[0][0]) == str(upstream.id)
+    assert links[0][1] == "input"
 
 
 def test_begin_run_path_input_uses_bulk_prefetched_parent(tracker, run_dir: Path):
@@ -309,8 +302,7 @@ def test_sync_artifacts_merges_existing_artifact_rows(tracker, run_dir: Path):
             direction="output",
         )
 
-    with Session(tracker.engine) as session:
-        persisted = session.get(Artifact, artifact.id)
+    persisted = tracker.db.get_artifact(artifact.id)
     assert persisted is not None
     assert persisted.meta["merged_marker"] == "updated"
 
@@ -337,15 +329,13 @@ def test_cache_hit_persists_output_links_and_completion(tracker, run_dir: Path):
         assert tracker.current_consist.cached_run is not None
         assert tracker.current_consist.cached_run.id == "cache_seed_persisted_links"
 
-    with Session(tracker.engine) as session:
-        links = session.exec(
-            select(RunArtifactLink).where(
-                RunArtifactLink.run_id == "cache_hit_persisted_links"
-            )
-        ).all()
-        run = session.get(Run, "cache_hit_persisted_links")
+    links = tracker.db.fetchall(
+        "SELECT direction FROM run_artifact_link WHERE run_id = ?",
+        ["cache_hit_persisted_links"],
+    )
+    run = tracker.db.get_run("cache_hit_persisted_links")
 
-    assert [link.direction for link in links] == ["output"]
+    assert [row[0] for row in links] == ["output"]
     assert run is not None
     assert run.status == "completed"
     assert run.ended_at is not None

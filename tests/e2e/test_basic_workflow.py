@@ -6,7 +6,6 @@ from unittest.mock import patch
 
 import pandas as pd
 import pytest
-from sqlmodel import select
 from typer.testing import CliRunner
 
 import consist
@@ -161,14 +160,13 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
     assert data["run"]["git_hash"] is not None
 
     # Database snapshot
-    # For tests, `consist.run_query(...)` is a convenient wrapper around a Session.
-    runs = consist.run_query(select(Run), tracker=tracker)
+    runs = tracker.query_rows("SELECT * FROM main.run", model=Run)
     run_ids = {r.id for r in runs}
     assert {scenario_id, ingest_run_id, transform_run_id} <= run_ids
     assert all(r.status == "completed" for r in runs)
 
-    artifacts = consist.run_query(select(Artifact), tracker=tracker)
-    keys = {a.key for a in artifacts}
+    artifacts_df = tracker.query_df("SELECT key FROM main.artifact")
+    keys = set(artifacts_df["key"].tolist())
     assert {"raw_table", "features"} <= keys
     assert raw_artifact is not None
     outputs = tracker.get_run_outputs(transform_run_id)
@@ -189,22 +187,25 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
     assert "schema_id" in features_artifact.meta
     assert "schema_summary" in features_artifact.meta
 
-    # `consist.db_session(...)` is the ergonomic way to open a Session for ad-hoc queries.
-    with consist.db_session(tracker=tracker) as session:
-        schema_id = features_artifact.meta["schema_id"]
-        assert session.get(ArtifactSchema, schema_id) is not None
-        fields = session.exec(
-            select(ArtifactSchemaField).where(
-                ArtifactSchemaField.schema_id == schema_id
-            )
-        ).all()
-        assert {f.name for f in fields} >= {"value", "category", "value_doubled"}
-        observations = session.exec(
-            select(ArtifactSchemaObservation).where(
-                ArtifactSchemaObservation.schema_id == schema_id
-            )
-        ).all()
-        assert len(observations) >= 1
+    schema_id = features_artifact.meta["schema_id"]
+    schemas = tracker.query_rows(
+        "SELECT * FROM main.artifact_schema WHERE id = ?",
+        [schema_id],
+        model=ArtifactSchema,
+    )
+    assert len(schemas) == 1
+    fields = tracker.query_rows(
+        "SELECT * FROM main.artifact_schema_field WHERE schema_id = ?",
+        [schema_id],
+        model=ArtifactSchemaField,
+    )
+    assert {f.name for f in fields} >= {"value", "category", "value_doubled"}
+    observations = tracker.query_rows(
+        "SELECT * FROM main.artifact_schema_observation WHERE schema_id = ?",
+        [schema_id],
+        model=ArtifactSchemaObservation,
+    )
+    assert len(observations) >= 1
 
     # CLI sanity: runs/show/artifacts/summary/preview
     db_path = str(tracker.db_path)
@@ -366,21 +367,27 @@ def test_resume_after_failure_uses_cache_and_ghost_mode(
         )
     assert "No space left on device" in str(exc_info.value)
 
-    prepare_runs = consist.run_query(
-        select(Run).where(Run.model_name == "prepare_data"), tracker=tracker
+    prepare_runs = tracker.query_rows(
+        "SELECT * FROM main.run WHERE model_name = ?",
+        ["prepare_data"],
+        model=Run,
     )
     assert len(prepare_runs) == 1
     assert prepare_runs[0].status == "completed"
 
-    train_runs = consist.run_query(
-        select(Run).where(Run.model_name == "train_model"), tracker=tracker
+    train_runs = tracker.query_rows(
+        "SELECT * FROM main.run WHERE model_name = ?",
+        ["train_model"],
+        model=Run,
     )
     assert len(train_runs) == 1
     assert train_runs[0].status == "failed"
     assert "No space left on device" in train_runs[0].meta.get("error", "")
 
-    eval_runs = consist.run_query(
-        select(Run).where(Run.model_name == "evaluate_model"), tracker=tracker
+    eval_runs = tracker.query_rows(
+        "SELECT * FROM main.run WHERE model_name = ?",
+        ["evaluate_model"],
+        model=Run,
     )
     assert len(eval_runs) == 0
 
@@ -420,21 +427,27 @@ def test_resume_after_failure_uses_cache_and_ghost_mode(
     assert execution_counts["train_model"] == 2
     assert execution_counts["evaluate_model"] == 1
 
-    prepare_runs = consist.run_query(
-        select(Run).where(Run.model_name == "prepare_data"), tracker=tracker
+    prepare_runs = tracker.query_rows(
+        "SELECT * FROM main.run WHERE model_name = ?",
+        ["prepare_data"],
+        model=Run,
     )
     assert len(prepare_runs) == 2
     assert any(r.meta.get("cache_hit") is True for r in prepare_runs)
 
-    train_runs = consist.run_query(
-        select(Run).where(Run.model_name == "train_model"), tracker=tracker
+    train_runs = tracker.query_rows(
+        "SELECT * FROM main.run WHERE model_name = ?",
+        ["train_model"],
+        model=Run,
     )
     assert len(train_runs) == 2
     assert [r.status for r in train_runs].count("failed") == 1
     assert [r.status for r in train_runs].count("completed") == 1
 
-    eval_runs = consist.run_query(
-        select(Run).where(Run.model_name == "evaluate_model"), tracker=tracker
+    eval_runs = tracker.query_rows(
+        "SELECT * FROM main.run WHERE model_name = ?",
+        ["evaluate_model"],
+        model=Run,
     )
     assert len(eval_runs) == 1
     assert eval_runs[0].status == "completed"

@@ -26,7 +26,6 @@ from pathlib import Path
 from typing import Dict
 
 import pytest
-from sqlmodel import Session, func, select
 
 from tests.large_db_helpers import (
     _count_artifacts_keyset,
@@ -37,8 +36,6 @@ from tests.large_db_helpers import (
     _seed_wide_lineage,
 )
 from consist.core.tracker import Tracker
-from consist.models.artifact import Artifact
-from consist.models.run import Run
 
 METRIC_DESCRIPTIONS = {
     "seed.base_dataset": "Populate the base run/artifact tables for scale testing.",
@@ -109,7 +106,7 @@ def _timed(label: str, metrics: Dict[str, float]):
 
 
 def _emit_stdout(message: str) -> None:
-    stream = getattr(sys, "__stdout__", None)
+    stream = sys.__stdout__
     if stream is None:
         print(message)
         return
@@ -151,25 +148,25 @@ def test_large_db_scale_queries(tmp_path):
 
     metrics: Dict[str, float] = {}
 
-    with Session(tracker.engine) as session:
-        with _timed("seed.base_dataset", metrics):
-            sample = _seed_base_dataset(
-                session,
-                total_runs=total_runs,
-                runs_per_scenario=runs_per_scenario,
-                chunk_size=chunk_size,
-            )
+    assert tracker.db is not None
+    with _timed("seed.base_dataset", metrics):
+        sample = _seed_base_dataset(
+            tracker.db,
+            total_runs=total_runs,
+            runs_per_scenario=runs_per_scenario,
+            chunk_size=chunk_size,
+        )
 
-        with _timed("seed.lineage.deep", metrics):
-            deep_artifact_id = _seed_deep_lineage(session, depth=lineage_depth)
+    with _timed("seed.lineage.deep", metrics):
+        deep_artifact_id = _seed_deep_lineage(tracker.db, depth=lineage_depth)
 
-        with _timed("seed.lineage.wide", metrics):
-            wide_artifact_id = _seed_wide_lineage(session, input_count=wide_inputs)
+    with _timed("seed.lineage.wide", metrics):
+        wide_artifact_id = _seed_wide_lineage(tracker.db, input_count=wide_inputs)
 
-        with _timed("seed.config.diff_runs", metrics):
-            diff_run_a, diff_run_b, expected_changes = _seed_diff_runs(
-                session, num_keys=config_keys
-            )
+    with _timed("seed.config.diff_runs", metrics):
+        diff_run_a, diff_run_b, expected_changes = _seed_diff_runs(
+            tracker.db, num_keys=config_keys
+        )
 
     cache_tuple = sample["cache_tuple"]
     scenario_id = sample["scenario_id"]
@@ -241,43 +238,44 @@ def test_large_db_scale_queries(tmp_path):
         by_key = tracker.get_artifact(lookup_key)
     assert by_key is not None
 
-    with Session(tracker.engine) as session:
-        with _timed("artifact.lookup.hash", metrics):
-            by_hash = session.exec(
-                select(Artifact).where(Artifact.hash == lookup_hash)
-            ).first()
-        assert by_hash is not None
-        assert by_hash.id == by_key.id
+    with _timed("artifact.lookup.hash", metrics):
+        by_hash = tracker.db.find_latest_artifact_by_hash(lookup_hash)
+    assert by_hash is not None
+    assert by_hash.id == by_key.id
 
-        with _timed("scenarios.group_by_parent_run", metrics):
-            query = (
-                select(
-                    Run.parent_run_id.label("scenario_id"),
-                    func.count(Run.id).label("run_count"),
-                    func.min(Run.created_at).label("first_run"),
-                    func.max(Run.created_at).label("last_run"),
-                )
-                .where(Run.parent_run_id.is_not(None))
-                .group_by(Run.parent_run_id)
-                .order_by(func.max(Run.created_at).desc())
-                .limit(sample["scenario_count"])
-            )
-            scenario_rows = session.exec(query).all()
-        assert len(scenario_rows) == sample["scenario_count"]
+    with _timed("scenarios.group_by_parent_run", metrics):
+        scenario_rows = tracker.db.fetchall(
+            """
+            SELECT
+                parent_run_id AS scenario_id,
+                COUNT(id) AS run_count,
+                MIN(created_at) AS first_run,
+                MAX(created_at) AS last_run
+            FROM main.run
+            WHERE parent_run_id IS NOT NULL
+            GROUP BY parent_run_id
+            ORDER BY MAX(created_at) DESC
+            LIMIT ?
+            """,
+            [sample["scenario_count"]],
+        )
+    assert len(scenario_rows) == sample["scenario_count"]
 
-        with _timed("validate.select_all_artifacts", metrics):
-            all_artifacts = session.exec(select(Artifact)).all()
-        expected_artifacts = total_runs + lineage_depth + wide_inputs + 1
-        assert len(all_artifacts) == expected_artifacts
+    with _timed("validate.select_all_artifacts", metrics):
+        all_artifacts = tracker.db.fetchall(
+            "SELECT id, key, uri, driver FROM main.artifact"
+        )
+    expected_artifacts = total_runs + lineage_depth + wide_inputs + 1
+    assert len(all_artifacts) == expected_artifacts
 
-        with _timed("validate.paginated", metrics):
-            paginated_count = _count_artifacts_keyset(session, batch_size=1000)
-        assert paginated_count == expected_artifacts
+    with _timed("validate.paginated", metrics):
+        paginated_count = _count_artifacts_keyset(tracker.db, batch_size=1000)
+    assert paginated_count == expected_artifacts
 
-        if write_runs:
-            initial_run_count = session.exec(
-                select(func.count()).select_from(Run)
-            ).one()
+    initial_run_count = 0
+    if write_runs:
+        row = tracker.db.fetchone("SELECT COUNT(*) FROM main.run")
+        initial_run_count = int(row[0]) if row else 0
 
     if write_runs:
         write_dir = run_dir / "write_phase"
@@ -341,8 +339,8 @@ def test_large_db_scale_queries(tmp_path):
             for stat, value in stats.items():
                 metrics[f"{label}.{stat}"] = value
 
-        with Session(tracker.engine) as session:
-            final_run_count = session.exec(select(func.count()).select_from(Run)).one()
+        row = tracker.db.fetchone("SELECT COUNT(*) FROM main.run")
+        final_run_count = int(row[0]) if row else 0
         assert final_run_count - initial_run_count == write_runs
 
     db_size_mb = db_path.stat().st_size / (1024 * 1024)

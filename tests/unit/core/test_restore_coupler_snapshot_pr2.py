@@ -38,11 +38,7 @@ def _create_persisted_artifact(
         meta=dict(meta or {}),
     )
     if tracker.db is not None:
-        with tracker.db.session_scope() as session:
-            session.add(art)
-            session.commit()
-            session.refresh(art)
-            session.expunge(art)
+        tracker.db.sync_artifact(art)
     return art
 
 
@@ -256,7 +252,7 @@ def test_multi_node_restart_materialization_and_pruning(tmp_path: Path) -> None:
 
 
 def test_directory_and_shapefile_bundle_materialization(tmp_path: Path) -> None:
-    """Verify directory / Zarr and shapefile bundle artifacts end-to-end with PR 1."""
+    """Verify directory / Zarr and shapefile bundle artifacts end-to-end."""
     db_path = tmp_path / "test.duckdb"
     archive_dir = tmp_path / "archive"
     local_dir = tmp_path / "local"

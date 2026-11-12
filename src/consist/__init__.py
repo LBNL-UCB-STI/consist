@@ -35,7 +35,6 @@ if TYPE_CHECKING:
         current_consist,
         current_run,
         current_tracker,
-        db_session,
         define_step,
         diff_coupler_snapshots,
         ensure_local_path,
@@ -75,12 +74,13 @@ if TYPE_CHECKING:
         output_dir,
         output_path,
         pivot_facets,
+        query_df,
+        query_rows,
         ref,
         refs,
         register_artifact_facet_parser,
         register_artifact_recovery_copy,
         register_run_output_recovery_copies,
-        register_views,
         require_runtime_kwargs,
         resolve_canonical_run_id,
         resolve_run_output_paths,
@@ -99,7 +99,6 @@ if TYPE_CHECKING:
         to_df,
         trace,
         use_tracker,
-        view,
     )
     from consist.core.command_exec import (
         CommandExecutionError,
@@ -150,7 +149,9 @@ if TYPE_CHECKING:
         resolve_callable,
     )
     from consist.core.persistence import (
+        DatabaseMigrationRequired,
         IncompatibleSchemaError,
+        TransactionAbortedError,
     )
     from consist.core.resolved_binding import (
         AdmissionEvidence,
@@ -212,6 +213,7 @@ if TYPE_CHECKING:
         OutputPathRef,
         OutputPolicyOptions,
         OutputSet,
+        ParameterizedSQL,
         RunCompletionArchivePolicy,
         StringCapture,
     )
@@ -255,6 +257,10 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "CommandExecutionResult": ("consist.core.command_exec", "CommandExecutionResult"),
     "Coupler": ("consist.core.coupler", "Coupler"),
     "CouplerSnapshotPhase": ("consist.models.run", "CouplerSnapshotPhase"),
+    "DatabaseMigrationRequired": (
+        "consist.core.persistence",
+        "DatabaseMigrationRequired",
+    ),
     "DriverType": ("consist.types", "DriverType"),
     "EnumCapture": ("consist.types", "EnumCapture"),
     "ExecutionAttempt": ("consist.core.orchestration", "ExecutionAttempt"),
@@ -286,6 +292,7 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "OutputPathRef": ("consist.types", "OutputPathRef"),
     "OutputPolicyOptions": ("consist.types", "OutputPolicyOptions"),
     "OutputSet": ("consist.types", "OutputSet"),
+    "ParameterizedSQL": ("consist.types", "ParameterizedSQL"),
     "PythonCallableTarget": ("consist.core.orchestration", "PythonCallableTarget"),
     "RelationConnectionLeakWarning": ("consist.api", "RelationConnectionLeakWarning"),
     "ResolvedBinding": ("consist.core.resolved_binding", "ResolvedBinding"),
@@ -326,6 +333,10 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     ),
     "Tracker": ("consist.core.tracker", "Tracker"),
     "TrackerLike": ("consist.protocols", "TrackerLike"),
+    "TransactionAbortedError": (
+        "consist.core.persistence",
+        "TransactionAbortedError",
+    ),
     "active_relation_count": ("consist.api", "active_relation_count"),
     "archive_artifact": ("consist.api", "archive_artifact"),
     "archive_current_run_outputs": ("consist.api", "archive_current_run_outputs"),
@@ -341,7 +352,6 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "current_consist": ("consist.api", "current_consist"),
     "current_run": ("consist.api", "current_run"),
     "current_tracker": ("consist.api", "current_tracker"),
-    "db_session": ("consist.api", "db_session"),
     "define_step": ("consist.api", "define_step"),
     "diff_coupler_snapshots": ("consist.api", "diff_coupler_snapshots"),
     "ensure_local_path": ("consist.api", "ensure_local_path"),
@@ -387,6 +397,8 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "output_dir": ("consist.api", "output_dir"),
     "output_path": ("consist.api", "output_path"),
     "pivot_facets": ("consist.api", "pivot_facets"),
+    "query_df": ("consist.api", "query_df"),
+    "query_rows": ("consist.api", "query_rows"),
     "ref": ("consist.api", "ref"),
     "refs": ("consist.api", "refs"),
     "register_artifact_facet_parser": ("consist.api", "register_artifact_facet_parser"),
@@ -398,7 +410,6 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
         "consist.api",
         "register_run_output_recovery_copies",
     ),
-    "register_views": ("consist.api", "register_views"),
     "require_runtime_kwargs": ("consist.api", "require_runtime_kwargs"),
     "resolve_callable": ("consist.core.orchestration", "resolve_callable"),
     "resolve_canonical_run_id": ("consist.api", "resolve_canonical_run_id"),
@@ -419,7 +430,6 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "to_df": ("consist.api", "to_df"),
     "trace": ("consist.api", "trace"),
     "use_tracker": ("consist.api", "use_tracker"),
-    "view": ("consist.api", "view"),
 }
 
 _DEPRECATED_TOP_LEVEL_EXPORTS: dict[str, tuple[str, str]] = {
@@ -545,6 +555,7 @@ __all__ = [
     "CommandExecutionResult",
     "Coupler",
     "CouplerSnapshotPhase",
+    "DatabaseMigrationRequired",
     "DriverType",
     "EnumCapture",
     "ExecutionAttempt",
@@ -570,6 +581,7 @@ __all__ = [
     "OutputPathRef",
     "OutputPolicyOptions",
     "OutputSet",
+    "ParameterizedSQL",
     "PythonCallableTarget",
     "RelationConnectionLeakWarning",
     "ResolvedBinding",
@@ -595,6 +607,7 @@ __all__ = [
     "TrackedArtifactLocator",
     "Tracker",
     "TrackerLike",
+    "TransactionAbortedError",
     "active_relation_count",
     "archive_artifact",
     "archive_current_run_outputs",
@@ -610,7 +623,6 @@ __all__ = [
     "current_consist",
     "current_run",
     "current_tracker",
-    "db_session",
     "define_step",
     "diff_coupler_snapshots",
     "ensure_local_path",
@@ -653,12 +665,13 @@ __all__ = [
     "output_dir",
     "output_path",
     "pivot_facets",
+    "query_df",
+    "query_rows",
     "ref",
     "refs",
     "register_artifact_facet_parser",
     "register_artifact_recovery_copy",
     "register_run_output_recovery_copies",
-    "register_views",
     "require_runtime_kwargs",
     "resolve_callable",
     "resolve_canonical_run_id",
@@ -679,7 +692,6 @@ __all__ = [
     "to_df",
     "trace",
     "use_tracker",
-    "view",
 ]
 
 

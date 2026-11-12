@@ -1,10 +1,12 @@
+from __future__ import annotations
+
+from pydantic import BaseModel
 import pytest
-from sqlmodel import select
 
-from consist import pivot_facets, run_query
+from consist import ParameterizedSQL, pivot_facets, query_df, query_rows
 
 
-def test_pivot_facets_numeric_and_string(tracker):
+def test_pivot_facets_numeric_and_string(tracker) -> None:
     tracker.begin_run(
         "run_a",
         "simulate",
@@ -19,17 +21,15 @@ def test_pivot_facets_numeric_and_string(tracker):
     )
     tracker.end_run()
 
-    params = pivot_facets(
+    stmt = pivot_facets(
         namespace="simulate",
         keys=["alpha", "beta", "mode"],
         value_columns={"mode": "value_str"},
     )
+    assert isinstance(stmt, ParameterizedSQL)
 
-    rows = run_query(
-        select(params.c.run_id, params.c.alpha, params.c.beta, params.c.mode),
-        tracker=tracker,
-    )
-    by_run = {row._mapping["run_id"]: row._mapping for row in rows}
+    df = query_df(stmt, tracker=tracker)
+    by_run = df.set_index("run_id").to_dict(orient="index")
 
     assert by_run["run_a"]["alpha"] == pytest.approx(0.1)
     assert by_run["run_a"]["beta"] == pytest.approx(2)
@@ -39,7 +39,7 @@ def test_pivot_facets_numeric_and_string(tracker):
     assert by_run["run_b"]["mode"] == "slow"
 
 
-def test_pivot_facets_labeling_and_namespace_optional(tracker):
+def test_pivot_facets_labeling_and_namespace_optional(tracker) -> None:
     tracker.begin_run(
         "run_c",
         "simulate",
@@ -54,30 +54,28 @@ def test_pivot_facets_labeling_and_namespace_optional(tracker):
     )
     tracker.end_run()
 
-    params = pivot_facets(
+    stmt = pivot_facets(
         namespace=None,
         keys=["alpha", "beta"],
         label_prefix="cfg_",
         label_map={"beta": "cfg_beta_override"},
     )
 
-    rows = run_query(
-        select(
-            params.c.run_id,
-            params.c.cfg_alpha,
-            params.c.cfg_beta_override,
-        ),
-        tracker=tracker,
-    )
-    by_run = {row._mapping["run_id"]: row._mapping for row in rows}
+    class PivotedRow(BaseModel):
+        run_id: str
+        cfg_alpha: float
+        cfg_beta_override: float
 
-    assert by_run["run_c"]["cfg_alpha"] == pytest.approx(0.4)
-    assert by_run["run_c"]["cfg_beta_override"] == pytest.approx(4)
-    assert by_run["run_d"]["cfg_alpha"] == pytest.approx(0.5)
-    assert by_run["run_d"]["cfg_beta_override"] == pytest.approx(5)
+    rows = query_rows(stmt, model=PivotedRow, tracker=tracker)
+    by_run = {row.run_id: row for row in rows}
+
+    assert by_run["run_c"].cfg_alpha == pytest.approx(0.4)
+    assert by_run["run_c"].cfg_beta_override == pytest.approx(4)
+    assert by_run["run_d"].cfg_alpha == pytest.approx(0.5)
+    assert by_run["run_d"].cfg_beta_override == pytest.approx(5)
 
 
-def test_pivot_facets_rejects_invalid_value_column(tracker):
+def test_pivot_facets_rejects_invalid_value_column(tracker) -> None:
     tracker.begin_run(
         "run_e",
         "simulate",
@@ -96,7 +94,7 @@ def test_pivot_facets_rejects_invalid_value_column(tracker):
         )
 
 
-def test_pivot_facets_normalizes_numpy_scalars(tracker):
+def test_pivot_facets_normalizes_numpy_scalars(tracker) -> None:
     np = pytest.importorskip("numpy")
 
     tracker.begin_run(
@@ -106,12 +104,9 @@ def test_pivot_facets_normalizes_numpy_scalars(tracker):
     )
     tracker.end_run()
 
-    params = pivot_facets(namespace="simulate", keys=["alpha", "beta"])
-    rows = run_query(
-        select(params.c.run_id, params.c.alpha, params.c.beta),
-        tracker=tracker,
-    )
-    by_run = {row._mapping["run_id"]: row._mapping for row in rows}
+    stmt = pivot_facets(namespace="simulate", keys=["alpha", "beta"])
+    df = query_df(stmt, tracker=tracker)
+    by_run = df.set_index("run_id").to_dict(orient="index")
 
     assert by_run["run_numpy"]["alpha"] == pytest.approx(0.7)
     assert by_run["run_numpy"]["beta"] == pytest.approx(7)

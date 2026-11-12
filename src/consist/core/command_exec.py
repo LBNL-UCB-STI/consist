@@ -10,6 +10,7 @@ exit status directly into DuckDB without refactoring code into Python callables.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import logging
 import os
@@ -18,6 +19,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import (
@@ -29,14 +31,13 @@ from typing import (
 )
 
 from pydantic import ConfigDict, Field as PydanticField
-from sqlmodel import select
 
-from consist.core.run_ordering import recent_run_order_by
 from consist.models.artifact import Artifact
-from consist.models.run import Run, RunResult
+from consist.models.run import RunResult
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
+
 
 logger = logging.getLogger(__name__)
 
@@ -203,35 +204,34 @@ def compare_with_baseline(
         return None
 
     try:
-        with tracker.db.session_scope() as session:
-            stmt = (
-                select(Run)
-                .where(Run.model_name == model_name)
-                .where(Run.status == "completed")
-                .where(Run.id != current_run_id)
-                .order_by(*recent_run_order_by())
-                .limit(1)
-            )
-            baseline_run = session.exec(stmt).first()
-            if not baseline_run:
-                return None
+        recent_runs = tracker.db.find_runs(
+            model=model_name,
+            status="completed",
+            limit=10,
+        )
+        baseline_run = next(
+            (candidate for candidate in recent_runs if candidate.id != current_run_id),
+            None,
+        )
+        if not baseline_run:
+            return None
 
-            baseline_id = baseline_run.id
-            baseline_meta = baseline_run.meta or {}
-            raw_cmd_meta = baseline_meta.get("command")
-            baseline_cmd_meta: dict[str, Any] = (
-                raw_cmd_meta if isinstance(raw_cmd_meta, dict) else {}
-            )
-            baseline_command = baseline_cmd_meta.get("argv", [])
-            baseline_duration = baseline_cmd_meta.get("duration")
-            if (
-                baseline_duration is None
-                and baseline_run.ended_at
-                and baseline_run.started_at
-            ):
-                baseline_duration = (
-                    baseline_run.ended_at - baseline_run.started_at
-                ).total_seconds()
+        baseline_id = baseline_run.id
+        baseline_meta = baseline_run.meta or {}
+        raw_cmd_meta = baseline_meta.get("command")
+        baseline_cmd_meta: dict[str, Any] = (
+            raw_cmd_meta if isinstance(raw_cmd_meta, dict) else {}
+        )
+        baseline_command = baseline_cmd_meta.get("argv", [])
+        baseline_duration = baseline_cmd_meta.get("duration")
+        if (
+            baseline_duration is None
+            and baseline_run.ended_at
+            and baseline_run.started_at
+        ):
+            baseline_duration = (
+                baseline_run.ended_at - baseline_run.started_at
+            ).total_seconds()
     except Exception as exc:
         logger.debug("Error querying baseline run: %s", exc)
         return None
@@ -301,7 +301,12 @@ def _safe_stream_write(stream: Any, chunk: bytes) -> None:
     if stream is None or not chunk:
         return
     try:
-        buf = getattr(stream, "buffer", None)
+        buf = stream.buffer if isinstance(stream, io.TextIOWrapper) else None
+        if buf is None and not isinstance(stream, io.TextIOBase):
+            try:
+                buf = stream.buffer
+            except AttributeError:
+                buf = None
         if buf is not None:
             buf.write(chunk)
             buf.flush()
@@ -645,47 +650,53 @@ def execute_command(
 
     proc = None
     try:
-        proc = subprocess.Popen(
-            cmd_to_spawn,
-            shell=shell,
-            cwd=str(resolved_cwd),
-            env=merged_env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+        suspend_ctx = (
+            tracker.db.suspend_for_subprocesses()
+            if tracker.db is not None
+            else nullcontext()
         )
+        with suspend_ctx:
+            proc = subprocess.Popen(
+                cmd_to_spawn,
+                shell=shell,
+                cwd=str(resolved_cwd),
+                env=merged_env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
 
-        out_target = sys.stdout if stream_output else None
-        err_target = sys.stderr if stream_output else None
+            out_target = sys.stdout if stream_output else None
+            err_target = sys.stderr if stream_output else None
 
-        out_thread = threading.Thread(
-            target=_stream_reader,
-            args=(
-                proc.stdout,
-                stdout_chunks,
-                out_file,
-                out_target,
-                max_memory_stream_bytes,
-            ),
-            daemon=True,
-        )
-        err_thread = threading.Thread(
-            target=_stream_reader,
-            args=(
-                proc.stderr,
-                stderr_chunks,
-                err_file,
-                err_target,
-                max_memory_stream_bytes,
-            ),
-            daemon=True,
-        )
+            out_thread = threading.Thread(
+                target=_stream_reader,
+                args=(
+                    proc.stdout,
+                    stdout_chunks,
+                    out_file,
+                    out_target,
+                    max_memory_stream_bytes,
+                ),
+                daemon=True,
+            )
+            err_thread = threading.Thread(
+                target=_stream_reader,
+                args=(
+                    proc.stderr,
+                    stderr_chunks,
+                    err_file,
+                    err_target,
+                    max_memory_stream_bytes,
+                ),
+                daemon=True,
+            )
 
-        out_thread.start()
-        err_thread.start()
+            out_thread.start()
+            err_thread.start()
 
-        proc.wait()
-        out_thread.join(timeout=3.0)
-        err_thread.join(timeout=3.0)
+            proc.wait()
+            out_thread.join(timeout=3.0)
+            err_thread.join(timeout=3.0)
 
     except FileNotFoundError as exc:
         return _abort_spawn(127, f"Command not found: {cmd_list[0]}", exc)

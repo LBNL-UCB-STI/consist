@@ -37,10 +37,6 @@ from typing import (
     get_args,
 )
 
-import pandas as pd
-from sqlalchemy import Column, MetaData, Table, select, text
-from sqlalchemy.exc import SQLAlchemyError
-
 from consist.core.container_policy import validate_recovery_registration_policy
 from consist.core.directory_artifacts import (
     build_directory_manifest,
@@ -59,7 +55,8 @@ from consist.core.directory_artifacts import (
     validate_shapefile_bundle_destination,
     validate_shapefile_bundle_root,
 )
-from consist.core.stores import get_hot_data_engine
+from consist.core.stores import get_hot_data_db
+from consist.core.views import _quote_ident, _validate_identifier
 from consist.digest import file_sha256
 from consist.models.artifact import Artifact, _private_state
 
@@ -4008,23 +4005,19 @@ def stage_inputs(
     )
 
 
-def _load_global_table_metadata(table_name: str, hot_data_engine: Any) -> Table:
-    """Construct a SQLAlchemy Table for ``global_tables.<table_name>`` without dialect reflection."""
-    metadata = MetaData()
+def _load_global_table_columns(table_name: str, hot_db: Any) -> list[str]:
+    """Inspect ``global_tables.<table_name>`` column names from DuckDB."""
     try:
-        with hot_data_engine.connect() as conn:
-            rows = conn.execute(
-                text(
-                    "SELECT column_name "
-                    "FROM information_schema.columns "
-                    "WHERE table_catalog = current_database() "
-                    "AND table_schema = 'global_tables' "
-                    "AND table_name = :table_name "
-                    "ORDER BY ordinal_position"
-                ),
-                {"table_name": table_name},
-            ).fetchall()
-    except SQLAlchemyError as e:
+        rows = hot_db.fetchall(
+            "SELECT column_name "
+            "FROM information_schema.columns "
+            "WHERE table_catalog = current_database() "
+            "AND table_schema = 'global_tables' "
+            "AND table_name = ? "
+            "ORDER BY ordinal_position",
+            [table_name],
+        )
+    except Exception as e:
         raise RuntimeError(
             f"Failed to reflect table 'global_tables.{table_name}': {e}"
         ) from e
@@ -4035,19 +4028,7 @@ def _load_global_table_metadata(table_name: str, hot_data_engine: Any) -> Table:
             "table does not exist or has no columns."
         )
 
-    column_names = list(dict.fromkeys(str(row[0]) for row in rows))
-    columns = [Column(name) for name in column_names]
-    try:
-        return Table(
-            table_name,
-            metadata,
-            *columns,
-            schema="global_tables",
-        )
-    except SQLAlchemyError as e:
-        raise RuntimeError(
-            f"Failed to reflect table 'global_tables.{table_name}': {e}"
-        ) from e
+    return list(dict.fromkeys(str(row[0]) for row in rows))
 
 
 def materialize_ingested_artifact_from_db(
@@ -4089,8 +4070,8 @@ def materialize_ingested_artifact_from_db(
         If the artifact is not marked as ingested or uses an unsupported
         materialization driver.
     """
-    hot_data_engine = get_hot_data_engine(tracker)
-    if not tracker or hot_data_engine is None:
+    hot_db = get_hot_data_db(tracker) if tracker else None
+    if not tracker or hot_db is None:
         raise RuntimeError(
             "Cannot materialize ingested artifact: tracker has no DB engine."
         )
@@ -4110,16 +4091,35 @@ def materialize_ingested_artifact_from_db(
     table_name = artifact.meta.get("dlt_table_name") or artifact.key
     if not isinstance(table_name, str) or not table_name:
         raise ValueError("Artifact table name is missing; cannot reconstruct from DB.")
+    _validate_identifier(table_name, label="table name")
 
-    table = _load_global_table_metadata(table_name, hot_data_engine)
+    column_names = _load_global_table_columns(table_name, hot_db)
+    quoted_cols = ", ".join(_quote_ident(col) for col in column_names)
+    has_artifact_id = "consist_artifact_id" in column_names
+    has_run_id = "consist_run_id" in column_names
 
-    if "consist_artifact_id" not in table.c:
+    if has_artifact_id and has_run_id and artifact.run_id is not None:
+        where_sql = (
+            'WHERE (CAST("consist_artifact_id" AS VARCHAR) = ? '
+            'OR ("consist_artifact_id" IS NULL AND CAST("consist_run_id" AS VARCHAR) = ?))'
+        )
+        query_params: list[Any] = [str(artifact.id), str(artifact.run_id)]
+    elif has_artifact_id:
+        where_sql = 'WHERE CAST("consist_artifact_id" AS VARCHAR) = ?'
+        query_params = [str(artifact.id)]
+    elif has_run_id and artifact.run_id is not None:
+        where_sql = 'WHERE CAST("consist_run_id" AS VARCHAR) = ?'
+        query_params = [str(artifact.run_id)]
+    else:
         raise RuntimeError(
             f"Table 'global_tables.{table_name}' is missing consist_artifact_id."
         )
 
-    stmt = select(table).where(table.c.consist_artifact_id == str(artifact.id))
-    df = pd.read_sql(stmt, hot_data_engine)
+    sql = (
+        f'SELECT {quoted_cols} FROM "global_tables".{_quote_ident(table_name)} '
+        f"{where_sql}"
+    )
+    df = hot_db.fetchdf(sql, query_params)
     if df.empty:
         raise FileNotFoundError(
             f"No ingested rows found for artifact {artifact.key!r} ({artifact.id})."

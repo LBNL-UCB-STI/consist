@@ -30,20 +30,22 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from sqlmodel import Session, select
-
 from consist.core.materialize import materialize_artifacts
 from consist.core.tracker import Tracker
-from consist.integrations.containers.backends import DockerBackend, SingularityBackend
+from consist.integrations.containers.backends import (
+    ContainerBackend,
+    DockerBackend,
+    SingularityBackend,
+)
 from consist.integrations.containers.models import (
     ContainerDefinition,
     _hash_environment,
 )
 from consist.models.artifact import Artifact
-from consist.models.run import RunArtifactLink
 from consist.types import ArtifactRef
 
 logger = logging.getLogger(__name__)
+
 
 MAX_CONTAINER_COMMAND_LENGTH = 10_000
 
@@ -65,11 +67,28 @@ class ContainerResult:
         return next(iter(self.artifacts.values()), None)
 
 
-def _resolve_image_digest(backend, image: str, pull_latest: bool) -> str:
+def _resolve_image_digest(
+    backend: ContainerBackend | Any, image: str, pull_latest: bool
+) -> str:
     """Resolve image digest (backend handles pull_latest internally if supported)."""
-    if getattr(backend, "resolve_image_digest", None):
+    del pull_latest
+    try:
         return backend.resolve_image_digest(image)
-    return image
+    except AttributeError:
+        return image
+
+
+def _run_backend_with_db_suspended(
+    tracker: Tracker,
+    backend: ContainerBackend | Any,
+    backend_run_kwargs: Dict[str, Any],
+) -> bool:
+    """Suspend file-backed DuckDB locks while external container backends run."""
+    db = tracker.db
+    if db is not None and db._tx_depth == 0:
+        with db.suspend_for_subprocesses():
+            return bool(backend.run(**backend_run_kwargs))
+    return bool(backend.run(**backend_run_kwargs))
 
 
 def _hash_inputs(tracker: Tracker, items: Sequence[ArtifactRef]) -> List[str]:
@@ -83,8 +102,7 @@ def _hash_inputs(tracker: Tracker, items: Sequence[ArtifactRef]) -> List[str]:
                 if run:
                     if run.config_hash:
                         sig_parts.append(f"conf:{run.config_hash}")
-            # Intentional hash usage: container signatures need a portable content
-            # fingerprint, not a tracker-local ``content_id``.
+            # Container signatures use a portable content digest fingerprint.
             if item.hash:
                 sig_parts.append(f"hash:{item.hash}")
             if not sig_parts:
@@ -214,7 +232,11 @@ def _validate_host_path(
 def _ensure_output_within_run_dir(
     path: Path, tracker: Tracker, *, strict_mounts: bool
 ) -> None:
-    if getattr(tracker, "allow_external_paths", False) or (not strict_mounts):
+    try:
+        allow_ext = bool(tracker.allow_external_paths)
+    except AttributeError:
+        allow_ext = False
+    if allow_ext or (not strict_mounts):
         return
     base_dir = tracker.run_dir.resolve()
     resolved = path.resolve()
@@ -296,18 +318,19 @@ def _reuse_or_execute_container(
         if set(requested_outputs).issubset(set(cached_outputs)):
             logger.info(f"✅ [Consist] Container cache hit: {run_id} -> {cached.id}")
             # Re-link cached artifacts to current run for provenance (inputs + outputs).
-            if tracker.db and tracker.engine:
-                with Session(tracker.engine) as session:
-                    links = session.exec(
-                        select(RunArtifactLink).where(
-                            RunArtifactLink.run_id == cached.id
-                        )
-                    ).all()
-                for link in links:
+            if tracker.db is not None:
+                link_rows = tracker.db.fetchall(
+                    "SELECT artifact_id, direction, role, is_implicit "
+                    "FROM run_artifact_link WHERE run_id = ?",
+                    [cached.id],
+                )
+                for art_id, direction, role, is_implicit in link_rows:
                     tracker.db.link_artifact_to_run(
-                        artifact_id=link.artifact_id,
+                        artifact_id=art_id,
                         run_id=run_id,
-                        direction=link.direction,
+                        direction=str(direction),
+                        role=str(role or ""),
+                        is_implicit=bool(is_implicit),
                     )
 
             # Materialize requested outputs onto the host so callers see expected files.
@@ -616,7 +639,9 @@ def run_container(
             Path(host_path).mkdir(parents=True, exist_ok=True)
 
         logger.info(f"🔄 [Consist] Executing Container: {run_id}")
-        success = backend.run(**backend_run_kwargs)
+        success = _run_backend_with_db_suspended(
+            active_tracker, backend, backend_run_kwargs
+        )
 
         if not success:
             raise RuntimeError(f"Container execution failed for run_id: {run_id}")
@@ -634,7 +659,7 @@ def run_container(
                     **log_kwargs,
                 )
                 try:
-                    object.__setattr__(logged, "_abs_path", str(path_obj))
+                    logged._abs_path = str(path_obj)
                 except Exception:
                     continue
             else:
@@ -684,7 +709,9 @@ def run_container(
             for host_path in volumes.keys():
                 Path(host_path).mkdir(parents=True, exist_ok=True)
             logger.info(f"🔄 [Consist] Executing Container (no-lineage): {run_id}")
-            success = backend.run(**backend_run_kwargs)
+            success = _run_backend_with_db_suspended(
+                tracker, backend, backend_run_kwargs
+            )
             if not success:
                 raise RuntimeError(
                     f"Container execution failed for run_id (no-lineage): {run_id}"
@@ -733,7 +760,7 @@ def run_container(
         for host_path in volumes.keys():
             Path(host_path).mkdir(parents=True, exist_ok=True)
         logger.info(f"🔄 [Consist] Executing Container (no-lineage): {run_id}")
-        success = backend.run(**backend_run_kwargs)
+        success = _run_backend_with_db_suspended(tracker, backend, backend_run_kwargs)
         if not success:
             raise RuntimeError(
                 f"Container execution failed for run_id (no-lineage): {run_id}"

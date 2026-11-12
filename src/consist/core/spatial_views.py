@@ -7,34 +7,31 @@ Provides a lightweight view for querying spatial metadata ingested by Consist.
 from __future__ import annotations
 
 import logging
-import re
 from numbers import Integral
 from typing import TYPE_CHECKING, Dict, List, Optional
 
+import duckdb
 import pandas as pd
-from sqlalchemy import text
+
+from consist.core.stores import get_hot_data_db
+from consist.core.views import (
+    _SAFE_IDENTIFIER_RE as _SAFE_IDENTIFIER_RE,
+    _build_metadata_artifact_join,
+    _dlt_child_list_cte,
+    _quote_ident,
+    _validate_identifier,
+)
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
 
-_SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
 
 def _validate_concept_key(concept_key: str) -> None:
-    if not _SAFE_IDENTIFIER_RE.fullmatch(concept_key):
-        raise ValueError(
-            "Invalid concept_key. Only letters, numbers, and underscores are allowed, "
-            "and the key must not start with a number."
-        )
+    _validate_identifier(concept_key, label="concept_key")
 
 
 class SpatialMetadataView:
-    """
-    View factory for querying spatial metadata stored in the DuckDB catalog.
-
-    Spatial metadata is ingested as a small catalog table per artifact key
-    (e.g., bounds, CRS, geometry types, column names).
-    """
+    """View factory for querying spatial metadata stored in the DuckDB catalog."""
 
     def __init__(self, tracker: Tracker) -> None:
         self.tracker = tracker
@@ -45,81 +42,62 @@ class SpatialMetadataView:
         run_ids: Optional[List[str]] = None,
         year: Optional[int] = None,
     ) -> pd.DataFrame:
-        """
-        Return spatial metadata rows for the given artifact key.
-
-        Parameters
-        ----------
-        concept_key : str
-            The semantic key identifying the spatial artifact.
-        run_ids : Optional[List[str]], optional
-            Optional list of run IDs to include.
-        year : Optional[int], optional
-            Optional year filter.
-        """
-        # TODO(metadata-hot-store): This metadata query still depends on the
-        # single-store compatibility engine because it joins metadata tables and
-        # `global_tables.*` in one query. Keep it deferred until cross-store
-        # query surfaces are redesigned intentionally.
-        if not self.tracker.engine:
+        """Return spatial metadata rows for the given artifact key."""
+        db = get_hot_data_db(self.tracker)
+        if db is None:
             raise RuntimeError("Database connection required.")
         _validate_concept_key(concept_key)
+        if not db.has_table(concept_key, table_schema="global_tables"):
+            return pd.DataFrame()
+
+        q_base = f"global_tables.{_quote_ident(concept_key)}"
+        bounds_cte = _dlt_child_list_cte(
+            db, f"{concept_key}__bounds", "bounds", "DOUBLE[]"
+        )
+        geom_cte = _dlt_child_list_cte(
+            db, f"{concept_key}__geometry_types", "geometry_types", "VARCHAR[]"
+        )
+        cols_cte = _dlt_child_list_cte(
+            db, f"{concept_key}__column_names", "column_names", "VARCHAR[]"
+        )
+        artifact_join, params = _build_metadata_artifact_join(db, concept_key, "sm")
+        if artifact_join is None:
+            return pd.DataFrame()
 
         query = f"""
-            WITH bounds AS (
-                SELECT
-                    _dlt_parent_id,
-                    list(value ORDER BY _dlt_list_idx) AS bounds
-                FROM global_tables.{concept_key}__bounds
-                GROUP BY _dlt_parent_id
-            ),
-            geometry_types AS (
-                SELECT
-                    _dlt_parent_id,
-                    list(value ORDER BY _dlt_list_idx) AS geometry_types
-                FROM global_tables.{concept_key}__geometry_types
-                GROUP BY _dlt_parent_id
-            ),
-            column_names AS (
-                SELECT
-                    _dlt_parent_id,
-                    list(value ORDER BY _dlt_list_idx) AS column_names
-                FROM global_tables.{concept_key}__column_names
-                GROUP BY _dlt_parent_id
-            )
+            WITH bounds AS ({bounds_cte}),
+            geometry_types AS ({geom_cte}),
+            column_names AS ({cols_cte})
             SELECT
-                b.bounds,
+                COALESCE(b.bounds, CAST([] AS DOUBLE[])) AS bounds,
                 sm.crs,
                 sm.feature_count,
-                gt.geometry_types,
+                COALESCE(gt.geometry_types, CAST([] AS VARCHAR[])) AS geometry_types,
                 sm.geometry_column,
-                cn.column_names,
-                ANY_VALUE(COALESCE(r.id, a.run_id)) as run_id,
+                COALESCE(cn.column_names, CAST([] AS VARCHAR[])) AS column_names,
+                ANY_VALUE(COALESCE(r.id, a.run_id)) AS run_id,
                 r.year,
                 r.iteration
-            FROM global_tables.{concept_key} sm
+            FROM {q_base} sm
             LEFT JOIN bounds b
                 ON b._dlt_parent_id = sm._dlt_id
             LEFT JOIN geometry_types gt
                 ON gt._dlt_parent_id = sm._dlt_id
             LEFT JOIN column_names cn
                 ON cn._dlt_parent_id = sm._dlt_id
-            JOIN artifact a ON sm.consist_artifact_id = CAST(a.id AS TEXT)
-            LEFT JOIN run r ON a.run_id = r.id
+            {artifact_join}
+            LEFT JOIN main.run r ON a.run_id = r.id
             WHERE TRUE
         """
 
-        params: Dict[str, str | int] = {}
-
         if run_ids:
-            placeholders = ",".join([f":{i}" for i in range(len(run_ids))])
-            query += f" AND r.id IN ({placeholders})"
-            for i, rid in enumerate(run_ids):
-                params[str(i)] = rid
+            placeholders = ", ".join("?" for _ in run_ids)
+            query += f" AND COALESCE(r.id, a.run_id) IN ({placeholders})"
+            params.extend(run_ids)
 
         if year is not None:
-            query += " AND r.year = :year"
-            params["year"] = year
+            query += " AND r.year = ?"
+            params.append(int(year))
 
         query += """
             GROUP BY
@@ -137,8 +115,8 @@ class SpatialMetadataView:
         """
 
         try:
-            return pd.read_sql(text(query), self.tracker.engine, params=params)
-        except Exception as e:
+            return db.fetchdf(query, params)
+        except (duckdb.Error, ValueError, RuntimeError) as e:
             logging.warning(
                 "[Consist] Failed to query spatial metadata for %s: %s",
                 concept_key,
@@ -151,9 +129,7 @@ class SpatialMetadataView:
         concept_key: str,
         run_ids: Optional[List[str]] = None,
     ) -> Dict[str, object]:
-        """
-        Return bounds keyed by run ID.
-        """
+        """Return bounds keyed by run ID."""
         df = self.get_metadata(concept_key, run_ids=run_ids)
         if df.empty:
             return {}
@@ -170,9 +146,7 @@ class SpatialMetadataView:
         concept_key: str,
         run_ids: Optional[List[str]] = None,
     ) -> Dict[str, int]:
-        """
-        Return feature counts keyed by run ID.
-        """
+        """Return feature counts keyed by run ID."""
         df = self.get_metadata(concept_key, run_ids=run_ids)
         if df.empty:
             return {}
@@ -194,9 +168,7 @@ class SpatialMetadataView:
         concept_key: str,
         run_ids: Optional[List[str]] = None,
     ) -> Dict[str, object]:
-        """
-        Return geometry types keyed by run ID.
-        """
+        """Return geometry types keyed by run ID."""
         df = self.get_metadata(concept_key, run_ids=run_ids)
         if df.empty:
             return {}

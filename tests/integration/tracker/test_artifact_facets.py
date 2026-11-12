@@ -2,9 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sqlmodel import Session, select
-
-from consist.models.artifact_facet import ArtifactFacet
 from consist.models.artifact_kv import ArtifactKV
 from consist.tools import queries
 
@@ -74,12 +71,11 @@ def test_log_artifacts_facets_are_deduplicated_by_json_hash(
             facet_index=True,
         )
 
-    assert tracker.engine is not None
-    with Session(tracker.engine) as session:
-        facets = session.exec(select(ArtifactFacet)).all()
-        kv_rows = session.exec(select(ArtifactKV)).all()
+    assert tracker.db is not None
+    facet_count = tracker.run_query("SELECT COUNT(*) FROM main.artifact_facet")[0]
+    kv_rows = tracker.query_rows("SELECT * FROM main.artifact_kv", model=ArtifactKV)
 
-    assert len(facets) == 1
+    assert facet_count == 1
     assert len({row.artifact_id for row in kv_rows}) == 2
 
 

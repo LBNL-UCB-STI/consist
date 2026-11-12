@@ -154,8 +154,7 @@ def test_cache_validation_warning_includes_mount_hint(tmp_path, caplog) -> None:
 
     assert any("Cache Validation Failed" in record.message for record in caplog.records)
     assert any("Mount root mismatch" in record.message for record in caplog.records)
-    if tracker.engine:
-        tracker.engine.dispose()
+    tracker.close()
 
 
 @pytest.mark.parametrize("corruption", ["delete", "modify", "extra"])

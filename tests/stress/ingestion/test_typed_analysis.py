@@ -19,7 +19,7 @@ import pytest
 import pandas as pd
 import numpy as np
 from typing import Optional
-from sqlmodel import SQLModel, Field, select, func
+from sqlmodel import SQLModel, Field
 from consist.core.tracker import Tracker
 import consist
 
@@ -80,12 +80,11 @@ def test_typed_analysis_workflow(tmp_path):
        synthetic census data (100,000 rows). This DataFrame is then ingested into
        Consist using `consist.ingest`, with `CensusRecord` provided as a strict
        schema. This ensures the incoming data conforms to the defined types and structure.
-    3. **Pythonic Analysis**: A Pythonic analytical query is constructed using
-       SQLAlchemy expressions (e.g., `select(CensusRecord.mode, func.count(...))`)
+    3. **Analytical Query**: An analytical query is executed via `consist.run_query`
        to group data by mode, calculate the count of persons, and their average income,
-       filtered by age. This query is executed via the `tracker.engine`.
-    4. **Results as DataFrame**: The results of the SQLAlchemy query are also fetched
-       directly as a Pandas DataFrame for further Python-based analysis.
+       filtered by age.
+    4. **Results as DataFrame**: The results of the query are also fetched
+       directly as a Pandas DataFrame via `tracker.query_df`.
 
     What's checked:
     - The ingestion process successfully loads data into the `global_tables.census_strict`
@@ -128,32 +127,25 @@ def test_typed_analysis_workflow(tmp_path):
         )
 
     # =========================================================================
-    # 2. ANALYSIS (The "Pandas-like" SQL Way)
+    # 2. ANALYSIS
     # =========================================================================
-    logging.info("[Step 2] performing Typed Analysis (No SQL Strings)...")
+    logging.info("[Step 2] performing Typed Analysis...")
 
-    # We use the tracker's session to execute SQLAlchemy expressions
-    # This is efficient: It generates the SQL query, sends it to DuckDB,
-    # and only fetches the aggregated results (not 100k objects).
-
-    # Query: "Group by Mode, calculate Avg Income and Count"
-    statement = (
-        select(
-            CensusRecord.mode,
-            func.count(CensusRecord.person_id).label("count"),
-            func.avg(CensusRecord.income).label("avg_income"),
-        )
-        .where(CensusRecord.age > 30)  # easy filtering
-        .group_by(CensusRecord.mode)
-        .order_by(func.avg(CensusRecord.income).desc())
-    )
-
-    results = consist.run_query(statement, tracker=tracker)
+    sql_query = """
+        SELECT
+            mode,
+            COUNT(person_id) AS count,
+            AVG(income) AS avg_income
+        FROM global_tables.census_strict
+        WHERE age > 30
+        GROUP BY mode
+        ORDER BY avg_income DESC
+    """
+    results = consist.run_query(sql_query, tracker=tracker)
 
     logging.info(f"\n{'Mode':<10} {'Count':<10} {'Avg Income':<15}")
     logging.info("-" * 35)
     for row in results:
-        # Row matches the select() structure
         mode, count, avg_inc = row
         logging.info(f"{mode:<10} {count:<10} ${avg_inc:,.2f}")
 
@@ -166,8 +158,7 @@ def test_typed_analysis_workflow(tmp_path):
     # If you really want a DataFrame back for plotting:
     logging.info("\n[Step 3] Fetching aggregated result as DataFrame...")
 
-    with consist.db_session(tracker=tracker) as session:
-        df_agg = pd.read_sql(statement, session.connection())
+    df_agg = tracker.query_df(sql_query)
 
     logging.info(df_agg)
     assert len(df_agg) == 3

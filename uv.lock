@@ -640,15 +640,16 @@ source = { editable = "." }
 dependencies = [
     { name = "click" },
     { name = "duckdb" },
-    { name = "duckdb-engine" },
     { name = "pandas" },
     { name = "pyarrow" },
     { name = "pydantic" },
+    { name = "pytz" },
     { name = "rich" },
     { name = "sqlalchemy" },
     { name = "sqlmodel" },
     { name = "tqdm" },
     { name = "typer" },
+    { name = "typing-extensions" },
 ]
 
 [package.optional-dependencies]
@@ -774,8 +775,7 @@ requires-dist = [
     { name = "dlt", marker = "extra == 'ingest'", specifier = ">=1.27.0" },
     { name = "docker", marker = "extra == 'all'", specifier = ">=7.1.0" },
     { name = "docker", marker = "extra == 'docker'", specifier = ">=7.1.0" },
-    { name = "duckdb", specifier = ">=1.4.2" },
-    { name = "duckdb-engine", specifier = ">=0.17.0" },
+    { name = "duckdb", specifier = ">=1.4.2,<2.0.0" },
     { name = "geopandas", marker = "extra == 'all'", specifier = ">=0.14.0" },
     { name = "geopandas", marker = "extra == 'spatial'", specifier = ">=0.14.0" },
     { name = "gitpython", marker = "extra == 'all'", specifier = ">=3.1.50" },
@@ -800,6 +800,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.12.4" },
     { name = "pyhocon", marker = "extra == 'all'", specifier = ">=0.3.60" },
     { name = "pyhocon", marker = "extra == 'beam'", specifier = ">=0.3.60" },
+    { name = "pytz", specifier = ">=2024.1" },
     { name = "pyyaml", marker = "extra == 'activitysim'", specifier = ">=6.0" },
     { name = "pyyaml", marker = "extra == 'all'", specifier = ">=6.0" },
     { name = "rich", specifier = ">=13.7.1" },
@@ -810,6 +811,7 @@ requires-dist = [
     { name = "tables", marker = "extra == 'hdf5'", specifier = ">=3.10.2" },
     { name = "tqdm", specifier = ">=4.67.1" },
     { name = "typer", specifier = ">=0.12.3" },
+    { name = "typing-extensions", specifier = ">=4.12" },
     { name = "xarray", marker = "extra == 'all'", specifier = ">=2024.9.0" },
     { name = "xarray", marker = "extra == 'netcdf'", specifier = ">=2024.9.0" },
     { name = "xarray", marker = "extra == 'netcdf4'", specifier = ">=2024.9.0" },
@@ -1239,20 +1241,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/d4/4c/47e838393aa90d3d78549c8c04cb09452efeb14aaae0ee24dc0bd61c3a41/duckdb-1.5.1-cp314-cp314-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:8843bd9594e1387f1e601439e19ad73abdf57356104fd1e53a708255bb95a13d", size = 21387569, upload-time = "2026-03-23T12:12:05.693Z" },
     { url = "https://files.pythonhosted.org/packages/f4/9b/ce65743e0e85f5c984d2f7e8a81bc908d0bac345d6d8b6316436b29430e7/duckdb-1.5.1-cp314-cp314-win_amd64.whl", hash = "sha256:d68c5a01a283cb13b79eafe016fe5869aa11bff8c46e7141c70aa0aac808010f", size = 13603876, upload-time = "2026-03-23T12:12:09.344Z" },
     { url = "https://files.pythonhosted.org/packages/e6/ac/f9e4e731635192571f86f52d86234f537c7f8ca4f6917c56b29051c077ef/duckdb-1.5.1-cp314-cp314-win_arm64.whl", hash = "sha256:a3be2072315982e232bfe49c9d3db0a59ba67b2240a537ef42656cc772a887c7", size = 14370790, upload-time = "2026-03-23T12:12:12.497Z" },
-]
-
-[[package]]
-name = "duckdb-engine"
-version = "0.17.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "duckdb" },
-    { name = "packaging" },
-    { name = "sqlalchemy" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/89/d5/c0d8d0a4ca3ffea92266f33d92a375e2794820ad89f9be97cf0c9a9697d0/duckdb_engine-0.17.0.tar.gz", hash = "sha256:396b23869754e536aa80881a92622b8b488015cf711c5a40032d05d2cf08f3cf", size = 48054, upload-time = "2025-03-29T09:49:17.663Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/2a/a2/e90242f53f7ae41554419b1695b4820b364df87c8350aa420b60b20cab92/duckdb_engine-0.17.0-py3-none-any.whl", hash = "sha256:3aa72085e536b43faab635f487baf77ddc5750069c16a2f8d9c6c3cb6083e979", size = 49676, upload-time = "2025-03-29T09:49:15.564Z" },
 ]
 
 [[package]]

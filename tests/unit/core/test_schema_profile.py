@@ -1,12 +1,14 @@
 """
 Unit tests for Consist's schema discovery + persistence layer.
 
-These tests validate the new "deduped schema" feature:
+These tests validate the deduped schema feature:
 - profiling a DuckDB table produces a stable schema_id,
 - schema payloads are persisted in normalized tables,
 - artifacts store a pointer + small summary in `Artifact.meta`,
 - repeated profiling dedupes schema rows but records multiple observations.
 """
+
+from __future__ import annotations
 
 import json
 import uuid
@@ -14,8 +16,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import pytest
-from sqlalchemy import column, table
-from sqlmodel import Field, SQLModel, Session, select
+from sqlmodel import Field, SQLModel
 
 from consist.models.artifact import Artifact
 from consist.models.artifact_schema import (
@@ -24,12 +25,14 @@ from consist.models.artifact_schema import (
     ArtifactSchemaObservation,
     ArtifactSchemaRelation,
 )
-from consist.models.run import RunArtifactLink
+from consist.models.run import Run
 
 
 def test_get_artifact_filters_key_lookup_by_run_id(tracker):
+    assert tracker.db is not None
     artifact_run_a_id = uuid.uuid4()
     artifact_run_b_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
     artifact_run_a = Artifact(
         id=artifact_run_a_id,
         key="collision_key",
@@ -37,7 +40,7 @@ def test_get_artifact_filters_key_lookup_by_run_id(tracker):
         driver="csv",
         hash="collision_hash_a",
         run_id=None,
-        created_at=datetime.now(timezone.utc),
+        created_at=now,
     )
     artifact_run_b = Artifact(
         id=artifact_run_b_id,
@@ -46,27 +49,29 @@ def test_get_artifact_filters_key_lookup_by_run_id(tracker):
         driver="csv",
         hash="collision_hash_b",
         run_id="run_b",
-        created_at=datetime.now(timezone.utc) + timedelta(seconds=1),
+        created_at=now + timedelta(seconds=1),
     )
 
-    with Session(tracker.engine) as session:
-        session.add(artifact_run_a)
-        session.add(artifact_run_b)
-        session.add(
-            RunArtifactLink(
-                run_id="run_a",
-                artifact_id=artifact_run_a_id,
-                direction="input",
-            )
+    tracker.db.sync_run(
+        Run(
+            id="run_a",
+            model_name="demo",
+            config_hash=None,
+            git_hash=None,
+            status="completed",
         )
-        session.add(
-            RunArtifactLink(
-                run_id="run_b",
-                artifact_id=artifact_run_b_id,
-                direction="output",
-            )
+    )
+    tracker.db.sync_run(
+        Run(
+            id="run_b",
+            model_name="demo",
+            config_hash=None,
+            git_hash=None,
+            status="completed",
         )
-        session.commit()
+    )
+    tracker.db.sync_artifact(artifact_run_a, run_id="run_a", direction="input")
+    tracker.db.sync_artifact(artifact_run_b, run_id="run_b", direction="output")
 
     fetched_default = tracker.db.get_artifact("collision_key")
     assert fetched_default is not None
@@ -99,15 +104,14 @@ def test_profile_and_persist_ingested_schema(tracker, sample_csv):
     """
     with tracker.start_run("schema_profile_run", "demo") as t:
         artifact = t.log_output(sample_csv("fixture.csv"), key="fixture")
-        assert t.engine is not None
+        assert t.db is not None
 
-        with t.engine.begin() as conn:
-            conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS global_tables")
-            conn.exec_driver_sql(
-                "CREATE TABLE global_tables.fixture (a INTEGER, b VARCHAR)"
-            )
-            conn.exec_driver_sql("INSERT INTO global_tables.fixture VALUES (1, 'x')")
+        with t.db.transaction() as cur:
+            cur.execute("CREATE SCHEMA IF NOT EXISTS global_tables")
+            cur.execute("CREATE TABLE global_tables.fixture (a INTEGER, b VARCHAR)")
+            cur.execute("INSERT INTO global_tables.fixture VALUES (1, 'x')")
 
+        assert t.current_consist is not None
         run = t.current_consist.run
         t.artifact_schemas.profile_ingested_table(
             artifact=artifact,
@@ -123,26 +127,21 @@ def test_profile_and_persist_ingested_schema(tracker, sample_csv):
         assert summary["table_name"] == "fixture"
         assert summary["n_columns"] == 2
 
-        with Session(t.engine) as session:
-            schema_id = artifact.meta["schema_id"]
-            assert session.get(ArtifactSchema, schema_id) is not None
+        schema_id = artifact.meta["schema_id"]
+        fetched = t.db.get_artifact_schema(schema_id=schema_id)
+        assert fetched is not None
+        _, fields = fetched
+        assert {f.name for f in fields} == {"a", "b"}
+        ordinal_by_name = {f.name: f.ordinal_position for f in fields}
+        assert ordinal_by_name["a"] == 1
+        assert ordinal_by_name["b"] == 2
 
-            fields = session.exec(
-                select(ArtifactSchemaField).where(
-                    ArtifactSchemaField.schema_id == schema_id
-                )
-            ).all()
-            assert {f.name for f in fields} == {"a", "b"}
-            ordinal_by_name = {f.name: f.ordinal_position for f in fields}
-            assert ordinal_by_name["a"] == 1
-            assert ordinal_by_name["b"] == 2
-
-            observations = session.exec(
-                select(ArtifactSchemaObservation).where(
-                    ArtifactSchemaObservation.schema_id == schema_id
-                )
-            ).all()
-            assert len(observations) == 1
+        observations = t.query_rows(
+            "SELECT * FROM main.artifact_schema_observation WHERE schema_id = ?",
+            [schema_id],
+            model=ArtifactSchemaObservation,
+        )
+        assert len(observations) == 1
 
         t.artifact_schemas.profile_ingested_table(
             artifact=artifact,
@@ -151,16 +150,16 @@ def test_profile_and_persist_ingested_schema(tracker, sample_csv):
             table_name="fixture",
         )
 
-        with Session(t.engine) as session:
-            schema_id = artifact.meta["schema_id"]
-            schemas = session.exec(select(ArtifactSchema)).all()
-            assert len(schemas) == 1
-            observations = session.exec(
-                select(ArtifactSchemaObservation).where(
-                    ArtifactSchemaObservation.schema_id == schema_id
-                )
-            ).all()
-            assert len(observations) == 2
+        assert artifact.meta["schema_id"] == schema_id
+        schema_count_row = t.db.fetchone("SELECT COUNT(*) FROM main.artifact_schema")
+        assert schema_count_row is not None
+        assert schema_count_row[0] == 1
+        observations = t.query_rows(
+            "SELECT * FROM main.artifact_schema_observation WHERE schema_id = ?",
+            [schema_id],
+            model=ArtifactSchemaObservation,
+        )
+        assert len(observations) == 2
 
         if "schema_profile" in artifact.meta:
             json.dumps(artifact.meta["schema_profile"])
@@ -178,20 +177,18 @@ def test_profile_duckdb_table_truncates_fields_for_wide_tables(tracker):
     from consist.tools import schema_profile
 
     with tracker.start_run("schema_profile_wide", "demo") as t:
-        assert t.engine is not None
+        assert t.db is not None
         table_schema = "global_tables"
         table_name = "wide_table"
 
         wide_n = schema_profile.MAX_FIELDS + 1
         cols_sql = ", ".join(f"c{i} INTEGER" for i in range(wide_n))
-        with t.engine.begin() as conn:
-            conn.exec_driver_sql(f"CREATE SCHEMA IF NOT EXISTS {table_schema}")
-            conn.exec_driver_sql(
-                f"CREATE TABLE {table_schema}.{table_name} ({cols_sql})"
-            )
+        with t.db.transaction() as cur:
+            cur.execute(f"CREATE SCHEMA IF NOT EXISTS {table_schema}")
+            cur.execute(f"CREATE TABLE {table_schema}.{table_name} ({cols_sql})")
 
         result = schema_profile.profile_duckdb_table(
-            engine=t.engine,
+            db=t.db,
             identity=t.identity,
             table_schema=table_schema,
             table_name=table_name,
@@ -213,12 +210,12 @@ def test_profile_duckdb_table_respects_size_limits(tracker, monkeypatch):
     from consist.tools import schema_profile
 
     with tracker.start_run("schema_profile_limits", "demo") as t:
-        assert t.engine is not None
+        assert t.db is not None
         table_schema = "global_tables"
         table_name = "small_table"
-        with t.engine.begin() as conn:
-            conn.exec_driver_sql(f"CREATE SCHEMA IF NOT EXISTS {table_schema}")
-            conn.exec_driver_sql(
+        with t.db.transaction() as cur:
+            cur.execute(f"CREATE SCHEMA IF NOT EXISTS {table_schema}")
+            cur.execute(
                 f"CREATE TABLE {table_schema}.{table_name} (a INTEGER, b VARCHAR)"
             )
 
@@ -226,7 +223,7 @@ def test_profile_duckdb_table_respects_size_limits(tracker, monkeypatch):
         monkeypatch.setattr(schema_profile, "MAX_SCHEMA_JSON_BYTES", 1)
 
         result = schema_profile.profile_duckdb_table(
-            engine=t.engine,
+            db=t.db,
             identity=t.identity,
             table_schema=table_schema,
             table_name=table_name,
@@ -253,31 +250,28 @@ def test_profile_user_provided_schema_persists_fields_and_meta(tracker, sample_c
         assert artifact.meta.get("schema_name") == "UserSchema"
         assert artifact.meta.get("schema_summary", {}).get("n_columns") == 3
 
-        with Session(t.engine) as session:
-            schema_row = session.get(ArtifactSchema, schema_id)
-            assert schema_row is not None
+        assert t.db is not None
+        fetched = t.db.get_artifact_schema(schema_id=schema_id)
+        assert fetched is not None
+        schema_row, fields = fetched
+        assert schema_row is not None
 
-            fields = session.exec(
-                select(ArtifactSchemaField).where(
-                    ArtifactSchemaField.schema_id == schema_id
-                )
-            ).all()
-            fields_by_name = {field.name: field for field in fields}
-            assert fields_by_name["id"].logical_type == "integer"
-            assert fields_by_name["id"].nullable is False
-            assert fields_by_name["name"].logical_type == "varchar"
-            assert fields_by_name["name"].nullable is False
-            assert fields_by_name["optional_count"].logical_type == "integer"
-            assert fields_by_name["optional_count"].nullable is True
+        fields_by_name = {field.name: field for field in fields}
+        assert fields_by_name["id"].logical_type == "integer"
+        assert fields_by_name["id"].nullable is False
+        assert fields_by_name["name"].logical_type == "varchar"
+        assert fields_by_name["name"].nullable is False
+        assert fields_by_name["optional_count"].logical_type == "integer"
+        assert fields_by_name["optional_count"].nullable is True
 
-            observations = session.exec(
-                select(ArtifactSchemaObservation).where(
-                    ArtifactSchemaObservation.artifact_id == artifact.id
-                )
-            ).all()
-            assert len(observations) == 1
-            assert observations[0].source == "user_provided"
-            assert observations[0].schema_id == schema_id
+        observations = t.query_rows(
+            "SELECT * FROM main.artifact_schema_observation WHERE artifact_id = ?",
+            [artifact.id],
+            model=ArtifactSchemaObservation,
+        )
+        assert len(observations) == 1
+        assert observations[0].source == "user_provided"
+        assert observations[0].schema_id == schema_id
 
 
 def test_profile_user_provided_schema_persists_relations_and_hash(tracker, sample_csv):
@@ -307,17 +301,13 @@ def test_profile_user_provided_schema_persists_relations_and_hash(tracker, sampl
         assert schema_id_b
         assert schema_id_a != schema_id_b
 
-        with Session(t.engine) as session:
-            relations = session.exec(
-                select(ArtifactSchemaRelation).where(
-                    ArtifactSchemaRelation.schema_id == schema_id_a
-                )
-            ).all()
-            assert len(relations) == 1
-            rel = relations[0]
-            assert rel.from_field == "person_id"
-            assert rel.to_table == "people"
-            assert rel.to_field == "id"
+        assert t.db is not None
+        relations = t.db.get_artifact_schema_relations(schema_id=schema_id_a)
+        assert len(relations) == 1
+        rel = relations[0]
+        assert rel.from_field == "person_id"
+        assert rel.to_table == "people"
+        assert rel.to_field == "id"
 
 
 def test_profile_user_provided_schema_uses_combined_persistence_helper(
@@ -327,6 +317,7 @@ def test_profile_user_provided_schema_uses_combined_persistence_helper(
         id: int
         name: str
 
+    assert tracker.db is not None
     combined_calls = 0
     upsert_calls = 0
     observation_calls = 0
@@ -383,6 +374,7 @@ def test_profile_user_provided_schema_uses_combined_persistence_helper(
 def test_profile_file_artifact_uses_combined_persistence_helper(
     tracker, sample_csv, monkeypatch
 ):
+    assert tracker.db is not None
     combined_calls = 0
     upsert_calls = 0
     observation_calls = 0
@@ -427,6 +419,7 @@ def test_profile_file_artifact_uses_combined_persistence_helper(
             sample_csv("file_schema_combined.csv"),
             key="file_schema_combined",
         )
+        assert t.current_consist is not None
         t.artifact_schemas.profile_file_artifact(
             artifact=artifact,
             run=t.current_consist.run,
@@ -450,6 +443,7 @@ def test_profile_file_artifact_reuse_uses_combined_observation_helper(
     first_path.write_text("a,b\n1,x\n", encoding="utf-8")
     second_path.write_text("a,b\n1,x\n", encoding="utf-8")
 
+    assert tracker.db is not None
     combined_reuse_calls = 0
     observation_calls = 0
     meta_calls = 0
@@ -485,6 +479,7 @@ def test_profile_file_artifact_reuse_uses_combined_observation_helper(
 
     with tracker.start_run("schema_reuse_first", "demo") as t:
         first = t.log_artifact(first_path, key="schema_reuse_first")
+        assert t.current_consist is not None
         t.artifact_schemas.profile_file_artifact(
             artifact=first,
             run=t.current_consist.run,
@@ -500,6 +495,7 @@ def test_profile_file_artifact_reuse_uses_combined_observation_helper(
 
     with tracker.start_run("schema_reuse_second", "demo") as t:
         second = t.log_artifact(second_path, key="schema_reuse_second")
+        assert t.current_consist is not None
         t.artifact_schemas.profile_file_artifact(
             artifact=second,
             run=t.current_consist.run,
@@ -529,44 +525,27 @@ def test_schema_links_view_returns_relations(tracker, sample_csv):
         schema_id = artifact.meta.get("schema_id")
         assert schema_id
 
-        if t.db:
-            t.db._ensure_schema_links_view()
+        assert t.db is not None
 
-        with Session(t.engine) as session:
-            links = table(
-                "consist_schema_links",
-                column("from_table"),
-                column("from_field"),
-                column("to_table"),
-                column("to_field"),
-                column("schema_id"),
-            )
-            stmt = (
-                select(
-                    links.c.from_table,
-                    links.c.from_field,
-                    links.c.to_table,
-                    links.c.to_field,
-                )
-                .where(links.c.schema_id == schema_id)
-                .select_from(links)
-            )
-            rows = session.exec(stmt).all()
-            assert len(rows) == 1
-            from_table, from_field, to_table, to_field = rows[0]
-            assert from_table == "houseschema"
-            assert from_field == "owner_id"
-            assert to_table == "owners"
-            assert to_field == "id"
+        rows = t.db.fetchall(
+            "SELECT from_table, from_field, to_table, to_field "
+            "FROM main.consist_schema_links WHERE schema_id = ?",
+            [schema_id],
+        )
+        assert len(rows) == 1
+        from_table, from_field, to_table, to_field = rows[0]
+        assert str(from_table).lower() == "houseschema"
+        assert from_field == "owner_id"
+        assert to_table == "owners"
+        assert to_field == "id"
 
 
 def test_apply_physical_fks_best_effort(tracker):
-    assert tracker.engine is not None
     assert tracker.db is not None
 
-    with tracker.engine.begin() as conn:
-        conn.exec_driver_sql("CREATE TABLE parents (id INTEGER PRIMARY KEY)")
-        conn.exec_driver_sql("CREATE TABLE children (id INTEGER, parent_id INTEGER)")
+    with tracker.db.transaction() as cur:
+        cur.execute("CREATE TABLE parents (id INTEGER PRIMARY KEY)")
+        cur.execute("CREATE TABLE children (id INTEGER, parent_id INTEGER)")
 
     schema_row = ArtifactSchema(
         id="schema_fk_apply",
@@ -604,6 +583,7 @@ def test_apply_physical_fks_best_effort(tracker):
 
 
 def test_get_artifact_schema_for_artifact_prefers_user_provided(tracker):
+    assert tracker.db is not None
     artifact_id = uuid.uuid4()
     artifact = Artifact(
         id=artifact_id,
@@ -617,39 +597,14 @@ def test_get_artifact_schema_for_artifact_prefers_user_provided(tracker):
     schema_file = "schema_file"
     schema_duckdb = "schema_duckdb"
 
-    with Session(tracker.engine) as session:
-        session.add(artifact)
-        session.add(
-            ArtifactSchema(
-                id=schema_user,
-                summary_json={"table_name": "user_table"},
-                profile_version=1,
-            )
-        )
-        session.add(
-            ArtifactSchema(
-                id=schema_file,
-                summary_json={"table_name": "file_table"},
-                profile_version=1,
-            )
-        )
-        session.add(
-            ArtifactSchema(
-                id=schema_duckdb,
-                summary_json={"table_name": "duckdb_table"},
-                profile_version=1,
-            )
-        )
-        session.add(
-            ArtifactSchemaField(
-                schema_id=schema_user,
-                ordinal_position=1,
-                name="user_col",
-                logical_type="varchar",
-                nullable=True,
-            )
-        )
-        session.add(
+    tracker.db.upsert_artifact(artifact)
+    tracker.db.persist_artifact_schema(
+        ArtifactSchema(
+            id=schema_file,
+            summary_json={"table_name": "file_table"},
+            profile_version=1,
+        ),
+        [
             ArtifactSchemaField(
                 schema_id=schema_file,
                 ordinal_position=1,
@@ -657,8 +612,20 @@ def test_get_artifact_schema_for_artifact_prefers_user_provided(tracker):
                 logical_type="varchar",
                 nullable=True,
             )
-        )
-        session.add(
+        ],
+        observation=ArtifactSchemaObservation(
+            artifact_id=artifact_id,
+            schema_id=schema_file,
+            source="file",
+        ),
+    )
+    tracker.db.persist_artifact_schema(
+        ArtifactSchema(
+            id=schema_duckdb,
+            summary_json={"table_name": "duckdb_table"},
+            profile_version=1,
+        ),
+        [
             ArtifactSchemaField(
                 schema_id=schema_duckdb,
                 ordinal_position=1,
@@ -666,29 +633,34 @@ def test_get_artifact_schema_for_artifact_prefers_user_provided(tracker):
                 logical_type="varchar",
                 nullable=True,
             )
-        )
-        session.add(
-            ArtifactSchemaObservation(
-                artifact_id=artifact_id,
-                schema_id=schema_file,
-                source="file",
-            )
-        )
-        session.add(
-            ArtifactSchemaObservation(
-                artifact_id=artifact_id,
-                schema_id=schema_duckdb,
-                source="duckdb",
-            )
-        )
-        session.add(
-            ArtifactSchemaObservation(
-                artifact_id=artifact_id,
+        ],
+        observation=ArtifactSchemaObservation(
+            artifact_id=artifact_id,
+            schema_id=schema_duckdb,
+            source="duckdb",
+        ),
+    )
+    tracker.db.persist_artifact_schema(
+        ArtifactSchema(
+            id=schema_user,
+            summary_json={"table_name": "user_table"},
+            profile_version=1,
+        ),
+        [
+            ArtifactSchemaField(
                 schema_id=schema_user,
-                source="user_provided",
+                ordinal_position=1,
+                name="user_col",
+                logical_type="varchar",
+                nullable=True,
             )
-        )
-        session.commit()
+        ],
+        observation=ArtifactSchemaObservation(
+            artifact_id=artifact_id,
+            schema_id=schema_user,
+            source="user_provided",
+        ),
+    )
 
     fetched = tracker.db.get_artifact_schema_for_artifact(
         artifact_id=artifact_id, prefer_source="duckdb"
@@ -699,6 +671,7 @@ def test_get_artifact_schema_for_artifact_prefers_user_provided(tracker):
 
 
 def test_get_artifact_schema_for_artifact_respects_prefer_source(tracker):
+    assert tracker.db is not None
     artifact_id = uuid.uuid4()
     artifact = Artifact(
         id=artifact_id,
@@ -711,23 +684,14 @@ def test_get_artifact_schema_for_artifact_respects_prefer_source(tracker):
     schema_file = "schema_file_only"
     schema_duckdb = "schema_duckdb_only"
 
-    with Session(tracker.engine) as session:
-        session.add(artifact)
-        session.add(
-            ArtifactSchema(
-                id=schema_file,
-                summary_json={"table_name": "file_table"},
-                profile_version=1,
-            )
-        )
-        session.add(
-            ArtifactSchema(
-                id=schema_duckdb,
-                summary_json={"table_name": "duckdb_table"},
-                profile_version=1,
-            )
-        )
-        session.add(
+    tracker.db.upsert_artifact(artifact)
+    tracker.db.persist_artifact_schema(
+        ArtifactSchema(
+            id=schema_file,
+            summary_json={"table_name": "file_table"},
+            profile_version=1,
+        ),
+        [
             ArtifactSchemaField(
                 schema_id=schema_file,
                 ordinal_position=1,
@@ -735,8 +699,20 @@ def test_get_artifact_schema_for_artifact_respects_prefer_source(tracker):
                 logical_type="varchar",
                 nullable=True,
             )
-        )
-        session.add(
+        ],
+        observation=ArtifactSchemaObservation(
+            artifact_id=artifact_id,
+            schema_id=schema_file,
+            source="file",
+        ),
+    )
+    tracker.db.persist_artifact_schema(
+        ArtifactSchema(
+            id=schema_duckdb,
+            summary_json={"table_name": "duckdb_table"},
+            profile_version=1,
+        ),
+        [
             ArtifactSchemaField(
                 schema_id=schema_duckdb,
                 ordinal_position=1,
@@ -744,22 +720,13 @@ def test_get_artifact_schema_for_artifact_respects_prefer_source(tracker):
                 logical_type="varchar",
                 nullable=True,
             )
-        )
-        session.add(
-            ArtifactSchemaObservation(
-                artifact_id=artifact_id,
-                schema_id=schema_file,
-                source="file",
-            )
-        )
-        session.add(
-            ArtifactSchemaObservation(
-                artifact_id=artifact_id,
-                schema_id=schema_duckdb,
-                source="duckdb",
-            )
-        )
-        session.commit()
+        ],
+        observation=ArtifactSchemaObservation(
+            artifact_id=artifact_id,
+            schema_id=schema_duckdb,
+            source="duckdb",
+        ),
+    )
 
     fetched_default = tracker.db.get_artifact_schema_for_artifact(
         artifact_id=artifact_id
@@ -777,6 +744,7 @@ def test_get_artifact_schema_for_artifact_respects_prefer_source(tracker):
 
 
 def test_select_artifact_schema_for_artifact_strict_source_metadata(tracker):
+    assert tracker.db is not None
     artifact_id = uuid.uuid4()
     artifact = Artifact(
         id=artifact_id,
@@ -789,23 +757,14 @@ def test_select_artifact_schema_for_artifact_strict_source_metadata(tracker):
     schema_file = "schema_select_file"
     schema_duckdb = "schema_select_duckdb"
 
-    with Session(tracker.engine) as session:
-        session.add(artifact)
-        session.add(
-            ArtifactSchema(
-                id=schema_file,
-                summary_json={"table_name": "file_table"},
-                profile_version=1,
-            )
-        )
-        session.add(
-            ArtifactSchema(
-                id=schema_duckdb,
-                summary_json={"table_name": "duckdb_table"},
-                profile_version=1,
-            )
-        )
-        session.add(
+    tracker.db.upsert_artifact(artifact)
+    tracker.db.persist_artifact_schema(
+        ArtifactSchema(
+            id=schema_file,
+            summary_json={"table_name": "file_table"},
+            profile_version=1,
+        ),
+        [
             ArtifactSchemaField(
                 schema_id=schema_file,
                 ordinal_position=1,
@@ -813,8 +772,20 @@ def test_select_artifact_schema_for_artifact_strict_source_metadata(tracker):
                 logical_type="varchar",
                 nullable=True,
             )
-        )
-        session.add(
+        ],
+        observation=ArtifactSchemaObservation(
+            artifact_id=artifact_id,
+            schema_id=schema_file,
+            source="file",
+        ),
+    )
+    tracker.db.persist_artifact_schema(
+        ArtifactSchema(
+            id=schema_duckdb,
+            summary_json={"table_name": "duckdb_table"},
+            profile_version=1,
+        ),
+        [
             ArtifactSchemaField(
                 schema_id=schema_duckdb,
                 ordinal_position=1,
@@ -822,22 +793,13 @@ def test_select_artifact_schema_for_artifact_strict_source_metadata(tracker):
                 logical_type="varchar",
                 nullable=True,
             )
-        )
-        session.add(
-            ArtifactSchemaObservation(
-                artifact_id=artifact_id,
-                schema_id=schema_file,
-                source="file",
-            )
-        )
-        session.add(
-            ArtifactSchemaObservation(
-                artifact_id=artifact_id,
-                schema_id=schema_duckdb,
-                source="duckdb",
-            )
-        )
-        session.commit()
+        ],
+        observation=ArtifactSchemaObservation(
+            artifact_id=artifact_id,
+            schema_id=schema_duckdb,
+            source="duckdb",
+        ),
+    )
 
     selection = tracker.db.select_artifact_schema_for_artifact(
         artifact_id=artifact_id,
@@ -852,6 +814,7 @@ def test_select_artifact_schema_for_artifact_strict_source_metadata(tracker):
 
 
 def test_select_artifact_schema_for_artifact_strict_source_missing_raises(tracker):
+    assert tracker.db is not None
     artifact_id = uuid.uuid4()
     artifact = Artifact(
         id=artifact_id,
@@ -862,16 +825,14 @@ def test_select_artifact_schema_for_artifact_strict_source_missing_raises(tracke
     )
 
     schema_file = "schema_select_missing_file"
-    with Session(tracker.engine) as session:
-        session.add(artifact)
-        session.add(
-            ArtifactSchema(
-                id=schema_file,
-                summary_json={"table_name": "file_table"},
-                profile_version=1,
-            )
-        )
-        session.add(
+    tracker.db.upsert_artifact(artifact)
+    tracker.db.persist_artifact_schema(
+        ArtifactSchema(
+            id=schema_file,
+            summary_json={"table_name": "file_table"},
+            profile_version=1,
+        ),
+        [
             ArtifactSchemaField(
                 schema_id=schema_file,
                 ordinal_position=1,
@@ -879,15 +840,13 @@ def test_select_artifact_schema_for_artifact_strict_source_missing_raises(tracke
                 logical_type="varchar",
                 nullable=True,
             )
-        )
-        session.add(
-            ArtifactSchemaObservation(
-                artifact_id=artifact_id,
-                schema_id=schema_file,
-                source="file",
-            )
-        )
-        session.commit()
+        ],
+        observation=ArtifactSchemaObservation(
+            artifact_id=artifact_id,
+            schema_id=schema_file,
+            source="file",
+        ),
+    )
 
     with pytest.raises(
         ValueError,
@@ -903,66 +862,61 @@ def test_select_artifact_schema_for_artifact_strict_source_missing_raises(tracke
 def test_get_artifact_schema_for_artifact_backfills_ordinals_from_profile_order(
     tracker,
 ):
+    assert tracker.db is not None
     artifact_id = uuid.uuid4()
     schema_id = "schema_profile_backfill_order"
 
-    with Session(tracker.engine) as session:
-        session.add(
-            Artifact(
-                id=artifact_id,
-                key="artifact_profile_backfill",
-                container_uri="inputs://artifact_profile_backfill.csv",
-                driver="csv",
-                hash="profile_backfill_hash",
-            )
+    tracker.db.upsert_artifact(
+        Artifact(
+            id=artifact_id,
+            key="artifact_profile_backfill",
+            container_uri="inputs://artifact_profile_backfill.csv",
+            driver="csv",
+            hash="profile_backfill_hash",
         )
-        session.add(
-            ArtifactSchema(
-                id=schema_id,
-                summary_json={"table_name": "ordered_rows"},
-                profile_json={
-                    "fields": [
-                        {"name": "beta"},
-                        {"name": "alpha"},
-                        {"name": "gamma"},
-                    ]
-                },
-                profile_version=1,
-            )
-        )
-        session.add_all(
-            [
-                ArtifactSchemaField(
-                    schema_id=schema_id,
-                    ordinal_position=None,
-                    name="alpha",
-                    logical_type="varchar",
-                    nullable=True,
-                ),
-                ArtifactSchemaField(
-                    schema_id=schema_id,
-                    ordinal_position=None,
-                    name="beta",
-                    logical_type="varchar",
-                    nullable=True,
-                ),
-                ArtifactSchemaField(
-                    schema_id=schema_id,
-                    ordinal_position=7,
-                    name="gamma",
-                    logical_type="varchar",
-                    nullable=True,
-                ),
-            ]
-        )
-        session.add(
-            ArtifactSchemaObservation(
-                artifact_id=artifact_id,
+    )
+    tracker.db.persist_artifact_schema(
+        ArtifactSchema(
+            id=schema_id,
+            summary_json={"table_name": "ordered_rows"},
+            profile_json={
+                "fields": [
+                    {"name": "beta"},
+                    {"name": "alpha"},
+                    {"name": "gamma"},
+                ]
+            },
+            profile_version=1,
+        ),
+        [
+            ArtifactSchemaField(
                 schema_id=schema_id,
-                source="file",
-            )
-        )
-        session.commit()
+                ordinal_position=None,
+                name="alpha",
+                logical_type="varchar",
+                nullable=True,
+            ),
+            ArtifactSchemaField(
+                schema_id=schema_id,
+                ordinal_position=None,
+                name="beta",
+                logical_type="varchar",
+                nullable=True,
+            ),
+            ArtifactSchemaField(
+                schema_id=schema_id,
+                ordinal_position=7,
+                name="gamma",
+                logical_type="varchar",
+                nullable=True,
+            ),
+        ],
+        observation=ArtifactSchemaObservation(
+            artifact_id=artifact_id,
+            schema_id=schema_id,
+            source="file",
+        ),
+    )
 
     fetched = tracker.db.get_artifact_schema_for_artifact(artifact_id=artifact_id)
     assert fetched is not None
@@ -971,12 +925,11 @@ def test_get_artifact_schema_for_artifact_backfills_ordinals_from_profile_order(
     ordinal_by_name = {field.name: field.ordinal_position for field in fields}
     assert ordinal_by_name == {"alpha": 2, "beta": 1, "gamma": 7}
 
-    with Session(tracker.engine) as session:
-        persisted_fields = session.exec(
-            select(ArtifactSchemaField).where(
-                ArtifactSchemaField.schema_id == schema_id
-            )
-        ).all()
+    persisted_bundle = tracker.db.get_artifact_schema(
+        schema_id=schema_id, backfill_ordinals=False
+    )
+    assert persisted_bundle is not None
+    _, persisted_fields = persisted_bundle
     persisted_ordinal_by_name = {
         field.name: field.ordinal_position for field in persisted_fields
     }
@@ -984,60 +937,55 @@ def test_get_artifact_schema_for_artifact_backfills_ordinals_from_profile_order(
 
 
 def test_get_artifact_schema_for_artifact_backfills_ordinals_alphabetically(tracker):
+    assert tracker.db is not None
     artifact_id = uuid.uuid4()
     schema_id = "schema_profile_backfill_alpha"
 
-    with Session(tracker.engine) as session:
-        session.add(
-            Artifact(
-                id=artifact_id,
-                key="artifact_alpha_backfill",
-                container_uri="inputs://artifact_alpha_backfill.csv",
-                driver="csv",
-                hash="alpha_backfill_hash",
-            )
+    tracker.db.upsert_artifact(
+        Artifact(
+            id=artifact_id,
+            key="artifact_alpha_backfill",
+            container_uri="inputs://artifact_alpha_backfill.csv",
+            driver="csv",
+            hash="alpha_backfill_hash",
         )
-        session.add(
-            ArtifactSchema(
-                id=schema_id,
-                summary_json={"table_name": "alpha_rows"},
-                profile_json={},
-                profile_version=1,
-            )
-        )
-        session.add_all(
-            [
-                ArtifactSchemaField(
-                    schema_id=schema_id,
-                    ordinal_position=None,
-                    name="c_col",
-                    logical_type="varchar",
-                    nullable=True,
-                ),
-                ArtifactSchemaField(
-                    schema_id=schema_id,
-                    ordinal_position=None,
-                    name="a_col",
-                    logical_type="varchar",
-                    nullable=True,
-                ),
-                ArtifactSchemaField(
-                    schema_id=schema_id,
-                    ordinal_position=None,
-                    name="b_col",
-                    logical_type="varchar",
-                    nullable=True,
-                ),
-            ]
-        )
-        session.add(
-            ArtifactSchemaObservation(
-                artifact_id=artifact_id,
+    )
+    tracker.db.persist_artifact_schema(
+        ArtifactSchema(
+            id=schema_id,
+            summary_json={"table_name": "alpha_rows"},
+            profile_json={},
+            profile_version=1,
+        ),
+        [
+            ArtifactSchemaField(
                 schema_id=schema_id,
-                source="duckdb",
-            )
-        )
-        session.commit()
+                ordinal_position=None,
+                name="c_col",
+                logical_type="varchar",
+                nullable=True,
+            ),
+            ArtifactSchemaField(
+                schema_id=schema_id,
+                ordinal_position=None,
+                name="a_col",
+                logical_type="varchar",
+                nullable=True,
+            ),
+            ArtifactSchemaField(
+                schema_id=schema_id,
+                ordinal_position=None,
+                name="b_col",
+                logical_type="varchar",
+                nullable=True,
+            ),
+        ],
+        observation=ArtifactSchemaObservation(
+            artifact_id=artifact_id,
+            schema_id=schema_id,
+            source="duckdb",
+        ),
+    )
 
     fetched = tracker.db.get_artifact_schema_for_artifact(artifact_id=artifact_id)
     assert fetched is not None

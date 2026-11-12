@@ -6,10 +6,9 @@ from typing import (
     Callable,
     Mapping,
     Optional,
-    Protocol,
     TYPE_CHECKING,
-    runtime_checkable,
 )
+from typing_extensions import Protocol, runtime_checkable
 
 from consist.types import ArtifactRef
 from consist.types import OutputPathRef

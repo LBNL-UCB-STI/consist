@@ -484,8 +484,7 @@ def test_register_artifact_recovery_copy_uses_full_hash_when_tracker_is_fast(
         refreshed = tracker.get_run_outputs("producer_adopt_fast")["fast_hash"]
         assert refreshed.recovery_roots == [str(recovery_root.resolve())]
     finally:
-        if tracker.engine:
-            tracker.engine.dispose()
+        tracker.close()
 
 
 def test_register_artifact_recovery_copy_fast_hash_requires_byte_hash(
@@ -521,8 +520,7 @@ def test_register_artifact_recovery_copy_fast_hash_requires_byte_hash(
         ]
         assert "recovery_roots" not in refreshed.meta
     finally:
-        if tracker.engine:
-            tracker.engine.dispose()
+        tracker.close()
 
 
 def test_register_artifact_recovery_copy_verify_false_adopts_existing_copy(
@@ -562,8 +560,7 @@ def test_register_artifact_recovery_copy_verify_false_adopts_existing_copy(
         ]
         assert refreshed.recovery_roots == [str(recovery_root.resolve())]
     finally:
-        if tracker.engine:
-            tracker.engine.dispose()
+        tracker.close()
 
 
 def test_register_artifact_recovery_copy_empty_content_hash_is_explicit(
@@ -640,8 +637,7 @@ def test_register_artifact_recovery_copy_rejects_same_metadata_wrong_bytes(
         ]
         assert "recovery_roots" not in refreshed.meta
     finally:
-        if tracker.engine:
-            tracker.engine.dispose()
+        tracker.close()
 
 
 def test_register_artifact_recovery_copy_unmappable_layout_blocks_clearly(
@@ -784,10 +780,8 @@ def test_archive_artifact_prefers_historical_source_over_current_workspace(
 
     assert archived_path.read_text(encoding="utf-8") == "historical\n"
 
-    if tracker_a.engine:
-        tracker_a.engine.dispose()
-    if tracker_b.engine:
-        tracker_b.engine.dispose()
+    tracker_a.close()
+    tracker_b.close()
 
 
 def test_archive_run_outputs_uses_current_configured_mount_for_run_owned_file(
@@ -843,10 +837,8 @@ def test_archive_run_outputs_uses_current_configured_mount_for_run_owned_file(
         assert hydrated["shared"].path == restored_root / "outputs" / "shared.csv"
         assert hydrated["shared"].path.read_text(encoding="utf-8") == "historical\n"
     finally:
-        if tracker_a.engine:
-            tracker_a.engine.dispose()
-        if tracker_b.engine:
-            tracker_b.engine.dispose()
+        tracker_a.close()
+        tracker_b.close()
 
 
 def test_archive_run_outputs_rejects_stale_current_managed_mount_file(
@@ -887,10 +879,8 @@ def test_archive_run_outputs_rejects_stale_current_managed_mount_file(
         assert refreshed.recovery_roots == []
         assert not archive_root.exists()
     finally:
-        if tracker_a.engine:
-            tracker_a.engine.dispose()
-        if tracker_b.engine:
-            tracker_b.engine.dispose()
+        tracker_a.close()
+        tracker_b.close()
 
 
 def test_archive_artifact_move_rolls_back_on_metadata_failure(
@@ -1684,8 +1674,7 @@ def test_archive_run_outputs_supports_output_sets_with_fast_manifest_identity(
             str((tmp_path / "fast_archive_output_set").resolve())
         ]
     finally:
-        if fast_tracker.engine is not None:
-            fast_tracker.engine.dispose()
+        fast_tracker.close()
 
 
 def test_archive_run_output_files_copies_verifies_and_registers_selected_file(
@@ -2764,8 +2753,7 @@ def test_tracker_hydrate_run_outputs_allows_external_target_root_when_configured
 
     assert calls["allowed_base"] is None
 
-    if tracker.engine:
-        tracker.engine.dispose()
+    tracker.close()
 
 
 def test_run_materialize_outputs_delegates_to_tracker() -> None:

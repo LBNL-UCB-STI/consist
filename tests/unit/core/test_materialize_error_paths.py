@@ -3,7 +3,6 @@ from types import SimpleNamespace
 
 import pandas as pd
 import pytest
-from sqlalchemy.exc import SQLAlchemyError
 
 from consist.core.materialize import (
     materialize_artifacts,
@@ -186,13 +185,13 @@ def test_materialize_artifacts_from_sources_refuses_symlink_destination_when_ove
     assert target.read_text(encoding="utf-8") == "value\nstale\n"
 
 
-def test_materialize_ingested_artifact_from_db_requires_tracker_engine(
+def test_materialize_ingested_artifact_from_db_requires_tracker_db(
     tmp_path: Path,
 ) -> None:
     artifact = _artifact(key="ingested_csv", is_ingested=True)
-    tracker = SimpleNamespace(engine=None)
+    tracker = SimpleNamespace(db=None)
 
-    with pytest.raises(RuntimeError, match="tracker has no DB engine"):
+    with pytest.raises(RuntimeError, match="tracker has no DB"):
         materialize_ingested_artifact_from_db(
             artifact=artifact,
             tracker=tracker,
@@ -204,7 +203,7 @@ def test_materialize_ingested_artifact_from_db_rejects_unsupported_driver(
     tmp_path: Path,
 ) -> None:
     artifact = _artifact(key="ingested_json", driver="json", is_ingested=True)
-    tracker = SimpleNamespace(engine=object())
+    tracker = SimpleNamespace(db=object())
 
     with pytest.raises(ValueError, match="Only csv/parquet artifacts"):
         materialize_ingested_artifact_from_db(
@@ -224,11 +223,11 @@ def test_materialize_ingested_artifact_from_db_wraps_reflection_failure(
         meta={"is_ingested": True},
     )
 
-    class _FailingEngine:
-        def connect(self):
-            raise SQLAlchemyError("reflection failed")
+    class _FailingDB:
+        def fetchall(self, *_args, **_kwargs):
+            raise RuntimeError("reflection failed")
 
-    tracker = SimpleNamespace(engine=_FailingEngine())
+    tracker = SimpleNamespace(db=_FailingDB())
 
     with pytest.raises(RuntimeError, match="Failed to reflect table"):
         materialize_ingested_artifact_from_db(
@@ -248,21 +247,11 @@ def test_materialize_ingested_artifact_from_db_fails_when_table_has_no_columns(
         meta={"is_ingested": True},
     )
 
-    class _EmptyConn:
-        def __enter__(self):
-            return self
+    class _EmptyDB:
+        def fetchall(self, *_args, **_kwargs):
+            return []
 
-        def __exit__(self, *_args):
-            return False
-
-        def execute(self, *_args, **_kwargs):
-            return SimpleNamespace(fetchall=lambda: [])
-
-    class _EmptyEngine:
-        def connect(self):
-            return _EmptyConn()
-
-    tracker = SimpleNamespace(engine=_EmptyEngine())
+    tracker = SimpleNamespace(db=_EmptyDB())
 
     with pytest.raises(
         RuntimeError,
@@ -285,21 +274,11 @@ def test_materialize_ingested_artifact_from_db_requires_consist_artifact_id_colu
         meta={"is_ingested": True},
     )
 
-    class _NoArtifactIdConn:
-        def __enter__(self):
-            return self
+    class _NoArtifactIdDB:
+        def fetchall(self, *_args, **_kwargs):
+            return [("value",)]
 
-        def __exit__(self, *_args):
-            return False
-
-        def execute(self, *_args, **_kwargs):
-            return SimpleNamespace(fetchall=lambda: [("value",)])
-
-    class _NoArtifactIdEngine:
-        def connect(self):
-            return _NoArtifactIdConn()
-
-    tracker = SimpleNamespace(engine=_NoArtifactIdEngine())
+    tracker = SimpleNamespace(db=_NoArtifactIdDB())
 
     with pytest.raises(RuntimeError, match="missing consist_artifact_id"):
         materialize_ingested_artifact_from_db(
@@ -329,7 +308,7 @@ def test_materialize_ingested_artifact_from_db_requires_consist_artifact_id_colu
 def test_materialize_ingested_artifact_from_db_rejects_invalid_or_empty_table_name(
     tmp_path: Path, artifact: Artifact
 ) -> None:
-    tracker = SimpleNamespace(engine=object())
+    tracker = SimpleNamespace(db=object())
 
     with pytest.raises(ValueError, match="table name is missing"):
         materialize_ingested_artifact_from_db(
@@ -339,8 +318,8 @@ def test_materialize_ingested_artifact_from_db_rejects_invalid_or_empty_table_na
         )
 
 
-def test_materialize_ingested_artifact_from_db_uses_hot_data_store_engine(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_materialize_ingested_artifact_from_db_uses_hot_data_store_db(
+    tmp_path: Path,
 ) -> None:
     artifact = Artifact(
         key="ingested_csv",
@@ -350,35 +329,24 @@ def test_materialize_ingested_artifact_from_db_uses_hot_data_store_engine(
     )
     captured: dict[str, object] = {}
 
-    class _Conn:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def execute(self, _sql, params=None):
+    class _HotDB:
+        def fetchall(self, _sql, params=None):
+            captured["fetchall_db"] = self
             captured["queried_params"] = params
-            return SimpleNamespace(
-                fetchall=lambda: [("consist_artifact_id",), ("value",)]
+            return [("consist_artifact_id",), ("value",)]
+
+        def fetchdf(self, _sql, params=None):
+            captured["fetchdf_db"] = self
+            captured["fetchdf_params"] = params
+            return pd.DataFrame(
+                {"consist_artifact_id": [str(artifact.id)], "value": [1]}
             )
 
-    class _HotEngine:
-        def connect(self):
-            captured["connected_engine"] = self
-            return _Conn()
-
-    hot_engine = _HotEngine()
+    hot_db = _HotDB()
     tracker = SimpleNamespace(
-        engine=None,
-        hot_data_store=SimpleNamespace(engine=hot_engine),
+        db=None,
+        hot_data_store=SimpleNamespace(db=hot_db),
     )
-
-    def _fake_read_sql(_stmt, engine):
-        captured["read_sql_engine"] = engine
-        return pd.DataFrame({"value": [1]})
-
-    monkeypatch.setattr("consist.core.materialize.pd.read_sql", _fake_read_sql)
 
     output = tmp_path / "reconstructed.csv"
     result = materialize_ingested_artifact_from_db(
@@ -387,7 +355,8 @@ def test_materialize_ingested_artifact_from_db_uses_hot_data_store_engine(
         destination=output,
     )
 
-    assert captured["connected_engine"] is hot_engine
-    assert captured["read_sql_engine"] is hot_engine
-    assert captured["queried_params"] == {"table_name": "ingested_csv"}
+    assert captured["fetchall_db"] is hot_db
+    assert captured["fetchdf_db"] is hot_db
+    assert captured["queried_params"] == ["ingested_csv"]
+    assert captured["fetchdf_params"] == [str(artifact.id)]
     assert Path(result).resolve() == output.resolve()

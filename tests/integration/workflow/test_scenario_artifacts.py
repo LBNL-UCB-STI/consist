@@ -1,6 +1,5 @@
 import pytest
 from pathlib import Path
-from sqlmodel import Session, select
 
 from consist.core.tracker import Tracker
 from consist.models.run import RunArtifactLink
@@ -55,10 +54,11 @@ def test_scenario_links_child_artifacts_in_db(tracker: Tracker, run_dir: Path):
     out_id = child_artifacts.outputs["db_out"].id
     in_id = child_artifacts.inputs["db_in"].id
 
-    with Session(tracker.db.engine) as session:
-        links = session.exec(
-            select(RunArtifactLink).where(RunArtifactLink.run_id == "scenario_db")
-        ).all()
+    links = tracker.query_rows(
+        "SELECT * FROM main.run_artifact_link WHERE run_id = ?",
+        ["scenario_db"],
+        model=RunArtifactLink,
+    )
 
     directions = {(link.artifact_id, link.direction) for link in links}
     assert (out_id, "output") in directions

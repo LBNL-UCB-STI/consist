@@ -211,10 +211,10 @@ def test_find_matching_runs_returns_deterministic_recency_order(tracker):
 
 
 def test_unexpected_query_errors_propagate(tracker, monkeypatch):
-    def fail_execute_with_retry(*_args, **_kwargs):
+    def fail_fetchall(*_args, **_kwargs):
         raise RuntimeError("database unavailable")
 
-    monkeypatch.setattr(tracker.db, "execute_with_retry", fail_execute_with_retry)
+    monkeypatch.setattr(tracker.db, "fetchall", fail_fetchall)
 
     with pytest.raises(RuntimeError, match="database unavailable"):
         tracker.find_matching_run(model="traffic_assignment")

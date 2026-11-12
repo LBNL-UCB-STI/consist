@@ -30,6 +30,7 @@ class TrackerConfig(BaseModel):
     schemas: Optional[list[type[SQLModel]]] = None
     builtin_schemas: list[BuiltinSchemaLiteral] = Field(default_factory=list)
     access_mode: AccessMode = "standard"
+    read_only: bool = False
     run_subdir_fn: Optional[Callable[[Run], str]] = None
     allow_external_paths: Optional[bool] = None
     openlineage_enabled: bool = False
@@ -52,6 +53,7 @@ class TrackerConfig(BaseModel):
             "schemas": self.schemas,
             "builtin_schemas": self.builtin_schemas,
             "access_mode": self.access_mode,
+            "read_only": self.read_only,
             "run_subdir_fn": self.run_subdir_fn,
             "allow_external_paths": self.allow_external_paths,
             "openlineage_enabled": self.openlineage_enabled,

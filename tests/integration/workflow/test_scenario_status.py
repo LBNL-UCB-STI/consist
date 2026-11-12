@@ -1,5 +1,4 @@
 import pytest
-from sqlmodel import Session, select
 
 from consist.core.tracker import Tracker
 from consist.models.run import Run
@@ -35,16 +34,17 @@ def test_scenario_status_persistence_debug(tracker: Tracker):
             pass
 
     header_db = tracker.get_run("scenario_status_debug")
-    last_status = getattr(getattr(tracker, "_last_consist", None), "run", None)
-    last_status_val = last_status.status if last_status else None
+    last_consist = tracker._last_consist
+    last_status_val = last_consist.run.status if last_consist else None
 
     db_status = None
     if tracker.db:
-        with Session(tracker.db.engine) as session:
-            db_row = session.exec(
-                select(Run).where(Run.id == "scenario_status_debug")
-            ).first()
-            db_status = db_row.status if db_row else None
+        rows = tracker.query_rows(
+            "SELECT * FROM main.run WHERE id = ?",
+            ["scenario_status_debug"],
+            model=Run,
+        )
+        db_status = rows[0].status if rows else None
 
     assert header_db.status == "completed", (
         f"Header status mismatch: header_db={header_db.status}, "

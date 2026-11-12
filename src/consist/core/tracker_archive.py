@@ -10,8 +10,6 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, Literal, Mapping, Sequence
 
-from sqlmodel import col, select
-
 from consist.core._tracker_service_base import _TrackerServiceBase
 from consist.core.container_policy import validate_recovery_registration_policy
 from consist.core.directory_artifacts import (
@@ -1862,25 +1860,10 @@ class TrackerArchiveService(_TrackerServiceBase):
 
         if not updates:
             return
-        artifact_ids = [artifact.id for artifact, _ in updates.values()]
-        with self.db.session_scope() as session:
-            db_artifacts = session.exec(
-                select(Artifact).where(col(Artifact.id).in_(artifact_ids))
-            ).all()
-            db_artifacts_by_id = {
-                str(db_artifact.id): db_artifact for db_artifact in db_artifacts
-            }
-            missing_ids = sorted(set(updates) - set(db_artifacts_by_id))
-            if missing_ids:
-                raise KeyError(
-                    "Artifacts were not found for recovery root update: "
-                    + ", ".join(missing_ids)
-                )
-            for artifact_id, (_, next_meta) in updates.items():
-                db_artifact = db_artifacts_by_id[artifact_id]
-                db_artifact.meta = dict(next_meta)
-                session.add(db_artifact)
-            session.commit()
+        self.db.replace_artifacts_meta_bulk(
+            {artifact.id: next_meta for artifact, next_meta in updates.values()},
+            require_all=True,
+        )
 
         for artifact, next_meta in updates.values():
             artifact.meta = dict(next_meta)
@@ -2753,28 +2736,11 @@ class TrackerArchiveService(_TrackerServiceBase):
             for art in self.get_run_outputs(active_run_id).values()
             if art.id is not None
         }
-        updated_any = False
-        with self.db.session_scope() as session:
-            statement = select(Artifact)
-            if retained_ids:
-                statement = statement.where(col(Artifact.id).not_in(retained_ids))
-            candidates = session.exec(statement).all()
-            for db_artifact in candidates:
-                meta = db_artifact.meta if isinstance(db_artifact.meta, Mapping) else {}
-                existing = self.fs.normalize_recovery_roots(meta.get("recovery_roots"))
-                if target_root not in existing:
-                    continue
-                remaining = [root for root in existing if root != target_root]
-                next_meta = dict(meta)
-                if remaining:
-                    next_meta["recovery_roots"] = remaining
-                else:
-                    next_meta.pop("recovery_roots", None)
-                db_artifact.meta = next_meta
-                session.add(db_artifact)
-                updated_any = True
-            if updated_any:
-                session.commit()
+        updated_any = self.db.prune_recovery_root_from_artifacts(
+            target_root=target_root,
+            retained_ids=retained_ids,
+            normalize_fn=self.fs.normalize_recovery_roots,
+        )
         if updated_any:
             self._run_artifacts_cache.clear()
 

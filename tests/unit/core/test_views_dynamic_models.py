@@ -1,29 +1,65 @@
 from __future__ import annotations
 
-import warnings
+from pathlib import Path
 
-from consist.core.views import create_view_model
+import pandas as pd
+
+import consist
+from consist.core.tracker import Tracker
 from consist.models.gtfs import GtfsTrips
 
 
-def test_create_view_model_is_idempotent() -> None:
-    first = create_view_model(GtfsTrips, name="v_gtfs_trips")
-
-    with warnings.catch_warnings(record=True) as captured:
-        warnings.simplefilter("always")
-        second = create_view_model(GtfsTrips, name="v_gtfs_trips")
-
-    assert first is second
-    assert captured == []
+def test_legacy_view_helpers_removed_from_tracker_and_public_api(
+    tracker: Tracker,
+) -> None:
+    assert "view" not in dir(tracker)
+    assert "register_views" not in dir(tracker)
+    assert "view" not in dir(consist)
+    assert "register_views" not in dir(consist)
 
 
-def test_create_view_model_distinct_names_do_not_collide() -> None:
-    first = create_view_model(GtfsTrips, name="v_gtfs_trips_a")
+def test_create_view_and_query_rows_with_typed_model(
+    gtfs_tracker: Tracker, tmp_path: Path
+) -> None:
+    trips_parquet = tmp_path / "trips.parquet"
+    pd.DataFrame(
+        [
+            {
+                "feed_key": "feed_a",
+                "trip_id": "T1",
+                "route_id": "R1",
+                "service_id": "S1",
+            },
+            {
+                "feed_key": "feed_a",
+                "trip_id": "T2",
+                "route_id": "R2",
+                "service_id": "S1",
+            },
+        ]
+    ).to_parquet(trips_parquet, index=False)
 
-    with warnings.catch_warnings(record=True) as captured:
-        warnings.simplefilter("always")
-        second = create_view_model(GtfsTrips, name="v_gtfs_trips_b")
+    with gtfs_tracker.start_run("gtfs_view_run", "gtfs"):
+        gtfs_tracker.log_artifact(
+            str(trips_parquet),
+            key="trips",
+            driver="parquet",
+            schema=GtfsTrips,
+        )
 
-    assert first is not second
-    assert first.__name__ != second.__name__
-    assert captured == []
+    gtfs_tracker.create_view("v_gtfs_trips_a", "trips")
+    gtfs_tracker.create_view("v_gtfs_trips_b", "trips")
+
+    rows_a = gtfs_tracker.query_rows(
+        "SELECT feed_key, trip_id, route_id, service_id FROM v_gtfs_trips_a ORDER BY trip_id",
+        model=GtfsTrips,
+    )
+    rows_b = gtfs_tracker.query_rows(
+        "SELECT feed_key, trip_id, route_id, service_id FROM v_gtfs_trips_b ORDER BY trip_id",
+        model=GtfsTrips,
+    )
+
+    assert len(rows_a) == 2
+    assert all(isinstance(row, GtfsTrips) for row in rows_a)
+    assert [row.trip_id for row in rows_a] == ["T1", "T2"]
+    assert [row.route_id for row in rows_b] == ["R1", "R2"]

@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
-from sqlmodel import col, select
 
 from consist.core.logical_array_identity import (
     LogicalProfileName,
@@ -31,7 +30,6 @@ from consist.core.logical_array_identity import (
 from consist.core.persistence import DatabaseManager
 from consist.digest import digest_file
 from consist.models.artifact import Artifact
-from consist.models.run import Run, RunArtifactLink
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
@@ -1280,25 +1278,18 @@ def _expected_artifact(
     """
     Resolve one exact expected artifact without key-collapsing history helpers.
     """
-    with database.session_scope() as session:
-        run = session.get(Run, expected_run_id)
-        if run is None:
-            return None, "expected_prior_run_absent"
-        if run.status != "completed":
-            return None, "expected_prior_run_not_completed"
-        statement = (
-            select(Artifact)
-            .join(
-                RunArtifactLink,
-                Artifact.id == RunArtifactLink.artifact_id,  # ty: ignore[invalid-argument-type]
-            )
-            .where(RunArtifactLink.run_id == expected_run_id)
-            .where(Artifact.key == artifact_key)
-        )
-        if expected_direction in ("input", "output"):
-            statement = statement.where(RunArtifactLink.direction == expected_direction)
-        statement = statement.order_by(col(Artifact.id))
-        matches = list(session.exec(statement).all())
+    run = database.get_run(expected_run_id)
+    if run is None:
+        return None, "expected_prior_run_absent"
+    if run.status != "completed":
+        return None, "expected_prior_run_not_completed"
+    matches = database.find_linked_artifacts_exact(
+        run_id=expected_run_id,
+        key=artifact_key,
+        direction=(
+            expected_direction if expected_direction in ("input", "output") else None
+        ),
+    )
 
     if not matches:
         if expected_direction == "output":
@@ -1513,7 +1504,7 @@ def check_artifact_identity(
             raise
     finally:
         if owns_db and db is not None:
-            db.engine.dispose()
+            db.close()
 
     if expected_error is not None:
         return _report(

@@ -689,13 +689,9 @@ def test_direct_zarr_output_logging_is_an_immutable_directory_artifact(
     assert logged.meta["directory_artifact"] is True
     assert logged.hash == logged.meta["directory_manifest"]["tree_hash"]
     assert logged.meta["content_identity"] == f"sha256:manifest-v1:{logged.hash}"
-    assert logged.content_id is not None
-    content = tracker.db.find_artifact_content(
-        content_hash=logged.meta["content_identity"],
-        driver="zarr",
-    )
-    assert content is not None
-    assert content.id == logged.content_id
+    persisted = tracker.db.get_artifact(logged.id)
+    assert persisted is not None
+    assert persisted.hash == logged.hash
     assert consist.is_zarr_artifact(logged)
 
 
@@ -1102,8 +1098,7 @@ def test_directory_hydration_reopens_snapshot_with_original_archive_only(
             db_fallback="never",
         )
     finally:
-        if reopened.engine is not None:
-            reopened.engine.dispose()
+        reopened.close()
 
     assert hydrated["skims"].status == "materialized_directory_from_filesystem"
     assert destination.is_dir()

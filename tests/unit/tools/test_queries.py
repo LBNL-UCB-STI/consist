@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from sqlmodel import Session
 import pytest
 
 from consist.tools import queries
@@ -10,8 +9,7 @@ def test_get_summary_empty_db(tracker) -> None:
     """
     Empty DB summary should return zero counts and empty model distribution.
     """
-    with Session(tracker.engine) as session:
-        summary = queries.get_summary(session)
+    summary = queries.get_summary(tracker)
 
     assert summary["total_runs"] == 0
     assert summary["completed_runs"] == 0
@@ -80,11 +78,8 @@ def test_get_runs_filters_invalid_tags_and_status(tracker) -> None:
     except RuntimeError:
         pass
 
-    with Session(tracker.engine) as session:
-        matches = queries.get_runs(
-            session, tags=["alpha", "shared"], status="completed"
-        )
-        assert [run.id for run in matches] == ["run_ok"]
-        assert queries.get_runs(session, tags=["missing"], status="completed") == []
-        assert queries.get_runs(session, tags=["alpha"], status="failed") == []
-        assert queries.get_runs(session, status="bogus") == []
+    matches = queries.get_runs(tracker, tags=["alpha", "shared"], status="completed")
+    assert [run.id for run in matches] == ["run_ok"]
+    assert queries.get_runs(tracker, tags=["missing"], status="completed") == []
+    assert queries.get_runs(tracker, tags=["alpha"], status="failed") == []
+    assert queries.get_runs(tracker, status="bogus") == []

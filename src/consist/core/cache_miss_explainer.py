@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal, Optional, Protocol, Sequence, runtime_checkable
+from typing import Any, Literal, Optional, Sequence
+from typing_extensions import Protocol, runtime_checkable
 
 from consist.models.artifact import Artifact
 from consist.models.run import Run, RunArtifacts
@@ -376,10 +377,11 @@ def _resolve_run_signature(
 
 
 def _artifact_content_id(artifact: Artifact) -> Optional[str]:
-    content_id = artifact.content_id
-    if content_id is None:
-        return None
-    return str(content_id)
+    meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
+    content_identity = meta.get("content_identity")
+    if isinstance(content_identity, str) and content_identity:
+        return content_identity
+    return None
 
 
 def _artifact_change_labels(

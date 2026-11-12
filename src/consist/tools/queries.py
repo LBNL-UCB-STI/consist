@@ -2,20 +2,40 @@
 Reusable database queries for inspecting Consist provenance data.
 """
 
-from typing import Dict, Iterable, List, Optional
-from sqlmodel import Session, select, func, col
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Dict, Iterable, List, Optional
+
 import duckdb
 import pandas as pd
 
-from consist.core.run_ordering import recent_run_order_by
-from consist.models.run import Run
-from consist.models.artifact import Artifact
-from consist.core.tracker import Tracker
 import consist
+from consist.core.persistence import DatabaseManager
+from consist.models.run import Run
+
+if TYPE_CHECKING:
+    from consist.core.tracker import Tracker
+
+
+def _resolve_db(db_or_tracker: DatabaseManager | Tracker) -> DatabaseManager:
+    if isinstance(db_or_tracker, DatabaseManager):
+        return db_or_tracker
+    if db_or_tracker.db is None:
+        raise RuntimeError("Tracker does not have an initialized database.")
+    return db_or_tracker.db
+
+
+def _normalize_dt(val: object) -> Optional[datetime]:
+    if isinstance(val, datetime):
+        if val.tzinfo is not None:
+            return val.astimezone(timezone.utc).replace(tzinfo=None)
+        return val
+    return None
 
 
 def get_runs(
-    session: Session,
+    db_or_tracker: DatabaseManager | Tracker,
     limit: int = 10,
     model_name: Optional[str] = None,
     tags: Optional[List[str]] = None,
@@ -23,45 +43,43 @@ def get_runs(
     run_ids: Optional[Iterable[str]] = None,
 ) -> List[Run]:
     """Fetches a list of runs with optional filters."""
-    statement = select(Run).order_by(*recent_run_order_by())
-
-    if run_ids is not None:
-        id_list = list(run_ids)
-        if not id_list:
-            return []
-        statement = statement.where(col(Run.id).in_(id_list))
-    if model_name:
-        statement = statement.where(Run.model_name == model_name)
-    if status:
-        statement = statement.where(Run.status == status)
-    if tags:
-        # This is a simple "contains all" search for tags
-        for tag in tags:
-            # SQLModel doesn't have a clean way to query JSON arrays on all backends,
-            # so we use a LIKE query as a good-enough solution for DuckDB.
-            statement = statement.where(col(Run.tags).like(f'%"{tag}"%'))
-
-    return list(session.exec(statement.limit(limit)).all())
-
-
-def get_summary(session: Session) -> Dict[str, object]:
-    """Returns a high-level summary of the database."""
-    total_runs = session.exec(select(func.count(col(Run.id)))).one()
-    completed_runs = session.exec(
-        select(func.count(col(Run.id))).where(Run.status == "completed")
-    ).one()
-    failed_runs = session.exec(
-        select(func.count(col(Run.id))).where(Run.status == "failed")
-    ).one()
-    total_artifacts = session.exec(select(func.count(col(Artifact.id)))).one()
-
-    models_stmt = select(Run.model_name, func.count(col(Run.id))).group_by(
-        Run.model_name
+    db = _resolve_db(db_or_tracker)
+    return db.find_runs(
+        tags=tags,
+        model=model_name,
+        status=status,
+        limit=limit,
+        run_ids=run_ids,
     )
-    models_dist = session.exec(models_stmt).all()
 
-    first_run_date = session.exec(select(func.min(Run.created_at))).one()
-    last_run_date = session.exec(select(func.max(Run.created_at))).one()
+
+def get_summary(db_or_tracker: DatabaseManager | Tracker) -> Dict[str, object]:
+    """Returns a high-level summary of the database."""
+    db = _resolve_db(db_or_tracker)
+    counts_row = db.fetchone(
+        "SELECT "
+        "COUNT(*), "
+        "COUNT(*) FILTER (WHERE status = 'completed'), "
+        "COUNT(*) FILTER (WHERE status = 'failed'), "
+        "MIN(created_at), "
+        "MAX(created_at) "
+        "FROM run"
+    )
+    total_runs = int(counts_row[0]) if counts_row else 0
+    completed_runs = int(counts_row[1]) if counts_row else 0
+    failed_runs = int(counts_row[2]) if counts_row else 0
+    first_run_date = _normalize_dt(counts_row[3]) if counts_row else None
+    last_run_date = _normalize_dt(counts_row[4]) if counts_row else None
+
+    art_row = db.fetchone("SELECT COUNT(*) FROM artifact")
+    total_artifacts = int(art_row[0]) if art_row else 0
+
+    models_dist = [
+        (str(row[0]), int(row[1]))
+        for row in db.fetchall(
+            "SELECT model_name, COUNT(*) FROM run GROUP BY model_name"
+        )
+    ]
 
     return {
         "total_runs": total_runs,
@@ -81,7 +99,6 @@ def get_artifact_preview(
     Loads an artifact and returns the first few rows as a pandas DataFrame.
     Returns None if the artifact is not found or not a tabular format.
     """
-    # Find the artifact by key or ID
     artifact = tracker.get_artifact(artifact_key)
     if not artifact:
         return None
@@ -93,12 +110,10 @@ def get_artifact_preview(
         if isinstance(data, pd.DataFrame):
             return data.head(limit)
         if isinstance(data, duckdb.DuckDBPyRelation):
-            return consist.to_df(data)
+            return consist.to_df(data, close=True)
     except FileNotFoundError:
-        # Propagate so CLI can give a precise message
         raise
     except Exception:
-        # Could fail if file is missing, etc.
         return None
 
     return None
@@ -115,28 +130,6 @@ def find_artifacts_by_params(
 ) -> List[Dict[str, object]]:
     """
     Query artifacts by indexed facet predicates and optional prefix filters.
-
-    Parameters
-    ----------
-    tracker : Tracker
-        Active tracker with a configured database.
-    params : Optional[Iterable[str]], optional
-        Predicate expressions of the form ``key=value``, ``key>=value``,
-        or ``key<=value``. A dotted prefix can be used as namespace
-        (e.g., ``beam.phys_sim_iteration=2``).
-    namespace : Optional[str], optional
-        Default namespace filter when predicates do not specify one.
-    key_prefix : Optional[str], optional
-        Prefix filter on ``artifact.key``.
-    artifact_family_prefix : Optional[str], optional
-        Prefix filter on indexed ``artifact_family`` facet values.
-    limit : int, default 100
-        Maximum number of results.
-
-    Returns
-    -------
-    List[Dict[str, object]]
-        Result rows containing artifact metadata and persisted facet metadata.
     """
     artifacts = tracker.find_artifacts_by_params(
         params=list(params or []),

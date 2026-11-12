@@ -33,7 +33,8 @@ import re
 import sqlite3
 import struct
 import sys
-from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, cast
+from typing_extensions import Protocol, runtime_checkable
 import unicodedata
 
 if TYPE_CHECKING:

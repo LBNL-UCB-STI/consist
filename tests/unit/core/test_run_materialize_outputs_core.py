@@ -1337,13 +1337,12 @@ def test_materialize_run_outputs_db_fallback_handles_attached_catalog_with_same_
     output_path.unlink()
 
     attached_db = run_dir / "attached_other.duckdb"
-    with tracker.engine.begin() as conn:
-        conn.exec_driver_sql(f"ATTACH '{attached_db}' AS attached_other")
-        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS attached_other.global_tables")
-        conn.exec_driver_sql(
-            'CREATE TABLE attached_other.global_tables."table" '
-            "(consist_artifact_id VARCHAR, value BIGINT, extra_col VARCHAR)"
-        )
+    tracker.db.execute(f"ATTACH '{attached_db}' AS attached_other")
+    tracker.db.execute("CREATE SCHEMA IF NOT EXISTS attached_other.global_tables")
+    tracker.db.execute(
+        'CREATE TABLE attached_other.global_tables."table" '
+        "(consist_artifact_id VARCHAR, value BIGINT, extra_col VARCHAR)"
+    )
 
     try:
         result = tracker.materialize_run_outputs(
@@ -1352,8 +1351,7 @@ def test_materialize_run_outputs_db_fallback_handles_attached_catalog_with_same_
             db_fallback="if_ingested",
         )
     finally:
-        with tracker.engine.begin() as conn:
-            conn.exec_driver_sql("DETACH DATABASE IF EXISTS attached_other")
+        tracker.db.execute("DETACH DATABASE IF EXISTS attached_other")
 
     restored_path = run_dir / "restored_attached" / "outputs" / "table.csv"
     assert result.materialized_from_db == {"table": str(restored_path.resolve())}
@@ -1404,10 +1402,7 @@ def test_materialize_run_outputs_db_fallback_empty_export_is_missing_source(
     tracker.ingest(artifact)
     output_path.unlink()
 
-    monkeypatch.setattr(
-        "consist.core.materialize.pd.read_sql",
-        lambda *_args, **_kwargs: pd.DataFrame(),
-    )
+    tracker.db.execute('DELETE FROM "global_tables"."empty"')
 
     result = tracker.materialize_run_outputs(
         "producer_empty",

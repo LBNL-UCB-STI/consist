@@ -13,13 +13,17 @@ from typing import (
     get_origin,
 )
 
+from consist.core._schema_model_introspection import (
+    field_foreign_key_target,
+    model_table_name,
+)
+from consist.core.stores import get_hot_data_db
 from consist.digest import canonical_json_sha256
 from consist.models.artifact import Artifact
 from consist.models.run import Run
 from consist.types import DriverType
 
 if TYPE_CHECKING:
-    from sqlalchemy.engine import Engine
     from consist.core.persistence import DatabaseManager
     from consist.core.tracker import Tracker
     from sqlmodel import SQLModel
@@ -66,12 +70,8 @@ class ArtifactSchemaManager:
         # Compatibility alias for single-store mode while migration is in progress.
         return self.tracker.db
 
-    def _hot_engine(self) -> Engine | None:
-        hot_data_store = self.tracker.hot_data_store
-        if hot_data_store is not None:
-            return hot_data_store.engine
-        # Compatibility alias for single-store mode while migration is in progress.
-        return self.tracker.engine
+    def _hot_db(self) -> DatabaseManager | None:
+        return get_hot_data_db(self.tracker)
 
     def _type_annotation_to_logical_type(self, annotation: Any) -> str:
         """
@@ -196,31 +196,10 @@ class ArtifactSchemaManager:
             # 1. Extract fields from the SQLModel class
             fields = []
             relations: list[dict[str, str]] = []
-            table_name = (
-                getattr(schema_model, "__tablename__", None) or schema_model.__name__
-            )
+            table_name = model_table_name(schema_model, preserve_case_fallback=True)
 
             # model_fields is a dict of field_name -> FieldInfo from Pydantic
             if schema_model.model_fields:
-
-                def _resolve_fk_target(field_info: Any) -> Optional[str]:
-                    raw_fk = getattr(field_info, "foreign_key", None)
-                    if raw_fk:
-                        return str(raw_fk)
-                    sa_column = getattr(field_info, "sa_column", None)
-                    if sa_column is None:
-                        return None
-                    fk_set = getattr(sa_column, "foreign_keys", None)
-                    if not fk_set:
-                        return None
-                    for fk in fk_set:
-                        target = getattr(fk, "target_fullname", None)
-                        if target:
-                            return str(target)
-                        target_col = getattr(fk, "column", None)
-                        if target_col is not None:
-                            return str(target_col)
-                    return None
 
                 def _split_fk_target(target: str) -> Optional[tuple[str, str]]:
                     parts = [part for part in str(target).split(".") if part]
@@ -232,7 +211,7 @@ class ArtifactSchemaManager:
                     schema_model.model_fields.items(), start=1
                 ):
                     # Extract the type annotation from the field
-                    annotation = getattr(field_info, "annotation", None)
+                    annotation = field_info.annotation
                     if annotation is None:
                         annotation = str
 
@@ -241,7 +220,7 @@ class ArtifactSchemaManager:
 
                     # Determine if field is nullable (default: True for safety)
                     # If required=True in the field, then it's not nullable
-                    is_required = getattr(field_info, "is_required", lambda: False)()
+                    is_required = field_info.is_required()
                     nullable = not is_required
 
                     fields.append(
@@ -257,7 +236,7 @@ class ArtifactSchemaManager:
                         )
                     )
 
-                    fk_target = _resolve_fk_target(field_info)
+                    fk_target = field_foreign_key_target(field_info)
                     if fk_target:
                         parsed = _split_fk_target(fk_target)
                         if parsed is not None:
@@ -413,8 +392,8 @@ class ArtifactSchemaManager:
         rather than file-side dtypes.
         """
         metadata_db = self._metadata_db()
-        hot_engine = self._hot_engine()
-        if metadata_db is None or hot_engine is None:
+        hot_db = self._hot_db()
+        if metadata_db is None or hot_db is None:
             return
 
         try:
@@ -426,7 +405,7 @@ class ArtifactSchemaManager:
             from consist.tools.schema_profile import profile_duckdb_table
 
             result = profile_duckdb_table(
-                engine=hot_engine,
+                db=hot_db,
                 table_schema=table_schema,
                 table_name=table_name,
                 source=source,
@@ -523,8 +502,7 @@ class ArtifactSchemaManager:
             Maximum rows to sample when inferring schema.
         reuse_if_unchanged : bool, default False
             If True, reuse a prior schema observation when the artifact content
-            identity matches. This prefers ``artifact.content_id`` and falls back
-            to hash-based lookup for legacy rows.
+            identity or digest matches.
         source : str, default "file"
             Source label for the schema observation.
 
@@ -577,14 +555,16 @@ class ArtifactSchemaManager:
                     return
 
             if reuse_if_unchanged:
-                prior_obs = None
-                # Prefer content identity when available, but still fall back to
-                # hash-based lookup when the matching schema observation lives on a
-                # legacy row that has not been backfilled with content_id yet.
-                if artifact.content_id is not None:
-                    prior_obs = metadata_db.find_schema_observation_for_content_id(
-                        artifact.content_id
-                    )
+                content_identity: Optional[str] = None
+                if isinstance(artifact.meta, dict):
+                    raw_ci = artifact.meta.get("content_identity")
+                    if isinstance(raw_ci, str) and raw_ci:
+                        content_identity = raw_ci
+                prior_obs = metadata_db.find_schema_observation_for_content_identity(
+                    content_identity=content_identity,
+                    digest=artifact.hash,
+                    driver=artifact.driver,
+                )
                 if prior_obs is None and artifact.hash:
                     prior_obs = metadata_db.find_schema_observation_for_hash(
                         cast(str, artifact.hash)

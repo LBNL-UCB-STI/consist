@@ -14,11 +14,10 @@ from typing import (
     Dict,
     Literal,
     Optional,
-    Protocol,
     Sequence,
     cast,
-    runtime_checkable,
 )
+from typing_extensions import Protocol, runtime_checkable
 
 from consist.core.directory_artifacts import (
     is_valid_directory_artifact_tree,
@@ -918,7 +917,7 @@ def hydrate_cache_hit_outputs(
     # Ensure the new (cached) run has DB links to its hydrated outputs.
     if link_outputs:
         db = tracker.db
-        if db is not None and db.engine is not None:
+        if db is not None:
             try:
                 db.link_artifacts_to_run_bulk(
                     artifact_ids=[a.id for a in record.outputs],

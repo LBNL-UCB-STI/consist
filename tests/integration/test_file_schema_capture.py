@@ -1,10 +1,10 @@
 import os
 
 import pandas as pd
-from sqlmodel import Session, select
 from typer.testing import CliRunner
 
 from consist.cli import app
+from consist.core.tracker import Tracker
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaObservation
 
 
@@ -72,6 +72,9 @@ def test_cli_schema_capture_file_profiles_existing_artifact(tracker, run_dir):
 
     assert tracker.db.get_artifact_schema_for_artifact(artifact_id=art.id) is None
 
+    db_path = str(tracker.db_path)
+    tracker.close()
+
     result = CliRunner().invoke(
         app,
         [
@@ -80,24 +83,28 @@ def test_cli_schema_capture_file_profiles_existing_artifact(tracker, run_dir):
             "--artifact-key",
             "capture_data",
             "--db-path",
-            str(tracker.db_path),
+            db_path,
         ],
     )
-    assert result.exit_code == 0
+    assert result.exit_code == 0, result.stdout
     assert "Captured file schema for artifact 'capture_data'" in result.stdout
 
-    fetched = tracker.db.get_artifact_schema_for_artifact(artifact_id=art.id)
-    assert fetched is not None
-    schema, _ = fetched
-    with Session(tracker.engine) as session:
-        observations = session.exec(
-            select(ArtifactSchemaObservation).where(
-                ArtifactSchemaObservation.schema_id == schema.id
-            )
-        ).all()
-    assert any(
-        obs.artifact_id == art.id and obs.source == "file" for obs in observations
-    )
+    reopened = Tracker(run_dir=run_dir, db_path=db_path)
+    try:
+        assert reopened.db is not None
+        fetched = reopened.db.get_artifact_schema_for_artifact(artifact_id=art.id)
+        assert fetched is not None
+        schema, _ = fetched
+        observations = reopened.query_rows(
+            "SELECT * FROM main.artifact_schema_observation WHERE schema_id = ?",
+            [schema.id],
+            model=ArtifactSchemaObservation,
+        )
+        assert any(
+            obs.artifact_id == art.id and obs.source == "file" for obs in observations
+        )
+    finally:
+        reopened.close()
 
 
 def test_profile_file_artifact_skips_when_schema_id_present(tracker, tmp_path):
@@ -117,9 +124,13 @@ def test_profile_file_artifact_skips_when_schema_id_present(tracker, tmp_path):
             sample_rows=1,
         )
 
-    with Session(tracker.engine) as session:
-        schemas = session.exec(select(ArtifactSchema)).all()
-        observations = session.exec(select(ArtifactSchemaObservation)).all()
+    schemas = tracker.query_rows(
+        "SELECT * FROM main.artifact_schema", model=ArtifactSchema
+    )
+    observations = tracker.query_rows(
+        "SELECT * FROM main.artifact_schema_observation",
+        model=ArtifactSchemaObservation,
+    )
 
     assert schemas == []
     assert observations == []
@@ -148,23 +159,27 @@ def test_log_artifact_profiles_schema_if_changed(tracker, tmp_path):
             profile_file_schema="if_changed",
         )
 
-    with Session(tracker.engine) as session:
-        schemas = session.exec(select(ArtifactSchema)).all()
-        observations = session.exec(select(ArtifactSchemaObservation)).all()
+    schemas = tracker.query_rows(
+        "SELECT * FROM main.artifact_schema", model=ArtifactSchema
+    )
+    observations = tracker.query_rows(
+        "SELECT * FROM main.artifact_schema_observation",
+        model=ArtifactSchemaObservation,
+    )
 
     schema_a = tracker.db.get_artifact_schema_for_artifact(artifact_id=art_a.id)
     schema_b = tracker.db.get_artifact_schema_for_artifact(artifact_id=art_b.id)
     assert schema_a is not None
     assert schema_b is not None
     # Content identity should be shared across distinct output rows.
-    assert art_a.content_id is not None and art_b.content_id is not None
-    assert art_a.content_id == art_b.content_id
+    assert art_a.meta.get("content_identity") is not None
+    assert art_a.meta.get("content_identity") == art_b.meta.get("content_identity")
     assert schema_a[0].id == schema_b[0].id
     assert len(schemas) == 1
     assert len(observations) == 2
 
 
-def test_profile_file_artifact_if_changed_prefers_content_id(tracker, tmp_path):
+def test_profile_file_artifact_if_changed_prefers_content_identity(tracker, tmp_path):
     path_a = tmp_path / "data_content_a.csv"
     path_b = tmp_path / "data_content_b.csv"
     df = pd.DataFrame({"a": [1], "b": ["x"]})
@@ -187,16 +202,14 @@ def test_profile_file_artifact_if_changed_prefers_content_id(tracker, tmp_path):
         art_b = tracker.log_artifact(path_b, key="data", direction="output")
         run_b = tracker.current_consist.run
 
-        assert art_a.content_id is not None
-        assert art_b.content_id == art_a.content_id
+        assert art_a.meta.get("content_identity") is not None
+        assert art_b.meta.get("content_identity") == art_a.meta.get("content_identity")
 
-        with Session(tracker.engine) as session:
-            persisted = session.get(type(art_b), art_b.id)
-            assert persisted is not None
-            persisted.hash = None
-            session.add(persisted)
-            session.commit()
-
+        assert tracker.db is not None
+        tracker.db.execute(
+            "UPDATE main.artifact SET digest = NULL WHERE id = ?",
+            [art_b.id],
+        )
         art_b.hash = None
 
         tracker.artifact_schemas.profile_file_artifact(
@@ -230,38 +243,36 @@ def test_profile_file_artifact_if_changed_falls_back_to_hash_for_legacy_rows(
         art_a = tracker.log_artifact(path_a, key="data", direction="output")
         run_a = tracker.current_consist.run
 
-    # Simulate a legacy pre-backfill row: it has the same hash as the new content,
-    # but no content_id. The only reusable schema observation lives on that row.
-    with Session(tracker.engine) as session:
-        legacy_artifact = type(art_a)(
-            key="data_legacy",
-            container_uri="outputs://legacy_data.csv",
-            driver="csv",
-            hash=art_a.hash,
-            content_id=None,
-            run_id=run_a.id,
-        )
-        legacy_schema = ArtifactSchema(
-            id="schema_legacy_hash_only",
-            summary_json={"table_name": "legacy_table"},
-            profile_version=1,
-        )
-        legacy_obs = ArtifactSchemaObservation(
-            artifact_id=legacy_artifact.id,
-            schema_id=legacy_schema.id,
-            run_id=run_a.id,
-            source="file",
-        )
-        session.add(legacy_artifact)
-        session.add(legacy_schema)
-        session.add(legacy_obs)
-        session.commit()
+    # Simulate a legacy row: it has the same hash as the new content,
+    # but no content_identity in meta.
+    legacy_artifact = type(art_a)(
+        key="data_legacy",
+        container_uri="outputs://legacy_data.csv",
+        driver="csv",
+        hash=art_a.hash,
+        run_id=run_a.id,
+        meta={},
+    )
+    legacy_schema = ArtifactSchema(
+        id="schema_legacy_hash_only",
+        summary_json={"table_name": "legacy_table"},
+        profile_version=1,
+    )
+    legacy_obs = ArtifactSchemaObservation(
+        artifact_id=legacy_artifact.id,
+        schema_id=legacy_schema.id,
+        run_id=run_a.id,
+        source="file",
+    )
+    assert tracker.db is not None
+    tracker.db.sync_artifact(legacy_artifact)
+    tracker.db.persist_artifact_schema(legacy_schema, observation=legacy_obs)
 
     with tracker.start_run("run_profile_legacy_b", model="test_model"):
         art_b = tracker.log_artifact(path_b, key="data", direction="output")
         run_b = tracker.current_consist.run
 
-        assert art_b.content_id is not None
+        assert art_b.meta.get("content_identity") is not None
         assert art_b.hash == art_a.hash
 
         tracker.artifact_schemas.profile_file_artifact(

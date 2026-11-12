@@ -61,17 +61,8 @@ def test_loader_priority_and_ghost_mode(tracker: Tracker):
         # Note: Ingest updates the artifact metadata in the DB,
         # but our local 'artifact' variable might be stale.
         # Let's fetch the fresh artifact from DB to ensure we have 'dlt_table_name' / 'is_ingested'
-        fresh_artifact = tracker.get_artifact(
-            artifact.key
-        )  # Assuming get_artifact helper exists, or manual fetch:
-
-        # Manual fetch for test robustness if get_artifact isn't exposed yet
-        from sqlmodel import Session, select
-
-        with Session(tracker.engine) as session:
-            fresh_artifact = session.exec(
-                select(Artifact).where(Artifact.id == artifact.id)
-            ).one()
+        fresh_artifact = tracker.get_artifact(artifact.id)
+        assert fresh_artifact is not None
 
     # --- Phase 3: Ghost Mode (Delete File) ---
     file_path.unlink()  # DELETE THE FILE
@@ -127,12 +118,8 @@ def test_loader_db_fallback_policy_paths(tracker: Tracker):
         tracker.ingest(artifact, df)
 
     # Refresh the artifact so `is_ingested` is present in metadata.
-    from sqlmodel import Session, select
-
-    with Session(tracker.engine) as session:
-        ingested_artifact = session.exec(
-            select(Artifact).where(Artifact.id == artifact.id)
-        ).one()
+    ingested_artifact = tracker.get_artifact(artifact.id)
+    assert ingested_artifact is not None
 
     # Delete the file to force any recovery to come from DuckDB.
     file_path.unlink()

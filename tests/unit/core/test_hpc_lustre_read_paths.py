@@ -143,12 +143,14 @@ def test_read_only_tracker_opens_db_read_only_and_skips_view_ddl(
 
     view_called = False
 
-    def fail_if_view_called(self: Tracker, schema: object) -> object:
+    def fail_if_view_called(self: Tracker, *args: object, **kwargs: object) -> object:
         nonlocal view_called
         view_called = True
-        raise AssertionError("Tracker.view() should not be called in read_only mode")
+        raise AssertionError(
+            "Tracker.create_view() should not be called in read_only mode"
+        )
 
-    monkeypatch.setattr(Tracker, "view", fail_if_view_called)
+    monkeypatch.setattr(Tracker, "create_view", fail_if_view_called)
 
     class DummySchema:
         pass

@@ -669,17 +669,20 @@ class TrackerConfigPlanService(_TrackerServiceBase):
         if store is not None:
             return store.ingest_cache_hit(table_name, content_hash)
 
-        if self.engine is None:
+        db = self.tracker.db
+        if db is None:
             return False
         if not _is_safe_identifier(table_name):
             return False
-        table_ref = f"{_quote_ident('global_tables')}.{_quote_ident(table_name)}"
-        try:
-            with self.engine.begin() as connection:
-                result = connection.exec_driver_sql(
-                    f"SELECT 1 FROM {table_ref} WHERE content_hash = ? LIMIT 1",
-                    (content_hash,),
-                ).fetchone()
-            return result is not None
-        except Exception:
+        if not db.has_table_column(
+            table_name=table_name,
+            column_name="content_hash",
+            table_schema="global_tables",
+        ):
             return False
+        table_ref = f"{_quote_ident('global_tables')}.{_quote_ident(table_name)}"
+        row = db.fetchone(
+            f"SELECT 1 FROM {table_ref} WHERE content_hash = ? LIMIT 1",
+            [content_hash],
+        )
+        return row is not None

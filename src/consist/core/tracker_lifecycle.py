@@ -458,11 +458,25 @@ class RunLifecycleCoordinator:
 
         identity_mode = code_identity or "repo_git"
         with _track_begin_run_phase("lifecycle.resolve_code_identity"):
-            code_identity_resolution = tracker.identity.resolve_code_identity(
-                mode=identity_mode,
-                func=code_identity_callable,
-                extra_deps=code_identity_extra_deps,
-            )
+            from consist.core.identity import CodeIdentityUnavailableError, _get_git
+
+            try:
+                code_identity_resolution = tracker.identity.resolve_code_identity(
+                    mode=identity_mode,
+                    func=code_identity_callable,
+                    extra_deps=code_identity_extra_deps,
+                )
+            except CodeIdentityUnavailableError:
+                if (
+                    code_identity is None
+                    and code_identity_callable is None
+                    and _get_git() is None
+                ):
+                    code_identity_resolution = tracker.identity.resolve_fallback_code_identity_without_gitpython(
+                        extra_deps=code_identity_extra_deps
+                    )
+                else:
+                    raise
             git_hash = code_identity_resolution.digest
 
         action_code_identity = tracker.identity.describe_code_identity(

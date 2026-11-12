@@ -82,7 +82,8 @@ class RunArtifactLink(SQLModel, table=True):
         primary_key=True, sa_type=UUIDType, sa_column_kwargs={"autoincrement": False}
     )
 
-    direction: str  # "input" or "output"
+    direction: str = Field(primary_key=True)  # "input" or "output"
+    role: str = Field(default="", primary_key=True)
     is_implicit: bool = Field(default=False)
 
 
@@ -236,6 +237,11 @@ class Run(SQLModel, table=True):
         default=None,
         index=True,
         description="Composite hash (SHA256) of code, config, and input hashes, defining the unique identity for caching.",
+    )
+    cacheable: bool = Field(
+        default=True,
+        index=True,
+        description="Whether this run is eligible to satisfy downstream cache lookups.",
     )
 
     # Metadata
