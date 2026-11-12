@@ -18,7 +18,6 @@ from typing import (
 
 import duckdb
 from pydantic import BaseModel
-from sqlmodel import SQLModel
 
 from consist.core._schema_model_introspection import (
     model_table_name,
@@ -207,7 +206,7 @@ class ViewFactory:
         view_name: str,
         concept_key: str,
         driver_filter: Optional[List[str]] = None,
-        schema_model: Optional[Type[SQLModel]] = None,
+        schema_model: Optional[Type[BaseModel]] = None,
     ) -> bool:
         """Create or replace a hybrid view (TEMP VIEW when tracker is read-only)."""
         return self.create_hybrid_view(
@@ -696,7 +695,7 @@ class ViewFactory:
         *,
         hydrate_missing: bool = True,
     ) -> Optional[Path]:
-        primary_path = Path(self.tracker.resolve_uri(record.artifact.container_uri))
+        primary_path = Path(self.tracker.resolve_uri(record.artifact.uri))
         if primary_path.exists():
             return primary_path
 
@@ -756,7 +755,7 @@ class ViewFactory:
 
             resolved_path = self._resolve_cold_record_path(record)
             if resolved_path is None:
-                abs_path = self.tracker.resolve_uri(record.artifact.container_uri)
+                abs_path = self.tracker.resolve_uri(record.artifact.uri)
                 if missing_files == "error":
                     raise FileNotFoundError(abs_path)
                 if missing_files == "warn":

@@ -33,21 +33,23 @@ def test_get_artifact_filters_key_lookup_by_run_id(tracker):
     artifact_run_a_id = uuid.uuid4()
     artifact_run_b_id = uuid.uuid4()
     now = datetime.now(timezone.utc)
+    from consist.digest import Digest
+
     artifact_run_a = Artifact(
         id=artifact_run_a_id,
         key="collision_key",
-        container_uri="inputs://collision_a.csv",
+        uri="inputs://collision_a.csv",
         driver="csv",
-        hash="collision_hash_a",
+        digest=Digest("sha256:file", "aa" * 32),
         run_id=None,
         created_at=now,
     )
     artifact_run_b = Artifact(
         id=artifact_run_b_id,
         key="collision_key",
-        container_uri="inputs://collision_b.csv",
+        uri="inputs://collision_b.csv",
         driver="csv",
-        hash="collision_hash_b",
+        digest=Digest("sha256:file", "bb" * 32),
         run_id="run_b",
         created_at=now + timedelta(seconds=1),
     )
@@ -113,7 +115,7 @@ def test_profile_and_persist_ingested_schema(tracker, sample_csv):
 
         assert t.current_consist is not None
         run = t.current_consist.run
-        t.artifact_schemas.profile_ingested_table(
+        artifact = t.artifact_schemas.profile_ingested_table(
             artifact=artifact,
             run=run,
             table_schema="global_tables",
@@ -143,7 +145,7 @@ def test_profile_and_persist_ingested_schema(tracker, sample_csv):
         )
         assert len(observations) == 1
 
-        t.artifact_schemas.profile_ingested_table(
+        artifact = t.artifact_schemas.profile_ingested_table(
             artifact=artifact,
             run=run,
             table_schema="global_tables",
@@ -583,14 +585,16 @@ def test_apply_physical_fks_best_effort(tracker):
 
 
 def test_get_artifact_schema_for_artifact_prefers_user_provided(tracker):
+    from consist.digest import Digest
+
     assert tracker.db is not None
     artifact_id = uuid.uuid4()
     artifact = Artifact(
         id=artifact_id,
         key="artifact_pref",
-        container_uri="inputs://artifact.csv",
+        uri="inputs://artifact.csv",
         driver="csv",
-        hash="abc",
+        digest=Digest("sha256:file", "ab" * 32),
     )
 
     schema_user = "schema_user"
@@ -671,14 +675,16 @@ def test_get_artifact_schema_for_artifact_prefers_user_provided(tracker):
 
 
 def test_get_artifact_schema_for_artifact_respects_prefer_source(tracker):
+    from consist.digest import Digest
+
     assert tracker.db is not None
     artifact_id = uuid.uuid4()
     artifact = Artifact(
         id=artifact_id,
         key="artifact_pref_no_user",
-        container_uri="inputs://artifact_no_user.csv",
+        uri="inputs://artifact_no_user.csv",
         driver="csv",
-        hash="def",
+        digest=Digest("sha256:file", "de" * 32),
     )
 
     schema_file = "schema_file_only"
@@ -744,14 +750,16 @@ def test_get_artifact_schema_for_artifact_respects_prefer_source(tracker):
 
 
 def test_select_artifact_schema_for_artifact_strict_source_metadata(tracker):
+    from consist.digest import Digest
+
     assert tracker.db is not None
     artifact_id = uuid.uuid4()
     artifact = Artifact(
         id=artifact_id,
         key="artifact_select_source",
-        container_uri="inputs://artifact_select_source.csv",
+        uri="inputs://artifact_select_source.csv",
         driver="csv",
-        hash="select_source_hash",
+        digest=Digest("sha256:file", "ef" * 32),
     )
 
     schema_file = "schema_select_file"
@@ -814,14 +822,16 @@ def test_select_artifact_schema_for_artifact_strict_source_metadata(tracker):
 
 
 def test_select_artifact_schema_for_artifact_strict_source_missing_raises(tracker):
+    from consist.digest import Digest
+
     assert tracker.db is not None
     artifact_id = uuid.uuid4()
     artifact = Artifact(
         id=artifact_id,
         key="artifact_select_source_missing",
-        container_uri="inputs://artifact_select_source_missing.csv",
+        uri="inputs://artifact_select_source_missing.csv",
         driver="csv",
-        hash="select_source_missing_hash",
+        digest=Digest("sha256:file", "12" * 32),
     )
 
     schema_file = "schema_select_missing_file"
@@ -866,13 +876,15 @@ def test_get_artifact_schema_for_artifact_backfills_ordinals_from_profile_order(
     artifact_id = uuid.uuid4()
     schema_id = "schema_profile_backfill_order"
 
+    from consist.digest import Digest
+
     tracker.db.upsert_artifact(
         Artifact(
             id=artifact_id,
             key="artifact_profile_backfill",
-            container_uri="inputs://artifact_profile_backfill.csv",
+            uri="inputs://artifact_profile_backfill.csv",
             driver="csv",
-            hash="profile_backfill_hash",
+            digest=Digest("sha256:file", "34" * 32),
         )
     )
     tracker.db.persist_artifact_schema(
@@ -941,13 +953,15 @@ def test_get_artifact_schema_for_artifact_backfills_ordinals_alphabetically(trac
     artifact_id = uuid.uuid4()
     schema_id = "schema_profile_backfill_alpha"
 
+    from consist.digest import Digest
+
     tracker.db.upsert_artifact(
         Artifact(
             id=artifact_id,
             key="artifact_alpha_backfill",
-            container_uri="inputs://artifact_alpha_backfill.csv",
+            uri="inputs://artifact_alpha_backfill.csv",
             driver="csv",
-            hash="alpha_backfill_hash",
+            digest=Digest("sha256:file", "56" * 32),
         )
     )
     tracker.db.persist_artifact_schema(

@@ -39,11 +39,11 @@ from consist.core.materialize import (
 )
 from consist.core.materialize_options import normalize_materialize_output_keys
 from consist.core.output_sets import (
-    _manifest_identity_hash,
     _normalize_output_set_relative_path,
+    compute_output_set_manifest_digest,
 )
-from consist.digest import file_sha256
-from consist.models.artifact import Artifact, ArchivedOutputs, set_tracker_ref
+from consist.digest import file_sha256, verify_digest
+from consist.models.artifact import Artifact, ArchivedOutputs
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,11 +123,33 @@ class TrackerArchiveService(_TrackerServiceBase):
 
     _active_archive_replace_backup: tuple[Path, Path] | None = None
 
+    def _has_verifiable_content_digest(self, artifact: Artifact) -> bool:
+        return (
+            self.identity.hashing_strategy == "full"
+            and artifact.digest is not None
+            and artifact.digest.scheme
+            not in {"stat_file_v1:sha256", "stat_dir_v1:sha256"}
+        )
+
+    @staticmethod
+    def _verify_file_against_artifact_digest(path: Path, artifact: Artifact) -> bool:
+        if artifact.digest is None:
+            return False
+        try:
+            return verify_digest(
+                path,
+                artifact.digest,
+                driver=artifact.driver,
+                member=artifact.member,
+            )
+        except (ValueError, OSError):
+            return False
+
     def _directory_archive_sort_key(
         self, index_and_item: tuple[int, tuple[str, Artifact]]
     ) -> tuple[int, int]:
         index, (_, artifact) = index_and_item
-        relative_path = self.fs.get_remappable_relative_path(artifact.container_uri)
+        relative_path = self.fs.get_remappable_relative_path(artifact.uri)
         depth = len(relative_path.parts) if relative_path is not None else 0
         return (depth, index)
 
@@ -139,7 +161,7 @@ class TrackerArchiveService(_TrackerServiceBase):
         if artifact.abs_path and Path(artifact.abs_path).exists():
             return False
         try:
-            resolved = Path(self.resolve_uri(artifact.container_uri))
+            resolved = Path(self.resolve_uri(artifact.uri))
             if resolved.exists():
                 return False
         except (ValueError, RuntimeError, OSError, TypeError):
@@ -161,16 +183,16 @@ class TrackerArchiveService(_TrackerServiceBase):
         return True
 
     def _iter_live_couplers(self) -> list[Any]:
-        active = self.tracker.__dict__.get("_active_coupler")
-        couplers = list(self.tracker.__dict__.get("_couplers") or ())
+        active = self.tracker._active_coupler
+        couplers = list(self.tracker._couplers or ())
         if active is not None and not any(c is active for c in couplers):
             return [active, *couplers]
         return couplers
 
     def _source_mount_recovery_root(self, artifact: Artifact) -> Path | None:
-        if "://" not in artifact.container_uri:
+        if "://" not in artifact.uri:
             return None
-        scheme, _ = artifact.container_uri.split("://", 1)
+        scheme, _ = artifact.uri.split("://", 1)
         mount_root = self.fs.mounts.get(scheme)
         if not mount_root:
             return None
@@ -221,15 +243,22 @@ class TrackerArchiveService(_TrackerServiceBase):
                 continue
             for artifact_id, meta in updated_by_id.items():
                 record.sync_output_artifact(artifact_id=artifact_id, meta=meta)
+            record.outputs = [
+                art.with_resolver(self.tracker)
+                if art.id is not None and str(art.id) in updated_by_id
+                else art
+                for art in record.outputs
+            ]
         for coupler in self._iter_live_couplers():
-            for art in coupler.values():
+            for coupler_key, art in list(coupler.items()):
                 if (
                     isinstance(art, Artifact)
                     and art.id is not None
                     and str(art.id) in updated_by_id
                 ):
-                    art.meta = dict(updated_by_id[str(art.id)])
-                    set_tracker_ref(art, self.tracker)
+                    coupler._artifacts[coupler_key] = art.with_meta(
+                        dict(updated_by_id[str(art.id)])
+                    ).with_resolver(self.tracker)
 
     def _sync_active_run_artifact_abs_path(
         self,
@@ -240,6 +269,8 @@ class TrackerArchiveService(_TrackerServiceBase):
     ) -> None:
         if artifact.id is None:
             return
+        if not preserve_existing or artifact.abs_path is None:
+            self.tracker._record_artifact_abs_path_override(artifact, abs_path)
         target_id = str(artifact.id)
         for record in (self.current_consist, self.tracker._last_consist):
             if record is None:
@@ -249,16 +280,25 @@ class TrackerArchiveService(_TrackerServiceBase):
                 abs_path=abs_path,
                 preserve_existing_abs_path=preserve_existing,
             )
+            record.outputs = [
+                art.with_resolver(self.tracker)
+                if art.id is not None and str(art.id) == target_id
+                else art
+                for art in record.outputs
+            ]
         for coupler in self._iter_live_couplers():
-            for art in coupler.values():
+            for coupler_key, art in list(coupler.items()):
                 if (
                     isinstance(art, Artifact)
                     and art.id is not None
                     and str(art.id) == target_id
                 ):
+                    next_art = art
                     if not preserve_existing or art.abs_path is None:
-                        art.abs_path = abs_path
-                    set_tracker_ref(art, self.tracker)
+                        next_art = next_art.with_abs_path(abs_path)
+                    coupler._artifacts[coupler_key] = next_art.with_resolver(
+                        self.tracker
+                    )
 
     def _sync_archived_run_outputs_to_runtime_state(
         self,
@@ -267,26 +307,22 @@ class TrackerArchiveService(_TrackerServiceBase):
         refreshed_outputs: Mapping[str, Artifact],
         preserve_existing_abs_path: bool,
     ) -> None:
-        for refreshed in refreshed_outputs.values():
-            set_tracker_ref(refreshed, self.tracker)
-
         for record in (self.current_consist, self.tracker._last_consist):
             if record is None or record.run is None:
                 continue
             is_matching_run = str(record.run.id) == str(run_id)
             for key, refreshed in refreshed_outputs.items():
-                matched = record.sync_output_artifact(
+                record.sync_output_artifact(
                     key=key if is_matching_run else None,
                     artifact_id=refreshed.id,
                     meta=dict(refreshed.meta or {}),
                     abs_path=refreshed.abs_path,
                     preserve_existing_abs_path=preserve_existing_abs_path,
                 )
-                for art in matched:
-                    set_tracker_ref(art, self.tracker)
+            record.outputs = [art.with_resolver(self.tracker) for art in record.outputs]
 
         for coupler in self._iter_live_couplers():
-            for coupler_key, coupler_art in coupler.items():
+            for coupler_key, coupler_art in list(coupler.items()):
                 if not isinstance(coupler_art, Artifact):
                     continue
                 matched_refreshed: Artifact | None = None
@@ -308,12 +344,12 @@ class TrackerArchiveService(_TrackerServiceBase):
                     matched_refreshed = refreshed_outputs.get(coupler_key)
                 if matched_refreshed is None:
                     continue
-                coupler_art.meta = dict(matched_refreshed.meta or {})
+                next_art = coupler_art.with_meta(dict(matched_refreshed.meta or {}))
                 if matched_refreshed.abs_path is not None and (
                     not preserve_existing_abs_path or coupler_art.abs_path is None
                 ):
-                    coupler_art.abs_path = matched_refreshed.abs_path
-                set_tracker_ref(coupler_art, self.tracker)
+                    next_art = next_art.with_abs_path(matched_refreshed.abs_path)
+                coupler._artifacts[coupler_key] = next_art.with_resolver(self.tracker)
 
     def set_artifact_recovery_roots(
         self,
@@ -372,21 +408,22 @@ class TrackerArchiveService(_TrackerServiceBase):
             self.db.update_artifact_meta(
                 artifact, {"recovery_roots": None}, raise_on_error=True
             )
-            artifact.meta = current_meta
+            updated = artifact.with_meta(current_meta).with_resolver(self.tracker)
             if artifact.id is not None:
                 self._sync_active_run_artifacts_meta({str(artifact.id): current_meta})
             self._run_artifacts_cache.clear()
-            return artifact
+            return updated
 
         self.db.update_artifact_meta(
             artifact, {"recovery_roots": normalized}, raise_on_error=True
         )
-        artifact.meta = dict(artifact.meta or {})
-        artifact.meta["recovery_roots"] = normalized
+        next_meta = dict(artifact.meta or {})
+        next_meta["recovery_roots"] = normalized
+        updated = artifact.with_meta(next_meta).with_resolver(self.tracker)
         if artifact.id is not None:
-            self._sync_active_run_artifacts_meta({str(artifact.id): artifact.meta})
+            self._sync_active_run_artifacts_meta({str(artifact.id): next_meta})
         self._run_artifacts_cache.clear()
-        return artifact
+        return updated
 
     def archive_artifact(
         self,
@@ -483,7 +520,7 @@ class TrackerArchiveService(_TrackerServiceBase):
                 "cannot be archived; re-log the output under the current contract."
             )
 
-        relative_path = self.fs.get_remappable_relative_path(artifact.container_uri)
+        relative_path = self.fs.get_remappable_relative_path(artifact.uri)
         if relative_path is None:
             raise ValueError(
                 f"Artifact {artifact.key!r} does not have a rematerializable URI "
@@ -556,7 +593,6 @@ class TrackerArchiveService(_TrackerServiceBase):
             elif matched_existing_destination:
                 source_path.unlink(missing_ok=True)
             resolved_dest = str(destination.resolve())
-            artifact.abs_path = resolved_dest
             self._sync_active_run_artifact_abs_path(artifact, resolved_dest)
         return destination
 
@@ -568,26 +604,25 @@ class TrackerArchiveService(_TrackerServiceBase):
         generic URI resolver also accepts run-relative and legacy local paths,
         which must not become a new source authority for run-owned artifacts.
         """
-        if "://" not in artifact.container_uri:
+        if "://" not in artifact.uri:
             return None
 
-        scheme, _ = artifact.container_uri.split("://", 1)
+        scheme, _ = artifact.uri.split("://", 1)
         if scheme not in self.fs.mounts:
             return None
 
-        candidate = Path(self.fs.resolve_uri(artifact.container_uri))
+        candidate = Path(self.fs.resolve_uri(artifact.uri))
         if not candidate.exists():
             return None
         if not candidate.is_file() or _is_file_bundle_artifact(artifact):
             return candidate
-        if not artifact.hash:
+        if artifact.digest is None:
             raise ValueError(
                 f"Cannot archive artifact {artifact.key!r} from its current "
                 "configured mount: artifact hash is unavailable."
             )
 
-        candidate_hash = self.identity.compute_file_checksum(candidate)
-        if candidate_hash != artifact.hash:
+        if not self._verify_file_against_artifact_digest(candidate, artifact):
             raise ValueError(
                 f"Current configured mount source for artifact {artifact.key!r} "
                 "does not match artifact hash."
@@ -607,7 +642,7 @@ class TrackerArchiveService(_TrackerServiceBase):
     @staticmethod
     def _is_output_set_parent(artifact: Artifact) -> bool:
         """Return whether an artifact is the logical parent of an OutputSet."""
-        metadata = artifact.meta if isinstance(artifact.meta, dict) else {}
+        metadata = artifact.meta if isinstance(artifact.meta, Mapping) else {}
         return artifact.driver == "artifact_set" or metadata.get("artifact_set") is True
 
     def _find_archive_source_candidate(
@@ -650,7 +685,7 @@ class TrackerArchiveService(_TrackerServiceBase):
             if artifact.abs_path:
                 direct_candidates.append(Path(artifact.abs_path))
             try:
-                direct_candidates.append(Path(self.resolve_uri(artifact.container_uri)))
+                direct_candidates.append(Path(self.resolve_uri(artifact.uri)))
             except (OSError, RuntimeError, TypeError, ValueError):
                 pass
             validators = (
@@ -739,7 +774,7 @@ class TrackerArchiveService(_TrackerServiceBase):
         archive_root: str | os.PathLike[str],
     ) -> _OutputSetArchivePlan:
         """Validate a persisted OutputSet graph before changing archive bytes."""
-        metadata = artifact.meta if isinstance(artifact.meta, dict) else {}
+        metadata = artifact.meta if isinstance(artifact.meta, Mapping) else {}
         output_set_key = metadata.get("output_set_key")
         if not isinstance(output_set_key, str) or output_set_key != artifact.key:
             raise ValueError(
@@ -760,7 +795,7 @@ class TrackerArchiveService(_TrackerServiceBase):
             raise ValueError(
                 f"OutputSet parent {artifact.key!r} references a missing manifest artifact."
             )
-        manifest_metadata = manifest.meta if isinstance(manifest.meta, dict) else {}
+        manifest_metadata = manifest.meta if isinstance(manifest.meta, Mapping) else {}
         if (
             manifest_metadata.get("output_set_manifest") is not True
             or manifest_metadata.get("output_set_key") != artifact.key
@@ -769,8 +804,8 @@ class TrackerArchiveService(_TrackerServiceBase):
                 f"OutputSet parent {artifact.key!r} has an invalid manifest artifact."
             )
 
-        parent_relative = self.fs.get_remappable_relative_path(artifact.container_uri)
-        manifest_relative = self.fs.get_remappable_relative_path(manifest.container_uri)
+        parent_relative = self.fs.get_remappable_relative_path(artifact.uri)
+        manifest_relative = self.fs.get_remappable_relative_path(manifest.uri)
         if parent_relative is None or manifest_relative is None:
             raise ValueError(
                 f"OutputSet parent {artifact.key!r} does not have a rematerializable "
@@ -820,16 +855,23 @@ class TrackerArchiveService(_TrackerServiceBase):
             raise ValueError(
                 f"OutputSet parent {artifact.key!r} has a malformed manifest."
             )
-        if (
-            not manifest.hash
-            or self.identity.compute_file_checksum(manifest_source) != manifest.hash
+        if manifest.digest is None or not self._verify_file_against_artifact_digest(
+            manifest_source, manifest
         ):
             raise ValueError(
                 f"OutputSet manifest {manifest.key!r} bytes do not match its "
                 "persisted identity."
             )
         manifest_content_hash = file_sha256(manifest_source)
-        if artifact.hash != _manifest_identity_hash(manifest_contents):
+        try:
+            expected_parent_digest = compute_output_set_manifest_digest(
+                manifest_contents
+            )
+        except ValueError as exc:
+            raise ValueError(
+                f"OutputSet parent {artifact.key!r} has an incomplete manifest."
+            ) from exc
+        if artifact.digest != expected_parent_digest:
             raise ValueError(
                 f"OutputSet parent {artifact.key!r} manifest does not match its identity."
             )
@@ -844,7 +886,7 @@ class TrackerArchiveService(_TrackerServiceBase):
 
         children = self.tracker.get_child_artifacts(artifact)
         if any(
-            (child.meta if isinstance(child.meta, dict) else {}).get(
+            (child.meta if isinstance(child.meta, Mapping) else {}).get(
                 "output_set_member"
             )
             is not True
@@ -893,7 +935,7 @@ class TrackerArchiveService(_TrackerServiceBase):
         total_size_bytes = 0
         destination_paths: set[Path] = set()
         for child in children:
-            child_metadata = child.meta if isinstance(child.meta, dict) else {}
+            child_metadata = child.meta if isinstance(child.meta, Mapping) else {}
             if (
                 child.id is None
                 or child.parent_artifact_id != artifact.id
@@ -915,7 +957,7 @@ class TrackerArchiveService(_TrackerServiceBase):
             size_bytes = manifest_member.get("size_bytes")
             if (
                 manifest_member.get("key") != child.key
-                or manifest_member.get("uri") != child.container_uri
+                or manifest_member.get("uri") != child.uri
                 or manifest_member.get("driver") != child.driver
                 or manifest_member.get("relative_path") != relative_path
                 or not isinstance(content_hash, str)
@@ -926,7 +968,7 @@ class TrackerArchiveService(_TrackerServiceBase):
                 raise ValueError(
                     f"OutputSet parent {artifact.key!r} has an incomplete manifest."
                 )
-            child_relative = self.fs.get_remappable_relative_path(child.container_uri)
+            child_relative = self.fs.get_remappable_relative_path(child.uri)
             if child_relative is None:
                 raise ValueError(
                     f"OutputSet member {child.key!r} does not have a rematerializable "
@@ -1026,7 +1068,7 @@ class TrackerArchiveService(_TrackerServiceBase):
         for key, artifact in selected.items():
             if key in output_set_plans:
                 continue
-            relative_path = self.fs.get_remappable_relative_path(artifact.container_uri)
+            relative_path = self.fs.get_remappable_relative_path(artifact.uri)
             if relative_path is None:
                 continue
             destination = archive_root_path / relative_path
@@ -1070,7 +1112,7 @@ class TrackerArchiveService(_TrackerServiceBase):
                 )
             member = matching_members[0]
             if (
-                artifact.container_uri != member.artifact.container_uri
+                artifact.uri != member.artifact.uri
                 or artifact.driver != member.artifact.driver
             ):
                 raise ValueError(
@@ -1109,9 +1151,9 @@ class TrackerArchiveService(_TrackerServiceBase):
 
         def _matches_artifact_hash(candidate: Path) -> bool:
             nonlocal mismatched_candidate
-            if not candidate.is_file() or not artifact.hash:
+            if not candidate.is_file() or artifact.digest is None:
                 return True
-            if self.identity.compute_file_checksum(str(candidate)) == artifact.hash:
+            if self._verify_file_against_artifact_digest(candidate, artifact):
                 return True
             mismatched_candidate = candidate
             return False
@@ -1451,7 +1493,7 @@ class TrackerArchiveService(_TrackerServiceBase):
         """Archive a manifest-verified immutable directory artifact."""
         manifest = _directory_artifact_manifest(artifact)
         allow_extra_files = directory_allows_extra_files(artifact)
-        relative_path = self.fs.get_remappable_relative_path(artifact.container_uri)
+        relative_path = self.fs.get_remappable_relative_path(artifact.uri)
         if relative_path is None:
             raise ValueError(
                 f"Artifact {artifact.key!r} does not have a rematerializable URI layout."
@@ -1500,7 +1542,6 @@ class TrackerArchiveService(_TrackerServiceBase):
                 elif source_path.exists():
                     shutil.rmtree(source_path)
             resolved_dest = str(destination.resolve())
-            artifact.abs_path = resolved_dest
             self._sync_active_run_artifact_abs_path(artifact, resolved_dest)
         return destination
 
@@ -1516,7 +1557,7 @@ class TrackerArchiveService(_TrackerServiceBase):
     ) -> Path:
         """Archive a verified Shapefile sidecar bundle as one atomic directory."""
         entry, manifest = _shapefile_bundle_metadata(artifact)
-        relative_path = self.fs.get_remappable_relative_path(artifact.container_uri)
+        relative_path = self.fs.get_remappable_relative_path(artifact.uri)
         if relative_path is None:
             raise ValueError(
                 f"Artifact {artifact.key!r} does not have a rematerializable URI layout."
@@ -1569,7 +1610,6 @@ class TrackerArchiveService(_TrackerServiceBase):
                     else:
                         member_source.unlink(missing_ok=True)
             resolved_dest = resolve_artifact_entry_path(artifact, destination)
-            artifact.abs_path = resolved_dest
             self._sync_active_run_artifact_abs_path(artifact, resolved_dest)
         return destination
 
@@ -1692,7 +1732,7 @@ class TrackerArchiveService(_TrackerServiceBase):
                 "blocked_by_container_policy", message=policy_validation.message
             )
 
-        relative_path = self.fs.get_remappable_relative_path(artifact.container_uri)
+        relative_path = self.fs.get_remappable_relative_path(artifact.uri)
         if relative_path is None:
             return result(
                 "skipped_unmapped",
@@ -1739,12 +1779,8 @@ class TrackerArchiveService(_TrackerServiceBase):
                 ),
             )
 
-        expected_hashes: list[tuple[str, str]] = []
-        if content_hash is not None:
-            expected_hashes.append(("content_hash", content_hash))
-        elif artifact.hash and self.identity.hashing_strategy == "full":
-            expected_hashes.append(("artifact.hash", artifact.hash))
-        if verify and not expected_hashes:
+        has_verifiable_digest = self._has_verifiable_content_digest(artifact)
+        if verify and content_hash is None and not has_verifiable_digest:
             return result(
                 "unverifiable_hash",
                 expected_path=expected_path_resolved,
@@ -1755,19 +1791,33 @@ class TrackerArchiveService(_TrackerServiceBase):
                 ),
             )
         if verify:
+            mismatches: list[str] = []
             try:
-                actual_hash = file_sha256(expected_path_resolved)
+                if content_hash is not None:
+                    if ":" in content_hash:
+                        matched = verify_digest(
+                            expected_path_resolved,
+                            content_hash,
+                            driver=artifact.driver,
+                            member=artifact.member,
+                        )
+                    else:
+                        matched = file_sha256(expected_path_resolved) == content_hash
+                    if not matched:
+                        mismatches.append("content_hash")
+                elif not verify_digest(
+                    expected_path_resolved,
+                    artifact.digest,  # type: ignore[arg-type]
+                    driver=artifact.driver,
+                    member=artifact.member,
+                ):
+                    mismatches.append("artifact.digest")
             except Exception as exc:
                 return result(
                     "failed",
                     expected_path=expected_path_resolved,
                     message=f"Could not hash recovery copy {expected_path_resolved}: {exc}",
                 )
-            mismatches = [
-                label
-                for label, expected_hash in expected_hashes
-                if actual_hash != expected_hash
-            ]
             if mismatches:
                 return result(
                     "hash_mismatch",
@@ -1786,7 +1836,7 @@ class TrackerArchiveService(_TrackerServiceBase):
                 verification_succeeded=True,
             )
         try:
-            self.tracker.set_artifact_recovery_roots(
+            artifact = self.tracker.set_artifact_recovery_roots(
                 artifact, [recovery_root_path], append=append
             )
         except Exception as exc:
@@ -1810,29 +1860,8 @@ class TrackerArchiveService(_TrackerServiceBase):
         roots: str | os.PathLike[str] | Sequence[str | os.PathLike[str]],
         *,
         append: bool,
-    ) -> None:
-        """Persist recovery roots for artifacts in one database transaction.
-
-        Parameters
-        ----------
-        artifacts : sequence of Artifact
-            Persisted artifacts receiving the same recovery roots.
-        roots : path-like or sequence of path-like
-            Roots to normalize and store.
-        append : bool
-            Whether to append roots to each artifact's current metadata.
-
-        Raises
-        ------
-        RuntimeError
-            If no metadata database is configured.
-        TypeError
-            If an item is not an artifact.
-        ValueError
-            If an artifact has no persistent identifier.
-        KeyError
-            If an artifact is no longer present in the database.
-        """
+    ) -> dict[str, Artifact]:
+        """Persist recovery roots for artifacts in one database transaction."""
         if self.db is None:
             raise RuntimeError(
                 "Cannot update artifact recovery roots: tracker has no database configured."
@@ -1859,18 +1888,21 @@ class TrackerArchiveService(_TrackerServiceBase):
             updates[str(artifact.id)] = (artifact, next_meta)
 
         if not updates:
-            return
+            return {}
         self.db.replace_artifacts_meta_bulk(
             {artifact.id: next_meta for artifact, next_meta in updates.values()},
             require_all=True,
         )
 
-        for artifact, next_meta in updates.values():
-            artifact.meta = dict(next_meta)
+        refreshed_by_id = {
+            artifact_id: artifact.with_meta(dict(next_meta)).with_resolver(self.tracker)
+            for artifact_id, (artifact, next_meta) in updates.items()
+        }
         self._sync_active_run_artifacts_meta(
             {artifact_id: next_meta for artifact_id, (_, next_meta) in updates.items()}
         )
         self._run_artifacts_cache.clear()
+        return refreshed_by_id
 
     def register_run_output_recovery_copies(
         self,
@@ -1949,7 +1981,7 @@ class TrackerArchiveService(_TrackerServiceBase):
         recovery_root_path = Path(recovery_root).resolve()
         if pending_metadata_updates:
             try:
-                self.tracker._set_artifact_recovery_roots_bulk(
+                refreshed_by_id = self.tracker._set_artifact_recovery_roots_bulk(
                     [artifact for _, artifact, _ in pending_metadata_updates],
                     [recovery_root_path],
                     append=append,
@@ -1957,7 +1989,7 @@ class TrackerArchiveService(_TrackerServiceBase):
             except Exception:
                 for key, artifact, registration in pending_metadata_updates:
                     try:
-                        self.tracker.set_artifact_recovery_roots(
+                        updated_art = self.tracker.set_artifact_recovery_roots(
                             artifact, [recovery_root_path], append=append
                         )
                     except Exception as exc:
@@ -1970,13 +2002,20 @@ class TrackerArchiveService(_TrackerServiceBase):
                     else:
                         registered[key] = replace(
                             registration,
+                            artifact=updated_art,
                             message="Recovery copy verified and registered.",
                             metadata_updated=True,
                         )
             else:
-                for key, _, registration in pending_metadata_updates:
+                for key, artifact, registration in pending_metadata_updates:
+                    updated_art = (
+                        refreshed_by_id.get(str(artifact.id), artifact)
+                        if isinstance(refreshed_by_id, Mapping)
+                        else artifact
+                    )
                     registered[key] = replace(
                         registration,
+                        artifact=updated_art,
                         message="Recovery copy verified and registered.",
                         metadata_updated=True,
                     )
@@ -2079,8 +2118,14 @@ class TrackerArchiveService(_TrackerServiceBase):
                 candidate, "preserved_existing", "not_requested"
             )
         try:
-            matches = file_sha256(candidate.target_path) == candidate.artifact.hash
-        except OSError as exc:
+            assert candidate.artifact.digest is not None
+            matches = verify_digest(
+                candidate.target_path,
+                candidate.artifact.digest,
+                driver=candidate.artifact.driver,
+                member=candidate.artifact.member,
+            )
+        except (OSError, ValueError) as exc:
             return self._archive_result(
                 candidate,
                 "destination_exists",
@@ -2131,12 +2176,9 @@ class TrackerArchiveService(_TrackerServiceBase):
 
         def validate_source(path: Path) -> bool:
             reject_symlink(path)
-            if not path.is_file() or not candidate.artifact.hash:
+            if not path.is_file() or candidate.artifact.digest is None:
                 return True
-            return (
-                self.identity.compute_file_checksum(str(path))
-                == candidate.artifact.hash
-            )
+            return self._verify_file_against_artifact_digest(path, candidate.artifact)
 
         if producing_run is not None:
             try:
@@ -2228,7 +2270,9 @@ class TrackerArchiveService(_TrackerServiceBase):
                     "failed",
                     message="Archive destination already exists.",
                 )
-            if verify and file_sha256(candidate.target_path) != candidate.artifact.hash:
+            if verify and not self._verify_file_against_artifact_digest(
+                candidate.target_path, candidate.artifact
+            ):
                 return self._archive_result(
                     candidate,
                     "hash_mismatch",
@@ -2402,7 +2446,7 @@ class TrackerArchiveService(_TrackerServiceBase):
                     ),
                 )
                 continue
-            relative_path = self.fs.get_remappable_relative_path(artifact.container_uri)
+            relative_path = self.fs.get_remappable_relative_path(artifact.uri)
             if relative_path is None:
                 report[key] = ArchivedRunOutputFile(
                     artifact=artifact,
@@ -2417,9 +2461,7 @@ class TrackerArchiveService(_TrackerServiceBase):
             candidate = _ArchiveFileCandidate(
                 key, artifact, recovery_root_path / relative_path
             )
-            if verify and not (
-                artifact.hash and self.identity.hashing_strategy == "full"
-            ):
+            if verify and not self._has_verifiable_content_digest(artifact):
                 report[key] = self._archive_result(
                     candidate,
                     "unverifiable_hash",
@@ -2516,10 +2558,14 @@ class TrackerArchiveService(_TrackerServiceBase):
             keys, caller="archive_run_outputs"
         )
         known_abs_paths = self._known_run_output_abs_paths(run_id)
-        outputs = self.get_run_outputs(run_id)
-        for key, artifact in outputs.items():
-            if artifact.abs_path is None and key in known_abs_paths:
-                artifact.abs_path = known_abs_paths[key]
+        outputs = {
+            key: (
+                artifact.with_abs_path(known_abs_paths[key])
+                if artifact.abs_path is None and key in known_abs_paths
+                else artifact
+            )
+            for key, artifact in self.get_run_outputs(run_id).items()
+        }
         selected = self._select_required_output_keys(
             outputs, normalized_keys, run_id=run_id
         )
@@ -2534,15 +2580,17 @@ class TrackerArchiveService(_TrackerServiceBase):
             if not selected:
                 return ArchivedOutputs(paths={}, outputs={})
         if mode == "copy":
-            for key, artifact in selected.items():
+            for key, artifact in list(selected.items()):
                 if artifact.abs_path is not None:
                     continue
                 try:
-                    resolved_candidate = Path(self.resolve_uri(artifact.container_uri))
+                    resolved_candidate = Path(self.resolve_uri(artifact.uri))
                 except (ValueError, RuntimeError, OSError, TypeError):
                     continue
                 if resolved_candidate.exists():
-                    artifact.abs_path = str(resolved_candidate.resolve())
+                    selected[key] = artifact.with_abs_path(
+                        str(resolved_candidate.resolve())
+                    )
         output_set_plans, nested_scalars, nested_directories = (
             self._build_selected_output_set_archive_plans(selected, archive_root)
         )
@@ -2600,6 +2648,13 @@ class TrackerArchiveService(_TrackerServiceBase):
                 prepend_source_mount_root=prepend_source_mount_root,
                 _deferred_directory_source_removals=deferred_removals,
             )
+            if mode == "move":
+                resolved_moved = (
+                    resolve_artifact_entry_path(artifact, archived_by_key[key])
+                    if _is_file_bundle_artifact(artifact)
+                    else str(archived_by_key[key].resolve())
+                )
+                selected[key] = artifact.with_abs_path(resolved_moved)
 
         if mode == "move" and deferred_removals is not None:
             for source_path, destination in reversed(deferred_removals):
@@ -2614,12 +2669,19 @@ class TrackerArchiveService(_TrackerServiceBase):
             for plan in output_set_plans.values():
                 self._remove_output_set_sources(plan)
         archived_paths = {key: archived_by_key[key] for key in selected}
-        refreshed_outputs = self.get_run_outputs(run_id)
-        for key, artifact in refreshed_outputs.items():
+        raw_refreshed = self.get_run_outputs(run_id)
+        refreshed_outputs: dict[str, Artifact] = {}
+        for key, artifact in raw_refreshed.items():
+            abs_hint = artifact.abs_path
             if key in selected and selected[key].abs_path is not None:
-                artifact.abs_path = selected[key].abs_path
-            elif artifact.abs_path is None and key in known_abs_paths:
-                artifact.abs_path = known_abs_paths[key]
+                abs_hint = selected[key].abs_path
+            elif abs_hint is None and key in known_abs_paths:
+                abs_hint = known_abs_paths[key]
+            refreshed_outputs[key] = (
+                artifact.with_abs_path(abs_hint)
+                if abs_hint != artifact.abs_path
+                else artifact
+            ).with_resolver(self.tracker)
         self._sync_archived_run_outputs_to_runtime_state(
             run_id=run_id,
             refreshed_outputs=refreshed_outputs,
@@ -2780,9 +2842,7 @@ class TrackerArchiveService(_TrackerServiceBase):
             for artifact in outputs.values():
                 if self.is_virtual_unbacked_artifact(artifact):
                     continue
-                relative_path = self.fs.get_remappable_relative_path(
-                    artifact.container_uri
-                )
+                relative_path = self.fs.get_remappable_relative_path(artifact.uri)
                 if relative_path is None:
                     return False
                 if self._is_output_set_parent(artifact):
@@ -2840,10 +2900,14 @@ class TrackerArchiveService(_TrackerServiceBase):
             )
 
         known_abs_paths = self._known_run_output_abs_paths(active_run_id)
-        prior_outputs = self.get_run_outputs(active_run_id)
-        for key, artifact in prior_outputs.items():
-            if artifact.abs_path is None and key in known_abs_paths:
-                artifact.abs_path = known_abs_paths[key]
+        prior_outputs = {
+            key: (
+                artifact.with_abs_path(known_abs_paths[key])
+                if artifact.abs_path is None and key in known_abs_paths
+                else artifact
+            )
+            for key, artifact in self.get_run_outputs(active_run_id).items()
+        }
         prior_state = [
             (
                 artifact,
@@ -2857,9 +2921,10 @@ class TrackerArchiveService(_TrackerServiceBase):
 
         def _restore_prior_state() -> None:
             for artifact, prior_roots, prior_abs_path in prior_state:
-                self.set_artifact_recovery_roots(artifact, prior_roots, append=False)
-                artifact.abs_path = prior_abs_path
-                self._sync_active_run_artifact_abs_path(artifact, prior_abs_path)
+                restored = self.set_artifact_recovery_roots(
+                    artifact, prior_roots, append=False
+                )
+                self._sync_active_run_artifact_abs_path(restored, prior_abs_path)
 
         if self._archive_root_has_expected_layout(archive_root_path, prior_outputs):
             try:

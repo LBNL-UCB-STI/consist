@@ -25,7 +25,7 @@ from typing import (
     Tuple,
 )
 
-from consist.models.artifact import Artifact, set_tracker_ref
+from consist.models.artifact import Artifact
 from consist.models.run import (
     ConsistRecord,
     RunResult,
@@ -49,11 +49,11 @@ from consist.core.orchestration import (
 from consist.core.error_messages import format_problem_cause_fix
 from consist.core.metadata_resolver import MetadataResolver, ResolvedStepIdentity
 from consist.core.resolved_binding import (
-    ArtifactIdentity,
     ResolvedBinding,
     TrackedArtifactLocator,
     _create_strict_binding_invocation_context,
     step_contract_identity,
+    trusted_digest_from_artifact,
 )
 from consist.core.run_invocation import resolve_run_invocation
 from consist.core.run_options import resolve_trace_output_policy
@@ -957,8 +957,8 @@ class ScenarioContext:
         artifact: Artifact,
         effective_remappable_schemes: Mapping[str, Path],
     ) -> Literal["workspace_managed", "external_mount"]:
-        """Classify artifact container URI as workspace-managed or external mount."""
-        uri = artifact.container_uri
+        """Classify artifact URI as workspace-managed or external mount."""
+        uri = artifact.uri
         if not uri:
             return "workspace_managed"
         if "://" not in uri:
@@ -994,7 +994,7 @@ class ScenarioContext:
         """Check for local artifact presence or recover into tracker.run_dir."""
         existing_path: Optional[Path] = None
         try:
-            candidate = Path(self.tracker.resolve_uri(art.container_uri))
+            candidate = Path(self.tracker.resolve_uri(art.uri))
             if candidate.exists():
                 existing_path = candidate
         except (ValueError, RuntimeError, OSError, TypeError):
@@ -1010,8 +1010,9 @@ class ScenarioContext:
 
         if existing_path is not None:
             resolved_existing = existing_path.resolve()
-            detached = art.model_copy(deep=True)
-            detached.abs_path = str(resolved_existing)
+            detached = art.with_abs_path(str(resolved_existing)).with_resolver(
+                self.tracker
+            )
             return MaterializedArtifact(
                 artifact=detached,
                 key=key,
@@ -1035,8 +1036,7 @@ class ScenarioContext:
                 scheme_prefixes=effective_remappable_schemes,
             )
 
-        detached_missing = art.model_copy(deep=True)
-        detached_missing.abs_path = None
+        detached_missing = art.with_abs_path(None).with_resolver(self.tracker)
         return MaterializedArtifact(
             artifact=detached_missing,
             key=key,
@@ -1191,8 +1191,9 @@ class ScenarioContext:
 
         if target_root is None and not prune_unrecoverable:
             if artifacts:
-                for art in artifacts.values():
-                    set_tracker_ref(art, self.tracker)
+                artifacts = {
+                    k: art.with_resolver(self.tracker) for k, art in artifacts.items()
+                }
                 self.coupler.update(artifacts)
             if restored_step_ordinal > 0:
                 if phase == "pre":
@@ -1261,15 +1262,15 @@ class ScenarioContext:
                 art, effective_remappable_schemes
             )
             if scheme_classification == "external_mount":
-                set_tracker_ref(art, self.tracker)
-                restored_artifacts[key] = art
-                self.coupler.set(key, art)
+                bound_art = art.with_resolver(self.tracker)
+                restored_artifacts[key] = bound_art
+                self.coupler.set(key, bound_art)
                 outcomes[key] = MaterializedArtifact(
-                    artifact=art,
+                    artifact=bound_art,
                     key=key,
-                    path=art.as_path(self.tracker),
+                    path=bound_art.as_path(self.tracker),
                     source_path=None,
-                    target_path=art.as_path(self.tracker),
+                    target_path=bound_art.as_path(self.tracker),
                     status="preserved_existing",
                     resolvable=True,
                 )
@@ -1301,10 +1302,10 @@ class ScenarioContext:
             if outcome.resolvable:
                 hydrated_art = outcome.artifact
                 if outcome.path is not None:
-                    hydrated_art.abs_path = str(outcome.path)
+                    hydrated_art = hydrated_art.with_abs_path(str(outcome.path))
                 meta = dict(hydrated_art.meta or {})
 
-                uri = hydrated_art.container_uri
+                uri = hydrated_art.uri
                 if (
                     not uri
                     or uri.startswith("workspace://")
@@ -1327,8 +1328,9 @@ class ScenarioContext:
                 )
                 if recovery_roots or "recovery_roots" in meta:
                     meta["recovery_roots"] = recovery_roots
-                hydrated_art.meta = meta
-                set_tracker_ref(hydrated_art, self.tracker)
+                hydrated_art = hydrated_art.with_meta(meta, merge=False).with_resolver(
+                    self.tracker
+                )
 
                 restored_artifacts[key] = hydrated_art
                 self.coupler.set(key, hydrated_art)
@@ -1338,8 +1340,7 @@ class ScenarioContext:
                         self.coupler.pop(key, None)
                     pruned_keys_list.append(key)
                 else:
-                    unresolvable_art = outcome.artifact
-                    set_tracker_ref(unresolvable_art, self.tracker)
+                    unresolvable_art = outcome.artifact.with_resolver(self.tracker)
                     restored_artifacts[key] = unresolvable_art
                     self.coupler.set(key, unresolvable_art)
 
@@ -1388,8 +1389,7 @@ class ScenarioContext:
         if result is None:
             return None
         matched_run_id, matched_ordinal, artifacts = result
-        for art in artifacts.values():
-            set_tracker_ref(art, self.tracker)
+        artifacts = {k: art.with_resolver(self.tracker) for k, art in artifacts.items()}
         return (matched_run_id, matched_ordinal, artifacts)
 
     def _coerce_keys(self, value: Optional[Iterable[str] | str]) -> List[str]:
@@ -1841,10 +1841,13 @@ class ScenarioContext:
                                 f"Resolved binding artifact is unavailable for {parameter!r}."
                             )
                         resolved_by_id[locator.artifact_id] = artifact
-                    if (
-                        ArtifactIdentity.from_artifact(artifact)
-                        != resolved_input.artifact.identity
-                    ):
+                    try:
+                        current_digest = trusted_digest_from_artifact(artifact)
+                    except ValueError as exc:
+                        raise ValueError(
+                            f"Resolved binding artifact identity changed for {parameter!r}."
+                        ) from exc
+                    if current_digest != resolved_input.artifact.identity:
                         raise ValueError(
                             f"Resolved binding artifact identity changed for {parameter!r}."
                         )

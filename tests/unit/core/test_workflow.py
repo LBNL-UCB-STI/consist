@@ -793,14 +793,10 @@ def test_scenario_step_run_completion_archive_default_and_override(
         ]
 
     assert Path(
-        tracker.fs.resolve_historical_path(
-            res1.outputs["one"].container_uri, default_archive
-        )
+        tracker.fs.resolve_historical_path(res1.outputs["one"].uri, default_archive)
     ).exists()
     assert Path(
-        tracker.fs.resolve_historical_path(
-            res2.outputs["two"].container_uri, override_archive
-        )
+        tracker.fs.resolve_historical_path(res2.outputs["two"].uri, override_archive)
     ).exists()
     assert tracker.last_run is not None
     header_outputs = {art.key: art for art in tracker.last_run.outputs}
@@ -1200,9 +1196,9 @@ def test_set_output_meta_reserved_keys_trace_demotion_and_post_call_preservation
     def step_post_meta(ctx) -> None:
         p = ctx.run_dir / "post.csv"
         p.write_text("id\n2\n", encoding="utf-8")
-        logged = tracker.log_output(p, key="post", initial="drop_me")
+        tracker.log_output(p, key="post", initial="drop_me")
         ctx.set_output_meta("post", {"replaced": True}, merge=False)
-        logged.meta["after_replace"] = "keep_me"
+        ctx.set_output_meta("post", {"after_replace": "keep_me"})
 
     res_post = tracker.run(
         fn=step_post_meta,

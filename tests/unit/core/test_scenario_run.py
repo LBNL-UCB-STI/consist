@@ -257,11 +257,11 @@ def test_scenario_strict_binding_rejects_container_before_tracker_handoff(
     tracker, tmp_path, monkeypatch
 ) -> None:
     from consist.core.resolved_binding import (
-        ArtifactIdentity,
         BoundArtifact,
         ResolvedBindingBuilder,
         TrackedArtifactLocator,
         step_contract_identity,
+        trusted_digest_from_artifact,
     )
 
     source = tmp_path / "raw.txt"
@@ -281,7 +281,7 @@ def test_scenario_strict_binding_rejects_container_before_tracker_handoff(
             parameter="raw",
             artifact=BoundArtifact(
                 artifact_id=artifact.id,
-                identity=ArtifactIdentity.from_artifact(artifact),
+                identity=trusted_digest_from_artifact(artifact),
                 locator=TrackedArtifactLocator(artifact_id=artifact.id),
             ),
             destination=Path("inputs/raw.txt"),

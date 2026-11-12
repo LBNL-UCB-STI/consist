@@ -1,40 +1,39 @@
 """
-Database model for artifacts in the Consist main database.
+Immutable non-ORM ``Artifact`` value model for Consist provenance and caching.
 
-Artifacts represent tracked files/datasets and are linked to runs via the
-run_artifact_link table for provenance and caching.
+This module belongs to Layer 2 (``consist.models``):
+- Imports only stdlib, Pydantic core schema hooks, and Layer-1 leaves
+  (``consist.digest``, ``consist.protocols``, ``consist.types``).
+- Zero imports from ``consist.core.*``, ``consist.api``, ``sqlalchemy``, or ``sqlmodel``.
 """
 
 from __future__ import annotations
 
 import copy
-import uuid
-import weakref
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from collections.abc import Iterator, Mapping as MappingABC, Sequence
 from datetime import datetime, timezone
+import logging
 from pathlib import Path
 from types import MappingProxyType
+import uuid
+import weakref
 from typing import (
     TYPE_CHECKING,
     Any,
-    ClassVar,
     Dict,
     Literal,
     Optional,
-    Protocol,
     cast,
 )
 
-from pydantic import PrivateAttr
-from sqlalchemy import DateTime, JSON, Column
-from sqlalchemy.dialects.postgresql import (
-    UUID as PG_UUID,
-)  # Import for potential postgresql compatibility
-from sqlalchemy.types import CHAR, TypeDecorator
+from pydantic_core import core_schema
 
-from sqlmodel import Field, SQLModel
-
+from consist.digest import Digest, _HEX64_RE, canonical_json_str
+from consist.protocols import (
+    ArtifactResolver,
+    resolve_active_or_default_resolver,
+)
 from consist.types import DriverType
 
 UTC = timezone.utc
@@ -42,88 +41,119 @@ UTC = timezone.utc
 if TYPE_CHECKING:
     import pandas as pd
 
-    from consist.core.fs import FileSystemManager
-    from consist.core.tracker import Tracker
+
+def _deep_copy_meta_value(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float, str, Digest)):
+        return value
+    if isinstance(value, MappingABC):
+        return {str(k): _deep_copy_meta_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_deep_copy_meta_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_deep_copy_meta_value(item) for item in value)
+    return copy.deepcopy(value)
 
 
-class _ArtifactTrackerRef(Protocol):
-    def resolve_uri(self, uri: str) -> str: ...
+_EMPTY_META: MappingABC[str, Any] = MappingProxyType({})
 
 
-class _TrackerWithFS(Protocol):
-    fs: "FileSystemManager"
-
-    def resolve_uri(self, uri: str) -> str: ...
-
-
-def _private_state(artifact: object) -> Optional[dict[str, object]]:
-    """Return Pydantic's private-attribute storage when it exists.
-
-    ``Artifact`` uses ``PrivateAttr`` for runtime-only state such as the tracker
-    weakref and resolved absolute path. In practice, ORM-loaded instances and
-    copied models do not always present that storage consistently through normal
-    attribute access, so this helper reads ``__pydantic_private__`` directly via
-    ``object.__getattribute__``.
-
-    Returning ``None`` means "treat this instance as if it has no initialized
-    private state yet" rather than failing the caller.
-    """
-    try:
-        private_state = object.__getattribute__(artifact, "__pydantic_private__")
-    except AttributeError:
-        return None
-    return private_state if isinstance(private_state, dict) else None
+def _freeze_meta_mapping(raw_meta: MappingABC[str, Any] | None) -> MappingABC[str, Any]:
+    if not raw_meta:
+        return _EMPTY_META
+    copied = {str(k): _deep_copy_meta_value(v) for k, v in raw_meta.items()}
+    return MappingProxyType(copied)
 
 
-def get_tracker_ref(
-    artifact: object,
-) -> Optional[weakref.ReferenceType[_ArtifactTrackerRef]]:
-    """Read the runtime tracker weakref without depending on normal model access.
+def _coerce_uuid(
+    value: uuid.UUID | str | None, *, default_new: bool
+) -> Optional[uuid.UUID]:
+    if value is None:
+        return uuid.uuid4() if default_new else None
+    if isinstance(value, uuid.UUID):
+        return value
+    if isinstance(value, str):
+        return uuid.UUID(value)
+    raise TypeError(f"Expected UUID or str, got {type(value).__name__}")
 
-    The tracker reference is a convenience link used only at runtime for path
-    resolution. It is intentionally not part of the persisted model schema.
 
-    We first check Pydantic's private-state dictionary, which is the preferred
-    storage for ``PrivateAttr`` values. If that storage is unavailable, we fall
-    back to a direct ``object.__getattribute__`` lookup so partially initialized
-    or copied objects still work. Missing state is treated as a normal case and
-    returns ``None``.
-    """
-    private_state = _private_state(artifact)
-    if private_state is not None:
-        tracker_ref = private_state.get("_tracker")
-        if tracker_ref is not None:
-            return cast(weakref.ReferenceType[_ArtifactTrackerRef], tracker_ref)
-    try:
-        return cast(
-            weakref.ReferenceType[_ArtifactTrackerRef],
-            object.__getattribute__(artifact, "_tracker"),
+def _coerce_utc_datetime(value: datetime | str | None) -> datetime:
+    if value is None:
+        return datetime.now(UTC)
+    if isinstance(value, str):
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    elif isinstance(value, datetime):
+        parsed = value
+    else:
+        raise TypeError(
+            f"Expected datetime or ISO-8601 str, got {type(value).__name__}"
         )
-    except AttributeError:
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _coerce_resolver_ref(
+    resolver: weakref.ReferenceType[ArtifactResolver] | ArtifactResolver | Any | None,
+) -> Optional[weakref.ReferenceType[ArtifactResolver]]:
+    if resolver is None:
+        return None
+    if isinstance(resolver, weakref.ReferenceType):
+        return resolver
+    try:
+        return weakref.ref(cast(ArtifactResolver, resolver))
+    except TypeError:
         return None
 
 
-def set_tracker_ref(artifact: object, tracker: _ArtifactTrackerRef) -> None:
-    """Store a runtime tracker weakref on an artifact when possible.
-
-    This helper mirrors :func:`get_tracker_ref`: prefer Pydantic's private-state
-    dictionary, but fall back to ``object.__setattr__`` when that storage has not
-    been initialized. The weakref avoids keeping the tracker alive solely because
-    an artifact still points at it.
-
-    Failing to attach the ref is non-fatal. The artifact can still function as a
-    plain data object; it just loses the convenience of tracker-backed path
-    resolution until another code path reattaches the tracker.
-    """
-    tracker_ref = weakref.ref(tracker)
-    private_state = _private_state(artifact)
-    if private_state is not None:
-        private_state["_tracker"] = tracker_ref
-        return
-    try:
-        object.__setattr__(artifact, "_tracker", tracker_ref)
-    except (AttributeError, TypeError):
-        return
+def _coerce_legacy_v04_hash(
+    raw_hash: Any,
+    *,
+    driver: str,
+    member: str | None,
+    meta: dict[str, Any],
+) -> Optional[Digest]:
+    if raw_hash is None:
+        return None
+    if isinstance(raw_hash, Digest):
+        return raw_hash
+    if not isinstance(raw_hash, str):
+        raise TypeError(f"Expected Digest, str, or None, got {type(raw_hash).__name__}")
+    cleaned = raw_hash.strip()
+    if not cleaned:
+        return None
+    if cleaned.startswith("sha256:logical_matrices:v1:"):
+        _, _, hex_part = cleaned.rpartition(":")
+        if _HEX64_RE.fullmatch(hex_part):
+            profile = meta.get("logical_profile")
+            scheme = (
+                "logical_matrices_f32_v1:sha256"
+                if profile == "float32_matrices_v1"
+                else "logical_matrices_canonical_v1:sha256"
+            )
+            return Digest(scheme, hex_part.lower())
+    if ":" in cleaned:
+        try:
+            return Digest.parse(cleaned)
+        except ValueError:
+            meta.setdefault("legacy_v04_hash", cleaned)
+            return None
+    if _HEX64_RE.fullmatch(cleaned):
+        hex_lower = cleaned.lower()
+        if (
+            meta.get("directory_artifact") is True
+            or meta.get("file_bundle_artifact") is True
+            or driver in {"zarr", "shapefile", "directory"}
+        ):
+            return Digest("dir_manifest_v1:sha256", hex_lower)
+        if meta.get("artifact_set") == "output_set" or driver == "output_set":
+            return Digest("output_set_v1:sha256", hex_lower)
+        if driver == "h5_table":
+            return Digest("h5_fixed_v1:sha256", hex_lower)
+        if driver in {"h5", "hdf5"} and member is not None:
+            return Digest("h5_dataset_v1:sha256", hex_lower)
+        return Digest("sha256:file", hex_lower)
+    meta.setdefault("legacy_v04_hash", cleaned)
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,393 +195,416 @@ class ArtifactAccessibility:
         return None
 
 
-class UUIDType(TypeDecorator):
-    """Platform-independent UUID type.
-    Uses PostgreSQL's UUID type, otherwise uses
-    CHAR(36), storing UUIDs as strings."""
+class _ArtifactMeta(type):
+    """Fast constructor normalizer keeping ``Artifact`` frozen without post-init mutation."""
 
-    impl = CHAR(36)  # Explicitly use CHAR(36) for storage
+    def __call__(
+        cls,
+        *,
+        key: str,
+        uri: str,
+        driver: str,
+        id: uuid.UUID | str | None = None,
+        digest: Digest | str | None = None,
+        member: Optional[str] = None,
+        run_id: Optional[str] = None,
+        parent_artifact_id: uuid.UUID | str | None = None,
+        facet_id: Optional[str] = None,
+        created_at: datetime | str | None = None,
+        meta: MappingABC[str, Any] | None = None,
+        _abs_path: str | Path | None = None,
+        _resolver_ref: (
+            weakref.ReferenceType[ArtifactResolver] | ArtifactResolver | Any | None
+        ) = None,
+    ) -> Any:
+        if type(key) is not str and not isinstance(key, str):
+            raise TypeError(f"Artifact.key must be str, got {type(key).__name__}")
+        if type(uri) is not str and not isinstance(uri, str):
+            raise TypeError(f"Artifact.uri must be str, got {type(uri).__name__}")
+        if type(driver) is not str and not isinstance(driver, str):
+            raise TypeError(f"Artifact.driver must be str, got {type(driver).__name__}")
 
-    cache_ok = True
+        frozen_meta = _EMPTY_META if not meta else _freeze_meta_mapping(meta)
+        parsed_digest = (
+            digest
+            if digest is None or type(digest) is Digest or isinstance(digest, Digest)
+            else Digest.parse(digest)
+        )
+        resolved_id = (
+            id if type(id) is uuid.UUID else _coerce_uuid(id, default_new=True)
+        )
+        resolved_parent_id = (
+            None
+            if parent_artifact_id is None
+            else (
+                parent_artifact_id
+                if type(parent_artifact_id) is uuid.UUID
+                else _coerce_uuid(parent_artifact_id, default_new=False)
+            )
+        )
+        resolved_created_at = (
+            created_at
+            if type(created_at) is datetime and created_at.tzinfo is UTC
+            else _coerce_utc_datetime(created_at)
+        )
+        resolved_abs = (
+            None
+            if _abs_path is None
+            else (_abs_path if type(_abs_path) is str else str(_abs_path))
+        )
+        resolved_ref = (
+            None if _resolver_ref is None else _coerce_resolver_ref(_resolver_ref)
+        )
 
-    def load_dialect_impl(self, dialect):
-        if dialect.name == "postgresql":
-            return dialect.type_descriptor(PG_UUID(as_uuid=True))
-        return dialect.type_descriptor(CHAR(36))
-
-    def process_bind_param(self, value, dialect):
-        if value is None:
-            return value
-        if not isinstance(value, uuid.UUID):
-            raise ValueError(f"Expected UUID object, got {type(value)}")
-        return str(value)  # Convert UUID object to string for storage
-
-    def process_result_value(self, value, dialect):
-        if value is None:
-            return value
-        if isinstance(
-            value, uuid.UUID
-        ):  # If the dialect already returned a UUID object
-            return value
-        return uuid.UUID(value)  # Convert string to UUID object
+        obj = cls.__new__(cls)
+        cls.__init__(
+            obj,
+            id=resolved_id,
+            key=key,
+            uri=uri,
+            driver=driver,
+            digest=parsed_digest,
+            member=member,
+            run_id=run_id,
+            parent_artifact_id=resolved_parent_id,
+            facet_id=facet_id,
+            created_at=resolved_created_at,
+            meta=frozen_meta,
+            _abs_path=resolved_abs,
+            _resolver_ref=resolved_ref,
+        )
+        return obj
 
 
-class Artifact(SQLModel, table=True):
+@dataclass(frozen=True, kw_only=True, repr=False, eq=False)
+class Artifact(metaclass=_ArtifactMeta):
     """
-    Represents a physical data object in the Consist database.
+    Immutable value representation of a tracked Consist artifact.
 
-    This table stores canonical metadata for any file/dataset Consist tracks. It is
-    linked to runs via ``run_artifact_link`` to record whether an artifact was an
-    input or output. The ``run_id`` field records the producing run (if any) and
-    is often ``None`` for external inputs.
-
-    Artifacts are the core building blocks of provenance and caching. Each artifact
-    has a unique identity, a virtualized location, and rich metadata, supporting
-    both "hot" (ingested) and "cold" (file-based) data strategies.
-
-    The public fingerprint surface for downstream consumers is ``Artifact.hash``.
-    Consist preserves that field across logging, querying, replay, staging, and
-    hydration so external provenance/bookkeeping code can read one stable
-    fingerprint without probing wrapper-specific fields. Fingerprint semantics
-    follow the configured hashing strategy: ``full`` is generally content-based,
-    while ``fast`` may use metadata-based hashing for files or directories.
-
-    Attributes:
-        id (uuid.UUID): A unique identifier for the artifact.
-        key (str): A semantic, human-readable name for the artifact (e.g., "households", "parcels").
-        container_uri (str): A portable, virtualized Uniform Resource Identifier (URI) for the
-                   artifact's location (e.g., "inputs://land_use.csv").
-        table_path (Optional[str]): Optional path inside a container (e.g., "/tables/households").
-        array_path (Optional[str]): Optional path inside a container for array artifacts.
-        driver (str): The name of the format handler used to read or write the artifact
-                      (e.g., "parquet", "csv", "zarr").
-        hash (Optional[str]): Canonical portable artifact fingerprint. This is usually a SHA256
-                              digest and remains the stable public identity field across logging,
-                              replay, staging, and hydration.
-        parent_artifact_id (Optional[uuid.UUID]): Canonical parent artifact relation for
-                              container child artifacts. Null for standalone artifacts.
-        run_id (Optional[str]): The ID of the run that generated this artifact. Null for inputs.
-        meta (dict[str, object]): A flexible JSON field for storing arbitrary metadata, such as
-                               schema signatures, or data dimensions.
-        created_at (datetime): The timestamp when the artifact was first logged.
+    Attributes
+    ----------
+    id : uuid.UUID
+        Unique artifact row identifier.
+    key : str
+        Semantic name for the artifact (for example ``"households"``).
+    uri : str
+        Portable virtualized URI (for example ``"inputs://land_use.csv"``).
+    driver : str
+        Format handler name (for example ``"parquet"``, ``"csv"``, ``"zarr"``).
+    digest : Digest | None
+        Self-describing cryptographic content or observation digest.
+    member : str | None
+        Optional child table or dataset path inside a multi-member container.
+    run_id : str | None
+        Producing run ID, or ``None`` for external inputs.
+    parent_artifact_id : uuid.UUID | None
+        Parent container/set artifact artifact ID for child member artifacts.
+    facet_id : str | None
+        Optional persisted ``ArtifactFacet`` identifier.
+    created_at : datetime
+        UTC timestamp when the artifact was created.
+    meta : Mapping[str, Any]
+        Read-only ``MappingProxyType`` view over defensive-copied metadata.
     """
 
-    __tablename__: ClassVar[str] = "artifact"  # pyright: ignore[reportIncompatibleVariableOverride]
-
-    # Core Identity
-    id: uuid.UUID = Field(
-        default_factory=uuid.uuid4,
-        primary_key=True,
-        sa_type=UUIDType,
-        sa_column_kwargs={"autoincrement": False},
-    )
-    key: str = Field(index=True, description="Semantic name, e.g., 'households'")
-
-    # Location (Virtualized)
-    container_uri: str = Field(
-        index=True, description="Portable URI, e.g., 'inputs://land_use.csv'"
-    )
-    table_path: Optional[str] = Field(
-        default=None,
-        description="Optional path inside a container for tabular artifacts.",
-    )
-    array_path: Optional[str] = Field(
-        default=None,
-        description="Optional path inside a container for array artifacts.",
+    __slots__ = (
+        "id",
+        "key",
+        "uri",
+        "driver",
+        "digest",
+        "member",
+        "run_id",
+        "parent_artifact_id",
+        "facet_id",
+        "created_at",
+        "meta",
+        "_abs_path",
+        "_resolver_ref",
+        "__weakref__",
     )
 
-    # Driver Info
-    # Valid drivers: parquet, csv, gtfs, zarr, json, h5_table, h5, hdf5, geojson, geoparquet, shapefile, geopackage, other
-    # (See DriverType enum in consist.types for the authoritative list)
-    driver: str = Field(
-        description="Format handler: parquet, csv, gtfs, zarr, json, h5_table, h5, hdf5, geojson, geoparquet, shapefile, geopackage, or other"
-    )
+    id: uuid.UUID
+    key: str
+    uri: str
+    driver: str
+    digest: Optional[Digest]
+    member: Optional[str]
+    run_id: Optional[str]
+    parent_artifact_id: Optional[uuid.UUID]
+    facet_id: Optional[str]
+    created_at: datetime
+    meta: MappingABC[str, Any]
+    _abs_path: Optional[str]
+    _resolver_ref: Optional[weakref.ReferenceType[ArtifactResolver]]
 
-    # Canonical artifact fingerprint (portable).
-    hash: Optional[str] = Field(
-        default=None,
-        index=True,
-        description=(
-            "Canonical portable artifact fingerprint. Semantics follow the active "
-            "hashing strategy and may be content- or metadata-based."
-        ),
-    )
-    parent_artifact_id: Optional[uuid.UUID] = Field(
-        default=None,
-        index=True,
-        sa_type=UUIDType,
-        description=(
-            "Canonical parent artifact relation for container child artifacts."
-        ),
-    )
+    def __eq__(self, other: object) -> bool:
+        if self is other:
+            return True
+        if not isinstance(other, Artifact):
+            return NotImplemented
+        return (
+            self.id == other.id
+            and self.key == other.key
+            and self.uri == other.uri
+            and self.driver == other.driver
+            and self.digest == other.digest
+            and self.member == other.member
+            and self.run_id == other.run_id
+            and self.parent_artifact_id == other.parent_artifact_id
+            and self.facet_id == other.facet_id
+            and self.created_at == other.created_at
+            and self.meta == other.meta
+        )
 
-    # Lineage
-    run_id: Optional[str] = Field(default=None, index=True)
+    def __hash__(self) -> int:
+        meta_token = canonical_json_str(self.meta) if self.meta else ""
+        return hash(
+            (
+                self.id,
+                self.key,
+                self.uri,
+                self.driver,
+                self.digest,
+                self.member,
+                self.run_id,
+                self.parent_artifact_id,
+                self.facet_id,
+                self.created_at,
+                meta_token,
+            )
+        )
 
-    # Metadata (Flexible JSON bag)
-    # Stores: schema signatures, matrix shapes, etc.
-    # Uses SQLAlchemy's JSON type for efficient persistence of arbitrary JSON structures.
-    meta: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    # --- Immutable Copy / Update Builders ---
 
-    # Audit
-    created_at: datetime = Field(
-        default_factory=lambda: datetime.now(UTC),
-        sa_type=DateTime,
-    )
+    def with_meta(
+        self,
+        meta: MappingABC[str, Any] | None = None,
+        *,
+        merge: bool = False,
+        **updates: Any,
+    ) -> "Artifact":
+        """Return a new ``Artifact`` with replaced or merged metadata."""
+        if merge:
+            merged: dict[str, Any] = dict(self.meta)
+            if meta is not None:
+                merged.update(meta)
+            if updates:
+                merged.update(updates)
+            return replace(self, meta=merged)
+        base: dict[str, Any] = (
+            dict(meta) if meta is not None else (dict(self.meta) if updates else {})
+        )
+        if updates:
+            base.update(updates)
+        return replace(self, meta=base)
 
-    # --- Runtime State (Not persisted) ---
-    # PrivateAttr is used here to store data that is not part of the SQLModel schema
-    # but is needed at runtime, aligning with "Path Resolution & Mounts" and "Artifact Chaining"
-    # as described in the architecture documentation.
-    _abs_path: Optional[str] = PrivateAttr(default=None)
-    _tracker: Optional[weakref.ReferenceType[_ArtifactTrackerRef]] = PrivateAttr(
-        default=None
-    )
+    def with_digest(self, digest: Digest | str | None) -> "Artifact":
+        """Return a new ``Artifact`` with an updated ``Digest``."""
+        parsed = (
+            digest
+            if isinstance(digest, Digest) or digest is None
+            else Digest.parse(digest)
+        )
+        return replace(self, digest=parsed)
+
+    def with_uri(self, uri: str) -> "Artifact":
+        """Return a new ``Artifact`` with an updated ``uri``."""
+        return replace(self, uri=uri)
+
+    def with_member(self, member: Optional[str]) -> "Artifact":
+        """Return a new ``Artifact`` with an updated ``member``."""
+        return replace(self, member=member)
+
+    def with_run_id(self, run_id: Optional[str]) -> "Artifact":
+        """Return a new ``Artifact`` with an updated ``run_id``."""
+        return replace(self, run_id=run_id)
+
+    def with_facet_id(self, facet_id: Optional[str]) -> "Artifact":
+        """Return a new ``Artifact`` with an updated ``facet_id``."""
+        return replace(self, facet_id=facet_id)
+
+    def with_abs_path(self, abs_path: str | Path | None) -> "Artifact":
+        """Return a new ``Artifact`` carrying a resolved local ``_abs_path`` hint."""
+        return replace(
+            self,
+            _abs_path=str(abs_path) if abs_path is not None else None,
+        )
+
+    def with_resolver(self, resolver: ArtifactResolver | Any | None) -> "Artifact":
+        """Return a new ``Artifact`` weakly bound to ``resolver``."""
+        return replace(self, _resolver_ref=_coerce_resolver_ref(resolver))
+
+    # --- Runtime Resolver & Path Delegation ---
 
     @property
     def abs_path(self) -> Optional[str]:
-        """
-        Runtime-only helper to access the absolute path of this artifact.
-
-        This property provides the resolved absolute file system path for the artifact.
-        It is not persisted to the database but is crucial for local file operations
-        and for chaining Consist runs within the same script or environment.
-
-        Returns
-        -------
-        Optional[str]
-            The absolute file system path of the artifact, or `None` if it has not
-            yet been resolved or set.
-        """
-        private_state = _private_state(self)
-        if private_state is not None:
-            abs_path = private_state.get("_abs_path")
-            if isinstance(abs_path, (str, Path)):
-                return str(abs_path)
-        try:
-            abs_path = object.__getattribute__(self, "_abs_path")
-            if isinstance(abs_path, (str, Path)):
-                return str(abs_path)
-        except AttributeError:
-            pass
-        return None
-
-    @property
-    def recovery_roots(self) -> list[str]:
-        """
-        Ordered advisory recovery roots recorded on this artifact.
-
-        This is a typed convenience view over ``meta["recovery_roots"]``. Use
-        ``Tracker.set_artifact_recovery_roots(...)`` to persist changes.
-        """
-        roots = (self.meta or {}).get("recovery_roots")
-        if roots is None:
-            return []
-        if isinstance(roots, (str, Path)):
-            return [str(roots)]
-        if isinstance(roots, Sequence):
-            return [str(item) for item in roots if isinstance(item, (str, Path))]
-        return []
-
-    @property
-    def locations(self) -> tuple[ArtifactLocationStatus, ...]:
-        """Return the currently checked locations for this artifact."""
-        return self.accessibility().locations
-
-    @property
-    def tracker(self) -> Optional["Tracker"]:
-        """
-        Return the attached runtime ``Tracker`` if alive, falling back to the
-        currently active or default tracker when available.
-        """
-        tracker_ref = get_tracker_ref(self)
-        if tracker_ref is not None:
-            tracker_obj = tracker_ref()
-            if tracker_obj is not None:
-                return cast("Tracker", tracker_obj)
-        from consist.core.context import get_active_tracker, get_default_tracker
-
-        try:
-            return get_active_tracker()
-        except RuntimeError:
-            return get_default_tracker()
-
-    def ensure_local_path(
-        self,
-        *,
-        tracker: Optional["Tracker"] = None,
-        target_root: Optional[Path | str] = None,
-        source_root: Optional[Path | str] = None,
-        on_missing: Literal["warn", "raise"] = "warn",
-    ) -> Optional[Path]:
-        """
-        Ensure this artifact exists on the local filesystem and return its ``Path``.
-
-        Returns the existing local path immediately if already present on disk
-        (when ``target_root`` is not overriding the destination), or attempts
-        recovery/materialization via ``tracker`` (falling back to ``self.tracker``).
-        When recovery is unavailable and ``on_missing="warn"``, logs a warning
-        and returns ``None``.
-        """
-        resolved_tracker = tracker if tracker is not None else self.tracker
-        if target_root is None:
-            candidate = self.as_path(resolved_tracker)
-            try:
-                if candidate.exists():
-                    self.abs_path = str(candidate)
-                    if resolved_tracker is not None:
-                        set_tracker_ref(self, resolved_tracker)
-                    return candidate
-            except OSError:
-                pass
-
-        if resolved_tracker is None:
-            msg = (
-                f"[Consist] Cannot materialize artifact {self.key!r}: "
-                "no Tracker is attached or active in context."
-            )
-            if on_missing == "raise":
-                raise FileNotFoundError(msg)
-            import logging
-
-            logging.warning(msg)
-            return None
-
-        resolved_target_root: Path | str = (
-            target_root if target_root is not None else resolved_tracker.run_dir
+        """Runtime-only resolved absolute filesystem path, if attached."""
+        bound = self._resolver_ref() if self._resolver_ref is not None else None
+        resolver_obj = (
+            bound if bound is not None else resolve_active_or_default_resolver()
         )
-        result = resolved_tracker.materialize_artifact(
-            self,
-            target_root=resolved_target_root,
-            source_root=source_root,
-            preserve_existing=True,
-            on_missing=on_missing,
-            allow_external_paths=True if target_root is not None else None,
-        )
-        if result.path is not None and result.path.exists():
-            self.abs_path = str(result.path)
-            set_tracker_ref(self, resolved_tracker)
-            return result.path
+        if resolver_obj is not None and isinstance(resolver_obj, ArtifactResolver):
+            override = resolver_obj.artifact_abs_path_override(self)
+            if override is not None:
+                recorded_from, override_val = override
+                if self._abs_path == recorded_from:
+                    return override_val
+        return self._abs_path
 
-        if on_missing == "raise":
-            raise FileNotFoundError(
-                f"[Consist] Cannot materialize artifact {self.key!r}: "
-                f"status={result.status}."
-            )
-        return None
+    @property
+    def resolver(self) -> Optional[ArtifactResolver]:
+        """Return the attached ``ArtifactResolver`` if alive, else the active/default resolver."""
+        if self._resolver_ref is not None:
+            bound = self._resolver_ref()
+            if bound is not None:
+                return bound
+        return resolve_active_or_default_resolver()
 
-    @abs_path.setter
-    def abs_path(self, value: Optional[str | Path]) -> None:
-        """
-        Sets the runtime-only absolute path of this artifact.
-
-        Parameters
-        ----------
-        value : Optional[str | Path]
-            The absolute file system path to set for the artifact, or None to clear.
-        """
-        resolved_val = str(value) if value is not None else None
-        self._abs_path = resolved_val
-        if "_abs_path" in self.__dict__:
-            self.__dict__["_abs_path"] = resolved_val
+    @property
+    def tracker(self) -> Optional[Any]:
+        """Return the attached or active runtime tracker resolver, if any."""
+        return self.resolver
 
     @property
     def path(self) -> Path:
-        """
-        Resolve this artifact to a filesystem Path.
-
-        When a runtime ``abs_path`` is set and exists on disk (for example after
-        historical hydration, workspace materialization, or archive ``move``),
-        it takes precedence. Otherwise this uses the attached tracker when
-        available to handle mount-aware URIs, falling back to ``abs_path`` or
-        the raw URI.
-        """
-        if self.abs_path:
-            abs_candidate = Path(self.abs_path)
+        """Resolve this artifact to a filesystem ``Path`` via ``ArtifactResolver``."""
+        resolved_abs = self.abs_path
+        if resolved_abs:
+            abs_candidate = Path(resolved_abs)
             try:
                 if abs_candidate.exists():
                     return abs_candidate
             except OSError:
                 pass
 
-        tracker_ref = get_tracker_ref(self)
-        if tracker_ref is not None:
-            tracker_obj = tracker_ref()
-            if tracker_obj is not None:
+        bound_resolver = (
+            self._resolver_ref() if self._resolver_ref is not None else None
+        )
+        target_resolver = (
+            bound_resolver
+            if bound_resolver is not None
+            else resolve_active_or_default_resolver()
+        )
+        if target_resolver is not None:
+            if isinstance(target_resolver, ArtifactResolver):
                 try:
-                    resolved = Path(tracker_obj.resolve_uri(self.container_uri))
-                    if resolved.exists() or not self.abs_path:
-                        return resolved
+                    return target_resolver.resolve_artifact_path(self)
                 except (ValueError, RuntimeError, OSError, TypeError):
-                    resolved = None
-
-        if self.abs_path:
-            return Path(self.abs_path)
-        return Path(self.container_uri)
-
-    def as_path(self, tracker: Optional["Tracker"] = None) -> Path:
-        """
-        Resolve this artifact to a filesystem path.
-
-        When ``tracker`` is provided, URI resolution uses that tracker
-        explicitly unless ``tracker`` is the already-attached tracker for an
-        artifact with an existing runtime ``abs_path`` (such as an artifact
-        materialized into an alternate ``target_root``). Otherwise this falls
-        back to the attached tracker context (if any), then any runtime
-        ``abs_path`` captured during hydration or archive ``move``, then the
-        raw URI path.
-        """
-        if tracker is not None:
-            if self.abs_path:
-                tracker_ref = get_tracker_ref(self)
-                attached_tracker = tracker_ref() if tracker_ref is not None else None
-                if attached_tracker is tracker:
-                    abs_candidate = Path(self.abs_path)
-                    try:
-                        if abs_candidate.exists():
-                            return abs_candidate
-                    except OSError:
-                        pass
+                    pass
             try:
-                resolved = Path(tracker.resolve_uri(self.container_uri))
-                if resolved.exists() or not self.abs_path:
+                resolved = Path(target_resolver.resolve_uri(self.uri))
+                if resolved.exists() or not resolved_abs:
                     return resolved
             except (ValueError, RuntimeError, OSError, TypeError):
                 pass
-            if self.abs_path:
-                return Path(self.abs_path)
-            return Path(self.container_uri)
+
+        if resolved_abs:
+            return Path(resolved_abs)
+        return Path(self.uri)
+
+    def as_path(self, tracker: Optional[Any] = None) -> Path:
+        """Resolve this artifact to a filesystem ``Path`` using ``tracker`` or attached resolver."""
+        if tracker is not None:
+            resolved_abs = self.abs_path
+            attached = self._resolver_ref() if self._resolver_ref is not None else None
+            override = (
+                tracker.artifact_abs_path_override(self)
+                if isinstance(tracker, ArtifactResolver)
+                else None
+            )
+            has_tracker_override = (
+                override is not None and override[0] == self._abs_path
+            )
+            effective_abs = override[1] if has_tracker_override else resolved_abs
+            if effective_abs and (attached is tracker or has_tracker_override):
+                abs_candidate = Path(effective_abs)
+                try:
+                    if abs_candidate.exists():
+                        return abs_candidate
+                except OSError:
+                    pass
+            if attached is not tracker and not has_tracker_override:
+                try:
+                    resolved = Path(tracker.resolve_uri(self.uri))
+                    if resolved.exists() or not effective_abs:
+                        return resolved
+                except (ValueError, RuntimeError, OSError, TypeError):
+                    pass
+            if isinstance(tracker, ArtifactResolver):
+                try:
+                    return tracker.resolve_artifact_path(self)
+                except (ValueError, RuntimeError, OSError, TypeError):
+                    pass
+            try:
+                resolved = Path(tracker.resolve_uri(self.uri))
+                if resolved.exists() or not effective_abs:
+                    return resolved
+            except (ValueError, RuntimeError, OSError, TypeError):
+                pass
+            if effective_abs:
+                return Path(effective_abs)
+            return Path(self.uri)
         return self.path
 
-    def accessibility(
-        self, tracker: Optional["Tracker"] = None
-    ) -> ArtifactAccessibility:
-        """
-        Inspect the primary path and any advisory recovery roots.
+    def ensure_local_path(
+        self,
+        *,
+        tracker: Optional[Any] = None,
+        target_root: Optional[Path | str] = None,
+        source_root: Optional[Path | str] = None,
+        on_missing: Literal["warn", "raise"] = "warn",
+    ) -> Optional[Path]:
+        """Ensure this artifact exists on the local filesystem via ``ArtifactResolver``."""
+        resolved_resolver = tracker if tracker is not None else self.resolver
+        if target_root is None:
+            candidate = self.as_path(resolved_resolver)
+            try:
+                if candidate.exists():
+                    return candidate
+            except OSError:
+                pass
 
-        The primary location uses the currently attached tracker when available,
-        or the explicit ``tracker`` argument when provided. Recovery roots are
-        only checked when a tracker is available so the remappable layout can be
-        derived safely.
-        """
-        tracker_obj: Optional[_TrackerWithFS] = None
-        if tracker is not None:
-            tracker_obj = cast(_TrackerWithFS, tracker)
-        if tracker_obj is None:
-            tracker_ref = get_tracker_ref(self)
-            if tracker_ref is not None:
-                tracker_candidate = tracker_ref()
-                if tracker_candidate is not None:
-                    tracker_obj = cast(_TrackerWithFS, tracker_candidate)
+        if resolved_resolver is None:
+            msg = (
+                f"[Consist] Cannot materialize artifact {self.key!r}: "
+                "no Tracker is attached or active in context."
+            )
+            if on_missing == "raise":
+                raise FileNotFoundError(msg)
+            logging.warning(msg)
+            return None
 
+        return resolved_resolver.ensure_local_artifact_path(
+            self,
+            target_root=target_root,
+            source_root=source_root,
+            on_missing=on_missing,
+        )
+
+    @property
+    def recovery_roots(self) -> list[str]:
+        """Ordered advisory recovery roots recorded on this artifact (consulting live resolver DB when available)."""
+        active = self.resolver
+        if active is not None and isinstance(active, ArtifactResolver):
+            try:
+                return active.artifact_recovery_roots(self)
+            except Exception:
+                pass
+        return extract_recovery_roots_from_meta(self.meta)
+
+    def accessibility(self, tracker: Optional[Any] = None) -> ArtifactAccessibility:
+        """Inspect primary and advisory recovery locations for this artifact."""
+        resolver_obj = tracker if tracker is not None else self.resolver
         try:
             primary_path = (
-                Path(tracker_obj.resolve_uri(self.container_uri))
-                if tracker_obj is not None
+                Path(resolver_obj.resolve_uri(self.uri))
+                if resolver_obj is not None
                 else self.path
             )
         except Exception:
             primary_path = self.path
+
         locations = [
             ArtifactLocationStatus(
                 label="primary",
@@ -559,21 +612,21 @@ class Artifact(SQLModel, table=True):
                 exists=primary_path.exists(),
             )
         ]
-
-        if tracker_obj is None:
-            return ArtifactAccessibility(locations=tuple(locations))
-
-        fs = tracker_obj.fs
-        relative_path_helper = fs.get_remappable_relative_path
-        roots_helper = fs.normalize_recovery_roots
-
-        relative_path = relative_path_helper(self.container_uri)
-        if relative_path is None:
+        if resolver_obj is None:
             return ArtifactAccessibility(locations=tuple(locations))
 
         try:
-            roots = roots_helper(self.recovery_roots)
-        except (TypeError, ValueError):
+            fs = resolver_obj.fs
+            relative_path = fs.get_remappable_relative_path(self.uri)
+            if relative_path is None:
+                return ArtifactAccessibility(locations=tuple(locations))
+            raw_roots = (
+                resolver_obj.artifact_recovery_roots(self)
+                if isinstance(resolver_obj, ArtifactResolver)
+                else extract_recovery_roots_from_meta(self.meta)
+            )
+            roots = fs.normalize_recovery_roots(raw_roots)
+        except Exception:
             return ArtifactAccessibility(locations=tuple(locations))
 
         for index, root in enumerate(roots, start=1):
@@ -585,69 +638,55 @@ class Artifact(SQLModel, table=True):
                     exists=candidate.exists(),
                 )
             )
-
         return ArtifactAccessibility(locations=tuple(locations))
+
+    @property
+    def locations(self) -> tuple[ArtifactLocationStatus, ...]:
+        """Return the currently checked locations for this artifact."""
+        return self.accessibility().locations
+
+    @property
+    def is_accessible(self) -> bool:
+        """Return whether any checked location for this artifact exists locally."""
+        return self.accessibility().accessible
 
     def as_df(
         self,
-        tracker: Optional["Tracker"] = None,
+        tracker: Optional[Any] = None,
         *,
         db_fallback: Literal["inputs-only", "always", "never"] = "inputs-only",
         columns: Optional[Sequence[str]] = None,
         close: bool = True,
         **kwargs: Any,
     ) -> "pd.DataFrame":
-        """
-        Load this artifact as a pandas DataFrame.
-
-        This is equivalent to ``consist.load_df(self, ...)`` and supports the same
-        loader options.
-        """
-        # reason: keep the import local to avoid a circular dependency at module import time.
-        from consist.api import load_df
-
-        return load_df(
-            self,
-            tracker=tracker,
-            db_fallback=db_fallback,
-            columns=columns,
-            close=close,
-            **kwargs,
+        """Load this artifact as a pandas DataFrame through the active ``ArtifactResolver``."""
+        resolver_obj = tracker if tracker is not None else self.resolver
+        if resolver_obj is None:
+            raise RuntimeError(
+                f"Cannot load DataFrame for artifact {self.key!r}: "
+                "as_df() requires a Tracker instance (or active ArtifactResolver)."
+            )
+        return cast(
+            "pd.DataFrame",
+            resolver_obj.load_artifact_df(
+                self,
+                db_fallback=db_fallback,
+                columns=columns,
+                close=close,
+                **kwargs,
+            ),
         )
 
-    # --- Format Helpers ---
+    # --- Format & Metadata Helpers ---
 
     @property
     def is_matrix(self) -> bool:
-        """
-        Indicates if the artifact represents a multi-dimensional array or matrix-like data.
-
-        This property helps in dispatching to appropriate data loaders or processing
-        functions that handle array-based data structures, such as those typically
-        found in scientific computing.
-
-        Returns
-        -------
-        bool
-            True if the artifact's driver is associated with matrix-like data formats
-            (e.g., Zarr, HDF5, NetCDF, OpenMatrix), False otherwise.
-        """
+        """Return True if the artifact represents array or matrix-like data."""
         return self.driver in ("zarr", "h5", "netcdf", "openmatrix")
 
     @property
     def is_tabular(self) -> bool:
-        """
-        Indicates if the artifact represents tabular data (rows and columns).
-
-        This property assists in identifying artifacts that can be loaded and processed
-        using tools designed for structured, record-based data, such as Pandas DataFrames.
-
-        Returns
-        -------
-        bool
-            True if the artifact's driver is associated with tabular data formats
-            (e.g., Parquet, CSV, SQL), False otherwise.
-        """
+        """Return True if the artifact represents tabular or spatial record data."""
         return (
             self.driver in DriverType.tabular_drivers()
             or self.driver in DriverType.spatial_drivers()
@@ -655,169 +694,125 @@ class Artifact(SQLModel, table=True):
         )
 
     @property
+    def is_H5(self) -> bool:
+        """Return True if the artifact uses an HDF5 driver."""
+        return self.driver in ("h5", "hdf5", "h5_table")
+
+    @property
     def created_at_iso(self) -> Optional[str]:
-        """
-        Return created_at as an ISO 8601 formatted string.
-
-        Useful for serialization to external systems that expect string timestamps.
-
-        Returns
-        -------
-        Optional[str]
-            The created_at timestamp as ISO 8601 string, or None if not set.
-        """
+        """Return ``created_at`` as an ISO-8601 string."""
         return self.created_at.isoformat() if self.created_at else None
 
     def get_meta(self, key: str, default: Any = None) -> Any:
-        """
-        Safely retrieves a value from the 'meta' dictionary.
-
-        Args:
-            key (str): The key to look up in the metadata.
-            default (Any, optional): The default value to return if the key is not found.
-                                     Defaults to None.
-
-        Returns:
-            Any: The value associated with the key, or the default value if the key is not present.
-        """
+        """Safely retrieve a value from ``meta``."""
         return self.meta.get(key, default)
 
-    def __repr__(self) -> str:
-        """
-        Returns a developer-friendly string representation of the Artifact object.
+    # --- Serialization & Pydantic Integration (0 SQL queries) ---
 
-        This representation is designed for debugging and logging, providing a concise
-        summary of the artifact's key attributes.
+    def to_json_dict(self) -> dict[str, Any]:
+        """Serialize all persisted fields into a JSON-ready dict using pure memory reads."""
+        return {
+            "id": str(self.id),
+            "key": self.key,
+            "uri": self.uri,
+            "driver": self.driver,
+            "digest": str(self.digest) if self.digest is not None else None,
+            "member": self.member,
+            "run_id": self.run_id,
+            "parent_artifact_id": (
+                str(self.parent_artifact_id)
+                if self.parent_artifact_id is not None
+                else None
+            ),
+            "facet_id": self.facet_id,
+            "created_at": self.created_at.isoformat(),
+            "meta": _deep_copy_meta_value(self.meta),
+        }
 
-        Returns
-        -------
-        str
-            A string in the format "<Artifact key='...' driver='...' uri='...'>".
-        """
-        return (
-            f"<Artifact key='{self.key}' driver='{self.driver}' "
-            f"uri='{self.container_uri}'>"
+    @classmethod
+    def from_json_dict(cls, data: MappingABC[str, Any]) -> "Artifact":
+        """Hydrate an ``Artifact`` from either a ``v0.5`` or legacy ``v0.4`` JSON mapping."""
+        if "uri" in data and data["uri"] is not None:
+            uri_val = str(data["uri"])
+        elif "container_uri" in data and data["container_uri"] is not None:
+            uri_val = str(data["container_uri"])
+        else:
+            raise ValueError(
+                "Artifact mapping requires 'uri' (or legacy 'container_uri')."
+            )
+
+        driver_val = str(data.get("driver") or "unknown")
+        member_val = data.get("member")
+        if member_val is None:
+            member_val = data.get("table_path")
+        if member_val is None:
+            member_val = data.get("array_path")
+        member_str = str(member_val) if member_val is not None else None
+
+        raw_meta = data.get("meta")
+        meta_copy: dict[str, Any] = (
+            dict(raw_meta) if isinstance(raw_meta, MappingABC) else {}
         )
 
-    def __str__(self) -> str:
-        """
-        Returns a user-friendly string representation of the Artifact object.
+        if "digest" in data:
+            raw_digest = data.get("digest")
+            digest_obj = (
+                raw_digest
+                if isinstance(raw_digest, Digest) or raw_digest is None
+                else Digest.parse(raw_digest)
+            )
+        else:
+            digest_obj = _coerce_legacy_v04_hash(
+                data.get("hash"),
+                driver=driver_val,
+                member=member_str,
+                meta=meta_copy,
+            )
 
-        This representation is suitable for display to end-users, focusing on
-        the artifact's key and its portable URI.
+        facet_id_raw = data.get("facet_id")
+        if facet_id_raw is None and isinstance(meta_copy.get("artifact_facet_id"), str):
+            facet_id_raw = meta_copy["artifact_facet_id"]
 
-        Returns
-        -------
-        str
-            A string in the format "Artifact(key=..., path=...)".
-        """
-        return f"Artifact(key={self.key}, path={self.container_uri})"
+        return cls(
+            id=data.get("id"),
+            key=str(data["key"]),
+            uri=uri_val,
+            driver=driver_val,
+            digest=digest_obj,
+            member=member_str,
+            run_id=(str(data["run_id"]) if data.get("run_id") is not None else None),
+            parent_artifact_id=data.get("parent_artifact_id"),
+            facet_id=(str(facet_id_raw) if facet_id_raw is not None else None),
+            created_at=data.get("created_at"),
+            meta=meta_copy,
+        )
 
-    def __deepcopy__(self, memo: Optional[dict[int, Any]] = None) -> "Artifact":
-        """Produce a clean detached clone without inheriting dead ORM instance state.
+    @classmethod
+    def model_validate(cls, value: Any) -> "Artifact":
+        """Validate an ``Artifact`` instance or JSON-compatible mapping."""
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, MappingABC):
+            return cls.from_json_dict(value)
+        raise ValueError(f"Expected Artifact or mapping, got {type(value).__name__}")
 
-        Standard copy.deepcopy / BaseModel.__deepcopy__ on a SQLAlchemy/SQLModel
-        instance copies `_sa_instance_state`, leaving the cloned state with a dead
-        weak reference that raises ObjectDereferencedError on attribute mutation.
-        """
-        if memo is None:
-            memo = {}
-        elif id(self) in memo:
-            return memo[id(self)]
-
-        # Read model field values. We access attributes via getattr if expired or not
-        # yet present in self.__dict__, ensuring attached ORM instances refresh cleanly.
-        raw_values = {
-            k: self.__dict__[k] if k in self.__dict__ else getattr(self, k)
-            for k in self.__class__.model_fields
-            if not k.startswith("_")
+    def model_dump(self, *, mode: str = "python") -> dict[str, Any]:
+        """Return a detached dictionary of persisted fields (0 SQL queries)."""
+        if mode == "json":
+            return self.to_json_dict()
+        return {
+            "id": self.id,
+            "key": self.key,
+            "uri": self.uri,
+            "driver": self.driver,
+            "digest": self.digest,
+            "member": self.member,
+            "run_id": self.run_id,
+            "parent_artifact_id": self.parent_artifact_id,
+            "facet_id": self.facet_id,
+            "created_at": self.created_at,
+            "meta": _deep_copy_meta_value(self.meta),
         }
-        raw_meta = raw_values.pop("meta", {})
-
-        cloned = self.__class__(**raw_values, meta={})
-        memo[id(self)] = cloned
-
-        # Deep-copy mutable meta now that self is registered in memo
-        # (preventing infinite recursion on circular graphs)
-        cloned.meta = copy.deepcopy(raw_meta, memo)
-
-        # Copy any non-private, non-ORM custom attributes set on __dict__
-        for k, v in self.__dict__.items():
-            if not k.startswith("_") and k not in self.__class__.model_fields:
-                try:
-                    setattr(cloned, k, copy.deepcopy(v, memo))
-                except Exception:
-                    cloned.__dict__[k] = copy.deepcopy(v, memo)
-
-        # Preserve field set tracking
-        cloned.__pydantic_fields_set__ = set(self.__pydantic_fields_set__)
-
-        # Re-attach private runtime state (e.g., _tracker, _abs_path) whether stored
-        # in __pydantic_private__ or directly in __dict__ on ORM-loaded instances.
-        src_private = _private_state(self)
-        dst_private = _private_state(cloned)
-        if src_private is not None and dst_private is not None:
-            for k, v in src_private.items():
-                if k == "_tracker":
-                    dst_private[k] = v  # Preserve weakref as-is
-                else:
-                    dst_private[k] = copy.deepcopy(v, memo)
-
-        tracker_ref = get_tracker_ref(self)
-        if tracker_ref is not None:
-            if dst_private is not None:
-                dst_private["_tracker"] = tracker_ref
-            else:
-                try:
-                    object.__setattr__(cloned, "_tracker", tracker_ref)
-                except (AttributeError, TypeError):
-                    pass
-
-        abs_path = self.abs_path or self.__dict__.get("_abs_path")
-        if isinstance(abs_path, (str, Path)):
-            cloned.abs_path = str(abs_path)
-
-        return cloned
-
-    def __copy__(self) -> "Artifact":
-        """Produce a clean shallow clone without inheriting dead ORM instance state."""
-        raw_values = {
-            k: self.__dict__[k] if k in self.__dict__ else getattr(self, k)
-            for k in self.__class__.model_fields
-            if not k.startswith("_")
-        }
-
-        cloned = self.__class__(**raw_values)
-
-        for k, v in self.__dict__.items():
-            if not k.startswith("_") and k not in self.__class__.model_fields:
-                try:
-                    setattr(cloned, k, v)
-                except Exception:
-                    cloned.__dict__[k] = v
-
-        cloned.__pydantic_fields_set__ = set(self.__pydantic_fields_set__)
-
-        src_private = _private_state(self)
-        dst_private = _private_state(cloned)
-        if src_private is not None and dst_private is not None:
-            dst_private.update(src_private)
-
-        tracker_ref = get_tracker_ref(self)
-        if tracker_ref is not None:
-            if dst_private is not None:
-                dst_private["_tracker"] = tracker_ref
-            else:
-                try:
-                    object.__setattr__(cloned, "_tracker", tracker_ref)
-                except (AttributeError, TypeError):
-                    pass
-
-        abs_path = self.abs_path or self.__dict__.get("_abs_path")
-        if isinstance(abs_path, (str, Path)):
-            cloned.abs_path = str(abs_path)
-
-        return cloned
 
     def model_copy(
         self,
@@ -825,53 +820,125 @@ class Artifact(SQLModel, table=True):
         update: Optional[MappingABC[str, Any]] = None,
         deep: bool = False,
     ) -> "Artifact":
-        """Produce a clean detached clone without deepcopying ``_sa_instance_state``.
+        """Return an updated copy preserving ``_resolver_ref`` and ``_abs_path``."""
+        base = copy.deepcopy(self) if deep else copy.copy(self)
+        if not update:
+            return base
+        return replace(base, **dict(update))
 
-        Pydantic 2.14+ optimizes ``BaseModel.model_copy(deep=True, update=...)``
-        by calling ``__copy__()`` and then ``deepcopy()`` on each non-updated key
-        in ``copied.__dict__``, which includes ``_sa_instance_state``. Deepcopying
-        ``_sa_instance_state`` creates a new ``InstanceState`` whose weakref points
-        to an unreferenced ``Artifact`` in the temporary ``memo`` dict; once GC
-        runs, ``_sa_instance_state.obj()`` becomes ``None`` and SQLAlchemy's
-        ``Session.merge()`` treats the artifact as a brand-new row with unset PK.
-        """
-        cloned = self.__deepcopy__() if deep else self.__copy__()
-        if update:
-            for k, v in update.items():
-                if k in self.__class__.model_fields or not k.startswith("_"):
-                    try:
-                        setattr(cloned, k, copy.deepcopy(v) if deep else v)
-                    except Exception:
-                        cloned.__dict__[k] = copy.deepcopy(v) if deep else v
-                else:
-                    cloned.__dict__[k] = copy.deepcopy(v) if deep else v
-            cloned.__pydantic_fields_set__.update(update.keys())
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls,
+        source_type: Any,
+        handler: Any,
+    ) -> core_schema.CoreSchema:
+        del source_type, handler
+
+        def _validate(value: Any) -> "Artifact":
+            if isinstance(value, cls):
+                return value
+            if isinstance(value, MappingABC):
+                return cls.from_json_dict(value)
+            raise ValueError(
+                f"Expected Artifact or mapping, got {type(value).__name__}"
+            )
+
+        return core_schema.no_info_plain_validator_function(
+            _validate,
+            serialization=core_schema.plain_serializer_function_ser_schema(
+                lambda inst: inst.to_json_dict(),
+                return_schema=core_schema.dict_schema(),
+            ),
+        )
+
+    def __repr__(self) -> str:
+        return f"<Artifact key='{self.key}' driver='{self.driver}' uri='{self.uri}'>"
+
+    def __str__(self) -> str:
+        return f"Artifact(key={self.key}, path={self.uri})"
+
+    def __copy__(self) -> "Artifact":
+        return replace(self)
+
+    def __deepcopy__(self, memo: Optional[dict[int, Any]] = None) -> "Artifact":
+        if memo is not None and id(self) in memo:
+            return cast("Artifact", memo[id(self)])
+        cloned = replace(self, meta=copy.deepcopy(dict(self.meta), memo))
+        if memo is not None:
+            memo[id(self)] = cloned
         return cloned
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        return (
+            _reconstruct_artifact,
+            (
+                self.id,
+                self.key,
+                self.uri,
+                self.driver,
+                self.digest,
+                self.member,
+                self.run_id,
+                self.parent_artifact_id,
+                self.facet_id,
+                self.created_at,
+                dict(self.meta),
+                self._abs_path,
+            ),
+        )
+
+
+def _reconstruct_artifact(
+    id_val: uuid.UUID,
+    key: str,
+    uri: str,
+    driver: str,
+    digest: Optional[Digest],
+    member: Optional[str],
+    run_id: Optional[str],
+    parent_artifact_id: Optional[uuid.UUID],
+    facet_id: Optional[str],
+    created_at: datetime,
+    meta: dict[str, Any],
+    abs_path: Optional[str],
+) -> Artifact:
+    return Artifact(
+        id=id_val,
+        key=key,
+        uri=uri,
+        driver=driver,
+        digest=digest,
+        member=member,
+        run_id=run_id,
+        parent_artifact_id=parent_artifact_id,
+        facet_id=facet_id,
+        created_at=created_at,
+        meta=meta,
+        _abs_path=abs_path,
+    )
+
+
+def extract_recovery_roots_from_meta(meta: MappingABC[str, Any] | None) -> list[str]:
+    """Extract ordered string recovery roots from an artifact metadata mapping."""
+    if not isinstance(meta, MappingABC):
+        return []
+    roots = meta.get("recovery_roots")
+    if roots is None:
+        return []
+    if isinstance(roots, (str, Path)):
+        return [str(roots)]
+    if isinstance(roots, Sequence):
+        return [str(item) for item in roots if isinstance(item, (str, Path))]
+    return []
 
 
 class ArchivedOutputs(MappingABC[str, Path]):
-    """
-    Mapping of archived output paths returned by archive_run_outputs(...).
-
-    Behaves as a read-only ``Mapping[str, Path]`` for backward compatibility
-    with the previous ``dict[str, Path]`` return value. ``.paths`` exposes the
-    same archived-path mapping explicitly, and ``.outputs`` exposes refreshed
-    artifacts whose recovery metadata reflects the newly registered archive
-    root.
-
-    Use ``.outputs`` to pass archived artifacts into downstream
-    ``scenario.run(inputs=...)`` calls without a second ``get_run_outputs``
-    call::
-
-        archive = tracker.archive_run_outputs(result.run.id, archive_root)
-        archive["my_key"]           # archived Path (backward-compatible)
-        archive.outputs["my_key"]   # refreshed Artifact with recovery root set
-    """
+    """Read-only mapping of archived output paths plus refreshed ``Artifact`` values."""
 
     def __init__(
         self,
         paths: dict[str, Path],
-        outputs: dict[str, "Artifact"],
+        outputs: dict[str, Artifact],
     ) -> None:
         self._paths: dict[str, Path] = dict(paths)
         self.outputs: dict[str, Artifact] = outputs

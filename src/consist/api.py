@@ -33,7 +33,6 @@ import weakref
 import duckdb
 import pandas as pd
 from pydantic import BaseModel
-from sqlmodel import SQLModel
 from typing_extensions import Protocol, runtime_checkable
 
 # Internal imports
@@ -74,12 +73,13 @@ from consist.core.run_options import raise_legacy_policy_kwargs_error
 from consist.core.stores import get_hot_data_db, get_hot_data_db_path
 from consist.core.views import _quote_ident
 from consist.core.workflow import OutputCapture, RunContext
+from consist.digest import Digest
 from consist.integrations.ibis import (
     ibis_grouped_view as _ibis_grouped_view,
     ibis_connection as _ibis_connection,
     ibis_view as _ibis_view,
 )
-from consist.models.artifact import Artifact, ArchivedOutputs, get_tracker_ref
+from consist.models.artifact import Artifact, ArchivedOutputs
 from consist.models.run import (
     ConsistRecord,
     CouplerSnapshotPhase,
@@ -156,7 +156,7 @@ def _get_gpd() -> Optional[ModuleType]:
     return gpd
 
 
-T = TypeVar("T", bound=SQLModel)
+T = TypeVar("T", bound=BaseModel)
 
 
 class OpenMatrixFileLike(Protocol):
@@ -265,7 +265,7 @@ def ibis_connection(
 def ibis_view(
     tracker: Optional["Tracker"] = None,
     *,
-    model: Type[SQLModel],
+    model: Type[BaseModel],
     key: Optional[str] = None,
 ) -> "IbisTable":
     """
@@ -1470,7 +1470,7 @@ def hydrate_run_outputs(
     HydratedRunOutputsResult
         Keyed hydration outcome for the selected run outputs. Each detached
         returned artifact preserves the canonical fingerprint surface on
-        ``artifact.hash``.
+        ``artifact.digest``.
 
     Examples
     --------
@@ -1676,7 +1676,7 @@ def set_artifact_recovery_roots(
     These roots are probed after per-call overrides and historical run/mount
     locations when rematerializing historical outputs or hydrating cache-hit
     outputs. Use this when a workflow promotes bytes into a stable archive root
-    but you want to keep ``container_uri`` as the canonical logical location.
+    but you want to keep ``uri`` as the canonical logical location.
 
     Parameters
     ----------
@@ -1722,7 +1722,7 @@ def register_artifact_recovery_copy(
     verify : bool, default True
         Whether to verify the copy's full-file SHA-256 digest.
     content_hash : str | None, optional
-        Expected SHA-256 digest, taking precedence over ``artifact.hash``.
+        Expected SHA-256 digest, taking precedence over ``artifact.digest``.
     append : bool, default True
         Whether to append rather than replace recovery-root metadata.
     tracker : Tracker | None, optional
@@ -2024,10 +2024,12 @@ def log_artifact(
     path: ArtifactRef,
     key: Optional[str] = None,
     direction: str = "output",
-    schema: Optional[Type[SQLModel]] = None,
+    schema: Optional[Type[BaseModel]] = None,
     strict_schema: bool = False,
     driver: Optional[str] = None,
-    content_hash: Optional[str] = None,
+    member: Optional[str] = None,
+    content_hash: Optional[str | Digest] = None,
+    digest: Optional[Digest] = None,
     force_hash_override: bool = False,
     validate_content_hash: bool = False,
     reuse_if_unchanged: bool = False,
@@ -2057,8 +2059,8 @@ def log_artifact(
     direction : str, default "output"
         Specifies whether the artifact is an "input" or "output" for the
         current run. Defaults to "output".
-    schema : Optional[Type[SQLModel]], optional
-        An optional SQLModel class that names the artifact's logical schema.
+    schema : Optional[Type[BaseModel]], optional
+        An optional Pydantic/SQLModel class that names the artifact's logical schema.
         Its name will be stored in artifact metadata. This tags metadata; it
         does not validate file contents by default.
     strict_schema : bool, default False
@@ -2067,10 +2069,9 @@ def log_artifact(
     driver : Optional[str], optional
         Explicitly specify the driver (e.g., 'h5_table').
         If None, the driver is inferred from the file extension.
-    content_hash : Optional[str], optional
+    content_hash : Optional[str | Digest], optional
         Precomputed artifact fingerprint to use instead of hashing the path on
-        disk. When provided, Consist stores it on the canonical public
-        fingerprint field, ``artifact.hash``.
+        disk. When provided, Consist stores it on ``artifact.digest``.
     force_hash_override : bool, default False
         If True, overwrite an existing artifact hash when it differs from
         `content_hash`. By default, mismatched overrides are ignored with a warning.
@@ -2119,7 +2120,9 @@ def log_artifact(
             schema=schema,
             strict_schema=strict_schema,
             driver=driver,
-            content_hash=content_hash,
+            content_hash=str(digest)
+            if digest is not None
+            else (str(content_hash) if content_hash is not None else None),
             force_hash_override=force_hash_override,
             validate_content_hash=validate_content_hash,
             reuse_if_unchanged=reuse_if_unchanged,
@@ -2137,7 +2140,9 @@ def log_artifact(
         schema=schema,
         strict_schema=strict_schema,
         driver=driver,
+        member=member,
         content_hash=content_hash,
+        digest=digest,
         force_hash_override=force_hash_override,
         validate_content_hash=validate_content_hash,
         reuse_if_unchanged=reuse_if_unchanged,
@@ -2292,9 +2297,11 @@ def log_input(
     path: ArtifactRef,
     key: Optional[str] = None,
     *,
-    schema: Optional[Type[SQLModel]] = None,
+    schema: Optional[Type[BaseModel]] = None,
     driver: Optional[str] = None,
-    content_hash: Optional[str] = None,
+    member: Optional[str] = None,
+    content_hash: Optional[str | Digest] = None,
+    digest: Optional[Digest] = None,
     force_hash_override: bool = False,
     validate_content_hash: bool = False,
     facet: Optional[Any] = None,
@@ -2317,14 +2324,13 @@ def log_input(
     key : Optional[str]
         Semantic name for the artifact (e.g. "raw_households"). Required if `path`
         is a file path.
-    schema : Optional[Type[SQLModel]]
-        Optional SQLModel class defining the data structure.
+    schema : Optional[Type[BaseModel]]
+        Optional Pydantic/SQLModel class defining the data structure.
     driver : Optional[str]
         Explicit format driver (e.g. "parquet"). Inferred from extension if None.
-    content_hash : Optional[str]
+    content_hash : Optional[str | Digest]
         Precomputed artifact fingerprint to avoid re-hashing large files. When
-        provided, Consist stores it on the canonical public fingerprint field,
-        ``artifact.hash``.
+        provided, Consist stores it on ``artifact.digest``.
     force_hash_override : bool, default False
         Overwrite existing hash in the database if different from `content_hash`.
     validate_content_hash : bool, default False
@@ -2351,7 +2357,9 @@ def log_input(
         direction="input",
         schema=schema,
         driver=driver,
+        member=member,
         content_hash=content_hash,
+        digest=digest,
         force_hash_override=force_hash_override,
         validate_content_hash=validate_content_hash,
         facet=facet,
@@ -2367,9 +2375,11 @@ def log_output(
     key: Optional[str] = None,
     *,
     artifact_kind: Literal["file", "directory"] = "file",
-    schema: Optional[Type[SQLModel]] = None,
+    schema: Optional[Type[BaseModel]] = None,
     driver: Optional[str] = None,
-    content_hash: Optional[str] = None,
+    member: Optional[str] = None,
+    content_hash: Optional[str | Digest] = None,
+    digest: Optional[Digest] = None,
     force_hash_override: bool = False,
     validate_content_hash: bool = False,
     reuse_if_unchanged: bool = False,
@@ -2394,14 +2404,13 @@ def log_output(
         Declare an immutable directory artifact with a complete persisted tree
         manifest. The artifact retains its content driver (for example,
         ``"zarr"``) for loading and type narrowing.
-    schema : Optional[Type[SQLModel]]
-        Optional SQLModel class defining the data structure.
+    schema : Optional[Type[BaseModel]]
+        Optional Pydantic/SQLModel class defining the data structure.
     driver : Optional[str]
         Explicit format driver (e.g. "parquet"). Inferred from extension if None.
-    content_hash : Optional[str]
+    content_hash : Optional[str | Digest]
         Precomputed artifact fingerprint to avoid re-hashing large files. When
-        provided, Consist stores it on the canonical public fingerprint field,
-        ``artifact.hash``.
+        provided, Consist stores it on ``artifact.digest``.
     force_hash_override : bool, default False
         Overwrite existing hash in the database if different from `content_hash`.
     validate_content_hash : bool, default False
@@ -2436,7 +2445,9 @@ def log_output(
             artifact_kind=artifact_kind,
             schema=schema,
             driver=driver,
+            member=member,
             content_hash=content_hash,
+            digest=digest,
             force_hash_override=force_hash_override,
             validate_content_hash=validate_content_hash,
             reuse_if_unchanged=reuse_if_unchanged,
@@ -2452,7 +2463,9 @@ def log_output(
         direction="output",
         schema=schema,
         driver=driver,
+        member=member,
         content_hash=content_hash,
+        digest=digest,
         force_hash_override=force_hash_override,
         validate_content_hash=validate_content_hash,
         reuse_if_unchanged=reuse_if_unchanged,
@@ -2468,7 +2481,7 @@ def log_output(
 def ingest(
     artifact: Artifact,
     data: Optional[Union[Iterable[Dict[str, Any]], Any]] = None,
-    schema: Optional[Type[SQLModel]] = None,
+    schema: Optional[Type[BaseModel]] = None,
     run: Optional[Run] = None,
 ) -> Any:
     """
@@ -2487,8 +2500,8 @@ def ingest(
         (str or Path), a Pandas DataFrame, or any other data type that `dlt`
         can handle. If `None`, Consist attempts to read the data directly
         from the artifact's resolved file path.
-    schema : Optional[Type[SQLModel]], optional
-        An optional SQLModel class that defines the expected schema for the ingested data.
+    schema : Optional[Type[BaseModel]], optional
+        An optional Pydantic/SQLModel class that defines the expected schema for the ingested data.
         If provided, `dlt` will use this for strict validation and schema inference.
     run : Optional[Run], optional
         The `Run` context for ingestion. If provided, the data will be tagged with
@@ -2546,7 +2559,7 @@ def canonicalize_gtfs(
 def log_dataframe(
     df: pd.DataFrame,
     key: str,
-    schema: Optional[Type[SQLModel]] = None,
+    schema: Optional[Type[BaseModel]] = None,
     direction: str = "output",
     tracker: Optional["Tracker"] = None,
     path: Optional[Union[str, Path]] = None,
@@ -2564,7 +2577,7 @@ def log_dataframe(
         Data to persist.
     key : str
         Logical artifact key.
-    schema : Optional[Type[SQLModel]], optional
+    schema : Optional[Type[BaseModel]], optional
         Schema used for ingestion, if provided.
     direction : str, default "output"
         Artifact direction relative to the run.
@@ -3277,11 +3290,9 @@ def load(
     # 1. Resolve Tracker
     explicit_tracker = tracker is not None
     attached_tracker: Optional[Tracker] = None
-    tracker_ref = get_tracker_ref(artifact)
-    if tracker_ref:
-        ref_candidate = tracker_ref()
-        if isinstance(ref_candidate, Tracker):
-            attached_tracker = ref_candidate
+    resolver = artifact.resolver
+    if isinstance(resolver, Tracker):
+        attached_tracker = resolver
 
     if tracker is None:
         try:
@@ -3294,7 +3305,11 @@ def load(
 
     if tracker is None:
         # If we have a resolved path available, allow direct disk loading without a tracker.
-        if artifact.path and Path(artifact.path).exists():
+        try:
+            candidate_path = artifact.path
+        except RuntimeError:
+            candidate_path = None
+        if candidate_path and Path(candidate_path).exists():
             pass
         else:
             raise RuntimeError(
@@ -3313,7 +3328,7 @@ def load(
         ):
             path = artifact.abs_path
         else:
-            path = tracker.resolve_uri(artifact.container_uri)
+            path = tracker.resolve_uri(artifact.uri)
             if (
                 not Path(path).exists()
                 and artifact.abs_path
@@ -3334,20 +3349,27 @@ def load(
         artifact.driver in DriverType.table_path_drivers()
         and "table_path" not in load_kwargs
     ):
-        table_path = artifact.table_path
-        if table_path:
-            load_kwargs["table_path"] = table_path
+        if artifact.member:
+            load_kwargs["table_path"] = artifact.member
     if artifact.driver in DriverType.array_drivers():
         if "array_path" not in load_kwargs:
-            array_path = artifact.array_path
-            if array_path:
-                load_kwargs["array_path"] = array_path
+            if artifact.member:
+                load_kwargs["array_path"] = artifact.member
 
     # 3. Try Disk Load (Priority 1)
     if Path(path).exists():
         return _load_from_disk(str(path), artifact.driver, **load_kwargs)
 
     # 4. Try Database Load (Priority 2 - Ghost Mode)
+    if (
+        not artifact.meta.get("is_ingested", False)
+        and tracker is not None
+        and tracker.db is not None
+    ):
+        db_artifact = tracker.db.get_artifact(artifact.id)
+        if db_artifact is not None and db_artifact.meta.get("is_ingested", False):
+            artifact = db_artifact.with_resolver(tracker)
+
     if artifact.meta.get("is_ingested", False):
         if db_fallback not in {"inputs-only", "always", "never"}:
             raise ValueError(
@@ -3389,7 +3411,7 @@ def load(
                     f"Hint: pass db_fallback='always' if you explicitly want DB recovery here."
                 )
             is_declared_input = any(
-                (a.id == artifact.id) or (a.container_uri == artifact.container_uri)
+                (a.id == artifact.id) or (a.uri == artifact.uri)
                 for a in tracker.current_consist.inputs
             )
             if not is_declared_input:

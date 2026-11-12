@@ -176,8 +176,8 @@ class TestInputHashing:
         """
         im = IdentityManager()
 
-        art1 = Artifact(key="a1", container_uri="x", driver="x", run_id="run_123")
-        art2 = Artifact(key="a2", container_uri="y", driver="y", run_id="run_456")
+        art1 = Artifact(key="a1", uri="x", driver="x", run_id="run_123")
+        art2 = Artifact(key="a2", uri="y", driver="y", run_id="run_456")
 
         hash_a = im.compute_input_hash([art1, art2])
         hash_b = im.compute_input_hash([art2, art1])
@@ -185,17 +185,19 @@ class TestInputHashing:
         assert hash_a == hash_b
 
         # Changing source run_id should change hash
-        art3 = Artifact(key="a1", container_uri="x", driver="x", run_id="run_999")
+        art3 = Artifact(key="a1", uri="x", driver="x", run_id="run_999")
         hash_c = im.compute_input_hash([art3, art2])
         assert hash_a != hash_c
 
     def test_action_v2_reuses_attested_content_under_the_same_named_role(self):
-        digest = "a" * 64
+        from consist.digest import Digest
+
+        digest = Digest("sha256:file", "a" * 64)
         first = Artifact(
             key="upstream_one",
-            container_uri="archive://one.csv",
+            uri="archive://one.csv",
             driver="csv",
-            hash=digest,
+            digest=digest,
             run_id="producer_one",
             meta={
                 "hash_semantics": {
@@ -209,33 +211,32 @@ class TestInputHashing:
         )
         second = Artifact(
             key="upstream_two",
-            container_uri="archive://two.csv",
+            uri="archive://two.csv",
             driver="csv",
-            hash=digest,
+            digest=digest,
             run_id="producer_two",
             meta=dict(first.meta),
         )
         roles = [InputBindingRole(kind="named", role="data", input_index=0)]
-        code_identity = {"version": 1, "mode": "repo_git", "digest": "abc"}
+        im = IdentityManager()
 
-        first_action = IdentityManager().compute_action_input_identity(
-            inputs=[first], binding_roles=roles, code_identity=code_identity
-        )
-        second_action = IdentityManager().compute_action_input_identity(
-            inputs=[second], binding_roles=roles, code_identity=code_identity
-        )
+        first_hash = im.compute_input_hash(inputs=[first], binding_roles=roles)
+        second_hash = im.compute_input_hash(inputs=[second], binding_roles=roles)
+        first_bindings = im.describe_input_bindings(inputs=[first], binding_roles=roles)
 
-        assert first_action.value.startswith("sha256:action-v2:")
-        assert first_action.value == second_action.value
-        assert first_action.bindings[0].mode == "content-v1"
+        assert first_hash == second_hash
+        assert first_bindings[0]["mode"] == "content"
+        assert first_bindings[0]["value"] == str(digest)
 
     def test_action_v2_distinguishes_swapped_named_roles(self):
-        def artifact(key: str, digest: str) -> Artifact:
+        from consist.digest import Digest
+
+        def artifact(key: str, hex_digest: str) -> Artifact:
             return Artifact(
                 key=key,
-                container_uri=f"archive://{key}.csv",
+                uri=f"archive://{key}.csv",
                 driver="csv",
-                hash=digest,
+                digest=Digest("sha256:file", hex_digest),
                 run_id=f"producer_{key}",
                 meta={
                     "hash_semantics": {
@@ -255,97 +256,62 @@ class TestInputHashing:
             InputBindingRole(kind="named", role="right", input_index=1),
         ]
         identity = IdentityManager()
-        code_identity = {"version": 1, "mode": "callable_module", "digest": "abc"}
 
-        ordered = identity.compute_action_input_identity(
-            inputs=[left, right], binding_roles=roles, code_identity=code_identity
-        )
-        swapped = identity.compute_action_input_identity(
-            inputs=[right, left], binding_roles=roles, code_identity=code_identity
-        )
+        ordered = identity.compute_input_hash(inputs=[left, right], binding_roles=roles)
+        swapped = identity.compute_input_hash(inputs=[right, left], binding_roles=roles)
 
-        assert ordered.value != swapped.value
+        assert ordered != swapped
 
     def test_action_v2_separates_code_identity_modes(self):
+        from consist.digest import Digest
+
         artifact = Artifact(
             key="data",
-            container_uri="archive://data.csv",
+            uri="archive://data.csv",
             driver="csv",
-            hash="a" * 64,
+            digest=Digest("sha256:file", "a" * 64),
             run_id="producer",
-            meta={
-                "hash_semantics": {
-                    "version": 1,
-                    "algorithm": "sha256",
-                    "kind": "file",
-                    "digest_contract": "raw_file_bytes",
-                    "source": "computed_full",
-                }
-            },
         )
         roles = [InputBindingRole(kind="named", role="data", input_index=0)]
         identity = IdentityManager()
+        in_hash = identity.compute_input_hash(inputs=[artifact], binding_roles=roles)
 
-        repo = identity.compute_action_input_identity(
-            inputs=[artifact],
-            binding_roles=roles,
-            code_identity={"version": 1, "mode": "repo_git", "digest": "same"},
+        repo_sig = identity.calculate_run_signature(
+            code_hash="repo_git:same",
+            config_hash="cfg",
+            input_hash=in_hash,
         )
-        callable_module = identity.compute_action_input_identity(
-            inputs=[artifact],
-            binding_roles=roles,
-            code_identity={
-                "version": 1,
-                "mode": "callable_module",
-                "digest": "same",
-            },
+        callable_sig = identity.calculate_run_signature(
+            code_hash="callable_module:same",
+            config_hash="cfg",
+            input_hash=in_hash,
         )
 
-        assert repo.value != callable_module.value
+        assert repo_sig != callable_sig
 
     @pytest.mark.parametrize(
-        ("meta", "expected_mode", "expected_reason"),
+        ("scheme", "meta", "expected_mode", "expected_reason"),
         [
             (
-                {
-                    "hash_semantics": {
-                        "version": 1,
-                        "algorithm": "sha256",
-                        "kind": "file",
-                        "digest_contract": "file_metadata",
-                        "source": "computed_fast",
-                    }
-                },
-                "legacy-provenance-v1",
+                "stat_file_v1:sha256",
+                {},
+                "provenance",
                 "fast_file_observation",
             ),
             (
-                {
-                    "hash_semantics": {
-                        "version": 1,
-                        "algorithm": "sha256",
-                        "kind": "directory",
-                        "digest_contract": "legacy_directory_metadata",
-                        "source": "computed_fast_directory",
-                    }
-                },
-                "legacy-provenance-v1",
+                "stat_dir_v1:sha256",
+                {},
+                "provenance",
                 "fast_directory_observation",
             ),
             (
-                {
-                    "hash_semantics": {
-                        "version": 1,
-                        "algorithm": "unknown",
-                        "kind": "unknown",
-                        "digest_contract": "unknown",
-                        "source": "caller_supplied",
-                    }
-                },
-                "legacy-provenance-v1",
+                "caller_supplied_v1:sha256",
+                {},
+                "provenance",
                 "caller_supplied_hash",
             ),
             (
+                "sha256:file",
                 {
                     "hash_semantics": {
                         "version": 1,
@@ -355,24 +321,17 @@ class TestInputHashing:
                         "source": "computed_full_directory",
                     }
                 },
-                "legacy-provenance-v1",
+                "provenance",
                 "directory_without_manifest",
             ),
             (
-                {
-                    "hash_semantics": {
-                        "version": 1,
-                        "algorithm": "sha1",
-                        "kind": "file",
-                        "digest_contract": "raw_file_bytes",
-                        "source": "computed_full",
-                    }
-                },
-                "legacy-provenance-v1",
-                "untrusted_hash_semantics",
+                None,
+                {},
+                "provenance",
+                "missing_digest",
             ),
-            ({}, "legacy-provenance-v1", "missing_hash_semantics"),
             (
+                "sha256:file",
                 {
                     "hash_semantics": {
                         "version": 1,
@@ -382,7 +341,7 @@ class TestInputHashing:
                         "source": "computed_full",
                     }
                 },
-                "content-v1",
+                "content",
                 None,
             ),
         ],
@@ -391,37 +350,31 @@ class TestInputHashing:
             "fast-directory",
             "caller-supplied",
             "directory-without-manifest",
-            "untrusted-semantics",
-            "missing-semantics",
+            "missing-digest",
             "trusted-content",
         ],
     )
     def test_action_v2_records_nonhashed_binding_evidence(
-        self, meta, expected_mode, expected_reason
+        self, scheme, meta, expected_mode, expected_reason
     ):
+        from consist.digest import Digest
+
         artifact = Artifact(
             key="data",
-            container_uri="archive://data",
+            uri="archive://data",
             driver="unknown",
-            hash="a" * 64,
+            digest=Digest(scheme, "a" * 64) if scheme is not None else None,
             run_id="producer",
             meta=meta,
         )
 
-        binding = (
-            IdentityManager()
-            .compute_action_input_identity(
-                inputs=[artifact],
-                binding_roles=[
-                    InputBindingRole(kind="named", role="data", input_index=0)
-                ],
-                code_identity={"version": 1, "mode": "repo_git", "digest": "abc"},
-            )
-            .bindings[0]
-        )
+        binding = IdentityManager().describe_input_bindings(
+            inputs=[artifact],
+            binding_roles=[InputBindingRole(kind="named", role="data", input_index=0)],
+        )[0]
 
-        assert binding.mode == expected_mode
-        assert binding.as_evidence_payload() == {
+        assert binding["mode"] == expected_mode
+        assert binding["evidence"] == {
             "identity_strength": expected_mode,
             **(
                 {"fallback_reason": expected_reason}
@@ -429,118 +382,81 @@ class TestInputHashing:
                 else {}
             ),
         }
-        assert binding.as_payload() == {
-            "kind": "named",
-            "role": "data",
-            "mode": expected_mode,
-            "value": binding.value,
-        }
+        assert binding["kind"] == "named"
+        assert binding["role"] == "data"
 
     def test_action_v2_fallback_evidence_does_not_change_digest_payload(self):
+        from consist.digest import Digest, canonical_json_sha256
+
+        digest = Digest("stat_file_v1:sha256", "a" * 64)
         artifact = Artifact(
             key="data",
-            container_uri="archive://data",
+            uri="archive://data",
             driver="csv",
-            hash="a" * 64,
+            digest=digest,
             run_id="producer",
-            meta={
-                "hash_semantics": {
-                    "version": 1,
-                    "algorithm": "sha256",
-                    "kind": "file",
-                    "digest_contract": "file_metadata",
-                    "source": "computed_fast",
-                }
-            },
         )
 
-        identity = IdentityManager().compute_action_input_identity(
-            inputs=[artifact],
-            binding_roles=[InputBindingRole(kind="named", role="data", input_index=0)],
-            code_identity={"version": 1, "mode": "repo_git", "digest": "abc"},
-        )
-        expected_payload = {
-            "version": 2,
-            "code": {"version": 1, "mode": "repo_git", "digest": "abc"},
-            "bindings": [
-                {
-                    "kind": "named",
-                    "role": "data",
-                    "mode": "legacy-provenance-v1",
-                    "value": "driver:csv|key:data|run:producer|hash:" + "a" * 64,
-                    "selector": {
-                        "driver": "csv",
-                        "table_path": None,
-                        "array_path": None,
-                    },
-                }
-            ],
-        }
-        expected_digest = hashlib.sha256(
-            json.dumps(
-                expected_payload,
-                sort_keys=True,
-                ensure_ascii=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()
+        im = IdentityManager()
+        roles = [InputBindingRole(kind="named", role="data", input_index=0)]
+        in_hash = im.compute_input_hash(inputs=[artifact], binding_roles=roles)
+        bindings = im.describe_input_bindings(inputs=[artifact], binding_roles=roles)
 
-        assert identity.value == f"sha256:action-v2:{expected_digest}"
-        assert identity.bindings[0].as_evidence_payload() == {
-            "identity_strength": "legacy-provenance-v1",
+        expected_token = (
+            f"provenance_v1:driver:csv|key:data|run:producer|digest:{digest}"
+        )
+        expected_hash = canonical_json_sha256([("data", expected_token)])
+
+        assert in_hash == expected_hash
+        assert bindings[0]["evidence"] == {
+            "identity_strength": "provenance",
             "fallback_reason": "fast_file_observation",
         }
 
     @pytest.mark.parametrize(
-        "meta",
-        [
-            {
-                "hash_semantics": {
-                    "version": 1,
-                    "algorithm": "sha256",
-                    "kind": "file",
-                    "digest_contract": "file_stat",
-                    "source": "observed_fast",
-                }
-            },
-            {},
-        ],
-        ids=["fast-observation", "missing-semantics"],
+        "scheme",
+        ["stat_file_v1:sha256", None],
+        ids=["fast-observation", "missing-digest"],
     )
-    def test_action_v2_keeps_weak_managed_inputs_provenance_sensitive(self, meta):
+    def test_action_v2_keeps_weak_managed_inputs_provenance_sensitive(self, scheme):
+        from consist.digest import Digest
+
         def artifact(run_id: str) -> Artifact:
             return Artifact(
                 key="data",
-                container_uri="archive://data.csv",
+                uri="archive://data.csv",
                 driver="csv",
-                hash="a" * 64,
+                digest=Digest(scheme, "a" * 64) if scheme is not None else None,
                 run_id=run_id,
-                meta=meta,
             )
 
         roles = [InputBindingRole(kind="named", role="data", input_index=0)]
         identity = IdentityManager()
-        first = identity.compute_action_input_identity(
+        first = identity.compute_input_hash(
             inputs=[artifact("producer_one")],
             binding_roles=roles,
-            code_identity={"version": 1, "mode": "repo_git", "digest": "abc"},
             signature_lookup=lambda run_id: f"signature:{run_id}",
         )
-        second = identity.compute_action_input_identity(
+        second = identity.compute_input_hash(
             inputs=[artifact("producer_two")],
             binding_roles=roles,
-            code_identity={"version": 1, "mode": "repo_git", "digest": "abc"},
             signature_lookup=lambda run_id: f"signature:{run_id}",
         )
+        first_binding = identity.describe_input_bindings(
+            inputs=[artifact("producer_one")],
+            binding_roles=roles,
+            signature_lookup=lambda run_id: f"signature:{run_id}",
+        )[0]
 
-        assert first.bindings[0].mode == "legacy-provenance-v1"
-        assert second.bindings[0].mode == "legacy-provenance-v1"
-        assert first.value != second.value
+        assert first_binding["mode"] == "provenance"
+        assert first != second
 
     def test_raw_file_inputs(self):
         """
         Tests hashing for raw file inputs (no run_id) using a path resolver.
         """
+        from consist.digest import canonical_json_sha256
+
         im = IdentityManager()
 
         with tempfile.NamedTemporaryFile(mode="wb", delete=False) as f:
@@ -549,7 +465,7 @@ class TestInputHashing:
 
         try:
             art = Artifact(
-                key="raw", container_uri="inputs://file.txt", driver="txt", run_id=None
+                key="raw", uri="inputs://file.txt", driver="txt", run_id=None
             )
 
             def resolver(uri: str) -> str:
@@ -557,11 +473,10 @@ class TestInputHashing:
 
             hash_val = im.compute_input_hash([art], path_resolver=resolver)
 
-            # Expected: SHA256 of "hello world"
             expected_file_hash = hashlib.sha256(b"hello world").hexdigest()
-            expected_composite = hashlib.sha256(
-                f"driver:txt|container_uri:inputs://file.txt|file:{expected_file_hash}".encode()
-            ).hexdigest()
+            expected_composite = canonical_json_sha256(
+                [("raw", f"sha256:file:{expected_file_hash}")]
+            )
 
             assert hash_val == expected_composite
 
@@ -572,18 +487,18 @@ class TestInputHashing:
     def test_table_path_affects_identity(self):
         im = IdentityManager()
         art_a = Artifact(
-            key="a",
-            container_uri="inputs://file.h5",
+            key="shared",
+            uri="inputs://file.h5",
             driver="h5_table",
             run_id="run_shared",
-            table_path="/tables/a",
+            member="/tables/a",
         )
         art_b = Artifact(
-            key="b",
-            container_uri="inputs://file.h5",
+            key="shared",
+            uri="inputs://file.h5",
             driver="h5_table",
             run_id="run_shared",
-            table_path="/tables/b",
+            member="/tables/b",
         )
         hash_a = im.compute_input_hash([art_a])
         hash_b = im.compute_input_hash([art_b])
@@ -592,18 +507,18 @@ class TestInputHashing:
     def test_array_path_affects_identity(self):
         im = IdentityManager()
         art_a = Artifact(
-            key="a",
-            container_uri="inputs://array.zarr",
+            key="shared",
+            uri="inputs://array.zarr",
             driver="zarr",
             run_id="run_shared",
-            array_path="/group/a",
+            member="/group/a",
         )
         art_b = Artifact(
-            key="b",
-            container_uri="inputs://array.zarr",
+            key="shared",
+            uri="inputs://array.zarr",
             driver="zarr",
             run_id="run_shared",
-            array_path="/group/b",
+            member="/group/b",
         )
         hash_a = im.compute_input_hash([art_a])
         hash_b = im.compute_input_hash([art_b])
@@ -613,13 +528,13 @@ class TestInputHashing:
         im = IdentityManager()
         art_a = Artifact(
             key="output_a",
-            container_uri="inputs://a.parquet",
+            uri="inputs://a.parquet",
             driver="parquet",
             run_id="run_shared",
         )
         art_b = Artifact(
             key="output_a",
-            container_uri="workspace://a.parquet",
+            uri="workspace://a.parquet",
             driver="parquet",
             run_id="run_shared",
         )
@@ -636,9 +551,7 @@ class TestInputHashing:
             fname = f.name
 
         try:
-            art = Artifact(
-                key="raw", container_uri="inputs://x", driver="x", run_id=None
-            )
+            art = Artifact(key="raw", uri="inputs://x", driver="x", run_id=None)
 
             def resolver(uri: str) -> str:
                 return fname

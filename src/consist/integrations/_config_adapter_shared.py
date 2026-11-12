@@ -279,7 +279,7 @@ def run_with_config_overrides_orchestrated(
     if resolved_config_identity == "auto":
         consist_hash_inputs = (
             run_result.run.meta.get("consist_hash_inputs")
-            if isinstance(run_result.run.meta, dict)
+            if isinstance(run_result.run.meta, Mapping)
             else None
         )
         if len(materialized_roots) <= 1:

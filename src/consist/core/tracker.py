@@ -36,7 +36,6 @@ from typing import (
 
 import pandas as pd
 from pydantic import BaseModel
-from sqlmodel import SQLModel
 
 from consist.core.artifact_schemas import ArtifactSchemaManager
 from consist.core.artifact_facets import ArtifactFacetManager
@@ -90,7 +89,7 @@ from consist.core.gtfs import (
     GtfsCanonicalizationResult,
     canonicalize_gtfs_bundle,
 )
-from consist.digest import normalize_json
+from consist.digest import Digest, normalize_json
 from consist.core.indexing import IndexBySpec
 from consist.core.persistence import (
     ArtifactSchemaSelection,
@@ -118,7 +117,11 @@ from consist.core.settings import ConsistSettings
 from consist.core.stores import HotDataStore, MetadataStore
 from consist.core.workflow import OutputCapture, ScenarioContext
 from consist.models.gtfs import GTFS_SCHEMAS
-from consist.models.artifact import Artifact, ArchivedOutputs, set_tracker_ref
+from consist.models.artifact import (
+    Artifact,
+    ArchivedOutputs,
+    extract_recovery_roots_from_meta,
+)
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
 from consist.models.run import (
     ConsistRecord,
@@ -230,12 +233,118 @@ class Tracker:
         of previously computed results.
     """
 
+    _active_coupler: Optional["Coupler"] = None
+    _couplers: Optional[weakref.WeakSet["Coupler"]] = None
+    _artifact_abs_path_overrides: Optional[
+        Dict[uuid.UUID, Tuple[Optional[str], Optional[str]]]
+    ] = None
+
     def _compat_attr(self, name: str) -> Any:
         """Read optional compatibility state from partially initialized trackers."""
         try:
             return object.__getattribute__(self, name)
         except AttributeError:
             return None
+
+    def _record_artifact_abs_path_override(
+        self, artifact: Artifact, abs_path: Optional[str]
+    ) -> None:
+        overrides = self._compat_attr("_artifact_abs_path_overrides")
+        if overrides is None:
+            overrides = {}
+            self._artifact_abs_path_overrides = overrides
+        overrides[artifact.id] = (artifact._abs_path, abs_path)
+
+    def artifact_abs_path_override(
+        self, artifact: Any
+    ) -> Optional[Tuple[Optional[str], Optional[str]]]:
+        overrides = self._compat_attr("_artifact_abs_path_overrides")
+        if not overrides or not isinstance(artifact, Artifact):
+            return None
+        return overrides.get(artifact.id)
+
+    def resolve_artifact_path(self, artifact: Any) -> Path:
+        if isinstance(artifact, Artifact):
+            override = self.artifact_abs_path_override(artifact)
+            has_override = override is not None and override[0] == artifact._abs_path
+            attached = (
+                artifact._resolver_ref() if artifact._resolver_ref is not None else None
+            )
+            abs_val = override[1] if has_override else artifact.abs_path
+            if abs_val and (attached is self or has_override):
+                abs_candidate = Path(abs_val)
+                try:
+                    if abs_candidate.exists():
+                        return abs_candidate
+                except OSError:
+                    pass
+            try:
+                resolved = Path(self.resolve_uri(artifact.uri))
+                if resolved.exists() or not abs_val:
+                    return resolved
+            except (ValueError, RuntimeError, OSError, TypeError):
+                pass
+            if abs_val:
+                return Path(abs_val)
+            return Path(artifact.uri)
+        return Path(self.resolve_uri(str(artifact)))
+
+    def ensure_local_artifact_path(
+        self,
+        artifact: Any,
+        *,
+        target_root: Optional[Path | str] = None,
+        source_root: Optional[Path | str] = None,
+        on_missing: Literal["warn", "raise"] = "warn",
+    ) -> Optional[Path]:
+        resolved_target_root: Path | str = (
+            target_root if target_root is not None else self.run_dir
+        )
+        result = self.materialize_artifact(
+            artifact,
+            target_root=resolved_target_root,
+            source_root=source_root,
+            preserve_existing=True,
+            on_missing=on_missing,
+            allow_external_paths=True if target_root is not None else None,
+        )
+        if result.path is not None and result.path.exists():
+            if isinstance(artifact, Artifact):
+                self._record_artifact_abs_path_override(artifact, str(result.path))
+            return result.path
+        if on_missing == "raise":
+            key_repr = artifact.key if isinstance(artifact, Artifact) else artifact
+            raise FileNotFoundError(
+                f"[Consist] Cannot materialize artifact {key_repr!r}: "
+                f"status={result.status}."
+            )
+        return None
+
+    def load_artifact_df(self, artifact: Any, **kwargs: Any) -> Any:
+        from consist.api import load_df
+
+        return load_df(artifact, tracker=self, **kwargs)
+
+    def artifact_accessibility(self, artifact: Any) -> str:
+        if isinstance(artifact, Artifact):
+            acc = artifact.accessibility(tracker=self)
+            return "accessible" if acc.accessible else "missing"
+        return "missing"
+
+    def artifact_recovery_roots(self, artifact: Any) -> list[str]:
+        if not isinstance(artifact, Artifact):
+            return []
+        meta_roots = extract_recovery_roots_from_meta(artifact.meta)
+        db = self._compat_attr("db")
+        if db is not None and artifact.id is not None:
+            live_meta = db.get_artifact_meta_by_id(artifact.id)
+            if isinstance(live_meta, Mapping) and "recovery_roots" in live_meta:
+                db_roots = extract_recovery_roots_from_meta(live_meta)
+                for root in meta_roots:
+                    if root not in db_roots:
+                        db_roots.append(root)
+                return db_roots
+        return meta_roots
 
     @classmethod
     def from_config(cls, config: TrackerConfig) -> "Tracker":
@@ -255,7 +364,7 @@ class Tracker:
         project_root: str = ".",
         hashing_strategy: str = "full",
         cache_epoch: int = 1,
-        schemas: Optional[List[Type[SQLModel]]] = None,
+        schemas: Optional[List[Type[BaseModel]]] = None,
         builtin_schemas: Optional[Iterable[BuiltinSchemaLiteral]] = None,
         access_mode: AccessMode = "standard",
         read_only: bool = False,
@@ -497,11 +606,11 @@ class Tracker:
         # When ingest() is called in a different Python session, it can look up
         # a schema by the artifact's schema_name (e.g., "MyDataSchema") if the
         # tracker was initialized with schemas=[MyDataSchema, ...].
-        self._registered_schemas: Dict[str, Type[SQLModel]] = {}
-        registered_schemas: list[Type[SQLModel]] = []
+        self._registered_schemas: Dict[str, Type[BaseModel]] = {}
+        registered_schemas: list[Type[BaseModel]] = []
         seen_schema_names: set[str] = set()
 
-        builtin_registered_schemas: list[Type[SQLModel]] = []
+        builtin_registered_schemas: list[Type[BaseModel]] = []
         if "gtfs" in builtin_schema_names:
             builtin_registered_schemas.extend(GTFS_SCHEMAS)
 
@@ -525,6 +634,9 @@ class Tracker:
         self.current_consist: Optional[ConsistRecord] = None
         self._active_coupler: Optional["Coupler"] = None
         self._couplers: weakref.WeakSet["Coupler"] = weakref.WeakSet()
+        self._artifact_abs_path_overrides: Dict[
+            uuid.UUID, Tuple[Optional[str], Optional[str]]
+        ] = {}
 
         # Introspection State (Last completed run)
         self._last_consist: Optional[ConsistRecord] = None
@@ -748,34 +860,12 @@ class Tracker:
         )
 
     @property
-    def registered_schemas(self) -> Mapping[str, Type[SQLModel]]:
+    def registered_schemas(self) -> Mapping[str, Type[BaseModel]]:
         """
-        Return the SQLModel schemas registered on this tracker.
-
-        Registered schemas are the SQLModel classes passed via
-        ``Tracker(..., schemas=[...])`` during initialization. They are stored by
-        class name (for example, ``"LinkstatsRow"``) and used by lookup-based
-        workflows such as schema-aware ingestion.
-
-        Returns
-        -------
-        Mapping[str, Type[SQLModel]]
-            Read-only mapping from schema class name to the corresponding SQLModel
-            class object.
-
-        Notes
-        -----
-        The returned mapping is immutable from the caller perspective.
-
-        Examples
-        --------
-        ```python
-        tracker = Tracker(..., schemas=[MySchema])
-        assert "MySchema" in tracker.registered_schemas
-        ```
+        Return the Pydantic/SQLModel row schemas registered on this tracker.
         """
         return cast(
-            Mapping[str, Type[SQLModel]], MappingProxyType(self._registered_schemas)
+            Mapping[str, Type[BaseModel]], MappingProxyType(self._registered_schemas)
         )
 
     def to_config(self) -> TrackerConfig:
@@ -847,43 +937,10 @@ class Tracker:
     def get_registered_schema(
         self,
         schema_name: str,
-        default: Optional[Type[SQLModel]] = None,
-    ) -> Optional[Type[SQLModel]]:
+        default: Optional[Type[BaseModel]] = None,
+    ) -> Optional[Type[BaseModel]]:
         """
-        Resolve a registered SQLModel schema by its class name.
-
-        This is an ergonomic lookup helper for workflows that persist or exchange
-        schema names (for example ``artifact.meta["schema_name"]``) and then need
-        the corresponding SQLModel class at runtime.
-
-        Parameters
-        ----------
-        schema_name : str
-            Registered schema class name to resolve. Matching is exact and
-            case-sensitive.
-        default : Optional[Type[SQLModel]], optional
-            Value returned when ``schema_name`` is not found in the registry.
-            Defaults to ``None``.
-
-        Returns
-        -------
-        Optional[Type[SQLModel]]
-            The registered SQLModel class when found, otherwise ``default``.
-
-        Raises
-        ------
-        TypeError
-            If ``schema_name`` is not a string.
-        ValueError
-            If ``schema_name`` is an empty or whitespace-only string.
-
-        Examples
-        --------
-        ```python
-        tracker = Tracker(..., schemas=[MySchema])
-        schema_cls = tracker.get_registered_schema("MySchema")
-        missing = tracker.get_registered_schema("UnknownSchema")
-        ```
+        Resolve a registered Pydantic/SQLModel row schema by its class name.
         """
         if not isinstance(schema_name, str):
             raise TypeError("schema_name must be a string.")
@@ -942,7 +999,7 @@ class Tracker:
         base_dir = (self.run_dir / "outputs").resolve()
         artifact_dir = (
             target_run.meta.get("artifact_dir")
-            if isinstance(target_run.meta, dict)
+            if isinstance(target_run.meta, Mapping)
             else None
         )
         if isinstance(artifact_dir, Path):
@@ -1209,10 +1266,8 @@ class Tracker:
     def _coerce_facet_mapping(self, obj: Any, label: str) -> Dict[str, Any]:
         if obj is None:
             raise ValueError(f"facet_from requires a {label} to extract from.")
-        if hasattr(obj, "model_dump"):
+        if isinstance(obj, BaseModel):
             return obj.model_dump(mode="json")
-        if hasattr(obj, "dict") and hasattr(obj, "json"):
-            return obj.dict()
         if isinstance(obj, Mapping):
             return dict(obj)
         raise ValueError(f"Tracker {label} must be a mapping or Pydantic model.")
@@ -1331,8 +1386,8 @@ class Tracker:
         roots: str | os.PathLike[str] | Sequence[str | os.PathLike[str]],
         *,
         append: bool,
-    ) -> None:
-        self._archive_service._set_artifact_recovery_roots_bulk(
+    ) -> dict[str, Artifact]:
+        return self._archive_service._set_artifact_recovery_roots_bulk(
             artifacts, roots, append=append
         )
 
@@ -1431,7 +1486,7 @@ class Tracker:
         return None
 
     def _allow_external_paths_for_run(self, run: Optional[Run]) -> bool:
-        if run and isinstance(run.meta, dict) and "allow_external_paths" in run.meta:
+        if run and isinstance(run.meta, Mapping) and "allow_external_paths" in run.meta:
             return bool(run.meta["allow_external_paths"])
         return self.allow_external_paths
 
@@ -2817,12 +2872,12 @@ class Tracker:
         path: ArtifactRef,
         key: Optional[str] = None,
         direction: str = "output",
-        schema: Optional[Type[SQLModel]] = None,
+        schema: Optional[Type[BaseModel]] = None,
         strict_schema: bool = False,
         driver: Optional[str] = None,
-        table_path: Optional[str] = None,
-        array_path: Optional[str] = None,
-        content_hash: Optional[str] = None,
+        member: Optional[str] = None,
+        content_hash: Optional[str | Digest] = None,
+        digest: Optional[Digest] = None,
         force_hash_override: bool = False,
         validate_content_hash: bool = False,
         reuse_if_unchanged: bool = False,
@@ -2836,96 +2891,7 @@ class Tracker:
         **meta: Any,
     ) -> Artifact:
         """
-        Logs an artifact (file or data reference) within the current run context.
-
-        This method supports:
-
-        -   **Automatic Input Discovery**: If an input `path` matches a previously
-            logged output artifact, Consist automatically links them, building the
-            provenance graph. This is a key part of **"Auto-Forking"**.
-
-        -   **Path Virtualization**: Converts absolute file system paths to portable URIs
-            (e.g., `inputs://data.csv`) using configured mounts, adhering to
-            **"Path Resolution & Mounts"**.
-
-        -   **Schema Metadata Injection**: Embeds schema information (if provided) into the
-            artifact's metadata for discovery, export, and optional validation workflows.
-
-        -   **Immediate Persistence**: This single-artifact method flushes JSON state
-            and syncs artifact links to the database immediately for this call.
-
-        Parameters
-        ----------
-        path : ArtifactRef
-            A file path (str/Path) or an existing `Artifact` reference to be logged.
-            Passing an `Artifact` is useful for explicitly linking an already-logged artifact
-            as an input or output in the current run.
-        key : Optional[str], optional
-            A semantic, human-readable name for the artifact (e.g., "households").
-            Required if `path` is a path-like (str/Path).
-        direction : str, default "output"
-            Specifies whether the artifact is an "input" or "output" for the
-            current run. Defaults to "output".
-        schema : Optional[Type[SQLModel]], optional
-            An optional SQLModel class that names the artifact's logical schema.
-            Its name will be stored in artifact metadata. This tags metadata; it
-            does not validate file contents by default.
-        strict_schema : bool, default False
-            Whether a schema tag should also mark the artifact as strict for
-            validation workflows. Schema tagging itself is non-strict by default.
-        driver : Optional[str], optional
-            Explicitly specify the driver (e.g., 'h5_table').
-            If None, the driver is inferred from the file extension.
-        table_path : Optional[str], optional
-            Optional table path inside a container (e.g., HDF5).
-        array_path : Optional[str], optional
-            Optional array path inside a container (e.g., Zarr group).
-        content_hash : Optional[str], optional
-            Precomputed artifact fingerprint to use instead of hashing the path
-            on disk. When provided, Consist stores it on the canonical public
-            fingerprint field, ``artifact.hash``.
-        force_hash_override : bool, default False
-            If True, overwrite an existing artifact hash when it differs from
-            `content_hash`. By default, mismatched overrides are ignored with a warning.
-        validate_content_hash : bool, default False
-            If True, verify `content_hash` against the on-disk data and raise on mismatch.
-        reuse_if_unchanged : bool, default False
-            Deprecated for outputs. Consist now always creates a fresh output artifact row;
-            identical bytes are deduplicated via `artifact.content_id`. Setting this on outputs
-            emits a warning and does not reuse prior rows. Input-side behavior is unaffected.
-        reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
-            Deprecated for outputs. `any_uri` is ignored for outputs; deduplication is governed
-            by `content_id`. Input-side behavior is unaffected.
-        parent_artifact_id : uuid.UUID | None, optional
-            Canonical parent artifact relation for child/member artifacts.
-        profile_file_schema : bool, default False
-            If True, profile a lightweight schema for file-based tabular artifacts.
-            Use "if_changed" to skip profiling when matching content identity already
-            has a stored schema (prefers content_id; falls back to hash for legacy rows).
-        file_schema_sample_rows : Optional[int], default None
-            Maximum rows to sample when profiling file-based schemas.
-        facet : Optional[FacetLike], optional
-            Optional artifact-level facet payload (dict or Pydantic model).
-        facet_schema_version : Optional[Union[str, int]], optional
-            Optional schema version for artifact facet compatibility.
-        facet_index : bool, default False
-            If True, flatten scalar facet fields into ``artifact_kv`` for fast queries.
-        **meta : Any
-            Additional key-value pairs to store in the artifact's flexible `meta` field.
-            ``recovery_roots`` is normalized to an ordered list of absolute
-            filesystem roots when provided.
-
-        Returns
-        -------
-        Artifact
-            The created or updated `Artifact` object.
-
-        Raises
-        ------
-        RuntimeError
-            If called outside an active run context.
-        ValueError
-            If `key` is not provided when `path` is a path-like (str/Path).
+        Log an artifact (file or data reference) within the current run context.
         """
         return self._artifact_logging.log_artifact(
             path=path,
@@ -2934,9 +2900,9 @@ class Tracker:
             schema=schema,
             strict_schema=strict_schema,
             driver=driver,
-            table_path=table_path,
-            array_path=array_path,
+            member=member,
             content_hash=content_hash,
+            digest=digest,
             force_hash_override=force_hash_override,
             validate_content_hash=validate_content_hash,
             reuse_if_unchanged=reuse_if_unchanged,
@@ -2954,7 +2920,7 @@ class Tracker:
         self,
         df: pd.DataFrame,
         key: str,
-        schema: Optional[Type[SQLModel]] = None,
+        schema: Optional[Type[BaseModel]] = None,
         direction: str = "output",
         path: Optional[Union[str, Path]] = None,
         driver: Optional[str] = None,
@@ -3249,7 +3215,7 @@ class Tracker:
         facet_index: bool = False,
         *,
         artifact_kind: Literal["file", "directory"] = "file",
-        schema: Optional[Type[SQLModel]] = None,
+        schema: Optional[Type[BaseModel]] = None,
         driver: Optional[str] = None,
         **meta: Any,
     ) -> Artifact:
@@ -3698,103 +3664,20 @@ class Tracker:
         self,
         artifact: Artifact,
         data: Optional[Union[Iterable[Dict[str, Any]], Any]] = None,
-        schema: Optional[Type[SQLModel]] = None,
+        schema: Optional[Type[BaseModel]] = None,
         run: Optional[Run] = None,
         profile_schema: bool = True,
     ) -> Any:
         """
-        Ingests data associated with an `Artifact` into the Consist DuckDB database.
-
-        This method is central to Consist's **"Hot Data Strategy"**, where data is
-        materialized into the database for faster query performance and easier sharing.
-        It leverages the `dlt` (Data Load Tool) integration for efficient and robust
-        data loading, including support for schema inference and evolution.
-
-        Parameters
-        ----------
-        artifact : Artifact
-            The artifact object representing the data being ingested. If the artifact
-            was logged with a schema (e.g., ``log_artifact(path, schema=MySchema)``)
-            and that schema was registered with the Tracker at initialization
-            (e.g., ``Tracker(..., schemas=[MySchema])``), it will be automatically
-            looked up and used for ingestion. Logging the artifact with
-            ``schema=...`` only tags metadata; ingestion is the step that applies
-            the schema to data.
-        data : Optional[Union[Iterable[Dict[str, Any]], Any]], optional
-            An iterable (e.g., list of dicts, generator) where each item represents a
-            row of data to be ingested. If `data` is omitted, Consist attempts to
-            stream it directly from the artifact's file URI, resolving the path.
-            Can also be other data types that `dlt` can handle directly (e.g., Pandas DataFrame).
-        schema : Optional[Type[SQLModel]], optional
-            An optional SQLModel class that defines the expected schema for the ingested data.
-            If provided, `dlt` will use this for strict validation and this parameter
-            takes precedence over any auto-detected schema. If not provided, Consist will
-            automatically look up the schema by name from schemas registered in Tracker.__init__
-            (using artifact.meta["schema_name"]).
-        run : Optional[Run], optional
-            If provided, tags data with this run's ID (Offline Mode).
-            If None, uses the currently active run (Online Mode).
-        profile_schema : bool, default True
-            If True, profile and persist a deduped schema record for the ingested table,
-            writing `schema_id`/`schema_summary` (and optionally `schema_profile`) into
-            `Artifact.meta`.
-
-        Returns
-        -------
-        Any
-            The result information from the `dlt` ingestion process.
-
-        Raises
-        ------
-        RuntimeError
-            If no database is configured (`db_path` was not provided during
-            Tracker initialization) or if `ingest` is called outside of
-            an active run context.
-        Exception
-            Any exception raised by the underlying `dlt` ingestion process.
-
-        Examples
-        --------
-        Register a schema and associate it with a logged artifact:
-
-        ```python
-        tracker = Tracker(..., schemas=[MyDataSchema])
-        art = tracker.log_artifact(file.csv, schema=MyDataSchema)
-
-        # Automatically looks up and uses MyDataSchema for ingestion
-        tracker.ingest(art, data=df)
-        ```
-
-        Schemas are persisted by name, allowing lookup across different Python sessions:
-
-        ```python
-        # Session 1:
-        tracker = Tracker(..., schemas=[MyDataSchema])
-        art = tracker.log_artifact(file.csv, schema=MyDataSchema)
-
-        # Session 2:
-        tracker2 = Tracker(..., schemas=[MyDataSchema])
-        art2 = tracker2.get_artifact("mydata")
-        # Looks up MyDataSchema by artifact's schema_name ("MyDataSchema")
-        tracker2.ingest(art2, data=df)
-        ```
-
-        Explicitly override the default schema during ingestion:
-
-        ```python
-        tracker.ingest(art, data=df, schema=DifferentSchema)
-        ```
+        Ingests data associated with an ``Artifact`` into the Consist DuckDB database.
         """
         self._ensure_write_data()
 
-        # Auto-detect schema from artifact if not explicitly provided.
-        # Look up the schema by name in the tracker's registered schemas
-        # (schemas passed to Tracker.__init__).
         resolved_schema = schema
         if resolved_schema is None:
             schema_name = (
                 artifact.meta.get("schema_name")
-                if isinstance(artifact.meta, dict)
+                if isinstance(artifact.meta, Mapping)
                 else None
             )
             if isinstance(schema_name, str):
@@ -4261,7 +4144,7 @@ class Tracker:
         view_name: str,
         *,
         schema_id: Optional[str] = None,
-        schema: Optional[Type[SQLModel]] = None,
+        schema: Optional[Type[BaseModel]] = None,
         namespace: Optional[str] = None,
         params: Optional[Iterable[str]] = None,
         drivers: Optional[List[str]] = None,
@@ -4365,8 +4248,10 @@ class Tracker:
 
         resolved_schema_ids: Optional[List[str]] = None
         if schema is not None:
-            if not isinstance(schema, type) or not issubclass(schema, SQLModel):
-                raise ValueError("schema must be a SQLModel class.")
+            if not isinstance(schema, type) or not issubclass(schema, BaseModel):
+                raise ValueError(
+                    "schema must be a Pydantic BaseModel or SQLModel class."
+                )
             resolved_schema_ids = self.db.find_schema_ids_for_model(
                 schema_model=schema, compatible=False
             )
@@ -4376,7 +4261,7 @@ class Tracker:
                 )
             if not resolved_schema_ids:
                 raise ValueError(
-                    "No stored schema ids matched the provided SQLModel class."
+                    "No stored schema ids matched the provided schema model class."
                 )
 
         predicates = (
@@ -4417,7 +4302,7 @@ class Tracker:
 
     def ibis_view(
         self,
-        model: Type[SQLModel],
+        model: Type[BaseModel],
         key: Optional[str] = None,
     ) -> "IbisTable":
         """
@@ -4759,13 +4644,11 @@ class Tracker:
         self,
         uri: str,
         *,
-        table_path: Optional[str] = None,
-        array_path: Optional[str] = None,
+        member: Optional[str] = None,
     ) -> Optional[Artifact]:
         return self._artifact_queries.get_artifact_by_uri(
             uri,
-            table_path=table_path,
-            array_path=array_path,
+            member=member,
         )
 
     def find_artifacts(
@@ -5418,9 +5301,9 @@ class Tracker:
         artifacts = self.db.get_run_coupler_snapshot(
             run_id=run_id, phase=phase, must_exist=must_exist
         )
-        for artifact in artifacts.values():
-            set_tracker_ref(artifact, self)
-        return artifacts
+        return {
+            role: artifact.with_resolver(self) for role, artifact in artifacts.items()
+        }
 
     def diff_coupler_snapshots(
         self,
@@ -5842,13 +5725,13 @@ class Tracker:
     def load_input_bundle(self, run_id: str) -> dict[str, Artifact]:
         return self._history_service.load_input_bundle(run_id)
 
-    def _resolve_cached_artifact_abs_path(self, artifact: Artifact) -> None:
+    def _resolve_cached_artifact_abs_path(self, artifact: Artifact) -> Artifact:
         if artifact.abs_path:
-            return
+            return artifact
         try:
-            artifact.abs_path = self.resolve_uri(artifact.container_uri)
+            return artifact.with_abs_path(self.resolve_uri(artifact.uri))
         except Exception:
-            return
+            return artifact
 
     def _auto_capture_output_artifact(self, f_path: Path) -> Artifact | None:
         key = f_path.stem
@@ -5938,15 +5821,18 @@ class Tracker:
             return
 
         # 1. Update In-Memory
-        # Ensure 'meta' is a dict (SQLModel sometimes initializes defaults oddly depending on version)
         if self.current_consist.run.meta is None:
             self.current_consist.run.meta = {}
 
         normalized = normalize_json(kwargs)
-        for field in ("stage", "phase"):
-            value = normalized.get(field)
-            if isinstance(value, str) or value is None:
-                setattr(self.current_consist.run, field, value)
+        if "stage" in normalized:
+            stage_val = normalized.get("stage")
+            if isinstance(stage_val, str) or stage_val is None:
+                self.current_consist.run.stage = stage_val
+        if "phase" in normalized:
+            phase_val = normalized.get("phase")
+            if isinstance(phase_val, str) or phase_val is None:
+                self.current_consist.run.phase = phase_val
         self.current_consist.run.meta.update(normalized)
 
         # 2. Persist
@@ -6022,16 +5908,36 @@ class Tracker:
 
         from consist.models.artifact import merge_artifact_output_meta
 
+        updated_any = False
+        new_outputs: list[Artifact] = []
         for art in self.current_consist.outputs:
             if art.key == key:
-                existing_art_meta = dict(art.meta) if isinstance(art.meta, dict) else {}
-                art.meta = merge_artifact_output_meta(
+                existing_art_meta = (
+                    dict(art.meta) if isinstance(art.meta, Mapping) else {}
+                )
+                merged_meta = merge_artifact_output_meta(
                     existing_art_meta, normalized, merge=merge
                 )
-                entry.applied_object_ids.add(id(art))
+                updated_art = art.with_meta(merged_meta).with_resolver(self)
+                entry.applied_object_ids.add(id(updated_art))
                 if self.db is not None:
-                    self.db.update_artifact_meta(art, dict(art.meta), replace=not merge)
-                self._flush_json()
+                    self.db.update_artifact_meta(
+                        updated_art, dict(updated_art.meta), replace=not merge
+                    )
+                if (
+                    self._active_coupler is not None
+                    and key in self._active_coupler._artifacts
+                    and isinstance(self._active_coupler._artifacts[key], Artifact)
+                    and self._active_coupler._artifacts[key].id == updated_art.id
+                ):
+                    self._active_coupler._artifacts[key] = updated_art
+                new_outputs.append(updated_art)
+                updated_any = True
+            else:
+                new_outputs.append(art)
+        if updated_any:
+            self.current_consist.outputs = new_outputs
+            self._flush_json()
 
     set_pending_output_meta = set_output_meta
 
@@ -6210,67 +6116,86 @@ class Tracker:
             return None
         artifact = outputs.get(key) if key else next(iter(outputs.values()))
         if artifact:
-            self._resolve_cached_artifact_abs_path(artifact)
-            set_tracker_ref(artifact, self)
+            artifact = self._resolve_cached_artifact_abs_path(artifact).with_resolver(
+                self
+            )
+            if self.current_consist is not None:
+                self.current_consist.replace_artifact(artifact)
         return artifact
 
 
-_TRACKER_WRAPPER_DOCS = {
-    "get_artifact": TrackerArtifactQueryService.get_artifact,
-    "find_artifacts_with_same_content": (
-        TrackerArtifactQueryService.find_artifacts_with_same_content
+_TRACKER_WRAPPER_DOCS = (
+    (Tracker.get_artifact, TrackerArtifactQueryService.get_artifact),
+    (
+        Tracker.find_artifacts_with_same_content,
+        TrackerArtifactQueryService.find_artifacts_with_same_content,
     ),
-    "find_runs_producing_same_content": (
-        TrackerArtifactQueryService.find_runs_producing_same_content
+    (
+        Tracker.find_runs_producing_same_content,
+        TrackerArtifactQueryService.find_runs_producing_same_content,
     ),
-    "get_child_artifacts": TrackerArtifactQueryService.get_child_artifacts,
-    "get_parent_artifact": TrackerArtifactQueryService.get_parent_artifact,
-    "select_artifact_schema_for_artifact": (
-        TrackerArtifactQueryService.select_artifact_schema_for_artifact
+    (Tracker.get_child_artifacts, TrackerArtifactQueryService.get_child_artifacts),
+    (Tracker.get_parent_artifact, TrackerArtifactQueryService.get_parent_artifact),
+    (
+        Tracker.select_artifact_schema_for_artifact,
+        TrackerArtifactQueryService.select_artifact_schema_for_artifact,
     ),
-    "get_artifact_by_uri": TrackerArtifactQueryService.get_artifact_by_uri,
-    "find_artifacts": TrackerArtifactQueryService.find_artifacts,
-    "find_artifacts_by_params": TrackerArtifactQueryService.find_artifacts_by_params,
-    "get_artifact_kv": TrackerArtifactQueryService.get_artifact_kv,
-    "resolve_historical_path": TrackerHistoryService.resolve_historical_path,
-    "get_run": TrackerHistoryService.get_run,
-    "snapshot_db": TrackerHistoryService.snapshot_db,
-    "get_run_record": TrackerHistoryService.get_run_record,
-    "get_run_config": TrackerHistoryService.get_run_config,
-    "get_config_bundle": TrackerHistoryService.get_config_bundle,
-    "get_artifacts_for_run": TrackerHistoryService.get_artifacts_for_run,
-    "get_run_outputs": TrackerHistoryService.get_run_outputs,
-    "resolve_run_output_paths": TrackerHistoryService.resolve_run_output_paths,
-    "get_run_result": TrackerHistoryService.get_run_result,
-    "get_run_inputs": TrackerHistoryService.get_run_inputs,
-    "get_run_artifact": TrackerHistoryService.get_run_artifact,
-    "load_run_output": TrackerHistoryService.load_run_output,
-    "find_recent_completed_runs_for_model": (
-        TrackerHistoryService.find_recent_completed_runs_for_model
+    (Tracker.get_artifact_by_uri, TrackerArtifactQueryService.get_artifact_by_uri),
+    (Tracker.find_artifacts, TrackerArtifactQueryService.find_artifacts),
+    (
+        Tracker.find_artifacts_by_params,
+        TrackerArtifactQueryService.find_artifacts_by_params,
     ),
-    "history": TrackerHistoryService.history,
-    "load_input_bundle": TrackerHistoryService.load_input_bundle,
-    "set_artifact_recovery_roots": TrackerArchiveService.set_artifact_recovery_roots,
-    "archive_artifact": TrackerArchiveService.archive_artifact,
-    "register_artifact_recovery_copy": (
-        TrackerArchiveService.register_artifact_recovery_copy
+    (Tracker.get_artifact_kv, TrackerArtifactQueryService.get_artifact_kv),
+    (Tracker.resolve_historical_path, TrackerHistoryService.resolve_historical_path),
+    (Tracker.get_run, TrackerHistoryService.get_run),
+    (Tracker.snapshot_db, TrackerHistoryService.snapshot_db),
+    (Tracker.get_run_record, TrackerHistoryService.get_run_record),
+    (Tracker.get_run_config, TrackerHistoryService.get_run_config),
+    (Tracker.get_config_bundle, TrackerHistoryService.get_config_bundle),
+    (Tracker.get_artifacts_for_run, TrackerHistoryService.get_artifacts_for_run),
+    (Tracker.get_run_outputs, TrackerHistoryService.get_run_outputs),
+    (Tracker.resolve_run_output_paths, TrackerHistoryService.resolve_run_output_paths),
+    (Tracker.get_run_result, TrackerHistoryService.get_run_result),
+    (Tracker.get_run_inputs, TrackerHistoryService.get_run_inputs),
+    (Tracker.get_run_artifact, TrackerHistoryService.get_run_artifact),
+    (Tracker.load_run_output, TrackerHistoryService.load_run_output),
+    (
+        Tracker.find_recent_completed_runs_for_model,
+        TrackerHistoryService.find_recent_completed_runs_for_model,
     ),
-    "register_run_output_recovery_copies": (
-        TrackerArchiveService.register_run_output_recovery_copies
+    (Tracker.history, TrackerHistoryService.history),
+    (Tracker.load_input_bundle, TrackerHistoryService.load_input_bundle),
+    (
+        Tracker.set_artifact_recovery_roots,
+        TrackerArchiveService.set_artifact_recovery_roots,
     ),
-    "archive_run_output_files": TrackerArchiveService.archive_run_output_files,
-    "archive_run_outputs": TrackerArchiveService.archive_run_outputs,
-    "archive_current_run_outputs": TrackerArchiveService.archive_current_run_outputs,
-    "materialize": TrackerRecoveryService.materialize,
-    "stage_artifact": TrackerRecoveryService.stage_artifact,
-    "materialize_artifact": TrackerRecoveryService.materialize_artifact,
-    "stage_inputs": TrackerRecoveryService.stage_inputs,
-    "materialize_run_outputs": TrackerRecoveryService.materialize_run_outputs,
-    "hydrate_run_outputs": TrackerRecoveryService.hydrate_run_outputs,
-    "hydrate_run_outputs_to_destinations": (
-        TrackerRecoveryService.hydrate_run_outputs_to_destinations
+    (Tracker.archive_artifact, TrackerArchiveService.archive_artifact),
+    (
+        Tracker.register_artifact_recovery_copy,
+        TrackerArchiveService.register_artifact_recovery_copy,
     ),
-}
+    (
+        Tracker.register_run_output_recovery_copies,
+        TrackerArchiveService.register_run_output_recovery_copies,
+    ),
+    (Tracker.archive_run_output_files, TrackerArchiveService.archive_run_output_files),
+    (Tracker.archive_run_outputs, TrackerArchiveService.archive_run_outputs),
+    (
+        Tracker.archive_current_run_outputs,
+        TrackerArchiveService.archive_current_run_outputs,
+    ),
+    (Tracker.materialize, TrackerRecoveryService.materialize),
+    (Tracker.stage_artifact, TrackerRecoveryService.stage_artifact),
+    (Tracker.materialize_artifact, TrackerRecoveryService.materialize_artifact),
+    (Tracker.stage_inputs, TrackerRecoveryService.stage_inputs),
+    (Tracker.materialize_run_outputs, TrackerRecoveryService.materialize_run_outputs),
+    (Tracker.hydrate_run_outputs, TrackerRecoveryService.hydrate_run_outputs),
+    (
+        Tracker.hydrate_run_outputs_to_destinations,
+        TrackerRecoveryService.hydrate_run_outputs_to_destinations,
+    ),
+)
 
-for _name, _source in _TRACKER_WRAPPER_DOCS.items():
-    getattr(Tracker, _name).__doc__ = _source.__doc__
+for _target, _source in _TRACKER_WRAPPER_DOCS:
+    _target.__doc__ = _source.__doc__

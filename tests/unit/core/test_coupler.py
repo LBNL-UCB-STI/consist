@@ -11,15 +11,15 @@ from consist.core.noop import NoopRunContext
 from consist.models.artifact import Artifact
 
 
-def _artifact(*, key: str, container_uri: str = "workspace://dummy.csv") -> Artifact:
-    return Artifact(key=key, container_uri=container_uri, driver="csv")
+def _artifact(*, key: str, uri: str = "workspace://dummy.csv") -> Artifact:
+    return Artifact(key=key, uri=uri, driver="csv")
 
 
 def test_coupler_set_get_update_mapping_protocol() -> None:
     coupler = Coupler()
     art_a = _artifact(key="a")
-    art_b = _artifact(key="b", container_uri="workspace://b.csv")
-    art_c = _artifact(key="c", container_uri="workspace://c.csv")
+    art_b = _artifact(key="b", uri="workspace://b.csv")
+    art_c = _artifact(key="c", uri="workspace://c.csv")
 
     assert coupler.get("a") is None
     assert "a" not in coupler
@@ -54,7 +54,7 @@ def test_coupler_require_raises_with_available_keys() -> None:
 
 def test_coupler_path_requires_tracker() -> None:
     coupler = Coupler()
-    coupler.set("data", _artifact(key="data", container_uri="inputs://data.csv"))
+    coupler.set("data", _artifact(key="data", uri="inputs://data.csv"))
 
     with pytest.raises(RuntimeError) as excinfo:
         coupler.path("data")
@@ -62,7 +62,7 @@ def test_coupler_path_requires_tracker() -> None:
 
 
 def test_coupler_path_resolves_without_mutating_artifact() -> None:
-    art = _artifact(key="data", container_uri="inputs://data.csv")
+    art = _artifact(key="data", uri="inputs://data.csv")
     coupler = Coupler()
     coupler.tracker = type(
         "TrackerStub",
@@ -161,14 +161,14 @@ def test_coupler_set_from_artifact_with_real_artifact() -> None:
 
 
 def test_coupler_set_from_artifact_with_artifact_like() -> None:
-    """Test set_from_artifact with an artifact-like object (has .path and .container_uri)."""
+    """Test set_from_artifact with an artifact-like object (has .path and .uri)."""
     from consist.core.noop import NoopArtifact
 
     coupler = Coupler()
     noop_art = NoopArtifact(
         key="persons",
         path=Path("workspace/persons.parquet"),
-        container_uri="workspace://persons.parquet",
+        uri="workspace://persons.parquet",
     )
 
     result = coupler.set_from_artifact("persons", noop_art)
@@ -199,20 +199,18 @@ def test_coupler_set_from_artifact_with_string_path() -> None:
     assert coupler.get("data") == path_str
 
 
-def test_noop_run_context_preserves_table_and_array_paths() -> None:
+def test_noop_run_context_preserves_member() -> None:
     ctx = NoopRunContext()
     artifact = Artifact(
         key="members",
-        container_uri="workspace://members.h5",
+        uri="workspace://members.h5",
         driver="h5_table",
-        table_path="/tables/members",
-        array_path="/groups/members",
+        member="/tables/members",
     )
 
     noop_artifact = ctx.log_artifact(artifact, key="members")
 
-    assert noop_artifact.table_path == "/tables/members"
-    assert noop_artifact.array_path == "/groups/members"
+    assert noop_artifact.member == "/tables/members"
 
 
 def test_coupler_view_sets_namespaced_keys_and_preserves_global_access() -> None:
@@ -265,7 +263,7 @@ def test_coupler_view_path_resolves_tracker() -> None:
         {"resolve_uri": lambda _self, uri: "/abs/beam/data.csv"},
     )()
     beam = coupler.view("beam")
-    beam.set("data", _artifact(key="data", container_uri="inputs://beam/data.csv"))
+    beam.set("data", _artifact(key="data", uri="inputs://beam/data.csv"))
 
     assert beam.path("data") == Path("/abs/beam/data.csv")
 
@@ -335,7 +333,7 @@ def test_coupler_path_supports_path_string_and_artifact_like() -> None:
         NoopArtifact(
             key="as_noop",
             path=Path("workspace/persons.parquet"),
-            container_uri="workspace://persons.parquet",
+            uri="workspace://persons.parquet",
         ),
     )
 

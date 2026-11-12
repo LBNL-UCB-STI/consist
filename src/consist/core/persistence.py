@@ -46,6 +46,7 @@ from consist.core.db_snapshot import DatabaseSnapshotOps, snapshot_sidecar_path
 from consist.core.facet_common import flatten_facet_values
 from consist.core.provenance_writer import ProvenanceWriter
 from consist.core.run_ordering import recent_run_order_by_sql
+from consist.digest import Digest
 from consist.models.artifact import Artifact
 from consist.models.artifact_facet import ArtifactFacet
 from consist.models.artifact_kv import ArtifactKV
@@ -71,8 +72,6 @@ LIKE_ESCAPE_CHAR = "~"
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SAFE_JSON_KEY_RE = re.compile(r"^[A-Za-z0-9_.:/\-]+$")
 _RELATION_TOKEN_RE = re.compile(r"__consist_rel_([0-9a-f]{16})")
-_ARRAY_DRIVERS: frozenset[str] = frozenset({"zarr", "netcdf", "openmatrix", "omx"})
-_MEMBER_KIND_META_KEY = "_consist_member_kind"
 
 SchemaProfileSource = Literal["file", "duckdb", "user_provided"]
 _RowModelT = TypeVar("_RowModelT")
@@ -183,8 +182,28 @@ def _parse_optional_json_list_str(raw: Any) -> Optional[list[str]]:
     return None
 
 
+def _json_default(value: Any) -> Any:
+    if isinstance(value, (Path, os.PathLike)):
+        return os.fspath(value)
+    if isinstance(value, (uuid.UUID, Digest)):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, (set, frozenset)):
+        return sorted(str(item) for item in value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
 def _dump_json(obj: Any) -> str:
-    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return json.dumps(
+        obj,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=_json_default,
+    )
 
 
 def _dump_optional_json(obj: Any) -> Optional[str]:
@@ -519,49 +538,18 @@ def _hydrate_run_row(row: Sequence[Any]) -> Run:
     )
 
 
-def _extract_artifact_member(
-    artifact: Artifact,
-) -> tuple[Optional[str], dict[str, Any]]:
-    if artifact.table_path is not None and artifact.array_path is not None:
-        raise ValueError("Artifact cannot specify both table_path and array_path.")
-    meta = dict(artifact.meta) if isinstance(artifact.meta, Mapping) else {}
-    meta.pop(_MEMBER_KIND_META_KEY, None)
-    if artifact.array_path is not None:
-        if artifact.driver not in _ARRAY_DRIVERS:
-            meta[_MEMBER_KIND_META_KEY] = "array"
-        return artifact.array_path, meta
-    if artifact.table_path is not None:
-        if artifact.driver in _ARRAY_DRIVERS:
-            meta[_MEMBER_KIND_META_KEY] = "table"
-        return artifact.table_path, meta
-    return None, meta
-
-
 def _hydrate_artifact_row(row: Sequence[Any]) -> Artifact:
-    driver = str(row[3])
-    member = str(row[5]) if row[5] is not None else None
-    meta = _parse_json_dict(row[9])
-    member_kind = meta.pop(_MEMBER_KIND_META_KEY, None)
-    table_path: Optional[str] = None
-    array_path: Optional[str] = None
-    if member is not None:
-        if member_kind == "array" or (
-            member_kind != "table" and driver in _ARRAY_DRIVERS
-        ):
-            array_path = member
-        else:
-            table_path = member
     return Artifact(
         id=_coerce_uuid(row[0]),
         key=str(row[1]),
-        container_uri=str(row[2]),
-        driver=driver,
-        hash=str(row[4]) if row[4] is not None else None,
-        table_path=table_path,
-        array_path=array_path,
+        uri=str(row[2]),
+        driver=str(row[3]),
+        digest=str(row[4]) if row[4] is not None else None,
+        member=str(row[5]) if row[5] is not None else None,
         run_id=str(row[6]) if row[6] is not None else None,
         parent_artifact_id=_coerce_optional_uuid(row[7]),
-        meta=meta,
+        facet_id=str(row[8]) if row[8] is not None else None,
+        meta=_parse_json_dict(row[9]),
         created_at=_ensure_non_null_utc_dt(row[10]),
     )
 
@@ -1854,8 +1842,8 @@ class DatabaseManager:
     def _artifact_upsert_params(
         artifact: Artifact, *, explicit_facet_id: Optional[str] = None
     ) -> list[Any]:
-        member, meta_for_db = _extract_artifact_member(artifact)
-        facet_id = explicit_facet_id
+        meta_for_db = dict(artifact.meta) if isinstance(artifact.meta, Mapping) else {}
+        facet_id = explicit_facet_id or artifact.facet_id
         if facet_id is None:
             raw_fid = meta_for_db.get("artifact_facet_id")
             if isinstance(raw_fid, str) and raw_fid:
@@ -1863,10 +1851,10 @@ class DatabaseManager:
         return [
             _coerce_uuid(artifact.id),
             artifact.key,
-            artifact.container_uri,
+            artifact.uri,
             artifact.driver,
-            artifact.hash,
-            member,
+            str(artifact.digest) if artifact.digest is not None else None,
+            artifact.member,
             artifact.run_id,
             _coerce_optional_uuid(artifact.parent_artifact_id),
             facet_id,
@@ -1886,7 +1874,8 @@ class DatabaseManager:
         "digest = EXCLUDED.digest, member = EXCLUDED.member, run_id = EXCLUDED.run_id, "
         "parent_artifact_id = EXCLUDED.parent_artifact_id, "
         "facet_id = COALESCE(EXCLUDED.facet_id, artifact.facet_id), "
-        "meta = EXCLUDED.meta, created_at = EXCLUDED.created_at"
+        "meta = CAST(json_merge_patch(COALESCE(artifact.meta, '{}'), COALESCE(EXCLUDED.meta, '{}')) AS VARCHAR), "
+        "created_at = EXCLUDED.created_at"
     )
     _ARTIFACT_UPSERT_SQL = (
         f"{_ARTIFACT_INSERT_PREFIX} (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
@@ -2113,7 +2102,7 @@ class DatabaseManager:
     def update_artifact_meta(
         self,
         artifact: Artifact,
-        updates: Dict[str, Any],
+        updates: Mapping[str, Any],
         *,
         replace: bool = False,
         raise_on_error: bool = False,
@@ -2122,15 +2111,14 @@ class DatabaseManager:
         try:
             with self.transaction() as cur:
                 existing_row = cur.execute(
-                    "SELECT driver, meta FROM artifact WHERE id = ?",
+                    "SELECT meta FROM artifact WHERE id = ?",
                     [_coerce_uuid(artifact.id)],
                 ).fetchone()
                 base_meta = (
-                    _parse_json_dict(existing_row[1])
+                    _parse_json_dict(existing_row[0])
                     if existing_row is not None
                     else dict(artifact.meta or {})
                 )
-                base_meta.pop(_MEMBER_KIND_META_KEY, None)
                 current_meta = dict(artifact.meta or {})
                 if replace or updates is artifact.meta:
                     merged_meta = {} if replace else dict(current_meta)
@@ -2142,8 +2130,22 @@ class DatabaseManager:
                         merged_meta.pop(key, None)
                     else:
                         merged_meta[key] = value
-                artifact.meta = dict(merged_meta)
-                self._upsert_artifact_locked(cur, artifact)
+                updated_artifact = artifact.with_meta(merged_meta, merge=False)
+                if existing_row is not None:
+                    raw_fid = merged_meta.get("artifact_facet_id")
+                    resolved_fid = updated_artifact.facet_id or (
+                        raw_fid if isinstance(raw_fid, str) and raw_fid else None
+                    )
+                    cur.execute(
+                        "UPDATE artifact SET meta = ?, facet_id = COALESCE(?, facet_id) WHERE id = ?",
+                        [
+                            _dump_json(merged_meta),
+                            resolved_fid,
+                            _coerce_uuid(updated_artifact.id),
+                        ],
+                    )
+                else:
+                    self._upsert_artifact_locked(cur, updated_artifact)
             return True
         except Exception as exc:
             if raise_on_error or self._tx_depth > 0:
@@ -2256,7 +2258,7 @@ class DatabaseManager:
         cur: duckdb.DuckDBPyConnection,
         artifact: Artifact,
         meta_updates: Mapping[str, Any],
-    ) -> None:
+    ) -> Artifact:
         existing_row = cur.execute(
             "SELECT meta FROM artifact WHERE id = ?",
             [_coerce_uuid(artifact.id)],
@@ -2266,10 +2268,9 @@ class DatabaseManager:
             if existing_row is not None
             else dict(artifact.meta or {})
         )
-        current_meta.pop(_MEMBER_KIND_META_KEY, None)
         current_meta.update(artifact.meta or {})
         current_meta.update(meta_updates)
-        artifact.meta = dict(current_meta)
+        return artifact.with_meta(current_meta, merge=False)
 
     def upsert_config_facet(self, facet: ConfigFacet) -> None:
         """Upsert a ``ConfigFacet`` deduplicated by ``facet.id``."""
@@ -2305,17 +2306,22 @@ class DatabaseManager:
         *,
         artifact: Artifact,
         facet: ArtifactFacet,
-        meta_updates: Dict[str, Any],
+        meta_updates: Mapping[str, Any],
         kv_rows: Optional[List[ArtifactKV]] = None,
-    ) -> None:
+    ) -> Artifact:
         """Persist artifact facet, metadata updates, and optional KV index atomically."""
         with _DB_CALL_PROFILER.track("persist_artifact_facet_bundle"):
             with self.transaction() as cur:
-                self._merge_artifact_meta_locked(cur, artifact, meta_updates)
+                updated_artifact = self._merge_artifact_meta_locked(
+                    cur, artifact, meta_updates
+                ).with_facet_id(facet.id)
                 self._upsert_artifact_facet_locked(cur, facet)
-                self._upsert_artifact_locked(cur, artifact, explicit_facet_id=facet.id)
+                self._upsert_artifact_locked(
+                    cur, updated_artifact, explicit_facet_id=facet.id
+                )
                 if kv_rows:
                     self._replace_artifact_kv_locked(cur, kv_rows)
+                return updated_artifact
 
     def sync_artifact_with_facet_bundle(
         self,
@@ -2324,27 +2330,30 @@ class DatabaseManager:
         direction: str,
         *,
         facet: ArtifactFacet,
-        meta_updates: Dict[str, Any],
+        meta_updates: Mapping[str, Any],
         kv_rows: Optional[List[ArtifactKV]] = None,
-    ) -> None:
+    ) -> Artifact:
         """Upsert an Artifact, its run link, and its facet bundle in one transaction."""
         with _DB_CALL_PROFILER.track("sync_artifact_with_facet_bundle"):
             with self.transaction() as cur:
-                current_meta = dict(artifact.meta or {})
-                current_meta.update(meta_updates)
-                artifact.meta = current_meta
+                updated_artifact = artifact.with_meta(
+                    meta_updates, merge=True
+                ).with_facet_id(facet.id)
 
                 self._upsert_artifact_facet_locked(cur, facet)
-                self._upsert_artifact_locked(cur, artifact, explicit_facet_id=facet.id)
+                self._upsert_artifact_locked(
+                    cur, updated_artifact, explicit_facet_id=facet.id
+                )
                 self._link_artifacts_locked(
                     cur,
                     run_id=run_id,
-                    artifact_ids=[artifact.id],
+                    artifact_ids=[updated_artifact.id],
                     direction=direction,
-                    roles_by_id={artifact.id: artifact.key},
+                    roles_by_id={updated_artifact.id: updated_artifact.key},
                 )
                 if kv_rows:
                     self._replace_artifact_kv_locked(cur, kv_rows)
+                return updated_artifact
 
     def insert_run_config_kv_bulk(self, rows: List[RunConfigKV]) -> None:
         """Bulk insert ``RunConfigKV`` rows via ``executemany``."""
@@ -2507,30 +2516,36 @@ class DatabaseManager:
         schema: ArtifactSchema,
         fields: List[ArtifactSchemaField],
         observation: ArtifactSchemaObservation,
-        meta_updates: Dict[str, Any],
+        meta_updates: Mapping[str, Any],
         relations: Optional[List[ArtifactSchemaRelation]] = None,
-    ) -> None:
+    ) -> Artifact:
         """Persist schema rows, observation, and artifact metadata in one transaction."""
         with _DB_CALL_PROFILER.track("persist_artifact_schema_profile"):
             with self.transaction() as cur:
-                self._merge_artifact_meta_locked(cur, artifact, meta_updates)
+                updated_artifact = self._merge_artifact_meta_locked(
+                    cur, artifact, meta_updates
+                )
                 self._upsert_schema_rows_locked(cur, schema, fields, relations)
                 self._insert_schema_observation_locked(cur, observation)
-                self._upsert_artifact_locked(cur, artifact)
+                self._upsert_artifact_locked(cur, updated_artifact)
+                return updated_artifact
 
     def persist_artifact_schema_observation_bundle(
         self,
         *,
         artifact: Artifact,
         observation: ArtifactSchemaObservation,
-        meta_updates: Dict[str, Any],
-    ) -> None:
+        meta_updates: Mapping[str, Any],
+    ) -> Artifact:
         """Persist a schema observation plus artifact metadata in one transaction."""
         with _DB_CALL_PROFILER.track("persist_artifact_schema_observation_bundle"):
             with self.transaction() as cur:
-                self._merge_artifact_meta_locked(cur, artifact, meta_updates)
+                updated_artifact = self._merge_artifact_meta_locked(
+                    cur, artifact, meta_updates
+                )
                 self._insert_schema_observation_locked(cur, observation)
-                self._upsert_artifact_locked(cur, artifact)
+                self._upsert_artifact_locked(cur, updated_artifact)
+                return updated_artifact
 
     def insert_artifact_schema_observation(
         self, observation: ArtifactSchemaObservation
@@ -2865,18 +2880,10 @@ class DatabaseManager:
         uri: str,
         run_id: Optional[str] = None,
         driver: Optional[str] = None,
-        table_path: Optional[str] = None,
-        array_path: Optional[str] = None,
+        member: Optional[str] = None,
         include_inputs: bool = False,
     ) -> Optional[Artifact]:
         """Find the most recent artifact recorded at ``uri``."""
-        if (
-            table_path is not None
-            and array_path is not None
-            and table_path != array_path
-        ):
-            return None
-
         clauses: list[str] = ["a.uri = ?"]
         params: list[Any] = [uri]
         if not include_inputs:
@@ -2887,43 +2894,31 @@ class DatabaseManager:
         if driver is not None:
             clauses.append("a.driver = ?")
             params.append(driver)
-        requested_member = table_path if table_path is not None else array_path
-        if requested_member is not None:
+        if member is not None:
             clauses.append("a.member = ?")
-            params.append(requested_member)
+            params.append(member)
 
         with _DB_CALL_PROFILER.track("find_latest_artifact_at_uri"):
-            rows = self.fetchall(
+            row = self.fetchone(
                 f"SELECT {_ARTIFACT_SELECT_COLS} FROM artifact a "
                 f"WHERE {' AND '.join(clauses)} "
-                "ORDER BY a.created_at DESC, a.id DESC",
+                "ORDER BY a.created_at DESC, a.id DESC LIMIT 1",
                 params,
             )
-        for row in rows:
-            art = _hydrate_artifact_row(row)
-            if table_path is not None and art.table_path != table_path:
-                continue
-            if array_path is not None and art.array_path != array_path:
-                continue
-            return art
-        return None
+        return _hydrate_artifact_row(row) if row is not None else None
 
     def find_latest_artifacts_at_uris(
         self,
-        lookups: Sequence[Tuple[str, Optional[str], Optional[str], Optional[str]]],
-    ) -> Dict[
-        Tuple[str, Optional[str], Optional[str], Optional[str]], Optional[Artifact]
-    ]:
-        """Bulk variant of produced-artifact URI lookup."""
+        lookups: Sequence[Tuple[str, Optional[str], Optional[str]]],
+    ) -> Dict[Tuple[str, Optional[str], Optional[str]], Optional[Artifact]]:
+        """Bulk variant of produced-artifact URI lookup keyed by ``(uri, driver, member)``."""
         if not lookups:
             return {}
         unique_lookups = list(dict.fromkeys(lookups))
-        results: Dict[
-            Tuple[str, Optional[str], Optional[str], Optional[str]], Optional[Artifact]
-        ] = {lookup: None for lookup in unique_lookups}
-        lookups_by_uri: Dict[
-            str, List[Tuple[str, Optional[str], Optional[str], Optional[str]]]
-        ] = {}
+        results: Dict[Tuple[str, Optional[str], Optional[str]], Optional[Artifact]] = {
+            lookup: None for lookup in unique_lookups
+        }
+        lookups_by_uri: Dict[str, List[Tuple[str, Optional[str], Optional[str]]]] = {}
         for lookup in unique_lookups:
             lookups_by_uri.setdefault(lookup[0], []).append(lookup)
 
@@ -2938,18 +2933,16 @@ class DatabaseManager:
             )
         for row in rows:
             art = _hydrate_artifact_row(row)
-            candidates = lookups_by_uri.get(art.container_uri, [])
+            candidates = lookups_by_uri.get(art.uri, [])
             for lookup in candidates:
                 if results[lookup] is not None:
                     continue
-                _, l_driver, l_table, l_array = lookup
+                _, l_driver, l_member = lookup
                 if l_driver is not None and art.driver != l_driver:
                     continue
-                if l_table is not None and art.table_path != l_table:
+                if l_member is not None and art.member != l_member:
                     continue
-                if l_array is not None and art.array_path != l_array:
-                    continue
-                results[lookup] = art.model_copy(deep=True)
+                results[lookup] = art
         return results
 
     def find_latest_artifact_by_hash(
@@ -2987,9 +2980,10 @@ class DatabaseManager:
         params: list[Any] = []
         if content_identity:
             subclauses.append(
-                f"json_extract_string({alias}.meta, '/content_identity') = ?"
+                f"({alias}.digest = ? "
+                f"OR json_extract_string({alias}.meta, '/content_identity') = ?)"
             )
-            params.append(content_identity)
+            params.extend([content_identity, content_identity])
         if digest and driver:
             subclauses.append(f"({alias}.digest = ? AND {alias}.driver = ?)")
             params.extend([digest, driver])
@@ -3297,13 +3291,26 @@ class DatabaseManager:
                 results.append(art)
         return results
 
+    def get_artifact_meta_by_id(
+        self, artifact_id: uuid.UUID | str
+    ) -> Optional[dict[str, Any]]:
+        """Fetch raw ``artifact.meta`` by UUID without hydrating a full ``Artifact``."""
+        try:
+            aid = _coerce_uuid(artifact_id)
+        except ValueError:
+            return None
+        row = self.fetchone("SELECT meta FROM artifact WHERE id = ?", [aid])
+        if row is None:
+            return None
+        return _parse_json_dict(row[0])
+
     def get_parent_artifact(self, child_id: uuid.UUID) -> Optional[Artifact]:
         """Return the parent artifact for ``child_id`` if recorded."""
         child = self.get_artifact(_coerce_uuid(child_id))
         if child is None:
             return None
         parent_id = child.parent_artifact_id
-        if parent_id is None and isinstance(child.meta, dict):
+        if parent_id is None and isinstance(child.meta, Mapping):
             raw_pid = child.meta.get("parent_id")
             if isinstance(raw_pid, str):
                 try:
@@ -3865,15 +3872,13 @@ class DatabaseManager:
         self,
         uri: str,
         run_id: Optional[str] = None,
-        table_path: Optional[str] = None,
-        array_path: Optional[str] = None,
+        member: Optional[str] = None,
     ) -> Optional[Artifact]:
         """Get the most recent artifact at ``uri`` (including input artifacts)."""
         return self.find_latest_artifact_at_uri(
             uri=uri,
             run_id=run_id,
-            table_path=table_path,
-            array_path=array_path,
+            member=member,
             include_inputs=True,
         )
 
@@ -4199,8 +4204,15 @@ class DatabaseManager:
         self, *, schema_model: Type[BaseModel], compatible: bool = True
     ) -> List[str]:
         """Resolve stored schema IDs matching a SQLModel/Pydantic class."""
-        target_table_name = (
-            optional_model_table_name(schema_model) or schema_model.__name__
+        explicit_table = optional_model_table_name(schema_model)
+        accepted_table_names = (
+            {explicit_table, explicit_table.lower()}
+            if explicit_table is not None
+            else {
+                schema_model.__name__,
+                schema_model.__name__.lower(),
+                model_table_name(schema_model),
+            }
         )
         model_fields = set(schema_model_user_columns(schema_model))
         if not model_fields:
@@ -4223,8 +4235,10 @@ class DatabaseManager:
                 if isinstance(summary.get("table_name"), str)
                 else None
             )
-            if candidate_table_name is not None and str(candidate_table_name) != str(
-                target_table_name
+            if (
+                candidate_table_name is not None
+                and str(candidate_table_name) not in accepted_table_names
+                and str(candidate_table_name).lower() not in accepted_table_names
             ):
                 continue
             candidate_fields = schema_fields_by_id.get(schema_id, set())
@@ -4408,17 +4422,10 @@ class DatabaseManager:
         placeholders = ", ".join("?" for _ in ids)
         with self.transaction() as cur:
             found_rows = cur.execute(
-                f"SELECT id, meta FROM artifact WHERE id IN ({placeholders})",
+                f"SELECT id FROM artifact WHERE id IN ({placeholders})",
                 ids,
             ).fetchall()
-            existing_member_kind: dict[uuid.UUID, Any] = {}
-            found_ids: set[uuid.UUID] = set()
-            for raw_id, raw_meta in found_rows:
-                aid = _coerce_uuid(raw_id)
-                found_ids.add(aid)
-                parsed_meta = _parse_json_dict(raw_meta)
-                if _MEMBER_KIND_META_KEY in parsed_meta:
-                    existing_member_kind[aid] = parsed_meta[_MEMBER_KIND_META_KEY]
+            found_ids: set[uuid.UUID] = {_coerce_uuid(r[0]) for r in found_rows}
             if require_all:
                 missing_ids = sorted(str(aid) for aid in set(ids) - found_ids)
                 if missing_ids:
@@ -4426,17 +4433,9 @@ class DatabaseManager:
                         "Artifacts were not found for recovery root update: "
                         + ", ".join(missing_ids)
                     )
-            batch: list[list[Any]] = []
-            for aid in ids:
-                if aid not in found_ids:
-                    continue
-                next_meta = dict(coerced[aid])
-                if (
-                    _MEMBER_KIND_META_KEY not in next_meta
-                    and aid in existing_member_kind
-                ):
-                    next_meta[_MEMBER_KIND_META_KEY] = existing_member_kind[aid]
-                batch.append([_dump_json(next_meta), aid])
+            batch: list[list[Any]] = [
+                [_dump_json(dict(coerced[aid])), aid] for aid in ids if aid in found_ids
+            ]
             if batch:
                 _execute_multirow_values(
                     cur,
@@ -4979,8 +4978,12 @@ class DatabaseManager:
             ra = right_artifacts.get(key)
             left_id = str(la.id) if (la is not None and la.id is not None) else None
             right_id = str(ra.id) if (ra is not None and ra.id is not None) else None
-            left_hash = la.hash if la is not None else None
-            right_hash = ra.hash if ra is not None else None
+            left_hash = (
+                str(la.digest) if (la is not None and la.digest is not None) else None
+            )
+            right_hash = (
+                str(ra.digest) if (ra is not None and ra.digest is not None) else None
+            )
             left_prod = la.run_id if la is not None else None
             right_prod = ra.run_id if ra is not None else None
 

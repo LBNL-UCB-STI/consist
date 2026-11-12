@@ -155,7 +155,6 @@ if TYPE_CHECKING:
     )
     from consist.core.resolved_binding import (
         AdmissionEvidence,
-        ArtifactIdentity,
         BoundArtifact,
         ResolvedBinding,
         ResolvedBindingBuilder,
@@ -172,6 +171,9 @@ if TYPE_CHECKING:
     from consist.core.workflow import (
         RestoredCouplerSnapshotResult,
         StepIdentity,
+    )
+    from consist.digest import (
+        Digest,
     )
     from consist.models.artifact import (
         ArchivedOutputs,
@@ -228,7 +230,6 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
         "ArchivedRunOutputFilesReport",
     ),
     "Artifact": ("consist.models.artifact", "Artifact"),
-    "ArtifactIdentity": ("consist.core.resolved_binding", "ArtifactIdentity"),
     "ArtifactLike": ("consist.protocols", "ArtifactLike"),
     "ArtifactRecoveryCopyRegistration": (
         "consist.core.materialize",
@@ -261,6 +262,7 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
         "consist.core.persistence",
         "DatabaseMigrationRequired",
     ),
+    "Digest": ("consist.digest", "Digest"),
     "DriverType": ("consist.types", "DriverType"),
     "EnumCapture": ("consist.types", "EnumCapture"),
     "ExecutionAttempt": ("consist.core.orchestration", "ExecutionAttempt"),
@@ -437,14 +439,12 @@ _DEPRECATED_TOP_LEVEL_EXPORTS: dict[str, tuple[str, str]] = {
         "consist.admission",
         "ARTIFACT_PROVENANCE_SCHEMA_VERSION",
     ),
-    "AdmissionIdentity": ("consist.admission", "AdmissionIdentity"),
     "AdmissionReference": ("consist.admission", "AdmissionReference"),
     "AdmissionReport": ("consist.admission", "AdmissionReport"),
     "ArrayCanonicalizationPolicy": ("consist.digest", "ArrayCanonicalizationPolicy"),
     "ArtifactProvenanceSidecar": ("consist.admission", "ArtifactProvenanceSidecar"),
     "DeclaredDigestExpectation": ("consist.admission", "DeclaredDigestExpectation"),
     "FLOAT32_MATRICES_V1_POLICY": ("consist.digest", "FLOAT32_MATRICES_V1_POLICY"),
-    "FileIdentity": ("consist.admission", "FileIdentity"),
     "GTFS_SCHEMAS": ("consist.gtfs", "GTFS_SCHEMAS"),
     "GTFS_SCHEMA_BY_TABLE_NAME": ("consist.gtfs", "GTFS_SCHEMA_BY_TABLE_NAME"),
     "GTFS_TABLE_NAMES": ("consist.gtfs", "GTFS_TABLE_NAMES"),
@@ -538,7 +538,6 @@ __all__ = [
     "ArchivedRunOutputFile",
     "ArchivedRunOutputFilesReport",
     "Artifact",
-    "ArtifactIdentity",
     "ArtifactLike",
     "ArtifactRecoveryCopyRegistration",
     "ArtifactSpec",
@@ -556,6 +555,7 @@ __all__ = [
     "Coupler",
     "CouplerSnapshotPhase",
     "DatabaseMigrationRequired",
+    "Digest",
     "DriverType",
     "EnumCapture",
     "ExecutionAttempt",

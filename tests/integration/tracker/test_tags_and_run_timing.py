@@ -33,7 +33,7 @@ def test_tags_and_run_timing(tracker: Tracker, tmp_path: Path):
         else tracker.last_run.inputs[0]
     )
     print(f"Artifact key: {output_art.key}")
-    print(f"Artifact hash: {output_art.hash}")
+    print(f"Artifact digest: {output_art.digest}")
 
     # Check history includes new fields
     df = tracker.history(limit=5)

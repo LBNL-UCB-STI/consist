@@ -242,10 +242,12 @@ def test_log_input_force_override_preserves_existing_artifact(tracker, dummy_inp
 
     assert reused.id != produced.id
     assert reused.run_id is None
-    assert reused.hash == "override_hash"
+    assert reused.digest is not None
+    assert reused.digest.scheme == "caller_supplied_v1:sha256"
+    assert reused.meta.get("caller_supplied_hash") == "override_hash"
     persisted = tracker.db.get_artifact(produced.id)
     assert persisted is not None
-    assert persisted.hash == produced.hash
+    assert persisted.digest == produced.digest
     assert persisted.meta["hash_semantics"]["source"] == "computed_full"
 
     with tracker.start_run(
@@ -284,7 +286,7 @@ def test_log_input_override_ignored_when_hash_differs(tracker, dummy_input, capl
         )
 
     assert reused.id == produced.id
-    assert reused.hash == produced.hash
+    assert reused.digest == produced.digest
     assert any(
         "Ignoring content_hash override" in record.message for record in caplog.records
     )
@@ -323,7 +325,7 @@ def test_log_output_reuses_same_uri_when_enabled(tracker, tmp_path, caplog):
 
     assert reused.id != first.id
     assert reused.run_id == "run_output_reuse_same_uri_b"
-    assert reused.hash == first.hash
+    assert reused.digest == first.digest
     assert reused.meta.get("content_identity") == first.meta.get("content_identity")
     same_content = tracker.find_artifacts_with_same_content(reused.id)
     assert {artifact.id for artifact in same_content} == {first.id, reused.id}

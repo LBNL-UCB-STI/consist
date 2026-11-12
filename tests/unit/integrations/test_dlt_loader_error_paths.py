@@ -15,9 +15,9 @@ class _StrictSchema(SQLModel):
 def _artifact(*, key: str, driver: str, table_path: str | None = None) -> Artifact:
     return Artifact(
         key=key,
-        container_uri=f"./{key}",
+        uri=f"./{key}",
         driver=driver,
-        table_path=table_path,
+        member=table_path,
     )
 
 
@@ -146,7 +146,7 @@ def test_ingest_artifact_h5_table_driver_requires_table_path(
     artifact = _artifact(key="h5_rows", driver="h5_table", table_path=None)
     run_context = _run_context()
 
-    with pytest.raises(ValueError, match="missing 'table_path'"):
+    with pytest.raises(ValueError, match="missing 'member'"):
         dlt_loader.ingest_artifact(
             artifact=artifact,
             run_context=run_context,
@@ -211,8 +211,7 @@ def test_ingest_artifact_geoparquet_wkt_mode_is_rejected(
     artifact = _artifact(
         key="spatial_rows",
         driver="geoparquet",
-    )
-    artifact.meta["spatial_ingest_mode"] = "wkt"
+    ).with_meta({"spatial_ingest_mode": "wkt"})
 
     with pytest.raises(ValueError, match="GeoParquet does not support"):
         dlt_loader.ingest_artifact(

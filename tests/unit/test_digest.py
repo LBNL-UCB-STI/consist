@@ -481,7 +481,7 @@ def test_matrix_canonicalization_and_digest() -> None:
     )
     assert len(matrices_hash) == 64
     norm_id = normalize_logical_matrices_identity(matrices_hash)
-    assert norm_id.startswith("sha256:logical_matrices:")
+    assert norm_id.startswith("logical_matrices_canonical_v1:sha256:")
 
 
 def test_identity_manager_canonical_json_methods_deprecated() -> None:

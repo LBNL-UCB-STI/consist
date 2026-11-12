@@ -1088,7 +1088,7 @@ def test_cache_hydration_policies_end_to_end(
     # Inputs-missing should raise for ingested artifacts with unsupported drivers.
     bad_artifact = Artifact(
         key="unsupported",
-        container_uri="./outputs/unsupported.txt",
+        uri="./outputs/unsupported.txt",
         driver="txt",
         run_id=cached_a.run_id,
         meta={"is_ingested": True},
@@ -1195,13 +1195,13 @@ def test_build_materialize_items_and_materialize_from_sources(tmp_path: Path) ->
 
     artifact = Artifact(
         key="alpha",
-        container_uri="./source.txt",
+        uri="./source.txt",
         driver="txt",
         meta={},
     )
     missing_artifact = Artifact(
         key="missing",
-        container_uri="./missing.txt",
+        uri="./missing.txt",
         driver="txt",
         meta={},
     )
@@ -1507,7 +1507,7 @@ def test_inputs_missing_validation_preserves_existing_destination_without_hash(
         source = out_dir / "a.csv"
         source.write_text("value\nexpected\n", encoding="utf-8")
         artifact = tracker_a.log_artifact(source, key="a", direction="output")
-    artifact.hash = None
+    artifact = artifact.with_digest(None)
 
     tracker_b = Tracker(run_dir=tmp_path / "runs_b", db_path=db_path)
     _init_core_tables(tracker_b)
@@ -1742,7 +1742,7 @@ def test_hydrate_cache_hit_outputs_records_materialized_outputs_meta(
 
     artifact = Artifact(
         key="a",
-        container_uri="./outputs/a.csv",
+        uri="./outputs/a.csv",
         driver="csv",
         run_id="cached",
         meta={},
@@ -2195,7 +2195,7 @@ def test_outputs_all_delegates_to_run_materialization_with_preserved_layout(
     )
     artifact = Artifact(
         key="network",
-        container_uri="outputs://beam/network.parquet",
+        uri="outputs://beam/network.parquet",
         driver="parquet",
         run_id="producer",
         meta={"mount_root": str(tmp_path / "historical_mount")},
@@ -2311,7 +2311,7 @@ def test_outputs_all_legacy_fallback_uses_artifact_recovery_roots(
 
     artifact = Artifact(
         key="a",
-        container_uri="./outputs/a.csv",
+        uri="./outputs/a.csv",
         driver="csv",
         run_id=None,
         meta={"recovery_roots": [str(archive_root)]},
@@ -2367,7 +2367,7 @@ def test_outputs_all_legacy_fallback_raises_on_missing_source(
     tracker = Tracker(run_dir=tmp_path / "active_runs", allow_external_paths=True)
     artifact = Artifact(
         key="a",
-        container_uri="./outputs/a.csv",
+        uri="./outputs/a.csv",
         driver="csv",
         run_id=None,
         meta={},
@@ -2423,7 +2423,7 @@ def test_outputs_requested_delegates_via_staging_and_warns_on_missing_keys(
     tracker = Tracker(run_dir=tmp_path / "active_runs", allow_external_paths=True)
     artifact = Artifact(
         key="a",
-        container_uri="./outputs/a.csv",
+        uri="./outputs/a.csv",
         driver="csv",
         run_id="producer",
         meta={},
@@ -2526,7 +2526,7 @@ def test_outputs_requested_source_root_does_not_warn_and_continue_on_failure(
     tracker = Tracker(run_dir=tmp_path / "active_runs", allow_external_paths=True)
     artifact = Artifact(
         key="a",
-        container_uri="./outputs/a.csv",
+        uri="./outputs/a.csv",
         driver="csv",
         run_id="producer",
         meta={},
@@ -2586,7 +2586,7 @@ def test_outputs_requested_legacy_fallback_warns_on_missing_source(
     tracker = Tracker(run_dir=tmp_path / "active_runs", allow_external_paths=True)
     artifact = Artifact(
         key="a",
-        container_uri="./outputs/a.csv",
+        uri="./outputs/a.csv",
         driver="csv",
         run_id=None,
         meta={},

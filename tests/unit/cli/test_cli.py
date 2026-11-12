@@ -14,6 +14,7 @@ import typer
 from typer.testing import CliRunner
 
 from consist import Tracker
+from consist.digest import Digest
 from consist.models.artifact import Artifact
 from consist.cli import (
     ConsistShell,
@@ -64,10 +65,10 @@ def mock_data(tmp_path):
     art1 = Artifact(
         id=uuid.uuid4(),
         key="raw_data",
-        container_uri=str(csv_path),
+        uri=str(csv_path),
         driver="csv",
         run_id="run1",
-        hash="abc",
+        digest=Digest("sha256:file", "a1" * 32),
     )
     link1 = RunArtifactLink(run_id="run1", artifact_id=art1.id, direction="output")
 
@@ -85,17 +86,17 @@ def mock_data(tmp_path):
     art2 = Artifact(
         id=uuid.uuid4(),
         key="params",
-        container_uri="config/params.json",
+        uri="config/params.json",
         driver="json",
-        hash="def",
+        digest=Digest("sha256:file", "b2" * 32),
     )
     art3 = Artifact(
         id=uuid.uuid4(),
         key="processed_data",
-        container_uri="data/processed.parquet",
+        uri="data/processed.parquet",
         driver="parquet",
         run_id="run2",
-        hash="ghi",
+        digest=Digest("sha256:file", "c3" * 32),
     )
     link2_in1 = RunArtifactLink(run_id="run2", artifact_id=art1.id, direction="input")
     link2_in2 = RunArtifactLink(run_id="run2", artifact_id=art2.id, direction="input")
@@ -115,10 +116,10 @@ def mock_data(tmp_path):
     art4 = Artifact(
         id=uuid.uuid4(),
         key="more_raw_data",
-        container_uri="data/more_raw.csv",
+        uri="data/more_raw.csv",
         driver="csv",
         run_id="run3",
-        hash="jkl",
+        digest=Digest("sha256:file", "d4" * 32),
     )
     link3 = RunArtifactLink(run_id="run3", artifact_id=art4.id, direction="output")
 
@@ -931,28 +932,28 @@ def test_validate_paginates_artifacts(tmp_path, monkeypatch):
         Artifact(
             id=uuid.uuid4(),
             key="present",
-            container_uri=str(present_path),
+            uri=str(present_path),
             driver="txt",
             run_id="run_a",
-            hash="hash_present",
+            digest=Digest("sha256:file", "e5" * 32),
             created_at=datetime(2025, 1, 1, 0, 0),
         ),
         Artifact(
             id=uuid.uuid4(),
             key="missing",
-            container_uri=str(missing_path),
+            uri=str(missing_path),
             driver="txt",
             run_id="run_b",
-            hash="hash_missing",
+            digest=Digest("sha256:file", "f6" * 32),
             created_at=datetime(2025, 1, 1, 0, 1),
         ),
         Artifact(
             id=uuid.uuid4(),
             key="present_2",
-            container_uri=str(present_path_2),
+            uri=str(present_path_2),
             driver="txt",
             run_id="run_c",
-            hash="hash_present_2",
+            digest=Digest("sha256:file", "17" * 32),
             created_at=datetime(2025, 1, 1, 0, 2),
         ),
     ]
@@ -1019,10 +1020,10 @@ def _seed_db_for_maintenance_cli(db_path: Path) -> None:
         art = Artifact(
             id=artifact_id,
             key="cli_artifact",
-            container_uri="outputs://cli_artifact.parquet",
+            uri="outputs://cli_artifact.parquet",
             driver="parquet",
             run_id="cli_run",
-            hash="cli_hash_1",
+            digest=Digest("sha256:file", "28" * 32),
         )
         db.sync_artifact(art, run_id="cli_run", direction="output")
     finally:
@@ -1583,18 +1584,18 @@ def test_db_export_no_children_excludes_descendants(tmp_path, monkeypatch):
         parent_art = Artifact(
             id=parent_artifact_id,
             key="parent_art",
-            container_uri="outputs://parent.parquet",
+            uri="outputs://parent.parquet",
             driver="parquet",
             run_id="parent_run",
-            hash="parent_hash",
+            digest=Digest("sha256:file", "39" * 32),
         )
         child_art = Artifact(
             id=child_artifact_id,
             key="child_art",
-            container_uri="outputs://child.parquet",
+            uri="outputs://child.parquet",
             driver="parquet",
             run_id="child_run",
-            hash="child_hash",
+            digest=Digest("sha256:file", "4a" * 32),
         )
         db.sync_artifact(parent_art, run_id="parent_run", direction="output")
         db.sync_artifact(child_art, run_id="child_run", direction="output")

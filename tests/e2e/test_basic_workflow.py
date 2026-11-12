@@ -184,6 +184,9 @@ def test_dual_write_workflow(tracker: Tracker, run_dir: Path):
     # Schema persistence: ingest an artifact and verify schema discovery is persisted.
     assert features_artifact is not None
     tracker.ingest(features_artifact)
+    features_artifact = tracker.get_artifacts_for_run(transform_run_id).outputs[
+        "features"
+    ]
     assert "schema_id" in features_artifact.meta
     assert "schema_summary" in features_artifact.meta
 
@@ -399,7 +402,7 @@ def test_resume_after_failure_uses_cache_and_ghost_mode(
         execution_options=ExecutionOptions(runtime_kwargs={"rows": 8}),
     )
     prepared_artifact_2 = prepared_result_2.outputs["prepared_data"]
-    assert prepared_artifact_2.container_uri == prepared_artifact.container_uri
+    assert prepared_artifact_2.uri == prepared_artifact.uri
 
     model_result: RunResult = tracker.run(
         fn=train_model,

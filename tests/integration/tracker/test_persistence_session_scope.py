@@ -216,16 +216,16 @@ def test_pre_action_v2_rows_remain_queryable_without_identity_rewrites(tmp_path)
     )
     prepared = Artifact(
         key="prepared",
-        container_uri="outputs://prepared.csv",
+        uri="outputs://prepared.csv",
         driver="csv",
-        hash="legacy_prepared_hash",
+        digest=None,
         run_id=producer.id,
     )
     report = Artifact(
         key="report",
-        container_uri="outputs://report.csv",
+        uri="outputs://report.csv",
         driver="csv",
-        hash="legacy_report_hash",
+        digest=None,
         run_id=consumer.id,
     )
     consumer_id = consumer.id

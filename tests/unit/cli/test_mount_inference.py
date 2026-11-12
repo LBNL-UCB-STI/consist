@@ -30,7 +30,7 @@ def test_cli_infers_mounts_from_run_metadata(tmp_path: Path) -> None:
     _ensure_tracker_mounts_for_artifact(inspector, artifact, trust_db=True)
 
     assert inspector.mounts["inputs"] == str(inputs_root.resolve())
-    assert inspector.resolve_uri(artifact.container_uri) == str(data_path.resolve())
+    assert inspector.resolve_uri(artifact.uri) == str(data_path.resolve())
 
 
 def test_shell_preview_run_dir_overrides_trusted_stale_workspace_mount(
@@ -64,7 +64,7 @@ def test_shell_preview_run_dir_overrides_trusted_stale_workspace_mount(
 
     _ensure_tracker_mounts_for_artifact(inspector, artifact, trust_db=True)
     assert inspector.mounts["workspace"] == str(archive_run_dir.resolve())
-    assert inspector.resolve_uri(artifact.container_uri) == str(archive_file.resolve())
+    assert inspector.resolve_uri(artifact.uri) == str(archive_file.resolve())
 
     with (
         patch("consist.cli.Path.home", return_value=tmp_path),
@@ -119,7 +119,7 @@ def test_archive_mounts_resolve_non_workspace_scheme_from_run_dir(
 
     artifact = producer.get_artifact(logged.id)
     assert artifact is not None
-    assert artifact.container_uri == "beam_input://seattle/lccm-long.csv"
+    assert artifact.uri == "beam_input://seattle/lccm-long.csv"
 
     stale_file.unlink()
     inspector = get_tracker(str(db_path), run_dir=str(archive_run_dir))
@@ -134,7 +134,7 @@ def test_archive_mounts_resolve_non_workspace_scheme_from_run_dir(
     )
 
     assert inspector.mounts["beam_input"] == str(archive_beam_input.resolve())
-    assert inspector.resolve_uri(artifact.container_uri) == str(archive_file.resolve())
+    assert inspector.resolve_uri(artifact.uri) == str(archive_file.resolve())
 
 
 def test_explicit_non_workspace_mount_overrides_archive_mount(
@@ -272,7 +272,7 @@ def test_scenario_linked_artifact_uses_preferred_run_for_mount_inference(
     )
 
     assert inspector.mounts["data"] == str(data_root.resolve())
-    assert inspector.resolve_uri(artifact.container_uri) == str(data_file.resolve())
+    assert inspector.resolve_uri(artifact.uri) == str(data_file.resolve())
 
 
 def test_ambiguous_scenario_linked_artifact_uses_recorded_mount_root(
@@ -302,7 +302,7 @@ def test_ambiguous_scenario_linked_artifact_uses_recorded_mount_root(
     _ensure_tracker_mounts_for_artifact(inspector, artifact, trust_db=True)
 
     assert inspector.mounts["data"] == str(data_root.resolve())
-    assert inspector.resolve_uri(artifact.container_uri) == str(data_file.resolve())
+    assert inspector.resolve_uri(artifact.uri) == str(data_file.resolve())
 
 
 def test_explicit_workspace_mount_overrides_run_dir_workspace_mount(

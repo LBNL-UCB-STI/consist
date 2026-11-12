@@ -83,10 +83,9 @@ def test_loader_priority_and_ghost_mode(tracker: Tracker):
     # Create a fake artifact that exists nowhere
     fake_artifact = Artifact(
         key="fake",
-        container_uri="inputs://fake.csv",
+        uri="inputs://fake.csv",
         driver="csv",
-    )
-    fake_artifact.abs_path = str(tracker.run_dir / "fake.csv")
+    ).with_abs_path(str(tracker.run_dir / "fake.csv"))
 
     with pytest.raises(FileNotFoundError):
         load(fake_artifact, tracker=tracker)
@@ -189,7 +188,7 @@ def test_loader_db_fallback_uses_dlt_table_name(tracker: Tracker):
     artifact = Artifact(
         id=artifact_id,
         key="fallback_key",
-        container_uri=str(tracker.run_dir / "missing.csv"),
+        uri=str(tracker.run_dir / "missing.csv"),
         driver="csv",
         meta={"is_ingested": True, "dlt_table_name": table_name},
     )

@@ -123,7 +123,9 @@ def test_shell_preview_picker_selects_artifact_in_tty_mode(tmp_path) -> None:
         key="artifact-one",
         driver="csv",
         run_id=None,
-        container_uri="inputs://data/file.csv",
+        uri="inputs://data/file.csv",
+        member=None,
+        digest=None,
         meta={},
     )
 
@@ -331,13 +333,13 @@ def test_shell_hash_lookup_reports_ambiguity_with_candidates(tmp_path, capsys) -
 
     matches = [
         SimpleNamespace(
-            hash="deadbeef001",
+            digest="deadbeef001",
             key="trips_2018_it0",
             id="artifact-1",
             run_id="run-a",
         ),
         SimpleNamespace(
-            hash="deadbeef002",
+            digest="deadbeef002",
             key="trips_2018_it1",
             id="artifact-2",
             run_id="run-a",
@@ -667,7 +669,9 @@ def test_shell_preview_accepts_cached_artifact_ref(tmp_path) -> None:
         key="artifact-key",
         driver="csv",
         run_id=None,
-        container_uri="inputs://data/file.csv",
+        uri="inputs://data/file.csv",
+        member=None,
+        digest=None,
         meta={},
     )
     with (
@@ -693,7 +697,9 @@ def test_shell_preview_uses_cached_artifact_run_context(tmp_path) -> None:
         key="artifact-key",
         driver="csv",
         run_id="run-123",
-        container_uri="data://outputs/file.csv",
+        uri="data://outputs/file.csv",
+        member=None,
+        digest=None,
         meta={},
     )
     with (
@@ -730,7 +736,9 @@ def test_shell_schema_profile_uses_cached_artifact_run_context(tmp_path) -> None
         key="artifact-key",
         driver="csv",
         run_id="run-123",
-        container_uri="data://outputs/file.csv",
+        uri="data://outputs/file.csv",
+        member=None,
+        digest=None,
         meta={},
     )
     tracker.db = None
@@ -768,7 +776,9 @@ def test_shell_preview_renders_artifact_set_without_loading_parent(tmp_path) -> 
         key="annual",
         driver="artifact_set",
         run_id="run-1",
-        container_uri="./outputs/annual",
+        uri="./outputs/annual",
+        member=None,
+        digest=None,
         meta={"artifact_set": True},
     )
     tracker.get_artifact.return_value = parent
@@ -795,7 +805,9 @@ def test_shell_members_lists_artifact_set_children(tmp_path, capsys) -> None:
         key="annual",
         driver="artifact_set",
         run_id="run-1",
-        container_uri="./outputs/annual",
+        uri="./outputs/annual",
+        member=None,
+        digest=None,
         meta={"artifact_set": True},
     )
     tracker.get_artifact.return_value = parent
@@ -826,7 +838,9 @@ def test_shell_manifest_previews_artifact_set_manifest(tmp_path) -> None:
         key="annual",
         driver="artifact_set",
         run_id="run-1",
-        container_uri="./outputs/annual",
+        uri="./outputs/annual",
+        member=None,
+        digest=None,
         meta={"artifact_set": True, "manifest_artifact_id": "manifest-id"},
     )
     manifest = SimpleNamespace(
@@ -834,7 +848,9 @@ def test_shell_manifest_previews_artifact_set_manifest(tmp_path) -> None:
         key="annual_manifest",
         driver="json",
         run_id="run-1",
-        container_uri="./outputs/annual.output_set_manifest.json",
+        uri="./outputs/annual.output_set_manifest.json",
+        member=None,
+        digest=None,
         meta={"output_set_manifest": True},
     )
     tracker.get_artifact.side_effect = [parent, manifest]

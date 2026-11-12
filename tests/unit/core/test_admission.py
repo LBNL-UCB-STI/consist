@@ -14,7 +14,6 @@ from consist.core.admission import (
     AdmissionReference,
     AdmissionReport,
     DeclaredDigestExpectation,
-    FileIdentity,
     check_admission_reference,
     check_admission_reference_expected_identity,
     check_artifact_identity,
@@ -22,6 +21,7 @@ from consist.core.admission import (
     compare_path_to_identity,
     hash_semantics_for_new_artifact,
 )
+from consist.digest import Digest
 from consist.models.artifact import Artifact
 
 
@@ -58,11 +58,17 @@ def _record_input(
     semantics: dict[str, object] | None,
     direction: str = "input",
 ) -> None:
+    parsed_digest: Digest | None = None
+    if digest is not None:
+        if semantics == FULL_FILE_SHA256:
+            parsed_digest = Digest("sha256:file", digest)
+        else:
+            parsed_digest = Digest("legacy_v04:unverified", digest)
     artifact = Artifact(
         key=key,
-        container_uri=f"inputs://{source_path.name}",
+        uri=f"inputs://{source_path.name}",
         driver="other",
-        hash=digest,
+        digest=parsed_digest,
         meta={} if semantics is None else {"hash_semantics": semantics},
     )
     tracker.db.sync_artifact(artifact, run_id=run_id, direction=direction)
@@ -81,7 +87,7 @@ def test_public_package_exports_admission_api() -> None:
 
     assert cadmission.AdmissionReference is AdmissionReference
     assert cadmission.AdmissionReport is AdmissionReport
-    assert cadmission.FileIdentity is FileIdentity
+    assert cadmission.Digest is Digest
     assert cadmission.DeclaredDigestExpectation is DeclaredDigestExpectation
     assert cadmission.check_admission_reference is check_admission_reference
     assert (
@@ -105,7 +111,7 @@ def test_declared_digest_matching_file_is_verified_without_a_tracker(
     candidate = tmp_path / "initial_datastore.h5"
     candidate.write_bytes(b"canonical external datastore")
     expectation = DeclaredDigestExpectation(
-        identity=FileIdentity.parse(f"sha256:file:{_sha256(candidate.read_bytes())}"),
+        identity=Digest.parse(f"sha256:file:{_sha256(candidate.read_bytes())}"),
         source_label="UrbanSim 2018 initial datastore",
         source_uri="s3://governed-inputs/seattle/initial_datastore.h5",
     )
@@ -137,7 +143,7 @@ def test_declared_digest_runtime_reference_retains_context_without_artifact_key(
     candidate = tmp_path / "initial_datastore.h5"
     candidate.write_bytes(b"canonical external datastore")
     expectation = DeclaredDigestExpectation(
-        identity=FileIdentity.parse(f"sha256:file:{_sha256(candidate.read_bytes())}")
+        identity=Digest.parse(f"sha256:file:{_sha256(candidate.read_bytes())}")
     )
     reference = AdmissionReference(
         input_role="urbansim_initial_datastore",
@@ -178,7 +184,7 @@ def test_declared_digest_changed_file_is_mismatched(tmp_path: Path) -> None:
         execution_path=candidate,
         input_role="urbansim_initial_datastore",
         expectation=DeclaredDigestExpectation(
-            identity=FileIdentity.parse(f"sha256:file:{_sha256(expected.read_bytes())}")
+            identity=Digest.parse(f"sha256:file:{_sha256(expected.read_bytes())}")
         ),
     )
 
@@ -202,7 +208,7 @@ def test_declared_digest_preserves_candidate_failure_classifications(
             encoding="utf-8",
         )
     expectation = DeclaredDigestExpectation(
-        identity=FileIdentity.parse(f"sha256:file:{'a' * 64}")
+        identity=Digest.parse(f"sha256:file:{'a' * 64}")
     )
 
     report = check_expected_identity(
@@ -232,7 +238,7 @@ def test_declared_digest_is_independent_of_tracker_hash_strategy(
     candidate = tmp_path / "initial_datastore.h5"
     candidate.write_bytes(b"canonical external datastore")
     expectation = DeclaredDigestExpectation(
-        identity=FileIdentity.parse(f"sha256:file:{_sha256(candidate.read_bytes())}")
+        identity=Digest.parse(f"sha256:file:{_sha256(candidate.read_bytes())}")
     )
 
     tracker.identity.hashing_strategy = "fast"
@@ -296,9 +302,7 @@ def test_declared_digest_canonical_json_is_schema_v3_field_complete(
         execution_path=candidate,
         input_role="urbansim_initial_datastore",
         expectation=DeclaredDigestExpectation(
-            identity=FileIdentity.parse(
-                f"sha256:file:{_sha256(candidate.read_bytes())}"
-            )
+            identity=Digest.parse(f"sha256:file:{_sha256(candidate.read_bytes())}")
         ),
     )
 
@@ -337,24 +341,26 @@ def test_declared_digest_canonical_json_is_schema_v3_field_complete(
     assert payload["expected_source_uri"] is None
 
 
-def test_file_identity_rejects_bare_or_noncanonical_digests() -> None:
+def test_digest_rejects_bare_or_noncanonical_digests() -> None:
     digest = "a" * 64
     for value in (
         digest,
         f"sha256:file:{digest.upper()}",
-        f"sha256:manifest-v1:{digest}",
         "sha256:file:not-a-digest",
     ):
-        with pytest.raises(ValueError, match="file identity"):
-            FileIdentity.parse(value)
+        with pytest.raises(ValueError):
+            Digest.parse(value)
+    assert Digest.parse(f"sha256:manifest-v1:{digest}") == Digest(
+        "dir_manifest_v1:sha256", digest
+    )
 
 
 def test_declared_digest_value_objects_are_frozen() -> None:
-    identity = FileIdentity.parse(f"sha256:file:{'a' * 64}")
+    identity = Digest.parse(f"sha256:file:{'a' * 64}")
     expectation = DeclaredDigestExpectation(identity=identity)
 
-    with pytest.raises(ValidationError, match="frozen"):
-        identity.value = f"sha256:file:{'b' * 64}"
+    with pytest.raises(AttributeError):
+        identity.hex = "b" * 64  # type: ignore[misc]
     with pytest.raises(ValidationError, match="frozen"):
         expectation.source_label = "other source"
 
@@ -411,7 +417,8 @@ def test_caller_hash_override_does_not_retain_cloned_full_hash_semantics(
             force_hash_override=True,
         )
 
-    assert overridden.hash == caller_hash
+    assert overridden.digest is not None
+    assert overridden.digest.hex == caller_hash
     assert overridden.meta["hash_semantics"]["source"] == "caller_supplied"
     report = check_artifact_identity(
         tracker,

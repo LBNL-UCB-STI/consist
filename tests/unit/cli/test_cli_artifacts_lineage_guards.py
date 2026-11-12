@@ -235,7 +235,7 @@ def test_artifacts_run_mode_shows_accessibility_status(
     artifact = tracker.get_artifact("results")
     assert artifact is not None
 
-    relative_path = tracker.fs.get_remappable_relative_path(artifact.container_uri)
+    relative_path = tracker.fs.get_remappable_relative_path(artifact.uri)
     assert relative_path is not None
     archived_path = archive_root / relative_path
     archived_path.parent.mkdir(parents=True, exist_ok=True)

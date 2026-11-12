@@ -1,7 +1,7 @@
 import logging
 from typing import Any, Iterable, Optional, TYPE_CHECKING, Union
 
-from sqlmodel import SQLModel
+from pydantic import BaseModel
 
 from consist.core.stores import get_hot_data_db, get_hot_data_db_path
 from consist.models.artifact import Artifact
@@ -86,7 +86,7 @@ def resolve_ingest_data(
     """
     if data is not None:
         return data
-    return tracker.resolve_uri(artifact.container_uri)
+    return tracker.resolve_uri(artifact.uri)
 
 
 def ingest_artifact(
@@ -94,7 +94,7 @@ def ingest_artifact(
     tracker: "Tracker",
     artifact: Artifact,
     data: Optional[Union[Iterable[dict[str, Any]], Any]],
-    schema: Optional[type[SQLModel]],
+    schema: Optional[type[BaseModel]],
     run: Optional[Run],
     profile_schema: bool,
 ) -> Any:
@@ -149,16 +149,25 @@ def ingest_artifact(
     )
 
     if tracker.db:
-        tracker.db.update_artifact_meta(
-            artifact, {"is_ingested": True, "dlt_table_name": resource_name}
-        )
+        meta_updates = {"is_ingested": True, "dlt_table_name": resource_name}
+        tracker.db.update_artifact_meta(artifact, meta_updates)
+        updated_artifact = artifact.with_meta(meta_updates, merge=True)
 
         if profile_schema:
-            tracker.artifact_schemas.profile_ingested_table(
-                artifact=artifact,
+            updated_artifact = tracker.artifact_schemas.profile_ingested_table(
+                artifact=updated_artifact,
                 run=target_run,
                 table_schema="global_tables",
                 table_name=resource_name,
             )
+
+        if tracker.current_consist is not None:
+            tracker.current_consist.replace_artifact(updated_artifact)
+        from consist.core.tracker import Tracker as _TrackerCls
+
+        if isinstance(tracker, _TrackerCls):
+            if tracker._last_consist is not None:
+                tracker._last_consist.replace_artifact(updated_artifact)
+            tracker._run_artifacts_cache.clear()
 
     return info

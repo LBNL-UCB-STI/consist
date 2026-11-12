@@ -18,6 +18,7 @@ from consist.core.directory_artifacts import (
     validate_directory_manifest,
     validate_directory_tree,
 )
+from consist.digest import Digest, verify_digest
 
 if TYPE_CHECKING:
     from consist.models.artifact import Artifact
@@ -33,9 +34,6 @@ JSONValue: TypeAlias = (
     | Mapping[str, "JSONValue"]
 )
 
-_IDENTITY_PATTERN = re.compile(
-    r"^(?P<algorithm>sha256):(?P<kind>file|manifest-v1):(?P<digest>[0-9a-f]{64})$"
-)
 _STEP_IDENTITY_PATTERN = re.compile(r"^sha256:step-v1:[0-9a-f]{64}$")
 _STRICT_BINDING_CONTEXT_FACTORY_TOKEN = object()
 
@@ -67,11 +65,19 @@ def step_contract_identity(callable_: Any, step_name: str) -> str:
         source = inspect.getsource(callable_)
     except (OSError, TypeError):
         source = None
+    try:
+        module_name = callable_.__module__
+    except AttributeError:
+        module_name = None
+    try:
+        qual_name = callable_.__qualname__
+    except AttributeError:
+        qual_name = None
     payload = {
         "version": 1,
         "step_name": step_name,
-        "module": getattr(callable_, "__module__", None),
-        "qualname": getattr(callable_, "__qualname__", None),
+        "module": module_name,
+        "qualname": qual_name,
         "signature": str(inspect.signature(callable_)),
         "source": source,
     }
@@ -83,77 +89,67 @@ def step_contract_identity(callable_: Any, step_name: str) -> str:
     return f"sha256:step-v1:{digest}"
 
 
-@dataclass(frozen=True, slots=True)
-class ArtifactIdentity:
-    """Self-describing immutable identity for a strict bound artifact."""
+def parse_strict_artifact_digest(value: str | Digest) -> Digest:
+    """Parse a strict bound artifact ``Digest`` (``sha256:file`` or ``dir_manifest_v1:sha256``)."""
+    parsed = Digest.parse(value)
+    if parsed.scheme not in {"sha256:file", "dir_manifest_v1:sha256"}:
+        raise ValueError(f"unsupported artifact identity contract: {value!r}")
+    return parsed
 
-    algorithm: Literal["sha256"]
-    kind: Literal["file", "manifest-v1"]
-    digest: str
 
-    @classmethod
-    def parse(cls, value: str) -> "ArtifactIdentity":
-        """Parse one supported self-describing artifact identity."""
-        match = _IDENTITY_PATTERN.fullmatch(value)
-        if match is None:
-            parts = value.split(":", 2)
-            if len(parts) == 3 and parts[1] in {"file", "manifest-v1"}:
-                raise ValueError(f"invalid artifact identity: {value!r}")
-            if value.startswith("sha256:"):
-                raise ValueError(f"unsupported artifact identity contract: {value!r}")
-            raise ValueError(f"invalid artifact identity: {value!r}")
-        return cls(
-            algorithm="sha256",
-            kind=cast(Literal["file", "manifest-v1"], match.group("kind")),
-            digest=match.group("digest"),
-        )
+def trusted_digest_from_artifact(artifact: "Artifact") -> Digest:
+    """Return a strict ``Digest`` only when persisted artifact semantics prove it."""
+    meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
+    semantics = meta.get("hash_semantics")
+    if isinstance(semantics, Mapping) and semantics.get("source") == "caller_supplied":
+        raise ValueError("artifact does not declare a trusted immutable identity")
 
-    @classmethod
-    def from_artifact(cls, artifact: Any) -> "ArtifactIdentity":
-        """Return a strict identity only when persisted semantics prove it."""
-        meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
-        semantics = meta.get("hash_semantics")
-        artifact_hash = artifact.hash
-        if semantics == {
-            "version": 1,
-            "algorithm": "sha256",
-            "kind": "file",
-            "digest_contract": "raw_file_bytes",
-            "source": "computed_full",
-        } and isinstance(artifact_hash, str):
-            return cls.parse(f"sha256:file:{artifact_hash}")
+    digest = artifact.digest
+    if not isinstance(digest, Digest):
+        raise ValueError("artifact does not declare a trusted immutable identity")
+
+    if digest.scheme == "sha256:file":
+        if isinstance(semantics, Mapping):
+            source = semantics.get("source")
+            if source is not None and source != "computed_full":
+                raise ValueError(
+                    "artifact does not declare a trusted immutable identity"
+                )
+        return digest
+
+    if digest.scheme == "dir_manifest_v1:sha256":
         manifest = meta.get("directory_manifest")
         if meta.get("directory_artifact") is True and isinstance(manifest, Mapping):
             tree_hash = manifest.get("tree_hash")
-            if isinstance(tree_hash, str) and artifact_hash == tree_hash:
-                return cls.parse(f"sha256:manifest-v1:{tree_hash}")
+            if isinstance(tree_hash, str) and digest.hex == tree_hash:
+                return digest
         raise ValueError("artifact does not declare a trusted immutable identity")
 
-    def __str__(self) -> str:
-        return f"{self.algorithm}:{self.kind}:{self.digest}"
+    raise ValueError("artifact does not declare a trusted immutable identity")
 
 
 def create_execution_snapshot(
     *,
     source: Path,
     destination: Path,
-    identity: ArtifactIdentity,
+    identity: Digest | str,
     directory_manifest: Mapping[str, Any] | None = None,
 ) -> Path:
-    """Copy into a fresh run-owned destination and verify the typed identity."""
+    """Copy into a fresh run-owned destination and verify the typed ``Digest``."""
+    parsed_identity = parse_strict_artifact_digest(identity)
     source_path = Path(source)
     destination_path = Path(destination)
     if source_path.resolve() == destination_path.resolve():
         raise ValueError("execution snapshots require a fresh run-owned destination")
     if destination_path.exists():
         raise ValueError("execution snapshot destination must be fresh")
-    if identity.kind == "manifest-v1":
+    if parsed_identity.scheme == "dir_manifest_v1:sha256":
         if directory_manifest is None:
             raise ValueError(
                 "execution snapshot requires a manifest for directory identity"
             )
         normalized_manifest = validate_directory_manifest(directory_manifest)
-        if normalized_manifest["tree_hash"] != identity.digest:
+        if normalized_manifest["tree_hash"] != parsed_identity.hex:
             raise ValueError("directory manifest does not match the bound identity")
         materialize_directory_tree(
             source_path,
@@ -162,14 +158,16 @@ def create_execution_snapshot(
             preserve_existing=False,
         )
         validate_directory_tree(destination_path, normalized_manifest)
+        if not verify_digest(destination_path, parsed_identity):
+            shutil.rmtree(destination_path, ignore_errors=True)
+            raise ValueError("execution snapshot does not match the bound identity")
         return destination_path
     if not source_path.is_file():
         raise ValueError(f"file identity requires a regular file source: {source_path}")
 
     destination_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source_path, destination_path)
-    digest = hashlib.sha256(destination_path.read_bytes()).hexdigest()
-    if digest != identity.digest:
+    if not verify_digest(destination_path, parsed_identity):
         destination_path.unlink()
         raise ValueError("execution snapshot does not match the bound identity")
     return destination_path
@@ -190,7 +188,7 @@ class BoundArtifact:
     """Immutable artifact snapshot retained by a resolved binding."""
 
     artifact_id: uuid.UUID | None
-    identity: ArtifactIdentity
+    identity: Digest
     locator: ArtifactLocator
     artifact_kind: Literal["file", "directory_manifest"] = "file"
     directory_manifest: Mapping[str, JSONValue] | None = None
@@ -211,8 +209,8 @@ class ResolvedInput:
 class AdmissionEvidence:
     """Immutable evidence connecting an admitted observation to a bound input."""
 
-    observed_identity: ArtifactIdentity
-    expected_identity: ArtifactIdentity | None
+    observed_identity: Digest
+    expected_identity: Digest | None
     expected_source: (
         Literal["prior_run", "declared_digest", "registry_alias", "handoff_bundle"]
         | None
@@ -224,23 +222,31 @@ class AdmissionEvidence:
 
 
 def _validate_bound_artifact(artifact: BoundArtifact) -> None:
+    parsed_identity = parse_strict_artifact_digest(artifact.identity)
     if artifact.artifact_id != artifact.locator.artifact_id:
         raise ValueError("resolved binding artifact id must match its locator")
     if artifact.artifact_kind == "file":
-        if artifact.identity.kind != "file" or artifact.directory_manifest is not None:
+        if (
+            parsed_identity.scheme != "sha256:file"
+            or artifact.directory_manifest is not None
+        ):
             raise ValueError("file bindings require a file identity and no manifest")
         return
-    if artifact.identity.kind != "manifest-v1" or artifact.directory_manifest is None:
+    if (
+        parsed_identity.scheme != "dir_manifest_v1:sha256"
+        or artifact.directory_manifest is None
+    ):
         raise ValueError(
             "directory bindings require a manifest identity and directory manifest"
         )
     manifest = validate_directory_manifest(artifact.directory_manifest)
-    if manifest["tree_hash"] != artifact.identity.digest:
+    if manifest["tree_hash"] != parsed_identity.hex:
         raise ValueError("directory manifest does not match bound identity")
 
 
 def _freeze_bound_artifact(artifact: BoundArtifact) -> BoundArtifact:
     _validate_bound_artifact(artifact)
+    parsed_identity = parse_strict_artifact_digest(artifact.identity)
     manifest_mapping: Mapping[str, JSONValue] | None = None
     if artifact.artifact_kind == "directory_manifest":
         manifest = artifact.directory_manifest
@@ -252,7 +258,7 @@ def _freeze_bound_artifact(artifact: BoundArtifact) -> BoundArtifact:
         manifest_mapping = cast(Mapping[str, JSONValue], frozen_manifest)
     return BoundArtifact(
         artifact_id=artifact.artifact_id,
-        identity=artifact.identity,
+        identity=parsed_identity,
         locator=artifact.locator,
         artifact_kind=artifact.artifact_kind,
         directory_manifest=manifest_mapping,
@@ -318,20 +324,19 @@ def _validate_resolved_binding(
             )
 
 
-@dataclass(frozen=True, slots=True)
-class ResolvedBinding:
-    """Frozen, inspectable input contract for one exact Scenario invocation."""
+class _ResolvedBindingMeta(type):
+    """Normalize and freeze ``ResolvedBinding`` mappings before frozen dataclass init."""
 
-    schema_version: Literal[1]
-    step_name: str
-    step_contract_identity: str
-    inputs: Mapping[str, ResolvedInput]
-    metadata: Mapping[str, JSONValue]
-    admission_evidence: Mapping[str, AdmissionEvidence]
-    diagnostics: Mapping[str, JSONValue] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        """Defensively freeze every mapping accepted by the public value type."""
+    def __call__(
+        cls,
+        schema_version: Literal[1],
+        step_name: str,
+        step_contract_identity: str,
+        inputs: Mapping[str, ResolvedInput],
+        metadata: Mapping[str, JSONValue],
+        admission_evidence: Mapping[str, AdmissionEvidence],
+        diagnostics: Mapping[str, JSONValue] | None = None,
+    ) -> Any:
         frozen_inputs = {
             key: ResolvedInput(
                 parameter=resolved_input.parameter,
@@ -344,29 +349,61 @@ class ResolvedBinding:
                 source=resolved_input.source,
                 selected_role=resolved_input.selected_role,
             )
-            for key, resolved_input in self.inputs.items()
+            for key, resolved_input in inputs.items()
+        }
+        normalized_evidence = {
+            key: AdmissionEvidence(
+                observed_identity=parse_strict_artifact_digest(ev.observed_identity),
+                expected_identity=(
+                    parse_strict_artifact_digest(ev.expected_identity)
+                    if ev.expected_identity is not None
+                    else None
+                ),
+                expected_source=ev.expected_source,
+                alias=ev.alias,
+                alias_revision=ev.alias_revision,
+                local_report_id=ev.local_report_id,
+                registry_record_id=ev.registry_record_id,
+            )
+            for key, ev in admission_evidence.items()
         }
         _validate_resolved_binding(
-            schema_version=self.schema_version,
-            step_name=self.step_name,
-            step_contract=self.step_contract_identity,
+            schema_version=schema_version,
+            step_name=step_name,
+            step_contract=step_contract_identity,
             inputs=frozen_inputs,
-            admission_evidence=self.admission_evidence,
+            admission_evidence=normalized_evidence,
         )
-        metadata = _freeze_json(self.metadata)
-        diagnostics = _freeze_json(self.diagnostics)
-        if not isinstance(metadata, Mapping) or not isinstance(diagnostics, Mapping):
+        frozen_meta = _freeze_json(metadata)
+        frozen_diag = _freeze_json({} if diagnostics is None else diagnostics)
+        if not isinstance(frozen_meta, Mapping) or not isinstance(frozen_diag, Mapping):
             raise TypeError(
                 "resolved binding metadata and diagnostics must be mappings"
             )
-        object.__setattr__(self, "inputs", MappingProxyType(frozen_inputs))
-        object.__setattr__(self, "metadata", MappingProxyType(dict(metadata)))
-        object.__setattr__(
-            self,
-            "admission_evidence",
-            MappingProxyType(dict(self.admission_evidence)),
+        return super().__call__(
+            schema_version=schema_version,
+            step_name=step_name,
+            step_contract_identity=step_contract_identity,
+            inputs=MappingProxyType(frozen_inputs),
+            metadata=MappingProxyType(dict(frozen_meta)),
+            admission_evidence=MappingProxyType(normalized_evidence),
+            diagnostics=MappingProxyType(dict(frozen_diag)),
         )
-        object.__setattr__(self, "diagnostics", MappingProxyType(dict(diagnostics)))
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedBinding(metaclass=_ResolvedBindingMeta):
+    """Frozen, inspectable input contract for one exact Scenario invocation."""
+
+    schema_version: Literal[1]
+    step_name: str
+    step_contract_identity: str
+    inputs: Mapping[str, ResolvedInput]
+    metadata: Mapping[str, JSONValue]
+    admission_evidence: Mapping[str, AdmissionEvidence]
+    diagnostics: Mapping[str, JSONValue] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
     def input_for(self, parameter: str) -> ResolvedInput:
         """Return the resolved input contract for ``parameter``."""
@@ -584,7 +621,7 @@ _COMPOUND_ARCHIVE_EXTENSIONS = frozenset(
 
 def _extract_artifact_suffix(artifact: "Artifact") -> str:
     """Return the file extension(s) from an artifact's URI or path."""
-    for candidate in (artifact.container_uri, artifact.abs_path):
+    for candidate in (artifact.uri, artifact.abs_path):
         if not candidate:
             continue
         raw_path = candidate.split("://", 1)[1] if "://" in candidate else candidate
@@ -655,8 +692,8 @@ class ResolvedBindingBuilder:
         selected_role: str | None = None,
         preserve_suffix: bool = True,
     ) -> "ResolvedBindingBuilder":
-        """Bind a locally tracked artifact after deriving its trusted identity."""
-        identity = ArtifactIdentity.from_artifact(artifact)
+        """Bind a locally tracked artifact after deriving its trusted ``Digest``."""
+        identity = trusted_digest_from_artifact(artifact)
         manifest = artifact.meta.get("directory_manifest")
         dest_path = (
             Path("inputs") / parameter if destination is None else Path(destination)
@@ -668,18 +705,17 @@ class ResolvedBindingBuilder:
             if suffix and not has_alpha_suffix
             else dest_path
         )
+        is_manifest = identity.scheme == "dir_manifest_v1:sha256"
         return self.bind_artifact(
             parameter=parameter,
             artifact=BoundArtifact(
                 artifact_id=artifact.id,
                 identity=identity,
                 locator=TrackedArtifactLocator(artifact_id=artifact.id),
-                artifact_kind=(
-                    "directory_manifest" if identity.kind == "manifest-v1" else "file"
-                ),
+                artifact_kind="directory_manifest" if is_manifest else "file",
                 directory_manifest=(
                     cast(Mapping[str, JSONValue], manifest)
-                    if identity.kind == "manifest-v1" and isinstance(manifest, Mapping)
+                    if is_manifest and isinstance(manifest, Mapping)
                     else None
                 ),
             ),
@@ -713,23 +749,6 @@ class ResolvedBindingBuilder:
 
     def freeze(self) -> ResolvedBinding:
         """Validate cross-field invariants and return the immutable contract."""
-        for parameter, evidence in self._admission_evidence.items():
-            try:
-                bound = self._inputs[parameter]
-            except KeyError as exc:
-                raise ValueError(
-                    f"admission evidence has no bound input: {parameter!r}"
-                ) from exc
-            if evidence.observed_identity != bound.artifact.identity:
-                raise ValueError(
-                    "admission evidence observed identity does not match bound artifact"
-                )
-            if (evidence.expected_identity is None) != (
-                evidence.expected_source is None
-            ):
-                raise ValueError(
-                    "admission expected identity and expected source must be provided together"
-                )
         return ResolvedBinding(
             schema_version=1,
             step_name=self._step_name,

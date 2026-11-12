@@ -211,18 +211,21 @@ class ProvenanceWriter:
         facet: ArtifactFacet,
         meta_updates: Dict[str, Any],
         kv_rows: Optional[List[ArtifactKV]] = None,
-    ) -> None:
+    ) -> "Artifact":
+        updated_artifact = artifact.with_meta(meta_updates, merge=True).with_facet_id(
+            facet.id
+        )
         if self._artifact_batch_depth > 0:
-            self._batch_pending_artifacts.append((artifact, direction))
+            self._batch_pending_artifacts.append((updated_artifact, direction))
             self._batch_pending_artifact_facet_bundles.append(
-                (artifact, facet, meta_updates, kv_rows)
+                (updated_artifact, facet, meta_updates, kv_rows)
             )
-            return
+            return updated_artifact
 
         tracker = self._tracker
         if tracker.db and tracker.current_consist:
             try:
-                tracker.db.sync_artifact_with_facet_bundle(
+                return tracker.db.sync_artifact_with_facet_bundle(
                     artifact,
                     tracker.current_consist.run.id,
                     direction,
@@ -232,6 +235,7 @@ class ProvenanceWriter:
                 )
             except Exception as e:
                 logging.warning("Database sync failed: %s", e)
+        return updated_artifact
 
     def _sync_artifacts_now(
         self, artifacts_with_direction: Sequence[tuple["Artifact", str]]

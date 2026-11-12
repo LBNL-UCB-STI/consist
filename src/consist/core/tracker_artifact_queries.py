@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 import uuid
 from typing import Any, Dict, Iterable, List, Optional, TYPE_CHECKING, Union
 
 from consist.core._tracker_service_base import _TrackerServiceBase
-from consist.models.artifact import Artifact, set_tracker_ref
+from consist.models.artifact import Artifact
 from consist.models.run import Run
 
 if TYPE_CHECKING:
@@ -43,8 +44,7 @@ class TrackerArtifactQueryService(_TrackerServiceBase):
         if self.db:
             artifact = self.db.get_artifact(key_or_id, run_id=run_id)
             if artifact is not None:
-                set_tracker_ref(artifact, self._tracker)
-            return artifact
+                return artifact.with_resolver(self._tracker)
         return None
 
     def find_artifacts_with_same_content(
@@ -68,18 +68,16 @@ class TrackerArtifactQueryService(_TrackerServiceBase):
         target = self._resolve_artifact_ref(artifact)
         if target is None:
             return []
-        meta = target.meta if isinstance(target.meta, dict) else {}
+        meta = target.meta if isinstance(target.meta, Mapping) else {}
         content_identity = meta.get("content_identity")
         artifacts = self.db.find_artifacts_by_content_identity(
             content_identity=content_identity
             if isinstance(content_identity, str)
             else None,
-            digest=target.hash,
+            digest=str(target.digest) if target.digest is not None else None,
             driver=target.driver,
         )
-        for item in artifacts:
-            set_tracker_ref(item, self._tracker)
-        return artifacts
+        return [item.with_resolver(self._tracker) for item in artifacts]
 
     def find_runs_producing_same_content(
         self, artifact: Union[Artifact, str, uuid.UUID]
@@ -102,13 +100,13 @@ class TrackerArtifactQueryService(_TrackerServiceBase):
         target = self._resolve_artifact_ref(artifact)
         if target is None:
             return []
-        meta = target.meta if isinstance(target.meta, dict) else {}
+        meta = target.meta if isinstance(target.meta, Mapping) else {}
         content_identity = meta.get("content_identity")
         return self.db.find_runs_producing_content_identity(
             content_identity=content_identity
             if isinstance(content_identity, str)
             else None,
-            digest=target.hash,
+            digest=str(target.digest) if target.digest is not None else None,
             driver=target.driver,
         )
 
@@ -134,9 +132,7 @@ class TrackerArtifactQueryService(_TrackerServiceBase):
         if target is None:
             return []
         artifacts = self.db.get_child_artifacts(target.id)
-        for artifact in artifacts:
-            set_tracker_ref(artifact, self._tracker)
-        return artifacts
+        return [artifact.with_resolver(self._tracker) for artifact in artifacts]
 
     def get_parent_artifact(
         self, child: Union[Artifact, str, uuid.UUID]
@@ -161,8 +157,8 @@ class TrackerArtifactQueryService(_TrackerServiceBase):
             return None
         artifact = self.db.get_parent_artifact(target.id)
         if artifact is not None:
-            set_tracker_ref(artifact, self._tracker)
-        return artifact
+            return artifact.with_resolver(self._tracker)
+        return None
 
     def select_artifact_schema_for_artifact(
         self,
@@ -205,20 +201,17 @@ class TrackerArtifactQueryService(_TrackerServiceBase):
         self,
         uri: str,
         *,
-        table_path: Optional[str] = None,
-        array_path: Optional[str] = None,
+        member: Optional[str] = None,
     ) -> Optional[Artifact]:
         """
-        Find an artifact by URI and optional sub-path selectors.
+        Find an artifact by URI and optional sub-resource member selector.
 
         Parameters
         ----------
         uri : str
-            Artifact container URI to match.
-        table_path : Optional[str], optional
-            Optional table path to match for container-backed artifacts.
-        array_path : Optional[str], optional
-            Optional array path to match for array-backed artifacts.
+            Artifact URI to match.
+        member : Optional[str], optional
+            Optional intra-container member path to match.
 
         Returns
         -------
@@ -227,21 +220,17 @@ class TrackerArtifactQueryService(_TrackerServiceBase):
         """
         if self.current_consist:
             for art in self.current_consist.inputs + self.current_consist.outputs:
-                if art.container_uri != uri:
+                if art.uri != uri:
                     continue
-                if table_path is not None and art.table_path != table_path:
+                if member is not None and art.member != member:
                     continue
-                if array_path is not None and art.array_path != array_path:
-                    continue
-                return art
+                return art.with_resolver(self._tracker)
 
         if self.db:
-            artifact = self.db.get_artifact_by_uri(
-                uri, table_path=table_path, array_path=array_path
-            )
+            artifact = self.db.get_artifact_by_uri(uri, member=member)
             if artifact is not None:
-                set_tracker_ref(artifact, self._tracker)
-            return artifact
+                return artifact.with_resolver(self._tracker)
+            return None
 
         return None
 
@@ -281,9 +270,7 @@ class TrackerArtifactQueryService(_TrackerServiceBase):
         artifacts = self.db.find_artifacts(
             creator=creator_id, consumer=consumer_id, key=key, limit=limit
         )
-        for artifact in artifacts:
-            set_tracker_ref(artifact, self._tracker)
-        return artifacts
+        return [artifact.with_resolver(self._tracker) for artifact in artifacts]
 
     @staticmethod
     def _parse_artifact_param_value(raw: str) -> tuple[str, Any]:
@@ -398,9 +385,7 @@ class TrackerArtifactQueryService(_TrackerServiceBase):
             artifact_family_prefix=artifact_family_prefix,
             limit=limit,
         )
-        for artifact in artifacts:
-            set_tracker_ref(artifact, self._tracker)
-        return artifacts
+        return [artifact.with_resolver(self._tracker) for artifact in artifacts]
 
     def get_artifact_kv(
         self,

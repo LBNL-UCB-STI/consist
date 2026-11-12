@@ -32,6 +32,8 @@ from typing import (
 
 from pydantic import ConfigDict, Field as PydanticField
 
+from consist.core.artifacts import _infer_driver_from_path
+from consist.digest import compute_digest
 from consist.models.artifact import Artifact
 from consist.models.run import RunResult
 
@@ -91,7 +93,7 @@ class CommandExecutionResult(RunResult):
         """Return the error message recorded on the run, if any."""
         if self.run and self.run.meta:
             cmd_meta = self.run.meta.get("command")
-            if isinstance(cmd_meta, dict) and cmd_meta.get("error"):
+            if isinstance(cmd_meta, Mapping) and cmd_meta.get("error"):
                 return str(cmd_meta["error"])
             if self.run.meta.get("error"):
                 return str(self.run.meta["error"])
@@ -219,8 +221,8 @@ def compare_with_baseline(
         baseline_id = baseline_run.id
         baseline_meta = baseline_run.meta or {}
         raw_cmd_meta = baseline_meta.get("command")
-        baseline_cmd_meta: dict[str, Any] = (
-            raw_cmd_meta if isinstance(raw_cmd_meta, dict) else {}
+        baseline_cmd_meta: Mapping[str, Any] = (
+            raw_cmd_meta if isinstance(raw_cmd_meta, Mapping) else {}
         )
         baseline_command = baseline_cmd_meta.get("argv", [])
         baseline_duration = baseline_cmd_meta.get("duration")
@@ -251,7 +253,7 @@ def compare_with_baseline(
     modified_inputs: list[str] = []
     unchanged_inputs: list[str] = []
     for k in sorted(curr_inp_keys.intersection(base_inp_keys)):
-        if current_inputs[k].hash != baseline_artifacts.inputs[k].hash:
+        if current_inputs[k].digest != baseline_artifacts.inputs[k].digest:
             modified_inputs.append(k)
         else:
             unchanged_inputs.append(k)
@@ -263,7 +265,7 @@ def compare_with_baseline(
     modified_outputs: list[str] = []
     unchanged_outputs: list[str] = []
     for k in sorted(curr_out_keys.intersection(base_out_keys)):
-        if current_outputs[k].hash != baseline_artifacts.outputs[k].hash:
+        if current_outputs[k].digest != baseline_artifacts.outputs[k].digest:
             modified_outputs.append(k)
         else:
             unchanged_outputs.append(k)
@@ -538,12 +540,19 @@ def execute_command(
     # Log declared inputs
     logged_inputs: dict[str, Artifact] = {}
     for k, p in resolved_inputs.items():
-        computed_hash = tracker.identity.compute_file_checksum(p)
+        effective_driver = "directory" if p.is_dir() else _infer_driver_from_path(p)
+        if effective_driver in {"h5", "hdf5", "shapefile"}:
+            effective_driver = "file"
+        computed_digest = compute_digest(
+            p,
+            driver=effective_driver,
+            options={"hashing_strategy": tracker.identity.hashing_strategy},
+        )
         art = tracker.log_artifact(
             p,
             key=k,
             direction="input",
-            content_hash=computed_hash,
+            digest=computed_digest,
             force_hash_override=True,
         )
         logged_inputs[k] = art

@@ -5,11 +5,9 @@ Consist admission control, provenance sidecars, and container inspection.
 from __future__ import annotations
 
 from consist.core.admission import (
-    AdmissionIdentity,
     AdmissionReference,
     AdmissionReport,
     DeclaredDigestExpectation,
-    FileIdentity,
     PriorRunExpectation,
     admission_file_identity,
     check_admission_reference,
@@ -29,16 +27,15 @@ from consist.core.logical_array_identity import (
     read_artifact_provenance_sidecar,
     write_artifact_provenance_sidecar,
 )
-from consist.digest import MatrixContainerSummary
+from consist.digest import Digest, MatrixContainerSummary
 
 __all__ = [
     "ARTIFACT_PROVENANCE_SCHEMA_VERSION",
-    "AdmissionIdentity",
     "AdmissionReference",
     "AdmissionReport",
     "ArtifactProvenanceSidecar",
     "DeclaredDigestExpectation",
-    "FileIdentity",
+    "Digest",
     "MatrixContainerSummary",
     "PriorRunExpectation",
     "admission_directory_identity",

@@ -157,7 +157,7 @@ def test_pipeline_chaining(tracker: Tracker):
 
         # Verify Identity
         assert input_artifact.key == "my_data"
-        assert input_artifact.container_uri == generated_artifact.container_uri
+        assert input_artifact.uri == generated_artifact.uri
 
     # --- Phase 3: Verification (Database) ---
     artifact_count = tracker.run_query("SELECT COUNT(*) FROM main.artifact")[0]
@@ -362,12 +362,11 @@ def test_cross_tracker_input_hash_ignores_container_uri(tmp_path: Path):
 
     moved_artifact = Artifact(
         key=produced.key,
-        container_uri=tracker_b.fs.virtualize_path(str(moved_path)),
+        uri=tracker_b.fs.virtualize_path(str(moved_path)),
         driver=produced.driver,
         run_id=produced.run_id,
-        hash=produced.hash,
-        table_path=produced.table_path,
-        array_path=produced.array_path,
+        digest=produced.digest,
+        member=produced.member,
     )
 
     # First consumer run: establish cache entry using original artifact

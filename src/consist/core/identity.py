@@ -12,7 +12,7 @@ import fnmatch
 import subprocess
 import warnings
 from dataclasses import dataclass
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from importlib import import_module
 from types import ModuleType
 from typing import (
@@ -23,16 +23,15 @@ from typing import (
     Optional,
     Callable,
     Union,
-    Literal,
-    cast,
 )
 from pathlib import Path
 
 from consist.types import CodeIdentityMode
-from consist.core.resolved_binding import ArtifactIdentity
 from consist.digest import (
+    Digest,
     canonical_json_sha256,
     canonical_json_str,
+    compute_digest,
     file_sha256,
     normalize_json,
 )
@@ -87,58 +86,6 @@ class CodeIdentityResolution:
             raise ValueError(f"unknown code identity mode: {self.mode!r}")
         if not isinstance(self.digest, str) or not self.digest.strip():
             raise ValueError("code identity digest must not be empty")
-
-
-@dataclass(frozen=True, slots=True)
-class CodeIdentityDescriptor:
-    """Self-describing resolved code identity used by action-v2."""
-
-    version: Literal[1]
-    mode: Literal["repo_git", "callable_module", "callable_source"]
-    digest: str
-
-    def as_payload(self) -> dict[str, object]:
-        return {
-            "version": self.version,
-            "mode": self.mode,
-            "digest": self.digest,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class ActionBindingIdentity:
-    """Identity evidence selected for one role-aware action input."""
-
-    kind: str
-    role: str | int
-    mode: Literal["content-v1", "legacy-provenance-v1"]
-    value: str
-    fallback_reason: str | None = None
-
-    def as_payload(self) -> dict[str, object]:
-        return {
-            "kind": self.kind,
-            "role": self.role,
-            "mode": self.mode,
-            "value": self.value,
-        }
-
-    def as_evidence_payload(self) -> dict[str, object]:
-        """Return non-hashed metadata describing the selected identity strength."""
-        evidence: dict[str, object] = {"identity_strength": self.mode}
-        if self.fallback_reason is not None:
-            evidence["fallback_reason"] = self.fallback_reason
-        return evidence
-
-
-@dataclass(frozen=True, slots=True)
-class ActionInputIdentity:
-    """The domain-separated input identity and evidence used to derive it."""
-
-    value: str
-    code: CodeIdentityDescriptor
-    bindings: tuple[ActionBindingIdentity, ...]
-    strict_binding_identity: str | None = None
 
 
 class IdentityManager:
@@ -236,9 +183,9 @@ class IdentityManager:
         self, code_hash: str, config_hash: str, input_hash: str
     ) -> str:
         """
-        Computes the final cryptographic signature (cache key) for a run.
+        Computes the canonical cryptographic signature (cache key) for a run.
         """
-        composite = f"code:{code_hash}|conf:{config_hash}|in:{input_hash}"
+        composite = f"{code_hash}:{config_hash}:{input_hash}"
         return hashlib.sha256(composite.encode("utf-8")).hexdigest()
 
     # --- Component 1: Code Identity ---
@@ -698,60 +645,65 @@ class IdentityManager:
 
     # --- Component 3: Input Identity ---
 
-    def describe_code_identity(
-        self,
-        *,
-        mode: Literal["repo_git", "callable_module", "callable_source"],
-        digest: str,
-    ) -> CodeIdentityDescriptor:
-        """Return a typed descriptor for an already-resolved code identity."""
-        if not isinstance(digest, str) or not digest.strip():
-            raise ValueError("code identity digest must not be empty")
-        return CodeIdentityDescriptor(version=1, mode=mode, digest=digest)
+    _WEAK_DIGEST_SCHEMES = frozenset(
+        {"stat_file_v1:sha256", "stat_dir_v1:sha256", "caller_supplied_v1:sha256"}
+    )
 
-    def _coerce_code_identity_descriptor(
-        self, code_identity: CodeIdentityDescriptor | Mapping[str, object]
-    ) -> CodeIdentityDescriptor:
-        if isinstance(code_identity, CodeIdentityDescriptor):
-            return code_identity
-        version = code_identity.get("version")
-        mode = code_identity.get("mode")
-        digest = code_identity.get("digest")
-        if version != 1:
-            raise ValueError("action-v2 code identity version must be 1")
-        if mode not in {"repo_git", "callable_module", "callable_source"}:
-            raise ValueError(f"unsupported action-v2 code identity mode: {mode!r}")
-        if not isinstance(digest, str) or not digest.strip():
-            raise ValueError("action-v2 code identity digest must not be empty")
-        return CodeIdentityDescriptor(
-            version=1,
-            mode=cast(Literal["repo_git", "callable_module", "callable_source"], mode),
-            digest=digest,
-        )
+    @classmethod
+    def _trusted_input_digest_reason(
+        cls, artifact: "Artifact"
+    ) -> tuple[Digest | None, str | None]:
+        """Return ``(digest, None)`` when ``artifact.digest`` is content-addressed."""
+        meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
+        semantics = meta.get("hash_semantics")
+        if isinstance(semantics, Mapping):
+            source = semantics.get("source")
+            if source == "caller_supplied":
+                return None, "caller_supplied_hash"
+            if source == "computed_fast":
+                return None, "fast_file_observation"
+            if source == "computed_fast_directory":
+                return None, "fast_directory_observation"
+            if (
+                semantics.get("kind") == "directory"
+                and semantics.get("digest_contract") == "legacy_directory_content"
+            ):
+                return None, "directory_without_manifest"
 
-    @staticmethod
-    def _input_selector(artifact: "Artifact") -> dict[str, str | None]:
-        """Return the part of an artifact reference that changes input meaning."""
-        return {
-            "driver": artifact.driver,
-            "table_path": artifact.table_path,
-            "array_path": artifact.array_path,
-        }
+        digest = artifact.digest
+        if not isinstance(digest, Digest):
+            return None, "missing_digest"
+        if digest.scheme == "caller_supplied_v1:sha256":
+            return None, "caller_supplied_hash"
+        if digest.scheme == "stat_file_v1:sha256":
+            return None, "fast_file_observation"
+        if digest.scheme == "stat_dir_v1:sha256":
+            return None, "fast_directory_observation"
+        if digest.scheme in cls._WEAK_DIGEST_SCHEMES:
+            return None, "weak_observation"
+        return digest, None
 
-    def _compute_legacy_input_signature(
+    def _resolve_input_token(
         self,
         artifact: "Artifact",
         *,
-        path_resolver: Optional[Callable[[str], str]],
-        signature_lookup: Optional[Callable[[str], Optional[str]]],
-    ) -> str:
-        """Build conservative provenance evidence for untrusted action inputs."""
+        path_resolver: Optional[Callable[[str], str]] = None,
+        signature_lookup: Optional[Callable[[str], Optional[str]]] = None,
+    ) -> tuple[str, str, str | None]:
+        """Return ``(token, mode, fallback_reason)`` for a single input artifact."""
+        digest, fallback_reason = self._trusted_input_digest_reason(artifact)
+        if digest is not None:
+            token = (
+                f"{digest}#member={artifact.member}"
+                if artifact.member is not None
+                else str(digest)
+            )
+            return token, "content", None
+
         if artifact.run_id:
             sig_parts = [f"driver:{artifact.driver}", f"key:{artifact.key}"]
-            if artifact.table_path:
-                sig_parts.append(f"table_path:{artifact.table_path}")
-            if artifact.array_path:
-                sig_parts.append(f"array_path:{artifact.array_path}")
+            if artifact.member is not None:
+                sig_parts.append(f"member:{artifact.member}")
             producer_signature = (
                 signature_lookup(artifact.run_id) if signature_lookup else None
             )
@@ -759,276 +711,143 @@ class IdentityManager:
                 sig_parts.append(f"sig:{producer_signature}")
             else:
                 sig_parts.append(f"run:{artifact.run_id}")
-            if artifact.hash:
-                sig_parts.append(f"hash:{artifact.hash}")
-            return "|".join(sig_parts)
+            if artifact.digest is not None:
+                sig_parts.append(f"digest:{artifact.digest}")
+            return "provenance_v1:" + "|".join(sig_parts), "provenance", fallback_reason
 
         if not path_resolver:
             raise ValueError(
-                f"Cannot hash raw artifact '{artifact.container_uri}' without a path_resolver."
+                f"Cannot hash raw artifact '{artifact.uri}' without a path_resolver."
             )
-        file_hash = self.compute_file_checksum(path_resolver(artifact.container_uri))
-        sig_parts = [
-            f"driver:{artifact.driver}",
-            f"container_uri:{artifact.container_uri}",
-        ]
-        if artifact.table_path:
-            sig_parts.append(f"table_path:{artifact.table_path}")
-        if artifact.array_path:
-            sig_parts.append(f"array_path:{artifact.array_path}")
-        sig_parts.append(f"file:{file_hash}")
-        return "|".join(sig_parts)
+        resolved_path = path_resolver(artifact.uri)
+        computed = compute_digest(
+            resolved_path,
+            driver=artifact.driver,
+            member=artifact.member,
+            options={"hashing_strategy": self.hashing_strategy},
+        )
+        if computed.scheme in self._WEAK_DIGEST_SCHEMES:
+            base = f"{computed}|uri:{artifact.uri}"
+            mode = "provenance"
+            reason = (
+                "fast_directory_observation"
+                if computed.scheme == "stat_dir_v1:sha256"
+                else "fast_file_observation"
+            )
+        else:
+            base = str(computed)
+            mode = "content"
+            reason = None
+        token = (
+            f"{base}#member={artifact.member}" if artifact.member is not None else base
+        )
+        return token, mode, reason
 
     @staticmethod
-    def _action_binding_fallback_reason(artifact: "Artifact") -> str:
-        """Classify why an action binding cannot use immutable content identity."""
-        meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
-        semantics = meta.get("hash_semantics")
-        if not isinstance(semantics, Mapping):
-            return "missing_hash_semantics"
-        if semantics.get("source") == "caller_supplied":
-            return "caller_supplied_hash"
-        if semantics == {
-            "version": 1,
-            "algorithm": "sha256",
-            "kind": "file",
-            "digest_contract": "file_metadata",
-            "source": "computed_fast",
-        }:
-            return "fast_file_observation"
-        if semantics == {
-            "version": 1,
-            "algorithm": "sha256",
-            "kind": "directory",
-            "digest_contract": "legacy_directory_metadata",
-            "source": "computed_fast_directory",
-        }:
-            return "fast_directory_observation"
-        if semantics.get("kind") == "directory":
-            return "directory_without_manifest"
-        return "untrusted_hash_semantics"
-
-    def compute_action_input_identity(
-        self,
-        *,
-        inputs: List["Artifact"],
-        binding_roles: List["InputBindingRole"],
-        code_identity: CodeIdentityDescriptor | Mapping[str, object],
-        path_resolver: Optional[Callable[[str], str]] = None,
-        signature_lookup: Optional[Callable[[str], Optional[str]]] = None,
-        strict_binding_identity: str | None = None,
-    ) -> ActionInputIdentity:
-        """Compose a role-aware, content-first action-v2 input identity.
-
-        Trusted immutable artifact identities can be reused across producer runs.
-        All other inputs retain conservative provenance evidence; weak local
-        observations deliberately do not become a cache-reuse identity here.
-        """
-        descriptor = self._coerce_code_identity_descriptor(code_identity)
+    def _validate_binding_roles(
+        inputs: Sequence["Artifact"],
+        binding_roles: Sequence["InputBindingRole"],
+    ) -> None:
         if len(binding_roles) != len(inputs):
             raise ValueError(
-                "action-v2 binding role protocol mismatch: role count does not "
+                "input binding role protocol mismatch: role count does not "
                 "match input count"
             )
         if sorted(role.input_index for role in binding_roles) != list(
             range(len(inputs))
         ):
             raise ValueError(
-                "action-v2 binding role protocol mismatch: roles must cover each "
+                "input binding role protocol mismatch: roles must cover each "
                 "input index exactly once"
             )
-        if strict_binding_identity is not None and not strict_binding_identity.strip():
-            raise ValueError("strict binding identity must not be empty")
 
-        payload_bindings: list[dict[str, object]] = []
-        resolved_bindings: list[ActionBindingIdentity] = []
-        for role in binding_roles:
-            artifact = inputs[role.input_index]
-            try:
-                value = str(ArtifactIdentity.from_artifact(artifact))
-                mode: Literal["content-v1", "legacy-provenance-v1"] = "content-v1"
-                fallback_reason = None
-            except ValueError:
-                value = self._compute_legacy_input_signature(
-                    artifact,
-                    path_resolver=path_resolver,
-                    signature_lookup=signature_lookup,
-                )
-                mode = "legacy-provenance-v1"
-                fallback_reason = self._action_binding_fallback_reason(artifact)
-            binding = ActionBindingIdentity(
-                kind=role.kind,
-                role=role.role,
-                mode=mode,
-                value=value,
-                fallback_reason=fallback_reason,
-            )
-            resolved_bindings.append(binding)
-            payload_bindings.append(
-                {
-                    **binding.as_payload(),
-                    "selector": self._input_selector(artifact),
-                }
-            )
+    @staticmethod
+    def _format_binding_role(role: "InputBindingRole") -> str:
+        if role.kind == "named":
+            return str(role.role)
+        return f"{role.kind}:{role.role}"
 
-        payload: dict[str, object] = {
-            "version": 2,
-            "code": descriptor.as_payload(),
-            "bindings": payload_bindings,
-        }
-        if strict_binding_identity is not None:
-            payload["strict_binding"] = {
-                "version": 1,
-                "identity": strict_binding_identity,
-            }
-        return ActionInputIdentity(
-            value=f"sha256:action-v2:{canonical_json_sha256(payload)}",
-            code=descriptor,
-            bindings=tuple(resolved_bindings),
-            strict_binding_identity=strict_binding_identity,
-        )
-
-    def compute_input_hash(
+    def describe_input_bindings(
         self,
-        inputs: List["Artifact"],
+        inputs: Sequence["Artifact"],
+        *,
+        binding_roles: Sequence["InputBindingRole"],
         path_resolver: Optional[Callable[[str], str]] = None,
         signature_lookup: Optional[Callable[[str], Optional[str]]] = None,
-        binding_roles: Optional[List["InputBindingRole"]] = None,
-    ) -> str:
-        """
-        Synthesize a deterministic hash representing the aggregate state of all input artifacts.
-
-        This calculation is fundamental to the construction of the Merkle DAG. It
-        incorporates the unique identities of all inputs to ensure that upstream
-        data mutations correctly invalidate downstream caches.
-
-        The identity of an input is determined by its provenance:
-        1. **Managed Artifacts**: If the artifact was produced by a previous
-           Consist run, its identity is derived from the producing run's
-           cryptographic signature.
-        2. **Exogenous Files**: If the input is a raw file, its identity is
-           established through a physical content or metadata hash of the
-           filesystem object.
-
-        Parameters
-        ----------
-        inputs : List[Artifact]
-            A collection of Artifact instances representing the run's dependencies.
-        path_resolver : Optional[Callable[[str], str]], optional
-            A function to resolve virtualized URIs to absolute filesystem paths,
-            required for hashing exogenous files.
-        signature_lookup : Optional[Callable[[str], Optional[str]]], optional
-            A function to retrieve the run signatures of producing runs,
-            facilitating Merkle-link construction.
-        binding_roles : Optional[List[InputBindingRole]], optional
-            Caller-visible input roles preserved for the future role-aware composer.
-            Phase 2 deliberately does not include them in the legacy hash payload.
-
-        Returns
-        -------
-        str
-            A SHA256 hex digest representing the combined input identity.
-
-        Raises
-        ------
-        ValueError
-            If an exogenous file requires hashing but no path_resolver is provided.
-        """
-        del binding_roles
-
-        if not inputs:
-            # Hash of an empty set
-            return hashlib.sha256(b"empty_inputs").hexdigest()
-
-        signatures = [
-            self._compute_legacy_input_signature(
+    ) -> list[dict[str, Any]]:
+        """Build diagnostic binding metadata for ``run.meta['input_identity']``."""
+        self._validate_binding_roles(inputs, binding_roles)
+        records: list[dict[str, Any]] = []
+        for role in binding_roles:
+            artifact = inputs[role.input_index]
+            token, mode, fallback_reason = self._resolve_input_token(
                 artifact,
                 path_resolver=path_resolver,
                 signature_lookup=signature_lookup,
             )
-            for artifact in inputs
-        ]
+            evidence: dict[str, Any] = {"identity_strength": mode}
+            if fallback_reason is not None:
+                evidence["fallback_reason"] = fallback_reason
+            records.append(
+                {
+                    "kind": role.kind,
+                    "role": role.role,
+                    "mode": mode,
+                    "value": token,
+                    "artifact_id": str(artifact.id),
+                    "selector": {
+                        "driver": artifact.driver,
+                        "member": artifact.member,
+                    },
+                    "evidence": evidence,
+                }
+            )
+        return records
 
-        # 2. Sort signatures to ensure order-independence (Inputs A,B == Inputs B,A)
-        signatures.sort()
-
-        # 3. Hash the joined signatures
-        composite = "|".join(signatures)
-        return hashlib.sha256(composite.encode("utf-8")).hexdigest()
-
-    def compute_resolved_binding_input_hash(
+    def compute_input_hash(
         self,
-        *,
-        ordinary_inputs: List["Artifact"],
-        strict_binding_identity: str,
+        inputs: Sequence["Artifact"],
         path_resolver: Optional[Callable[[str], str]] = None,
         signature_lookup: Optional[Callable[[str], Optional[str]]] = None,
+        binding_roles: Optional[Sequence["InputBindingRole"]] = None,
+        strict_binding_identity: Optional[str] = None,
     ) -> str:
-        """Compute the input hash for a strict resolved binding.
-
-        Strict binding inputs are represented by their frozen binding identity,
-        while all remaining inputs retain the ordinary provenance-Merkle
-        semantics used by :meth:`compute_input_hash`.
-
-        Parameters
-        ----------
-        ordinary_inputs : list[Artifact]
-            Logged inputs outside the ordered strict-binding prefix. Their
-            producer signatures remain part of the resulting hash.
-        strict_binding_identity : str
-            Non-empty SHA-256 digest of the validated strict binding contract.
-        path_resolver : callable, optional
-            Resolves artifact paths before ordinary input hashing.
-        signature_lookup : callable, optional
-            Resolves a producing run signature for an ordinary artifact.
-
-        Returns
-        -------
-        str
-            SHA-256 input hash with the ``resolved-binding-content-v1`` domain
-            separator.
-
-        Raises
-        ------
-        ValueError
-            If ``strict_binding_identity`` is empty or not a string.
         """
-        if (
+        Compute the canonical ``v0.5`` SHA-256 hash over sorted ``(role, token)`` pairs.
+        """
+        if strict_binding_identity is not None and (
             not isinstance(strict_binding_identity, str)
             or not strict_binding_identity.strip()
         ):
             raise ValueError("strict binding identity must not be empty")
-        ordinary_hash = self.compute_input_hash(
-            ordinary_inputs,
-            path_resolver=path_resolver,
-            signature_lookup=signature_lookup,
-        )
-        payload = (
-            "resolved-binding-content-v1"
-            f"|ordinary:{ordinary_hash}"
-            f"|binding:{strict_binding_identity}"
-        )
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
-    def compute_resolved_binding_action_identity(
-        self,
-        *,
-        ordinary_inputs: List["Artifact"],
-        ordinary_binding_roles: List["InputBindingRole"],
-        strict_binding_identity: str,
-        code_identity: CodeIdentityDescriptor | Mapping[str, object],
-        path_resolver: Optional[Callable[[str], str]] = None,
-        signature_lookup: Optional[Callable[[str], Optional[str]]] = None,
-    ) -> ActionInputIdentity:
-        """Apply the action-v2 composer to the ordinary suffix of a strict run."""
-        return self.compute_action_input_identity(
-            inputs=ordinary_inputs,
-            binding_roles=ordinary_binding_roles,
-            code_identity=code_identity,
-            path_resolver=path_resolver,
-            signature_lookup=signature_lookup,
-            strict_binding_identity=strict_binding_identity,
-        )
+        pairs: list[tuple[str, str]] = []
+        if binding_roles is not None:
+            self._validate_binding_roles(inputs, binding_roles)
+            for role in binding_roles:
+                artifact = inputs[role.input_index]
+                token, _mode, _reason = self._resolve_input_token(
+                    artifact,
+                    path_resolver=path_resolver,
+                    signature_lookup=signature_lookup,
+                )
+                pairs.append((self._format_binding_role(role), token))
+        else:
+            for artifact in inputs:
+                token, _mode, _reason = self._resolve_input_token(
+                    artifact,
+                    path_resolver=path_resolver,
+                    signature_lookup=signature_lookup,
+                )
+                pairs.append((artifact.key, token))
+
+        if strict_binding_identity is not None:
+            pairs.append(
+                ("__strict_binding__", f"strict_binding_v1:{strict_binding_identity}")
+            )
+
+        pairs.sort()
+        return canonical_json_sha256(pairs)
 
     # --- Internal Utilities ---
 

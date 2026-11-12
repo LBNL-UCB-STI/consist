@@ -5,6 +5,7 @@ from pathlib import Path
 
 from consist import Tracker
 from consist.cli import ConsistShell
+from consist.digest import Digest
 from consist.models.artifact import Artifact
 from consist.models.artifact_schema import (
     ArtifactSchema,
@@ -33,9 +34,9 @@ def test_schema_command_uses_db_profile_when_available(tmp_path: Path, capsys) -
     artifact = Artifact(
         id=artifact_id,
         key="test_artifact",
-        container_uri="inputs://data.csv",
+        uri="inputs://data.csv",
         driver="csv",
-        hash="abc",
+        digest=Digest("sha256:file", "ab" * 32),
         meta={"schema_id": schema_id},
     )
 

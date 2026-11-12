@@ -1,321 +1,176 @@
 """
-Database models for runs and run-level snapshots in the Consist main database.
+Value models for runs and run-level provenance snapshots in Consist.
 
-These tables form the core provenance ledger: runs, run↔artifact links, and
-in-memory snapshot helpers used to serialize full run records.
+This module belongs to Layer 2 (``consist.models``):
+- Uses pure Pydantic ``BaseModel`` and stdlib types.
+- Zero imports from ``consist.core.*``, ``consist.api``, ``sqlalchemy``, or ``sqlmodel``.
 """
 
 from __future__ import annotations
 
-import uuid
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Sequence
+from typing import Any, Dict, List, Literal, Optional
+import uuid
 
-from pydantic import BaseModel, ConfigDict, Field as PydanticField, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
-from sqlalchemy import Column, DateTime, Index, JSON, String
-from sqlmodel import Field, SQLModel
-from consist.core.materialize_options import (
+from consist.models.artifact import Artifact
+from consist.protocols import ArtifactResolver
+from consist.types import (
     VALID_MATERIALIZE_DB_FALLBACK as _VALID_MATERIALIZE_DB_FALLBACK,
     VALID_MATERIALIZE_ON_MISSING as _VALID_MATERIALIZE_ON_MISSING,
     normalize_materialize_output_keys,
     validate_materialize_option,
 )
-from consist.models.artifact import Artifact, UUIDType
 
 UTC = timezone.utc
 
-if TYPE_CHECKING:
-    from consist.core.materialize import (
-        HydratedRunOutputsResult,
-        MaterializationResult,
-    )
-    from consist.core.tracker import Tracker
-
 CanonicalRunMetaField = Literal["stage", "phase"]
+CouplerSnapshotPhase = Literal["init", "pre", "post"]
 
 
 def resolve_canonical_run_meta_field(
-    run: "Run", field: CanonicalRunMetaField
+    run: "Run", field_name: CanonicalRunMetaField
 ) -> Optional[str]:
     """
     Resolve a canonical run field with fallback to legacy mirrored metadata.
 
-    Canonical ``Run`` columns take precedence. ``run.meta`` is only consulted for
-    compatibility with older rows or snapshot payloads that predate the schema
-    change.
+    Canonical ``Run`` fields take precedence; ``run.meta`` is consulted only for
+    older snapshot payloads.
     """
-    if field == "phase":
-        canonical_value = run.phase
-    else:
-        canonical_value = run.stage
+    canonical_value = run.phase if field_name == "phase" else run.stage
     if isinstance(canonical_value, str):
         return canonical_value
 
-    meta = run.meta if isinstance(run.meta, dict) else {}
-    meta_value = meta.get(field)
+    meta = run.meta if isinstance(run.meta, Mapping) else {}
+    meta_value = meta.get(field_name)
     return meta_value if isinstance(meta_value, str) else None
 
 
-class RunArtifactLink(SQLModel, table=True):
-    """
-    Link table that records run inputs/outputs in the main Consist database.
+class RunArtifactLink(BaseModel):
+    """Link record connecting a ``Run`` to an ``Artifact`` with direction and role."""
 
-    Each row connects a ``Run`` to an ``Artifact`` and records whether the artifact
-    was an input or output. This enables lineage queries and run reconstruction in
-    DuckDB without re-reading JSON snapshots.
-
-    Attributes:
-        run_id (str): The ID of the associated run.
-        artifact_id (uuid.UUID): The ID of the associated artifact.
-        direction (str): Specifies whether the artifact was an "input" or "output" for the run.
-        is_implicit (bool): True if the artifact was automatically detected through lineage,
-                            rather than explicitly logged. Defaults to False.
-    """
-
-    __tablename__ = "run_artifact_link"
-
-    run_id: str = Field(primary_key=True, sa_column_kwargs={"autoincrement": False})
-    artifact_id: uuid.UUID = Field(
-        primary_key=True, sa_type=UUIDType, sa_column_kwargs={"autoincrement": False}
-    )
-
-    direction: str = Field(primary_key=True)  # "input" or "output"
-    role: str = Field(default="", primary_key=True)
-    is_implicit: bool = Field(default=False)
+    run_id: str
+    artifact_id: uuid.UUID
+    direction: str
+    role: str = ""
+    is_implicit: bool = False
 
 
-class RunBindingInvocation(SQLModel, table=True):
-    """Immutable evidence for one resolved-binding execution attempt.
+class RunBindingInvocation(BaseModel):
+    """Immutable evidence for one resolved-binding execution attempt."""
 
-    A cache hit reuses a producer ``Run`` and therefore cannot safely store
-    per-invocation input intent on that historical row. This ledger keeps the
-    requested run identifier, the run that actually supplied the result, and
-    the canonical resolved binding as distinct durable facts.
-    """
-
-    __tablename__ = "run_binding_invocation"
-
-    id: uuid.UUID = Field(
-        default_factory=uuid.uuid4,
-        primary_key=True,
-        sa_type=UUIDType,
-        sa_column_kwargs={"autoincrement": False},
-    )
-    requested_run_id: str = Field(index=True)
-    execution_run_id: str = Field(index=True)
-    cache_source_run_id: Optional[str] = Field(default=None, index=True)
-    cache_outcome: str = Field(index=True)
+    id: uuid.UUID = Field(default_factory=uuid.uuid4)
+    requested_run_id: str
+    execution_run_id: str
+    cache_source_run_id: Optional[str] = None
+    cache_outcome: str
     binding_json: str
-    created_at: datetime = Field(
-        default_factory=lambda: datetime.now(UTC),
-        sa_type=DateTime,
-    )
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
-CouplerSnapshotPhase = Literal["init", "pre", "post"]
+class RunCouplerSnapshot(BaseModel):
+    """Relational snapshot of ``ScenarioContext.coupler`` bindings at a run boundary."""
+
+    run_id: str
+    phase: str
+    role_key: str
+    scenario_run_id: str
+    step_ordinal: int = 0
+    artifact_id: uuid.UUID
+    producer_run_id: Optional[str] = None
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
-class RunCouplerSnapshot(SQLModel, table=True):
+class Run(BaseModel):
     """
-    Normalized relational snapshot of ScenarioContext.coupler bindings at a
-    specific run boundary.
-    """
+    Value record representing a single tracked execution in Consist.
 
-    __tablename__ = "run_coupler_snapshot"
-    __table_args__ = (
-        Index(
-            "ix_run_coupler_snapshot_scenario_ordinal",
-            "scenario_run_id",
-            "step_ordinal",
-            "phase",
-        ),
-        Index(
-            "ix_run_coupler_snapshot_scenario_role",
-            "scenario_run_id",
-            "role_key",
-        ),
-    )
-
-    run_id: str = Field(
-        primary_key=True, index=True, sa_column_kwargs={"autoincrement": False}
-    )
-    phase: str = Field(primary_key=True, index=True)
-    role_key: str = Field(primary_key=True, index=True)
-    scenario_run_id: str = Field(index=True)
-    step_ordinal: int = Field(default=0, index=True)
-    artifact_id: uuid.UUID = Field(
-        sa_type=UUIDType, index=True, sa_column_kwargs={"autoincrement": False}
-    )
-    producer_run_id: Optional[str] = Field(default=None, index=True)
-    updated_at: datetime = Field(
-        default_factory=lambda: datetime.now(UTC),
-        sa_type=DateTime,
-    )
-
-
-class Run(SQLModel, table=True):
-    """
-    Primary run table in the Consist database.
-
-    Each run captures execution metadata (status, timing, identity hashes, tags)
-    and links to artifacts through ``run_artifact_link``. Full configuration details
-    live in the JSON run snapshot on disk, while the database stores hashes and
-    a queryable subset of metadata for caching and discovery.
-
-    Attributes:
-        id (str): A unique identifier for the run, often combining model name, year, and a UUID.
-        parent_run_id (Optional[str]): The ID of the parent run, if this is a nested execution.
-        status (str): The current state of the run (e.g., "running", "completed", "failed").
-        model_name (str): The name of the model or workflow being executed.
-        description (Optional[str]): Human-readable description of the run's purpose or outcome.
-        year (Optional[int]): The simulation or data year, if applicable.
-        iteration (Optional[int]): The iteration number, if applicable.
-        stage (Optional[str]): The workflow stage, if applicable.
-        phase (Optional[str]): The lifecycle phase, if applicable.
-        tags (List[str]): A list of string labels for categorization and filtering (e.g., ["production", "urbansim"]).
-        config_hash (Optional[str]): A hash of the run's configuration, used for caching.
-        git_hash (Optional[str]): The Git commit hash of the code version used for the run.
-        meta (dict[str, object]): A flexible dictionary for storing arbitrary metadata (e.g., hostname).
-        started_at (datetime): The timestamp when the run execution began.
-        ended_at (Optional[datetime]): The timestamp when the run execution completed or failed.
-        created_at (datetime): The timestamp when the run record was created.
-        updated_at (datetime): The timestamp when the run record was last updated.
+    Captures execution metadata, status, timing, tags, and cryptographic identity
+    hashes (``config_hash``, ``git_hash``, ``input_hash``, ``signature``).
     """
 
-    __tablename__ = "run"
+    id: str
+    parent_run_id: Optional[str] = None
+    status: str = "running"
 
-    id: str = Field(primary_key=True, sa_column_kwargs={"autoincrement": False})
-    parent_run_id: Optional[str] = Field(
-        default=None,
-        sa_column=Column(
-            String,
-            nullable=True,
-            index=True,
-        ),
-    )
+    model_name: str
+    description: Optional[str] = None
+    year: Optional[int] = None
+    iteration: Optional[int] = None
+    stage: Optional[str] = None
+    phase: Optional[str] = None
 
-    # State
-    status: str = Field(default="running", index=True)
+    tags: List[str] = Field(default_factory=list)
 
-    # Context
-    model_name: str = Field(index=True)
-    description: Optional[str] = Field(
-        default=None,
-        description="Human-readable description of the run's purpose or outcome",
-    )
-    year: Optional[int] = Field(default=None, index=True)
-    iteration: Optional[int] = Field(default=None, index=True)
-    stage: Optional[str] = Field(default=None, index=True)
-    phase: Optional[str] = Field(default=None, index=True)
+    config_hash: Optional[str] = None
+    git_hash: Optional[str] = None
+    input_hash: Optional[str] = None
+    signature: Optional[str] = None
+    cacheable: bool = True
 
-    # Tags (for filtering and categorization)
-    # Note: DuckDB supports arrays natively. For SQLite compatibility, this would need JSON storage.
-    tags: List[str] = Field(
-        default_factory=list,
-        sa_column=Column(JSON),  # Using JSON for broader DB compatibility
-        description="List of string labels for categorization and filtering",
-    )
+    meta: Dict[str, Any] = Field(default_factory=dict)
 
-    # Identity / Caching
-    # These fields are crucial for Consist's Merkle DAG caching strategy, forming the "signature"
-    # that determines run uniqueness and cache hits.
-    config_hash: Optional[str] = Field(
-        index=True, description="SHA256 hash of the canonicalized run configuration."
-    )
-    git_hash: Optional[str] = Field(
-        description="Git commit hash of the code version at the time of the run."
-    )
-    input_hash: Optional[str] = Field(
-        default=None,
-        index=True,
-        description="SHA256 hash derived from the provenance IDs of input artifacts.",
-    )
-    signature: Optional[str] = Field(
-        default=None,
-        index=True,
-        description="Composite hash (SHA256) of code, config, and input hashes, defining the unique identity for caching.",
-    )
-    cacheable: bool = Field(
-        default=True,
-        index=True,
-        description="Whether this run is eligible to satisfy downstream cache lookups.",
-    )
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _parse_tags_json(cls, value: Any) -> Any:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            if not value:
+                return []
+            return json.loads(value)
+        return value
 
-    # Metadata
-    # Uses SQLAlchemy's JSON type for efficient persistence of arbitrary JSON structures.
-    meta: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    @field_validator("meta", mode="before")
+    @classmethod
+    def _parse_meta_json(cls, value: Any) -> Any:
+        if value is None:
+            return {}
+        if isinstance(value, str):
+            if not value:
+                return {}
+            return json.loads(value)
+        return value
 
-    # Timing
-    started_at: datetime = Field(
-        default_factory=lambda: datetime.now(UTC),
-        sa_type=DateTime,
-    )
-    ended_at: Optional[datetime] = Field(default=None, sa_type=DateTime)
-
-    # Audit (record timestamps, distinct from execution timing)
-    created_at: datetime = Field(
-        default_factory=lambda: datetime.now(UTC),
-        sa_type=DateTime,
-    )
-    updated_at: datetime = Field(
-        default_factory=lambda: datetime.now(UTC),
-        sa_type=DateTime,
-    )
+    started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    ended_at: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     @property
     def is_cache_hit(self) -> bool:
         """Whether this run was satisfied from a prior cached run."""
-        return bool(isinstance(self.meta, dict) and self.meta.get("cache_hit"))
+        return bool(isinstance(self.meta, Mapping) and self.meta.get("cache_hit"))
 
     @property
     def cache_source_run_id(self) -> Optional[str]:
         """The run ID of the upstream cache source, if recorded."""
-        if not isinstance(self.meta, dict):
+        if not isinstance(self.meta, Mapping):
             return None
         val = self.meta.get("cache_source")
         return val if isinstance(val, str) and val else None
 
     @property
     def duration_seconds(self) -> Optional[float]:
-        """
-        Calculate the duration of the run in seconds.
-
-        Returns the elapsed time between `started_at` and `ended_at` if both are set,
-        otherwise returns None (e.g., if the run is still in progress).
-
-        Returns
-        -------
-        Optional[float]
-            The duration in seconds, or None if the run hasn't ended.
-        """
+        """Return elapsed duration in seconds when both ``started_at`` and ``ended_at`` exist."""
         if self.ended_at and self.started_at:
             return (self.ended_at - self.started_at).total_seconds()
         return None
 
     @property
     def identity_summary(self) -> Dict[str, Any]:
-        """
-        Return a structured cache-identity breakdown for this run.
-
-        The summary is intended for debugging cache behavior and explains the
-        component hashes that form the run signature, plus identity-relevant
-        metadata persisted on the run.
-
-        Returns
-        -------
-        dict[str, Any]
-            Cache-identity components and persisted identity metadata. Strict
-            resolved-binding runs additionally include ``input_identity`` with
-            the versioned hash mode, strict and ordinary input counts, and the
-            frozen strict-binding digest.
-        """
-        meta = self.meta if isinstance(self.meta, dict) else {}
+        """Return a structured cache-identity breakdown for this run."""
+        meta = self.meta if isinstance(self.meta, Mapping) else {}
         identity_input_digests = meta.get("consist_hash_inputs")
-        if not isinstance(identity_input_digests, dict):
+        if not isinstance(identity_input_digests, Mapping):
             identity_input_digests = {}
+        else:
+            identity_input_digests = dict(identity_input_digests)
 
         run_fields = {
             "model": self.model_name,
@@ -335,20 +190,20 @@ class Run(SQLModel, table=True):
         }
 
         config_payload = meta.get("config")
-        if not isinstance(config_payload, dict):
-            config_payload = {}
+        config_dict = (
+            dict(config_payload) if isinstance(config_payload, Mapping) else {}
+        )
 
         inputs = meta.get("inputs")
-        if not isinstance(inputs, list):
-            inputs = []
+        inputs_list = list(inputs) if isinstance(inputs, list) else []
 
-        summary = {
+        summary: Dict[str, Any] = {
             "code_version": self.git_hash,
-            "config": config_payload,
+            "config": config_dict,
             "adapter": adapter,
             "identity_inputs": identity_input_digests,
             "run_fields": run_fields,
-            "inputs": inputs,
+            "inputs": inputs_list,
             "config_hash": self.config_hash,
             "input_hash": self.input_hash,
             "code_hash": self.git_hash,
@@ -381,11 +236,11 @@ class Run(SQLModel, table=True):
             },
         }
         input_identity = meta.get("input_identity")
-        if isinstance(input_identity, dict):
-            summary["input_identity"] = input_identity
+        if isinstance(input_identity, Mapping):
+            summary["input_identity"] = dict(input_identity)
         return summary
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         status_icon = (
             "🟢"
             if self.status == "completed"
@@ -397,7 +252,7 @@ class Run(SQLModel, table=True):
 
     def materialize_outputs(
         self,
-        tracker: "Tracker",
+        tracker: Any,
         *,
         target_root: str | Path,
         source_root: str | Path | None = None,
@@ -405,40 +260,8 @@ class Run(SQLModel, table=True):
         preserve_existing: bool = True,
         on_missing: Literal["warn", "raise"] = "warn",
         db_fallback: Literal["never", "if_ingested"] = "if_ingested",
-    ) -> "MaterializationResult":
-        """
-        Materialize this run's linked outputs through the supplied tracker.
-
-        This is the convenience ``Run`` wrapper for
-        ``Tracker.materialize_run_outputs(...)``. It restores historical bytes
-        into ``target_root`` and returns the legacy aggregate
-        ``MaterializationResult`` summary.
-
-        Prefer ``hydrate_outputs(...)`` when you want per-key statuses,
-        detached artifacts, or directly usable hydrated paths.
-
-        Parameters
-        ----------
-        tracker : Tracker
-            Tracker instance that owns the provenance database and path policy.
-        target_root : str | Path
-            Destination root for rematerialized outputs.
-        source_root : str | Path | None, optional
-            Optional alternate source root for filesystem-backed recovery.
-        keys : Sequence[str] | None, optional
-            Optional subset of output keys to restore.
-        preserve_existing : bool, default True
-            If True, keep existing destination paths in place.
-        on_missing : {"warn", "raise"}, default "warn"
-            Missing-source handling policy forwarded to the tracker.
-        db_fallback : {"never", "if_ingested"}, default "if_ingested"
-            DB fallback policy forwarded to the tracker.
-
-        Returns
-        -------
-        MaterializationResult
-            Aggregate summary of which outputs were restored, skipped, or failed.
-        """
+    ) -> Any:
+        """Materialize this run's linked outputs through ``tracker``."""
         normalized_keys = normalize_materialize_output_keys(
             keys,
             caller="materialize_outputs",
@@ -466,7 +289,7 @@ class Run(SQLModel, table=True):
 
     def hydrate_outputs(
         self,
-        tracker: "Tracker",
+        tracker: Any,
         *,
         target_root: str | Path,
         source_root: str | Path | None = None,
@@ -474,37 +297,8 @@ class Run(SQLModel, table=True):
         preserve_existing: bool = True,
         on_missing: Literal["warn", "raise"] = "warn",
         db_fallback: Literal["never", "if_ingested"] = "if_ingested",
-    ) -> "HydratedRunOutputsResult":
-        """
-        Hydrate this run's linked outputs through the supplied tracker.
-
-        This is the convenience ``Run`` wrapper for
-        ``Tracker.hydrate_run_outputs(...)``. It restores historical bytes into
-        ``target_root`` and returns a key-indexed result whose detached
-        artifacts and paths can be used immediately in the new workspace.
-
-        Parameters
-        ----------
-        tracker : Tracker
-            Tracker instance that owns the provenance database and path policy.
-        target_root : str | Path
-            Destination root for hydrated outputs.
-        source_root : str | Path | None, optional
-            Optional alternate source root for filesystem-backed recovery.
-        keys : Sequence[str] | None, optional
-            Optional subset of output keys to restore.
-        preserve_existing : bool, default True
-            If True, keep existing destination paths in place.
-        on_missing : {"warn", "raise"}, default "warn"
-            Missing-source handling policy forwarded to the tracker.
-        db_fallback : {"never", "if_ingested"}, default "if_ingested"
-            DB fallback policy forwarded to the tracker.
-
-        Returns
-        -------
-        HydratedRunOutputsResult
-            Per-key hydration outcomes keyed by output name.
-        """
+    ) -> Any:
+        """Hydrate this run's linked outputs through ``tracker``."""
         normalized_keys = normalize_materialize_output_keys(
             keys,
             caller="hydrate_outputs",
@@ -532,32 +326,19 @@ class Run(SQLModel, table=True):
 
 
 class RunArtifacts(BaseModel):
-    """
-    Structured container for artifacts associated with a run.
-    Allows dictionary-style access by artifact key.
+    """Structured in-memory container for ``inputs`` and ``outputs`` of a run."""
 
-    This model is in-memory only and is not persisted to the database.
-
-    Usage:
-        artifacts.outputs['persons'] -> Artifact(...)
-        artifacts.inputs['config'] -> Artifact(...)
-    """
-
-    inputs: Dict[str, Artifact] = PydanticField(default_factory=dict)
-    outputs: Dict[str, Artifact] = PydanticField(default_factory=dict)
+    inputs: Dict[str, Artifact] = Field(default_factory=dict)
+    outputs: Dict[str, Artifact] = Field(default_factory=dict)
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class RunResult(BaseModel):
-    """
-    Structured return value for Tracker.run/ScenarioContext.run.
-
-    This model is in-memory only and is not persisted to the database.
-    """
+    """Structured return value for ``Tracker.run`` and ``ScenarioContext.run``."""
 
     run: Run
-    outputs: Dict[str, Artifact] = PydanticField(default_factory=dict)
+    outputs: Dict[str, Artifact] = Field(default_factory=dict)
     cache_hit: bool = False
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -581,23 +362,8 @@ class RunResult(BaseModel):
     def as_dict(self) -> dict[str, Artifact]:
         return dict(self.outputs)
 
-    def output_path(self, key: str, tracker: Optional["Tracker"] = None) -> Path:
-        """
-        Resolve a run output key to a filesystem path.
-
-        Parameters
-        ----------
-        key : str
-            Output artifact key to resolve.
-        tracker : Optional[Tracker], optional
-            Explicit tracker to use for URI resolution when the artifact is
-            detached from tracker context.
-
-        Returns
-        -------
-        Path
-            Resolved filesystem path for the selected output artifact.
-        """
+    def output_path(self, key: str, tracker: Optional[ArtifactResolver] = None) -> Path:
+        """Resolve a run output key to a filesystem path."""
         artifact = resolve_run_result_output(self, key=key)
         return artifact.as_path(tracker=tracker)
 
@@ -605,28 +371,7 @@ class RunResult(BaseModel):
 def resolve_run_result_output(
     run_result: RunResult, key: Optional[str] = None
 ) -> Artifact:
-    """
-    Resolve one output artifact from a RunResult.
-
-    Parameters
-    ----------
-    run_result : RunResult
-        The run result to select from.
-    key : Optional[str], optional
-        Output key to select. If omitted, exactly one output must exist.
-
-    Returns
-    -------
-    Artifact
-        Selected output artifact.
-
-    Raises
-    ------
-    KeyError
-        If ``key`` is provided but missing.
-    ValueError
-        If ``key`` is omitted and output selection is ambiguous.
-    """
+    """Resolve one output artifact from a ``RunResult``."""
     output_keys = list(run_result.outputs.keys())
     available_keys = ", ".join(repr(item) for item in output_keys) or "<none>"
 
@@ -662,55 +407,40 @@ class _PendingOutputMetaEntry:
     applied_object_ids: set[int] = field(default_factory=set)
 
 
-class ConsistRecord(SQLModel):
+class ConsistRecord(BaseModel):
     """
-    A comprehensive record of a run, acting as the primary log entry.
-
-    This class aggregates all information related to a single execution, including the
-    run itself, its input and output artifacts, and a snapshot of the configuration used.
-    It represents the "log as truth" by providing a complete, self-contained
-    description of what happened during the run. Consist serializes this model to
-    JSON in ``consist_runs/<run_id>.json``; the database stores a summarized view
-    (run row + artifact links + optional facets) for querying.
-
-    Attributes:
-        run (Run): The core `Run` object containing the execution's metadata and state.
-        inputs (List[Artifact]): A list of all artifacts that served as inputs to the run.
-        outputs (List[Artifact]): A list of all artifacts that were generated as outputs by the run.
-        config (dict[str, object]): A snapshot of the configuration dictionary used for this run.
+    Self-contained JSON snapshot of a run, its input/output artifacts, and config.
     """
 
     run: Run
-    inputs: List[Artifact] = PydanticField(default_factory=list)
-    outputs: List[Artifact] = PydanticField(default_factory=list)
+    inputs: List[Artifact] = Field(default_factory=list)
+    outputs: List[Artifact] = Field(default_factory=list)
 
-    # Cache Detection State
-    cached_run: Optional[Run] = None  # NEW: Stores the potential cache hit
-
-    config: Dict[str, Any] = PydanticField(default_factory=dict)
-
-    # Optional, minimal, queryable config facet (not persisted to Run table).
-    # This is included in the per-run `consist.json` snapshot for inspection/debugging.
-    facet: Dict[str, Any] = PydanticField(default_factory=dict)
+    cached_run: Optional[Run] = None
+    config: Dict[str, Any] = Field(default_factory=dict)
+    facet: Dict[str, Any] = Field(default_factory=dict)
 
     _pending_output_meta: Dict[str, _PendingOutputMetaEntry] = PrivateAttr(
         default_factory=dict
     )
     _pending_archive_policy: Any = PrivateAttr(default=None)
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     def sync_output_artifact(
         self,
         *,
         key: Optional[str] = None,
         artifact_id: str | uuid.UUID | None = None,
-        meta: Optional[Dict[str, Any]] = None,
-        abs_path: Optional[str] = None,
+        meta: Optional[Mapping[str, Any]] = None,
+        abs_path: Optional[str | Path] = None,
+        facet_id: Optional[str] = None,
         preserve_existing_abs_path: bool = False,
     ) -> List[Artifact]:
-        """Synchronize ``meta`` and/or ``abs_path`` across matching recorded outputs."""
+        """Immutably update matching recorded outputs and return the updated handles."""
         matched: List[Artifact] = []
         target_id = str(artifact_id) if artifact_id is not None else None
-        for recorded in self.outputs:
+        for idx, recorded in enumerate(self.outputs):
             matches_key = key is not None and recorded.key == key
             matches_id = (
                 target_id is not None
@@ -719,11 +449,29 @@ class ConsistRecord(SQLModel):
             )
             if not (matches_key or matches_id):
                 continue
+            updated = recorded
             if meta is not None:
-                recorded.meta = dict(meta)
+                updated = updated.with_meta(meta, merge=False)
+            if facet_id is not None:
+                updated = updated.with_facet_id(facet_id)
             if abs_path is not None and (
-                not preserve_existing_abs_path or recorded.abs_path is None
+                not preserve_existing_abs_path or updated.abs_path is None
             ):
-                recorded.abs_path = abs_path
-            matched.append(recorded)
+                updated = updated.with_abs_path(abs_path)
+            self.outputs[idx] = updated
+            matched.append(updated)
         return matched
+
+    def replace_artifact(
+        self, updated: Artifact, *, direction: Optional[str] = None
+    ) -> Artifact:
+        """Replace any matching ``inputs`` or ``outputs`` entry by ``Artifact.id``."""
+        if direction in (None, "output"):
+            for idx, item in enumerate(self.outputs):
+                if item.id == updated.id:
+                    self.outputs[idx] = updated
+        if direction in (None, "input"):
+            for idx, item in enumerate(self.inputs):
+                if item.id == updated.id:
+                    self.inputs[idx] = updated
+        return updated

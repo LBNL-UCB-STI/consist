@@ -58,12 +58,33 @@ def _artifact(
     hash_value: str | None = None,
     meta: dict | None = None,
 ) -> Artifact:
+    from consist.digest import Digest
+    import hashlib
+
+    digest_obj = None
+    if hash_value is not None:
+        scheme = (
+            "dir_manifest_v1:sha256"
+            if (meta or {}).get("directory_artifact")
+            else (
+                "shapefile_v1:sha256"
+                if (meta or {}).get("file_bundle") == "shapefile"
+                else "sha256:file"
+            )
+        )
+        hex_val = (
+            hash_value
+            if len(hash_value) == 64
+            and all(c in "0123456789abcdef" for c in hash_value)
+            else hashlib.sha256(hash_value.encode("utf-8")).hexdigest()
+        )
+        digest_obj = Digest(scheme, hex_val)
     return Artifact(
         id=uuid.uuid4(),
         key=key,
-        container_uri=uri,
+        uri=uri,
         driver=driver,
-        hash=hash_value,
+        digest=digest_obj,
         run_id=run_id,
         meta=dict(meta or {}),
     )
@@ -1481,8 +1502,8 @@ def test_hydrate_run_outputs_returns_detached_artifact_views(
     assert result.resolvable is True
     assert result.path == restored_path
     assert result.artifact is not historical_artifact
-    assert result.artifact.hash == historical_artifact.hash == logged.hash
-    assert result.artifact.container_uri == historical_artifact.container_uri
+    assert result.artifact.digest == historical_artifact.digest == logged.digest
+    assert result.artifact.uri == historical_artifact.uri
     assert result.artifact.path == restored_path
     assert result.artifact.as_path() == restored_path
     assert result.artifact.as_path(tracker=tracker) == output_path
@@ -1562,7 +1583,7 @@ def test_hydrate_run_outputs_preserves_unhashed_artifacts(tmp_path: Path) -> Non
     result = hydrated["table"]
     assert result.status == "materialized_from_filesystem"
     assert result.resolvable is True
-    assert result.artifact.hash is None
+    assert result.artifact.digest is None
 
 
 def test_hydrate_run_outputs_warn_mode_returns_mixed_keyed_statuses(

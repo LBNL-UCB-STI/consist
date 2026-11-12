@@ -1,10 +1,11 @@
 """
-The `models` module defines the core data structures and database models
-used by Consist for tracking runs, artifacts, and their relationships.
+The ``models`` module defines the core value structures and optional user table
+schemas used by Consist for tracking runs, artifacts, and their relationships.
 """
 
 from __future__ import annotations
 
+from consist.digest import Digest
 from consist.models.artifact import Artifact, ArchivedOutputs
 from consist.models.artifact_facet import ArtifactFacet
 from consist.models.artifact_kv import ArtifactKV
@@ -57,6 +58,7 @@ __all__ = [
     "ArtifactSchemaObservation",
     "ArtifactSchemaRelation",
     "ConfigFacet",
+    "Digest",
     "ActivitySimConstantsCache",
     "ActivitySimCoefficientsCache",
     "ActivitySimCoefficientTemplateRefsCache",

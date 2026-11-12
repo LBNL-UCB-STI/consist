@@ -696,7 +696,7 @@ def test_hybrid_view_resolves_archived_move_mode_outputs_via_ensure_local_path(
             direction="output",
         )
 
-    primary_path = Path(tracker.resolve_uri(art.container_uri))
+    primary_path = Path(tracker.resolve_uri(art.uri))
     assert primary_path.exists()
 
     tracker.archive_run_outputs(

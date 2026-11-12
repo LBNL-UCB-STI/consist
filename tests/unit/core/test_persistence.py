@@ -86,21 +86,22 @@ def test_find_schema_observation_for_content_identity_and_hash(tmp_path: Path) -
     db_path = tmp_path / "content_obs.duckdb"
     db = DatabaseManager(str(db_path))
     try:
+        from consist.digest import Digest
+
         digest = "a" * 64
-        content_identity = f"sha256:file:{digest}"
+        digest_obj = Digest("sha256:file", digest)
+        content_identity = str(digest_obj)
         a = Artifact(
             key="a",
-            container_uri="inputs://a.csv",
+            uri="inputs://a.csv",
             driver="csv",
-            hash=digest,
-            meta={"content_identity": content_identity},
+            digest=digest_obj,
         )
         b = Artifact(
             key="b",
-            container_uri="inputs://b.csv",
+            uri="inputs://b.csv",
             driver="csv",
-            hash=digest,
-            meta={"content_identity": content_identity},
+            digest=digest_obj,
         )
         db.sync_artifact(a)
         db.sync_artifact(b)
@@ -115,13 +116,13 @@ def test_find_schema_observation_for_content_identity_and_hash(tmp_path: Path) -
 
         obs_by_identity = db.find_schema_observation_for_content_identity(
             content_identity=content_identity,
-            digest=digest,
+            digest=str(digest_obj),
             driver="csv",
         )
         assert obs_by_identity is not None
         assert obs_by_identity.schema_id == "sid"
 
-        obs_by_hash = db.find_schema_observation_for_hash(digest)
+        obs_by_hash = db.find_schema_observation_for_hash(str(digest_obj))
         assert obs_by_hash is not None
         assert obs_by_hash.schema_id == "sid"
     finally:
@@ -137,24 +138,24 @@ def test_parent_artifact_queries_support_canonical_and_legacy_rows(
         parent = Artifact(
             id=parent_id,
             key="container",
-            container_uri="outputs://container.h5",
+            uri="outputs://container.h5",
             driver="h5",
             run_id="run_a",
         )
         child = Artifact(
             key="child",
-            container_uri="outputs://container.h5",
+            uri="outputs://container.h5",
             driver="h5_table",
-            table_path="/a",
+            member="/a",
             parent_artifact_id=parent_id,
             run_id="run_a",
             meta={"parent_id": str(parent_id)},
         )
         legacy_child = Artifact(
             key="legacy_child",
-            container_uri="outputs://legacy.h5",
+            uri="outputs://legacy.h5",
             driver="h5_table",
-            table_path="/legacy",
+            member="/legacy",
             run_id="run_a",
             meta={"parent_id": str(parent_id)},
         )

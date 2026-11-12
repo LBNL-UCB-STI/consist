@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -204,7 +205,7 @@ def _parent_facet(
 def _dataset_name_from_artifact(artifact: Artifact, run: Run) -> str:
     year = None
     iteration = None
-    if isinstance(artifact.meta, dict):
+    if isinstance(artifact.meta, Mapping):
         year = artifact.meta.get("year")
         iteration = artifact.meta.get("iteration")
     if year is None:
@@ -224,9 +225,9 @@ def _schema_facet_from_artifact(
     schema_resolver: Optional[Callable[[Artifact], Optional[tuple[Any, list[Any]]]]],
 ) -> Optional[dict[str, Any]]:
     profile = None
-    if isinstance(artifact.meta, dict):
+    if isinstance(artifact.meta, Mapping):
         profile = artifact.meta.get("schema_profile")
-    if profile and isinstance(profile, dict) and "fields" in profile:
+    if profile and isinstance(profile, Mapping) and "fields" in profile:
         return {
             "fields": [
                 {"name": field["name"], "type": field.get("logical_type", "")}
@@ -246,13 +247,13 @@ def _schema_facet_from_artifact(
 
 
 def _data_source_facet_from_artifact(artifact: Artifact) -> Optional[dict[str, Any]]:
-    if not artifact.driver and not artifact.container_uri:
+    if not artifact.driver and not artifact.uri:
         return None
     data_source: dict[str, Any] = {}
     if artifact.driver:
         data_source["name"] = artifact.driver
-    if artifact.container_uri:
-        data_source["uri"] = artifact.container_uri
+    if artifact.uri:
+        data_source["uri"] = artifact.uri
     return data_source or None
 
 
@@ -260,11 +261,9 @@ def _dataset_version_facet_from_artifact(
     artifact: Artifact,
 ) -> Optional[dict[str, Any]]:
     version = None
-    # Intentional hash usage: OpenLineage datasetVersion should be a portable
-    # content fingerprint, not a Consist-internal ``content_id``.
-    if artifact.hash:
-        version = artifact.hash
-    elif isinstance(artifact.meta, dict):
+    if artifact.digest is not None:
+        version = str(artifact.digest)
+    elif isinstance(artifact.meta, Mapping):
         version = artifact.meta.get("schema_id")
     if not version:
         return None
@@ -272,7 +271,7 @@ def _dataset_version_facet_from_artifact(
 
 
 def _documentation_facet_from_artifact(artifact: Artifact) -> Optional[dict[str, Any]]:
-    if not isinstance(artifact.meta, dict):
+    if not isinstance(artifact.meta, Mapping):
         return None
     description = artifact.meta.get("description")
     if not description:
@@ -283,12 +282,12 @@ def _documentation_facet_from_artifact(artifact: Artifact) -> Optional[dict[str,
 def _consist_dataset_facet(artifact: Artifact) -> Optional[dict[str, Any]]:
     facet: dict[str, Any] = {
         "key": artifact.key,
-        "uri": artifact.container_uri,
+        "uri": artifact.uri,
         "driver": artifact.driver,
-        # Intentional exposure of the raw checksum for external/debug consumers.
-        "hash": artifact.hash,
+        "member": artifact.member,
+        "digest": str(artifact.digest) if artifact.digest is not None else None,
     }
-    if isinstance(artifact.meta, dict):
+    if isinstance(artifact.meta, Mapping):
         meta = artifact.meta
         facet["schema_id"] = meta.get("schema_id")
         facet["schema_summary"] = meta.get("schema_summary")
