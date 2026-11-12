@@ -2303,7 +2303,11 @@ def test_outputs_all_legacy_fallback_uses_artifact_recovery_roots(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    tracker = Tracker(run_dir=tmp_path / "active_runs", allow_external_paths=True)
+    tracker = Tracker(
+        run_dir=tmp_path / "active_runs",
+        db_path=str(tmp_path / "provenance.db"),
+        allow_external_paths=True,
+    )
     archive_root = tmp_path / "archive_outputs"
     archived = archive_root / "outputs" / "a.csv"
     archived.parent.mkdir(parents=True, exist_ok=True)
@@ -2314,8 +2318,11 @@ def test_outputs_all_legacy_fallback_uses_artifact_recovery_roots(
         uri="./outputs/a.csv",
         driver="csv",
         run_id=None,
-        meta={"recovery_roots": [str(archive_root)]},
+        meta={},
     )
+    assert tracker.db is not None
+    tracker.db.sync_artifact(artifact)
+    tracker.set_artifact_recovery_roots(artifact, [archive_root])
     run = Run(
         id="active",
         model_name="model",
@@ -2737,7 +2744,7 @@ def test_cache_hit_and_hydrated_outputs_support_set_artifact_recovery_roots(
 
     persisted = tracker_b.db.get_artifact(cached_art.id)
     assert persisted is not None
-    assert str(archive_root_1.resolve()) in persisted.meta.get("recovery_roots", [])
+    assert str(archive_root_1.resolve()) in tracker_b.artifact_recovery_roots(persisted)
 
     # 4. Output hydration path: hydrate_run_outputs produces detached clones via materialize.py
     hydrated_result = tracker_b.hydrate_run_outputs(
@@ -2752,8 +2759,8 @@ def test_cache_hit_and_hydrated_outputs_support_set_artifact_recovery_roots(
     tracker_b.set_artifact_recovery_roots(hydrated_art, [archive_root_2], append=True)
     persisted_after = tracker_b.db.get_artifact(hydrated_art.id)
     assert persisted_after is not None
-    assert str(archive_root_2.resolve()) in persisted_after.meta.get(
-        "recovery_roots", []
+    assert str(archive_root_2.resolve()) in tracker_b.artifact_recovery_roots(
+        persisted_after
     )
 
     tracker_a.close()

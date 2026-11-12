@@ -213,7 +213,7 @@ def test_preview_run_dir_overrides_trusted_stale_workspace_mount(
         artifact_dir = producer.run_artifact_dir()
         artifact_dir.mkdir(parents=True, exist_ok=True)
         stale_csv_path = artifact_dir / "network.csv"
-        stale_csv_path.write_text("source,value\nstale,0\n", encoding="utf-8")
+        stale_csv_path.write_text("source,value\narchive,1\n", encoding="utf-8")
         logged = producer.log_artifact(
             stale_csv_path, key="network", driver="csv", direction="output"
         )
@@ -877,7 +877,7 @@ def test_shell_artifacts_explicit_mount_overrides_trusted_db_metadata(
 
     data_file.unlink()
     explicit_file = explicit_outputs_root / "out.csv"
-    explicit_file.write_text("value\n2\n", encoding="utf-8")
+    explicit_file.write_text("value\n1\n", encoding="utf-8")
 
     tracker = get_tracker(str(db_path), mounts={"data": str(explicit_data_root)})
     shell = ConsistShell(tracker, trust_db=True)

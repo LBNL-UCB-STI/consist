@@ -969,7 +969,6 @@ class BeamConfigAdapter:
                 directory_artifact=True,
                 directory_manifest=manifest,
                 directory_manifest_version=manifest["version"],
-                recovery_roots=[durable_root_path],
                 beam_launch_bundle=True,
                 bundle_identity=bundle_identity,
                 bundle_config_roots=[
@@ -987,6 +986,9 @@ class BeamConfigAdapter:
             )
             artifact = artifact.with_resolver(tracker)
             tracker.db.upsert_artifact(artifact)
+            artifact = tracker.set_artifact_recovery_roots(
+                artifact, [durable_root_path]
+            )
             _materialize_beam_launch_bundle_tree(
                 artifact=artifact,
                 source=durable_path,

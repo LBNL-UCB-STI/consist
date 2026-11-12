@@ -187,7 +187,7 @@ def test_run_completion_archive_policy_archives_outputs_on_cache_miss(
     expected_root = str(archive_root.resolve())
     assert result.cache_hit is False
     for key in ("summary", "bundle", "annual"):
-        assert result.outputs[key].meta.get("recovery_roots") == [expected_root]
+        assert result.outputs[key].recovery_roots == [expected_root]
 
     # Verify archive files exist on disk
     assert (archive_root / "outputs" / "summary.csv").read_text(
@@ -204,21 +204,21 @@ def test_run_completion_archive_policy_archives_outputs_on_cache_miss(
     assert tracker.last_run is not None
     last_outputs_by_key = {art.key: art for art in tracker.last_run.outputs}
     for key in ("summary", "bundle", "annual"):
-        assert last_outputs_by_key[key].meta.get("recovery_roots") == [expected_root]
+        assert last_outputs_by_key[key].recovery_roots == [expected_root]
 
     # Verify DB persistence (including OutputSet member and manifest artifacts)
     db_outputs = tracker.get_artifacts_for_run("archive_miss_run").outputs
     assert len(db_outputs) > 3
     for key, art in db_outputs.items():
-        assert art.meta.get("recovery_roots") == [expected_root], key
+        assert art.recovery_roots == [expected_root], key
 
-    # Verify consist.json snapshot has recovery_roots across all outputs
+    # Verify consist.json snapshot never leaks mutable recovery_roots into meta
     snapshot = json.loads(
         (tracker.run_dir / "consist.json").read_text(encoding="utf-8")
     )
     snapshot_outputs = {art["key"]: art for art in snapshot["outputs"]}
     for key, art in snapshot_outputs.items():
-        assert art["meta"].get("recovery_roots") == [expected_root], key
+        assert "recovery_roots" not in art["meta"], key
 
 
 def test_run_completion_archive_policy_on_cache_hit_backfills_new_archive_root(
@@ -259,8 +259,8 @@ def test_run_completion_archive_policy_on_cache_hit_backfills_new_archive_root(
     )
     expected_root = str(archive_root.resolve())
     assert second.cache_hit is True
-    assert second.outputs["table"].meta.get("recovery_roots") == [expected_root]
-    assert second.outputs["annual"].meta.get("recovery_roots") == [expected_root]
+    assert second.outputs["table"].recovery_roots == [expected_root]
+    assert second.outputs["annual"].recovery_roots == [expected_root]
     assert (archive_root / "table.csv").read_text(encoding="utf-8") == "col\n42\n"
     archived_annual_hit = Path(
         tracker.fs.resolve_historical_path(second.outputs["annual"].uri, archive_root)
@@ -300,8 +300,9 @@ def test_run_completion_archive_policy_skips_virtual_unbacked_artifacts(
     )
 
     expected_root = str(archive_root.resolve())
-    assert result.outputs["backed"].meta.get("recovery_roots") == [expected_root]
+    assert result.outputs["backed"].recovery_roots == [expected_root]
     assert "recovery_roots" not in (result.outputs["virtual_ingested"].meta or {})
+    assert result.outputs["virtual_ingested"].recovery_roots == []
     assert (archive_root / "backed.csv").exists()
 
 
@@ -343,7 +344,7 @@ def test_run_completion_archive_policy_does_not_perturb_cache_identity(
     assert run1.run.config_hash == run2.run.config_hash
     assert run1.run.input_hash == run2.run.input_hash
     assert run1.run.git_hash == run2.run.git_hash
-    assert run2.outputs["out"].meta.get("recovery_roots") == [
+    assert run2.outputs["out"].recovery_roots == [
         str(archive_a.resolve()),
         str(archive_b.resolve()),
     ]
@@ -390,9 +391,7 @@ def test_run_completion_archive_policy_cross_workspace_cache_hit_archives_file_b
 
     expected_root = str(archive_root.resolve())
     assert second.cache_hit is True
-    assert second.outputs["ingested_backed"].meta.get("recovery_roots") == [
-        expected_root
-    ]
+    assert second.outputs["ingested_backed"].recovery_roots == [expected_root]
     assert (archive_root / "ingested_backed.csv").read_text(
         encoding="utf-8"
     ) == "col\n99\n"
@@ -550,7 +549,7 @@ def test_archive_run_outputs_handles_nested_scalar_and_child_directory_inside_di
 
     expected_root = str(archive_root.resolve())
     for key in output_keys:
-        assert res.outputs[key].meta.get("recovery_roots") == [expected_root]
+        assert res.outputs[key].recovery_roots == [expected_root]
         assert res.outputs[key].abs_path is not None
 
     assert (
@@ -718,19 +717,19 @@ def test_archive_run_outputs_filters_virtual_ingested_and_syncs_last_consist_and
             str(workspace.resolve()),
             str(archive_root.resolve()),
         ]
-        assert archived.outputs["metrics"].meta["recovery_roots"] == expected_roots
+        assert archived.outputs["metrics"].recovery_roots == expected_roots
         assert archived.outputs["metrics"].abs_path == str(out_path.resolve())
 
         # Verify in-memory sync onto ScenarioContext.coupler and tracker._last_consist
         coupler_art = sc.coupler.require("metrics")
-        assert coupler_art.meta["recovery_roots"] == expected_roots
+        assert coupler_art.recovery_roots == expected_roots
         assert coupler_art.abs_path == str(out_path.resolve())
 
         assert tracker._last_consist is not None
         last_metrics = next(
             a for a in tracker._last_consist.outputs if a.key == "metrics"
         )
-        assert last_metrics.meta["recovery_roots"] == expected_roots
+        assert last_metrics.recovery_roots == expected_roots
         assert last_metrics.abs_path == str(out_path.resolve())
 
     # Also test prepend_source_mount_root=False
@@ -746,7 +745,7 @@ def test_archive_run_outputs_filters_virtual_ingested_and_syncs_last_consist_and
         mode="copy",
         prepend_source_mount_root=False,
     )
-    assert archived_b.outputs["metrics_b"].meta["recovery_roots"] == [
+    assert archived_b.outputs["metrics_b"].recovery_roots == [
         str(archive_root_no_prepend.resolve())
     ]
 
@@ -816,8 +815,8 @@ def test_archive_directory_and_shapefile_under_separate_workspace_mount(
         str(archive_root.resolve()),
     ]
     assert set(archived.keys()) == {"skims_zarr", "zones_shp"}
-    assert archived.outputs["skims_zarr"].meta["recovery_roots"] == expected_roots
-    assert archived.outputs["zones_shp"].meta["recovery_roots"] == expected_roots
+    assert archived.outputs["skims_zarr"].recovery_roots == expected_roots
+    assert archived.outputs["zones_shp"].recovery_roots == expected_roots
     assert (archive_root / "beam_outputs" / "skims.zarr" / "0.0").exists()
     assert (
         archive_root / "beam_outputs" / "zones_bundle" / "zones.shp" / "zones.shp"
@@ -909,7 +908,7 @@ def test_run_completion_archive_rerun_with_fast_hashing_and_modified_outputs(
         output_policy=policy,
     )
     expected_root = str(archive_root.resolve())
-    assert expected_root in res_1.outputs["households"].meta["recovery_roots"]
+    assert expected_root in res_1.outputs["households"].recovery_roots
 
     # Re-run 2: identical bytes but newer mtime under fast hashing
     def step_v1_newer_mtime(ctx) -> None:
@@ -930,7 +929,7 @@ def test_run_completion_archive_rerun_with_fast_hashing_and_modified_outputs(
         execution_options=ExecutionOptions(inject_context="ctx"),
         output_policy=policy,
     )
-    assert expected_root in res_2.outputs["households"].meta["recovery_roots"]
+    assert expected_root in res_2.outputs["households"].recovery_roots
 
     # Re-run 3: code/config change produces different scalar & directory bytes into the same archive_root
     def step_v2_modified(ctx) -> None:
@@ -948,8 +947,8 @@ def test_run_completion_archive_rerun_with_fast_hashing_and_modified_outputs(
         execution_options=ExecutionOptions(inject_context="ctx"),
         output_policy=policy,
     )
-    assert expected_root in res_3.outputs["households"].meta["recovery_roots"]
-    assert expected_root in res_3.outputs["configs_dir"].meta["recovery_roots"]
+    assert expected_root in res_3.outputs["households"].recovery_roots
+    assert expected_root in res_3.outputs["configs_dir"].recovery_roots
     assert (
         archive_root / "asim" / "households.csv"
     ).read_bytes() == b"hh_id\n1\n2\n3\n"
@@ -961,12 +960,8 @@ def test_run_completion_archive_rerun_with_fast_hashing_and_modified_outputs(
     superseded_outputs_1 = tracker.get_run_outputs("asim_preprocess_run_1")
     superseded_outputs_2 = tracker.get_run_outputs("asim_preprocess_run_2")
     for key in ("households", "configs_dir"):
-        assert expected_root not in superseded_outputs_1[key].meta.get(
-            "recovery_roots", []
-        )
-        assert expected_root not in superseded_outputs_2[key].meta.get(
-            "recovery_roots", []
-        )
+        assert expected_root not in superseded_outputs_1[key].recovery_roots
+        assert expected_root not in superseded_outputs_2[key].recovery_roots
 
 
 def test_archive_scalar_skips_or_rejects_in_place_modified_workspace_source(
@@ -1061,8 +1056,8 @@ def test_run_completion_archive_policy_replaces_stale_step_archive_root_in_move_
 
     expected_root = str(archive_root.resolve())
     run_2_outputs = tracker.get_run_outputs("move_step_run_2")
-    assert run_2_outputs["first"].meta["recovery_roots"] == [expected_root]
-    assert run_2_outputs["second"].meta["recovery_roots"] == [expected_root]
+    assert run_2_outputs["first"].recovery_roots == [expected_root]
+    assert run_2_outputs["second"].recovery_roots == [expected_root]
     assert (archive_root / "asim" / "first_new.csv").read_bytes() == b"first-v2-bytes\n"
     assert (
         archive_root / "asim" / "second_conflict.csv"
@@ -1183,7 +1178,7 @@ def test_run_completion_archive_policy_cache_hit_does_not_copytree(
     )
     assert not res_1.cache_hit
     expected_root = str(archive_root.resolve())
-    assert expected_root in res_1.outputs["persons"].meta["recovery_roots"]
+    assert expected_root in res_1.outputs["persons"].recovery_roots
 
     def fail_copytree(*args, **kwargs):
         raise AssertionError("unexpected copytree")
@@ -1201,7 +1196,7 @@ def test_run_completion_archive_policy_cache_hit_does_not_copytree(
         output_policy=policy,
     )
     assert res_hit.cache_hit
-    assert expected_root in res_hit.outputs["persons"].meta["recovery_roots"]
+    assert expected_root in res_hit.outputs["persons"].recovery_roots
     assert not list(
         archive_root.parent.glob(f".consist-archive-replace-{archive_root.name}-*")
     )
@@ -1217,12 +1212,10 @@ def test_run_completion_archive_policy_cache_hit_does_not_copytree(
         output_policy=policy,
     )
     assert not res_rerun.cache_hit
-    assert expected_root in res_rerun.outputs["persons"].meta["recovery_roots"]
+    assert expected_root in res_rerun.outputs["persons"].recovery_roots
     assert (
         expected_root
-        in tracker.get_run_outputs("no_copytree_run_1")["persons"].meta[
-            "recovery_roots"
-        ]
+        in tracker.get_run_outputs("no_copytree_run_1")["persons"].recovery_roots
     )
     assert not list(
         archive_root.parent.glob(f".consist-archive-replace-{archive_root.name}-*")
@@ -1312,8 +1305,8 @@ def test_run_completion_archive_policy_evicts_stale_files_when_output_set_shrink
     expected_root = str(archive_root.resolve())
     assert (archive_root / "asim" / "a.csv").read_bytes() == b"col\n1\n"
     assert (archive_root / "asim" / "b.csv").read_bytes() == b"col\n2\n"
-    assert expected_root in res_1.outputs["a"].meta["recovery_roots"]
-    assert expected_root in res_1.outputs["b"].meta["recovery_roots"]
+    assert expected_root in res_1.outputs["a"].recovery_roots
+    assert expected_root in res_1.outputs["b"].recovery_roots
 
     def step_only_a(ctx) -> None:
         file_a.write_bytes(b"col\n1\n")
@@ -1330,11 +1323,11 @@ def test_run_completion_archive_policy_evicts_stale_files_when_output_set_shrink
     )
     assert (archive_root / "asim" / "a.csv").read_bytes() == b"col\n1\n"
     assert not (archive_root / "asim" / "b.csv").exists()
-    assert expected_root in res_2.outputs["a"].meta["recovery_roots"]
+    assert expected_root in res_2.outputs["a"].recovery_roots
 
     run_1_outputs = tracker.get_run_outputs("shrink_run_1")
-    assert expected_root not in run_1_outputs["a"].meta.get("recovery_roots", [])
-    assert expected_root not in run_1_outputs["b"].meta.get("recovery_roots", [])
+    assert expected_root not in run_1_outputs["a"].recovery_roots
+    assert expected_root not in run_1_outputs["b"].recovery_roots
 
 
 def test_cache_hit_preserves_imperative_outputs_when_output_paths_passed_and_outputs_is_none(

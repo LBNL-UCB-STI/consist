@@ -37,8 +37,9 @@ def _create_persisted_artifact(
         if (
             meta_dict.get("directory_artifact")
             or meta_dict.get("artifact_kind") == "directory"
+            or meta_dict.get("file_bundle_artifact")
             or meta_dict.get("file_bundle") == "shapefile"
-            or driver == "zarr"
+            or driver in {"zarr", "shapefile", "directory"}
         ):
             scheme = "dir_manifest_v1:sha256"
         else:

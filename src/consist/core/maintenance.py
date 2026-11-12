@@ -11,6 +11,7 @@ from pathlib import Path, PurePosixPath
 import re
 import shutil
 import tempfile
+import time
 from typing import TYPE_CHECKING, Any, Literal, Optional
 from urllib.parse import unquote, urlsplit
 import uuid
@@ -19,12 +20,14 @@ import duckdb
 
 from consist.core._performance_attribution import _track_maintenance_merge_phase
 from consist.core.facet_common import flatten_facet_values
+from consist.core.fs import FileSystemManager
 from consist.core.persistence import (
     _dump_json,
     _dump_optional_json,
     lookup_live_db_by_path,
 )
 from consist.digest import canonical_json_sha256
+from consist.location import ArtifactLocationRow, LocationSite, capture_witness
 from consist.models.artifact import Artifact
 from consist.models.artifact_kv import ArtifactKV
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaObservation
@@ -741,6 +744,12 @@ class DatabaseMaintenance:
                 )
 
             if selected_orphaned_artifact_ids:
+                if self.db.has_table("artifact_location"):
+                    self.db.execute(
+                        "DELETE FROM artifact_location WHERE CAST(artifact_id AS VARCHAR) IN (SELECT UNNEST(?))",
+                        [selected_orphaned_artifact_ids],
+                    )
+                    self.db.bump_location_epoch()
                 self.db.execute(
                     "DELETE FROM artifact WHERE CAST(id AS VARCHAR) IN (SELECT UNNEST(?))",
                     [selected_orphaned_artifact_ids],
@@ -1167,6 +1176,28 @@ class DatabaseMaintenance:
                             WHERE CAST(artifact_id AS VARCHAR) IN (SELECT UNNEST(?))
                             """,
                             [artifact_ids],
+                        )
+
+                    loc_cols = _core_columns("artifact_location")
+                    if loc_cols:
+                        col_sql = ", ".join(loc_cols)
+                        cur.execute(
+                            f"""
+                            INSERT INTO {self._qualified_table_sql("artifact_location", catalog=alias)} ({col_sql})
+                            SELECT {col_sql}
+                            FROM {self._qualified_table_sql("artifact_location")}
+                            WHERE CAST(artifact_id AS VARCHAR) IN (SELECT UNNEST(?))
+                               OR (
+                                   digest IS NOT NULL
+                                   AND digest IN (
+                                       SELECT DISTINCT digest FROM main.artifact
+                                       WHERE CAST(id AS VARCHAR) IN (SELECT UNNEST(?))
+                                         AND digest IS NOT NULL
+                                   )
+                               )
+                            ON CONFLICT (location_id) DO NOTHING
+                            """,
+                            [artifact_ids, artifact_ids],
                         )
 
                 obs_cols = _core_columns("artifact_schema_observation")
@@ -1646,6 +1677,31 @@ class DatabaseMaintenance:
                                     [artifact_ids],
                                 )
 
+                            loc_cols = _core_columns("artifact_location")
+                            if loc_cols:
+                                col_sql = ", ".join(loc_cols)
+                                sel_sql = _source_select_columns("src_loc", loc_cols)
+                                cur.execute(
+                                    f"""
+                                    INSERT INTO main."artifact_location" ({col_sql})
+                                    SELECT {sel_sql}
+                                    FROM {self._qualified_table_sql("artifact_location", catalog=alias)} AS "src_loc"
+                                    WHERE CAST("src_loc"."artifact_id" AS VARCHAR) IN (SELECT UNNEST(?))
+                                       OR (
+                                           "src_loc"."digest" IS NOT NULL
+                                           AND "src_loc"."digest" IN (
+                                               SELECT DISTINCT "digest"
+                                               FROM {self._qualified_table_sql("artifact", catalog=alias)}
+                                               WHERE CAST("id" AS VARCHAR) IN (SELECT UNNEST(?))
+                                                 AND "digest" IS NOT NULL
+                                           )
+                                       )
+                                    ON CONFLICT ("location_id") DO NOTHING
+                                    """,
+                                    [artifact_ids, artifact_ids],
+                                )
+                                self.db.bump_location_epoch()
+
                         cfg_facet_cols = _core_columns("config_facet")
                         if cfg_facet_cols:
                             col_sql = ", ".join(cfg_facet_cols)
@@ -1909,7 +1965,12 @@ class DatabaseMaintenance:
                 continue
 
             artifact_rows: dict[str, Artifact] = {}
+            artifact_legacy_roots: dict[str, list[str]] = {}
             snapshot_artifact_meta: dict[str, tuple[uuid.UUID, dict[str, Any]]] = {}
+            rebuild_fs = FileSystemManager(
+                run_dir=self.run_dir,
+                mounts=self._mounts,
+            )
             for artifact in [*record.inputs, *record.outputs]:
                 parsed_uuid = self._coerce_uuid(artifact.id)
                 if parsed_uuid is None:
@@ -1918,6 +1979,20 @@ class DatabaseMaintenance:
                     )
                     continue
                 artifact_id = str(parsed_uuid)
+                raw_meta = (
+                    dict(artifact.meta) if isinstance(artifact.meta, Mapping) else {}
+                )
+                legacy_roots_raw = raw_meta.pop("recovery_roots", None)
+                if (
+                    legacy_roots_raw is not None
+                    and artifact_id not in artifact_legacy_roots
+                ):
+                    try:
+                        artifact_legacy_roots[artifact_id] = (
+                            rebuild_fs.normalize_recovery_roots(legacy_roots_raw)
+                        )
+                    except ValueError:
+                        artifact_legacy_roots[artifact_id] = []
                 if artifact_id not in artifact_rows:
                     artifact_rows[artifact_id] = Artifact(
                         id=parsed_uuid,
@@ -1929,17 +2004,13 @@ class DatabaseMaintenance:
                         facet_id=artifact.facet_id,
                         parent_artifact_id=artifact.parent_artifact_id,
                         run_id=artifact.run_id,
-                        meta=dict(artifact.meta)
-                        if isinstance(artifact.meta, Mapping)
-                        else {},
+                        meta=raw_meta,
                         created_at=artifact.created_at,
                     )
                 if artifact_id not in snapshot_artifact_meta:
                     snapshot_artifact_meta[artifact_id] = (
                         parsed_uuid,
-                        dict(artifact.meta)
-                        if isinstance(artifact.meta, Mapping)
-                        else {},
+                        dict(raw_meta),
                     )
 
             link_rows: dict[str, str] = {}
@@ -2010,10 +2081,18 @@ class DatabaseMaintenance:
                         )
 
                     inserted_artifacts_for_file = 0
-                    for artifact in artifact_rows.values():
+                    for artifact_id_str, artifact in artifact_rows.items():
                         if self.db.get_artifact(artifact.id) is not None:
                             continue
-                        self.db.upsert_artifact(artifact)
+                        rebuilt_locs = self._build_rebuilt_artifact_locations(
+                            rebuild_fs=rebuild_fs,
+                            artifact=artifact,
+                            run=run,
+                            legacy_roots=artifact_legacy_roots.get(artifact_id_str, []),
+                        )
+                        self.db.upsert_artifact(
+                            artifact, locations=rebuilt_locs or None
+                        )
                         inserted_artifacts_for_file += 1
 
                     for artifact_id, direction in link_rows.items():
@@ -2084,6 +2163,103 @@ class DatabaseMaintenance:
             )
 
         return result
+
+    def _build_rebuilt_artifact_locations(
+        self,
+        *,
+        rebuild_fs: FileSystemManager,
+        artifact: Artifact,
+        run: Run,
+        legacy_roots: Sequence[str],
+    ) -> list[ArtifactLocationRow]:
+        rows: list[ArtifactLocationRow] = []
+        run_meta = run.meta if isinstance(run.meta, Mapping) else {}
+        hist_run_dir = run_meta.get("_physical_run_dir")
+        effective_fs = (
+            FileSystemManager(run_dir=hist_run_dir, mounts=self._mounts)
+            if isinstance(hist_run_dir, str) and hist_run_dir
+            else rebuild_fs
+        )
+        mount_name, mount_instance_id, canonical_uri = (
+            effective_fs.location_coordinate_for_uri(artifact.uri)
+        )
+        site: LocationSite = (
+            "workspace" if mount_name in ("workspace", "runs") else "external"
+        )
+        candidate_path: Optional[Path] = None
+        try:
+            candidate_path = Path(effective_fs.resolve_uri(artifact.uri))
+        except (ValueError, RuntimeError, OSError, TypeError):
+            candidate_path = None
+        obs_ns = time.time_ns()
+        witness = None
+        if candidate_path is not None:
+            try:
+                os.lstat(candidate_path)
+                meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
+                witness = capture_witness(
+                    candidate_path,
+                    observed_at_ns=obs_ns,
+                    driver=artifact.driver,
+                    is_directory=bool(
+                        meta.get("directory_artifact") is True
+                        or meta.get("artifact_set") is True
+                        or artifact.driver in ("zarr", "directory", "artifact_set")
+                    ),
+                    is_shapefile_bundle=bool(
+                        meta.get("file_bundle_artifact") is True
+                        or artifact.driver == "shapefile"
+                    ),
+                    bundle_entry=(
+                        str(meta.get("file_bundle_entry"))
+                        if isinstance(meta.get("file_bundle_entry"), str)
+                        else None
+                    ),
+                )
+            except (OSError, ValueError):
+                witness = None
+        if witness is not None or (
+            isinstance(artifact.meta, Mapping)
+            and artifact.meta.get("is_ingested") is not True
+        ):
+            rows.append(
+                ArtifactLocationRow.create(
+                    digest=(
+                        str(artifact.digest) if artifact.digest is not None else None
+                    ),
+                    artifact_id=artifact.id,
+                    site=site,
+                    mount_name=mount_name,
+                    mount_instance_id=mount_instance_id,
+                    uri=canonical_uri,
+                    member=artifact.member or "",
+                    status="active",
+                    witness=witness,
+                    observed_at_ns=obs_ns,
+                )
+            )
+        base_ns = time.time_ns()
+        for idx, root in enumerate(legacy_roots):
+            m_name, m_inst, r_uri, _ = rebuild_fs.archive_coordinate_for_root(
+                artifact.uri, root
+            )
+            rows.append(
+                ArtifactLocationRow.create(
+                    digest=(
+                        str(artifact.digest) if artifact.digest is not None else None
+                    ),
+                    artifact_id=artifact.id,
+                    site="advisory",
+                    mount_name=m_name,
+                    mount_instance_id=m_inst,
+                    uri=r_uri,
+                    member=artifact.member or "",
+                    status="active",
+                    witness=None,
+                    observed_at_ns=base_ns + idx,
+                )
+            )
+        return rows
 
     def _build_rebuild_full_table_support(self) -> dict[str, bool]:
         return {

@@ -175,6 +175,13 @@ class ArtifactLoggingCoordinator:
         if not tracker.current_consist:
             raise RuntimeError("Cannot log artifact: no active run.")
 
+        raw_recovery_roots = meta.pop("recovery_roots", None)
+        normalized_recovery_roots = (
+            tracker.fs.normalize_recovery_roots(raw_recovery_roots)
+            if raw_recovery_roots is not None
+            else None
+        )
+
         if direction == "output" and tracker.is_cached:
             cached = maybe_return_cached_output_or_demote_cache_hit(
                 tracker=tracker,
@@ -329,6 +336,7 @@ class ArtifactLoggingCoordinator:
                 facet=prepared_artifact_facet_bundle.facet,
                 meta_updates=prepared_artifact_facet_bundle.meta_updates,
                 kv_rows=prepared_artifact_facet_bundle.kv_rows,
+                recovery_roots=normalized_recovery_roots,
             )
             artifact_obj = self._replace_attached_artifact(
                 artifact_obj, direction=direction
@@ -342,6 +350,7 @@ class ArtifactLoggingCoordinator:
                     artifact=artifact_obj,
                     direction=direction,
                 ),
+                recovery_roots=normalized_recovery_roots,
             )
 
         profile_mode = (

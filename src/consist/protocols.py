@@ -94,6 +94,7 @@ class ArtifactResolver(Protocol):
         *,
         target_root: Optional[Path | str] = None,
         source_root: Optional[Path | str] = None,
+        mutable: bool = False,
         on_missing: Literal["warn", "raise"] = "warn",
     ) -> Optional[Path]: ...
 
@@ -106,6 +107,15 @@ class ArtifactResolver(Protocol):
     def artifact_abs_path_override(
         self, artifact: Any
     ) -> Optional[tuple[Optional[str], Optional[str]]]: ...
+
+
+@runtime_checkable
+class ArtifactLocationInspector(Protocol):
+    """Optional resolver extension returning verified reachability per location."""
+
+    def inspect_artifact_locations(
+        self, artifact: Any
+    ) -> Sequence[tuple[str, Path, bool]]: ...
 
 
 _ResolverSlot = weakref.ReferenceType[ArtifactResolver] | ArtifactResolver

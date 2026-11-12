@@ -318,14 +318,15 @@ def test_set_artifact_recovery_roots_persists_and_invalidates_cache(
         [archive_a, archive_a],
         tracker=tracker,
     )
-    assert updated.meta["recovery_roots"] == [str(archive_a.resolve())]
+    assert "recovery_roots" not in updated.meta
+    assert updated.recovery_roots == [str(archive_a.resolve())]
 
     refreshed = tracker.get_run_outputs("producer_recovery_roots")["table"]
-    assert refreshed.meta["recovery_roots"] == [str(archive_a.resolve())]
+    assert refreshed.recovery_roots == [str(archive_a.resolve())]
 
     tracker.set_artifact_recovery_roots(refreshed, [archive_b], append=True)
     appended = tracker.get_run_outputs("producer_recovery_roots")["table"]
-    assert appended.meta["recovery_roots"] == [
+    assert appended.recovery_roots == [
         str(archive_a.resolve()),
         str(archive_b.resolve()),
     ]
@@ -333,6 +334,7 @@ def test_set_artifact_recovery_roots_persists_and_invalidates_cache(
     tracker.set_artifact_recovery_roots(appended, [], append=False)
     cleared = tracker.get_run_outputs("producer_recovery_roots")["table"]
     assert "recovery_roots" not in cleared.meta
+    assert cleared.recovery_roots == []
 
 
 def test_log_artifact_normalizes_recovery_roots_metadata(tracker: Tracker) -> None:
@@ -349,7 +351,7 @@ def test_log_artifact_normalizes_recovery_roots_metadata(tracker: Tracker) -> No
             recovery_roots=[archive, archive],
         )
 
-    assert artifact.meta["recovery_roots"] == [str(archive.resolve())]
+    assert "recovery_roots" not in artifact.meta
     assert artifact.recovery_roots == [str(archive.resolve())]
 
 
@@ -371,7 +373,7 @@ def test_archive_artifact_copies_bytes_and_records_recovery_root(
     assert archived_path.read_text(encoding="utf-8") == "value\n1\n"
     assert output_path.exists()
     refreshed = tracker.get_run_outputs("producer_archive_copy")["archived"]
-    assert refreshed.meta["recovery_roots"] == [str(archive_root.resolve())]
+    assert refreshed.recovery_roots == [str(archive_root.resolve())]
 
 
 def test_register_artifact_recovery_copy_verifies_existing_file_without_copying(
@@ -900,7 +902,9 @@ def test_archive_artifact_move_rolls_back_on_metadata_failure(
     def _raise_update(*_args, **_kwargs):
         raise RuntimeError("db down")
 
-    monkeypatch.setattr(tracker.db, "update_artifact_meta", _raise_update)
+    monkeypatch.setattr(
+        tracker.db, "replace_artifact_recovery_locations_bulk", _raise_update
+    )
 
     with pytest.raises(RuntimeError, match="db down"):
         tracker.archive_artifact(artifact, archive_root, mode="move")
@@ -974,8 +978,9 @@ def test_archive_run_outputs_archives_selected_keys(
 
     assert archived == {"a": (archive_root / "outputs" / "a.csv").resolve()}
     outputs = tracker.get_run_outputs("producer_archive_bulk")
-    assert outputs["a"].meta["recovery_roots"] == [str(archive_root.resolve())]
+    assert outputs["a"].recovery_roots == [str(archive_root.resolve())]
     assert "recovery_roots" not in outputs["b"].meta
+    assert outputs["b"].recovery_roots == []
 
 
 def test_archive_run_outputs_archives_output_set_and_hydrates_from_recovery_root(
@@ -1482,6 +1487,7 @@ def test_archive_run_outputs_moves_all_output_set_members_and_manifest(
     [member] = tracker.get_child_artifacts(parent)
     manifest = tracker.get_artifact(parent.meta["manifest_artifact_id"])
     assert manifest is not None
+    parent_source = Path(parent.path)
     member_source = Path(member.path)
     manifest_source = Path(manifest.path)
     archive_root = tmp_path / "move_archive_output_set"
@@ -1491,7 +1497,8 @@ def test_archive_run_outputs_moves_all_output_set_members_and_manifest(
     assert (archived["annual"] / "annual_2030.csv").is_file()
     assert not member_source.exists()
     assert not manifest_source.exists()
-    assert not Path(parent.path).exists()
+    assert not parent_source.exists()
+    assert Path(parent.path) == archived["annual"]
     refreshed_parent = archived.outputs["annual"]
     refreshed_members = tracker.get_child_artifacts(refreshed_parent)
     refreshed_manifest = tracker.get_artifact(
@@ -1844,8 +1851,24 @@ def test_archive_run_output_files_rejects_symlink_recovery_root_before_resolutio
             output_path, key="root_linked", direction="output"
         )
 
+    from consist.location import ArtifactLocationRow
+
     output_path.unlink()
-    artifact = artifact.with_meta({"recovery_roots": [str(linked_root)]}, merge=False)
+    assert tracker.db is not None
+    tracker.db.replace_artifact_recovery_locations_bulk(
+        {
+            artifact.id: [
+                ArtifactLocationRow.create(
+                    digest=str(artifact.digest) if artifact.digest else None,
+                    artifact_id=artifact.id,
+                    site="advisory",
+                    mount_name="abs",
+                    mount_instance_id="",
+                    uri=f"file://{linked_root}/outputs/root_linked.csv",
+                )
+            ]
+        }
+    )
     monkeypatch.setattr(
         tracker, "get_run_outputs", lambda _run_id: {"root_linked": artifact}
     )

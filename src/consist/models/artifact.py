@@ -32,6 +32,7 @@ from pydantic_core import core_schema
 
 from consist.digest import Digest, _HEX64_RE
 from consist.protocols import (
+    ArtifactLocationInspector,
     ArtifactResolver,
     resolve_active_or_default_resolver,
 )
@@ -621,7 +622,6 @@ class Artifact(metaclass=_ArtifactMeta):
 
     def as_path(self, tracker: Optional[Any] = None) -> Path:
         """Resolve this artifact to a filesystem ``Path`` using ``tracker`` or attached resolver."""
-        resolved_abs = self.abs_path
         attached = self._resolver_ref() if self._resolver_ref is not None else None
         if tracker is not None:
             target_resolver: Optional[Any] = tracker
@@ -633,48 +633,37 @@ class Artifact(metaclass=_ArtifactMeta):
             has_tracker_override = (
                 override is not None and override[0] == self._abs_path
             )
-            effective_abs = override[1] if has_tracker_override else resolved_abs
+            ignore_runtime_abs = not (attached is tracker or has_tracker_override)
         else:
             target_resolver = (
                 attached
                 if attached is not None
                 else resolve_active_or_default_resolver()
             )
-            has_tracker_override = False
-            effective_abs = resolved_abs
-
-        if effective_abs and (
-            tracker is None or attached is tracker or has_tracker_override
-        ):
-            abs_candidate = Path(effective_abs)
-            try:
-                if abs_candidate.exists():
-                    return abs_candidate
-            except OSError:
-                pass
-        elif tracker is not None and target_resolver is not None:
-            try:
-                resolved = Path(target_resolver.resolve_uri(self.uri))
-                if resolved.exists() or not effective_abs:
-                    return resolved
-            except (ValueError, RuntimeError, OSError, TypeError):
-                pass
+            ignore_runtime_abs = False
 
         if target_resolver is not None:
             if isinstance(target_resolver, ArtifactResolver):
+                target_art = (
+                    self.with_abs_path(None)
+                    if ignore_runtime_abs and self._abs_path is not None
+                    else self
+                )
                 try:
-                    return target_resolver.resolve_artifact_path(self)
+                    return target_resolver.resolve_artifact_path(target_art)
+                except FileNotFoundError:
+                    raise
                 except (ValueError, RuntimeError, OSError, TypeError):
                     pass
             try:
                 resolved = Path(target_resolver.resolve_uri(self.uri))
-                if resolved.exists() or not effective_abs:
+                if resolved.exists() or ignore_runtime_abs or not self._abs_path:
                     return resolved
             except (ValueError, RuntimeError, OSError, TypeError):
                 pass
 
-        if effective_abs:
-            return Path(effective_abs)
+        if self._abs_path and not ignore_runtime_abs:
+            return Path(self._abs_path)
         return Path(self.uri)
 
     def ensure_local_path(
@@ -683,10 +672,22 @@ class Artifact(metaclass=_ArtifactMeta):
         tracker: Optional[Any] = None,
         target_root: Optional[Path | str] = None,
         source_root: Optional[Path | str] = None,
+        mutable: bool = False,
         on_missing: Literal["warn", "raise"] = "warn",
     ) -> Optional[Path]:
         """Ensure this artifact exists on the local filesystem via ``ArtifactResolver``."""
         resolved_resolver = tracker if tracker is not None else self.resolver
+        if resolved_resolver is not None and isinstance(
+            resolved_resolver, ArtifactResolver
+        ):
+            return resolved_resolver.ensure_local_artifact_path(
+                self,
+                target_root=target_root,
+                source_root=source_root,
+                mutable=mutable,
+                on_missing=on_missing,
+            )
+
         if target_root is None:
             candidate = self.as_path(resolved_resolver)
             try:
@@ -695,37 +696,43 @@ class Artifact(metaclass=_ArtifactMeta):
             except OSError:
                 pass
 
-        if resolved_resolver is None:
-            msg = (
-                f"[Consist] Cannot materialize artifact {self.key!r}: "
-                "no Tracker is attached or active in context."
-            )
-            if on_missing == "raise":
-                raise FileNotFoundError(msg)
-            logging.warning(msg)
-            return None
-
-        return resolved_resolver.ensure_local_artifact_path(
-            self,
-            target_root=target_root,
-            source_root=source_root,
-            on_missing=on_missing,
+        msg = (
+            f"[Consist] Cannot materialize artifact {self.key!r}: "
+            "no Tracker is attached or active in context."
         )
+        if on_missing == "raise":
+            raise FileNotFoundError(msg)
+        logging.warning(msg)
+        return None
 
     @property
     def recovery_roots(self) -> list[str]:
-        """Ordered advisory recovery roots recorded on this artifact (consulting live resolver DB when available)."""
+        """Ordered recovery roots recorded for this artifact in the active resolver database."""
         active = self.resolver
         if active is not None and isinstance(active, ArtifactResolver):
             try:
                 return active.artifact_recovery_roots(self)
             except (OSError, RuntimeError, ValueError, TypeError, LookupError):
                 pass
-        return extract_recovery_roots_from_meta(self.meta)
+        return []
 
     def accessibility(self, tracker: Optional[Any] = None) -> ArtifactAccessibility:
-        """Inspect primary and advisory recovery locations for this artifact."""
+        """Inspect primary and recorded recovery locations for this artifact."""
         resolver_obj = tracker if tracker is not None else self.resolver
+        if resolver_obj is not None and isinstance(
+            resolver_obj, ArtifactLocationInspector
+        ):
+            try:
+                inspected = resolver_obj.inspect_artifact_locations(self)
+                return ArtifactAccessibility(
+                    locations=tuple(
+                        ArtifactLocationStatus(label=label, path=path, exists=exists)
+                        for label, path, exists in inspected
+                    )
+                )
+            except (OSError, RuntimeError, ValueError, TypeError):
+                pass
+
         try:
             primary_path = (
                 Path(resolver_obj.resolve_uri(self.uri))
@@ -742,32 +749,6 @@ class Artifact(metaclass=_ArtifactMeta):
                 exists=primary_path.exists(),
             )
         ]
-        if resolver_obj is None:
-            return ArtifactAccessibility(locations=tuple(locations))
-
-        try:
-            fs = resolver_obj.fs
-            relative_path = fs.get_remappable_relative_path(self.uri)
-            if relative_path is None:
-                return ArtifactAccessibility(locations=tuple(locations))
-            raw_roots = (
-                resolver_obj.artifact_recovery_roots(self)
-                if isinstance(resolver_obj, ArtifactResolver)
-                else extract_recovery_roots_from_meta(self.meta)
-            )
-            roots = fs.normalize_recovery_roots(raw_roots)
-        except (AttributeError, OSError, RuntimeError, ValueError, TypeError):
-            return ArtifactAccessibility(locations=tuple(locations))
-
-        for index, root in enumerate(roots, start=1):
-            candidate = (Path(root) / relative_path).resolve()
-            locations.append(
-                ArtifactLocationStatus(
-                    label=f"recovery_root #{index}",
-                    path=candidate,
-                    exists=candidate.exists(),
-                )
-            )
         return ArtifactAccessibility(locations=tuple(locations))
 
     @property
@@ -1029,20 +1010,6 @@ def _reconstruct_artifact(
     )
 
 
-def extract_recovery_roots_from_meta(meta: MappingABC[str, Any] | None) -> list[str]:
-    """Extract ordered string recovery roots from an artifact metadata mapping."""
-    if not isinstance(meta, MappingABC):
-        return []
-    roots = meta.get("recovery_roots")
-    if roots is None:
-        return []
-    if isinstance(roots, (str, Path)):
-        return [str(roots)]
-    if isinstance(roots, Sequence):
-        return [str(item) for item in roots if isinstance(item, (str, Path))]
-    return []
-
-
 class ArchivedOutputs(MappingABC[str, Path]):
     """Read-only mapping of archived output paths plus refreshed ``Artifact`` values."""
 
@@ -1083,7 +1050,6 @@ _SYSTEM_ARTIFACT_META_KEYS: frozenset[str] = frozenset(
     {
         "is_ingested",
         "dlt_table_name",
-        "recovery_roots",
         "schema_id",
         "schema_summary",
         "file_schema",

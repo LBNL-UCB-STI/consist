@@ -72,7 +72,6 @@ from consist.core.persistence import (
 from consist.core.run_ordering import RECENT_RUN_ORDER_BY_SQL
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
 from consist.tools import queries
-from consist.types import DriverType
 
 from typing import TYPE_CHECKING
 
@@ -1370,7 +1369,7 @@ def _artifact_recovery_candidate_paths(
         return []
 
     try:
-        roots = fs.normalize_recovery_roots((artifact.meta or {}).get("recovery_roots"))
+        roots = fs.normalize_recovery_roots(tracker.artifact_recovery_roots(artifact))
     except (TypeError, ValueError):
         return []
 
@@ -1386,26 +1385,6 @@ def _artifact_recovery_candidate_paths(
         seen.add(candidate)
         candidates.append((f"artifact recovery_root #{index}", candidate))
     return candidates
-
-
-def _load_artifact_from_resolved_path(
-    artifact: "Artifact",
-    path: Path,
-    *,
-    n_rows: int | None = None,
-) -> Any:
-    from consist.api import _load_from_disk
-
-    load_kwargs: Dict[str, Any] = {}
-    if artifact.driver == "csv" and n_rows is not None:
-        load_kwargs["nrows"] = n_rows
-    if artifact.member:
-        if artifact.driver in DriverType.table_path_drivers():
-            load_kwargs["table_path"] = artifact.member
-        elif artifact.driver in DriverType.array_drivers():
-            load_kwargs["array_path"] = artifact.member
-
-    return _load_from_disk(str(path), artifact.driver, **load_kwargs)
 
 
 def _resolve_schema_capture_path(
@@ -3571,20 +3550,6 @@ def _load_artifact_with_diagnostics(
         finally:
             _set_tracker_run_dir(tracker, original_run_dir)
 
-    def _load_from_recovery_roots() -> Any | None:
-        for label, candidate in recovery_paths:
-            if not candidate.exists():
-                attempted_paths.append((label, candidate))
-                continue
-            try:
-                return _load_artifact_from_resolved_path(
-                    artifact, candidate, n_rows=n_rows
-                )
-            except FileNotFoundError:
-                attempted_paths.append((label, candidate))
-                continue
-        return None
-
     try:
         if artifact.uri.startswith("./") and resolution_bases:
             original_run_dir = _resolve_cli_path(tracker.run_dir)
@@ -3592,10 +3557,7 @@ def _load_artifact_with_diagnostics(
                 loaded = _load_from_base(base_dir, label, original_run_dir)
                 if loaded is not None:
                     return loaded
-            loaded = _load_from_recovery_roots()
-            if loaded is not None:
-                return loaded
-
+            attempted_paths.extend(recovery_paths)
             _print_missing_artifact_file_help(
                 tracker,
                 artifact,
@@ -3607,9 +3569,7 @@ def _load_artifact_with_diagnostics(
 
         return _load_once()
     except FileNotFoundError:
-        loaded = _load_from_recovery_roots()
-        if loaded is not None:
-            return loaded
+        attempted_paths.extend(recovery_paths)
         _print_missing_artifact_file_help(
             tracker,
             artifact,
@@ -5973,6 +5933,140 @@ def exec_cmd(
 
     if result.exit_code != 0:
         raise typer.Exit(code=result.exit_code)
+
+
+@app.command("migrate")
+def migrate_cmd(
+    target_or_action: str = typer.Argument(
+        ...,
+        help="Path to the DuckDB database to migrate, or 'undo' followed by <db_path>.",
+    ),
+    undo_db_path: Optional[Path] = typer.Argument(
+        None,
+        help="Database path when running 'consist migrate undo <db_path>'.",
+    ),
+    run_dir: Optional[Path] = typer.Option(
+        None,
+        "--run-dir",
+        help="Fallback run directory for resolving relative artifact paths.",
+    ),
+    mount: Optional[List[str]] = typer.Option(
+        None,
+        "--mount",
+        help="Mount mapping NAME=PATH (repeatable) for resolving mounted URIs.",
+    ),
+    trust_v04_hashes: bool = typer.Option(
+        False,
+        "--trust-v04-hashes",
+        help="Promote attested v0.4 SHA-256 digests without re-reading file bytes.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Build and validate the migrated v0.5 database in a temp file without modifying <db_path>.",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit migration report as JSON.",
+    ),
+) -> None:
+    """Migrate a Consist v0.4 DuckDB database to v0.5 (or 'consist migrate undo <db_path>')."""
+    from consist.core.migrate import migrate_database, undo_migrate_database
+
+    if target_or_action == "undo":
+        if undo_db_path is None:
+            console.print("[red]Error:[/red] Usage: consist migrate undo <db_path>")
+            raise typer.Exit(CLI_EXIT_USAGE_ERROR)
+        try:
+            restored = undo_migrate_database(undo_db_path)
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            console.print(f"[red]Error:[/red] {exc}")
+            raise typer.Exit(1) from exc
+        if json_output:
+            typer.echo(json.dumps({"status": "restored", "db_path": str(restored)}))
+        else:
+            console.print(f"[green]Restored[/green] {restored} from {restored}.v04.bak")
+        return
+
+    if undo_db_path is not None:
+        console.print(f"[red]Error:[/red] Unexpected extra argument {undo_db_path!s}.")
+        raise typer.Exit(CLI_EXIT_USAGE_ERROR)
+
+    parsed_mounts: Dict[str, str] = {}
+    if mount:
+        for entry in mount:
+            if "=" not in entry:
+                console.print(
+                    f"[red]Error:[/red] Invalid --mount {entry!r}; expected NAME=PATH."
+                )
+                raise typer.Exit(CLI_EXIT_USAGE_ERROR)
+            m_name, m_path = entry.split("=", 1)
+            m_name = m_name.strip()
+            m_path = m_path.strip()
+            if not m_name or not m_path:
+                console.print(
+                    f"[red]Error:[/red] Invalid --mount {entry!r}; expected NAME=PATH."
+                )
+                raise typer.Exit(CLI_EXIT_USAGE_ERROR)
+            parsed_mounts[m_name] = m_path
+
+    try:
+        report = migrate_database(
+            Path(target_or_action),
+            run_dir=run_dir,
+            mounts=parsed_mounts or None,
+            trust_v04_hashes=trust_v04_hashes,
+            dry_run=dry_run,
+        )
+    except (FileNotFoundError, IncompatibleSchemaError, ValueError, OSError) as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+    if json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "db_path": str(report.db_path),
+                    "backup_path": (
+                        str(report.backup_path) if report.backup_path else None
+                    ),
+                    "already_current": report.already_current,
+                    "dry_run": report.dry_run,
+                    "runs_migrated": report.runs_migrated,
+                    "cacheable_runs": report.cacheable_runs,
+                    "uncacheable_runs": report.uncacheable_runs,
+                    "artifacts_migrated": report.artifacts_migrated,
+                    "artifacts_hashed": report.artifacts_hashed,
+                    "artifacts_trusted": report.artifacts_trusted,
+                    "artifacts_cold_unverified": report.artifacts_cold_unverified,
+                    "locations_created": report.locations_created,
+                    "global_tables_copied": report.global_tables_copied,
+                    "views_copied": report.views_copied,
+                },
+                indent=2,
+            )
+        )
+        return
+
+    if report.already_current:
+        console.print(
+            f"[green]Already up to date:[/green] {report.db_path} is at schema version 2."
+        )
+        return
+
+    mode_prefix = (
+        "[yellow]Dry run complete[/yellow]"
+        if report.dry_run
+        else "[green]Migrated[/green]"
+    )
+    console.print(
+        f"{mode_prefix} {report.db_path} "
+        f"(runs={report.runs_migrated}, cacheable={report.cacheable_runs}, "
+        f"artifacts={report.artifacts_migrated}, hashed={report.artifacts_hashed}, "
+        f"trusted={report.artifacts_trusted}, cold={report.artifacts_cold_unverified}, "
+        f"locations={report.locations_created})"
+    )
 
 
 if __name__ == "__main__":

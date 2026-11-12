@@ -3,6 +3,8 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Optional, Union, cast
 
+from consist.location import ArtifactLocationRow, workspace_mount_instance_id
+
 
 def resolve_historical_artifact_path(
     fs: Any,
@@ -77,6 +79,10 @@ class FileSystemManager:
         self.run_dir = Path(run_dir).resolve()
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.mounts = mounts or {}
+        self._ws_id_cache: Optional[tuple[Path, str]] = None
+        self._mounts_key_cache: Optional[
+            tuple[tuple[tuple[str, str], ...], tuple[tuple[str, str], ...]]
+        ] = None
 
     def resolve_uri(self, uri: str) -> str:
         """
@@ -567,3 +573,198 @@ class FileSystemManager:
             return None
 
         return historical_root, relative_path
+
+    @property
+    def workspace_instance_id(self) -> str:
+        """Return deterministic 16-hex instance ID for ``self.run_dir``."""
+        cached = self._ws_id_cache
+        if cached is not None and cached[0] == self.run_dir:
+            return cached[1]
+        ws_id = workspace_mount_instance_id(self.run_dir)
+        self._ws_id_cache = (self.run_dir, ws_id)
+        return ws_id
+
+    @property
+    def sorted_mounts_key(self) -> tuple[tuple[str, str], ...]:
+        """Return canonical sorted ``(name, realpath)`` tuple for memoization."""
+        raw_snapshot = tuple((str(k), str(v)) for k, v in self.mounts.items())
+        cached = self._mounts_key_cache
+        if cached is not None and cached[0] == raw_snapshot:
+            return cached[1]
+        computed = tuple(
+            sorted(
+                (name, os.path.realpath(Path(root).expanduser()))
+                for name, root in raw_snapshot
+            )
+        )
+        self._mounts_key_cache = (raw_snapshot, computed)
+        return computed
+
+    def location_coordinate_for_uri(self, uri: str) -> tuple[str, str, str]:
+        """Map an artifact URI to ``(mount_name, mount_instance_id, canonical_uri)``."""
+        if "://" in uri:
+            scheme, rel_raw = uri.split("://", 1)
+            if scheme in ("workspace", "runs"):
+                inst_id = (
+                    workspace_mount_instance_id(self.mounts[scheme])
+                    if scheme in self.mounts
+                    else self.workspace_instance_id
+                )
+                return scheme, inst_id, f"{scheme}://{rel_raw.lstrip('/')}"
+            if scheme in self.mounts:
+                return scheme, "", f"{scheme}://{rel_raw.lstrip('/')}"
+            if scheme == "file":
+                return "abs", "", f"file://{rel_raw}"
+            return scheme, "", f"{scheme}://{rel_raw.lstrip('/')}"
+
+        if uri.startswith("./"):
+            mount_name = "runs" if "workspace" in self.mounts else "workspace"
+            return mount_name, self.workspace_instance_id, uri
+
+        path_obj = Path(uri)
+        if path_obj.is_absolute():
+            return "abs", "", f"file://{path_obj}"
+        mount_name = "runs" if "workspace" in self.mounts else "workspace"
+        return mount_name, self.workspace_instance_id, f"./{uri.lstrip('/')}"
+
+    def archive_coordinate_for_root(
+        self,
+        artifact_uri: str,
+        root: str | os.PathLike[str],
+        *,
+        resolve: bool = True,
+    ) -> tuple[str, str, str, Path]:
+        """Map an archive/recovery root + artifact URI to ``(mount_name, '', uri, target_path)``."""
+        rel = self.get_remappable_relative_path(artifact_uri) if artifact_uri else None
+        raw_root_str = os.fspath(root)
+        if "://" in raw_root_str:
+            scheme, root_rel_raw = raw_root_str.split("://", 1)
+            if scheme == "file":
+                raw_root_str = root_rel_raw
+            else:
+                clean_root_rel = root_rel_raw.strip("/")
+                rel_posix = rel.as_posix() if rel is not None else ""
+                combined = "/".join(p for p in (clean_root_rel, rel_posix) if p)
+                uri_str = f"{scheme}://{combined}"
+                if scheme in self.mounts:
+                    mount_base = (
+                        Path(self.mounts[scheme]).resolve()
+                        if resolve
+                        else Path(self.mounts[scheme]).absolute()
+                    )
+                    target = (mount_base / combined) if combined else mount_base
+                else:
+                    target = Path(f"/__unmounted__/{scheme}/{combined}")
+                return scheme, "", uri_str, target
+
+        root_path = (
+            Path(raw_root_str).resolve() if resolve else Path(raw_root_str).absolute()
+        )
+        target_path = (root_path / rel) if rel is not None else root_path
+        target_str = str(target_path)
+
+        sorted_mounts = sorted(
+            (
+                (name, Path(mount_root).resolve())
+                for name, mount_root in self.mounts.items()
+            ),
+            key=lambda item: len(str(item[1])),
+            reverse=True,
+        )
+        for name, mount_root in sorted_mounts:
+            mount_str = str(mount_root)
+            if target_str == mount_str:
+                return name, "", f"{name}://", target_path
+            if target_str.startswith(mount_str + os.sep):
+                rel_in_mount = Path(os.path.relpath(target_str, mount_str)).as_posix()
+                return name, "", f"{name}://{rel_in_mount}", target_path
+
+        return "abs", "", f"file://{target_str}", target_path
+
+    def resolve_location_row_path(
+        self,
+        row: ArtifactLocationRow,
+        *,
+        historical_run_dir: str | Path | None = None,
+    ) -> Optional[Path]:
+        """Resolve an ``ArtifactLocationRow`` to a host ``Path`` or ``None`` if unmounted/foreign."""
+        if row.mount_name == "abs":
+            raw = (
+                row.uri[len("file://") :] if row.uri.startswith("file://") else row.uri
+            )
+            return Path(raw) if raw else None
+
+        if row.mount_name in self.mounts:
+            mount_root = Path(
+                os.path.realpath(Path(self.mounts[row.mount_name]).expanduser())
+            )
+            rel = (
+                row.uri.split("://", 1)[1].lstrip("/")
+                if "://" in row.uri
+                else row.uri.lstrip("./")
+            )
+            candidate = mount_root / rel if rel else mount_root
+            resolved = (
+                Path(os.path.realpath(candidate.parent)) / candidate.name
+                if rel
+                else mount_root
+            )
+            try:
+                resolved.relative_to(mount_root)
+            except ValueError:
+                return None
+            return resolved
+
+        if row.mount_name in ("workspace", "runs"):
+            if row.uri.startswith("workspace://"):
+                rel = row.uri[len("workspace://") :].lstrip("/")
+            elif row.uri.startswith("./"):
+                rel = row.uri[2:]
+            elif "://" in row.uri:
+                rel = row.uri.split("://", 1)[1].lstrip("/")
+            else:
+                rel = row.uri
+
+            base_root: Optional[Path] = None
+            if row.mount_instance_id in ("", self.workspace_instance_id):
+                base_root = Path(os.path.realpath(self.run_dir))
+            elif historical_run_dir is not None:
+                hist_path = Path(historical_run_dir).expanduser()
+                if workspace_mount_instance_id(hist_path) == row.mount_instance_id:
+                    base_root = Path(os.path.realpath(hist_path))
+
+            if base_root is None:
+                return None
+            # Preserve leaf without following a leaf symlink so broken/foreign leaf symlinks are caught
+            candidate = base_root / rel
+            parent_real = Path(os.path.realpath(candidate.parent))
+            resolved_candidate = parent_real / candidate.name
+            try:
+                resolved_candidate.relative_to(base_root)
+            except ValueError:
+                return None
+            return resolved_candidate
+
+        return None
+
+    def extract_recovery_root_from_location_row(
+        self,
+        artifact_uri: str,
+        row: ArtifactLocationRow,
+        *,
+        resolve: bool = True,
+    ) -> Optional[str]:
+        """Reconstruct the normalized recovery root directory from an archive/advisory location row."""
+        target = self.resolve_location_row_path(row)
+        if target is None:
+            return None
+        resolved_target = (
+            Path(os.path.realpath(target)) if resolve else target.absolute()
+        )
+        rel = self.get_remappable_relative_path(artifact_uri)
+        if rel is not None and len(rel.parts) > 0:
+            if len(resolved_target.parts) > len(rel.parts) and (
+                resolved_target.parts[-len(rel.parts) :] == rel.parts
+            ):
+                return str(resolved_target.parents[len(rel.parts) - 1])
+        return str(resolved_target)

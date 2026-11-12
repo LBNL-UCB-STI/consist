@@ -36,6 +36,7 @@ from typing import (
     cast,
     get_args,
 )
+from typing_extensions import Protocol, runtime_checkable
 
 from consist.core.container_policy import validate_recovery_registration_policy
 from consist.core.directory_artifacts import (
@@ -1301,6 +1302,11 @@ def _derive_historical_root(
     )
 
 
+@runtime_checkable
+class _HasArtifactRecoveryRoots(Protocol):
+    def artifact_recovery_roots(self, artifact: Any) -> Any: ...
+
+
 def _artifact_recovery_roots(
     tracker: "Tracker",
     *,
@@ -1308,19 +1314,13 @@ def _artifact_recovery_roots(
     preserve_raw_paths: bool = False,
 ) -> tuple[Path, ...]:
     """Return ordered recovery roots recorded for an artifact."""
-    artifact_meta = artifact.meta if isinstance(artifact.meta, MappingABC) else {}
-    raw_roots = artifact_meta.get("recovery_roots")
-    try:
-        db = tracker.db
-    except AttributeError:
-        db = None
-    if db is not None and artifact.id is not None:
+    raw_roots: Any = ()
+    if isinstance(tracker, _HasArtifactRecoveryRoots):
+        fn = tracker.artifact_recovery_roots
         try:
-            db_meta = db.get_artifact_meta_by_id(artifact.id)
-        except Exception:
-            db_meta = None
-        if isinstance(db_meta, MappingABC) and "recovery_roots" in db_meta:
-            raw_roots = db_meta.get("recovery_roots")
+            raw_roots = fn(artifact, resolve=not preserve_raw_paths)  # type: ignore[call-arg]
+        except TypeError:
+            raw_roots = fn(artifact)
     return tuple(
         Path(root)
         for root in tracker.fs.normalize_recovery_roots(
@@ -2526,26 +2526,37 @@ def _resolve_staging_source_path(
     *,
     artifact: Artifact,
 ) -> Path | None:
-    canonical_path: Path | None = None
+    from consist.core.tracker_recovery import (
+        resolve_verified_local_path,
+        verify_candidate_against_artifact,
+    )
+
+    verified = resolve_verified_local_path(tracker, artifact, allow_recovery_roots=True)
+    if verified is not None:
+        return verified.resolve()
+
+    fallback_existing: Path | None = None
     try:
         candidate = Path(tracker.resolve_uri(artifact.uri)).resolve()
         if candidate.exists():
-            canonical_path = candidate
+            if verify_candidate_against_artifact(candidate, artifact):
+                return candidate
+            fallback_existing = candidate
     except (OSError, ValueError, AttributeError):
-        canonical_path = None
-
-    if canonical_path is not None:
-        return canonical_path
+        pass
 
     runtime_abs_path = artifact.abs_path
     if runtime_abs_path:
         candidate = Path(runtime_abs_path).resolve()
         if candidate.exists():
-            return candidate
+            if verify_candidate_against_artifact(candidate, artifact):
+                return candidate
+            if fallback_existing is None:
+                fallback_existing = candidate
 
     relative_path = tracker.fs.get_remappable_relative_path(artifact.uri)
     if relative_path is None:
-        return None
+        return fallback_existing
 
     if artifact.run_id:
         owning_run = tracker.get_run(str(artifact.run_id))
@@ -2557,13 +2568,19 @@ def _resolve_staging_source_path(
                 source_root=None,
             )
             if source is not None:
-                return source
+                if verify_candidate_against_artifact(source, artifact):
+                    return source
+                if fallback_existing is None:
+                    fallback_existing = source
 
     for root in _artifact_recovery_roots(tracker, artifact=artifact):
         candidate = (root / relative_path).resolve()
         if candidate.exists():
-            return candidate
-    return None
+            if verify_candidate_against_artifact(candidate, artifact):
+                return candidate
+            if fallback_existing is None:
+                fallback_existing = candidate
+    return fallback_existing
 
 
 def _stage_artifact_path(

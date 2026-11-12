@@ -20,8 +20,10 @@ def _create_stub_tracker(
     run_dir: Path,
     mounts: dict[str, str | Path] | None = None,
     runs: dict[str, Any] | None = None,
+    recovery_roots_by_id: dict[Any, list[str | Path]] | None = None,
 ):
     fs = FileSystemManager(run_dir=run_dir, mounts=mounts or {})
+    roots_map = dict(recovery_roots_by_id or {})
 
     class StubIdentity:
         hashing_strategy = "full"
@@ -73,6 +75,9 @@ def _create_stub_tracker(
 
         def resolve_uri(self, uri: str) -> str:
             return self.fs.resolve_uri(uri)
+
+        def artifact_recovery_roots(self, artifact, *, resolve: bool = True):
+            return list(roots_map.get(artifact.id, []))
 
         def materialize_artifact(
             self,
@@ -346,7 +351,6 @@ def test_shapefile_bundle_materialization_from_archive_dir(tmp_path: Path) -> No
             "file_bundle": "shapefile",
             "file_bundle_entry": "roads.shp",
             "file_bundle_manifest": manifest,
-            "recovery_roots": [str(archive_root)],
         },
     )
 
@@ -356,7 +360,10 @@ def test_shapefile_bundle_materialization_from_archive_dir(tmp_path: Path) -> No
     unrelated_file = dest_dir / "unrelated_sibling.csv"
     unrelated_file.write_text("a,b,c\n1,2,3\n", encoding="utf-8")
 
-    tracker = _create_stub_tracker(tmp_path / "workspace")
+    tracker = _create_stub_tracker(
+        tmp_path / "workspace",
+        recovery_roots_by_id={artifact.id: [str(archive_root)]},
+    )
 
     result = materialize_artifact(
         tracker,

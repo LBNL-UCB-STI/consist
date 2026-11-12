@@ -6,9 +6,11 @@ import json
 import os
 import shutil
 import tempfile
+import time
+import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Dict, Literal, Mapping, Sequence
+from typing import Any, Callable, Dict, Literal, Mapping, Optional, Sequence
 
 from consist.core._tracker_service_base import _TrackerServiceBase
 from consist.core.container_policy import validate_recovery_registration_policy
@@ -42,7 +44,13 @@ from consist.core.output_sets import (
     _normalize_output_set_relative_path,
     compute_output_set_manifest_digest,
 )
+from consist.core.tracker_recovery import (
+    capture_artifact_witness,
+    is_unvalidated_caller_digest,
+    verify_candidate_against_artifact,
+)
 from consist.digest import file_sha256, verify_digest
+from consist.location import ArtifactLocationRow, LocationSite, compute_location_id
 from consist.models.artifact import Artifact, ArchivedOutputs
 
 
@@ -359,6 +367,319 @@ class TrackerArchiveService(_TrackerServiceBase):
                     next_art = next_art.with_abs_path(matched_refreshed.abs_path)
                 coupler._artifacts[coupler_key] = next_art.with_resolver(self.tracker)
 
+    def _build_recovery_location_rows_for_artifact(
+        self,
+        artifact: Artifact,
+        roots: Sequence[str],
+        *,
+        existing_rows: Sequence[ArtifactLocationRow] = (),
+        base_ns: Optional[int] = None,
+    ) -> list[ArtifactLocationRow]:
+        if not roots or artifact.id is None:
+            return []
+        digest_str = str(artifact.digest) if artifact.digest is not None else None
+        member_str = artifact.member or ""
+        now_base = time.time_ns() if base_ns is None else int(base_ns)
+        existing_by_coord: dict[tuple[str, str, str], ArtifactLocationRow] = {
+            (r.mount_name, r.mount_instance_id, r.uri): r for r in existing_rows
+        }
+        built: list[ArtifactLocationRow] = []
+        for idx, root_str in enumerate(roots):
+            mount_name, mount_inst, loc_uri, _target = (
+                self.fs.archive_coordinate_for_root(artifact.uri, root_str)
+            )
+            prior = existing_by_coord.get((mount_name, mount_inst, loc_uri))
+            site: LocationSite = prior.site if prior is not None else "advisory"
+            witness = prior.witness if prior is not None else None
+            built.append(
+                ArtifactLocationRow(
+                    location_id=compute_location_id(
+                        digest=digest_str,
+                        artifact_id=artifact.id,
+                        site=site,
+                        mount_name=mount_name,
+                        mount_instance_id=mount_inst,
+                        uri=loc_uri,
+                        member=member_str,
+                    ),
+                    digest=digest_str,
+                    artifact_id=artifact.id,
+                    site=site,
+                    mount_name=mount_name,
+                    mount_instance_id=mount_inst,
+                    uri=loc_uri,
+                    member=member_str,
+                    status="active",
+                    witness=witness,
+                    observed_at_ns=now_base + idx,
+                )
+            )
+        return built
+
+    def _promote_verified_archive_location(
+        self,
+        artifact: Artifact,
+        archive_root: Path,
+        destination: Path,
+    ) -> None:
+        if self.db is None or artifact.id is None:
+            return
+        mount_name, mount_inst, loc_uri, _ = self.fs.archive_coordinate_for_root(
+            artifact.uri, archive_root
+        )
+        digest_str = str(artifact.digest) if artifact.digest is not None else None
+        member_str = artifact.member or ""
+        now_ns = time.time_ns()
+        witness = capture_artifact_witness(destination, artifact, observed_at_ns=now_ns)
+        existing = self.db.get_artifact_recovery_locations(artifact.id)
+        obs_ns = now_ns
+        evict_advisory_ids: list[uuid.UUID] = []
+        for r in existing:
+            if (r.mount_name, r.mount_instance_id, r.uri) == (
+                mount_name,
+                mount_inst,
+                loc_uri,
+            ):
+                obs_ns = r.observed_at_ns
+                if r.site != "archive":
+                    evict_advisory_ids.append(r.location_id)
+        if evict_advisory_ids:
+            self.db.mark_artifact_locations_status_bulk(evict_advisory_ids, "evicted")
+        archive_row = ArtifactLocationRow(
+            location_id=compute_location_id(
+                digest=digest_str,
+                artifact_id=artifact.id,
+                site="archive",
+                mount_name=mount_name,
+                mount_instance_id=mount_inst,
+                uri=loc_uri,
+                member=member_str,
+            ),
+            digest=digest_str,
+            artifact_id=artifact.id,
+            site="archive",
+            mount_name=mount_name,
+            mount_instance_id=mount_inst,
+            uri=loc_uri,
+            member=member_str,
+            status="active",
+            witness=witness,
+            observed_at_ns=obs_ns,
+        )
+        self.db.upsert_artifact_locations([archive_row])
+
+    def _mark_moved_artifact_source_evicted(
+        self,
+        artifact: Artifact,
+        source_path: Optional[Path] = None,
+    ) -> None:
+        if self.db is None or artifact.id is None:
+            return
+        mount_name, mount_inst, loc_uri = self.fs.location_coordinate_for_uri(
+            artifact.uri
+        )
+        site: LocationSite = (
+            "workspace" if mount_name in ("workspace", "runs") else "external"
+        )
+        self.db.mark_coordinate_locations_status(
+            site=site,
+            mount_name=mount_name,
+            mount_instance_id=mount_inst,
+            uri=loc_uri,
+            member=artifact.member or "",
+            status="evicted",
+        )
+        if source_path is not None:
+            src_real = Path(
+                os.path.realpath(
+                    resolve_file_bundle_root(source_path)
+                    if _is_file_bundle_artifact(artifact)
+                    else source_path
+                )
+            )
+            active_rows = self.db.get_active_artifact_locations(
+                artifact_id=artifact.id,
+                digest=artifact.digest,
+                member=artifact.member,
+            )
+            extra_ids: list[uuid.UUID] = []
+            for row in active_rows:
+                if row.site in ("archive", "advisory"):
+                    continue
+                cand = self.fs.resolve_location_row_path(row)
+                if cand is None:
+                    continue
+                cand_real = Path(
+                    os.path.realpath(
+                        resolve_file_bundle_root(cand)
+                        if _is_file_bundle_artifact(artifact)
+                        else cand
+                    )
+                )
+                if cand_real == src_real:
+                    extra_ids.append(row.location_id)
+            if extra_ids:
+                self.db.mark_artifact_locations_status_bulk(extra_ids, "evicted")
+
+    def evict_artifact(
+        self,
+        artifact: Artifact,
+        *,
+        path: Optional[str | os.PathLike[str]] = None,
+    ) -> Path:
+        """Safely evict a verified local scratch copy of ``artifact``."""
+        if not isinstance(artifact, Artifact):
+            raise TypeError("artifact must be an Artifact instance.")
+        if self.db is None:
+            raise RuntimeError(
+                "Cannot evict artifact: tracker has no database configured."
+            )
+        if (
+            artifact.digest is None
+            or artifact.digest.scheme
+            in {
+                "stat_file_v1:sha256",
+                "stat_dir_v1:sha256",
+                "caller_supplied_v1:sha256",
+            }
+            or is_unvalidated_caller_digest(artifact)
+        ):
+            raise ValueError(
+                f"Cannot safely evict artifact {artifact.key!r}: "
+                "no verifiable content digest is recorded."
+            )
+
+        target_path: Optional[Path] = None
+        if path is not None:
+            target_path = Path(path).expanduser()
+        else:
+            active_rows = self.db.get_active_artifact_locations(
+                artifact_id=artifact.id,
+                digest=artifact.digest,
+                member=artifact.member,
+            )
+            for row in active_rows:
+                if row.site in ("archive", "advisory"):
+                    continue
+                cand = self.fs.resolve_location_row_path(row)
+                if cand is not None and cand.exists():
+                    target_path = Path(resolve_artifact_entry_path(artifact, cand))
+                    break
+            if target_path is None:
+                try:
+                    target_path = Path(self.resolve_uri(artifact.uri))
+                except (ValueError, RuntimeError, OSError, TypeError):
+                    target_path = Path(artifact.abs_path) if artifact.abs_path else None
+
+        if target_path is None:
+            raise FileNotFoundError(
+                f"Cannot resolve local scratch path for artifact {artifact.key!r}."
+            )
+        if target_path.is_symlink():
+            raise ValueError(
+                f"Refusing to evict symlink path {target_path} for artifact {artifact.key!r}."
+            )
+        if not target_path.exists():
+            raise FileNotFoundError(
+                f"Scratch path does not exist for artifact {artifact.key!r}: {target_path}"
+            )
+
+        # Safety Gate 1: Never delete user edits — verify full content/manifest digest first.
+        if not verify_candidate_against_artifact(target_path, artifact):
+            raise ValueError(
+                f"Refusing to evict artifact {artifact.key!r} at {target_path}: "
+                f"local bytes were modified after logging and do not match digest {artifact.digest}."
+            )
+
+        if artifact.member is not None:
+            container_real = os.path.realpath(target_path)
+            sibling_rows = self.db.fetchall(
+                "SELECT id, uri FROM artifact WHERE id != ?",
+                [artifact.id],
+            )
+            for _sib_id, sib_uri in sibling_rows:
+                try:
+                    sib_resolved = os.path.realpath(self.resolve_uri(str(sib_uri)))
+                except (ValueError, RuntimeError, OSError, TypeError):
+                    continue
+                if sib_resolved == container_real:
+                    raise ValueError(
+                        f"Refusing to evict shared container {target_path} via member "
+                        f"artifact {artifact.key!r} ({artifact.member!r})."
+                    )
+
+        # Safety Gate 2: Require >= 1 verified active archive on disk at a distinct realpath
+        # OR ingested hot data in global_tables.
+        target_compare = Path(
+            os.path.realpath(
+                resolve_file_bundle_root(target_path)
+                if _is_file_bundle_artifact(artifact)
+                else target_path
+            )
+        )
+        verified_archive_entry: Optional[str] = None
+        for row in self.db.get_active_artifact_locations(
+            artifact_id=artifact.id,
+            digest=artifact.digest,
+            member=artifact.member,
+        ):
+            if row.site not in ("archive", "advisory"):
+                continue
+            cand = self.fs.resolve_location_row_path(row)
+            if cand is None or not cand.exists():
+                continue
+            cand_compare = Path(
+                os.path.realpath(
+                    resolve_file_bundle_root(cand)
+                    if _is_file_bundle_artifact(artifact)
+                    else cand
+                )
+            )
+            if cand_compare == target_compare:
+                continue
+            if verify_candidate_against_artifact(cand, artifact):
+                verified_archive_entry = resolve_artifact_entry_path(artifact, cand)
+                break
+
+        has_hot_table = False
+        if verified_archive_entry is None:
+            meta = dict(artifact.meta or {})
+            if artifact.id is not None:
+                db_art = self.db.get_artifact(artifact.id)
+                if db_art is not None and isinstance(db_art.meta, Mapping):
+                    meta.update(db_art.meta)
+            is_ingested = meta.get("is_ingested") is True
+            dlt_table = meta.get("dlt_table_name") or artifact.key
+            has_hot_table = (
+                is_ingested
+                and artifact.driver != "geoparquet"
+                and isinstance(dlt_table, str)
+                and bool(dlt_table)
+                and self.db.has_table(dlt_table, table_schema="global_tables")
+            )
+
+        if verified_archive_entry is None and not has_hot_table:
+            raise ValueError(
+                f"Refusing to evict artifact {artifact.key!r} at {target_path}: "
+                "no surviving verified archive location or ingested global_tables table survives."
+            )
+
+        evicted_resolved = Path(os.path.realpath(target_path))
+        if _is_file_bundle_artifact(artifact):
+            _entry, manifest = _shapefile_bundle_metadata(artifact)
+            bundle_root = resolve_file_bundle_root(target_path)
+            for member_item in manifest["entries"]:
+                (bundle_root / member_item["path"]).unlink(missing_ok=True)
+        elif target_path.is_dir():
+            shutil.rmtree(target_path)
+        else:
+            target_path.unlink()
+
+        self._mark_moved_artifact_source_evicted(artifact, evicted_resolved)
+        self._sync_active_run_artifact_abs_path(artifact, verified_archive_entry)
+        self._run_artifacts_cache.clear()
+        return evicted_resolved
+
     def set_artifact_recovery_roots(
         self,
         artifact: Artifact,
@@ -366,83 +687,46 @@ class TrackerArchiveService(_TrackerServiceBase):
         *,
         append: bool = False,
     ) -> Artifact:
-        """Persist advisory filesystem recovery roots for an artifact.
-
-        Parameters
-        ----------
-        artifact : Artifact
-            Artifact whose recovery metadata should be updated.
-        roots : path-like or sequence of path-like
-            Ordered filesystem roots to store after normalization.
-        append : bool, default False
-            If ``True``, append roots after existing distinct roots; otherwise
-            replace them. An empty normalized list clears the metadata field.
-
-        Returns
-        -------
-        Artifact
-            The supplied artifact with its in-memory metadata refreshed.
-
-        Raises
-        ------
-        TypeError
-            If ``artifact`` is not an :class:`Artifact`.
-        RuntimeError
-            If the tracker has no metadata database.
-
-        Notes
-        -----
-        Recovery roots are ordered fallback locations during historical
-        rematerialization. ``container_uri`` remains canonical.
-        """
+        """Persist ordered recovery locations for ``artifact`` in ``artifact_location``."""
         if not isinstance(artifact, Artifact):
             raise TypeError("artifact must be an Artifact instance.")
         if self.db is None:
             raise RuntimeError(
                 "Cannot update artifact recovery roots: tracker has no database configured."
             )
-
-        db_meta_map = (
-            self.db.get_artifact_meta_by_ids([artifact.id])
-            if artifact.id is not None
-            else {}
-        )
-        persisted_meta = (
-            db_meta_map.get(artifact.id) if artifact.id is not None else None
-        )
-        base_meta = dict(artifact.meta or {})
-        if persisted_meta is not None:
-            base_meta.update(persisted_meta)
+        if artifact.id is None:
+            raise ValueError("artifact must have an id.")
 
         incoming = self.fs.normalize_recovery_roots(roots)
-        existing_raw = (
-            persisted_meta.get("recovery_roots")
-            if persisted_meta is not None and "recovery_roots" in persisted_meta
-            else (artifact.meta or {}).get("recovery_roots")
-        )
-        existing = self.fs.normalize_recovery_roots(existing_raw)
-        normalized = incoming
+        existing_rows = self.db.get_artifact_recovery_locations(artifact.id)
         if append:
-            normalized = self.fs.normalize_recovery_roots([*existing, *incoming])
+            existing_roots = [
+                extracted
+                for r in existing_rows
+                if (
+                    extracted := self.fs.extract_recovery_root_from_location_row(
+                        artifact.uri, r
+                    )
+                )
+                is not None
+            ]
+            normalized = self.fs.normalize_recovery_roots([*existing_roots, *incoming])
+        else:
+            normalized = incoming
 
-        if not normalized:
-            base_meta.pop("recovery_roots", None)
-            self.db.update_artifact_meta(
-                artifact, {"recovery_roots": None}, raise_on_error=True
-            )
-            updated = artifact.with_meta(base_meta).with_resolver(self.tracker)
-            if artifact.id is not None:
-                self._sync_active_run_artifacts_meta({str(artifact.id): base_meta})
-            self._run_artifacts_cache.clear()
-            return updated
-
-        self.db.update_artifact_meta(
-            artifact, {"recovery_roots": normalized}, raise_on_error=True
+        new_rows = self._build_recovery_location_rows_for_artifact(
+            artifact,
+            normalized,
+            existing_rows=existing_rows,
         )
-        base_meta["recovery_roots"] = normalized
+        self.db.replace_artifact_recovery_locations_bulk(
+            {artifact.id: new_rows},
+            require_all=True,
+        )
+        base_meta = dict(artifact.meta or {})
+        base_meta.pop("recovery_roots", None)
         updated = artifact.with_meta(base_meta).with_resolver(self.tracker)
-        if artifact.id is not None:
-            self._sync_active_run_artifacts_meta({str(artifact.id): base_meta})
+        self._sync_active_run_artifacts_meta({str(artifact.id): base_meta})
         self._run_artifacts_cache.clear()
         return updated
 
@@ -594,6 +878,9 @@ class TrackerArchiveService(_TrackerServiceBase):
             self.tracker.set_artifact_recovery_roots(
                 artifact, recovery_roots, append=append
             )
+            self._promote_verified_archive_location(
+                artifact, archive_root_path, destination
+            )
         except Exception:
             if moved_from is not None and destination.exists():
                 moved_from.parent.mkdir(parents=True, exist_ok=True)
@@ -613,6 +900,7 @@ class TrackerArchiveService(_TrackerServiceBase):
                     )
             elif matched_existing_destination:
                 source_path.unlink(missing_ok=True)
+            self._mark_moved_artifact_source_evicted(artifact, source_path)
             resolved_dest = str(destination.resolve())
             self._sync_active_run_artifact_abs_path(artifact, resolved_dest)
         return destination
@@ -1491,14 +1779,57 @@ class TrackerArchiveService(_TrackerServiceBase):
                 recovery_roots,
                 append=append,
             )
+            self._promote_verified_archive_location(
+                plan.parent, archive_root_path, plan.destination
+            )
+            for member_item in plan.members:
+                self._promote_verified_archive_location(
+                    member_item.artifact, archive_root_path, member_item.destination
+                )
+            self._promote_verified_archive_location(
+                plan.manifest, archive_root_path, plan.manifest_destination
+            )
+            for dep_art in dependent_artifacts:
+                dep_rel = self.fs.get_remappable_relative_path(dep_art.uri)
+                if dep_rel is not None:
+                    self._promote_verified_archive_location(
+                        dep_art,
+                        archive_root_path,
+                        (archive_root_path / dep_rel).resolve(),
+                    )
         except Exception:
             if published_manifest:
                 self._remove_output_set_archive_destination(plan.manifest_destination)
             if published_directory:
                 self._remove_output_set_archive_destination(plan.destination)
             raise
-        if mode == "move" and remove_sources:
-            self._remove_output_set_sources(plan)
+        if mode == "move":
+            if remove_sources:
+                self._remove_output_set_sources(plan)
+            self._mark_moved_artifact_source_evicted(plan.parent, plan.parent_source)
+            self._sync_active_run_artifact_abs_path(
+                plan.parent, str(plan.destination.resolve())
+            )
+            for member_item in plan.members:
+                self._mark_moved_artifact_source_evicted(
+                    member_item.artifact, member_item.source_path
+                )
+                self._sync_active_run_artifact_abs_path(
+                    member_item.artifact, str(member_item.destination.resolve())
+                )
+            self._mark_moved_artifact_source_evicted(
+                plan.manifest, plan.manifest_source
+            )
+            self._sync_active_run_artifact_abs_path(
+                plan.manifest, str(plan.manifest_destination.resolve())
+            )
+            for dep_art in dependent_artifacts:
+                self._mark_moved_artifact_source_evicted(dep_art)
+                dep_rel = self.fs.get_remappable_relative_path(dep_art.uri)
+                if dep_rel is not None:
+                    self._sync_active_run_artifact_abs_path(
+                        dep_art, str((archive_root_path / dep_rel).resolve())
+                    )
         return plan.destination
 
     @staticmethod
@@ -1568,6 +1899,9 @@ class TrackerArchiveService(_TrackerServiceBase):
             self.tracker.set_artifact_recovery_roots(
                 artifact, recovery_roots, append=append
             )
+            self._promote_verified_archive_location(
+                artifact, archive_root_path, destination
+            )
         except Exception:
             rollback_published_directory_tree(destination, published)
             raise
@@ -1579,6 +1913,7 @@ class TrackerArchiveService(_TrackerServiceBase):
                     )
                 elif source_path.exists():
                     shutil.rmtree(source_path)
+            self._mark_moved_artifact_source_evicted(artifact, source_path)
             resolved_dest = str(destination.resolve())
             self._sync_active_run_artifact_abs_path(artifact, resolved_dest)
         return destination
@@ -1634,6 +1969,9 @@ class TrackerArchiveService(_TrackerServiceBase):
             self.tracker.set_artifact_recovery_roots(
                 artifact, recovery_roots, append=append
             )
+            self._promote_verified_archive_location(
+                artifact, archive_root_path, destination
+            )
         except Exception:
             if published and destination.exists():
                 shutil.rmtree(destination)
@@ -1648,6 +1986,7 @@ class TrackerArchiveService(_TrackerServiceBase):
                         )
                     else:
                         member_source.unlink(missing_ok=True)
+            self._mark_moved_artifact_source_evicted(artifact, source_path)
             resolved_dest = resolve_artifact_entry_path(artifact, destination)
             self._sync_active_run_artifact_abs_path(artifact, resolved_dest)
         return destination
@@ -1878,11 +2217,15 @@ class TrackerArchiveService(_TrackerServiceBase):
             artifact = self.tracker.set_artifact_recovery_roots(
                 artifact, [recovery_root_path], append=append
             )
+            if verify and expected_path_resolved is not None:
+                self._promote_verified_archive_location(
+                    artifact, recovery_root_path, expected_path_resolved
+                )
         except Exception as exc:
             return result(
                 "failed",
                 expected_path=expected_path_resolved,
-                message=f"Could not update recovery_roots metadata: {exc}",
+                message=f"Could not update recovery location state: {exc}",
                 verification_succeeded=True,
             )
         return result(
@@ -1899,8 +2242,9 @@ class TrackerArchiveService(_TrackerServiceBase):
         roots: str | os.PathLike[str] | Sequence[str | os.PathLike[str]],
         *,
         append: bool,
+        site: str = "advisory",
     ) -> dict[str, Artifact]:
-        """Persist recovery roots for artifacts in one database transaction."""
+        """Persist recovery locations for artifacts in one database transaction."""
         if self.db is None:
             raise RuntimeError(
                 "Cannot update artifact recovery roots: tracker has no database configured."
@@ -1915,44 +2259,54 @@ class TrackerArchiveService(_TrackerServiceBase):
                 raise ValueError("artifact must have an id.")
             validated_artifacts.append(artifact)
 
-        db_meta_by_id = self.db.get_artifact_meta_by_ids(
+        if not validated_artifacts:
+            return {}
+
+        existing_by_id = self.db.get_artifacts_recovery_locations_bulk(
             [a.id for a in validated_artifacts]
         )
-        updates: dict[str, tuple[Artifact, dict[str, Any]]] = {}
+        base_ns = time.time_ns()
+        locations_by_aid: dict[uuid.UUID, list[ArtifactLocationRow]] = {}
+        cleaned_meta_by_id: dict[str, dict[str, Any]] = {}
+        refreshed_by_id: dict[str, Artifact] = {}
         for artifact in validated_artifacts:
-            persisted_meta = db_meta_by_id.get(artifact.id)
-            next_meta = dict(artifact.meta or {})
-            if persisted_meta is not None:
-                next_meta.update(persisted_meta)
-            existing_raw = (
-                persisted_meta.get("recovery_roots")
-                if persisted_meta is not None and "recovery_roots" in persisted_meta
-                else (artifact.meta or {}).get("recovery_roots")
-            )
-            existing = self.fs.normalize_recovery_roots(existing_raw)
-            normalized = incoming
+            existing_rows = existing_by_id.get(artifact.id, [])
             if append:
-                normalized = self.fs.normalize_recovery_roots([*existing, *incoming])
-            if normalized:
-                next_meta["recovery_roots"] = normalized
+                existing_roots = [
+                    extracted
+                    for r in existing_rows
+                    if (
+                        extracted := self.fs.extract_recovery_root_from_location_row(
+                            artifact.uri, r
+                        )
+                    )
+                    is not None
+                ]
+                normalized = self.fs.normalize_recovery_roots(
+                    [*existing_roots, *incoming]
+                )
             else:
-                next_meta.pop("recovery_roots", None)
-            updates[str(artifact.id)] = (artifact, next_meta)
+                normalized = incoming
+            locations_by_aid[artifact.id] = (
+                self._build_recovery_location_rows_for_artifact(
+                    artifact,
+                    normalized,
+                    existing_rows=existing_rows,
+                    base_ns=base_ns,
+                )
+            )
+            clean_meta = dict(artifact.meta or {})
+            clean_meta.pop("recovery_roots", None)
+            cleaned_meta_by_id[str(artifact.id)] = clean_meta
+            refreshed_by_id[str(artifact.id)] = artifact.with_meta(
+                clean_meta
+            ).with_resolver(self.tracker)
 
-        if not updates:
-            return {}
-        self.db.replace_artifacts_meta_bulk(
-            {artifact.id: next_meta for artifact, next_meta in updates.values()},
+        self.db.replace_artifact_recovery_locations_bulk(
+            locations_by_aid,
             require_all=True,
         )
-
-        refreshed_by_id = {
-            artifact_id: artifact.with_meta(dict(next_meta)).with_resolver(self.tracker)
-            for artifact_id, (artifact, next_meta) in updates.items()
-        }
-        self._sync_active_run_artifacts_meta(
-            {artifact_id: next_meta for artifact_id, (_, next_meta) in updates.items()}
-        )
+        self._sync_active_run_artifacts_meta(cleaned_meta_by_id)
         self._run_artifacts_cache.clear()
         return refreshed_by_id
 
@@ -2048,10 +2402,16 @@ class TrackerArchiveService(_TrackerServiceBase):
                         registered[key] = replace(
                             registration,
                             status="failed",
-                            message=f"Could not update recovery_roots metadata: {exc}",
+                            message=f"Could not update recovery location state: {exc}",
                             metadata_updated=False,
                         )
                     else:
+                        if verify and registration.expected_path is not None:
+                            self._promote_verified_archive_location(
+                                updated_art,
+                                recovery_root_path,
+                                registration.expected_path,
+                            )
                         registered[key] = replace(
                             registration,
                             artifact=updated_art,
@@ -2065,6 +2425,12 @@ class TrackerArchiveService(_TrackerServiceBase):
                         if isinstance(refreshed_by_id, Mapping)
                         else artifact
                     )
+                    if verify and registration.expected_path is not None:
+                        self._promote_verified_archive_location(
+                            updated_art,
+                            recovery_root_path,
+                            registration.expected_path,
+                        )
                     registered[key] = replace(
                         registration,
                         artifact=updated_art,
@@ -2662,6 +3028,10 @@ class TrackerArchiveService(_TrackerServiceBase):
                 dependent_artifacts=dependent_artifacts,
                 prepend_source_mount_root=prepend_source_mount_root,
             )
+            if mode == "move":
+                selected[key] = plan.parent.with_abs_path(
+                    str(plan.destination.resolve())
+                )
         remaining_directory_items: list[tuple[int, tuple[str, Artifact]]] = []
         remaining_other_items: list[tuple[str, Artifact]] = []
         for idx, (key, artifact) in enumerate(selected.items()):
@@ -2670,10 +3040,18 @@ class TrackerArchiveService(_TrackerServiceBase):
             nested_scalar = nested_scalars.get(key)
             if nested_scalar is not None:
                 archived_by_key[key] = nested_scalar.destination
+                if mode == "move":
+                    selected[key] = artifact.with_abs_path(
+                        str(nested_scalar.destination.resolve())
+                    )
                 continue
             nested_directory = nested_directories.get(key)
             if nested_directory is not None:
                 archived_by_key[key] = nested_directory.destination
+                if mode == "move":
+                    selected[key] = artifact.with_abs_path(
+                        str(nested_directory.destination.resolve())
+                    )
                 continue
             if _is_directory_artifact(artifact):
                 remaining_directory_items.append((idx, (key, artifact)))
@@ -2838,22 +3216,26 @@ class TrackerArchiveService(_TrackerServiceBase):
         *,
         active_run_id: str,
     ) -> None:
-        """Remove an overwritten archive root from superseded runs' artifact metadata."""
+        """Mark an overwritten archive root evicted for superseded runs' artifacts."""
         if self.db is None:
             return
         normalized_roots = self.fs.normalize_recovery_roots(archive_root)
         if not normalized_roots:
             return
         target_root = normalized_roots[0]
+        mount_name, mount_inst, root_uri, _ = self.fs.archive_coordinate_for_root(
+            "", target_root
+        )
         retained_ids = {
             art.id
             for art in self.get_run_outputs(active_run_id).values()
             if art.id is not None
         }
-        updated_any = self.db.prune_recovery_root_from_artifacts(
-            target_root=target_root,
+        updated_any = self.db.evict_recovery_root_locations(
+            mount_name=mount_name,
+            mount_instance_id=mount_inst,
+            root_uri=root_uri,
             retained_ids=retained_ids,
-            normalize_fn=self.fs.normalize_recovery_roots,
         )
         if updated_any:
             self._run_artifacts_cache.clear()
