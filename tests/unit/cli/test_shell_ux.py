@@ -278,9 +278,12 @@ def test_shell_hash_lookup_reports_run_scoped_miss(tmp_path, capsys) -> None:
         shell = ConsistShell(tracker)
 
     with patch("consist.cli._require_db") as require_db:
-        require_db.return_value.fetchall.return_value = []
+        require_db.return_value.find_artifacts_by_digest_prefix.return_value = []
         resolved = shell._lookup_artifact_by_hash_prefix(
             "deadbeef", command_name="preview", run_id="run-123"
+        )
+        require_db.return_value.find_artifacts_by_digest_prefix.assert_called_once_with(
+            "deadbeef", run_id="run-123", limit=6
         )
 
     out = capsys.readouterr().out
@@ -302,9 +305,12 @@ def test_shell_hash_lookup_does_not_inherit_last_artifact_run_scope(
     shell._last_artifact_run_id = "run-123"
 
     with patch("consist.cli._require_db") as require_db:
-        require_db.return_value.fetchall.return_value = []
+        require_db.return_value.find_artifacts_by_digest_prefix.return_value = []
         resolved = shell._lookup_artifact_by_hash_prefix(
             "deadbeef", command_name="preview"
+        )
+        require_db.return_value.find_artifacts_by_digest_prefix.assert_called_once_with(
+            "deadbeef", run_id=None, limit=6
         )
 
     out = capsys.readouterr().out
@@ -338,11 +344,8 @@ def test_shell_hash_lookup_reports_ambiguity_with_candidates(tmp_path, capsys) -
         ),
     ]
 
-    with (
-        patch("consist.cli._require_db") as require_db,
-        patch("consist.cli._hydrate_artifact_row", side_effect=matches),
-    ):
-        require_db.return_value.fetchall.return_value = [("row-1",), ("row-2",)]
+    with patch("consist.cli._require_db") as require_db:
+        require_db.return_value.find_artifacts_by_digest_prefix.return_value = matches
         resolved = shell._lookup_artifact_by_hash_prefix(
             "deadbeef", command_name="schema_profile", run_id="run-a"
         )

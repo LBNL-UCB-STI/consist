@@ -13,11 +13,14 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+import duckdb
 import pandas as pd
 
 from consist.core.stores import get_hot_data_db
 from consist.core.views import (
     _SAFE_IDENTIFIER_RE as _SAFE_IDENTIFIER_RE,
+    _build_metadata_artifact_join,
+    _dlt_child_list_cte,
     _qualified_table,
     _validate_identifier,
 )
@@ -48,70 +51,12 @@ class NetCdfMetadataView:
             return pd.DataFrame()
 
         base_table = _qualified_table("global_tables", concept_key)
-        dims_name = f"{concept_key}__dims"
-        shape_name = f"{concept_key}__shape"
-        has_dims = db.has_table(dims_name, table_schema="global_tables")
-        has_shape = db.has_table(shape_name, table_schema="global_tables")
-
-        if has_dims:
-            dims_table = _qualified_table("global_tables", dims_name)
-            dims_cte = f"""
-                SELECT
-                    _dlt_parent_id,
-                    list(value ORDER BY _dlt_list_idx) AS dims
-                FROM {dims_table}
-                GROUP BY _dlt_parent_id
-            """
-        else:
-            dims_cte = (
-                "SELECT CAST(NULL AS VARCHAR) AS _dlt_parent_id, "
-                "CAST([] AS VARCHAR[]) AS dims WHERE FALSE"
-            )
-
-        if has_shape:
-            shape_table = _qualified_table("global_tables", shape_name)
-            shape_cte = f"""
-                SELECT
-                    _dlt_parent_id,
-                    list(value ORDER BY _dlt_list_idx) AS shape
-                FROM {shape_table}
-                GROUP BY _dlt_parent_id
-            """
-        else:
-            shape_cte = (
-                "SELECT CAST(NULL AS VARCHAR) AS _dlt_parent_id, "
-                "CAST([] AS BIGINT[]) AS shape WHERE FALSE"
-            )
-
-        has_art_col = db.has_table_column(
-            table_name=concept_key,
-            column_name="consist_artifact_id",
-            table_schema="global_tables",
+        dims_cte = _dlt_child_list_cte(db, f"{concept_key}__dims", "dims", "VARCHAR[]")
+        shape_cte = _dlt_child_list_cte(
+            db, f"{concept_key}__shape", "shape", "BIGINT[]"
         )
-        has_run_col = db.has_table_column(
-            table_name=concept_key,
-            column_name="consist_run_id",
-            table_schema="global_tables",
-        )
-        params: list[Any] = []
-        if has_art_col and has_run_col:
-            artifact_join = (
-                "JOIN main.artifact a ON ("
-                "TRY_CAST(nc.consist_artifact_id AS UUID) = a.id "
-                "OR (nc.consist_artifact_id IS NULL AND a.key = ? "
-                "AND CAST(nc.consist_run_id AS VARCHAR) = a.run_id)"
-                ")"
-            )
-            params.append(concept_key)
-        elif has_art_col:
-            artifact_join = "JOIN main.artifact a ON TRY_CAST(nc.consist_artifact_id AS UUID) = a.id"
-        elif has_run_col:
-            artifact_join = (
-                "JOIN main.artifact a ON (a.key = ? "
-                "AND CAST(nc.consist_run_id AS VARCHAR) = a.run_id)"
-            )
-            params.append(concept_key)
-        else:
+        artifact_join, params = _build_metadata_artifact_join(db, concept_key, "nc")
+        if artifact_join is None:
             return pd.DataFrame()
 
         query = f"""
@@ -152,7 +97,7 @@ class NetCdfMetadataView:
 
         try:
             return db.fetchdf(query, params)
-        except Exception as e:
+        except (duckdb.Error, ValueError, RuntimeError) as e:
             logging.warning(
                 f"[Consist] Failed to query NetCDF metadata for {concept_key}: {e}"
             )
@@ -196,7 +141,7 @@ class NetCdfMetadataView:
                         dimensions[key] = size
                     else:
                         dimensions[key] = max(dimensions[key], size)
-            except Exception as e:
+            except (json.JSONDecodeError, TypeError, ValueError, KeyError) as e:
                 logging.debug(f"[Consist] Failed to parse dims/shape: {e}")
                 continue
 
@@ -244,7 +189,7 @@ class NetCdfMetadataView:
             if isinstance(attrs_str, str):
                 return json.loads(attrs_str.replace("'", '"'))
             return attrs_str
-        except Exception as e:
+        except (json.JSONDecodeError, TypeError, ValueError, KeyError) as e:
             logging.debug(f"[Consist] Failed to parse attributes: {e}")
             return None
 

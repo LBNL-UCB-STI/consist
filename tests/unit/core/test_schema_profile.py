@@ -510,7 +510,6 @@ def test_schema_links_view_returns_relations(tracker, sample_csv):
         assert schema_id
 
         assert t.db is not None
-        t.db._ensure_schema_links_view()
 
         rows = t.db.fetchall(
             "SELECT from_table, from_field, to_table, to_field "

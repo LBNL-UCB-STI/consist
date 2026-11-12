@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Iterator, Literal, cast
 import uuid
 import weakref
 
+import duckdb
 from sqlmodel import SQLModel
 
 from consist.core.context import get_active_tracker, get_default_tracker
@@ -36,9 +37,10 @@ _DB_HINT = (
     "Create the tracker with db_path=... or pass a tracker that already has one."
 )
 
-_CACHED_BACKENDS: weakref.WeakKeyDictionary[Tracker, tuple[str, IbisDuckDBBackend]] = (
-    weakref.WeakKeyDictionary()
-)
+_CACHED_BACKENDS: weakref.WeakKeyDictionary[
+    Tracker,
+    tuple[str, DatabaseManager, duckdb.DuckDBPyConnection, IbisDuckDBBackend],
+] = weakref.WeakKeyDictionary()
 
 
 def _is_backend_connected(backend: IbisDuckDBBackend) -> bool:
@@ -50,39 +52,30 @@ def _is_backend_connected(backend: IbisDuckDBBackend) -> bool:
         return False
     try:
         con.execute("SELECT 1")
-    except Exception:
+    except duckdb.Error:
         return False
     return True
 
 
-@contextmanager
-def suspend_tracker_ibis_connection(
-    tracker: Tracker,
-    *,
-    disconnect: bool = False,
-) -> Iterator[None]:
-    """Suspend or evict a cached Ibis connection around tracker store operations.
-
-    In-process DDL/DML uses ``disconnect=False`` (no-op) because Ibis attaches to
-    a cloned ``DatabaseManager.cursor()``. Subprocess suspension passes
-    ``disconnect=True`` so any cached cloned cursor is closed before releasing
-    the underlying DuckDB file lock.
-    """
-    if disconnect:
-        close_tracker_ibis_connection(tracker)
-    yield
-
-
-def close_tracker_ibis_connection(tracker: Tracker) -> None:
-    """Disconnect (closing only the cloned cursor) and evict any cached Ibis backend."""
-    cached = _CACHED_BACKENDS.pop(tracker, None)
-    if cached is None:
-        return
-    _instance_key, backend = cached
+def _disconnect_backend_and_cursor(
+    db: DatabaseManager,
+    cursor: duckdb.DuckDBPyConnection,
+    backend: IbisDuckDBBackend,
+) -> None:
     try:
         backend.disconnect()
     except Exception:
         pass
+    db.close_cursor(cursor)
+
+
+def close_tracker_ibis_connection(tracker: Tracker) -> None:
+    """Disconnect (closing and untracking the cloned cursor) and evict any cached Ibis backend."""
+    cached = _CACHED_BACKENDS.pop(tracker, None)
+    if cached is None:
+        return
+    _instance_key, cached_db, cached_cursor, backend = cached
+    _disconnect_backend_and_cursor(cached_db, cached_cursor, backend)
 
 
 def _import_ibis() -> ModuleType:
@@ -114,7 +107,9 @@ def _require_db(tracker: Tracker) -> DatabaseManager:
     return db
 
 
-def _connect_backend(tracker: Tracker, db: DatabaseManager) -> IbisDuckDBBackend:
+def _connect_backend(
+    tracker: Tracker, db: DatabaseManager
+) -> tuple[duckdb.DuckDBPyConnection, IbisDuckDBBackend]:
     """Connect Ibis via a cloned ``DatabaseManager`` cursor."""
     ibis = _import_ibis()
     duckdb_backend_mod = cast(Any, ibis).duckdb
@@ -127,7 +122,12 @@ def _connect_backend(tracker: Tracker, db: DatabaseManager) -> IbisDuckDBBackend
             close_tracker_ibis_connection(t)
 
     db.register_suspend_hook(_on_suspend)
-    return cast("IbisDuckDBBackend", duckdb_backend_mod.from_connection(cursor))
+    try:
+        backend = cast("IbisDuckDBBackend", duckdb_backend_mod.from_connection(cursor))
+    except Exception:
+        db.close_cursor(cursor)
+        raise
+    return cursor, backend
 
 
 def ibis_connection(
@@ -138,12 +138,16 @@ def ibis_connection(
     db = _require_db(resolved_tracker)
     cached = _CACHED_BACKENDS.get(resolved_tracker)
     if cached is not None:
-        cached_key, cached_backend = cached
-        if cached_key == db.instance_key and _is_backend_connected(cached_backend):
+        cached_key, cached_db, _cached_cursor, cached_backend = cached
+        if (
+            cached_db is db
+            and cached_key == db.instance_key
+            and _is_backend_connected(cached_backend)
+        ):
             return cached_backend
         close_tracker_ibis_connection(resolved_tracker)
-    backend = _connect_backend(resolved_tracker, db)
-    _CACHED_BACKENDS[resolved_tracker] = (db.instance_key, backend)
+    cursor, backend = _connect_backend(resolved_tracker, db)
+    _CACHED_BACKENDS[resolved_tracker] = (db.instance_key, db, cursor, backend)
     return backend
 
 
@@ -210,7 +214,7 @@ def ibis_grouped_view(
 ) -> Iterator[IbisTable]:
     """Create a grouped Consist view and expose it as a native Ibis table."""
     resolved_tracker = _resolve_tracker(tracker)
-    _require_db(resolved_tracker)
+    db = _require_db(resolved_tracker)
     schema_id = _resolve_grouped_view_schema_id(
         resolved_tracker, artifact_id=artifact_id
     )
@@ -235,6 +239,8 @@ def ibis_grouped_view(
     )
 
     backend = ibis_connection(resolved_tracker)
+    entry = _CACHED_BACKENDS.get(resolved_tracker)
+    entry_cursor = entry[2] if entry is not None and entry[3] is backend else None
     ibis = _import_ibis()
     ibis_exceptions = cast(Any, ibis).common.exceptions
     try:
@@ -248,5 +254,8 @@ def ibis_grouped_view(
         yield table
     finally:
         cached = _CACHED_BACKENDS.get(resolved_tracker)
-        if cached is None or cached[1] is not backend:
-            backend.disconnect()
+        if cached is None or cached[3] is not backend:
+            if entry_cursor is not None:
+                _disconnect_backend_and_cursor(db, entry_cursor, backend)
+            else:
+                backend.disconnect()

@@ -31,7 +31,6 @@ import uuid
 import pandas as pd
 from typing import (
     TYPE_CHECKING,
-    Annotated,
     Optional,
     Any,
     Iterable,
@@ -41,14 +40,16 @@ from typing import (
     Set,
     Dict,
     Tuple,
-    get_args,
-    get_origin,
     cast,
 )
-from sqlalchemy import JSON
 from sqlmodel import SQLModel
 from typing_extensions import Protocol, runtime_checkable
 
+from consist.core._schema_model_introspection import (
+    is_additive_schema_model,
+    optional_model_table_name,
+    schema_model_dlt_columns,
+)
 from consist.core.persistence import lookup_live_db_by_path
 from consist.models.artifact import Artifact
 from consist.models.run import Run
@@ -64,26 +65,6 @@ if TYPE_CHECKING:
 @runtime_checkable
 class _HasMatrixAttrs(Protocol):
     attrs: Any
-
-
-@runtime_checkable
-class _HasTableNameAttr(Protocol):
-    __tablename__: str
-
-
-@runtime_checkable
-class _HasAdditiveSchemaAttr(Protocol):
-    __consist_additive_schema__: Any
-
-
-@runtime_checkable
-class _HasSaColumnAttr(Protocol):
-    sa_column: Any
-
-
-@runtime_checkable
-class _HasColTypeAttr(Protocol):
-    type: Any
 
 
 # Optional dependency: `dlt` is only required when using ingestion helpers.
@@ -751,18 +732,12 @@ def ingest_artifact(
 
     # 2. Configure dlt Pipeline
     schema_table_name = (
-        schema_model.__tablename__
-        if schema_model is not None and isinstance(schema_model, _HasTableNameAttr)
-        else None
+        optional_model_table_name(schema_model) if schema_model is not None else None
     )
     desired_table_name = str(schema_table_name or artifact.key)
 
     # 3. Validation Setup
-    additive_schema = bool(
-        schema_model.__consist_additive_schema__
-        if schema_model is not None and isinstance(schema_model, _HasAdditiveSchemaAttr)
-        else False
-    )
+    additive_schema = is_additive_schema_model(schema_model)
     allowed_keys: Optional[Set[str]] = None
     if schema_model and not additive_schema:
         allowed_keys = set(schema_model.model_fields.keys())
@@ -896,61 +871,8 @@ def ingest_artifact(
 
 
 def _sqlmodel_to_dlt_columns(model: Type[SQLModel]) -> Dict[str, Dict[str, Any]]:
-    """
-    Converts a SQLModel class definition into a `dlt` columns dictionary.
-
-    This function inspects the fields of a given `SQLModel` class and translates
-    them into a format suitable for `dlt`'s schema definition. It infers `dlt`
-    data types based on Python types and determines nullability.
-
-    Parameters
-    ----------
-    model : Type[SQLModel]
-        The `SQLModel` class to convert.
-
-    Returns
-    -------
-    Dict[str, Dict[str, Any]]
-        A dictionary where keys are column names and values are dictionaries
-        containing `dlt` column properties (e.g., `data_type`, `nullable`).
-    """
-
-    def _normalize_types(annotation: Any) -> set[Any]:
-        origin = get_origin(annotation)
-        if origin is None:
-            return {annotation}
-        if origin in {list, dict, tuple}:
-            return {origin}
-        if origin is Annotated:
-            args = get_args(annotation)
-            return _normalize_types(args[0]) if args else {annotation}
-        args = get_args(annotation)
-        if not args:
-            return {annotation}
-        normalized: set[Any] = set()
-        for arg in args:
-            if arg is type(None):
-                continue
-            normalized |= _normalize_types(arg)
-        return normalized or {annotation}
-
-    columns: Dict[str, Dict[str, Any]] = {}
-    for name, field in model.model_fields.items():
-        sa_col = field.sa_column if isinstance(field, _HasSaColumnAttr) else None
-        sa_type = sa_col.type if isinstance(sa_col, _HasColTypeAttr) else None
-        py_type = field.annotation
-        normalized = _normalize_types(py_type)
-        dlt_type = "text"
-        if isinstance(sa_type, JSON) or dict in normalized or list in normalized:
-            dlt_type = "json"
-        elif float in normalized:
-            dlt_type = "double"
-        elif int in normalized:
-            dlt_type = "bigint"
-        elif bool in normalized:
-            dlt_type = "bool"
-        columns[name] = {"data_type": dlt_type, "nullable": not field.is_required()}
-    return columns
+    """Convert a SQLModel class definition into a ``dlt`` columns dictionary."""
+    return schema_model_dlt_columns(model)
 
 
 # --- Generators ---

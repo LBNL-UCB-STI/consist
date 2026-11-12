@@ -252,7 +252,7 @@ def test_multi_node_restart_materialization_and_pruning(tmp_path: Path) -> None:
 
 
 def test_directory_and_shapefile_bundle_materialization(tmp_path: Path) -> None:
-    """Verify directory / Zarr and shapefile bundle artifacts end-to-end with PR 1."""
+    """Verify directory / Zarr and shapefile bundle artifacts end-to-end."""
     db_path = tmp_path / "test.duckdb"
     archive_dir = tmp_path / "archive"
     local_dir = tmp_path / "local"

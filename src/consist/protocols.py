@@ -6,7 +6,6 @@ from typing import (
     Callable,
     Mapping,
     Optional,
-    Sequence,
     TYPE_CHECKING,
 )
 from typing_extensions import Protocol, runtime_checkable
@@ -17,17 +16,6 @@ from consist.types import OutputSet
 
 if TYPE_CHECKING:
     from consist.models.run import Run
-
-
-@runtime_checkable
-class ParameterizedSQLProtocol(Protocol):
-    """Structural protocol for parameterized DuckDB SQL query objects."""
-
-    @property
-    def sql(self) -> str: ...
-
-    @property
-    def params(self) -> Sequence[Any]: ...
 
 
 @runtime_checkable

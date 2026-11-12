@@ -8,7 +8,8 @@ import re
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Iterator, Literal, Mapping, Protocol, Sequence, cast
+from typing import Any, Callable, Iterator, Literal, Mapping, Sequence, cast
+from typing_extensions import Protocol
 
 from sqlmodel import SQLModel
 

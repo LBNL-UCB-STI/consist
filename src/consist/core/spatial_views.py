@@ -8,13 +8,16 @@ from __future__ import annotations
 
 import logging
 from numbers import Integral
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
+import duckdb
 import pandas as pd
 
 from consist.core.stores import get_hot_data_db
 from consist.core.views import (
     _SAFE_IDENTIFIER_RE as _SAFE_IDENTIFIER_RE,
+    _build_metadata_artifact_join,
+    _dlt_child_list_cte,
     _quote_ident,
     _validate_identifier,
 )
@@ -48,81 +51,17 @@ class SpatialMetadataView:
             return pd.DataFrame()
 
         q_base = f"global_tables.{_quote_ident(concept_key)}"
-        bounds_name = f"{concept_key}__bounds"
-        geom_name = f"{concept_key}__geometry_types"
-        cols_name = f"{concept_key}__column_names"
-
-        if db.has_table(bounds_name, table_schema="global_tables"):
-            bounds_cte = f"""
-                SELECT
-                    _dlt_parent_id,
-                    list(value ORDER BY _dlt_list_idx) AS bounds
-                FROM global_tables.{_quote_ident(bounds_name)}
-                GROUP BY _dlt_parent_id
-            """
-        else:
-            bounds_cte = (
-                "SELECT CAST(NULL AS VARCHAR) AS _dlt_parent_id, "
-                "CAST([] AS DOUBLE[]) AS bounds WHERE FALSE"
-            )
-
-        if db.has_table(geom_name, table_schema="global_tables"):
-            geom_cte = f"""
-                SELECT
-                    _dlt_parent_id,
-                    list(value ORDER BY _dlt_list_idx) AS geometry_types
-                FROM global_tables.{_quote_ident(geom_name)}
-                GROUP BY _dlt_parent_id
-            """
-        else:
-            geom_cte = (
-                "SELECT CAST(NULL AS VARCHAR) AS _dlt_parent_id, "
-                "CAST([] AS VARCHAR[]) AS geometry_types WHERE FALSE"
-            )
-
-        if db.has_table(cols_name, table_schema="global_tables"):
-            cols_cte = f"""
-                SELECT
-                    _dlt_parent_id,
-                    list(value ORDER BY _dlt_list_idx) AS column_names
-                FROM global_tables.{_quote_ident(cols_name)}
-                GROUP BY _dlt_parent_id
-            """
-        else:
-            cols_cte = (
-                "SELECT CAST(NULL AS VARCHAR) AS _dlt_parent_id, "
-                "CAST([] AS VARCHAR[]) AS column_names WHERE FALSE"
-            )
-
-        has_art_col = db.has_table_column(
-            table_name=concept_key,
-            column_name="consist_artifact_id",
-            table_schema="global_tables",
+        bounds_cte = _dlt_child_list_cte(
+            db, f"{concept_key}__bounds", "bounds", "DOUBLE[]"
         )
-        has_run_col = db.has_table_column(
-            table_name=concept_key,
-            column_name="consist_run_id",
-            table_schema="global_tables",
+        geom_cte = _dlt_child_list_cte(
+            db, f"{concept_key}__geometry_types", "geometry_types", "VARCHAR[]"
         )
-        params: list[Any] = []
-        if has_art_col and has_run_col:
-            artifact_join = (
-                "JOIN main.artifact a ON ("
-                "TRY_CAST(sm.consist_artifact_id AS UUID) = a.id "
-                "OR (sm.consist_artifact_id IS NULL AND a.key = ? "
-                "AND CAST(sm.consist_run_id AS VARCHAR) = a.run_id)"
-                ")"
-            )
-            params.append(concept_key)
-        elif has_art_col:
-            artifact_join = "JOIN main.artifact a ON TRY_CAST(sm.consist_artifact_id AS UUID) = a.id"
-        elif has_run_col:
-            artifact_join = (
-                "JOIN main.artifact a ON (a.key = ? "
-                "AND CAST(sm.consist_run_id AS VARCHAR) = a.run_id)"
-            )
-            params.append(concept_key)
-        else:
+        cols_cte = _dlt_child_list_cte(
+            db, f"{concept_key}__column_names", "column_names", "VARCHAR[]"
+        )
+        artifact_join, params = _build_metadata_artifact_join(db, concept_key, "sm")
+        if artifact_join is None:
             return pd.DataFrame()
 
         query = f"""
@@ -177,7 +116,7 @@ class SpatialMetadataView:
 
         try:
             return db.fetchdf(query, params)
-        except Exception as e:
+        except (duckdb.Error, ValueError, RuntimeError) as e:
             logging.warning(
                 "[Consist] Failed to query spatial metadata for %s: %s",
                 concept_key,

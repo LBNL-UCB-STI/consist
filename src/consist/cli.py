@@ -56,8 +56,6 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.tree import Tree
 from rich.text import Text
-from typing_extensions import Protocol, runtime_checkable
-
 from consist import Tracker
 from consist.admission import AdmissionReport, check_artifact_identity
 from consist.core.gtfs import GTFS_CORE_TABLE_NAMES, discover_gtfs_members
@@ -67,15 +65,11 @@ from consist.core.persistence import (
     DatabaseManager,
     DatabaseMigrationRequired,
     IncompatibleSchemaError,
-    _ARTIFACT_SELECT_COLS,
-    _RUN_SELECT_COLS,
-    _hydrate_artifact_row,
-    _hydrate_run_row,
     close_tracked_relation_tokens,
     extract_tracked_relation_tokens,
     lookup_live_db_by_path,
 )
-from consist.core.run_ordering import RECENT_RUN_ORDER_BY_SQL, recent_run_order_by_sql
+from consist.core.run_ordering import RECENT_RUN_ORDER_BY_SQL
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
 from consist.tools import queries
 
@@ -412,14 +406,6 @@ def _require_db(tracker: Tracker) -> DatabaseManager:
 
 def _close_relation_connection(relation: duckdb.DuckDBPyRelation) -> None:
     close_tracked_relation_tokens(extract_tracked_relation_tokens(relation))
-
-
-@runtime_checkable
-class _SchemaSelectionProtocol(Protocol):
-    schema_id: str
-    source: str
-    candidate_count: int
-    selection_rule: str
 
 
 def get_tracker(
@@ -1984,16 +1970,7 @@ def _get_scenario_member_runs(tracker: Tracker, scenario_id: str) -> List["Run"]
     """Fetch all transitive member Run rows for a scenario in chronological order."""
     db = _require_db(tracker)
     run_ids = _collect_scenario_run_ids(tracker, scenario_id)
-    if not run_ids:
-        return []
-    placeholders = ", ".join("?" for _ in run_ids)
-    rows = db.fetchall(
-        f"SELECT {_RUN_SELECT_COLS} FROM run r "
-        f"WHERE r.id IN ({placeholders}) "
-        "ORDER BY r.created_at ASC, r.started_at ASC, r.id ASC",
-        run_ids,
-    )
-    return [_hydrate_run_row(row) for row in rows]
+    return db.get_runs_by_ids_chronological(run_ids)
 
 
 def _query_runs_with_scenario(
@@ -2396,56 +2373,11 @@ def _iter_artifact_rows(
         if not scoped_run_ids:
             return
 
-    last_created: Any = None
-    last_id: Optional[str] = None
-    while True:
-        where_clauses: List[str] = []
-        params: List[Any] = []
-
-        if scoped_run_ids is not None or outputs_only:
-            link_clauses: List[str] = []
-            link_params: List[Any] = []
-            if scoped_run_ids is not None:
-                run_placeholders = ", ".join("?" for _ in scoped_run_ids)
-                link_clauses.append(f"ral.run_id IN ({run_placeholders})")
-                link_params.extend(scoped_run_ids)
-            if outputs_only:
-                link_clauses.append("ral.direction = 'output'")
-            link_sql = "SELECT ral.artifact_id FROM run_artifact_link ral"
-            if link_clauses:
-                link_sql += " WHERE " + " AND ".join(link_clauses)
-
-            if scoped_run_ids is not None:
-                run_placeholders = ", ".join("?" for _ in scoped_run_ids)
-                where_clauses.append(
-                    f"(a.id IN ({link_sql}) OR a.run_id IN ({run_placeholders}))"
-                )
-                params.extend(link_params)
-                params.extend(scoped_run_ids)
-            else:
-                where_clauses.append(f"(a.id IN ({link_sql}) OR a.run_id IS NOT NULL)")
-                params.extend(link_params)
-
-        if last_created is not None and last_id is not None:
-            where_clauses.append(
-                "(a.created_at > ? OR (a.created_at = ? AND CAST(a.id AS VARCHAR) > ?))"
-            )
-            params.extend([last_created, last_created, last_id])
-
-        sql = f"SELECT {_ARTIFACT_SELECT_COLS} FROM artifact a"
-        if where_clauses:
-            sql += " WHERE " + " AND ".join(where_clauses)
-        sql += " ORDER BY a.created_at ASC, CAST(a.id AS VARCHAR) ASC LIMIT ?"
-        params.append(int(batch_size))
-
-        rows = db.fetchall(sql, params)
-        if not rows:
-            break
-        batch = [_hydrate_artifact_row(row) for row in rows]
-        for artifact in batch:
-            yield artifact
-        last_id = str(batch[-1].id)
-        last_created = batch[-1].created_at
+    yield from db.iter_artifacts_for_rebuild(
+        scoped_run_ids=scoped_run_ids,
+        outputs_only=outputs_only,
+        batch_size=batch_size,
+    )
 
 
 def _render_scenarios(tracker: Tracker, limit: int = 20) -> None:
@@ -2540,23 +2472,8 @@ def search(
         raise typer.BadParameter(
             f"Query must be 1-{MAX_SEARCH_QUERY_LENGTH} characters."
         )
-    escaped_query = _escape_like_pattern(query)
-    pattern = f"%{escaped_query}%"
     db = _require_db(tracker)
-    order_sql = recent_run_order_by_sql("r")
-    sql = (
-        f"SELECT {_RUN_SELECT_COLS} FROM run r "
-        f"WHERE (r.id LIKE ? ESCAPE '{LIKE_ESCAPE_CHAR}' "
-        f"OR r.model_name LIKE ? ESCAPE '{LIKE_ESCAPE_CHAR}' "
-        f"OR CAST(r.tags AS VARCHAR) LIKE ? ESCAPE '{LIKE_ESCAPE_CHAR}' "
-        f"OR (r.parent_run_id IS NOT NULL AND r.parent_run_id LIKE ? ESCAPE '{LIKE_ESCAPE_CHAR}')) "
-        f"ORDER BY {order_sql} LIMIT ?"
-    )
-    raw_rows = db.fetchall(
-        sql,
-        [pattern, pattern, pattern, pattern, int(limit)],
-    )
-    results = [_hydrate_run_row(row) for row in raw_rows]
+    results = db.search_runs(query, limit=limit)
 
     if not results:
         console.print(f"[yellow]No runs found matching '{query}'[/yellow]")
@@ -4476,23 +4393,9 @@ class ConsistShell(cmd.Cmd):
 
         try:
             db = _require_db(self.tracker)
-            # Intentional hash usage: this command is explicitly a hash-prefix
-            # lookup UX.
-            where_clauses = [
-                "a.digest IS NOT NULL",
-                "starts_with(a.digest, ?)",
-            ]
-            params: List[Any] = [candidate]
-            if run_id is not None:
-                where_clauses.append("a.run_id = ?")
-                params.append(run_id)
-            sql = (
-                f"SELECT {_ARTIFACT_SELECT_COLS} FROM artifact a "
-                f"WHERE {' AND '.join(where_clauses)} "
-                "ORDER BY a.created_at DESC LIMIT 6"
+            matches = db.find_artifacts_by_digest_prefix(
+                candidate, run_id=run_id, limit=6
             )
-            rows = db.fetchall(sql, params)
-            matches = [_hydrate_artifact_row(row) for row in rows]
         except Exception as exc:
             _print_cli_error(f"Failed hash lookup: {exc}")
             return None
@@ -5360,11 +5263,17 @@ class ConsistShell(cmd.Cmd):
                 )
             except AttributeError:
                 selection = None
-            if isinstance(selection, _SchemaSelectionProtocol):
-                schema_id = selection.schema_id
-                selected_source = selection.source
-                candidate_count = selection.candidate_count
-                selection_rule = selection.selection_rule
+            if selection is not None:
+                try:
+                    schema_id = selection.schema_id
+                    selected_source = selection.source
+                    candidate_count = selection.candidate_count
+                    selection_rule = selection.selection_rule
+                except AttributeError:
+                    schema_id = None
+                    selected_source = None
+                    candidate_count = None
+                    selection_rule = None
                 if (
                     isinstance(schema_id, str)
                     and isinstance(selected_source, str)

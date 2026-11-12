@@ -100,7 +100,6 @@ from consist.core.persistence import (
 )
 from consist.core.views import ViewFactory
 from consist.core.ingestion import ingest_artifact
-from consist.protocols import ParameterizedSQLProtocol
 from consist.core.lineage import LineageService
 from consist.core.materialize import (
     ArchivedRunOutputFilesReport,
@@ -143,6 +142,7 @@ from consist.types import (
     OutputPolicyOptions,
     OutputPathRef,
     OutputSet,
+    ParameterizedSQL,
     RunCompletionArchivePolicy,
     RunInputRef,
 )
@@ -582,6 +582,7 @@ class Tracker:
             )
 
         self.events = EventManager()
+        self._run_signature_cache: Dict[str, str] = {}
         if openlineage_emitter:
             from consist.core.lifecycle import LifecycleEmitter
 
@@ -618,6 +619,10 @@ class Tracker:
                 "cannot be reassigned independently of metadata_store."
             )
         self._compat_db = value
+        try:
+            self._run_signature_cache.clear()
+        except AttributeError:
+            pass
 
     @property
     def db_path(self) -> str | None:
@@ -658,7 +663,7 @@ class Tracker:
 
     def query_df(
         self,
-        sql: str | ParameterizedSQLProtocol,
+        sql: str | ParameterizedSQL,
         params: Optional[Sequence[Any] | Mapping[str, Any]] = None,
     ) -> pd.DataFrame:
         """Execute a validated read-only SQL query and return a DataFrame."""
@@ -669,7 +674,7 @@ class Tracker:
 
     def query_rows(
         self,
-        sql: str | ParameterizedSQLProtocol,
+        sql: str | ParameterizedSQL,
         params: Optional[Sequence[Any] | Mapping[str, Any]] = None,
         *,
         model: Optional[Type[_QueryModelT]] = None,
@@ -1143,26 +1148,63 @@ class Tracker:
 
         return code
 
+    def _cache_run_signature(self, run_id: str, signature: Optional[str]) -> None:
+        if not signature:
+            return
+        cache = self._compat_attr("_run_signature_cache")
+        if not isinstance(cache, dict):
+            return
+        if len(cache) >= 4096 and run_id not in cache:
+            cache.pop(next(iter(cache)))
+        cache[run_id] = signature
+
     def _resolve_run_signature(self, run_id: str) -> Optional[str]:
         """
         Internal helper to look up a run's signature (Merkle identity) via the database.
         Used by IdentityManager to stabilize input hashes against ephemeral Run IDs.
         """
-        # 1. Check active run (unlikely for inputs, but good for completeness)
         if self.current_consist and self.current_consist.run.id == run_id:
             return self.current_consist.run.signature
-        # 2. Check Database
+        cache = self._compat_attr("_run_signature_cache")
+        if isinstance(cache, dict) and run_id in cache:
+            return cache[run_id]
         if self.db:
-            run = self.db.get_run(run_id)
-            if run:
-                return run.signature
+            fetched = self.db.get_run_signatures([run_id])
+            sig = fetched.get(run_id)
+            if sig is not None:
+                self._cache_run_signature(run_id, sig)
+                return sig
         return None
 
     def _prefetch_run_signatures(self, inputs: Iterable[Artifact]) -> None:
         """
         Warm the run-signature cache for input artifacts in bulk to reduce DB chatter.
         """
-        return
+        if not self.db:
+            return
+        cache = self._compat_attr("_run_signature_cache")
+        if not isinstance(cache, dict):
+            self._run_signature_cache = {}
+            cache = self._run_signature_cache
+        active_id = (
+            self.current_consist.run.id if self.current_consist is not None else None
+        )
+        missing_ids: list[str] = []
+        seen: set[str] = set()
+        for art in inputs:
+            if not isinstance(art, Artifact):
+                continue
+            rid = art.run_id
+            if not rid or rid == active_id or rid in cache or rid in seen:
+                continue
+            seen.add(rid)
+            missing_ids.append(rid)
+        if not missing_ids:
+            return
+        fetched = self.db.get_run_signatures(missing_ids)
+        for rid, sig in fetched.items():
+            if sig is not None:
+                self._cache_run_signature(rid, sig)
 
     def _coerce_facet_mapping(self, obj: Any, label: str) -> Dict[str, Any]:
         if obj is None:
@@ -2604,7 +2646,7 @@ class Tracker:
 
     def run_query(
         self,
-        query: str | ParameterizedSQLProtocol,
+        query: str | ParameterizedSQL,
         params: Optional[Sequence[Any] | Mapping[str, Any]] = None,
     ) -> list[Any]:
         """
@@ -2612,7 +2654,7 @@ class Tracker:
 
         Parameters
         ----------
-        query : str | ParameterizedSQLProtocol
+        query : str | ParameterizedSQL
             Read-only ``SELECT`` / ``WITH ... SELECT`` SQL string or ``ParameterizedSQL``.
         params : Optional[Sequence[Any] | Mapping[str, Any]], optional
             Optional positional or named query parameters.

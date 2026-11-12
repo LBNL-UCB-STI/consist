@@ -902,6 +902,21 @@ class DriverType(str, Enum):
         return frozenset({cls.H5.value, cls.HDF5.value})
 
 
+@dataclass(frozen=True, slots=True, init=False)
+class ParameterizedSQL:
+    """Immutable parameterized read-only DuckDB SQL statement and bound parameters."""
+
+    sql: str
+    params: tuple[Any, ...] = ()
+
+    def __init__(self, sql: str, params: Sequence[Any] = ()) -> None:
+        if not isinstance(sql, str):
+            raise TypeError(f"sql must be a str, got {type(sql).__name__}")
+        coerced = params if isinstance(params, tuple) else tuple(params)
+        super(ParameterizedSQL, self).__setattr__("sql", sql)
+        super(ParameterizedSQL, self).__setattr__("params", coerced)
+
+
 @runtime_checkable
 class HasConsistFacet(Protocol):
     def to_consist_facet(self) -> FacetLike: ...

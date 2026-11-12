@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
@@ -23,8 +23,6 @@ from typing import (
     Tuple,
     Type,
     TypeVar,
-    get_args,
-    get_origin,
 )
 import uuid
 import weakref
@@ -32,15 +30,22 @@ import weakref
 import duckdb
 import pandas as pd
 from pydantic import BaseModel, TypeAdapter
-from typing_extensions import Protocol, runtime_checkable
 
 from consist.core._performance_attribution import _track_begin_run_phase
+from consist.core._schema_model_introspection import (
+    field_duckdb_type,
+    field_is_primary_key,
+    field_sql_column_name,
+    model_table_name,
+    model_table_schema,
+    optional_model_table_name,
+    schema_model_user_columns,
+)
 from consist.core.db_runtime import DB_CALL_PROFILER as _DB_CALL_PROFILER
 from consist.core.db_snapshot import DatabaseSnapshotOps, snapshot_sidecar_path
 from consist.core.facet_common import flatten_facet_values
 from consist.core.provenance_writer import ProvenanceWriter
 from consist.core.run_ordering import recent_run_order_by_sql
-from consist.protocols import ParameterizedSQLProtocol
 from consist.models.artifact import Artifact
 from consist.models.artifact_facet import ArtifactFacet
 from consist.models.artifact_kv import ArtifactKV
@@ -58,6 +63,7 @@ from consist.models.run import (
     resolve_canonical_run_meta_field,
 )
 from consist.models.run_config_kv import RunConfigKV
+from consist.types import ParameterizedSQL
 
 
 MAX_JSON_DEPTH = 50
@@ -70,36 +76,6 @@ _MEMBER_KIND_META_KEY = "_consist_member_kind"
 
 SchemaProfileSource = Literal["file", "duckdb", "user_provided"]
 _RowModelT = TypeVar("_RowModelT")
-
-
-@runtime_checkable
-class _HasSQLColumnInfo(Protocol):
-    sa_column: Any
-
-
-@runtime_checkable
-class _HasPrimaryKeyFlag(Protocol):
-    primary_key: Any
-
-
-@runtime_checkable
-class _HasTableNameAttr(Protocol):
-    __tablename__: str
-
-
-@runtime_checkable
-class _HasTableArgsAttr(Protocol):
-    __table_args__: Any
-
-
-@runtime_checkable
-class _HasColumnName(Protocol):
-    name: str
-
-
-@runtime_checkable
-class _HasColumnType(Protocol):
-    type: Any
 
 
 def _escape_like_literal(value: str) -> str:
@@ -269,6 +245,11 @@ def _strip_leading_sql_comments(sql: str) -> str:
     return sql[idx:]
 
 
+_DISALLOWED_SELECT_LEADING_KEYWORDS: frozenset[str] = frozenset(
+    {"PRAGMA", "PIVOT", "UNPIVOT", "DESCRIBE", "SUMMARIZE"}
+)
+
+
 def _validate_select_only_sql(sql: str) -> None:
     if not isinstance(sql, str) or not sql.strip():
         raise ValueError("SQL query must be a non-empty SELECT statement")
@@ -276,11 +257,14 @@ def _validate_select_only_sql(sql: str) -> None:
     if not stripped:
         raise ValueError("SQL query must be a non-empty SELECT statement")
     first_word = stripped.split(None, 1)[0].rstrip("(").upper()
-    if first_word == "PRAGMA":
+    if first_word in _DISALLOWED_SELECT_LEADING_KEYWORDS:
         raise ValueError(
             "query_df, query_rows, and run_query only permit a single read-only SELECT statement"
         )
-    stmts = duckdb.extract_statements(sql)
+    try:
+        stmts = duckdb.extract_statements(sql)
+    except duckdb.Error as exc:
+        raise ValueError(f"Invalid SQL query: {exc}") from exc
     if not (len(stmts) == 1 and stmts[0].type == duckdb.StatementType.SELECT):  # ty: ignore[unresolved-attribute]
         raise ValueError(
             "query_df, query_rows, and run_query only permit a single read-only SELECT statement"
@@ -379,238 +363,122 @@ def close_all_tracked_relations() -> None:
     close_tracked_relation_tokens(tokens)
 
 
+def _live_managers_for_path(
+    db_path: str | os.PathLike[str],
+) -> list[DatabaseManager]:
+    raw = str(db_path).strip()
+    if not raw or raw == ":memory:":
+        return []
+    norm = str(Path(raw).expanduser().resolve())
+    with _LIVE_DB_LOCK:
+        return list(_LIVE_DB_MANAGERS.get(norm, ()))
+
+
 def lookup_live_db_by_path(
     db_path: str | os.PathLike[str],
 ) -> Optional[DatabaseManager]:
-    raw = str(db_path).strip()
-    if not raw or raw == ":memory:":
-        return None
-    norm = str(Path(raw).expanduser().resolve())
-    with _LIVE_DB_LOCK:
-        managers = list(_LIVE_DB_MANAGERS.get(norm, ()))
+    managers = _live_managers_for_path(db_path)
     for mgr in managers:
-        if not mgr._closed and not mgr._suspended and not mgr._con_read_only:
+        if not mgr._closed and not mgr._suspended and not mgr.read_only:
+            return mgr
+    for mgr in managers:
+        if not mgr._closed and not mgr._suspended:
             return mgr
     return None
 
 
 def has_live_writable_db_for_path(db_path: str | os.PathLike[str]) -> bool:
-    return lookup_live_db_by_path(db_path) is not None
+    return any(
+        not mgr._closed and not mgr._suspended and not mgr._con_read_only
+        for mgr in _live_managers_for_path(db_path)
+    )
 
 
 _CORE_SCHEMA_DDL: tuple[str, ...] = (
-    """
-    CREATE TABLE IF NOT EXISTS consist_schema (
-        version INTEGER PRIMARY KEY,
-        db_uid VARCHAR NOT NULL,
-        updated_at TIMESTAMPTZ NOT NULL
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS run (
-        id VARCHAR PRIMARY KEY,
-        parent_run_id VARCHAR,
-        status VARCHAR NOT NULL DEFAULT 'running',
-        model_name VARCHAR NOT NULL,
-        description VARCHAR,
-        year INTEGER,
-        iteration INTEGER,
-        stage VARCHAR,
-        phase VARCHAR,
-        tags JSON NOT NULL DEFAULT '[]',
-        config_hash VARCHAR,
-        git_hash VARCHAR,
-        input_hash VARCHAR,
-        signature VARCHAR,
-        cacheable BOOLEAN NOT NULL DEFAULT TRUE,
-        facet_id VARCHAR,
-        meta JSON NOT NULL DEFAULT '{}',
-        started_at TIMESTAMPTZ NOT NULL,
-        ended_at TIMESTAMPTZ,
-        created_at TIMESTAMPTZ NOT NULL,
-        updated_at TIMESTAMPTZ NOT NULL
-    )
-    """,
+    "CREATE TABLE IF NOT EXISTS consist_schema ("
+    "version INTEGER PRIMARY KEY, db_uid VARCHAR NOT NULL, updated_at TIMESTAMPTZ NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS run ("
+    "id VARCHAR PRIMARY KEY, parent_run_id VARCHAR, status VARCHAR NOT NULL DEFAULT 'running', "
+    "model_name VARCHAR NOT NULL, description VARCHAR, year INTEGER, iteration INTEGER, "
+    "stage VARCHAR, phase VARCHAR, tags JSON NOT NULL DEFAULT '[]', config_hash VARCHAR, "
+    "git_hash VARCHAR, input_hash VARCHAR, signature VARCHAR, "
+    "cacheable BOOLEAN NOT NULL DEFAULT TRUE, facet_id VARCHAR, meta JSON NOT NULL DEFAULT '{}', "
+    "started_at TIMESTAMPTZ NOT NULL, ended_at TIMESTAMPTZ, "
+    "created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL)",
     "CREATE INDEX IF NOT EXISTS ix_run_parent_run_id ON run (parent_run_id)",
     "CREATE INDEX IF NOT EXISTS ix_run_status ON run (status)",
     "CREATE INDEX IF NOT EXISTS ix_run_model_name ON run (model_name)",
     "CREATE INDEX IF NOT EXISTS ix_run_config_hash ON run (config_hash)",
     "CREATE INDEX IF NOT EXISTS ix_run_input_hash ON run (input_hash)",
     "CREATE INDEX IF NOT EXISTS ix_run_signature ON run (signature)",
-    "CREATE INDEX IF NOT EXISTS ix_run_cache_lookup ON run (status, cacheable, config_hash, input_hash, git_hash)",
-    """
-    CREATE TABLE IF NOT EXISTS artifact (
-        id UUID PRIMARY KEY,
-        key VARCHAR NOT NULL,
-        uri VARCHAR NOT NULL,
-        driver VARCHAR NOT NULL,
-        digest VARCHAR,
-        member VARCHAR,
-        run_id VARCHAR,
-        parent_artifact_id UUID,
-        facet_id VARCHAR,
-        meta JSON NOT NULL DEFAULT '{}',
-        created_at TIMESTAMPTZ NOT NULL
-    )
-    """,
+    "CREATE TABLE IF NOT EXISTS artifact ("
+    "id UUID PRIMARY KEY, key VARCHAR NOT NULL, uri VARCHAR NOT NULL, driver VARCHAR NOT NULL, "
+    "digest VARCHAR, member VARCHAR, run_id VARCHAR, parent_artifact_id UUID, "
+    "facet_id VARCHAR, meta JSON NOT NULL DEFAULT '{}', created_at TIMESTAMPTZ NOT NULL)",
     "CREATE INDEX IF NOT EXISTS ix_artifact_key ON artifact (key)",
     "CREATE INDEX IF NOT EXISTS ix_artifact_uri ON artifact (uri)",
     "CREATE INDEX IF NOT EXISTS ix_artifact_digest ON artifact (digest)",
     "CREATE INDEX IF NOT EXISTS ix_artifact_run_id ON artifact (run_id)",
     "CREATE INDEX IF NOT EXISTS ix_artifact_parent_artifact_id ON artifact (parent_artifact_id)",
-    """
-    CREATE TABLE IF NOT EXISTS run_artifact_link (
-        run_id VARCHAR NOT NULL,
-        artifact_id UUID NOT NULL,
-        direction VARCHAR NOT NULL,
-        role VARCHAR NOT NULL DEFAULT '',
-        is_implicit BOOLEAN NOT NULL DEFAULT FALSE,
-        PRIMARY KEY (run_id, artifact_id, direction, role)
-    )
-    """,
+    "CREATE TABLE IF NOT EXISTS run_artifact_link ("
+    "run_id VARCHAR NOT NULL, artifact_id UUID NOT NULL, direction VARCHAR NOT NULL, "
+    "role VARCHAR NOT NULL DEFAULT '', is_implicit BOOLEAN NOT NULL DEFAULT FALSE, "
+    "PRIMARY KEY (run_id, artifact_id, direction, role))",
     "CREATE INDEX IF NOT EXISTS ix_run_artifact_link_run_id ON run_artifact_link (run_id)",
     "CREATE INDEX IF NOT EXISTS ix_run_artifact_link_artifact_id ON run_artifact_link (artifact_id)",
-    """
-    CREATE TABLE IF NOT EXISTS run_binding_invocation (
-        id UUID PRIMARY KEY,
-        requested_run_id VARCHAR NOT NULL,
-        execution_run_id VARCHAR NOT NULL,
-        cache_source_run_id VARCHAR,
-        cache_outcome VARCHAR NOT NULL,
-        binding_json VARCHAR NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL
-    )
-    """,
+    "CREATE TABLE IF NOT EXISTS run_binding_invocation ("
+    "id UUID PRIMARY KEY, requested_run_id VARCHAR NOT NULL, execution_run_id VARCHAR NOT NULL, "
+    "cache_source_run_id VARCHAR, cache_outcome VARCHAR NOT NULL, "
+    "binding_json VARCHAR NOT NULL, created_at TIMESTAMPTZ NOT NULL)",
     "CREATE INDEX IF NOT EXISTS ix_run_binding_invocation_requested ON run_binding_invocation (requested_run_id)",
-    """
-    CREATE TABLE IF NOT EXISTS config_facet (
-        id VARCHAR PRIMARY KEY,
-        namespace VARCHAR NOT NULL,
-        schema_name VARCHAR NOT NULL,
-        schema_version VARCHAR,
-        "json" JSON NOT NULL DEFAULT '{}',
-        created_at TIMESTAMPTZ NOT NULL
-    )
-    """,
+    "CREATE TABLE IF NOT EXISTS config_facet ("
+    "id VARCHAR PRIMARY KEY, namespace VARCHAR NOT NULL, schema_name VARCHAR NOT NULL, "
+    "schema_version VARCHAR, \"json\" JSON NOT NULL DEFAULT '{}', created_at TIMESTAMPTZ NOT NULL)",
     "CREATE INDEX IF NOT EXISTS ix_config_facet_namespace ON config_facet (namespace)",
-    """
-    CREATE TABLE IF NOT EXISTS run_config_kv (
-        run_id VARCHAR NOT NULL,
-        facet_id VARCHAR NOT NULL,
-        namespace VARCHAR NOT NULL,
-        key VARCHAR NOT NULL,
-        value_type VARCHAR NOT NULL,
-        value_str VARCHAR,
-        value_num DOUBLE,
-        value_bool BOOLEAN,
-        value_json JSON,
-        created_at TIMESTAMPTZ NOT NULL,
-        PRIMARY KEY (run_id, facet_id, namespace, key)
-    )
-    """,
+    "CREATE TABLE IF NOT EXISTS run_config_kv ("
+    "run_id VARCHAR NOT NULL, facet_id VARCHAR NOT NULL, namespace VARCHAR NOT NULL, "
+    "key VARCHAR NOT NULL, value_type VARCHAR NOT NULL, value_str VARCHAR, "
+    "value_num DOUBLE, value_bool BOOLEAN, value_json JSON, created_at TIMESTAMPTZ NOT NULL, "
+    "PRIMARY KEY (run_id, facet_id, namespace, key))",
     "CREATE INDEX IF NOT EXISTS ix_run_config_kv_run_id ON run_config_kv (run_id)",
-    "CREATE INDEX IF NOT EXISTS ix_run_config_kv_lookup ON run_config_kv (namespace, key)",
-    """
-    CREATE TABLE IF NOT EXISTS artifact_facet (
-        id VARCHAR PRIMARY KEY,
-        namespace VARCHAR,
-        schema_name VARCHAR,
-        schema_version VARCHAR,
-        "json" JSON NOT NULL DEFAULT '{}',
-        created_at TIMESTAMPTZ NOT NULL
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS artifact_kv (
-        artifact_id UUID NOT NULL,
-        facet_id VARCHAR NOT NULL,
-        key_path VARCHAR NOT NULL,
-        namespace VARCHAR,
-        value_type VARCHAR NOT NULL,
-        value_str VARCHAR,
-        value_num DOUBLE,
-        value_bool BOOLEAN,
-        value_json JSON,
-        created_at TIMESTAMPTZ NOT NULL,
-        PRIMARY KEY (artifact_id, facet_id, key_path)
-    )
-    """,
+    "CREATE TABLE IF NOT EXISTS artifact_facet ("
+    "id VARCHAR PRIMARY KEY, namespace VARCHAR, schema_name VARCHAR, schema_version VARCHAR, "
+    "\"json\" JSON NOT NULL DEFAULT '{}', created_at TIMESTAMPTZ NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS artifact_kv ("
+    "artifact_id UUID NOT NULL, facet_id VARCHAR NOT NULL, key_path VARCHAR NOT NULL, "
+    "namespace VARCHAR, value_type VARCHAR NOT NULL, value_str VARCHAR, "
+    "value_num DOUBLE, value_bool BOOLEAN, value_json JSON, created_at TIMESTAMPTZ NOT NULL, "
+    "PRIMARY KEY (artifact_id, facet_id, key_path))",
     "CREATE INDEX IF NOT EXISTS ix_artifact_kv_artifact_id ON artifact_kv (artifact_id)",
     "CREATE INDEX IF NOT EXISTS ix_artifact_kv_key_path ON artifact_kv (key_path)",
-    """
-    CREATE TABLE IF NOT EXISTS run_coupler_snapshot (
-        run_id VARCHAR NOT NULL,
-        phase VARCHAR NOT NULL,
-        role_key VARCHAR NOT NULL,
-        scenario_run_id VARCHAR NOT NULL,
-        step_ordinal INTEGER NOT NULL DEFAULT 0,
-        artifact_id UUID NOT NULL,
-        producer_run_id VARCHAR,
-        updated_at TIMESTAMPTZ NOT NULL,
-        PRIMARY KEY (run_id, phase, role_key)
-    )
-    """,
+    "CREATE TABLE IF NOT EXISTS run_coupler_snapshot ("
+    "run_id VARCHAR NOT NULL, phase VARCHAR NOT NULL, role_key VARCHAR NOT NULL, "
+    "scenario_run_id VARCHAR NOT NULL, step_ordinal INTEGER NOT NULL DEFAULT 0, "
+    "artifact_id UUID NOT NULL, producer_run_id VARCHAR, updated_at TIMESTAMPTZ NOT NULL, "
+    "PRIMARY KEY (run_id, phase, role_key))",
     "CREATE INDEX IF NOT EXISTS ix_run_coupler_snapshot_scenario_ordinal ON run_coupler_snapshot (scenario_run_id, step_ordinal, phase)",
     "CREATE INDEX IF NOT EXISTS ix_run_coupler_snapshot_scenario_role ON run_coupler_snapshot (scenario_run_id, role_key)",
-    """
-    CREATE TABLE IF NOT EXISTS artifact_schema (
-        id VARCHAR PRIMARY KEY,
-        profile_version INTEGER NOT NULL DEFAULT 1,
-        summary_json JSON NOT NULL DEFAULT '{}',
-        profile_json JSON,
-        created_at TIMESTAMPTZ NOT NULL
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS artifact_schema_field (
-        schema_id VARCHAR NOT NULL,
-        ordinal_position INTEGER,
-        name VARCHAR NOT NULL,
-        logical_type VARCHAR NOT NULL,
-        nullable BOOLEAN NOT NULL DEFAULT TRUE,
-        stats_json JSON,
-        is_enum BOOLEAN NOT NULL DEFAULT FALSE,
-        enum_values_json JSON,
-        PRIMARY KEY (schema_id, name)
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS artifact_schema_observation (
-        id UUID PRIMARY KEY,
-        artifact_id UUID NOT NULL,
-        schema_id VARCHAR NOT NULL,
-        run_id VARCHAR,
-        source VARCHAR NOT NULL,
-        sample_rows INTEGER,
-        observed_at TIMESTAMPTZ NOT NULL
-    )
-    """,
+    "CREATE TABLE IF NOT EXISTS artifact_schema ("
+    "id VARCHAR PRIMARY KEY, profile_version INTEGER NOT NULL DEFAULT 1, "
+    "summary_json JSON NOT NULL DEFAULT '{}', profile_json JSON, created_at TIMESTAMPTZ NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS artifact_schema_field ("
+    "schema_id VARCHAR NOT NULL, ordinal_position INTEGER, name VARCHAR NOT NULL, "
+    "logical_type VARCHAR NOT NULL, nullable BOOLEAN NOT NULL DEFAULT TRUE, "
+    "stats_json JSON, is_enum BOOLEAN NOT NULL DEFAULT FALSE, enum_values_json JSON, "
+    "PRIMARY KEY (schema_id, name))",
+    "CREATE TABLE IF NOT EXISTS artifact_schema_observation ("
+    "id UUID PRIMARY KEY, artifact_id UUID NOT NULL, schema_id VARCHAR NOT NULL, "
+    "run_id VARCHAR, source VARCHAR NOT NULL, sample_rows INTEGER, observed_at TIMESTAMPTZ NOT NULL)",
     "CREATE INDEX IF NOT EXISTS ix_artifact_schema_obs_artifact_id ON artifact_schema_observation (artifact_id)",
     "CREATE INDEX IF NOT EXISTS ix_artifact_schema_obs_schema_id ON artifact_schema_observation (schema_id)",
-    """
-    CREATE TABLE IF NOT EXISTS artifact_schema_relation (
-        schema_id VARCHAR NOT NULL,
-        from_field VARCHAR NOT NULL,
-        to_table VARCHAR NOT NULL,
-        to_field VARCHAR NOT NULL,
-        relationship_type VARCHAR NOT NULL DEFAULT 'foreign_key',
-        cardinality VARCHAR,
-        PRIMARY KEY (schema_id, from_field)
-    )
-    """,
-    """
-    CREATE OR REPLACE VIEW consist_schema_links AS
-    SELECT
-        rel.schema_id,
-        src.summary_json->>'$.table_name' AS from_table,
-        rel.from_field,
-        rel.to_table,
-        rel.to_field,
-        rel.relationship_type,
-        rel.cardinality
-    FROM artifact_schema_relation rel
-    JOIN artifact_schema src ON rel.schema_id = src.id
-    """,
+    "CREATE TABLE IF NOT EXISTS artifact_schema_relation ("
+    "schema_id VARCHAR NOT NULL, from_field VARCHAR NOT NULL, to_table VARCHAR NOT NULL, "
+    "to_field VARCHAR NOT NULL, relationship_type VARCHAR NOT NULL DEFAULT 'foreign_key', "
+    "cardinality VARCHAR, PRIMARY KEY (schema_id, from_field))",
+    "CREATE OR REPLACE VIEW consist_schema_links AS "
+    "SELECT rel.schema_id, src.summary_json->>'$.table_name' AS from_table, "
+    "rel.from_field, rel.to_table, rel.to_field, rel.relationship_type, rel.cardinality "
+    "FROM artifact_schema_relation rel JOIN artifact_schema src ON rel.schema_id = src.id",
 )
 
 _RUN_SELECT_COLS = (
@@ -654,6 +522,8 @@ def _hydrate_run_row(row: Sequence[Any]) -> Run:
 def _extract_artifact_member(
     artifact: Artifact,
 ) -> tuple[Optional[str], dict[str, Any]]:
+    if artifact.table_path is not None and artifact.array_path is not None:
+        raise ValueError("Artifact cannot specify both table_path and array_path.")
     meta = dict(artifact.meta) if isinstance(artifact.meta, Mapping) else {}
     meta.pop(_MEMBER_KIND_META_KEY, None)
     if artifact.array_path is not None:
@@ -772,16 +642,14 @@ def _load_json_value_for_model(model: Any, col_name: str, value: Any) -> Any:
         field_info = model.model_fields.get(col_name)
         if field_info is None:
             for fname, finfo in model.model_fields.items():
-                if _pydantic_field_sql_name(fname, finfo) == col_name:
+                if field_sql_column_name(fname, finfo) == col_name:
                     field_info = finfo
                     break
-        if field_info is not None:
-            sql_type = _pydantic_field_duckdb_type(field_info.annotation, field_info)
-            if sql_type == "JSON":
-                try:
-                    return json.loads(value)
-                except json.JSONDecodeError:
-                    return value
+        if field_info is not None and field_duckdb_type(field_info) == "JSON":
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return value
     return value
 
 
@@ -815,73 +683,44 @@ def _hydrate_artifact_kv_row(row: Sequence[Any]) -> ArtifactKV:
     )
 
 
-def _pydantic_field_sql_name(attr_name: str, field_info: Any) -> str:
-    if isinstance(field_info, _HasSQLColumnInfo) and field_info.sa_column is not None:
-        sa_col = field_info.sa_column
-        if (
-            isinstance(sa_col, _HasColumnName)
-            and isinstance(sa_col.name, str)
-            and sa_col.name
-        ):
-            return sa_col.name
-    return attr_name
+def _decode_kv_value(
+    value_type: str,
+    value_str: Optional[str],
+    value_num: Optional[float],
+    value_bool: Optional[bool],
+    value_json: Any,
+) -> Any:
+    if value_type == "str":
+        return value_str
+    if value_type == "int":
+        return int(value_num) if value_num is not None else None
+    if value_type == "float":
+        return value_num
+    if value_type == "bool":
+        return value_bool
+    if value_type == "null":
+        return None
+    return value_json
 
 
-def _pydantic_field_is_pk(field_info: Any) -> bool:
-    if isinstance(field_info, _HasPrimaryKeyFlag) and field_info.primary_key is True:
-        return True
-    if isinstance(field_info, _HasSQLColumnInfo) and field_info.sa_column is not None:
-        sa_col = field_info.sa_column
-        if isinstance(sa_col, _HasPrimaryKeyFlag) and sa_col.primary_key is True:
-            return True
-    return False
-
-
-def _pydantic_field_duckdb_type(annotation: Any, field_info: Any) -> str:
-    if isinstance(field_info, _HasSQLColumnInfo) and field_info.sa_column is not None:
-        sa_col = field_info.sa_column
-        if isinstance(sa_col, _HasColumnType) and sa_col.type is not None:
-            col_type_name = type(sa_col.type).__name__.upper()
-            if "JSON" in col_type_name:
-                return "JSON"
-            if "FLOAT" in col_type_name or "DOUBLE" in col_type_name:
-                return "DOUBLE"
-            if "INT" in col_type_name:
-                return "BIGINT"
-            if "BOOL" in col_type_name:
-                return "BOOLEAN"
-            if "DATE" in col_type_name or "TIME" in col_type_name:
-                return "TIMESTAMPTZ"
-            if (
-                "STR" in col_type_name
-                or "CHAR" in col_type_name
-                or "TEXT" in col_type_name
-            ):
-                return "VARCHAR"
-
-    target = annotation
-    origin = get_origin(target)
-    if origin is not None:
-        non_none = [arg for arg in get_args(target) if arg is not type(None)]
-        if len(non_none) == 1:
-            target = non_none[0]
-            origin = get_origin(target)
-
-    if target is str:
-        return "VARCHAR"
-    if target is bool:
-        return "BOOLEAN"
-    if target is int:
-        return "BIGINT"
-    if target is float:
-        return "DOUBLE"
-    if target is uuid.UUID:
-        return "UUID"
-    if target is datetime:
-        return "TIMESTAMPTZ"
-    if origin in (dict, list, Mapping, Sequence) or target in (dict, list, Any):
-        return "JSON"
-    return "VARCHAR"
+def _execute_multirow_values(
+    cur: duckdb.DuckDBPyConnection,
+    *,
+    prefix_sql: str,
+    row_placeholder: str,
+    suffix_sql: str = "",
+    rows: Sequence[Sequence[Any]],
+) -> None:
+    if not rows:
+        return
+    cols_per_row = max(1, len(rows[0]))
+    chunk_size = max(1, min(500, 30_000 // cols_per_row))
+    trailing = f" {suffix_sql}" if suffix_sql else ""
+    for start in range(0, len(rows), chunk_size):
+        chunk = rows[start : start + chunk_size]
+        values_sql = ", ".join(row_placeholder for _ in chunk)
+        flat_params = [val for row in chunk for val in row]
+        cur.execute(f"{prefix_sql} {values_sql}{trailing}", flat_params)
 
 
 class DatabaseManager:
@@ -911,6 +750,8 @@ class DatabaseManager:
         self._lock: threading.RLock = threading.RLock()
         self._cond: threading.Condition = threading.Condition(self._lock)
         self._suspended: bool = False
+        self._suspended_owner_thread: Optional[int] = None
+        self._suspended_group_has_writable: bool = False
         self._closed: bool = False
         self._tx_depth: int = 0
         self._tx_poisoned: bool = False
@@ -973,16 +814,63 @@ class DatabaseManager:
         self._con_read_only: bool = False if in_proc_writable else self.read_only
         if self._resolved_db_path is not None and not self._con_read_only:
             self._resolved_db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._con: duckdb.DuckDBPyConnection = self._connect_with_lock_backoff(
-            target,
-            read_only=self._con_read_only,
-            lock_retries=0 if self.read_only else max(0, int(lock_retries)),
-            base_sleep_seconds=max(0.005, float(lock_base_sleep_seconds)),
-            max_sleep_seconds=max(0.01, float(lock_max_sleep_seconds)),
-        )
-        self._configure_connection(self._con)
+
+        ro_siblings_to_upgrade: list[DatabaseManager] = []
+        if self._resolved_db_path is not None and not self._con_read_only:
+            ro_siblings_to_upgrade = sorted(
+                [
+                    mgr
+                    for mgr in _live_managers_for_path(self._resolved_db_path)
+                    if not mgr._closed and not mgr._suspended and mgr._con_read_only
+                ],
+                key=id,
+            )
+
+        with ExitStack() as sibling_stack:
+            suspended_siblings: list[DatabaseManager] = []
+            for sib in ro_siblings_to_upgrade:
+                sibling_stack.enter_context(sib._cond)
+                if not sib._closed and not sib._suspended and sib._con_read_only:
+                    sib._run_suspend_hooks_locked()
+                    sib._close_tracked_cursors_locked()
+                    sib._con.close()
+                    suspended_siblings.append(sib)
+
+            try:
+                self._con: duckdb.DuckDBPyConnection = self._connect_with_lock_backoff(
+                    target,
+                    read_only=self._con_read_only,
+                    lock_retries=0 if self.read_only else max(0, int(lock_retries)),
+                    base_sleep_seconds=max(0.005, float(lock_base_sleep_seconds)),
+                    max_sleep_seconds=max(0.01, float(lock_max_sleep_seconds)),
+                )
+            except BaseException:
+                for sib in suspended_siblings:
+                    try:
+                        restored = duckdb.connect(target, read_only=True)
+                        self._configure_connection(restored)
+                        sib._replay_temp_views_locked(restored)
+                        sib._con = restored
+                        sib._con_read_only = True
+                    except duckdb.Error:
+                        sib._closed = True
+                        sib._unregister_live_manager()
+                raise
+
+            for sib in suspended_siblings:
+                upgraded = duckdb.connect(target, read_only=False)
+                try:
+                    self._configure_connection(upgraded)
+                    sib._replay_temp_views_locked(upgraded)
+                except BaseException:
+                    upgraded.close()
+                    self._con.close()
+                    raise
+                sib._con = upgraded
+                sib._con_read_only = False
 
         try:
+            self._configure_connection(self._con)
             self._validate_open_schema_locked()
             if not self._skip_schema_init:
                 self.db_uid: str = self._init_schema_locked(db_uid=db_uid)
@@ -991,7 +879,7 @@ class DatabaseManager:
         except BaseException:
             try:
                 self._con.close()
-            except Exception:
+            except duckdb.Error:
                 pass
             raise
 
@@ -1023,16 +911,26 @@ class DatabaseManager:
 
     @staticmethod
     def _configure_connection(conn: duckdb.DuckDBPyConnection) -> None:
-        conn.execute("SET TimeZone = 'UTC'")
+        conn.execute("SET GLOBAL TimeZone = 'UTC'")
         conn.execute("SET search_path = 'main'")
 
+    def _replay_temp_views_locked(self, conn: duckdb.DuckDBPyConnection) -> None:
+        for view_name, create_sql in list(self._temp_views.items()):
+            try:
+                conn.execute(create_sql)
+            except duckdb.Error as exc:
+                logging.warning(
+                    "Skipping stale temporary view %r replay: %s", view_name, exc
+                )
+
     def _prepare_cursor_locked(
-        self, cur: duckdb.DuckDBPyConnection
+        self,
+        cur: duckdb.DuckDBPyConnection,
+        *,
+        include_temp_views: bool = False,
     ) -> duckdb.DuckDBPyConnection:
-        cur.execute("SET TimeZone = 'UTC'")
-        cur.execute("SET search_path = 'main'")
-        for create_sql in self._temp_views.values():
-            cur.execute(create_sql)
+        if include_temp_views and self._temp_views:
+            self._replay_temp_views_locked(cur)
         return cur
 
     def _register_live_manager(self) -> None:
@@ -1159,57 +1057,92 @@ class DatabaseManager:
             self._wait_until_active_locked()
             return self._init_schema_locked(db_uid=db_uid)
 
-    def _ensure_schema_links_view(self) -> None:
-        if self.read_only:
-            return
-        with self._lock:
-            self._wait_until_active_locked()
-            self._con.execute(
-                """
-                CREATE OR REPLACE VIEW main.consist_schema_links AS
-                SELECT
-                    rel.schema_id,
-                    json_extract_string(src.summary_json, '$.table_name') AS from_table,
-                    rel.from_field,
-                    rel.to_table,
-                    rel.to_field,
-                    rel.relationship_type,
-                    rel.cardinality
-                FROM main.artifact_schema_relation rel
-                JOIN main.artifact_schema src ON rel.schema_id = src.id
-                """
-            )
-
     def _require_writable(self, op_name: str) -> None:
         if self.read_only:
             raise PermissionError(
                 f"Cannot execute {op_name}() on a read-only DatabaseManager."
             )
 
+    def _reopen_single_manager_locked(self, *, deadline: float) -> None:
+        if not self._suspended or self._resolved_db_path is None:
+            return
+        attempt = 0
+        last_err: Optional[duckdb.Error] = None
+        reopened: Optional[duckdb.DuckDBPyConnection] = None
+        reopen_ro = (
+            False
+            if (
+                self._suspended_group_has_writable
+                or has_live_writable_db_for_path(self._resolved_db_path)
+            )
+            else self.read_only
+        )
+        while True:
+            try:
+                reopened = duckdb.connect(
+                    str(self._resolved_db_path),
+                    read_only=reopen_ro,
+                )
+                last_err = None
+                break
+            except duckdb.Error as exc:
+                last_err = exc
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(0.02 * (1.3**attempt), 0.25, remaining))
+                attempt += 1
+
+        if reopened is None:
+            self._suspended = False
+            self._suspended_owner_thread = None
+            self._suspended_group_has_writable = False
+            self._closed = True
+            self._cond.notify_all()
+            if last_err is not None:
+                raise last_err
+            raise RuntimeError("Failed to reopen suspended DuckDB connection.")
+
+        try:
+            self._configure_connection(reopened)
+            self._replay_temp_views_locked(reopened)
+        except BaseException:
+            try:
+                reopened.close()
+            except duckdb.Error:
+                pass
+            self._suspended = False
+            self._suspended_owner_thread = None
+            self._suspended_group_has_writable = False
+            self._closed = True
+            self._cond.notify_all()
+            raise
+
+        self._con = reopened
+        self._con_read_only = reopen_ro
+        self._suspended = False
+        self._suspended_owner_thread = None
+        self._suspended_group_has_writable = False
+        self._register_live_manager()
+        self._cond.notify_all()
+
     def _wait_until_active_locked(self) -> None:
+        if (
+            self._suspended
+            and self._suspended_owner_thread == threading.get_ident()
+            and self._resolved_db_path is not None
+        ):
+            self._reopen_single_manager_locked(deadline=time.monotonic() + 20.0)
         while self._suspended:
             self._cond.wait()
         if self._closed:
             raise RuntimeError("DatabaseManager is closed.")
-
-    def _wait_while_suspended(self) -> None:
-        with self._lock:
-            self._wait_until_active_locked()
-
-    def _ensure_open(self) -> None:
-        with self._lock:
-            self._wait_until_active_locked()
 
     @property
     def connection(self) -> duckdb.DuckDBPyConnection:
         with self._lock:
             self._wait_until_active_locked()
             return self._con
-
-    @property
-    def has_open_connections(self) -> bool:
-        with self._lock:
-            return not self._closed and not self._suspended
 
     @property
     def instance_key(self) -> str:
@@ -1220,6 +1153,10 @@ class DatabaseManager:
         with self._lock:
             if hook not in self._suspend_hooks:
                 self._suspend_hooks.append(hook)
+
+    def has_temp_view(self, view_name: str) -> bool:
+        with self._lock:
+            return view_name in self._temp_views
 
     def register_temp_view(self, view_name: str, create_sql: str) -> None:
         with self._lock:
@@ -1232,6 +1169,21 @@ class DatabaseManager:
         with self._lock:
             self._open_cursors.pop(token, None)
 
+    def close_cursor(self, cur: duckdb.DuckDBPyConnection) -> None:
+        """Close a cursor previously returned by ``cursor()`` and untrack it."""
+        with self._lock:
+            matching_tokens = [
+                tok for tok, existing in self._open_cursors.items() if existing is cur
+            ]
+            for tok in matching_tokens:
+                self._open_cursors.pop(tok, None)
+                with _TRACKED_RELATION_LOCK:
+                    _TRACKED_RELATIONS.pop(tok, None)
+        try:
+            cur.close()
+        except duckdb.Error:
+            pass
+
     def _close_tracked_cursors_locked(self) -> None:
         tokens = list(self._open_cursors.keys())
         for token in tokens:
@@ -1241,19 +1193,30 @@ class DatabaseManager:
             if cur is not None:
                 try:
                     cur.close()
-                except Exception:
+                except duckdb.Error:
                     pass
 
     def _run_suspend_hooks_locked(self) -> None:
         for hook in list(self._suspend_hooks):
             try:
                 hook()
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.warning("Database suspend hook failed: %s", exc)
 
     def close(self) -> None:
         """Close all tracked cursors and the underlying DuckDB connection."""
         with self._cond:
+            if (
+                self._suspended
+                and self._suspended_owner_thread == threading.get_ident()
+            ):
+                self._suspended = False
+                self._suspended_owner_thread = None
+                self._suspended_group_has_writable = False
+                self._closed = True
+                self._unregister_live_manager()
+                self._cond.notify_all()
+                return
             while self._suspended:
                 self._cond.wait()
             if self._closed:
@@ -1263,7 +1226,7 @@ class DatabaseManager:
             if self._tx_depth > 0:
                 try:
                     self._con.execute("ROLLBACK")
-                except Exception:
+                except duckdb.Error:
                     pass
                 self._tx_depth = 0
                 self._tx_poisoned = False
@@ -1271,13 +1234,9 @@ class DatabaseManager:
             self._unregister_live_manager()
             try:
                 self._con.close()
-            except Exception:
+            except duckdb.Error:
                 pass
             self._cond.notify_all()
-
-    def dispose(self) -> None:
-        """Alias for ``close()``."""
-        self.close()
 
     def __enter__(self) -> DatabaseManager:
         return self
@@ -1293,72 +1252,81 @@ class DatabaseManager:
 
     @contextmanager
     def suspend_for_subprocesses(self) -> Iterator[None]:
-        """Release file-backed DuckDB handles while child worker processes run."""
-        should_suspend = False
-        with self._cond:
-            while self._suspended:
-                self._cond.wait()
-            if not self._closed and self._resolved_db_path is not None:
-                if self._tx_depth > 0:
+        """Release all in-process file-backed DuckDB handles while child processes run."""
+        if self._resolved_db_path is None:
+            with self._lock:
+                self._wait_until_active_locked()
+            yield
+            return
+
+        owner_tid = threading.get_ident()
+        candidates = sorted(
+            {self, *_live_managers_for_path(self._resolved_db_path)},
+            key=id,
+        )
+        suspended_targets: list[DatabaseManager] = []
+        with ExitStack() as lock_stack:
+            for mgr in candidates:
+                lock_stack.enter_context(mgr._cond)
+                while mgr._suspended and mgr._suspended_owner_thread != owner_tid:
+                    mgr._cond.wait()
+
+            if self._closed:
+                raise RuntimeError("DatabaseManager is closed.")
+
+            active_targets = [
+                mgr
+                for mgr in candidates
+                if not mgr._closed
+                and not mgr._suspended
+                and mgr._resolved_db_path == self._resolved_db_path
+            ]
+            for mgr in active_targets:
+                if mgr._tx_depth > 0:
                     raise RuntimeError(
                         "Cannot suspend DatabaseManager for subprocesses inside an active transaction."
                     )
-                self._suspended = True
-                should_suspend = True
-                self._run_suspend_hooks_locked()
-                self._close_tracked_cursors_locked()
-                if not self._con_read_only:
+
+            group_has_writable = any(
+                not mgr.read_only or not mgr._con_read_only for mgr in active_targets
+            )
+            for mgr in active_targets:
+                mgr._suspended = True
+                mgr._suspended_owner_thread = owner_tid
+                mgr._suspended_group_has_writable = group_has_writable
+                mgr._run_suspend_hooks_locked()
+                mgr._close_tracked_cursors_locked()
+                if not mgr._con_read_only:
                     try:
-                        self._con.execute("CHECKPOINT")
-                    except Exception:
-                        pass
-                self._unregister_live_manager()
-                self._con.close()
+                        mgr._con.execute("CHECKPOINT")
+                    except duckdb.Error as exc:
+                        logging.warning(
+                            "DuckDB CHECKPOINT before subprocess suspend failed: %s",
+                            exc,
+                        )
+                mgr._unregister_live_manager()
+                mgr._con.close()
+                suspended_targets.append(mgr)
 
         try:
             yield
         finally:
-            if should_suspend and self._resolved_db_path is not None:
+            if suspended_targets:
                 deadline = time.monotonic() + 20.0
-                attempt = 0
-                last_err: Optional[Exception] = None
-                reopened: Optional[duckdb.DuckDBPyConnection] = None
-                while True:
-                    try:
-                        in_proc_rw = has_live_writable_db_for_path(
-                            self._resolved_db_path
-                        )
-                        reopen_ro = False if in_proc_rw else self.read_only
-                        reopened = duckdb.connect(
-                            str(self._resolved_db_path),
-                            read_only=reopen_ro,
-                        )
-                        self._con_read_only = reopen_ro
-                        self._configure_connection(reopened)
-                        for create_sql in self._temp_views.values():
-                            reopened.execute(create_sql)
-                        last_err = None
-                        break
-                    except duckdb.Error as exc:
-                        last_err = exc
-                        remaining = deadline - time.monotonic()
-                        if remaining <= 0:
-                            break
-                        time.sleep(min(0.02 * (1.3**attempt), 0.25, remaining))
-                        attempt += 1
-
-                with self._cond:
-                    if reopened is not None:
-                        self._con = reopened
-                        self._suspended = False
-                        self._register_live_manager()
-                    else:
-                        self._suspended = False
-                        self._closed = True
-                    self._cond.notify_all()
-
-                if last_err is not None:
-                    raise last_err
+                first_reopen_err: Optional[BaseException] = None
+                reopen_order = sorted(
+                    suspended_targets, key=lambda mgr: (mgr.read_only, id(mgr))
+                )
+                for mgr in reopen_order:
+                    with mgr._cond:
+                        if mgr._suspended:
+                            try:
+                                mgr._reopen_single_manager_locked(deadline=deadline)
+                            except BaseException as exc:
+                                if first_reopen_err is None:
+                                    first_reopen_err = exc
+                if first_reopen_err is not None:
+                    raise first_reopen_err
 
     @contextmanager
     def transaction(self) -> Iterator[duckdb.DuckDBPyConnection]:
@@ -1390,26 +1358,33 @@ class DatabaseManager:
                 self._tx_poisoned = True
                 try:
                     self._con.execute("ROLLBACK")
-                except Exception:
+                except duckdb.Error:
                     pass
                 raise
             else:
                 if self._tx_poisoned:
                     try:
                         self._con.execute("ROLLBACK")
-                    except Exception:
+                    except duckdb.Error:
                         pass
                     raise TransactionAbortedError(
                         "Outer transaction rolled back because a nested transaction failed."
                     )
-                self._con.execute("COMMIT")
+                try:
+                    self._con.execute("COMMIT")
+                except BaseException:
+                    try:
+                        self._con.execute("ROLLBACK")
+                    except duckdb.Error:
+                        pass
+                    raise
             finally:
                 self._tx_depth = 0
                 self._tx_poisoned = False
 
     @contextmanager
     def borrow_for_dlt(self) -> Iterator[duckdb.DuckDBPyConnection]:
-        """Yield the locked DuckDB connection to dlt and restore session settings."""
+        """Yield the locked DuckDB connection to dlt and restore clean session state."""
         self._require_writable("borrow_for_dlt")
         with self._lock:
             self._wait_until_active_locked()
@@ -1421,16 +1396,22 @@ class DatabaseManager:
                 yield self._con
             finally:
                 try:
-                    self._con.execute("SET search_path = 'main'")
-                except Exception:
+                    self._con.execute("ROLLBACK")
+                except duckdb.Error:
                     pass
                 try:
-                    self._con.execute("SET TimeZone = 'UTC'")
-                except Exception:
+                    self._con.execute("SET search_path = 'main'")
+                except duckdb.Error:
+                    pass
+                try:
+                    self._con.execute("SET GLOBAL TimeZone = 'UTC'")
+                except duckdb.Error:
                     pass
 
     @contextmanager
-    def exec_cursor(self) -> Iterator[duckdb.DuckDBPyConnection]:
+    def exec_cursor(
+        self, *, include_temp_views: bool = False
+    ) -> Iterator[duckdb.DuckDBPyConnection]:
         """Yield ``self._con`` in an active transaction, or a temporary cloned cursor."""
         with self._lock:
             self._wait_until_active_locked()
@@ -1441,7 +1422,9 @@ class DatabaseManager:
                     )
                 yield self._con
                 return
-            cur = self._prepare_cursor_locked(self._con.cursor())
+            cur = self._prepare_cursor_locked(
+                self._con.cursor(), include_temp_views=include_temp_views
+            )
             try:
                 yield cur
             finally:
@@ -1456,30 +1439,34 @@ class DatabaseManager:
                     "Cannot allocate an independent cursor() inside an active transaction."
                 )
             token = uuid.uuid4().hex[:16]
-            cur = self._prepare_cursor_locked(self._con.cursor())
+            cur = self._prepare_cursor_locked(
+                self._con.cursor(), include_temp_views=True
+            )
             self._open_cursors[token] = cur
             return cur
 
     @staticmethod
     def _unwrap_sql_and_params(
-        sql: str | ParameterizedSQLProtocol,
+        sql: str | ParameterizedSQL,
         params: Optional[Sequence[Any] | Mapping[str, Any]] = None,
     ) -> tuple[str, Optional[list[Any] | dict[str, Any]]]:
-        if isinstance(sql, ParameterizedSQLProtocol):
+        if isinstance(sql, str):
+            if params is None:
+                return sql, None
+            if isinstance(params, Mapping):
+                return sql, dict(params)
+            return sql, list(params)
+        if isinstance(sql, ParameterizedSQL):
             if params is not None:
                 raise ValueError(
                     "Cannot supply separate 'params' when passing a ParameterizedSQL query."
                 )
             return sql.sql, list(sql.params)
-        if params is None:
-            return sql, None
-        if isinstance(params, Mapping):
-            return sql, dict(params)
-        return sql, list(params)
+        raise TypeError("SQL query must be a str or ParameterizedSQL instance.")
 
     def execute(
         self,
-        sql: str | ParameterizedSQLProtocol,
+        sql: str | ParameterizedSQL,
         params: Optional[Sequence[Any] | Mapping[str, Any]] = None,
     ) -> None:
         raw_sql, raw_params = self._unwrap_sql_and_params(sql, params)
@@ -1497,7 +1484,7 @@ class DatabaseManager:
 
     def fetchone(
         self,
-        sql: str | ParameterizedSQLProtocol,
+        sql: str | ParameterizedSQL,
         params: Optional[Sequence[Any] | Mapping[str, Any]] = None,
     ) -> Optional[Tuple[Any, ...]]:
         raw_sql, raw_params = self._unwrap_sql_and_params(sql, params)
@@ -1511,7 +1498,7 @@ class DatabaseManager:
 
     def fetchall(
         self,
-        sql: str | ParameterizedSQLProtocol,
+        sql: str | ParameterizedSQL,
         params: Optional[Sequence[Any] | Mapping[str, Any]] = None,
     ) -> List[Tuple[Any, ...]]:
         raw_sql, raw_params = self._unwrap_sql_and_params(sql, params)
@@ -1525,7 +1512,7 @@ class DatabaseManager:
 
     def fetchdf(
         self,
-        sql: str | ParameterizedSQLProtocol,
+        sql: str | ParameterizedSQL,
         params: Optional[Sequence[Any] | Mapping[str, Any]] = None,
     ) -> pd.DataFrame:
         raw_sql, raw_params = self._unwrap_sql_and_params(sql, params)
@@ -1539,17 +1526,23 @@ class DatabaseManager:
 
     def query_df(
         self,
-        sql: str | ParameterizedSQLProtocol,
+        sql: str | ParameterizedSQL,
         params: Optional[Sequence[Any] | Mapping[str, Any]] = None,
     ) -> pd.DataFrame:
         """Execute a validated read-only SELECT query and return a DataFrame."""
         raw_sql, raw_params = self._unwrap_sql_and_params(sql, params)
         _validate_select_only_sql(raw_sql)
-        return self.fetchdf(raw_sql, raw_params)
+        with self.exec_cursor(include_temp_views=True) as cur:
+            res = (
+                cur.execute(raw_sql)
+                if raw_params is None
+                else cur.execute(raw_sql, raw_params)
+            )
+            return res.fetchdf()
 
     def query_rows(
         self,
-        sql: str | ParameterizedSQLProtocol,
+        sql: str | ParameterizedSQL,
         params: Optional[Sequence[Any] | Mapping[str, Any]] = None,
         *,
         model: Optional[Type[_RowModelT]] = None,
@@ -1557,7 +1550,7 @@ class DatabaseManager:
         """Execute a validated read-only SELECT query and return rows or validated models."""
         raw_sql, raw_params = self._unwrap_sql_and_params(sql, params)
         _validate_select_only_sql(raw_sql)
-        with self.exec_cursor() as cur:
+        with self.exec_cursor(include_temp_views=True) as cur:
             res = (
                 cur.execute(raw_sql)
                 if raw_params is None
@@ -1595,7 +1588,7 @@ class DatabaseManager:
 
     def relation_query(
         self,
-        sql: str | ParameterizedSQLProtocol,
+        sql: str | ParameterizedSQL,
         params: Optional[Sequence[Any] | Mapping[str, Any]] = None,
     ) -> duckdb.DuckDBPyRelation:
         """Return a lazy DuckDBPyRelation backed by a tracked root cursor."""
@@ -1607,31 +1600,36 @@ class DatabaseManager:
             token = uuid.uuid4().hex[:16]
             alias = f"__consist_rel_{token}"
             if self._tx_depth > 0:
+                if self._tx_poisoned:
+                    raise TransactionAbortedError(
+                        "Current transaction is aborted due to an earlier failure."
+                    )
                 res = (
                     self._con.execute(stripped)
                     if raw_params is None
                     else self._con.execute(stripped, raw_params)
                 )
-                arrow_tbl = res.fetch_arrow_table()
-                cur = self._prepare_cursor_locked(self._con.cursor())
+                arrow_tbl = res.to_arrow_table()
+                cur = duckdb.connect(":memory:")
                 try:
+                    self._configure_connection(cur)
                     cur.register(alias, arrow_tbl)
                     rel = cur.sql(f"SELECT * FROM {alias}")
-                except Exception:
+                except BaseException:
                     cur.close()
                     raise
             else:
-                cur = self._prepare_cursor_locked(self._con.cursor())
+                cur = self._prepare_cursor_locked(
+                    self._con.cursor(), include_temp_views=True
+                )
                 try:
                     if raw_params is None:
                         rel = cur.sql(f"SELECT * FROM ({stripped}) AS {alias}")
                     else:
-                        arrow_tbl = cur.execute(
-                            stripped, raw_params
-                        ).fetch_arrow_table()
+                        arrow_tbl = cur.execute(stripped, raw_params).to_arrow_table()
                         cur.register(alias, arrow_tbl)
                         rel = cur.sql(f"SELECT * FROM {alias}")
-                except Exception:
+                except BaseException:
                     cur.close()
                     raise
             self._open_cursors[token] = cur
@@ -1670,9 +1668,6 @@ class DatabaseManager:
         )
         return row is not None
 
-    def _table_has_column(self, *, table_name: str, column_name: str) -> bool:
-        return self.has_table_column(table_name=table_name, column_name=column_name)
-
     def ensure_pydantic_table(
         self,
         model_cls: Type[BaseModel],
@@ -1681,37 +1676,18 @@ class DatabaseManager:
     ) -> tuple[str, str]:
         """Create a DuckDB table from a Pydantic/SQLModel class's ``model_fields``."""
         self._require_writable("ensure_pydantic_table")
-        table_name = (
-            model_cls.__tablename__
-            if isinstance(model_cls, _HasTableNameAttr)
-            and isinstance(model_cls.__tablename__, str)
-            else model_cls.__name__.lower()
-        )
-        resolved_schema = schema
-        if resolved_schema is None and isinstance(model_cls, _HasTableArgsAttr):
-            table_args = model_cls.__table_args__
-            if isinstance(table_args, Mapping) and isinstance(
-                table_args.get("schema"), str
-            ):
-                resolved_schema = str(table_args["schema"])
-            elif isinstance(table_args, tuple):
-                for item in table_args:
-                    if isinstance(item, Mapping) and isinstance(
-                        item.get("schema"), str
-                    ):
-                        resolved_schema = str(item["schema"])
-                        break
-        target_schema = resolved_schema or "main"
+        table_name = model_table_name(model_cls)
+        target_schema = schema or model_table_schema(model_cls) or "main"
         _validate_identifier(target_schema, label="table_schema")
         _validate_identifier(table_name, label="table_name")
 
         col_defs: list[str] = []
         pk_cols: list[str] = []
         for attr_name, field_info in model_cls.model_fields.items():
-            sql_col = _pydantic_field_sql_name(attr_name, field_info)
+            sql_col = field_sql_column_name(attr_name, field_info)
             _validate_identifier(sql_col, label="column_name")
-            duck_type = _pydantic_field_duckdb_type(field_info.annotation, field_info)
-            is_pk = _pydantic_field_is_pk(field_info)
+            duck_type = field_duckdb_type(field_info)
+            is_pk = field_is_primary_key(field_info)
             if is_pk:
                 pk_cols.append(_quote_ident(sql_col))
                 col_defs.append(f"{_quote_ident(sql_col)} {duck_type} NOT NULL")
@@ -1898,24 +1874,24 @@ class DatabaseManager:
             _ensure_non_null_utc_dt(artifact.created_at),
         ]
 
-    _ARTIFACT_UPSERT_SQL = """
-        INSERT INTO artifact (
-            id, key, uri, driver, digest, member,
-            run_id, parent_artifact_id, facet_id, meta, created_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT (id) DO UPDATE SET
-            key = EXCLUDED.key,
-            uri = EXCLUDED.uri,
-            driver = EXCLUDED.driver,
-            digest = EXCLUDED.digest,
-            member = EXCLUDED.member,
-            run_id = EXCLUDED.run_id,
-            parent_artifact_id = EXCLUDED.parent_artifact_id,
-            facet_id = COALESCE(EXCLUDED.facet_id, artifact.facet_id),
-            meta = EXCLUDED.meta,
-            created_at = EXCLUDED.created_at
-    """
+    _ARTIFACT_INSERT_PREFIX = (
+        "INSERT INTO artifact ("
+        "id, key, uri, driver, digest, member, "
+        "run_id, parent_artifact_id, facet_id, meta, created_at"
+        ") VALUES"
+    )
+    _ARTIFACT_UPSERT_SUFFIX = (
+        "ON CONFLICT (id) DO UPDATE SET "
+        "key = EXCLUDED.key, uri = EXCLUDED.uri, driver = EXCLUDED.driver, "
+        "digest = EXCLUDED.digest, member = EXCLUDED.member, run_id = EXCLUDED.run_id, "
+        "parent_artifact_id = EXCLUDED.parent_artifact_id, "
+        "facet_id = COALESCE(EXCLUDED.facet_id, artifact.facet_id), "
+        "meta = EXCLUDED.meta, created_at = EXCLUDED.created_at"
+    )
+    _ARTIFACT_UPSERT_SQL = (
+        f"{_ARTIFACT_INSERT_PREFIX} (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        f"{_ARTIFACT_UPSERT_SUFFIX}"
+    )
 
     def _upsert_artifact_locked(
         self,
@@ -1981,11 +1957,15 @@ class DatabaseManager:
             insert_rows.append([run_id, aid, direction, role_val, bool(is_implicit)])
 
         if insert_rows:
-            cur.executemany(
-                "INSERT INTO run_artifact_link (run_id, artifact_id, direction, role, is_implicit) "
-                "VALUES (?, ?, ?, ?, ?) "
-                "ON CONFLICT (run_id, artifact_id, direction, role) DO NOTHING",
-                insert_rows,
+            _execute_multirow_values(
+                cur,
+                prefix_sql=(
+                    "INSERT INTO run_artifact_link "
+                    "(run_id, artifact_id, direction, role, is_implicit) VALUES"
+                ),
+                row_placeholder="(?, ?, ?, ?, ?)",
+                suffix_sql="ON CONFLICT (run_id, artifact_id, direction, role) DO NOTHING",
+                rows=insert_rows,
             )
 
     def _upsert_artifact_facet_locked(
@@ -2030,22 +2010,28 @@ class DatabaseManager:
                 "DELETE FROM run_config_kv WHERE run_id = ? AND facet_id = ? AND namespace = ?",
                 [run_id, facet_id, namespace],
             )
-        cur.executemany(
-            """
-            INSERT INTO run_config_kv (
-                run_id, facet_id, namespace, key, value_type,
-                value_str, value_num, value_bool, value_json, created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (run_id, facet_id, namespace, key) DO UPDATE SET
-                value_type = EXCLUDED.value_type,
-                value_str = EXCLUDED.value_str,
-                value_num = EXCLUDED.value_num,
-                value_bool = EXCLUDED.value_bool,
-                value_json = EXCLUDED.value_json,
-                created_at = EXCLUDED.created_at
-            """,
-            [
+        deduped: dict[tuple[str, str, str, str], RunConfigKV] = {}
+        for row in rows:
+            deduped[(row.run_id, row.facet_id, row.namespace, row.key)] = row
+        _execute_multirow_values(
+            cur,
+            prefix_sql=(
+                "INSERT INTO run_config_kv ("
+                "run_id, facet_id, namespace, key, value_type, "
+                "value_str, value_num, value_bool, value_json, created_at"
+                ") VALUES"
+            ),
+            row_placeholder="(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            suffix_sql=(
+                "ON CONFLICT (run_id, facet_id, namespace, key) DO UPDATE SET "
+                "value_type = EXCLUDED.value_type, "
+                "value_str = EXCLUDED.value_str, "
+                "value_num = EXCLUDED.value_num, "
+                "value_bool = EXCLUDED.value_bool, "
+                "value_json = EXCLUDED.value_json, "
+                "created_at = EXCLUDED.created_at"
+            ),
+            rows=[
                 [
                     r.run_id,
                     r.facet_id,
@@ -2058,7 +2044,7 @@ class DatabaseManager:
                     _dump_optional_json(r.value_json),
                     _ensure_non_null_utc_dt(r.created_at),
                 ]
-                for r in rows
+                for r in deduped.values()
             ],
         )
 
@@ -2083,23 +2069,29 @@ class DatabaseManager:
                     "DELETE FROM artifact_kv WHERE artifact_id = ? AND facet_id = ? AND namespace = ?",
                     [artifact_id, facet_id, namespace],
                 )
-        cur.executemany(
-            """
-            INSERT INTO artifact_kv (
-                artifact_id, facet_id, key_path, namespace, value_type,
-                value_str, value_num, value_bool, value_json, created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (artifact_id, facet_id, key_path) DO UPDATE SET
-                namespace = EXCLUDED.namespace,
-                value_type = EXCLUDED.value_type,
-                value_str = EXCLUDED.value_str,
-                value_num = EXCLUDED.value_num,
-                value_bool = EXCLUDED.value_bool,
-                value_json = EXCLUDED.value_json,
-                created_at = EXCLUDED.created_at
-            """,
-            [
+        deduped: dict[tuple[uuid.UUID, str, str], ArtifactKV] = {}
+        for row in rows:
+            deduped[(_coerce_uuid(row.artifact_id), row.facet_id, row.key_path)] = row
+        _execute_multirow_values(
+            cur,
+            prefix_sql=(
+                "INSERT INTO artifact_kv ("
+                "artifact_id, facet_id, key_path, namespace, value_type, "
+                "value_str, value_num, value_bool, value_json, created_at"
+                ") VALUES"
+            ),
+            row_placeholder="(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            suffix_sql=(
+                "ON CONFLICT (artifact_id, facet_id, key_path) DO UPDATE SET "
+                "namespace = EXCLUDED.namespace, "
+                "value_type = EXCLUDED.value_type, "
+                "value_str = EXCLUDED.value_str, "
+                "value_num = EXCLUDED.value_num, "
+                "value_bool = EXCLUDED.value_bool, "
+                "value_json = EXCLUDED.value_json, "
+                "created_at = EXCLUDED.created_at"
+            ),
+            rows=[
                 [
                     _coerce_uuid(r.artifact_id),
                     r.facet_id,
@@ -2112,7 +2104,7 @@ class DatabaseManager:
                     _dump_optional_json(r.value_json),
                     _ensure_non_null_utc_dt(r.created_at),
                 ]
-                for r in rows
+                for r in deduped.values()
             ],
         )
 
@@ -2237,33 +2229,52 @@ class DatabaseManager:
                 [signature, datetime.now(timezone.utc), run_id],
             )
 
-    def upsert_config_facet(self, facet: ConfigFacet) -> None:
-        """Upsert a ``ConfigFacet`` deduplicated by ``facet.id``."""
+    def _upsert_config_facet_locked(
+        self, cur: duckdb.DuckDBPyConnection, facet: ConfigFacet
+    ) -> None:
         schema_ver = (
             str(facet.schema_version) if facet.schema_version is not None else None
         )
+        cur.execute(
+            'INSERT INTO config_facet (id, namespace, schema_name, schema_version, "json", created_at) '
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (id) DO UPDATE SET namespace = EXCLUDED.namespace, "
+            "schema_name = EXCLUDED.schema_name, schema_version = EXCLUDED.schema_version, "
+            '"json" = EXCLUDED."json"',
+            [
+                facet.id,
+                facet.namespace,
+                facet.schema_name,
+                schema_ver,
+                _dump_json(facet.facet_json or {}),
+                _ensure_non_null_utc_dt(facet.created_at),
+            ],
+        )
+
+    def _merge_artifact_meta_locked(
+        self,
+        cur: duckdb.DuckDBPyConnection,
+        artifact: Artifact,
+        meta_updates: Mapping[str, Any],
+    ) -> None:
+        existing_row = cur.execute(
+            "SELECT meta FROM artifact WHERE id = ?",
+            [_coerce_uuid(artifact.id)],
+        ).fetchone()
+        current_meta = (
+            _parse_json_dict(existing_row[0])
+            if existing_row is not None
+            else dict(artifact.meta or {})
+        )
+        current_meta.pop(_MEMBER_KIND_META_KEY, None)
+        current_meta.update(artifact.meta or {})
+        current_meta.update(meta_updates)
+        artifact.meta = dict(current_meta)
+
+    def upsert_config_facet(self, facet: ConfigFacet) -> None:
+        """Upsert a ``ConfigFacet`` deduplicated by ``facet.id``."""
         with self.transaction() as cur:
-            cur.execute(
-                """
-                INSERT INTO config_facet (
-                    id, namespace, schema_name, schema_version, "json", created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT (id) DO UPDATE SET
-                    namespace = EXCLUDED.namespace,
-                    schema_name = EXCLUDED.schema_name,
-                    schema_version = EXCLUDED.schema_version,
-                    "json" = EXCLUDED."json"
-                """,
-                [
-                    facet.id,
-                    facet.namespace,
-                    facet.schema_name,
-                    schema_ver,
-                    _dump_json(facet.facet_json or {}),
-                    _ensure_non_null_utc_dt(facet.created_at),
-                ],
-            )
+            self._upsert_config_facet_locked(cur, facet)
 
     def persist_config_facet_bundle(
         self,
@@ -2272,32 +2283,9 @@ class DatabaseManager:
         kv_rows: Optional[List[RunConfigKV]] = None,
     ) -> None:
         """Persist a ``ConfigFacet`` and optional ``RunConfigKV`` rows in one transaction."""
-        schema_ver = (
-            str(facet.schema_version) if facet.schema_version is not None else None
-        )
         with _DB_CALL_PROFILER.track("persist_config_facet_bundle"):
             with self.transaction() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO config_facet (
-                        id, namespace, schema_name, schema_version, "json", created_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT (id) DO UPDATE SET
-                        namespace = EXCLUDED.namespace,
-                        schema_name = EXCLUDED.schema_name,
-                        schema_version = EXCLUDED.schema_version,
-                        "json" = EXCLUDED."json"
-                    """,
-                    [
-                        facet.id,
-                        facet.namespace,
-                        facet.schema_name,
-                        schema_ver,
-                        _dump_json(facet.facet_json or {}),
-                        _ensure_non_null_utc_dt(facet.created_at),
-                    ],
-                )
+                self._upsert_config_facet_locked(cur, facet)
                 if kv_rows:
                     self._replace_run_config_kv_locked(cur, kv_rows)
                     run_ids = {r.run_id for r in kv_rows if r.run_id}
@@ -2323,20 +2311,7 @@ class DatabaseManager:
         """Persist artifact facet, metadata updates, and optional KV index atomically."""
         with _DB_CALL_PROFILER.track("persist_artifact_facet_bundle"):
             with self.transaction() as cur:
-                existing_row = cur.execute(
-                    "SELECT meta FROM artifact WHERE id = ?",
-                    [_coerce_uuid(artifact.id)],
-                ).fetchone()
-                current_meta = (
-                    _parse_json_dict(existing_row[0])
-                    if existing_row is not None
-                    else dict(artifact.meta or {})
-                )
-                current_meta.pop(_MEMBER_KIND_META_KEY, None)
-                current_meta.update(artifact.meta or {})
-                current_meta.update(meta_updates)
-                artifact.meta = dict(current_meta)
-
+                self._merge_artifact_meta_locked(cur, artifact, meta_updates)
                 self._upsert_artifact_facet_locked(cur, facet)
                 self._upsert_artifact_locked(cur, artifact, explicit_facet_id=facet.id)
                 if kv_rows:
@@ -2416,15 +2391,19 @@ class DatabaseManager:
             [schema.id],
         )
         if fields:
-            cur.executemany(
-                """
-                INSERT INTO artifact_schema_field (
-                    schema_id, ordinal_position, name, logical_type,
-                    nullable, stats_json, is_enum, enum_values_json
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
+            deduped_fields: dict[tuple[str, str], ArtifactSchemaField] = {}
+            for f in fields:
+                deduped_fields[(f.schema_id, f.name)] = f
+            _execute_multirow_values(
+                cur,
+                prefix_sql=(
+                    "INSERT INTO artifact_schema_field ("
+                    "schema_id, ordinal_position, name, logical_type, "
+                    "nullable, stats_json, is_enum, enum_values_json"
+                    ") VALUES"
+                ),
+                row_placeholder="(?, ?, ?, ?, ?, ?, ?, ?)",
+                rows=[
                     [
                         f.schema_id,
                         f.ordinal_position,
@@ -2435,7 +2414,7 @@ class DatabaseManager:
                         bool(f.is_enum),
                         _dump_optional_json(f.enum_values_json),
                     ]
-                    for f in fields
+                    for f in deduped_fields.values()
                 ],
             )
         cur.execute(
@@ -2443,15 +2422,19 @@ class DatabaseManager:
             [schema.id],
         )
         if relations:
-            cur.executemany(
-                """
-                INSERT INTO artifact_schema_relation (
-                    schema_id, from_field, to_table, to_field,
-                    relationship_type, cardinality
-                )
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                [
+            deduped_relations: dict[tuple[str, str], ArtifactSchemaRelation] = {}
+            for rel in relations:
+                deduped_relations[(rel.schema_id, rel.from_field)] = rel
+            _execute_multirow_values(
+                cur,
+                prefix_sql=(
+                    "INSERT INTO artifact_schema_relation ("
+                    "schema_id, from_field, to_table, to_field, "
+                    "relationship_type, cardinality"
+                    ") VALUES"
+                ),
+                row_placeholder="(?, ?, ?, ?, ?, ?)",
+                rows=[
                     [
                         rel.schema_id,
                         rel.from_field,
@@ -2460,7 +2443,7 @@ class DatabaseManager:
                         rel.relationship_type,
                         rel.cardinality,
                     ]
-                    for rel in relations
+                    for rel in deduped_relations.values()
                 ],
             )
 
@@ -2530,20 +2513,7 @@ class DatabaseManager:
         """Persist schema rows, observation, and artifact metadata in one transaction."""
         with _DB_CALL_PROFILER.track("persist_artifact_schema_profile"):
             with self.transaction() as cur:
-                existing_row = cur.execute(
-                    "SELECT meta FROM artifact WHERE id = ?",
-                    [_coerce_uuid(artifact.id)],
-                ).fetchone()
-                current_meta = (
-                    _parse_json_dict(existing_row[0])
-                    if existing_row is not None
-                    else dict(artifact.meta or {})
-                )
-                current_meta.pop(_MEMBER_KIND_META_KEY, None)
-                current_meta.update(artifact.meta or {})
-                current_meta.update(meta_updates)
-                artifact.meta = dict(current_meta)
-
+                self._merge_artifact_meta_locked(cur, artifact, meta_updates)
                 self._upsert_schema_rows_locked(cur, schema, fields, relations)
                 self._insert_schema_observation_locked(cur, observation)
                 self._upsert_artifact_locked(cur, artifact)
@@ -2558,20 +2528,7 @@ class DatabaseManager:
         """Persist a schema observation plus artifact metadata in one transaction."""
         with _DB_CALL_PROFILER.track("persist_artifact_schema_observation_bundle"):
             with self.transaction() as cur:
-                existing_row = cur.execute(
-                    "SELECT meta FROM artifact WHERE id = ?",
-                    [_coerce_uuid(artifact.id)],
-                ).fetchone()
-                current_meta = (
-                    _parse_json_dict(existing_row[0])
-                    if existing_row is not None
-                    else dict(artifact.meta or {})
-                )
-                current_meta.pop(_MEMBER_KIND_META_KEY, None)
-                current_meta.update(artifact.meta or {})
-                current_meta.update(meta_updates)
-                artifact.meta = dict(current_meta)
-
+                self._merge_artifact_meta_locked(cur, artifact, meta_updates)
                 self._insert_schema_observation_locked(cur, observation)
                 self._upsert_artifact_locked(cur, artifact)
 
@@ -2835,9 +2792,14 @@ class DatabaseManager:
                 artifact_list = list(deduped.values())
                 roles_by_id = {_coerce_uuid(art.id): art.key for art in artifact_list}
                 with self.transaction() as cur:
-                    cur.executemany(
-                        self._ARTIFACT_UPSERT_SQL,
-                        [self._artifact_upsert_params(art) for art in artifact_list],
+                    _execute_multirow_values(
+                        cur,
+                        prefix_sql=self._ARTIFACT_INSERT_PREFIX,
+                        row_placeholder="(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        suffix_sql=self._ARTIFACT_UPSERT_SUFFIX,
+                        rows=[
+                            self._artifact_upsert_params(art) for art in artifact_list
+                        ],
                     )
                     self._link_artifacts_locked(
                         cur,
@@ -2887,10 +2849,15 @@ class DatabaseManager:
 
         if updates:
             with self.transaction() as cur:
-                cur.executemany(
-                    "UPDATE artifact_schema_field SET ordinal_position = ? "
-                    "WHERE schema_id = ? AND name = ?",
-                    updates,
+                _execute_multirow_values(
+                    cur,
+                    prefix_sql=(
+                        "UPDATE artifact_schema_field AS f "
+                        "SET ordinal_position = v.ord FROM (VALUES"
+                    ),
+                    row_placeholder="(CAST(? AS INTEGER), CAST(? AS VARCHAR), CAST(? AS VARCHAR))",
+                    suffix_sql=" ) AS v(ord, sid, fname) WHERE f.schema_id = v.sid AND f.name = v.fname",
+                    rows=updates,
                 )
 
     def find_latest_artifact_at_uri(
@@ -3181,9 +3148,12 @@ class DatabaseManager:
         """Return the newest cacheable completed run matching ``(config_hash, input_hash, git_hash)``."""
         with _DB_CALL_PROFILER.track("cache_lookup"):
             row = self.fetchone(
-                f"SELECT {_RUN_SELECT_COLS} FROM run r "
-                "WHERE r.status = 'completed' AND r.cacheable = TRUE "
-                "AND r.config_hash = ? AND r.input_hash = ? AND r.git_hash = ? "
+                "WITH cand AS MATERIALIZED ("
+                f"SELECT {_RUN_SELECT_COLS} FROM run r WHERE r.config_hash = ?"
+                ") "
+                "SELECT * FROM cand r "
+                "WHERE r.input_hash = ? AND r.git_hash = ? "
+                "AND r.status = 'completed' AND r.cacheable = TRUE "
                 f"ORDER BY {recent_run_order_by_sql('r')} LIMIT 1",
                 [config_hash, input_hash, git_hash],
             )
@@ -3195,9 +3165,12 @@ class DatabaseManager:
         """Return all cacheable completed runs matching ``(config_hash, input_hash, git_hash)`` newest first."""
         with _DB_CALL_PROFILER.track("cache_lookup_candidates"):
             rows = self.fetchall(
-                f"SELECT {_RUN_SELECT_COLS} FROM run r "
-                "WHERE r.status = 'completed' AND r.cacheable = TRUE "
-                "AND r.config_hash = ? AND r.input_hash = ? AND r.git_hash = ? "
+                "WITH cand AS MATERIALIZED ("
+                f"SELECT {_RUN_SELECT_COLS} FROM run r WHERE r.config_hash = ?"
+                ") "
+                "SELECT * FROM cand r "
+                "WHERE r.input_hash = ? AND r.git_hash = ? "
+                "AND r.status = 'completed' AND r.cacheable = TRUE "
                 f"ORDER BY {recent_run_order_by_sql('r')}",
                 [config_hash, input_hash, git_hash],
             )
@@ -3218,8 +3191,11 @@ class DatabaseManager:
     def find_run_by_signature(self, signature: str) -> Optional[Run]:
         """Find the newest cacheable completed run by composite ``signature``."""
         row = self.fetchone(
-            f"SELECT {_RUN_SELECT_COLS} FROM run r "
-            "WHERE r.status = 'completed' AND r.cacheable = TRUE AND r.signature = ? "
+            "WITH cand AS MATERIALIZED ("
+            f"SELECT {_RUN_SELECT_COLS} FROM run r WHERE r.signature = ?"
+            ") "
+            "SELECT * FROM cand r "
+            "WHERE r.status = 'completed' AND r.cacheable = TRUE "
             f"ORDER BY {recent_run_order_by_sql('r')} LIMIT 1",
             [signature],
         )
@@ -3228,8 +3204,11 @@ class DatabaseManager:
     def find_runs_by_signature(self, signature: str) -> list[Run]:
         """Return all cacheable completed runs matching ``signature`` newest first."""
         rows = self.fetchall(
-            f"SELECT {_RUN_SELECT_COLS} FROM run r "
-            "WHERE r.status = 'completed' AND r.cacheable = TRUE AND r.signature = ? "
+            "WITH cand AS MATERIALIZED ("
+            f"SELECT {_RUN_SELECT_COLS} FROM run r WHERE r.signature = ?"
+            ") "
+            "SELECT * FROM cand r "
+            "WHERE r.status = 'completed' AND r.cacheable = TRUE "
             f"ORDER BY {recent_run_order_by_sql('r')}",
             [signature],
         )
@@ -3617,28 +3596,29 @@ class DatabaseManager:
                     f"AND json_type({table_alias}.meta) = 'OBJECT')"
                 )
 
-            for mk, mv in metadata.items():
-                if not isinstance(mk, str):
-                    clauses.append("1 = 1" if mv is None else "1 = 0")
-                    continue
-
-                ptr = "/" + mk.replace("~", "~0").replace("/", "~1")
-                is_bool = isinstance(mv, bool) or type(mv).__name__ == "bool_"
-                if mv is None:
-                    clauses.append(
-                        f"({table_alias}.meta IS NULL "
-                        f"OR json_type({table_alias}.meta) != 'OBJECT' "
-                        f"OR COALESCE(json_type({table_alias}.meta, ?), 'NULL') = 'NULL')"
-                    )
+            def _append_json_pointer_predicate(
+                ptr: str, value: Any, *, is_top_level: bool
+            ) -> None:
+                nonlocal needs_client_metadata_filter
+                is_bool = isinstance(value, bool) or type(value).__name__ == "bool_"
+                if value is None:
+                    if is_top_level:
+                        clauses.append(
+                            f"({table_alias}.meta IS NULL "
+                            f"OR json_type({table_alias}.meta) != 'OBJECT' "
+                            f"OR COALESCE(json_type({table_alias}.meta, ?), 'NULL') = 'NULL')"
+                        )
+                    else:
+                        clauses.append(f"json_type({table_alias}.meta, ?) = 'NULL'")
                     params.append(ptr)
                 elif is_bool:
                     clauses.append(
                         f"(json_type({table_alias}.meta, ?) = 'BOOLEAN' "
                         f"AND TRY_CAST(json_extract({table_alias}.meta, ?) AS BOOLEAN) = ?)"
                     )
-                    params.extend([ptr, ptr, bool(mv)])
-                elif isinstance(mv, numbers.Integral) and not is_bool:
-                    iv = int(mv)
+                    params.extend([ptr, ptr, bool(value)])
+                elif isinstance(value, numbers.Integral) and not is_bool:
+                    iv = int(value)
                     if abs(iv) < (1 << 53):
                         clauses.append(
                             f"(json_type({table_alias}.meta, ?) IN ('BIGINT', 'UBIGINT', 'DOUBLE') "
@@ -3651,8 +3631,8 @@ class DatabaseManager:
                             f"json_type({table_alias}.meta, ?) IN ('BIGINT', 'UBIGINT', 'DOUBLE')"
                         )
                         params.append(ptr)
-                elif isinstance(mv, numbers.Real) and not is_bool:
-                    fv = float(mv)
+                elif isinstance(value, numbers.Real) and not is_bool:
+                    fv = float(value)
                     if not math.isfinite(fv):
                         clauses.append("1 = 0")
                     elif abs(fv) < (1 << 53):
@@ -3667,24 +3647,47 @@ class DatabaseManager:
                             f"json_type({table_alias}.meta, ?) IN ('BIGINT', 'UBIGINT', 'DOUBLE')"
                         )
                         params.append(ptr)
-                elif isinstance(mv, str):
+                elif isinstance(value, str):
                     clauses.append(
                         f"(json_type({table_alias}.meta, ?) = 'VARCHAR' "
                         f"AND json_extract_string({table_alias}.meta, ?) = ?)"
                     )
-                    params.extend([ptr, ptr, mv])
-                elif isinstance(mv, Mapping):
-                    needs_client_metadata_filter = True
-                    clauses.append(f"json_type({table_alias}.meta, ?) = 'OBJECT'")
-                    params.append(ptr)
-                elif isinstance(mv, Sequence) and not isinstance(
-                    mv, (str, bytes, bytearray)
+                    params.extend([ptr, ptr, value])
+                elif isinstance(value, Mapping):
+                    clauses.append(
+                        f"(json_type({table_alias}.meta, ?) = 'OBJECT' "
+                        f"AND length(json_keys(json_extract({table_alias}.meta, ?))) = ?)"
+                    )
+                    params.extend([ptr, ptr, len(value)])
+                    for child_key, child_val in value.items():
+                        if not isinstance(child_key, str):
+                            clauses.append("1 = 0")
+                            return
+                        escaped = child_key.replace("~", "~0").replace("/", "~1")
+                        _append_json_pointer_predicate(
+                            f"{ptr}/{escaped}", child_val, is_top_level=False
+                        )
+                elif isinstance(value, Sequence) and not isinstance(
+                    value, (str, bytes, bytearray)
                 ):
-                    needs_client_metadata_filter = True
-                    clauses.append(f"json_type({table_alias}.meta, ?) = 'ARRAY'")
-                    params.append(ptr)
+                    clauses.append(
+                        f"(json_type({table_alias}.meta, ?) = 'ARRAY' "
+                        f"AND json_array_length(json_extract({table_alias}.meta, ?)) = ?)"
+                    )
+                    params.extend([ptr, ptr, len(value)])
+                    for idx, child_val in enumerate(value):
+                        _append_json_pointer_predicate(
+                            f"{ptr}/{idx}", child_val, is_top_level=False
+                        )
                 else:
                     needs_client_metadata_filter = True
+
+            for mk, mv in metadata.items():
+                if not isinstance(mk, str):
+                    clauses.append("1 = 1" if mv is None else "1 = 0")
+                    continue
+                top_ptr = "/" + mk.replace("~", "~0").replace("/", "~1")
+                _append_json_pointer_predicate(top_ptr, mv, is_top_level=True)
 
         return needs_client_metadata_filter
 
@@ -4192,27 +4195,14 @@ class DatabaseManager:
                 compatible.add(candidate_id)
         return compatible
 
-    @staticmethod
-    def _schema_model_field_names(schema_model: Type[BaseModel]) -> Set[str]:
-        field_names: Set[str] = set()
-        for attr_name, field_info in schema_model.model_fields.items():
-            sql_name = _pydantic_field_sql_name(attr_name, field_info)
-            if sql_name.startswith("consist_"):
-                continue
-            field_names.add(sql_name)
-        return field_names
-
     def find_schema_ids_for_model(
         self, *, schema_model: Type[BaseModel], compatible: bool = True
     ) -> List[str]:
         """Resolve stored schema IDs matching a SQLModel/Pydantic class."""
-        model_table_name = (
-            schema_model.__tablename__
-            if isinstance(schema_model, _HasTableNameAttr)
-            and isinstance(schema_model.__tablename__, str)
-            else schema_model.__name__
+        target_table_name = (
+            optional_model_table_name(schema_model) or schema_model.__name__
         )
-        model_fields = self._schema_model_field_names(schema_model)
+        model_fields = set(schema_model_user_columns(schema_model))
         if not model_fields:
             return []
 
@@ -4234,7 +4224,7 @@ class DatabaseManager:
                 else None
             )
             if candidate_table_name is not None and str(candidate_table_name) != str(
-                model_table_name
+                target_table_name
             ):
                 continue
             candidate_fields = schema_fields_by_id.get(schema_id, set())
@@ -4418,10 +4408,17 @@ class DatabaseManager:
         placeholders = ", ".join("?" for _ in ids)
         with self.transaction() as cur:
             found_rows = cur.execute(
-                f"SELECT id FROM artifact WHERE id IN ({placeholders})",
+                f"SELECT id, meta FROM artifact WHERE id IN ({placeholders})",
                 ids,
             ).fetchall()
-            found_ids = {_coerce_uuid(r[0]) for r in found_rows}
+            existing_member_kind: dict[uuid.UUID, Any] = {}
+            found_ids: set[uuid.UUID] = set()
+            for raw_id, raw_meta in found_rows:
+                aid = _coerce_uuid(raw_id)
+                found_ids.add(aid)
+                parsed_meta = _parse_json_dict(raw_meta)
+                if _MEMBER_KIND_META_KEY in parsed_meta:
+                    existing_member_kind[aid] = parsed_meta[_MEMBER_KIND_META_KEY]
             if require_all:
                 missing_ids = sorted(str(aid) for aid in set(ids) - found_ids)
                 if missing_ids:
@@ -4429,11 +4426,27 @@ class DatabaseManager:
                         "Artifacts were not found for recovery root update: "
                         + ", ".join(missing_ids)
                     )
-            batch = [[_dump_json(coerced[aid]), aid] for aid in ids if aid in found_ids]
+            batch: list[list[Any]] = []
+            for aid in ids:
+                if aid not in found_ids:
+                    continue
+                next_meta = dict(coerced[aid])
+                if (
+                    _MEMBER_KIND_META_KEY not in next_meta
+                    and aid in existing_member_kind
+                ):
+                    next_meta[_MEMBER_KIND_META_KEY] = existing_member_kind[aid]
+                batch.append([_dump_json(next_meta), aid])
             if batch:
-                cur.executemany(
-                    "UPDATE artifact SET meta = CAST(? AS JSON) WHERE id = ?",
-                    batch,
+                _execute_multirow_values(
+                    cur,
+                    prefix_sql=(
+                        "UPDATE artifact AS a "
+                        "SET meta = CAST(v.meta_json AS JSON) FROM (VALUES"
+                    ),
+                    row_placeholder="(CAST(? AS VARCHAR), CAST(? AS UUID))",
+                    suffix_sql=") AS v(meta_json, aid) WHERE a.id = v.aid",
+                    rows=batch,
                 )
 
     def prune_recovery_root_from_artifacts(
@@ -4472,9 +4485,15 @@ class DatabaseManager:
                     next_meta.pop("recovery_roots", None)
                 updates.append([_dump_json(next_meta), _coerce_uuid(raw_id)])
             if updates:
-                cur.executemany(
-                    "UPDATE artifact SET meta = CAST(? AS JSON) WHERE id = ?",
-                    updates,
+                _execute_multirow_values(
+                    cur,
+                    prefix_sql=(
+                        "UPDATE artifact AS a "
+                        "SET meta = CAST(v.meta_json AS JSON) FROM (VALUES"
+                    ),
+                    row_placeholder="(CAST(? AS VARCHAR), CAST(? AS UUID))",
+                    suffix_sql=") AS v(meta_json, aid) WHERE a.id = v.aid",
+                    rows=updates,
                 )
                 return True
             return False
@@ -4515,19 +4534,13 @@ class DatabaseManager:
             by_key = out.setdefault(row.artifact_id, {})
             if row.key_path in by_key:
                 continue
-            value: Any = None
-            if row.value_type == "str":
-                value = row.value_str
-            elif row.value_type == "int":
-                value = int(row.value_num) if row.value_num is not None else None
-            elif row.value_type == "float":
-                value = row.value_num
-            elif row.value_type == "bool":
-                value = row.value_bool
-            elif row.value_type == "json":
-                value = row.value_json
-            elif row.value_type == "null":
-                value = None
+            value = _decode_kv_value(
+                row.value_type,
+                row.value_str,
+                row.value_num,
+                row.value_bool,
+                row.value_json,
+            )
             by_key[row.key_path] = {"value": value, "type": row.value_type}
         return out
 
@@ -4594,19 +4607,13 @@ class DatabaseManager:
         values: Dict[str, Any] = {}
         for raw_row in rows:
             row = _hydrate_run_config_kv_row(raw_row)
-            if row.value_type == "null":
-                val: Any = None
-            elif row.value_type == "bool":
-                val = row.value_bool
-            elif row.value_type == "int":
-                val = int(row.value_num) if row.value_num is not None else None
-            elif row.value_type == "float":
-                val = row.value_num
-            elif row.value_type == "str":
-                val = row.value_str
-            else:
-                val = row.value_json
-            values[row.run_id] = val
+            values[row.run_id] = _decode_kv_value(
+                row.value_type,
+                row.value_str,
+                row.value_num,
+                row.value_bool,
+                row.value_json,
+            )
         return values
 
     def get_history(
@@ -4665,12 +4672,16 @@ class DatabaseManager:
                 [run_id, phase],
             )
             if insert_rows:
-                cur.executemany(
-                    "INSERT INTO run_coupler_snapshot ("
-                    "run_id, phase, role_key, scenario_run_id, step_ordinal, "
-                    "artifact_id, producer_run_id, updated_at"
-                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    insert_rows,
+                _execute_multirow_values(
+                    cur,
+                    prefix_sql=(
+                        "INSERT INTO run_coupler_snapshot ("
+                        "run_id, phase, role_key, scenario_run_id, step_ordinal, "
+                        "artifact_id, producer_run_id, updated_at"
+                        ") VALUES"
+                    ),
+                    row_placeholder="(?, ?, ?, ?, ?, ?, ?, ?)",
+                    rows=insert_rows,
                 )
 
     def get_run_coupler_snapshot_details(
@@ -4995,3 +5006,117 @@ class DatabaseManager:
                 }
             )
         return pd.DataFrame(rows, columns=columns)
+
+    def get_runs_by_ids_chronological(self, run_ids: Sequence[str]) -> List[Run]:
+        """Fetch ``Run`` rows for ``run_ids`` ordered chronologically."""
+        unique_ids = list(dict.fromkeys(str(rid) for rid in run_ids))
+        if not unique_ids:
+            return []
+        placeholders = ", ".join("?" for _ in unique_ids)
+        rows = self.fetchall(
+            f"SELECT {_RUN_SELECT_COLS} FROM run r "
+            f"WHERE r.id IN ({placeholders}) "
+            "ORDER BY r.created_at ASC, r.started_at ASC, r.id ASC",
+            unique_ids,
+        )
+        return [_hydrate_run_row(row) for row in rows]
+
+    def iter_artifacts_for_rebuild(
+        self,
+        *,
+        scoped_run_ids: Optional[Sequence[str]] = None,
+        outputs_only: bool = False,
+        batch_size: int = 1000,
+    ) -> Iterator[Artifact]:
+        """Stream ``Artifact`` rows in deterministic creation order for CLI rebuild/export."""
+        if scoped_run_ids is not None and not scoped_run_ids:
+            return
+
+        last_created: Any = None
+        last_id: Optional[str] = None
+        while True:
+            where_clauses: list[str] = []
+            params: list[Any] = []
+
+            if scoped_run_ids is not None or outputs_only:
+                link_clauses: list[str] = []
+                link_params: list[Any] = []
+                if scoped_run_ids is not None:
+                    run_placeholders = ", ".join("?" for _ in scoped_run_ids)
+                    link_clauses.append(f"ral.run_id IN ({run_placeholders})")
+                    link_params.extend(scoped_run_ids)
+                if outputs_only:
+                    link_clauses.append("ral.direction = 'output'")
+                link_sql = "SELECT ral.artifact_id FROM run_artifact_link ral"
+                if link_clauses:
+                    link_sql += " WHERE " + " AND ".join(link_clauses)
+
+                if scoped_run_ids is not None:
+                    run_placeholders = ", ".join("?" for _ in scoped_run_ids)
+                    where_clauses.append(
+                        f"(a.id IN ({link_sql}) OR a.run_id IN ({run_placeholders}))"
+                    )
+                    params.extend(link_params)
+                    params.extend(scoped_run_ids)
+                else:
+                    where_clauses.append(
+                        f"(a.id IN ({link_sql}) OR a.run_id IS NOT NULL)"
+                    )
+                    params.extend(link_params)
+
+            if last_created is not None and last_id is not None:
+                where_clauses.append(
+                    "(a.created_at > ? OR (a.created_at = ? AND CAST(a.id AS VARCHAR) > ?))"
+                )
+                params.extend([last_created, last_created, last_id])
+
+            sql = f"SELECT {_ARTIFACT_SELECT_COLS} FROM artifact a"
+            if where_clauses:
+                sql += " WHERE " + " AND ".join(where_clauses)
+            sql += " ORDER BY a.created_at ASC, CAST(a.id AS VARCHAR) ASC LIMIT ?"
+            params.append(max(1, int(batch_size)))
+
+            rows = self.fetchall(sql, params)
+            if not rows:
+                break
+            batch = [_hydrate_artifact_row(row) for row in rows]
+            yield from batch
+            last_id = str(batch[-1].id)
+            last_created = batch[-1].created_at
+
+    def search_runs(self, query: str, *, limit: int = 20) -> List[Run]:
+        """Substring search across run IDs, model names, tags, and parent run IDs."""
+        pattern = f"%{_escape_like_literal(query)}%"
+        order_sql = recent_run_order_by_sql("r")
+        rows = self.fetchall(
+            f"SELECT {_RUN_SELECT_COLS} FROM run r "
+            f"WHERE (r.id LIKE ? ESCAPE '{LIKE_ESCAPE_CHAR}' "
+            f"OR r.model_name LIKE ? ESCAPE '{LIKE_ESCAPE_CHAR}' "
+            f"OR CAST(r.tags AS VARCHAR) LIKE ? ESCAPE '{LIKE_ESCAPE_CHAR}' "
+            f"OR (r.parent_run_id IS NOT NULL AND r.parent_run_id LIKE ? ESCAPE '{LIKE_ESCAPE_CHAR}')) "
+            f"ORDER BY {order_sql} LIMIT ?",
+            [pattern, pattern, pattern, pattern, max(0, int(limit))],
+        )
+        return [_hydrate_run_row(row) for row in rows]
+
+    def find_artifacts_by_digest_prefix(
+        self,
+        prefix: str,
+        *,
+        run_id: Optional[str] = None,
+        limit: int = 6,
+    ) -> List[Artifact]:
+        """Find artifacts whose ``digest`` starts with ``prefix``."""
+        where_clauses = ["a.digest IS NOT NULL", "starts_with(a.digest, ?)"]
+        params: list[Any] = [prefix]
+        if run_id is not None:
+            where_clauses.append("a.run_id = ?")
+            params.append(run_id)
+        params.append(max(0, int(limit)))
+        rows = self.fetchall(
+            f"SELECT {_ARTIFACT_SELECT_COLS} FROM artifact a "
+            f"WHERE {' AND '.join(where_clauses)} "
+            "ORDER BY a.created_at DESC LIMIT ?",
+            params,
+        )
+        return [_hydrate_artifact_row(row) for row in rows]

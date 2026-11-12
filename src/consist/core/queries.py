@@ -6,12 +6,18 @@ import json
 from typing import Any, Dict, Hashable, List, Optional, Type, Union, TYPE_CHECKING
 
 from pydantic import BaseModel, TypeAdapter
-from typing_extensions import Protocol, runtime_checkable
 
+from consist.core._schema_model_introspection import (
+    field_is_json_column,
+    field_sql_column_name,
+    model_table_name,
+    model_table_schema,
+)
 from consist.core.indexing import FacetIndex, IndexBySpec, RunFieldIndex
 from consist.core.run_matching import find_matching_runs_for_tracker
 from consist.models.run import Run
 from consist.models.run_config_kv import RunConfigKV
+from consist.types import ParameterizedSQL
 
 if TYPE_CHECKING:
     from consist.core.persistence import DatabaseManager
@@ -23,54 +29,8 @@ _VALID_PIVOT_VALUE_COLUMNS = frozenset(
 )
 
 
-@runtime_checkable
-class _HasTableNameAttr(Protocol):
-    __tablename__: str
-
-
-@runtime_checkable
-class _HasTableArgsAttr(Protocol):
-    __table_args__: Any
-
-
-@runtime_checkable
-class _HasDbAttr(Protocol):
-    db: Optional["DatabaseManager"]
-
-
 def _quote_ident(ident: str) -> str:
     return '"' + str(ident).replace('"', '""') + '"'
-
-
-class ParameterizedSQL:
-    """Immutable parameterized read-only DuckDB SQL statement and bound parameters."""
-
-    __slots__ = ("_sql", "_params")
-
-    def __init__(self, sql: str, params: Sequence[Any] = ()) -> None:
-        if not isinstance(sql, str):
-            raise TypeError(f"sql must be a str, got {type(sql).__name__}")
-        self._sql = sql
-        self._params = params if isinstance(params, tuple) else tuple(params)
-
-    @property
-    def sql(self) -> str:
-        return self._sql
-
-    @property
-    def params(self) -> tuple[Any, ...]:
-        return self._params
-
-    def __repr__(self) -> str:
-        return f"ParameterizedSQL(sql={self._sql!r}, params={self._params!r})"
-
-    def __eq__(self, other: object) -> bool:
-        if not isinstance(other, ParameterizedSQL):
-            return NotImplemented
-        return self._sql == other._sql and self._params == other._params
-
-    def __hash__(self) -> int:
-        return hash((self._sql, self._params))
 
 
 @dataclass(frozen=True)
@@ -161,57 +121,20 @@ def _known_config_models_by_table() -> dict[str, Type[BaseModel]]:
         BeamConfigCache,
         BeamConfigIngestRunLink,
     ):
-        tname = (
-            cls.__tablename__
-            if isinstance(cls, _HasTableNameAttr)
-            else cls.__name__.lower()
-        )
-        mapping[tname] = cls
+        mapping[model_table_name(cls)] = cls
     _KNOWN_CONFIG_MODELS_CACHE = mapping
     return mapping
 
 
 def _inspect_model_spec(spec: Type[BaseModel]) -> _TableSpec:
-    from sqlalchemy.sql.schema import Column as SAColumn
-    from sqlalchemy.sql.sqltypes import JSON as SAJSON
-    from sqlmodel.main import FieldInfo as SQLModelFieldInfo
-
-    table_name = (
-        spec.__tablename__
-        if isinstance(spec, _HasTableNameAttr)
-        and isinstance(spec.__tablename__, str)
-        and spec.__tablename__
-        else spec.__name__.lower()
-    )
-    schema_name = "global_tables"
-    if isinstance(spec, _HasTableArgsAttr):
-        raw_ta = spec.__table_args__
-        if isinstance(raw_ta, Mapping):
-            raw_sc = raw_ta.get("schema")
-            if isinstance(raw_sc, str) and raw_sc:
-                schema_name = raw_sc
-        elif isinstance(raw_ta, tuple):
-            for item in raw_ta:
-                if isinstance(item, Mapping):
-                    raw_sc = item.get("schema")
-                    if isinstance(raw_sc, str) and raw_sc:
-                        schema_name = raw_sc
-                        break
-
+    table_name = model_table_name(spec)
+    schema_name = model_table_schema(spec, default="global_tables")
     field_to_col: dict[str, str] = {}
     col_to_field: dict[str, str] = {}
     json_cols: set[str] = set()
     for fname, finfo in spec.model_fields.items():
-        sa_col = finfo.sa_column if isinstance(finfo, SQLModelFieldInfo) else None
-        if (
-            isinstance(sa_col, SAColumn)
-            and isinstance(sa_col.name, str)
-            and sa_col.name
-        ):
-            cname = sa_col.name
-        else:
-            cname = fname
-        if isinstance(sa_col, SAColumn) and isinstance(sa_col.type, SAJSON):
+        cname = field_sql_column_name(fname, finfo)
+        if field_is_json_column(finfo):
             json_cols.add(cname)
         field_to_col[fname] = cname
         col_to_field[cname] = fname
@@ -719,17 +642,28 @@ def build_config_run_query(
     db: Optional["DatabaseManager"] = None,
 ) -> ParameterizedSQL:
     """Build a parameterized DuckDB SQL query joining a config cache table to its run-link table."""
+    from consist.core.persistence import _validate_select_only_sql
+
     inferred_table_columns: Optional[tuple[str, ...]] = None
     inferred_link_columns: Optional[tuple[str, ...]] = None
-    if db is not None:
-        if isinstance(table, str):
-            t_pre = _inspect_table_spec(table)
-            if t_pre.columns is None:
-                inferred_table_columns = _introspect_db_table_columns(db, t_pre)
-        if isinstance(link_table, str):
-            l_pre = _inspect_table_spec(link_table)
-            if l_pre.columns is None:
+    if isinstance(link_table, str):
+        l_pre = _inspect_table_spec(link_table)
+        if l_pre.columns is None:
+            if db is None:
+                if table_name is None:
+                    raise ValueError(
+                        f"Cannot infer whether unknown string link_table {link_table!r} "
+                        "has a 'table_name' column without a database connection. "
+                        "Pass tracker=... (or use tracker.config_run_query(...)) or "
+                        "specify table_name=... explicitly."
+                    )
+            else:
                 inferred_link_columns = _introspect_db_table_columns(db, l_pre)
+    if db is not None and isinstance(table, str):
+        t_pre = _inspect_table_spec(table)
+        if t_pre.columns is None:
+            inferred_table_columns = _introspect_db_table_columns(db, t_pre)
+
     query, _, _ = _compile_config_run_plan(
         table,
         link_table=link_table,
@@ -740,6 +674,7 @@ def build_config_run_query(
         inferred_table_columns=inferred_table_columns,
         inferred_link_columns=inferred_link_columns,
     )
+    _validate_select_only_sql(query.sql)
     return query
 
 
@@ -769,14 +704,18 @@ def execute_config_run_rows(
     join_on: Optional[Iterable[str]] = None,
 ) -> list[Any]:
     """Execute a config-to-run join query on ``DatabaseManager`` and hydrate result rows."""
-    from consist.core.persistence import DatabaseManager
+    from consist.core.persistence import DatabaseManager, _validate_select_only_sql
+    from consist.core.tracker import Tracker
 
     if isinstance(db_or_tracker, DatabaseManager):
         db: Optional[DatabaseManager] = db_or_tracker
-    elif isinstance(db_or_tracker, _HasDbAttr):
+    elif isinstance(db_or_tracker, Tracker):
         db = db_or_tracker.db
     else:
-        db = None
+        try:
+            db = db_or_tracker.db  # type: ignore[attr-defined]
+        except AttributeError:
+            db = None
     if db is None:
         raise RuntimeError("Database connection required.")
 
@@ -802,46 +741,43 @@ def execute_config_run_rows(
         inferred_table_columns=inferred_table_columns,
         inferred_link_columns=inferred_link_columns,
     )
+    _validate_select_only_sql(query.sql)
 
-    with db.exec_cursor() as cur:
+    with db.exec_cursor(include_temp_views=True) as cur:
         res = cur.execute(query.sql, list(query.params))
         description = res.description or ()
         raw_rows = res.fetchall()
 
     col_labels = [str(desc[0]) for desc in description]
     col_is_db_json = [str(desc[1]) == "JSON" for desc in description]
-    adapters: dict[Type[BaseModel], TypeAdapter[Any]] = {}
-    for proj in projections:
-        if proj.kind == "model" and proj.model_cls is not None:
-            if proj.model_cls not in adapters:
-                adapters[proj.model_cls] = TypeAdapter(proj.model_cls)
+    adapters: dict[Type[BaseModel], TypeAdapter[Any]] = {
+        proj.model_cls: TypeAdapter(proj.model_cls)
+        for proj in projections
+        if proj.kind == "model" and proj.model_cls is not None
+    }
+
+    def _hydrate_cell(
+        proj: _ProjectionItem, offset: int, cname: Optional[str], val: Any
+    ) -> Any:
+        col_idx = proj.start_idx + offset
+        is_json = (
+            (cname is not None and cname in proj.json_columns)
+            or (cname is None and bool(proj.json_columns))
+            or (col_idx < len(col_is_db_json) and col_is_db_json[col_idx])
+        )
+        return _decode_json_if_str(val) if is_json else val
 
     results: list[Any] = []
     for raw_row in raw_rows:
         built: list[Any] = []
         for proj in projections:
             if proj.kind == "scalar":
-                raw_val = raw_row[proj.start_idx]
-                is_json = bool(proj.json_columns) or (
-                    proj.start_idx < len(col_is_db_json)
-                    and col_is_db_json[proj.start_idx]
-                )
-                built.append(_decode_json_if_str(raw_val) if is_json else raw_val)
+                built.append(_hydrate_cell(proj, 0, None, raw_row[proj.start_idx]))
             elif proj.kind == "model" and proj.model_cls is not None:
                 slice_vals = raw_row[proj.start_idx : proj.start_idx + proj.width]
                 col_map = proj.col_to_field or {}
                 payload = {
-                    col_map.get(cname, cname): (
-                        _decode_json_if_str(val)
-                        if (
-                            cname in proj.json_columns
-                            or (
-                                (proj.start_idx + offset) < len(col_is_db_json)
-                                and col_is_db_json[proj.start_idx + offset]
-                            )
-                        )
-                        else val
-                    )
+                    col_map.get(cname, cname): _hydrate_cell(proj, offset, cname, val)
                     for offset, (cname, val) in enumerate(
                         zip(proj.col_names, slice_vals)
                     )
@@ -851,17 +787,7 @@ def execute_config_run_rows(
                 slice_vals = raw_row[proj.start_idx : proj.start_idx + proj.width]
                 built.append(
                     {
-                        cname: (
-                            _decode_json_if_str(val)
-                            if (
-                                cname in proj.json_columns
-                                or (
-                                    (proj.start_idx + offset) < len(col_is_db_json)
-                                    and col_is_db_json[proj.start_idx + offset]
-                                )
-                            )
-                            else val
-                        )
+                        cname: _hydrate_cell(proj, offset, cname, val)
                         for offset, (cname, val) in enumerate(
                             zip(proj.col_names, slice_vals)
                         )
@@ -872,23 +798,13 @@ def execute_config_run_rows(
                 slice_names = col_labels[proj.start_idx :]
                 built.append(
                     {
-                        cname: (
-                            _decode_json_if_str(val)
-                            if (
-                                (proj.start_idx + offset) < len(col_is_db_json)
-                                and col_is_db_json[proj.start_idx + offset]
-                            )
-                            else val
-                        )
+                        cname: _hydrate_cell(proj, offset, cname, val)
                         for offset, (cname, val) in enumerate(
                             zip(slice_names, slice_vals)
                         )
                     }
                 )
-        if unwrap_single:
-            results.append(built[0])
-        else:
-            results.append(tuple(built))
+        results.append(built[0] if unwrap_single else tuple(built))
     return results
 
 
@@ -988,49 +904,9 @@ def build_pivot_facets(
 
 
 def _get_run_field(run: Run, field_name: str) -> Any:
-    match field_name:
-        case "id":
-            return run.id
-        case "parent_run_id":
-            return run.parent_run_id
-        case "status":
-            return run.status
-        case "model_name":
-            return run.model_name
-        case "description":
-            return run.description
-        case "year":
-            return run.year
-        case "iteration":
-            return run.iteration
-        case "stage":
-            return run.stage
-        case "phase":
-            return run.phase
-        case "tags":
-            return run.tags
-        case "config_hash":
-            return run.config_hash
-        case "git_hash":
-            return run.git_hash
-        case "input_hash":
-            return run.input_hash
-        case "signature":
-            return run.signature
-        case "cacheable":
-            return run.cacheable
-        case "meta":
-            return run.meta
-        case "started_at":
-            return run.started_at
-        case "ended_at":
-            return run.ended_at
-        case "created_at":
-            return run.created_at
-        case "updated_at":
-            return run.updated_at
-        case _:
-            raise AttributeError(f"'Run' object has no attribute {field_name!r}")
+    if field_name not in Run.model_fields:
+        raise AttributeError(f"'Run' object has no attribute {field_name!r}")
+    return run.model_dump()[field_name]
 
 
 class RunQueryService:

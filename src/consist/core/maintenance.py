@@ -233,8 +233,7 @@ class DatabaseMaintenance:
         quoted_path = self._quote_sql_string_literal(str(db_path))
         attach_opts = " (READ_ONLY)" if read_only else " (READ_WRITE)"
         with self.db._lock:
-            self.db._wait_while_suspended()
-            self.db._ensure_open()
+            self.db._wait_until_active_locked()
             if self.db._tx_depth > 0:
                 raise RuntimeError(
                     "Cannot ATTACH shard database inside an active transaction."

@@ -4,7 +4,6 @@ from dataclasses import dataclass
 import os
 import re
 from typing import TYPE_CHECKING, Any
-from typing_extensions import Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from consist.core.persistence import DatabaseManager
@@ -19,21 +18,6 @@ def _is_safe_identifier(identifier: str) -> bool:
 
 def _quote_ident(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
-
-
-@runtime_checkable
-class _HasHotDataStore(Protocol):
-    hot_data_store: HotDataStore | None
-
-
-@runtime_checkable
-class _HasDbPath(Protocol):
-    db_path: str | os.PathLike[str] | None
-
-
-@runtime_checkable
-class _HasDb(Protocol):
-    db: DatabaseManager | None
 
 
 @dataclass(slots=True)
@@ -123,30 +107,45 @@ def build_hot_data_store(
     return HotDataStore(db_path=db.db_path, metadata_store=resolved_meta)
 
 
-def get_hot_data_store(tracker: "Tracker | Any | None") -> HotDataStore | None:
-    if tracker is None or not isinstance(tracker, _HasHotDataStore):
+def get_hot_data_store(tracker: Tracker | Any | None) -> HotDataStore | None:
+    if tracker is None:
         return None
-    return tracker.hot_data_store
+    try:
+        return tracker.hot_data_store
+    except AttributeError:
+        return None
 
 
-def get_hot_data_db_path(tracker: "Tracker | Any | None") -> str | None:
+def get_hot_data_db_path(tracker: Tracker | Any | None) -> str | None:
     store = get_hot_data_store(tracker)
     if store is not None:
-        return os.fspath(store.db_path)
-    if tracker is None or not isinstance(tracker, _HasDbPath):
+        try:
+            store_path = store.db_path
+        except AttributeError:
+            store_path = None
+        if store_path is not None:
+            return os.fspath(store_path)
+    if tracker is None:
         return None
-    db_path = tracker.db_path
+    try:
+        db_path = tracker.db_path
+    except AttributeError:
+        return None
     if db_path is None:
         return None
     return os.fspath(db_path)
 
 
-def get_hot_data_db(tracker: "Tracker | Any | None") -> DatabaseManager | None:
+def get_hot_data_db(tracker: Tracker | Any | None) -> DatabaseManager | None:
     store = get_hot_data_store(tracker)
     if store is not None:
-        if isinstance(store, _HasDb):
+        try:
             return store.db
+        except AttributeError:
+            return None
+    if tracker is None:
         return None
-    if tracker is None or not isinstance(tracker, _HasDb):
+    try:
+        return tracker.db
+    except AttributeError:
         return None
-    return tracker.db

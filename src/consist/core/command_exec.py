@@ -10,6 +10,7 @@ exit status directly into DuckDB without refactoring code into Python callables.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import logging
 import os
@@ -30,18 +31,12 @@ from typing import (
 )
 
 from pydantic import ConfigDict, Field as PydanticField
-from typing_extensions import Protocol, runtime_checkable
 
 from consist.models.artifact import Artifact
 from consist.models.run import RunResult
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
-
-
-@runtime_checkable
-class _HasBinaryBuffer(Protocol):
-    buffer: Any
 
 
 logger = logging.getLogger(__name__)
@@ -306,7 +301,12 @@ def _safe_stream_write(stream: Any, chunk: bytes) -> None:
     if stream is None or not chunk:
         return
     try:
-        buf = stream.buffer if isinstance(stream, _HasBinaryBuffer) else None
+        buf = stream.buffer if isinstance(stream, io.TextIOWrapper) else None
+        if buf is None and not isinstance(stream, io.TextIOBase):
+            try:
+                buf = stream.buffer
+            except AttributeError:
+                buf = None
         if buf is not None:
             buf.write(chunk)
             buf.flush()

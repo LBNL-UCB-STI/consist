@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Literal
 
 import duckdb
-from typing_extensions import Protocol, runtime_checkable
 
 from consist.core.drivers import TableInfo, TABLE_DRIVERS
 from consist.digest import canonical_json_sha256
@@ -16,13 +15,6 @@ from consist.digest import canonical_json_sha256
 if TYPE_CHECKING:
     from consist.core.identity import IdentityManager
     from consist.core.persistence import DatabaseManager
-
-
-@runtime_checkable
-class _FetchAllDB(Protocol):
-    def fetchall(
-        self, sql: str, params: Sequence[Any] = ()
-    ) -> list[tuple[Any, ...]]: ...
 
 
 PROFILE_VERSION = 1
@@ -224,10 +216,10 @@ def profile_duckdb_table(
         WHERE table_schema = ? AND table_name = ?
         ORDER BY ordinal_position
     """
-    if isinstance(db, _FetchAllDB):
-        rows = db.fetchall(sql, [table_schema, table_name])
-    else:
+    if isinstance(db, duckdb.DuckDBPyConnection):
         rows = db.execute(sql, [table_schema, table_name]).fetchall()
+    else:
+        rows = db.fetchall(sql, [table_schema, table_name])
 
     fields: List[SchemaFieldProfile] = []
     for col_name, data_type, is_nullable, _ordinal in rows:

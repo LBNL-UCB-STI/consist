@@ -13,8 +13,10 @@ from typing import (
     get_origin,
 )
 
-from typing_extensions import Protocol, runtime_checkable
-
+from consist.core._schema_model_introspection import (
+    field_foreign_key_target,
+    model_table_name,
+)
 from consist.core.stores import get_hot_data_db
 from consist.digest import canonical_json_sha256
 from consist.models.artifact import Artifact
@@ -25,36 +27,6 @@ if TYPE_CHECKING:
     from consist.core.persistence import DatabaseManager
     from consist.core.tracker import Tracker
     from sqlmodel import SQLModel
-
-
-@runtime_checkable
-class _HasTableName(Protocol):
-    __tablename__: Any
-
-
-@runtime_checkable
-class _HasForeignKeyAttr(Protocol):
-    foreign_key: Any
-
-
-@runtime_checkable
-class _HasSaColumn(Protocol):
-    sa_column: Any
-
-
-@runtime_checkable
-class _HasForeignKeys(Protocol):
-    foreign_keys: Any
-
-
-@runtime_checkable
-class _HasForeignKeyTarget(Protocol):
-    target_fullname: Any
-
-
-@runtime_checkable
-class _HasForeignKeyColumn(Protocol):
-    column: Any
 
 
 def _schema_view_name(
@@ -224,42 +196,10 @@ class ArtifactSchemaManager:
             # 1. Extract fields from the SQLModel class
             fields = []
             relations: list[dict[str, str]] = []
-            raw_table_name = (
-                schema_model.__tablename__
-                if isinstance(schema_model, _HasTableName)
-                else None
-            )
-            table_name = (
-                raw_table_name
-                if isinstance(raw_table_name, str) and raw_table_name
-                else schema_model.__name__
-            )
+            table_name = model_table_name(schema_model, preserve_case_fallback=True)
 
             # model_fields is a dict of field_name -> FieldInfo from Pydantic
             if schema_model.model_fields:
-
-                def _resolve_fk_target(field_info: Any) -> Optional[str]:
-                    if isinstance(field_info, _HasForeignKeyAttr):
-                        raw_fk = field_info.foreign_key
-                        if isinstance(raw_fk, str) and raw_fk:
-                            return raw_fk
-                    if not isinstance(field_info, _HasSaColumn):
-                        return None
-                    sa_column = field_info.sa_column
-                    if sa_column is None or not isinstance(sa_column, _HasForeignKeys):
-                        return None
-                    fk_set = sa_column.foreign_keys
-                    if not fk_set:
-                        return None
-                    for fk in fk_set:
-                        if isinstance(fk, _HasForeignKeyTarget) and fk.target_fullname:
-                            return str(fk.target_fullname)
-                        if (
-                            isinstance(fk, _HasForeignKeyColumn)
-                            and fk.column is not None
-                        ):
-                            return str(fk.column)
-                    return None
 
                 def _split_fk_target(target: str) -> Optional[tuple[str, str]]:
                     parts = [part for part in str(target).split(".") if part]
@@ -296,7 +236,7 @@ class ArtifactSchemaManager:
                         )
                     )
 
-                    fk_target = _resolve_fk_target(field_info)
+                    fk_target = field_foreign_key_target(field_info)
                     if fk_target:
                         parsed = _split_fk_target(fk_target)
                         if parsed is not None:

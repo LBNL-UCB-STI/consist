@@ -66,7 +66,6 @@ from consist.core.persistence import (
     tracked_relation_count,
 )
 from consist.core.queries import (
-    ParameterizedSQL,
     build_config_run_query,
     build_pivot_facets,
     execute_config_run_rows,
@@ -90,7 +89,7 @@ from consist.models.run import (
 )
 from consist.models.run_config_kv import RunConfigKV
 from consist.core.tracker import Tracker
-from consist.protocols import ArtifactRecordLike, ParameterizedSQLProtocol
+from consist.protocols import ArtifactRecordLike
 from consist.types import (
     ArtifactRef,
     CacheOptions,
@@ -103,6 +102,7 @@ from consist.types import (
     IdentityInputs,
     IntCapture as IntCapture,
     OutputPolicyOptions,
+    ParameterizedSQL,
     OutputSet,
     RunCompletionArchivePolicy,
     StringCapture as StringCapture,
@@ -2771,7 +2771,7 @@ def run_set(
 
 
 def run_query(
-    query: str | ParameterizedSQLProtocol,
+    query: str | ParameterizedSQL,
     params: Optional[Sequence[Any] | Mapping[str, Any]] = None,
     tracker: Optional["Tracker"] = None,
 ) -> list[Any]:
@@ -2783,7 +2783,7 @@ def run_query(
 
 
 def query_df(
-    sql: str | ParameterizedSQLProtocol,
+    sql: str | ParameterizedSQL,
     params: Optional[Sequence[Any] | Mapping[str, Any]] = None,
     *,
     tracker: Optional["Tracker"] = None,
@@ -2796,7 +2796,7 @@ def query_df(
 
 
 def query_rows(
-    sql: str | ParameterizedSQLProtocol,
+    sql: str | ParameterizedSQL,
     params: Optional[Sequence[Any] | Mapping[str, Any]] = None,
     *,
     model: Optional[Type[_QueryModelT]] = None,
@@ -2817,15 +2817,18 @@ def config_run_query(
     columns: Optional[Iterable[Any]] = None,
     where: Optional[Union[Iterable[Any], Any]] = None,
     join_on: Optional[Iterable[str]] = None,
+    tracker: Optional["Tracker"] = None,
 ) -> ParameterizedSQL:
     """
     Build a parameterized DuckDB SQL query joining a config cache table to its run-link table.
     """
-    active_db = None
-    try:
-        active_db = current_tracker().db
-    except RuntimeError:
-        active_db = None
+    if tracker is not None:
+        active_db = tracker.db
+    else:
+        try:
+            active_db = current_tracker().db
+        except RuntimeError:
+            active_db = None
     return build_config_run_query(
         table,
         link_table=link_table,

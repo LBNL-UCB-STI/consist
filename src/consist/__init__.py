@@ -153,9 +153,6 @@ if TYPE_CHECKING:
         IncompatibleSchemaError,
         TransactionAbortedError,
     )
-    from consist.core.queries import (
-        ParameterizedSQL,
-    )
     from consist.core.resolved_binding import (
         AdmissionEvidence,
         ArtifactIdentity,
@@ -216,6 +213,7 @@ if TYPE_CHECKING:
         OutputPathRef,
         OutputPolicyOptions,
         OutputSet,
+        ParameterizedSQL,
         RunCompletionArchivePolicy,
         StringCapture,
     )
@@ -294,7 +292,7 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "OutputPathRef": ("consist.types", "OutputPathRef"),
     "OutputPolicyOptions": ("consist.types", "OutputPolicyOptions"),
     "OutputSet": ("consist.types", "OutputSet"),
-    "ParameterizedSQL": ("consist.core.queries", "ParameterizedSQL"),
+    "ParameterizedSQL": ("consist.types", "ParameterizedSQL"),
     "PythonCallableTarget": ("consist.core.orchestration", "PythonCallableTarget"),
     "RelationConnectionLeakWarning": ("consist.api", "RelationConnectionLeakWarning"),
     "ResolvedBinding": ("consist.core.resolved_binding", "ResolvedBinding"),

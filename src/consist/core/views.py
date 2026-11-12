@@ -16,10 +16,14 @@ from typing import (
     Type,
 )
 
+import duckdb
 from pydantic import BaseModel
 from sqlmodel import SQLModel
-from typing_extensions import Protocol, runtime_checkable
 
+from consist.core._schema_model_introspection import (
+    model_table_name,
+    schema_model_user_columns,
+)
 from consist.core.stores import get_hot_data_db
 from consist.models.artifact import Artifact
 from consist.models.run import Run
@@ -29,21 +33,6 @@ if TYPE_CHECKING:
     from consist.core.tracker import Tracker
 
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-
-@runtime_checkable
-class _HasTableName(Protocol):
-    __tablename__: Any
-
-
-@runtime_checkable
-class _HasSaColumn(Protocol):
-    sa_column: Any
-
-
-@runtime_checkable
-class _HasColumnName(Protocol):
-    name: Any
 
 
 def _validate_identifier(identifier: str, *, label: str) -> str:
@@ -67,11 +56,68 @@ def _qualified_table(schema: str, table: str) -> str:
 
 
 def _model_tablename(model: Type[BaseModel]) -> str:
-    if isinstance(model, _HasTableName):
-        raw = model.__tablename__
-        if isinstance(raw, str) and raw:
-            return raw
-    return model.__name__.lower()
+    return model_table_name(model)
+
+
+def _dlt_child_list_cte(
+    db: DatabaseManager,
+    child_name: str,
+    alias: str,
+    empty_array_type: str,
+) -> str:
+    """Build a ``dlt`` child-list aggregation CTE or a typed empty fallback CTE."""
+    if db.has_table(child_name, table_schema="global_tables"):
+        child_table = _qualified_table("global_tables", child_name)
+        return f"""
+            SELECT
+                _dlt_parent_id,
+                list(value ORDER BY _dlt_list_idx) AS {_quote_ident(alias)}
+            FROM {child_table}
+            GROUP BY _dlt_parent_id
+        """
+    return (
+        "SELECT CAST(NULL AS VARCHAR) AS _dlt_parent_id, "
+        f"CAST([] AS {empty_array_type}) AS {_quote_ident(alias)} WHERE FALSE"
+    )
+
+
+def _build_metadata_artifact_join(
+    db: DatabaseManager,
+    concept_key: str,
+    table_alias: str,
+) -> Tuple[Optional[str], list[Any]]:
+    """Build ``JOIN main.artifact a`` SQL and parameters for metadata view tables."""
+    has_art_col = db.has_table_column(
+        table_name=concept_key,
+        column_name="consist_artifact_id",
+        table_schema="global_tables",
+    )
+    has_run_col = db.has_table_column(
+        table_name=concept_key,
+        column_name="consist_run_id",
+        table_schema="global_tables",
+    )
+    if has_art_col and has_run_col:
+        return (
+            f"JOIN main.artifact a ON ("
+            f"TRY_CAST({table_alias}.consist_artifact_id AS UUID) = a.id "
+            f"OR ({table_alias}.consist_artifact_id IS NULL AND a.key = ? "
+            f"AND CAST({table_alias}.consist_run_id AS VARCHAR) = a.run_id)"
+            f")",
+            [concept_key],
+        )
+    if has_art_col:
+        return (
+            f"JOIN main.artifact a ON TRY_CAST({table_alias}.consist_artifact_id AS UUID) = a.id",
+            [],
+        )
+    if has_run_col:
+        return (
+            f"JOIN main.artifact a ON (a.key = ? "
+            f"AND CAST({table_alias}.consist_run_id AS VARCHAR) = a.run_id)",
+            [concept_key],
+        )
+    return None, []
 
 
 def _safe_duckdb_path_literal(path_str: str) -> str:
@@ -141,21 +187,7 @@ class GroupedViewRecord:
 
 
 def _extract_schema_model_columns(schema_model: Type[BaseModel]) -> List[str]:
-    schema_columns: List[str] = []
-    for attr_name, field_info in schema_model.model_fields.items():
-        sa_col = field_info.sa_column if isinstance(field_info, _HasSaColumn) else None
-        col_name = (
-            sa_col.name
-            if sa_col is not None and isinstance(sa_col, _HasColumnName)
-            else None
-        )
-        sql_name = (
-            str(col_name) if isinstance(col_name, str) and col_name else str(attr_name)
-        )
-        if sql_name.startswith("consist_"):
-            continue
-        schema_columns.append(sql_name)
-    return schema_columns
+    return schema_model_user_columns(schema_model)
 
 
 class ViewFactory:
@@ -222,138 +254,134 @@ class ViewFactory:
         if missing_files not in {"warn", "error", "skip_silent"}:
             raise ValueError(f"Unsupported missing_files policy: {missing_files}")
 
-        from consist.integrations.ibis import suspend_tracker_ibis_connection
+        facets = list(dict.fromkeys(attach_facets or []))
+        selected = self.tracker.db.find_artifacts_for_grouped_view(
+            schema_id=schema_id,
+            schema_ids=schema_ids,
+            schema_compatible=schema_compatible,
+            predicates=predicates or [],
+            namespace=namespace,
+            drivers=drivers,
+            run_id=run_id,
+            parent_run_id=parent_run_id,
+            model=model,
+            status=status,
+            year=year,
+            iteration=iteration,
+        )
 
-        with suspend_tracker_ibis_connection(self.tracker):
-            facets = list(dict.fromkeys(attach_facets or []))
-            selected = self.tracker.db.find_artifacts_for_grouped_view(
-                schema_id=schema_id,
-                schema_ids=schema_ids,
-                schema_compatible=schema_compatible,
-                predicates=predicates or [],
+        facet_values_by_artifact: Dict[Any, Dict[str, Dict[str, Any]]] = {}
+        facet_types: Dict[str, List[str]] = {facet: [] for facet in facets}
+        if facets and selected:
+            artifact_ids = [artifact.id for artifact, _ in selected]
+            facet_values_by_artifact = self.tracker.db.get_artifact_kv_values_bulk(
+                artifact_ids=artifact_ids,
+                key_paths=facets,
                 namespace=namespace,
-                drivers=drivers,
-                run_id=run_id,
-                parent_run_id=parent_run_id,
-                model=model,
-                status=status,
-                year=year,
-                iteration=iteration,
             )
 
-            facet_values_by_artifact: Dict[Any, Dict[str, Dict[str, Any]]] = {}
-            facet_types: Dict[str, List[str]] = {facet: [] for facet in facets}
-            if facets and selected:
-                artifact_ids = [artifact.id for artifact, _ in selected]
-                facet_values_by_artifact = self.tracker.db.get_artifact_kv_values_bulk(
-                    artifact_ids=artifact_ids,
-                    key_paths=facets,
-                    namespace=namespace,
-                )
-
-            run_namespace = model
-            if run_namespace is None and selected:
-                model_names = {
-                    run.model_name
-                    for _, run in selected
-                    if isinstance(run.model_name, str) and run.model_name
-                }
-                if len(model_names) == 1:
-                    run_namespace = next(iter(model_names))
-
-            facet_values_by_run: Dict[str, Dict[str, Any]] = {}
-            if facets and selected and run_namespace is not None:
-                run_ids = [run.id for _, run in selected if isinstance(run.id, str)]
-                if run_ids:
-                    for facet in facets:
-                        facet_values_by_run[facet] = (
-                            self.tracker.db.get_facet_values_for_runs(
-                                run_ids,
-                                key=facet,
-                                namespace=run_namespace,
-                            )
-                        )
-
-            records: List[GroupedViewRecord] = []
-            for artifact, run in selected:
-                facet_values: Dict[str, Any] = {}
-                art_facet_map = facet_values_by_artifact.get(artifact.id, {})
-                for facet in facets:
-                    info = art_facet_map.get(facet)
-                    if info is None:
-                        run_facet_map = facet_values_by_run.get(facet, {})
-                        if run.id in run_facet_map:
-                            run_value = run_facet_map.get(run.id)
-                            facet_values[facet] = run_value
-                            facet_types[facet].append(
-                                _python_value_to_facet_type(run_value)
-                            )
-                        else:
-                            facet_values[facet] = None
-                            facet_types[facet].append("null")
-                    else:
-                        facet_values[facet] = info.get("value")
-                        facet_types[facet].append(str(info.get("type") or "null"))
-                records.append(
-                    GroupedViewRecord(
-                        artifact=artifact,
-                        run=run,
-                        facet_values=facet_values,
-                    )
-                )
-
-            facet_casts = {
-                facet: _facet_type_to_duckdb(types)
-                for facet, types in facet_types.items()
+        run_namespace = model
+        if run_namespace is None and selected:
+            model_names = {
+                run.model_name
+                for _, run in selected
+                if isinstance(run.model_name, str) and run.model_name
             }
+            if len(model_names) == 1:
+                run_namespace = next(iter(model_names))
 
-            parts: List[str] = []
-            if mode in {"hybrid", "hot_only"}:
-                hot_sql = self._generate_grouped_hot_query(
-                    records=records,
-                    facets=facets,
-                    facet_casts=facet_casts,
-                    include_system_columns=include_system_columns,
+        facet_values_by_run: Dict[str, Dict[str, Any]] = {}
+        if facets and selected and run_namespace is not None:
+            run_ids = [run.id for _, run in selected if isinstance(run.id, str)]
+            if run_ids:
+                for facet in facets:
+                    facet_values_by_run[facet] = (
+                        self.tracker.db.get_facet_values_for_runs(
+                            run_ids,
+                            key=facet,
+                            namespace=run_namespace,
+                        )
+                    )
+
+        records: List[GroupedViewRecord] = []
+        for artifact, run in selected:
+            facet_values: Dict[str, Any] = {}
+            art_facet_map = facet_values_by_artifact.get(artifact.id, {})
+            for facet in facets:
+                info = art_facet_map.get(facet)
+                if info is None:
+                    run_facet_map = facet_values_by_run.get(facet, {})
+                    if run.id in run_facet_map:
+                        run_value = run_facet_map.get(run.id)
+                        facet_values[facet] = run_value
+                        facet_types[facet].append(
+                            _python_value_to_facet_type(run_value)
+                        )
+                    else:
+                        facet_values[facet] = None
+                        facet_types[facet].append("null")
+                else:
+                    facet_values[facet] = info.get("value")
+                    facet_types[facet].append(str(info.get("type") or "null"))
+            records.append(
+                GroupedViewRecord(
+                    artifact=artifact,
+                    run=run,
+                    facet_values=facet_values,
                 )
-                if hot_sql:
-                    parts.append(hot_sql)
+            )
 
-            if mode in {"hybrid", "cold_only"}:
-                cold_sql = self._generate_grouped_cold_query_optimized(
-                    records=records,
-                    facets=facets,
-                    facet_casts=facet_casts,
-                    include_system_columns=include_system_columns,
-                    missing_files=missing_files,
-                )
-                if cold_sql:
-                    parts.append(cold_sql)
+        facet_casts = {
+            facet: _facet_type_to_duckdb(types) for facet, types in facet_types.items()
+        }
 
-            if not parts:
-                schema_cols: List[str] = []
-                fallback_schema_ids: List[str] = []
-                if schema_id is not None:
-                    fallback_schema_ids.append(schema_id)
-                if schema_ids:
-                    fallback_schema_ids.extend(schema_ids)
-                for sid in sorted(set(fallback_schema_ids)):
-                    schema_bundle = self.tracker.db.get_artifact_schema(schema_id=sid)
-                    if schema_bundle is None:
-                        continue
-                    _schema_row, fields = schema_bundle
-                    schema_cols = [row.name for row in fields]
-                    break
-                query = self._typed_empty_query(
-                    schema_columns=schema_cols,
-                    facets=facets,
-                    facet_casts=facet_casts,
-                    include_system_columns=include_system_columns,
-                )
-            else:
-                query = "\nUNION ALL BY NAME\n".join(parts)
+        parts: List[str] = []
+        if mode in {"hybrid", "hot_only"}:
+            hot_sql = self._generate_grouped_hot_query(
+                records=records,
+                facets=facets,
+                facet_casts=facet_casts,
+                include_system_columns=include_system_columns,
+            )
+            if hot_sql:
+                parts.append(hot_sql)
 
-            self._create_view_sql(view_name=view_name, query=query, if_exists=if_exists)
-            return True
+        if mode in {"hybrid", "cold_only"}:
+            cold_sql = self._generate_grouped_cold_query_optimized(
+                records=records,
+                facets=facets,
+                facet_casts=facet_casts,
+                include_system_columns=include_system_columns,
+                missing_files=missing_files,
+            )
+            if cold_sql:
+                parts.append(cold_sql)
+
+        if not parts:
+            schema_cols: List[str] = []
+            fallback_schema_ids: List[str] = []
+            if schema_id is not None:
+                fallback_schema_ids.append(schema_id)
+            if schema_ids:
+                fallback_schema_ids.extend(schema_ids)
+            for sid in sorted(set(fallback_schema_ids)):
+                schema_bundle = self.tracker.db.get_artifact_schema(schema_id=sid)
+                if schema_bundle is None:
+                    continue
+                _schema_row, fields = schema_bundle
+                schema_cols = [row.name for row in fields]
+                break
+            query = self._typed_empty_query(
+                schema_columns=schema_cols,
+                facets=facets,
+                facet_casts=facet_casts,
+                include_system_columns=include_system_columns,
+            )
+        else:
+            query = "\nUNION ALL BY NAME\n".join(parts)
+
+        self._create_view_sql(view_name=view_name, query=query, if_exists=if_exists)
+        return True
 
     def create_hybrid_view(
         self,
@@ -363,64 +391,61 @@ class ViewFactory:
         schema_model: Optional[Type[BaseModel]] = None,
     ) -> bool:
         """Creates or replaces a DuckDB SQL VIEW combining hot and cold data."""
-        self._require_db()
-        from consist.integrations.ibis import suspend_tracker_ibis_connection
+        db = self._require_db()
+        hot_table_exists = db.has_table(concept_key, table_schema="global_tables")
+        concept_cols = (
+            self._table_columns("global_tables", concept_key)
+            if hot_table_exists
+            else set()
+        )
+        cold_sql, extra_hot_queries = self._generate_cold_and_extra_hot_queries(
+            concept_key=concept_key,
+            driver_filter=driver_filter,
+        )
 
-        with suspend_tracker_ibis_connection(self.tracker):
-            hot_table_exists = self._check_table_exists("global_tables", concept_key)
-            concept_cols = (
-                self._table_columns("global_tables", concept_key)
-                if hot_table_exists
-                else set()
-            )
-            cold_sql, extra_hot_queries = self._generate_cold_and_extra_hot_queries(
-                concept_key=concept_key,
-                driver_filter=driver_filter,
-            )
-
-            parts: List[str] = []
-            if hot_table_exists:
-                if "consist_run_id" in concept_cols:
-                    hot_query = f"""
-                        SELECT t.*, r.parent_run_id AS consist_scenario_id
-                        FROM global_tables.{_quote_ident(concept_key)} t
-                        LEFT JOIN main.run r ON CAST(t.consist_run_id AS VARCHAR) = r.id
-                    """
-                elif "consist_artifact_id" in concept_cols:
-                    hot_query = f"""
-                        SELECT t.*, r.parent_run_id AS consist_scenario_id
-                        FROM global_tables.{_quote_ident(concept_key)} t
-                        LEFT JOIN main.artifact a ON TRY_CAST(t.consist_artifact_id AS UUID) = a.id
-                        LEFT JOIN main.run r ON a.run_id = r.id
-                    """
-                else:
-                    hot_query = f"""
-                        SELECT t.*, CAST(NULL AS VARCHAR) AS consist_scenario_id
-                        FROM global_tables.{_quote_ident(concept_key)} t
-                    """
-                parts.append(hot_query)
-
-            parts.extend(extra_hot_queries)
-
-            if cold_sql:
-                parts.append(cold_sql)
-
-            if not parts:
-                if schema_model is not None:
-                    schema_columns = _extract_schema_model_columns(schema_model)
-                    query = self._typed_empty_query(
-                        schema_columns=schema_columns,
-                        facets=[],
-                        facet_casts={},
-                        include_system_columns=True,
-                    )
-                else:
-                    query = "SELECT 1 AS _empty_marker WHERE 1=0"
+        parts: List[str] = []
+        if hot_table_exists:
+            if "consist_run_id" in concept_cols:
+                hot_query = f"""
+                    SELECT t.*, r.parent_run_id AS consist_scenario_id
+                    FROM global_tables.{_quote_ident(concept_key)} t
+                    LEFT JOIN main.run r ON CAST(t.consist_run_id AS VARCHAR) = r.id
+                """
+            elif "consist_artifact_id" in concept_cols:
+                hot_query = f"""
+                    SELECT t.*, r.parent_run_id AS consist_scenario_id
+                    FROM global_tables.{_quote_ident(concept_key)} t
+                    LEFT JOIN main.artifact a ON TRY_CAST(t.consist_artifact_id AS UUID) = a.id
+                    LEFT JOIN main.run r ON a.run_id = r.id
+                """
             else:
-                query = "\nUNION ALL BY NAME\n".join(parts)
+                hot_query = f"""
+                    SELECT t.*, CAST(NULL AS VARCHAR) AS consist_scenario_id
+                    FROM global_tables.{_quote_ident(concept_key)} t
+                """
+            parts.append(hot_query)
 
-            self._create_view_sql(view_name=view_name, query=query, if_exists="replace")
-            return True
+        parts.extend(extra_hot_queries)
+
+        if cold_sql:
+            parts.append(cold_sql)
+
+        if not parts:
+            if schema_model is not None:
+                schema_columns = _extract_schema_model_columns(schema_model)
+                query = self._typed_empty_query(
+                    schema_columns=schema_columns,
+                    facets=[],
+                    facet_casts={},
+                    include_system_columns=True,
+                )
+            else:
+                query = "SELECT 1 AS _empty_marker WHERE 1=0"
+        else:
+            query = "\nUNION ALL BY NAME\n".join(parts)
+
+        self._create_view_sql(view_name=view_name, query=query, if_exists="replace")
+        return True
 
     def _create_view_sql(
         self,
@@ -433,6 +458,8 @@ class ViewFactory:
         quoted_view_name = _quote_ident(view_name)
         if db.read_only:
             if if_exists == "error":
+                if db.has_temp_view(view_name):
+                    raise ValueError(f"View already exists: {view_name}")
                 row = db.fetchone(
                     "SELECT COUNT(*) FROM information_schema.views "
                     "WHERE table_schema IN ('main', 'temp') AND table_name = ?",
@@ -465,7 +492,7 @@ class ViewFactory:
                 [schema, table],
             )
             return {str(row[0]) for row in rows}
-        except Exception:
+        except duckdb.Error:
             return set()
 
     def _typed_empty_query(
@@ -529,8 +556,9 @@ class ViewFactory:
 
         union_parts: List[str] = []
         facet_col_names = {facet: f"facet_{idx}" for idx, facet in enumerate(facets)}
+        db = self._require_db()
         for table_name, table_records in grouped_by_table.items():
-            if not self._check_table_exists("global_tables", table_name):
+            if not db.has_table(table_name, table_schema="global_tables"):
                 logging.warning(
                     "[Consist Warning] Skipping grouped hot table that does not exist: %s",
                     table_name,
@@ -684,7 +712,7 @@ class ViewFactory:
                 )
                 if historical_path.exists():
                     return historical_path
-            except Exception:
+            except (OSError, ValueError):
                 pass
 
         if record.artifact.recovery_roots:
@@ -694,7 +722,7 @@ class ViewFactory:
                 ).best_location
                 if best_location is not None and best_location.exists:
                     return best_location.path
-            except Exception:
+            except (OSError, ValueError):
                 pass
 
         if hydrate_missing and record.artifact.recovery_roots:
@@ -825,20 +853,6 @@ class ViewFactory:
         if not union_parts:
             return None
         return "\nUNION ALL BY NAME\n".join(union_parts)
-
-    def _check_table_exists(self, schema: str, table: str) -> bool:
-        """Robustly checks if a table exists in a specific schema."""
-        db = self._require_db()
-        try:
-            row = db.fetchone(
-                "SELECT COUNT(*) FROM information_schema.tables "
-                "WHERE table_schema = ? AND table_name = ?",
-                [schema, table],
-            )
-            return bool(row and int(row[0]) > 0)
-        except Exception as e:
-            logging.warning(f"Failed to check table existence: {e}")
-            return False
 
     def _generate_cold_and_extra_hot_queries(
         self,

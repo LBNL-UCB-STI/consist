@@ -26,11 +26,15 @@ def test_load_json_safe_raises_value_error_for_excessive_nesting_depth() -> None
         load_json_safe(deeply_nested)
 
 
-def test_table_has_column_returns_false_for_unsafe_table_name() -> None:
+def test_has_table_column_returns_false_for_unsafe_table_name() -> None:
     db = DatabaseManager(":memory:")
     try:
         assert (
-            db._table_has_column(table_name="run; DROP TABLE run;", column_name="id")
+            db.has_table_column(
+                table_schema="main",
+                table_name="run; DROP TABLE run;",
+                column_name="id",
+            )
             is False
         )
     finally:
