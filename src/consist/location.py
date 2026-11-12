@@ -13,9 +13,16 @@ import time
 from typing import Any, Final, Literal, Mapping, Sequence, TypeAlias, Union
 import uuid
 
+from consist.digest import Digest, is_shapefile_sidecar_filename
+
 _RACY_WINDOW_NS: Final[int] = 2_000_000_000
 _LOCATION_ID_NAMESPACE: Final[uuid.UUID] = uuid.UUID(
     "c0b51570-0005-4000-8000-000000000003"
+)
+_NON_PORTABLE_DIGEST_PREFIXES: Final[tuple[str, ...]] = (
+    "stat_file_v1:",
+    "stat_dir_v1:",
+    "caller_supplied_v1:",
 )
 
 LocationSite: TypeAlias = Literal["workspace", "archive", "advisory", "external"]
@@ -195,27 +202,33 @@ class DirTreeStat:
 
         entries: list[tuple[str, FileStat]] = []
         subdirs: list[str] = []
+        real_root_str = os.fspath(real_root)
+        prefix_len = (
+            1 if real_root_str == os.sep else len(real_root_str.rstrip(os.sep)) + 1
+        )
+        need_slash_norm = os.sep != "/"
 
-        def _visit(directory: Path) -> None:
+        def _visit(directory: str) -> None:
             with os.scandir(directory) as scan:
                 children = sorted(scan, key=lambda entry: entry.name)
             for child in children:
-                child_path = Path(child.path)
-                rel = child_path.relative_to(real_root).as_posix()
+                rel = child.path[prefix_len:]
+                if need_slash_norm:
+                    rel = rel.replace(os.sep, "/")
                 if child.is_symlink():
-                    raise ValueError(f"Directory cannot contain symlink: {child_path}")
+                    raise ValueError(f"Directory cannot contain symlink: {child.path}")
                 if child.is_dir(follow_symlinks=False):
                     subdirs.append(rel)
-                    _visit(child_path)
+                    _visit(child.path)
                 elif child.is_file(follow_symlinks=False):
                     st = child.stat(follow_symlinks=False)
                     entries.append(
                         (rel, FileStat.from_os_stat(st, observed_at_ns=now_ns))
                     )
                 else:
-                    raise ValueError(f"Non-regular directory entry: {child_path}")
+                    raise ValueError(f"Non-regular directory entry: {child.path}")
 
-        _visit(real_root)
+        _visit(real_root_str)
         return cls._from_parts(
             entries=entries,
             subdirs=subdirs,
@@ -256,18 +269,22 @@ class DirTreeStat:
         ).name != resolved_entry or not resolved_entry.lower().endswith(".shp"):
             raise ValueError(f"Invalid shapefile bundle entry name: {resolved_entry!r}")
 
-        stem_prefix = f"{Path(resolved_entry).stem}."
+        stem = Path(resolved_entry).stem
         entries: list[tuple[str, FileStat]] = []
         has_shp = False
         with os.scandir(bundle_root) as scan:
             candidates = sorted(
-                (item for item in scan if item.name.startswith(stem_prefix)),
+                (
+                    item
+                    for item in scan
+                    if is_shapefile_sidecar_filename(item.name, stem)
+                ),
                 key=lambda item: item.name,
             )
         for cand in candidates:
             if cand.is_symlink() or not cand.is_file(follow_symlinks=False):
                 raise ValueError(f"Invalid shapefile sidecar entry: {cand.path}")
-            if cand.name == resolved_entry:
+            if cand.name.lower() == resolved_entry.lower():
                 has_shp = True
             st = cand.stat(follow_symlinks=False)
             entries.append(
@@ -438,7 +455,7 @@ def workspace_mount_instance_id(run_dir: str | Path) -> str:
 
 def compute_location_id(
     *,
-    digest: str | None,
+    digest: Digest | str | None,
     artifact_id: uuid.UUID | str | None,
     site: str,
     mount_name: str,
@@ -447,11 +464,20 @@ def compute_location_id(
     member: str = "",
 ) -> uuid.UUID:
     """Compute deterministic ``location_id`` for an ``artifact_location`` coordinate."""
+    digest_str = str(digest) if digest is not None else None
     aid_token = str(artifact_id) if artifact_id is not None else ""
-    identity_token = digest if digest is not None else f"id:{aid_token}"
+    if (
+        digest_str is not None
+        and site in ("workspace", "external")
+        and not digest_str.startswith(_NON_PORTABLE_DIGEST_PREFIXES)
+    ):
+        identity_token = digest_str
+    elif digest_str is not None:
+        identity_token = f"id:{aid_token}\x1f{digest_str}" if aid_token else digest_str
+    else:
+        identity_token = f"id:{aid_token}"
     key = "\x1f".join(
         (
-            aid_token,
             identity_token,
             site,
             mount_name,

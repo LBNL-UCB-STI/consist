@@ -695,47 +695,13 @@ class ViewFactory:
         *,
         hydrate_missing: bool = True,
     ) -> Optional[Path]:
-        from consist.core.tracker_recovery import (
-            resolve_verified_local_path,
-            verify_candidate_against_artifact,
-        )
-
-        override = self.tracker.artifact_abs_path_override(record.artifact)
-        if (
-            override is not None
-            and override[0] == record.artifact._abs_path
-            and override[1]
-        ):
-            override_cand = Path(override[1])
-            if override_cand.exists() and verify_candidate_against_artifact(
-                override_cand, record.artifact
-            ):
-                return override_cand
+        from consist.core.tracker_recovery import resolve_verified_local_path
 
         verified = resolve_verified_local_path(
             self.tracker, record.artifact, allow_recovery_roots=True
         )
         if verified is not None:
             return verified
-
-        if record.artifact.abs_path:
-            abs_candidate = Path(record.artifact.abs_path)
-            if abs_candidate.exists() and verify_candidate_against_artifact(
-                abs_candidate, record.artifact
-            ):
-                return abs_candidate
-
-        if record.run is not None:
-            try:
-                historical_path = self.tracker.resolve_historical_path(
-                    record.artifact, record.run
-                )
-                if historical_path.exists() and verify_candidate_against_artifact(
-                    historical_path, record.artifact
-                ):
-                    return historical_path
-            except (OSError, ValueError):
-                pass
 
         if hydrate_missing and record.artifact.recovery_roots:
             ensured_path = record.artifact.ensure_local_path(

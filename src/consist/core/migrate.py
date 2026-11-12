@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -16,20 +17,20 @@ import uuid
 
 import duckdb
 
-from consist.core.fs import FileSystemManager
+from consist.core.fs import FileSystemManager, build_verified_location_row
+from consist.core.identity import IdentityManager
 from consist.core.persistence import (
     DatabaseManager,
     IncompatibleSchemaError,
     _coerce_optional_uuid,
-    _coerce_run_tags,
     _coerce_uuid,
     _dump_json,
     _ensure_non_null_utc_dt,
-    _ensure_utc_dt,
     _execute_multirow_values,
     _parse_json_dict,
     _quote_ident,
 )
+from consist.core.resolved_binding import _identity_payload_from_binding_evidence
 from consist.digest import (
     Digest,
     build_manifest_v1,
@@ -38,12 +39,13 @@ from consist.digest import (
     compute_digest,
     normalize_logical_matrices_identity,
 )
-from consist.location import ArtifactLocationRow, LocationSite, Witness, capture_witness
+from consist.location import ArtifactLocationRow, LocationSite
 
 _LOWER_HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 _WEAK_SCHEMES = frozenset(
     {"stat_file_v1:sha256", "stat_dir_v1:sha256", "caller_supplied_v1:sha256"}
 )
+_STRICT_SCHEMES = frozenset({"sha256:file", "dir_manifest_v1:sha256"})
 _PASSTHROUGH_CORE_TABLES = (
     "config_facet",
     "run_config_kv",
@@ -89,63 +91,15 @@ class MigrationReport:
     views_copied: int = 0
 
 
-@dataclass
-class _MigratingRun:
-    id: str
-    parent_run_id: Optional[str]
-    status: str
-    model_name: str
-    description: Optional[str]
-    year: Optional[int]
-    iteration: Optional[int]
-    stage: Optional[str]
-    phase: Optional[str]
-    tags: list[str]
-    config_hash: Optional[str]
-    git_hash: Optional[str]
-    input_hash: Optional[str]
-    signature: Optional[str]
-    cacheable: bool
-    facet_id: Optional[str]
-    meta: dict[str, Any]
-    started_at: datetime
-    ended_at: Optional[datetime]
-    created_at: datetime
-    updated_at: datetime
-
-    def to_insert_row(self) -> list[Any]:
-        return [
-            self.id,
-            self.parent_run_id,
-            self.status,
-            self.model_name,
-            self.description,
-            self.year,
-            self.iteration,
-            self.stage,
-            self.phase,
-            _dump_json(self.tags),
-            self.config_hash,
-            self.git_hash,
-            self.input_hash,
-            self.signature,
-            self.cacheable,
-            self.facet_id,
-            _dump_json(self.meta),
-            self.started_at,
-            self.ended_at,
-            self.created_at,
-            self.updated_at,
-        ]
-
-
 @dataclass(frozen=True, slots=True)
 class _MigratedArtifactInfo:
     id: uuid.UUID
     key: str
+    uri: str
     driver: str
     digest: Optional[Digest]
     member: Optional[str]
+    meta: Mapping[str, Any]
 
 
 def _table_columns(
@@ -160,10 +114,24 @@ def _table_columns(
     return [str(r[0]) for r in rows]
 
 
-def _copy_passthrough_tables(
+def _copy_non_core_tables_and_views(
     cur: duckdb.DuckDBPyConnection, *, dst_catalog: str, src_tables: set[str]
-) -> None:
-    fallbacks = {"json": "facet_json"}
+) -> tuple[int, list[tuple[Any, ...]]]:
+    global_tables_copied = 0
+    for raw_s, raw_t in cur.execute(
+        "SELECT schema_name, table_name FROM duckdb_tables() "
+        "WHERE database_name = 'v04_src' AND schema_name != 'main' AND NOT internal"
+    ).fetchall():
+        qs, qt = _quote_ident(str(raw_s)), _quote_ident(str(raw_t))
+        cur.execute(f"CREATE SCHEMA IF NOT EXISTS {qs}")
+        cur.execute(f"CREATE TABLE {qs}.{qt} AS SELECT * FROM v04_src.{qs}.{qt}")
+        if str(raw_s) == "global_tables":
+            global_tables_copied += 1
+
+    for custom_tbl in sorted(src_tables - _CORE_MAIN_TABLES):
+        qc = _quote_ident(custom_tbl)
+        cur.execute(f"CREATE TABLE main.{qc} AS SELECT * FROM v04_src.main.{qc}")
+
     for tbl in _PASSTHROUGH_CORE_TABLES:
         if tbl not in src_tables:
             continue
@@ -171,27 +139,72 @@ def _copy_passthrough_tables(
         src_cols = set(
             _table_columns(cur, db_alias="v04_src", schema="main", table=tbl)
         )
-        sel_dst: list[str] = []
-        sel_src: list[str] = []
-        for col in dst_cols:
-            if col in src_cols:
-                sel_dst.append(_quote_ident(col))
-                sel_src.append(_quote_ident(col))
-            elif col in fallbacks and fallbacks[col] in src_cols:
-                sel_dst.append(_quote_ident(col))
-                sel_src.append(_quote_ident(fallbacks[col]))
-        if sel_dst:
+        pairs = [
+            (_quote_ident(c), _quote_ident(c))
+            if c in src_cols
+            else (_quote_ident(c), '"facet_json"')
+            for c in dst_cols
+            if c in src_cols or (c == "json" and "facet_json" in src_cols)
+        ]
+        if pairs:
             qt = _quote_ident(tbl)
+            d_sql = ", ".join(d for d, _ in pairs)
+            s_sql = ", ".join(s for _, s in pairs)
             cur.execute(
-                f"INSERT INTO main.{qt} ({', '.join(sel_dst)}) "
-                f"SELECT {', '.join(sel_src)} FROM v04_src.main.{qt} ON CONFLICT DO NOTHING"
+                f"INSERT INTO main.{qt} ({d_sql}) "
+                f"SELECT {s_sql} FROM v04_src.main.{qt} ON CONFLICT DO NOTHING"
             )
+
+    src_views = cur.execute(
+        "SELECT schema_name, view_name, sql FROM duckdb_views() "
+        "WHERE database_name = 'v04_src' AND NOT internal "
+        "AND view_name NOT IN ('consist_schema_links')"
+    ).fetchall()
+    return global_tables_copied, src_views
+
+
+def _copy_v04_runs_sql(cur: duckdb.DuckDBPyConnection, src_tables: set[str]) -> None:
+    if "run" not in src_tables:
+        return
+    cols = set(_table_columns(cur, db_alias="v04_src", schema="main", table="run"))
+    col = lambda n, d="NULL": _quote_ident(n) if n in cols else d  # noqa: E731
+    meta_r, tags_r = col("meta", "'{}'"), col("tags", "'[]'")
+    meta_e = (
+        f"CASE WHEN {meta_r} IS NULL THEN CAST('{{}}' AS JSON) "
+        f"WHEN json_valid(CAST({meta_r} AS VARCHAR)) THEN CAST({meta_r} AS JSON) "
+        "ELSE CAST('{}' AS JSON) END"
+    )
+    tags_e = (
+        f"CASE WHEN {tags_r} IS NULL THEN CAST('[]' AS JSON) "
+        f"WHEN ends_with(typeof({tags_r}), '[]') THEN to_json({tags_r}) "
+        f"WHEN json_valid(CAST({tags_r} AS VARCHAR)) THEN CAST({tags_r} AS JSON) "
+        "ELSE CAST('[]' AS JSON) END"
+    )
+    started_e = f"COALESCE({col('started_at')}, {col('created_at')}, current_timestamp)"
+    created_e = f"COALESCE({col('created_at')}, {col('started_at')}, current_timestamp)"
+    updated_e = f"COALESCE({col('updated_at')}, {col('created_at')}, {col('started_at')}, current_timestamp)"
+    cur.execute(
+        "INSERT INTO main.run ("
+        "id, parent_run_id, status, model_name, description, year, iteration, "
+        "stage, phase, tags, config_hash, git_hash, input_hash, signature, "
+        "cacheable, facet_id, meta, started_at, ended_at, created_at, updated_at"
+        ") SELECT "
+        f"{col('id')}, {col('parent_run_id')}, COALESCE({col('status')}, 'completed'), "
+        f"COALESCE({col('model_name')}, 'unknown'), {col('description')}, "
+        f"{col('year')}, {col('iteration')}, "
+        f"COALESCE({col('stage')}, json_extract_string({meta_e}, '$.stage')), "
+        f"COALESCE({col('phase')}, json_extract_string({meta_e}, '$.phase')), "
+        f"{tags_e}, {col('config_hash')}, {col('git_hash')}, {col('input_hash')}, "
+        f"{col('signature')}, FALSE, {col('facet_id')}, {meta_e}, {started_e}, "
+        f"{col('ended_at')}, {created_e}, {updated_e} "
+        "FROM v04_src.main.run ON CONFLICT (id) DO NOTHING"
+    )
 
 
 def _extract_recovery_roots(raw: Any) -> list[str]:
     if raw is None:
         return []
-    items = (
+    seq = (
         [raw]
         if isinstance(raw, str)
         else (
@@ -201,18 +214,15 @@ def _extract_recovery_roots(raw: Any) -> list[str]:
         )
     )
     out: list[str] = []
-    seen: set[str] = set()
-    for item in items:
+    for item in seq:
         if isinstance(item, (str, os.PathLike)):
             text = os.fspath(item).strip()
-            if text and text not in seen:
-                seen.add(text)
+            if text and text not in out:
                 out.append(text)
     return out
 
 
 def _try_trust_v04_digest(
-    *,
     old_hash: Optional[str],
     old_semantics: Any,
     driver: str,
@@ -238,10 +248,10 @@ def _try_trust_v04_digest(
         ):
             return None
     if text.startswith("sha256:manifest-v1:"):
-        hex_part = text[len("sha256:manifest-v1:") :].lower()
+        hx = text[len("sha256:manifest-v1:") :].lower()
         return (
-            Digest("dir_manifest_v1:sha256", hex_part)
-            if _LOWER_HEX64_RE.fullmatch(hex_part)
+            Digest("dir_manifest_v1:sha256", hx)
+            if _LOWER_HEX64_RE.fullmatch(hx)
             else None
         )
     if text.startswith("sha256:logical_matrices:"):
@@ -271,13 +281,12 @@ def _try_trust_v04_digest(
 
 
 def _compute_migrated_digest(
-    candidate_path: Path, *, driver: str, member: Optional[str], meta: dict[str, Any]
+    candidate_path: Path, driver: str, member: Optional[str], meta: dict[str, Any]
 ) -> Digest:
     options: dict[str, Any] = {}
     if driver == "artifact_set" or meta.get("artifact_set") is True:
-        member_paths = meta.get("output_set_member_paths")
-        if isinstance(member_paths, Mapping):
-            options["member_paths"] = member_paths
+        if isinstance(meta.get("output_set_member_paths"), Mapping):
+            options["member_paths"] = meta["output_set_member_paths"]
     elif candidate_path.is_dir():
         meta.setdefault("directory_artifact", True)
         if driver != "zarr" and "directory_manifest" not in meta:
@@ -293,228 +302,430 @@ def _compute_migrated_digest(
     )
 
 
-def _capture_location_witness(
-    path: Path, *, driver: str, meta: Mapping[str, Any], observed_at_ns: int
-) -> Optional[Witness]:
-    is_dir = bool(
-        path.is_dir()
-        or meta.get("directory_artifact") is True
-        or meta.get("artifact_set") is True
-        or driver in {"zarr", "directory", "artifact_set"}
-    )
-    is_shp = bool(
-        meta.get("file_bundle_artifact") is True
-        or driver == "shapefile"
-        or path.suffix.lower() == ".shp"
-    )
-    entry_raw = meta.get("file_bundle_entry")
-    bundle_entry = (
-        entry_raw
-        if isinstance(entry_raw, str) and entry_raw
-        else (path.name if is_shp and path.is_file() else None)
-    )
-    return capture_witness(
-        path,
-        observed_at_ns=observed_at_ns,
-        driver=driver,
-        is_directory=is_dir,
-        is_shapefile_bundle=is_shp,
-        bundle_entry=bundle_entry,
-    )
+def _migrate_artifacts_and_locations(
+    cur: duckdb.DuckDBPyConnection,
+    *,
+    src_tables: set[str],
+    run_meta_by_id: Mapping[str, dict[str, Any]],
+    linked_runs_by_art: Mapping[uuid.UUID, Sequence[str]],
+    src_path: Path,
+    cli_run_dir: Optional[Path],
+    cli_mounts: Mapping[str, str],
+    trust_v04_hashes: bool,
+) -> tuple[
+    list[list[Any]],
+    list[ArtifactLocationRow],
+    dict[uuid.UUID, _MigratedArtifactInfo],
+    tuple[int, int, int],
+]:
+    if "artifact" not in src_tables:
+        return [], [], {}, (0, 0, 0)
 
-
-def _probe_uri_on_fs(
-    fs: FileSystemManager,
-    uri: str,
-    art_id: uuid.UUID,
-    member_val: Optional[str],
-    obs_ns: int,
-) -> tuple[str, str, str, LocationSite, Optional[Path]]:
-    m_name, m_inst, m_uri = fs.location_coordinate_for_uri(uri)
-    site: LocationSite = "workspace" if m_name in ("workspace", "runs") else "external"
-    proto = ArtifactLocationRow.create(
-        digest=None,
-        artifact_id=art_id,
-        site=site,
-        mount_name=m_name,
-        mount_instance_id=m_inst,
-        uri=m_uri,
-        member=member_val or "",
-        observed_at_ns=obs_ns,
-    )
-    return m_name, m_inst, m_uri, site, fs.resolve_location_row_path(proto)
-
-
-def _load_v04_runs(
-    cur: duckdb.DuckDBPyConnection, src_tables: set[str]
-) -> list[_MigratingRun]:
-    if "run" not in src_tables:
-        return []
-    cols = set(_table_columns(cur, db_alias="v04_src", schema="main", table="run"))
-    now = datetime.now(timezone.utc)
-    spec = (
-        ("id", "NULL"),
-        ("parent_run_id", "NULL"),
-        ("status", "'completed'"),
-        ("model_name", "'unknown'"),
-        ("description", "NULL"),
-        ("year", "NULL"),
-        ("iteration", "NULL"),
-        ("stage", "NULL"),
-        ("phase", "NULL"),
-        ("tags", "'[]'"),
-        ("config_hash", "NULL"),
-        ("git_hash", "NULL"),
-        ("input_hash", "NULL"),
-        ("signature", "NULL"),
-        ("facet_id", "NULL"),
-        ("meta", "'{}'"),
-        ("started_at", "NULL"),
-        ("ended_at", "NULL"),
-        ("created_at", "NULL"),
-        ("updated_at", "NULL"),
-    )
-    exprs = [_quote_ident(c) if c in cols else d for c, d in spec]
-    rows = cur.execute(f"SELECT {', '.join(exprs)} FROM v04_src.main.run").fetchall()
-    out: list[_MigratingRun] = []
-    for r in rows:
-        meta = _parse_json_dict(r[15])
-        stage = (
-            str(r[7])
-            if r[7] is not None
-            else (str(meta["stage"]) if isinstance(meta.get("stage"), str) else None)
-        )
-        phase = (
-            str(r[8])
-            if r[8] is not None
-            else (str(meta["phase"]) if isinstance(meta.get("phase"), str) else None)
-        )
-        started = _ensure_utc_dt(r[16]) or _ensure_utc_dt(r[18]) or now
-        created = _ensure_utc_dt(r[18]) or started
-        status = str(r[2]) if r[2] is not None else "completed"
-        out.append(
-            _MigratingRun(
-                id=str(r[0]),
-                parent_run_id=str(r[1]) if r[1] is not None else None,
-                status=status,
-                model_name=str(r[3]) if r[3] is not None else "unknown",
-                description=str(r[4]) if r[4] is not None else None,
-                year=int(r[5]) if r[5] is not None else None,
-                iteration=int(r[6]) if r[6] is not None else None,
-                stage=stage,
-                phase=phase,
-                tags=_coerce_run_tags(r[9]),
-                config_hash=str(r[10]) if r[10] is not None else None,
-                git_hash=str(r[11]) if r[11] is not None else None,
-                input_hash=str(r[12]) if r[12] is not None else None,
-                signature=str(r[13]) if r[13] is not None else None,
-                cacheable=(status == "completed"),
-                facet_id=str(r[14]) if r[14] is not None else None,
-                meta=meta,
-                started_at=started,
-                ended_at=_ensure_utc_dt(r[17]),
-                created_at=created,
-                updated_at=_ensure_utc_dt(r[19]) or created,
+    content_hash_by_id: dict[str, str] = {}
+    if "artifact_content" in src_tables:
+        ac_cols = set(
+            _table_columns(
+                cur, db_alias="v04_src", schema="main", table="artifact_content"
             )
         )
-    return out
+        h_col = (
+            "content_hash"
+            if "content_hash" in ac_cols
+            else ("hash" if "hash" in ac_cols else None)
+        )
+        if "id" in ac_cols and h_col is not None:
+            content_hash_by_id = {
+                str(cid): str(chash)
+                for cid, chash in cur.execute(
+                    f"SELECT id, {_quote_ident(h_col)} FROM v04_src.main.artifact_content"
+                ).fetchall()
+                if cid is not None and chash
+            }
+
+    a_cols = set(
+        _table_columns(cur, db_alias="v04_src", schema="main", table="artifact")
+    )
+    u_expr = (
+        'COALESCE("container_uri", "uri")'
+        if {"container_uri", "uri"}.issubset(a_cols)
+        else ('"container_uri"' if "container_uri" in a_cols else '"uri"')
+    )
+    defaults = {"key": "'artifact'", "driver": "'unknown'", "meta": "'{}'"}
+    tail_cols = (
+        "driver",
+        "table_path",
+        "array_path",
+        "member",
+        "hash",
+        "digest",
+        "content_id",
+        "run_id",
+        "parent_artifact_id",
+        "facet_id",
+        "meta",
+        "created_at",
+    )
+    a_exprs = [
+        _quote_ident("id") if "id" in a_cols else "NULL",
+        _quote_ident("key") if "key" in a_cols else "'artifact'",
+        u_expr,
+        *(
+            _quote_ident(c) if c in a_cols else defaults.get(c, "NULL")
+            for c in tail_cols
+        ),
+    ]
+    raw_artifacts = cur.execute(
+        f"SELECT {', '.join(a_exprs)} FROM v04_src.main.artifact"
+    ).fetchall()
+
+    fs_cache: dict[tuple[Path, tuple[tuple[str, str], ...]], FileSystemManager] = {}
+
+    def _get_fs(eff_rd: Path, eff_mounts: Mapping[str, str]) -> FileSystemManager:
+        key = (eff_rd, tuple(sorted(eff_mounts.items())))
+        if key not in fs_cache:
+            fs_cache[key] = FileSystemManager(
+                run_dir=eff_rd, mounts=dict(eff_mounts), create_run_dir=False
+            )
+        return fs_cache[key]
+
+    def _fs_for_run(run_id: Optional[str]) -> FileSystemManager:
+        rm_meta = run_meta_by_id.get(run_id) if run_id else None
+        rm = rm_meta.get("mounts") if rm_meta else None
+        hm = (
+            {k: v for k, v in rm.items() if isinstance(k, str) and isinstance(v, str)}
+            if isinstance(rm, Mapping)
+            else {}
+        )
+        rrd = rm_meta.get("_physical_run_dir") if rm_meta else None
+        hrd = (
+            Path(rrd).expanduser().resolve()
+            if isinstance(rrd, str) and rrd.strip()
+            else None
+        )
+        return _get_fs(hrd or cli_run_dir or src_path.parent, {**hm, **cli_mounts})
+
+    def _probe(fs: FileSystemManager, uri: str) -> tuple[LocationSite, Optional[Path]]:
+        m_name, m_inst, m_uri = fs.location_coordinate_for_uri(uri)
+        site: LocationSite = (
+            "workspace" if m_name in ("workspace", "runs") else "external"
+        )
+        return site, fs.resolve_location_coordinate(m_name, m_inst, m_uri)
+
+    artifact_rows: list[list[Any]] = []
+    location_rows: list[ArtifactLocationRow] = []
+    artifacts_by_id: dict[uuid.UUID, _MigratedArtifactInfo] = {}
+    hashed = trusted = cold = 0
+    obs_base_ns = time.time_ns()
+
+    for a_idx, a_row in enumerate(raw_artifacts):
+        art_id = _coerce_uuid(a_row[0])
+        key, uri, driver = str(a_row[1]), str(a_row[2]), str(a_row[3])
+        member_val = next(
+            (
+                str(mc)
+                for mc in (a_row[4], a_row[5], a_row[6])
+                if mc is not None and str(mc).strip()
+            ),
+            None,
+        )
+        old_hash = next(
+            (
+                str(hc).strip()
+                for hc in (a_row[8], a_row[7])
+                if hc is not None and str(hc).strip()
+            ),
+            None,
+        ) or (content_hash_by_id.get(str(a_row[9])) if a_row[9] is not None else None)
+
+        prod_run_id = str(a_row[10]) if a_row[10] is not None else None
+        meta = _parse_json_dict(a_row[13])
+        recovery_roots = _extract_recovery_roots(meta.pop("recovery_roots", None))
+        old_semantics = meta.pop("hash_semantics", None)
+        meta.pop("content_identity", None)
+
+        cand_rids = [
+            r
+            for r in [prod_run_id, *linked_runs_by_art.get(art_id, ())]
+            if r and r in run_meta_by_id
+        ]
+        obs_ns = obs_base_ns + a_idx * 8
+        fs = primary_fs = _fs_for_run(cand_rids[0] if cand_rids else None)
+        p_site, primary_cand = _probe(fs, uri)
+        if (primary_cand is None or not primary_cand.exists()) and len(cand_rids) > 1:
+            for alt_rid in cand_rids[1:]:
+                alt_fs = _fs_for_run(alt_rid)
+                asite, acand = _probe(alt_fs, uri)
+                if acand is not None and acand.exists():
+                    fs = primary_fs = alt_fs
+                    p_site, primary_cand = asite, acand
+                    break
+        if (
+            (primary_cand is None or not primary_cand.exists())
+            and cli_run_dir is not None
+            and cli_run_dir != fs.run_dir
+            and p_site == "workspace"
+        ):
+            cli_fs = _get_fs(cli_run_dir, {**fs.mounts, **cli_mounts})
+            _, acand = _probe(cli_fs, uri)
+            if acand is not None and acand.exists():
+                primary_fs, primary_cand = cli_fs, acand
+
+        rec_targets = [
+            (
+                r_root,
+                None if str(t).startswith("/__unmounted__/") else t,
+            )
+            for r_root in recovery_roots
+            for _, _, _, t in (fs.archive_coordinate_for_root(uri, r_root),)
+        ]
+        existing_cands = [
+            c
+            for c in (primary_cand, *(rc for _, rc in rec_targets))
+            if c is not None and c.exists()
+        ]
+        resolved_digest: Optional[Digest] = None
+        if existing_cands:
+            if trust_v04_hashes:
+                resolved_digest = _try_trust_v04_digest(
+                    old_hash, old_semantics, driver, member_val, existing_cands[0], meta
+                )
+                if resolved_digest is not None:
+                    trusted += 1
+            if resolved_digest is None:
+                resolved_digest = _compute_migrated_digest(
+                    existing_cands[0], driver, member_val, meta
+                )
+                hashed += 1
+        else:
+            cold += 1
+            if old_hash:
+                meta["legacy_v04_hash"] = old_hash
+
+        art_info = _MigratedArtifactInfo(
+            art_id, key, uri, driver, resolved_digest, member_val, meta
+        )
+        artifacts_by_id[art_id] = art_info
+        p_ok = primary_cand is not None and primary_cand.exists()
+        location_rows.append(
+            build_verified_location_row(
+                primary_fs,
+                art_info,
+                local_path=primary_cand if p_ok else None,
+                uri=uri,
+                site=p_site,
+                capture_local_witness=p_ok,
+                observed_at_ns=obs_ns,
+            )
+        )
+        for r_idx, (r_root, rm_cand) in enumerate(rec_targets, start=1):
+            r_ok = rm_cand is not None and rm_cand.exists()
+            location_rows.append(
+                build_verified_location_row(
+                    fs,
+                    art_info,
+                    local_path=rm_cand if r_ok else None,
+                    uri=uri,
+                    archive_root=r_root,
+                    site="archive" if r_ok else "advisory",
+                    capture_local_witness=r_ok,
+                    observed_at_ns=obs_ns + r_idx,
+                )
+            )
+        artifact_rows.append(
+            [
+                art_id,
+                key,
+                uri,
+                driver,
+                str(resolved_digest) if resolved_digest is not None else None,
+                member_val,
+                prod_run_id,
+                _coerce_optional_uuid(a_row[11]),
+                str(a_row[12]) if a_row[12] is not None else None,
+                _dump_json(meta),
+                _ensure_non_null_utc_dt(a_row[14] or datetime.now(timezone.utc)),
+            ]
+        )
+
+    return artifact_rows, location_rows, artifacts_by_id, (hashed, trusted, cold)
+
+
+def _upgrade_strict_binding_evidence(
+    evidence_json: str, artifacts_by_id: Mapping[uuid.UUID, _MigratedArtifactInfo]
+) -> Optional[tuple[str, str]]:
+    try:
+        evidence = json.loads(evidence_json)
+        inputs = evidence.get("inputs")
+        if not isinstance(inputs, dict) or not inputs:
+            return None
+        adm = evidence.get("admission_evidence")
+        for key, item in inputs.items():
+            art_blk = item.get("artifact") if isinstance(item, dict) else None
+            if not isinstance(art_blk, dict) or not art_blk.get("artifact_id"):
+                return None
+            info = artifacts_by_id.get(_coerce_uuid(art_blk["artifact_id"]))
+            if (
+                info is None
+                or info.digest is None
+                or info.digest.scheme not in _STRICT_SCHEMES
+            ):
+                return None
+            art_blk["identity"] = str(info.digest)
+            if isinstance(adm, dict) and isinstance(adm.get(key), dict):
+                adm[key]["observed_identity"] = str(info.digest)
+        upgraded_json = json.dumps(
+            evidence, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        )
+        payload = _identity_payload_from_binding_evidence(upgraded_json)
+        digest = hashlib.sha256(
+            json.dumps(
+                payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+            ).encode("utf-8")
+        ).hexdigest()
+        return digest, upgraded_json
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
 
 
 def _promote_run_identities_and_links(
     *,
-    runs: list[_MigratingRun],
+    run_rows: Sequence[tuple[str, str, Optional[str], Optional[str], dict[str, Any]]],
     artifacts_by_id: Mapping[uuid.UUID, _MigratedArtifactInfo],
     raw_links: Sequence[tuple[str, uuid.UUID, str, str, bool]],
-) -> list[list[Any]]:
+    invocations_by_exec_run: Mapping[str, list[tuple[uuid.UUID, str]]],
+) -> tuple[list[list[Any]], list[list[Any]], list[list[Any]]]:
+    identity_mgr = IdentityManager()
     inputs_by_run: dict[str, list[tuple[uuid.UUID, str, bool]]] = {}
     outputs_by_run: dict[str, list[tuple[uuid.UUID, str, bool]]] = {}
     for run_id, aid, direction, raw_role, is_implicit in raw_links:
-        bucket = inputs_by_run if direction == "input" else outputs_by_run
-        bucket.setdefault(run_id, []).append((aid, raw_role, is_implicit))
+        (inputs_by_run if direction == "input" else outputs_by_run).setdefault(
+            run_id, []
+        ).append((aid, raw_role, is_implicit))
 
     link_dedup: dict[tuple[str, uuid.UUID, str, str], bool] = {}
-    for run in runs:
-        run_inputs = inputs_by_run.get(run.id, [])
-        role_by_aid: dict[uuid.UUID, str] = {}
-        for meta_key in ("input_binding", "input_identity"):
-            block = run.meta.get(meta_key)
-            bindings = block.get("bindings") if isinstance(block, Mapping) else None
-            if not isinstance(bindings, Sequence) or isinstance(bindings, (str, bytes)):
+    run_updates: list[list[Any]] = []
+    inv_updates: list[list[Any]] = []
+
+    def _resolve_aid(
+        b: Mapping[str, Any],
+        run_inputs: Sequence[tuple[uuid.UUID, str, bool]],
+        idx: int,
+    ) -> Optional[uuid.UUID]:
+        if b.get("artifact_id") is not None:
+            try:
+                return _coerce_uuid(b["artifact_id"])
+            except (ValueError, TypeError):
+                return None
+        return run_inputs[idx][0] if 0 <= idx < len(run_inputs) else None
+
+    for run_id, status, git_hash, config_hash, meta in run_rows:
+        run_inputs = inputs_by_run.get(run_id, [])
+        id_map = (
+            meta["input_identity"]
+            if isinstance(meta.get("input_identity"), Mapping)
+            else {}
+        )
+        bind_map = (
+            meta["input_binding"]
+            if isinstance(meta.get("input_binding"), Mapping)
+            else {}
+        )
+        raw_sc = id_map.get("strict_input_count", 0)
+        strict_cnt = (
+            int(raw_sc)
+            if isinstance(raw_sc, int) and not isinstance(raw_sc, bool) and raw_sc > 0
+            else 0
+        )
+        strict_id_raw = id_map.get("strict_binding_identity")
+        has_strict = strict_cnt > 0 or (
+            isinstance(strict_id_raw, str) and bool(strict_id_raw.strip())
+        )
+
+        roles_by_aid: dict[uuid.UUID, list[str]] = {}
+        for blk_bindings, offset in (
+            (bind_map.get("bindings"), 0),
+            (id_map.get("bindings"), strict_cnt),
+        ):
+            if not isinstance(blk_bindings, Sequence) or isinstance(
+                blk_bindings, (str, bytes)
+            ):
                 continue
-            for idx, b in enumerate(bindings):
+            for idx, b in enumerate(blk_bindings):
                 if not isinstance(b, Mapping):
                     continue
                 kind, role_name = b.get("kind"), b.get("role")
-                if not isinstance(kind, str) or role_name is None:
-                    continue
-                raw_aid = b.get("artifact_id")
-                target_aid: Optional[uuid.UUID] = None
-                if raw_aid is not None:
-                    try:
-                        target_aid = _coerce_uuid(raw_aid)
-                    except (ValueError, TypeError):
-                        target_aid = None
-                elif idx < len(run_inputs):
-                    target_aid = run_inputs[idx][0]
-                if target_aid is not None:
-                    role_by_aid[target_aid] = f"{kind}:{role_name}"
+                if isinstance(kind, str) and role_name is not None:
+                    aid = _resolve_aid(b, run_inputs, idx + offset)
+                    if aid is not None:
+                        r_val = f"{kind}:{role_name}"
+                        lst = roles_by_aid.setdefault(aid, [])
+                        if r_val not in lst:
+                            lst.append(r_val)
 
         for aid, raw_role, is_imp in run_inputs:
             info = artifacts_by_id.get(aid)
-            role_str = role_by_aid.get(aid) or (
+            roles = roles_by_aid.get(aid) or [
                 raw_role
                 if (raw_role and raw_role != "input")
                 else (info.key if info else "")
-            )
-            k = (run.id, aid, "input", role_str)
-            link_dedup[k] = link_dedup.get(k, False) or bool(is_imp)
+            ]
+            for role_str in roles:
+                k = (run_id, aid, "input", role_str)
+                link_dedup[k] = link_dedup.get(k, False) or bool(is_imp)
 
-        for aid, raw_role, is_imp in outputs_by_run.get(run.id, []):
+        for aid, raw_role, is_imp in outputs_by_run.get(run_id, []):
             info = artifacts_by_id.get(aid)
             role_str = (
                 raw_role
                 if (raw_role and raw_role != "output")
                 else (info.key if info else "")
             )
-            k = (run.id, aid, "output", role_str)
+            k = (run_id, aid, "output", role_str)
             link_dedup[k] = link_dedup.get(k, False) or bool(is_imp)
 
-        if run.status != "completed" or not run.git_hash or not run.config_hash:
-            run.cacheable = False
+        if status != "completed" or not git_hash or not config_hash:
             continue
 
-        id_blk = run.meta.get("input_identity")
-        bind_blk = run.meta.get("input_binding")
-        src_blk = (
-            id_blk
-            if isinstance(id_blk, Mapping) and isinstance(id_blk.get("bindings"), list)
+        all_strong = True
+        upgraded_strict_id: Optional[str] = None
+        if has_strict:
+            strict_ok = len(run_inputs) >= strict_cnt and all(
+                (si := artifacts_by_id.get(s_aid)) is not None
+                and si.digest is not None
+                and si.digest.scheme in _STRICT_SCHEMES
+                for s_aid, _, _ in run_inputs[:strict_cnt]
+            )
+            inv_list = invocations_by_exec_run.get(run_id, [])
+            upgraded = (
+                _upgrade_strict_binding_evidence(inv_list[0][1], artifacts_by_id)
+                if strict_ok and inv_list
+                else None
+            )
+            if upgraded is None:
+                continue
+            upgraded_strict_id, upgraded_ev_json = upgraded
+            for inv_id, _ in inv_list:
+                inv_updates.append([upgraded_ev_json, inv_id])
+
+        pairs: list[tuple[str, str]] = []
+        upgraded_bindings: list[dict[str, Any]] = []
+        ord_src = (
+            (id_map["bindings"], strict_cnt)
+            if isinstance(id_map.get("bindings"), list)
             else (
-                bind_blk
-                if isinstance(bind_blk, Mapping)
-                and isinstance(bind_blk.get("bindings"), list)
+                (bind_map["bindings"], 0)
+                if not has_strict and isinstance(bind_map.get("bindings"), list)
                 else None
             )
         )
-        pairs: list[tuple[str, str]] = []
-        upgraded_bindings: list[dict[str, Any]] = []
-        all_strong = True
-
-        if src_blk is not None:
-            for idx, b in enumerate(src_blk["bindings"]):
+        if ord_src is not None:
+            src_bindings, offset = ord_src
+            for idx, b in enumerate(src_bindings):
                 if not isinstance(b, Mapping):
                     all_strong = False
                     break
-                kind = str(b.get("kind", "named"))
-                role_val = b.get("role", idx)
-                raw_aid = b.get("artifact_id")
-                aid_lookup: Optional[uuid.UUID] = None
-                if raw_aid is not None:
-                    try:
-                        aid_lookup = _coerce_uuid(raw_aid)
-                    except (ValueError, TypeError):
-                        aid_lookup = None
-                elif idx < len(run_inputs):
-                    aid_lookup = run_inputs[idx][0]
+                kind, role_val = str(b.get("kind", "named")), b.get("role", idx)
+                aid_lookup = _resolve_aid(b, run_inputs, idx + offset)
                 info = (
                     artifacts_by_id.get(aid_lookup) if aid_lookup is not None else None
                 )
@@ -542,14 +753,7 @@ def _promote_run_identities_and_links(
                         "evidence": {"identity_strength": "content"},
                     }
                 )
-            strict_id = (
-                id_blk.get("strict_binding_identity")
-                if isinstance(id_blk, Mapping)
-                else None
-            )
-            if isinstance(strict_id, str) and strict_id.strip():
-                pairs.append(("__strict_binding__", f"strict_binding_v1:{strict_id}"))
-        else:
+        elif not has_strict:
             for aid, raw_role, _ in run_inputs:
                 info = artifacts_by_id.get(aid)
                 if (
@@ -569,32 +773,117 @@ def _promote_run_identities_and_links(
                 )
 
         if not all_strong:
-            run.cacheable = False
             continue
+        if has_strict and upgraded_strict_id is not None:
+            pairs.append(
+                ("__strict_binding__", f"strict_binding_v1:{upgraded_strict_id}")
+            )
 
         pairs.sort()
         new_in_hash = canonical_json_sha256(pairs)
-        run.input_hash = new_in_hash
-        run.signature = hashlib.sha256(
-            f"{run.git_hash}:{run.config_hash}:{new_in_hash}".encode("utf-8")
-        ).hexdigest()
-        run.cacheable = True
-        if src_blk is not None:
+        new_sig = identity_mgr.calculate_run_signature(
+            git_hash, config_hash, new_in_hash
+        )
+        updated_meta = dict(meta)
+        if ord_src is not None or has_strict:
             new_id_meta: dict[str, Any] = {"version": 1, "bindings": upgraded_bindings}
-            if isinstance(id_blk, Mapping):
-                for pk in (
-                    "strict_input_count",
-                    "ordinary_input_count",
-                    "strict_binding_identity",
-                ):
-                    if pk in id_blk:
-                        new_id_meta[pk] = id_blk[pk]
-            run.meta["input_identity"] = new_id_meta
+            for pk in ("strict_input_count", "ordinary_input_count"):
+                if pk in id_map:
+                    new_id_meta[pk] = id_map[pk]
+            if upgraded_strict_id is not None:
+                new_id_meta["strict_binding_identity"] = upgraded_strict_id
+            updated_meta["input_identity"] = new_id_meta
+        run_updates.append(
+            [new_in_hash, new_sig, True, _dump_json(updated_meta), run_id]
+        )
 
-    return [
-        [rid, aid, direction, role_str, is_imp]
-        for (rid, aid, direction, role_str), is_imp in link_dedup.items()
+    link_rows = [
+        [rid, aid, d, r_str, imp] for (rid, aid, d, r_str), imp in link_dedup.items()
     ]
+    return link_rows, run_updates, inv_updates
+
+
+def _atomic_swap_duckdb_files(src_path: Path, tmp_path: Path) -> Path:
+    bak_path = Path(f"{src_path}.v04.bak")
+    src_wal, bak_wal, tmp_wal = (
+        Path(f"{src_path}.wal"),
+        Path(f"{bak_path}.wal"),
+        Path(f"{tmp_path}.wal"),
+    )
+    bak_wal.unlink(missing_ok=True)
+    moved_src = moved_wal = False
+    try:
+        os.replace(src_path, bak_path)
+        moved_src = True
+        if src_wal.exists():
+            os.replace(src_wal, bak_wal)
+            moved_wal = True
+        os.replace(tmp_path, src_path)
+        if tmp_wal.exists():
+            os.replace(tmp_wal, src_wal)
+    except BaseException:
+        if moved_src and bak_path.exists() and not src_path.exists():
+            try:
+                os.replace(bak_path, src_path)
+            except OSError:
+                pass
+        if moved_wal and bak_wal.exists() and not src_wal.exists():
+            try:
+                os.replace(bak_wal, src_wal)
+            except OSError:
+                pass
+        raise
+    return bak_path
+
+
+def _inspect_source_schema(src_path: Path) -> tuple[bool, Optional[str]]:
+    existing_db_uid: Optional[str] = None
+    probe = duckdb.connect(str(src_path), read_only=True)
+    try:
+        main_tables = {
+            str(r[0])
+            for r in probe.execute(
+                "SELECT table_name FROM duckdb_tables() WHERE schema_name = 'main'"
+            ).fetchall()
+        }
+        if "consist_schema" not in main_tables:
+            return False, None
+        ver_row = probe.execute("SELECT MAX(version) FROM consist_schema").fetchone()
+        version = int(ver_row[0]) if ver_row and ver_row[0] is not None else None
+        if version is not None and version > 2:
+            raise IncompatibleSchemaError(
+                f"Database {src_path!s} uses unsupported schema version {version} (> 2)."
+            )
+        s_cols = {
+            str(r[0])
+            for r in probe.execute(
+                "SELECT column_name FROM duckdb_columns() "
+                "WHERE schema_name = 'main' AND table_name = 'consist_schema'"
+            ).fetchall()
+        }
+        if "db_uid" in s_cols:
+            uid_row = probe.execute(
+                "SELECT db_uid FROM consist_schema ORDER BY version DESC LIMIT 1"
+            ).fetchone()
+            if uid_row and uid_row[0]:
+                existing_db_uid = str(uid_row[0])
+        if version == 2:
+            if "artifact" in main_tables:
+                a_cols = {
+                    str(r[0])
+                    for r in probe.execute(
+                        "SELECT column_name FROM duckdb_columns() "
+                        "WHERE schema_name = 'main' AND table_name = 'artifact'"
+                    ).fetchall()
+                }
+                if not {"uri", "digest"}.issubset(a_cols):
+                    raise IncompatibleSchemaError(
+                        f"Database {src_path!s} declares schema v2 with invalid artifact table."
+                    )
+            return True, existing_db_uid
+        return False, existing_db_uid
+    finally:
+        probe.close()
 
 
 def migrate_database(
@@ -610,81 +899,25 @@ def migrate_database(
     if not src_path.is_file():
         raise FileNotFoundError(f"Database file not found: {src_path}")
 
-    existing_db_uid: Optional[str] = None
-    probe = duckdb.connect(str(src_path), read_only=True)
-    try:
-        main_tables = {
-            str(r[0])
-            for r in probe.execute(
-                "SELECT table_name FROM duckdb_tables() WHERE schema_name = 'main'"
-            ).fetchall()
-        }
-        if "consist_schema" in main_tables:
-            ver_row = probe.execute(
-                "SELECT MAX(version) FROM consist_schema"
-            ).fetchone()
-            version = int(ver_row[0]) if ver_row and ver_row[0] is not None else None
-            if version is not None and version > 2:
-                raise IncompatibleSchemaError(
-                    f"Database {src_path!s} uses unsupported schema version {version} (> 2)."
-                )
-            s_cols = {
-                str(r[0])
-                for r in probe.execute(
-                    "SELECT column_name FROM duckdb_columns() "
-                    "WHERE schema_name = 'main' AND table_name = 'consist_schema'"
-                ).fetchall()
-            }
-            if "db_uid" in s_cols:
-                uid_row = probe.execute(
-                    "SELECT db_uid FROM consist_schema ORDER BY version DESC LIMIT 1"
-                ).fetchone()
-                if uid_row and uid_row[0]:
-                    existing_db_uid = str(uid_row[0])
-            if version == 2:
-                if "artifact" in main_tables:
-                    a_cols = {
-                        str(r[0])
-                        for r in probe.execute(
-                            "SELECT column_name FROM duckdb_columns() "
-                            "WHERE schema_name = 'main' AND table_name = 'artifact'"
-                        ).fetchall()
-                    }
-                    if not {"uri", "digest"}.issubset(a_cols):
-                        raise IncompatibleSchemaError(
-                            f"Database {src_path!s} declares schema v2 with invalid artifact table."
-                        )
-                return MigrationReport(
-                    db_path=src_path, already_current=True, dry_run=dry_run
-                )
-    finally:
-        probe.close()
+    already_current, existing_db_uid = _inspect_source_schema(src_path)
+    if already_current:
+        return MigrationReport(db_path=src_path, already_current=True, dry_run=dry_run)
 
     cli_run_dir = Path(run_dir).expanduser().resolve() if run_dir is not None else None
-    cli_mounts = (
-        {str(k): str(Path(v).expanduser().resolve()) for k, v in mounts.items()}
-        if mounts
-        else {}
+    cli_mounts = {
+        str(k): str(Path(v).expanduser().resolve()) for k, v in (mounts or {}).items()
+    }
+    temp_dir_ctx = (
+        tempfile.TemporaryDirectory(prefix="consist_migrate_dryrun_")
+        if dry_run
+        else tempfile.TemporaryDirectory(
+            prefix=f".{src_path.name}.migrate-", dir=str(src_path.parent)
+        )
     )
-
-    temp_dir_ctx: Optional[tempfile.TemporaryDirectory[str]] = None
-    if dry_run:
-        temp_dir_ctx = tempfile.TemporaryDirectory(prefix="consist_migrate_dryrun_")
-        tmp_path = Path(temp_dir_ctx.name) / f"{src_path.name}.v05.tmp"
-    else:
-        tmp_path = Path(f"{src_path}.v05.tmp")
-        if tmp_path.resolve() == src_path or (
-            tmp_path.exists() and os.path.samefile(tmp_path, src_path)
-        ):
-            raise ValueError(f"Temporary migration path {tmp_path} aliases {src_path}.")
-        tmp_path.unlink(missing_ok=True)
-        Path(f"{tmp_path}.wal").unlink(missing_ok=True)
-
     try:
+        tmp_path = Path(temp_dir_ctx.name) / f"{src_path.name}.v05.tmp"
         dst_db = DatabaseManager(str(tmp_path), db_uid=existing_db_uid)
-        global_tables_copied = views_copied = 0
-        artifacts_hashed = artifacts_trusted = artifacts_cold = 0
-
+        views_copied = 0
         try:
             escaped_src = str(src_path).replace("'", "''")
             with dst_db.transaction() as cur:
@@ -699,29 +932,29 @@ def migrate_database(
                             "WHERE database_name = 'v04_src' AND schema_name = 'main' AND NOT internal"
                         ).fetchall()
                     }
-                    for raw_s, raw_t in cur.execute(
-                        "SELECT schema_name, table_name FROM duckdb_tables() "
-                        "WHERE database_name = 'v04_src' AND schema_name != 'main' AND NOT internal"
-                    ).fetchall():
-                        qs, qt = _quote_ident(str(raw_s)), _quote_ident(str(raw_t))
-                        cur.execute(f"CREATE SCHEMA IF NOT EXISTS {qs}")
-                        cur.execute(
-                            f"CREATE TABLE {qs}.{qt} AS SELECT * FROM v04_src.{qs}.{qt}"
-                        )
-                        if str(raw_s) == "global_tables":
-                            global_tables_copied += 1
-
-                    for custom_tbl in sorted(src_tables - _CORE_MAIN_TABLES):
-                        qc = _quote_ident(custom_tbl)
-                        cur.execute(
-                            f"CREATE TABLE main.{qc} AS SELECT * FROM v04_src.main.{qc}"
-                        )
-
-                    _copy_passthrough_tables(
+                    global_tables_copied, src_views = _copy_non_core_tables_and_views(
                         cur, dst_catalog=dst_catalog, src_tables=src_tables
                     )
-                    runs = _load_v04_runs(cur, src_tables)
-                    runs_by_id = {r.id: r for r in runs}
+                    _copy_v04_runs_sql(cur, src_tables)
+
+                    run_rows: list[
+                        tuple[str, str, Optional[str], Optional[str], dict[str, Any]]
+                    ] = []
+                    run_meta_by_id: dict[str, dict[str, Any]] = {}
+                    for r_id, r_status, r_git, r_cfg, r_meta in cur.execute(
+                        "SELECT id, status, git_hash, config_hash, meta FROM main.run"
+                    ).fetchall():
+                        rid, parsed_meta = str(r_id), _parse_json_dict(r_meta)
+                        run_meta_by_id[rid] = parsed_meta
+                        run_rows.append(
+                            (
+                                rid,
+                                str(r_status or "completed"),
+                                str(r_git) if r_git is not None else None,
+                                str(r_cfg) if r_cfg is not None else None,
+                                parsed_meta,
+                            )
+                        )
 
                     raw_links: list[tuple[str, uuid.UUID, str, str, bool]] = []
                     linked_runs_by_art: dict[uuid.UUID, list[str]] = {}
@@ -754,363 +987,83 @@ def migrate_database(
                             if l_rid not in lst:
                                 lst.append(l_rid)
 
-                    content_hash_by_id: dict[str, str] = {}
-                    if "artifact_content" in src_tables:
-                        ac_cols = set(
-                            _table_columns(
-                                cur,
-                                db_alias="v04_src",
-                                schema="main",
-                                table="artifact_content",
-                            )
-                        )
-                        h_col = (
-                            "content_hash"
-                            if "content_hash" in ac_cols
-                            else ("hash" if "hash" in ac_cols else None)
-                        )
-                        if "id" in ac_cols and h_col is not None:
-                            for cid, chash in cur.execute(
-                                f"SELECT id, {_quote_ident(h_col)} FROM v04_src.main.artifact_content"
-                            ).fetchall():
-                                if cid is not None and chash:
-                                    content_hash_by_id[str(cid)] = str(chash)
-
-                    artifact_insert_rows: list[list[Any]] = []
-                    location_rows: list[ArtifactLocationRow] = []
-                    artifacts_by_id: dict[uuid.UUID, _MigratedArtifactInfo] = {}
-
-                    if "artifact" in src_tables:
-                        a_cols = set(
-                            _table_columns(
-                                cur, db_alias="v04_src", schema="main", table="artifact"
-                            )
-                        )
-                        u_expr = (
-                            'COALESCE("container_uri", "uri")'
-                            if {"container_uri", "uri"}.issubset(a_cols)
-                            else (
-                                '"container_uri"'
-                                if "container_uri" in a_cols
-                                else '"uri"'
-                            )
-                        )
-                        a_spec = (
-                            ("id", "NULL"),
-                            ("key", "'artifact'"),
-                            (None, u_expr),
-                            ("driver", "'unknown'"),
-                            ("table_path", "NULL"),
-                            ("array_path", "NULL"),
-                            ("member", "NULL"),
-                            ("hash", "NULL"),
-                            ("digest", "NULL"),
-                            ("content_id", "NULL"),
-                            ("run_id", "NULL"),
-                            ("parent_artifact_id", "NULL"),
-                            ("facet_id", "NULL"),
-                            ("meta", "'{}'"),
-                            ("created_at", "NULL"),
-                        )
-                        a_exprs = [
-                            d if c is None else (_quote_ident(c) if c in a_cols else d)
-                            for c, d in a_spec
-                        ]
-                        raw_artifacts = cur.execute(
-                            f"SELECT {', '.join(a_exprs)} FROM v04_src.main.artifact"
-                        ).fetchall()
-                        obs_base_ns = time.time_ns()
-
-                        def _fs_for_run(
-                            m_run: Optional[_MigratingRun],
-                        ) -> FileSystemManager:
-                            hm: dict[str, str] = {}
-                            hrd: Optional[Path] = None
-                            if m_run is not None:
-                                rm = m_run.meta.get("mounts")
-                                if isinstance(rm, Mapping):
-                                    hm = {
-                                        mk: mv
-                                        for mk, mv in rm.items()
-                                        if isinstance(mk, str) and isinstance(mv, str)
-                                    }
-                                rrd = m_run.meta.get("_physical_run_dir")
-                                if isinstance(rrd, str) and rrd.strip():
-                                    hrd = Path(rrd).expanduser().resolve()
-                            eff_rd = hrd or cli_run_dir or src_path.parent
-                            return FileSystemManager(
-                                run_dir=eff_rd, mounts={**hm, **cli_mounts}
-                            )
-
-                        for a_idx, a_row in enumerate(raw_artifacts):
-                            art_id = _coerce_uuid(a_row[0])
-                            key, uri, driver = (
-                                str(a_row[1]),
-                                str(a_row[2]),
-                                str(a_row[3]),
-                            )
-                            member_val = next(
-                                (
-                                    str(mc)
-                                    for mc in (a_row[4], a_row[5], a_row[6])
-                                    if mc is not None and str(mc).strip()
-                                ),
-                                None,
-                            )
-                            old_hash = next(
-                                (
-                                    str(hc).strip()
-                                    for hc in (a_row[8], a_row[7])
-                                    if hc is not None and str(hc).strip()
-                                ),
-                                None,
-                            )
-                            if old_hash is None and a_row[9] is not None:
-                                old_hash = content_hash_by_id.get(str(a_row[9]))
-
-                            prod_run_id = (
-                                str(a_row[10]) if a_row[10] is not None else None
-                            )
-                            parent_aid = _coerce_optional_uuid(a_row[11])
-                            facet_id = str(a_row[12]) if a_row[12] is not None else None
-                            meta = _parse_json_dict(a_row[13])
-                            created_at = _ensure_non_null_utc_dt(
-                                a_row[14] or datetime.now(timezone.utc)
-                            )
-                            recovery_roots = _extract_recovery_roots(
-                                meta.pop("recovery_roots", None)
-                            )
-                            old_semantics = meta.pop("hash_semantics", None)
-                            meta.pop("content_identity", None)
-
-                            cand_runs: list[_MigratingRun] = []
-                            if prod_run_id and prod_run_id in runs_by_id:
-                                cand_runs.append(runs_by_id[prod_run_id])
-                            for l_rid in linked_runs_by_art.get(art_id, ()):
-                                lr_obj = runs_by_id.get(l_rid)
-                                if lr_obj is not None and lr_obj not in cand_runs:
-                                    cand_runs.append(lr_obj)
-
-                            obs_ns = obs_base_ns + a_idx * 8
-                            fs = _fs_for_run(cand_runs[0] if cand_runs else None)
-                            p_mount, p_inst, p_uri, p_site, primary_cand = (
-                                _probe_uri_on_fs(fs, uri, art_id, member_val, obs_ns)
-                            )
-                            if (
-                                primary_cand is None or not primary_cand.exists()
-                            ) and len(cand_runs) > 1:
-                                for alt_run in cand_runs[1:]:
-                                    alt_fs = _fs_for_run(alt_run)
-                                    am, ai, au, asite, acand = _probe_uri_on_fs(
-                                        alt_fs, uri, art_id, member_val, obs_ns
-                                    )
-                                    if acand is not None and acand.exists():
-                                        fs = alt_fs
-                                        p_mount, p_inst, p_uri, p_site, primary_cand = (
-                                            am,
-                                            ai,
-                                            au,
-                                            asite,
-                                            acand,
-                                        )
-                                        break
-                            if (
-                                (primary_cand is None or not primary_cand.exists())
-                                and cli_run_dir is not None
-                                and cli_run_dir != fs.run_dir
-                                and p_mount in ("workspace", "runs")
-                            ):
-                                cli_fs = FileSystemManager(
-                                    run_dir=cli_run_dir,
-                                    mounts={**fs.mounts, **cli_mounts},
-                                )
-                                am, ai, au, _asite, acand = _probe_uri_on_fs(
-                                    cli_fs, uri, art_id, member_val, obs_ns
-                                )
-                                if acand is not None and acand.exists():
-                                    p_mount, p_inst, p_uri, primary_cand = (
-                                        am,
-                                        ai,
-                                        au,
-                                        acand,
-                                    )
-
-                            recovery_coords: list[
-                                tuple[str, str, str, Optional[Path]]
-                            ] = []
-                            for r_root in recovery_roots:
-                                rm_name, rm_inst, rm_uri, rm_target = (
-                                    fs.archive_coordinate_for_root(uri, r_root)
-                                )
-                                rm_cand = (
-                                    None
-                                    if str(rm_target).startswith("/__unmounted__/")
-                                    else rm_target
-                                )
-                                recovery_coords.append(
-                                    (rm_name, rm_inst, rm_uri, rm_cand)
-                                )
-
-                            existing_cands = [
-                                c
-                                for c in (
-                                    primary_cand,
-                                    *(rc for _, _, _, rc in recovery_coords),
-                                )
-                                if c is not None and c.exists()
-                            ]
-                            resolved_digest: Optional[Digest] = None
-                            if existing_cands:
-                                first_cand = existing_cands[0]
-                                if trust_v04_hashes:
-                                    resolved_digest = _try_trust_v04_digest(
-                                        old_hash=old_hash,
-                                        old_semantics=old_semantics,
-                                        driver=driver,
-                                        member=member_val,
-                                        candidate_path=first_cand,
-                                        meta=meta,
-                                    )
-                                    if resolved_digest is not None:
-                                        artifacts_trusted += 1
-                                if resolved_digest is None:
-                                    resolved_digest = _compute_migrated_digest(
-                                        first_cand,
-                                        driver=driver,
-                                        member=member_val,
-                                        meta=meta,
-                                    )
-                                    artifacts_hashed += 1
-                            else:
-                                artifacts_cold += 1
-                                if old_hash:
-                                    meta["legacy_v04_hash"] = old_hash
-
-                            digest_str = (
-                                str(resolved_digest)
-                                if resolved_digest is not None
-                                else None
-                            )
-                            primary_witness = (
-                                _capture_location_witness(
-                                    primary_cand,
-                                    driver=driver,
-                                    meta=meta,
-                                    observed_at_ns=obs_ns,
-                                )
-                                if (primary_cand is not None and primary_cand.exists())
-                                else None
-                            )
-                            location_rows.append(
-                                ArtifactLocationRow.create(
-                                    digest=digest_str,
-                                    artifact_id=art_id,
-                                    site=p_site,
-                                    mount_name=p_mount,
-                                    mount_instance_id=p_inst,
-                                    uri=p_uri,
-                                    member=member_val or "",
-                                    witness=primary_witness,
-                                    observed_at_ns=obs_ns,
-                                )
-                            )
-                            for r_idx, (rm_name, rm_inst, rm_uri, rm_cand) in enumerate(
-                                recovery_coords, start=1
-                            ):
-                                rec_exists = rm_cand is not None and rm_cand.exists()
-                                rec_witness = (
-                                    _capture_location_witness(
-                                        rm_cand,
-                                        driver=driver,
-                                        meta=meta,
-                                        observed_at_ns=obs_ns + r_idx,
-                                    )
-                                    if (rec_exists and rm_cand is not None)
-                                    else None
-                                )
-                                location_rows.append(
-                                    ArtifactLocationRow.create(
-                                        digest=digest_str,
-                                        artifact_id=art_id,
-                                        site="archive" if rec_exists else "advisory",
-                                        mount_name=rm_name,
-                                        mount_instance_id=rm_inst,
-                                        uri=rm_uri,
-                                        member=member_val or "",
-                                        witness=rec_witness,
-                                        observed_at_ns=obs_ns + r_idx,
-                                    )
-                                )
-
-                            artifact_insert_rows.append(
-                                [
-                                    art_id,
-                                    key,
-                                    uri,
-                                    driver,
-                                    digest_str,
-                                    member_val,
-                                    prod_run_id,
-                                    parent_aid,
-                                    facet_id,
-                                    _dump_json(meta),
-                                    created_at,
-                                ]
-                            )
-                            artifacts_by_id[art_id] = _MigratedArtifactInfo(
-                                id=art_id,
-                                key=key,
-                                driver=driver,
-                                digest=resolved_digest,
-                                member=member_val,
-                            )
-
-                    if artifact_insert_rows:
-                        _execute_multirow_values(
-                            cur,
-                            prefix_sql=dst_db._ARTIFACT_INSERT_PREFIX,
-                            row_placeholder="(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                            suffix_sql=dst_db._ARTIFACT_UPSERT_SUFFIX,
-                            rows=artifact_insert_rows,
-                        )
-                    if location_rows:
-                        dst_db._upsert_artifact_locations_locked(cur, location_rows)
-
-                    link_insert_rows = _promote_run_identities_and_links(
-                        runs=runs, artifacts_by_id=artifacts_by_id, raw_links=raw_links
+                    (
+                        artifact_insert_rows,
+                        location_rows,
+                        artifacts_by_id,
+                        (artifacts_hashed, artifacts_trusted, artifacts_cold),
+                    ) = _migrate_artifacts_and_locations(
+                        cur,
+                        src_tables=src_tables,
+                        run_meta_by_id=run_meta_by_id,
+                        linked_runs_by_art=linked_runs_by_art,
+                        src_path=src_path,
+                        cli_run_dir=cli_run_dir,
+                        cli_mounts=cli_mounts,
+                        trust_v04_hashes=trust_v04_hashes,
                     )
-                    if runs:
-                        _execute_multirow_values(
-                            cur,
-                            prefix_sql=(
-                                "INSERT INTO run (id, parent_run_id, status, model_name, "
-                                "description, year, iteration, stage, phase, tags, "
-                                "config_hash, git_hash, input_hash, signature, cacheable, "
-                                "facet_id, meta, started_at, ended_at, created_at, updated_at) VALUES"
-                            ),
-                            row_placeholder="(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                            suffix_sql="ON CONFLICT (id) DO NOTHING",
-                            rows=[r.to_insert_row() for r in runs],
-                        )
-                    if link_insert_rows:
-                        _execute_multirow_values(
-                            cur,
-                            prefix_sql=(
-                                "INSERT INTO run_artifact_link "
-                                "(run_id, artifact_id, direction, role, is_implicit) VALUES"
-                            ),
-                            row_placeholder="(?, ?, ?, ?, ?)",
-                            suffix_sql="ON CONFLICT (run_id, artifact_id, direction, role) DO NOTHING",
-                            rows=link_insert_rows,
-                        )
-
-                    src_views = cur.execute(
-                        "SELECT schema_name, view_name, sql FROM duckdb_views() "
-                        "WHERE database_name = 'v04_src' AND NOT internal "
-                        "AND view_name NOT IN ('consist_schema_links')"
-                    ).fetchall()
                 finally:
                     cur.execute("DETACH v04_src")
+
+                if artifact_insert_rows:
+                    _execute_multirow_values(
+                        cur,
+                        prefix_sql=dst_db._ARTIFACT_INSERT_PREFIX,
+                        row_placeholder="(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        suffix_sql=dst_db._ARTIFACT_UPSERT_SUFFIX,
+                        rows=artifact_insert_rows,
+                    )
+                if location_rows:
+                    dst_db._upsert_artifact_locations_locked(cur, location_rows)
+
+                invocations_by_exec_run: dict[str, list[tuple[uuid.UUID, str]]] = {}
+                for inv_id, exec_rid, b_json in cur.execute(
+                    "SELECT id, execution_run_id, binding_json FROM main.run_binding_invocation"
+                ).fetchall():
+                    if exec_rid and b_json:
+                        invocations_by_exec_run.setdefault(str(exec_rid), []).append(
+                            (_coerce_uuid(inv_id), str(b_json))
+                        )
+
+                link_rows, run_updates, inv_updates = _promote_run_identities_and_links(
+                    run_rows=run_rows,
+                    artifacts_by_id=artifacts_by_id,
+                    raw_links=raw_links,
+                    invocations_by_exec_run=invocations_by_exec_run,
+                )
+                if run_updates:
+                    _execute_multirow_values(
+                        cur,
+                        prefix_sql=(
+                            "UPDATE main.run AS r SET input_hash = v.in_h, signature = v.sig, "
+                            "cacheable = v.cacheable, meta = CAST(v.meta AS JSON) FROM (VALUES"
+                        ),
+                        row_placeholder="(CAST(? AS VARCHAR), CAST(? AS VARCHAR), CAST(? AS BOOLEAN), CAST(? AS VARCHAR), CAST(? AS VARCHAR))",
+                        suffix_sql=") AS v(in_h, sig, cacheable, meta, rid) WHERE r.id = v.rid",
+                        rows=run_updates,
+                    )
+                if inv_updates:
+                    _execute_multirow_values(
+                        cur,
+                        prefix_sql=(
+                            "UPDATE main.run_binding_invocation AS rbi SET "
+                            "binding_json = v.bjson FROM (VALUES"
+                        ),
+                        row_placeholder="(CAST(? AS VARCHAR), CAST(? AS UUID))",
+                        suffix_sql=") AS v(bjson, iid) WHERE rbi.id = v.iid",
+                        rows=inv_updates,
+                    )
+                if link_rows:
+                    _execute_multirow_values(
+                        cur,
+                        prefix_sql=(
+                            "INSERT INTO run_artifact_link "
+                            "(run_id, artifact_id, direction, role, is_implicit) VALUES"
+                        ),
+                        row_placeholder="(?, ?, ?, ?, ?)",
+                        suffix_sql="ON CONFLICT (run_id, artifact_id, direction, role) DO NOTHING",
+                        rows=link_rows,
+                    )
 
                 for v_schema, _v_name, v_sql in src_views:
                     if not v_sql:
@@ -1133,28 +1086,15 @@ def migrate_database(
         finally:
             dst_db.close()
 
-        cacheable_count = sum(1 for r in runs if r.cacheable)
-        bak_path: Optional[Path] = None
-        if not dry_run:
-            bak_path = Path(f"{src_path}.v04.bak")
-            src_wal = Path(f"{src_path}.wal")
-            bak_wal = Path(f"{bak_path}.wal")
-            bak_wal.unlink(missing_ok=True)
-            os.replace(src_path, bak_path)
-            if src_wal.exists():
-                os.replace(src_wal, bak_wal)
-            os.replace(tmp_path, src_path)
-            tmp_wal = Path(f"{tmp_path}.wal")
-            if tmp_wal.exists():
-                os.replace(tmp_wal, src_wal)
-
+        bak_path = None if dry_run else _atomic_swap_duckdb_files(src_path, tmp_path)
+        cacheable_count = len(run_updates)
         return MigrationReport(
             db_path=src_path,
             backup_path=bak_path,
             dry_run=dry_run,
-            runs_migrated=len(runs),
+            runs_migrated=len(run_rows),
             cacheable_runs=cacheable_count,
-            uncacheable_runs=len(runs) - cacheable_count,
+            uncacheable_runs=len(run_rows) - cacheable_count,
             artifacts_migrated=len(artifact_insert_rows),
             artifacts_hashed=artifacts_hashed,
             artifacts_trusted=artifacts_trusted,
@@ -1164,8 +1104,7 @@ def migrate_database(
             views_copied=views_copied,
         )
     finally:
-        if temp_dir_ctx is not None:
-            temp_dir_ctx.cleanup()
+        temp_dir_ctx.cleanup()
 
 
 def undo_migrate_database(db_path: str | os.PathLike[str]) -> Path:
@@ -1176,8 +1115,7 @@ def undo_migrate_database(db_path: str | os.PathLike[str]) -> Path:
         raise FileNotFoundError(
             f"Backup database not found: {bak_path}. Cannot undo migration."
         )
-    target_wal = Path(f"{target}.wal")
-    bak_wal = Path(f"{bak_path}.wal")
+    target_wal, bak_wal = Path(f"{target}.wal"), Path(f"{bak_path}.wal")
     target_wal.unlink(missing_ok=True)
     os.replace(bak_path, target)
     if bak_wal.exists():

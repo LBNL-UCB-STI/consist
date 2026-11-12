@@ -56,6 +56,11 @@ from consist.core.drivers import (
     _normalize_columns,
 )
 from consist.core.gtfs import GTFS_BUNDLE_SOURCE_KEY, GtfsCanonicalizationResult
+from consist.core.migrate import (
+    MigrationReport as MigrationReport,
+    migrate_database as migrate_database,
+    undo_migrate_database as undo_migrate_database,
+)
 from consist.core.noop import NoopRunContext, NoopScenarioContext
 from consist.core.persistence import (
     close_tracked_relation_tokens,
@@ -1826,10 +1831,13 @@ def evict_artifact(
     artifact: Artifact,
     *,
     path: Optional[str | Path] = None,
+    scratch_path: Optional[str | Path] = None,
     tracker: Optional["Tracker"] = None,
 ) -> Path:
     """Safely evict a verified local scratch copy when an archive or ingested table survives."""
-    return _resolve_tracker(tracker).evict_artifact(artifact, path=path)
+    return _resolve_tracker(tracker).evict_artifact(
+        artifact, path=path, scratch_path=scratch_path
+    )
 
 
 def archive_run_outputs(
@@ -3434,32 +3442,42 @@ def load(
             )
 
         if db_fallback == "inputs-only":
-            if not tracker or not tracker.current_consist:
-                raise FileNotFoundError(
-                    f"Artifact '{artifact.key}' (ID: {artifact.id}) not found.\n"
-                    f" - Disk Path: {path} (Missing)\n"
-                    f" - Database: Ingested, but no active run context\n"
-                    f"Hint: call consist.load(...) within a tracker.start_run(..., inputs=[...]) context, "
-                    f"or pass db_fallback='always'."
+            evicted_to_db = (
+                isinstance(tracker, Tracker)
+                and tracker.db is not None
+                and tracker.db.has_evicted_artifact_location(
+                    artifact_id=artifact.id,
+                    digest=artifact.digest,
+                    member=artifact.member,
                 )
-            if tracker.is_cached:
-                raise FileNotFoundError(
-                    f"Artifact '{artifact.key}' (ID: {artifact.id}) not found.\n"
-                    f" - Disk Path: {path} (Missing)\n"
-                    f" - Database: Ingested, but current run is a cache hit\n"
-                    f"Hint: pass db_fallback='always' if you explicitly want DB recovery here."
-                )
-            is_declared_input = any(
-                (a.id == artifact.id) or (a.uri == artifact.uri)
-                for a in tracker.current_consist.inputs
             )
-            if not is_declared_input:
-                raise FileNotFoundError(
-                    f"Artifact '{artifact.key}' (ID: {artifact.id}) not found.\n"
-                    f" - Disk Path: {path} (Missing)\n"
-                    f" - Database: Ingested, but artifact is not a declared input to the active run\n"
-                    f"Hint: add it to inputs=[...] when starting the run, or pass db_fallback='always'."
+            if not evicted_to_db:
+                if not tracker or not tracker.current_consist:
+                    raise FileNotFoundError(
+                        f"Artifact '{artifact.key}' (ID: {artifact.id}) not found.\n"
+                        f" - Disk Path: {path} (Missing)\n"
+                        f" - Database: Ingested, but no active run context\n"
+                        f"Hint: call consist.load(...) within a tracker.start_run(..., inputs=[...]) context, "
+                        f"or pass db_fallback='always'."
+                    )
+                if tracker.is_cached:
+                    raise FileNotFoundError(
+                        f"Artifact '{artifact.key}' (ID: {artifact.id}) not found.\n"
+                        f" - Disk Path: {path} (Missing)\n"
+                        f" - Database: Ingested, but current run is a cache hit\n"
+                        f"Hint: pass db_fallback='always' if you explicitly want DB recovery here."
+                    )
+                is_declared_input = any(
+                    (a.id == artifact.id) or (a.uri == artifact.uri)
+                    for a in tracker.current_consist.inputs
                 )
+                if not is_declared_input:
+                    raise FileNotFoundError(
+                        f"Artifact '{artifact.key}' (ID: {artifact.id}) not found.\n"
+                        f" - Disk Path: {path} (Missing)\n"
+                        f" - Database: Ingested, but artifact is not a declared input to the active run\n"
+                        f"Hint: add it to inputs=[...] when starting the run, or pass db_fallback='always'."
+                    )
 
         if not tracker or get_hot_data_db_path(tracker) is None:
             raise RuntimeError(

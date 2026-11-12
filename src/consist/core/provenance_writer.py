@@ -1,17 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 from contextlib import contextmanager
-import inspect
+import json
 import logging
 import os
 from pathlib import Path
 import tempfile
 import time
-import types
 from typing import (
     Any,
-    Callable,
     Dict,
     Iterator,
     List,
@@ -22,7 +19,8 @@ from typing import (
 import uuid
 
 from consist.core._performance_attribution import _track_begin_run_phase
-from consist.location import ArtifactLocationRow, LocationSite, capture_witness
+from consist.core.fs import build_verified_location_row
+from consist.location import ArtifactLocationRow
 from consist.models.artifact_facet import ArtifactFacet
 from consist.models.artifact_kv import ArtifactKV
 
@@ -33,15 +31,9 @@ if TYPE_CHECKING:
     from consist.models.run import Run as RunModel
 
 
-def _accepts_locations_kwarg(fn: Callable[..., Any]) -> bool:
-    if isinstance(fn, types.MethodType):
-        return True
-    try:
-        params = inspect.signature(fn).parameters
-    except (TypeError, ValueError):
-        return False
-    return "locations" in params or any(
-        p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+def safe_snapshot_run_id(run_id: str) -> str:
+    return "".join(
+        c if (c.isalnum() or c in ("-", "_", ".")) else "_" for c in str(run_id)
     )
 
 
@@ -130,10 +122,7 @@ class ProvenanceWriter:
         tracker = self._tracker
         json_str = record.model_dump_json(indent=2)
 
-        run_id = record.run.id
-        safe_run_id = "".join(
-            c if (c.isalnum() or c in ("-", "_", ".")) else "_" for c in run_id
-        )
+        safe_run_id = safe_snapshot_run_id(record.run.id)
 
         per_run_dir = tracker.fs.run_dir / "consist_runs"
         per_run_dir.mkdir(parents=True, exist_ok=True)
@@ -208,13 +197,65 @@ class ProvenanceWriter:
                 if require_success:
                     raise
 
+    def persist_snapshot_recovery_roots(
+        self,
+        roots_by_run_and_artifact: Dict[str, Dict[uuid.UUID, Sequence[str]]],
+    ) -> None:
+        """Persist post-run recovery roots to ``consist_runs/<run>.locations.json`` when snapshot exists."""
+        per_run_dir = self._tracker.fs.run_dir / "consist_runs"
+        if not per_run_dir.is_dir():
+            return
+        for run_id, by_aid in roots_by_run_and_artifact.items():
+            if not run_id or not by_aid:
+                continue
+            safe_id = safe_snapshot_run_id(run_id)
+            snap_file = per_run_dir / f"{safe_id}.json"
+            if not snap_file.is_file():
+                continue
+            sidecar = per_run_dir / f"{safe_id}.locations.json"
+            existing: dict[str, list[str]] = {}
+            if sidecar.is_file():
+                try:
+                    loaded = json.loads(sidecar.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict) and isinstance(
+                        loaded.get("recovery_roots_by_artifact_id"), dict
+                    ):
+                        existing = {
+                            str(k): [str(x) for x in v]
+                            for k, v in loaded["recovery_roots_by_artifact_id"].items()
+                            if isinstance(v, list)
+                        }
+                except (OSError, ValueError):
+                    existing = {}
+            for aid, roots in by_aid.items():
+                aid_key = str(aid)
+                if roots:
+                    existing[aid_key] = list(roots)
+                else:
+                    existing.pop(aid_key, None)
+            try:
+                self._write_text_atomic(
+                    sidecar,
+                    json.dumps(
+                        {"version": 1, "recovery_roots_by_artifact_id": existing},
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                )
+            except OSError:
+                continue
+
     def _build_artifact_location_rows(
         self,
         artifact: "Artifact",
         *,
+        direction: str = "output",
         recovery_roots: Optional[Sequence[str]] = None,
     ) -> list[ArtifactLocationRow]:
         tracker = self._tracker
+        db = tracker.db
+        if db is not None:
+            db.sync_location_epoch_caches()
         rows: list[ArtifactLocationRow] = []
         local_path: Optional[Path] = (
             Path(artifact._abs_path) if artifact._abs_path else None
@@ -232,76 +273,38 @@ class ProvenanceWriter:
             except OSError:
                 path_exists = False
             if path_exists:
-                mount_name, mount_instance_id, canonical_uri = (
-                    tracker.fs.location_coordinate_for_uri(artifact.uri)
+                loc = build_verified_location_row(
+                    tracker.fs, artifact, local_path=local_path
                 )
-                site: LocationSite = (
-                    "workspace" if mount_name in ("workspace", "runs") else "external"
-                )
-                meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
-                is_dir = bool(
-                    meta.get("directory_artifact") is True
-                    or meta.get("artifact_set") is True
-                    or artifact.driver in ("zarr", "directory", "artifact_set")
-                )
-                is_shp = bool(
-                    meta.get("file_bundle_artifact") is True
-                    or artifact.driver == "shapefile"
-                )
-                raw_entry = meta.get("file_bundle_entry")
-                bundle_entry = str(raw_entry) if isinstance(raw_entry, str) else None
-                obs_ns = time.time_ns()
-                try:
-                    witness = capture_witness(
-                        local_path,
-                        observed_at_ns=obs_ns,
-                        driver=artifact.driver,
-                        is_directory=is_dir,
-                        is_shapefile_bundle=is_shp,
-                        bundle_entry=bundle_entry,
+                skip_unchanged = False
+                if direction == "input" and db is not None:
+                    coord = (
+                        loc.site,
+                        loc.mount_name,
+                        loc.mount_instance_id,
+                        loc.uri,
+                        loc.member,
                     )
-                except (OSError, ValueError):
-                    witness = None
-                rows.append(
-                    ArtifactLocationRow.create(
-                        digest=(
-                            str(artifact.digest)
-                            if artifact.digest is not None
-                            else None
-                        ),
-                        artifact_id=artifact.id,
-                        site=site,
-                        mount_name=mount_name,
-                        mount_instance_id=mount_instance_id,
-                        uri=canonical_uri,
-                        member=artifact.member or "",
-                        status="active",
-                        witness=witness,
-                        observed_at_ns=obs_ns,
-                    )
-                )
+                    cached = db._active_coord_witness.get(coord)
+                    if (
+                        cached is not None
+                        and cached[0] == loc.digest
+                        and db._witness_matches_or_settled(cached[1], loc.witness)
+                    ):
+                        skip_unchanged = True
+                if not skip_unchanged:
+                    rows.append(loc)
 
         if recovery_roots:
             base_ns = time.time_ns()
             for idx, root in enumerate(recovery_roots):
-                m_name, m_inst, r_uri, _ = tracker.fs.archive_coordinate_for_root(
-                    artifact.uri, root
-                )
                 rows.append(
-                    ArtifactLocationRow.create(
-                        digest=(
-                            str(artifact.digest)
-                            if artifact.digest is not None
-                            else None
-                        ),
-                        artifact_id=artifact.id,
+                    build_verified_location_row(
+                        tracker.fs,
+                        artifact,
+                        archive_root=root,
                         site="advisory",
-                        mount_name=m_name,
-                        mount_instance_id=m_inst,
-                        uri=r_uri,
-                        member=artifact.member or "",
-                        status="active",
-                        witness=None,
+                        capture_local_witness=False,
                         observed_at_ns=base_ns + idx,
                     )
                 )
@@ -324,25 +327,16 @@ class ProvenanceWriter:
         tracker = self._tracker
         if tracker.db and tracker.current_consist:
             try:
-                sync_fn = tracker.db.sync_artifact
-                if _accepts_locations_kwarg(sync_fn):
-                    locations = self._build_artifact_location_rows(
-                        artifact, recovery_roots=roots_tuple
-                    )
-                    sync_fn(
-                        artifact,
-                        tracker.current_consist.run.id,
-                        direction,
-                        profile_label=profile_label,
-                        locations=locations or None,
-                    )
-                else:
-                    sync_fn(
-                        artifact,
-                        tracker.current_consist.run.id,
-                        direction,
-                        profile_label=profile_label,
-                    )
+                locations = self._build_artifact_location_rows(
+                    artifact, direction=direction, recovery_roots=roots_tuple
+                )
+                tracker.db.sync_artifact(
+                    artifact,
+                    tracker.current_consist.run.id,
+                    direction,
+                    profile_label=profile_label,
+                    locations=locations or None,
+                )
             except Exception as e:
                 logging.warning("Database sync failed: %s", e)
 
@@ -372,27 +366,17 @@ class ProvenanceWriter:
         tracker = self._tracker
         if tracker.db and tracker.current_consist:
             try:
-                sync_fn = tracker.db.sync_artifact_with_facet_bundle
-                if _accepts_locations_kwarg(sync_fn):
-                    locations = self._build_artifact_location_rows(
-                        updated_artifact, recovery_roots=roots_tuple
-                    )
-                    return sync_fn(
-                        artifact,
-                        tracker.current_consist.run.id,
-                        direction,
-                        facet=facet,
-                        meta_updates=meta_updates,
-                        kv_rows=kv_rows,
-                        locations=locations or None,
-                    )
-                return sync_fn(
+                locations = self._build_artifact_location_rows(
+                    updated_artifact, direction=direction, recovery_roots=roots_tuple
+                )
+                return tracker.db.sync_artifact_with_facet_bundle(
                     artifact,
                     tracker.current_consist.run.id,
                     direction,
                     facet=facet,
                     meta_updates=meta_updates,
                     kv_rows=kv_rows,
+                    locations=locations or None,
                 )
             except Exception as e:
                 logging.warning("Database sync failed: %s", e)
@@ -420,27 +404,19 @@ class ProvenanceWriter:
         for direction, items in artifacts_by_direction.items():
             try:
                 artifacts = [art for art, _ in items]
-                sync_fn = tracker.db.sync_artifacts
-                if _accepts_locations_kwarg(sync_fn):
-                    locations: list[ArtifactLocationRow] = []
-                    for art, roots_tuple in items:
-                        locations.extend(
-                            self._build_artifact_location_rows(
-                                art, recovery_roots=roots_tuple
-                            )
+                locations: list[ArtifactLocationRow] = []
+                for art, roots_tuple in items:
+                    locations.extend(
+                        self._build_artifact_location_rows(
+                            art, direction=direction, recovery_roots=roots_tuple
                         )
-                    sync_fn(
-                        artifacts=artifacts,
-                        run_id=run_id,
-                        direction=direction,
-                        locations=locations or None,
                     )
-                else:
-                    sync_fn(
-                        artifacts=artifacts,
-                        run_id=run_id,
-                        direction=direction,
-                    )
+                tracker.db.sync_artifacts(
+                    artifacts=artifacts,
+                    run_id=run_id,
+                    direction=direction,
+                    locations=locations or None,
+                )
             except Exception as e:
                 logging.warning("Database sync failed: %s", e)
 

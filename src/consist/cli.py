@@ -5952,6 +5952,7 @@ def migrate_cmd(
     ),
     mount: Optional[List[str]] = typer.Option(
         None,
+        "--mounts",
         "--mount",
         help="Mount mapping NAME=PATH (repeatable) for resolving mounted URIs.",
     ),
