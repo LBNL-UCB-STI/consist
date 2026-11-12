@@ -39,8 +39,9 @@ def model_table_name(
 def model_table_schema(model_cls: type[BaseModel], *, default: str = "main") -> str:
     """Return SQL schema from ``__table__`` or ``__table_args__``, else ``default``."""
     if isinstance(model_cls, type) and issubclass(model_cls, SQLModel):
+        cls_any: Any = model_cls
         try:
-            table_obj = model_cls.__table__  # type: ignore[attr-defined]
+            table_obj = cls_any.__table__
         except AttributeError:
             table_obj = None
         if (
@@ -51,7 +52,7 @@ def model_table_schema(model_cls: type[BaseModel], *, default: str = "main") -> 
             return table_obj.schema
 
         try:
-            raw_ta = model_cls.__table_args__  # type: ignore[attr-defined]
+            raw_ta = cls_any.__table_args__
         except AttributeError:
             raw_ta = None
         if isinstance(raw_ta, Mapping):
@@ -71,8 +72,9 @@ def is_additive_schema_model(model_cls: type[BaseModel] | None) -> bool:
     """Return True when ``model_cls`` sets ``__consist_additive_schema__ = True``."""
     if model_cls is None:
         return False
+    cls_any: Any = model_cls
     try:
-        return bool(model_cls.__consist_additive_schema__)  # type: ignore[attr-defined]
+        return bool(cls_any.__consist_additive_schema__)
     except AttributeError:
         return False
 

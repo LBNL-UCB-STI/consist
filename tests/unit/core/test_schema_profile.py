@@ -52,8 +52,24 @@ def test_get_artifact_filters_key_lookup_by_run_id(tracker):
         created_at=now + timedelta(seconds=1),
     )
 
-    tracker.db.sync_run(Run(id="run_a", model_name="demo", status="completed"))
-    tracker.db.sync_run(Run(id="run_b", model_name="demo", status="completed"))
+    tracker.db.sync_run(
+        Run(
+            id="run_a",
+            model_name="demo",
+            config_hash=None,
+            git_hash=None,
+            status="completed",
+        )
+    )
+    tracker.db.sync_run(
+        Run(
+            id="run_b",
+            model_name="demo",
+            config_hash=None,
+            git_hash=None,
+            status="completed",
+        )
+    )
     tracker.db.sync_artifact(artifact_run_a, run_id="run_a", direction="input")
     tracker.db.sync_artifact(artifact_run_b, run_id="run_b", direction="output")
 

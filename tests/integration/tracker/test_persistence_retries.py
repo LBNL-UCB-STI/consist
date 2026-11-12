@@ -52,6 +52,8 @@ def test_sync_run_with_facet_bundle_replaces_kv_rows_idempotently(tmp_path) -> N
         run = Run(
             id="run_1",
             model_name="model",
+            config_hash=None,
+            git_hash=None,
             status="completed",
             created_at=now,
             started_at=now,

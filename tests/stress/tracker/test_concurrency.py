@@ -89,6 +89,8 @@ def test_multithread_shared_tracker_concurrency(tmp_path: Path):
             run = Run(
                 id=run_id,
                 model_name="mt_stress_test",
+                config_hash=None,
+                git_hash=None,
                 status="completed",
             )
             assert tracker.db is not None

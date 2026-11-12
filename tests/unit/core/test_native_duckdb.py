@@ -107,12 +107,28 @@ def test_poison_safe_reentrant_transaction_rolls_back_when_inner_caught(
     try:
         # Nested visibility inside active transaction
         with db.transaction() as outer_cur:
-            db.sync_run(Run(id="outer_ok", model_name="demo", status="completed"))
+            db.sync_run(
+                Run(
+                    id="outer_ok",
+                    model_name="demo",
+                    config_hash=None,
+                    git_hash=None,
+                    status="completed",
+                )
+            )
             with db.transaction() as inner_cur:
                 assert inner_cur is outer_cur
                 visible = db.get_run("outer_ok")
                 assert visible is not None
-                db.sync_run(Run(id="inner_ok", model_name="demo", status="completed"))
+                db.sync_run(
+                    Run(
+                        id="inner_ok",
+                        model_name="demo",
+                        config_hash=None,
+                        git_hash=None,
+                        status="completed",
+                    )
+                )
 
         assert db.get_run("outer_ok") is not None
         assert db.get_run("inner_ok") is not None
@@ -121,7 +137,13 @@ def test_poison_safe_reentrant_transaction_rolls_back_when_inner_caught(
         with pytest.raises(TransactionAbortedError):
             with db.transaction():
                 db.sync_run(
-                    Run(id="must_rollback", model_name="demo", status="completed")
+                    Run(
+                        id="must_rollback",
+                        model_name="demo",
+                        config_hash=None,
+                        git_hash=None,
+                        status="completed",
+                    )
                 )
                 try:
                     with db.transaction():
@@ -129,6 +151,8 @@ def test_poison_safe_reentrant_transaction_rolls_back_when_inner_caught(
                             Run(
                                 id="inner_boom_row",
                                 model_name="demo",
+                                config_hash=None,
+                                git_hash=None,
                                 status="completed",
                             )
                         )
@@ -312,7 +336,15 @@ def test_b2_export_rejects_self_symlink_and_hardlink_before_unlink(
     db = DatabaseManager(str(db_path))
     maint = DatabaseMaintenance(db, run_dir=tmp_path / "runs")
     try:
-        db.sync_run(Run(id="r1", model_name="demo", status="completed"))
+        db.sync_run(
+            Run(
+                id="r1",
+                model_name="demo",
+                config_hash=None,
+                git_hash=None,
+                status="completed",
+            )
+        )
         symlink_target = tmp_path / "b2_symlink.duckdb"
         symlink_target.symlink_to(db_path)
         hardlink_target = tmp_path / "b2_hardlink.duckdb"
@@ -345,8 +377,24 @@ def test_b3_purge_preserves_shared_containers_unmounted_uris_and_surviving_coupl
 
     db = DatabaseManager(str(db_path))
     try:
-        db.sync_run(Run(id="purge_run", model_name="demo", status="completed"))
-        db.sync_run(Run(id="survive_run", model_name="demo", status="completed"))
+        db.sync_run(
+            Run(
+                id="purge_run",
+                model_name="demo",
+                config_hash=None,
+                git_hash=None,
+                status="completed",
+            )
+        )
+        db.sync_run(
+            Run(
+                id="survive_run",
+                model_name="demo",
+                config_hash=None,
+                git_hash=None,
+                status="completed",
+            )
+        )
 
         art_h5_purge = Artifact(
             key="h5_member_a",
@@ -442,6 +490,8 @@ def test_b14_find_runs_coerces_numpy_scalars_and_pushes_down_sql_limit(
                 Run(
                     id=f"run_{idx}",
                     model_name="sim",
+                    config_hash=None,
+                    git_hash=None,
                     status="completed",
                     meta={"step": 3, "ratio": 0.5, "idx": idx},
                 )
@@ -450,6 +500,8 @@ def test_b14_find_runs_coerces_numpy_scalars_and_pushes_down_sql_limit(
             Run(
                 id="run_other",
                 model_name="sim",
+                config_hash=None,
+                git_hash=None,
                 status="completed",
                 meta={"step": 9, "ratio": 0.25},
             )
@@ -499,7 +551,9 @@ def test_b16_readonly_temp_views_str_config_query_null_artifact_id_fallback_and_
         assert list(nc_df.iloc[0]["shape"]) == []
 
         # Verify consist.to_df(consist.load(art).limit(2), close=True) closes root tracked cursor
-        chained_rel = consist.load(pq_art, tracker=writer).limit(2)
+        loaded_rel = consist.load(pq_art, tracker=writer)
+        assert isinstance(loaded_rel, duckdb.DuckDBPyRelation)
+        chained_rel = loaded_rel.limit(2)
         assert consist.active_relation_count() == 1
         df_limited = consist.to_df(chained_rel, close=True)
         assert len(df_limited) == 2
@@ -545,7 +599,12 @@ def test_b16_readonly_temp_views_str_config_query_null_artifact_id_fallback_and_
             # Seed hot tables with consist_artifact_id IS NULL (consist_run_id fallback)
             # across hybrid views, netcdf_views, spatial_views, and openmatrix_views
             hot_only_run = Run(
-                id="run_null_art", model_name="demo", status="completed", year=2035
+                id="run_null_art",
+                model_name="demo",
+                config_hash=None,
+                git_hash=None,
+                status="completed",
+                year=2035,
             )
             writer.db.sync_run(hot_only_run)
             for key, driver in (
@@ -758,7 +817,15 @@ def test_coexisting_readonly_and_writable_managers_suspend_all_for_subprocess(
 ) -> None:
     db_path = tmp_path / "coexist.duckdb"
     seed = DatabaseManager(str(db_path))
-    seed.upsert_run(Run(id="seed_r", model_name="m", status="completed"))
+    seed.upsert_run(
+        Run(
+            id="seed_r",
+            model_name="m",
+            config_hash=None,
+            git_hash=None,
+            status="completed",
+        )
+    )
     seed.close()
 
     # Order 1: read_only opened BEFORE writable in the same OS process
@@ -1021,7 +1088,14 @@ def test_relation_query_in_active_and_poisoned_tx_and_borrow_for_dlt_aborted_tx_
     try:
         with db.transaction() as cur:
             db._upsert_run_locked(
-                cur, Run(id="uncommitted_r", model_name="m", status="running")
+                cur,
+                Run(
+                    id="uncommitted_r",
+                    model_name="m",
+                    config_hash=None,
+                    git_hash=None,
+                    status="running",
+                ),
             )
             rel = db.relation_query(
                 "SELECT id FROM run WHERE id = ?", ["uncommitted_r"]
@@ -1047,7 +1121,15 @@ def test_relation_query_in_active_and_poisoned_tx_and_borrow_for_dlt_aborted_tx_
                 conn.execute("SELECT * FROM missing_dlt_staging_table")
 
         # Connection must be cleanly rolled back and usable after aborted dlt tx
-        db.upsert_run(Run(id="after_dlt_abort", model_name="m", status="completed"))
+        db.upsert_run(
+            Run(
+                id="after_dlt_abort",
+                model_name="m",
+                config_hash=None,
+                git_hash=None,
+                status="completed",
+            )
+        )
         assert db.get_run("after_dlt_abort") is not None
     finally:
         db.close()
@@ -1182,6 +1264,8 @@ def test_cache_lookup_uses_art_index_scan_nested_metadata_pushdown_and_signature
             Run(
                 id="meta_exact",
                 model_name="meta_m",
+                config_hash=None,
+                git_hash=None,
                 status="completed",
                 meta={"nested": {"b": [2, 3], "a": 1, "n": None}},
             )
@@ -1190,6 +1274,8 @@ def test_cache_lookup_uses_art_index_scan_nested_metadata_pushdown_and_signature
             Run(
                 id="meta_wrong_order",
                 model_name="meta_m",
+                config_hash=None,
+                git_hash=None,
                 status="completed",
                 meta={"nested": {"a": 1, "b": [3, 2], "n": None}},
             )
@@ -1198,6 +1284,8 @@ def test_cache_lookup_uses_art_index_scan_nested_metadata_pushdown_and_signature
             Run(
                 id="meta_extra_key",
                 model_name="meta_m",
+                config_hash=None,
+                git_hash=None,
                 status="completed",
                 meta={"nested": {"a": 1, "b": [2, 3], "n": None, "extra": 9}},
             )
@@ -1206,6 +1294,8 @@ def test_cache_lookup_uses_art_index_scan_nested_metadata_pushdown_and_signature
             Run(
                 id="meta_missing_null_key",
                 model_name="meta_m",
+                config_hash=None,
+                git_hash=None,
                 status="completed",
                 meta={"nested": {"a": 1, "b": [2, 3]}},
             )
