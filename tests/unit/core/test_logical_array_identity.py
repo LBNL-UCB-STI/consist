@@ -39,7 +39,6 @@ from consist.core.logical_array_identity import (
     write_artifact_provenance_sidecar,
 )
 from consist.models.artifact import Artifact
-from consist.models.run import RunArtifactLink
 
 
 def _complete_run(tracker, run_id: str) -> None:
@@ -397,17 +396,7 @@ def test_admission_auto_fast_path_and_cross_format_logical_fallback(
             "logical_profile": "preserve_canonical",
         },
     )
-    with tracker.db.session_scope() as session:
-        session.add(prior_artifact)
-        session.add(
-            RunArtifactLink(
-                run_id="producer_run",
-                artifact_id=prior_artifact.id,
-                direction="output",
-            )
-        )
-        session.commit()
-        session.refresh(prior_artifact)
+    tracker.db.sync_artifact(prior_artifact, "producer_run", "output")
 
     expectation = PriorRunExpectation.from_artifact(
         prior_artifact,

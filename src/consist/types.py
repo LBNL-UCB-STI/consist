@@ -21,14 +21,13 @@ from typing import (
     Iterable,
     Mapping,
     Optional,
-    Protocol,
     Literal,
     Callable,
     Sequence,
     TypeAlias,
     Union,
-    runtime_checkable,
 )
+from typing_extensions import Protocol, runtime_checkable
 from pydantic import BaseModel
 from sqlmodel import SQLModel
 

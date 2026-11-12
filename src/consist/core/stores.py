@@ -1,15 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import os
 import re
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
-
-from sqlalchemy.engine import Engine
-
-from consist.core.persistence import DatabaseManager
+from typing_extensions import Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from consist.core.persistence import DatabaseManager
     from consist.core.tracker import Tracker
 
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -23,33 +21,42 @@ def _quote_ident(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
 
 
+@runtime_checkable
+class _HasHotDataStore(Protocol):
+    hot_data_store: HotDataStore | None
+
+
+@runtime_checkable
+class _HasDbPath(Protocol):
+    db_path: str | os.PathLike[str] | None
+
+
+@runtime_checkable
+class _HasDb(Protocol):
+    db: DatabaseManager | None
+
+
 @dataclass(slots=True)
 class MetadataStore:
-    """
-    Metadata-store facade for single-store mode.
-
-    In this phase, metadata persistence is still backed by the existing
-    ``DatabaseManager`` over the configured local DuckDB file.
-    """
+    """Metadata-store facade for single-store mode backed by ``DatabaseManager``."""
 
     db: DatabaseManager
-
-    @property
-    def engine(self) -> Engine:
-        return self.db.engine
 
     @property
     def db_path(self) -> str:
         return self.db.db_path
 
+    def close(self) -> None:
+        self.db.close()
+
 
 @dataclass(slots=True)
 class HotDataStore:
     """
-    Hot-data-store facade for single-store mode.
+    Hot-data-store facade for single-store mode backed by ``DatabaseManager``.
 
-    In this phase, hot data (``global_tables.*``) still lives in the same local
-    DuckDB file as metadata, but ownership is made explicit at the API boundary.
+    Hot data (``global_tables.*``) shares the same local DuckDB connection
+    managed by ``DatabaseManager`` as metadata.
     """
 
     db_path: str
@@ -70,73 +77,76 @@ class HotDataStore:
             )
 
     @property
-    def engine(self) -> Engine | None:
+    def db(self) -> DatabaseManager | None:
         self._validate_single_store_alignment()
         if self.metadata_store is None:
             return None
-        return self.metadata_store.engine
+        return self.metadata_store.db
 
-    def dispose_engine(self) -> None:
-        self._validate_single_store_alignment()
-        engine = self.engine
-        if engine is not None:
-            engine.dispose()
+    def close(self) -> None:
+        db = self.db
+        if db is not None:
+            db.close()
 
     def ingest_cache_hit(self, table_name: str, content_hash: str) -> bool:
         self._validate_single_store_alignment()
-        engine = self.engine
-        if engine is None:
+        db = self.db
+        if db is None:
             return False
         if not _is_safe_identifier(table_name):
             return False
 
-        table_ref = f"{_quote_ident('global_tables')}.{_quote_ident(table_name)}"
-        try:
-            with engine.begin() as connection:
-                result = connection.exec_driver_sql(
-                    f"SELECT 1 FROM {table_ref} WHERE content_hash = ? LIMIT 1",
-                    (content_hash,),
-                ).fetchone()
-            return result is not None
-        except Exception:
+        if not db.has_table_column(
+            table_schema="global_tables",
+            table_name=table_name,
+            column_name="content_hash",
+        ):
             return False
 
+        table_ref = f"{_quote_ident('global_tables')}.{_quote_ident(table_name)}"
+        row = db.fetchone(
+            f"SELECT 1 FROM {table_ref} WHERE content_hash = ? LIMIT 1",
+            [content_hash],
+        )
+        return row is not None
 
-def get_hot_data_store(tracker: "Tracker | None") -> HotDataStore | None:
-    if tracker is None:
+
+def build_metadata_store(db: DatabaseManager) -> MetadataStore:
+    return MetadataStore(db=db)
+
+
+def build_hot_data_store(
+    db: DatabaseManager,
+    metadata_store: MetadataStore | None = None,
+) -> HotDataStore:
+    resolved_meta = metadata_store or MetadataStore(db=db)
+    return HotDataStore(db_path=db.db_path, metadata_store=resolved_meta)
+
+
+def get_hot_data_store(tracker: "Tracker | Any | None") -> HotDataStore | None:
+    if tracker is None or not isinstance(tracker, _HasHotDataStore):
         return None
-    store = getattr(tracker, "hot_data_store", None)
-    if store is None:
-        return None
-    return store
+    return tracker.hot_data_store
 
 
-def get_hot_data_db_path(tracker: "Tracker | None") -> str | None:
+def get_hot_data_db_path(tracker: "Tracker | Any | None") -> str | None:
     store = get_hot_data_store(tracker)
     if store is not None:
         return os.fspath(store.db_path)
-    if tracker is None:
+    if tracker is None or not isinstance(tracker, _HasDbPath):
         return None
-    db_path = getattr(tracker, "db_path", None)
+    db_path = tracker.db_path
     if db_path is None:
         return None
     return os.fspath(db_path)
 
 
-def get_hot_data_engine(tracker: "Tracker | None") -> Engine | Any | None:
+def get_hot_data_db(tracker: "Tracker | Any | None") -> DatabaseManager | None:
     store = get_hot_data_store(tracker)
     if store is not None:
-        return store.engine
-    if tracker is None:
+        if isinstance(store, _HasDb):
+            return store.db
         return None
-    return getattr(tracker, "engine", None)
-
-
-def dispose_hot_data_engine(tracker: "Tracker | None") -> None:
-    store = get_hot_data_store(tracker)
-    if store is not None:
-        store.dispose_engine()
-        return
-    engine = get_hot_data_engine(tracker)
-    if engine is not None:
-        engine.dispose()
+    if tracker is None or not isinstance(tracker, _HasDb):
+        return None
+    return tracker.db

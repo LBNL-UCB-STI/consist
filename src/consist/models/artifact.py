@@ -27,7 +27,7 @@ from typing import (
 )
 
 from pydantic import PrivateAttr
-from sqlalchemy import DateTime, JSON, Column, UniqueConstraint
+from sqlalchemy import DateTime, JSON, Column
 from sqlalchemy.dialects.postgresql import (
     UUID as PG_UUID,
 )  # Import for potential postgresql compatibility
@@ -215,8 +215,6 @@ class Artifact(SQLModel, table=True):
     fingerprint without probing wrapper-specific fields. Fingerprint semantics
     follow the configured hashing strategy: ``full`` is generally content-based,
     while ``fast`` may use metadata-based hashing for files or directories.
-    ``Artifact.content_id`` is a database-local deduplication key and is not the
-    public fingerprint contract.
 
     Attributes:
         id (uuid.UUID): A unique identifier for the artifact.
@@ -269,22 +267,13 @@ class Artifact(SQLModel, table=True):
         description="Format handler: parquet, csv, gtfs, zarr, json, h5_table, h5, hdf5, geojson, geoparquet, shapefile, geopackage, or other"
     )
 
-    # Canonical artifact fingerprint (portable) plus DB-local content identity.
+    # Canonical artifact fingerprint (portable).
     hash: Optional[str] = Field(
         default=None,
         index=True,
         description=(
             "Canonical portable artifact fingerprint. Semantics follow the active "
             "hashing strategy and may be content- or metadata-based."
-        ),
-    )
-    content_id: Optional[uuid.UUID] = Field(
-        default=None,
-        index=True,
-        sa_type=UUIDType,
-        description=(
-            "Database-local pointer to shared ArtifactContent metadata used for "
-            "deduplication; not the public artifact fingerprint surface."
         ),
     )
     parent_artifact_id: Optional[uuid.UUID] = Field(
@@ -860,118 +849,6 @@ class Artifact(SQLModel, table=True):
         return cloned
 
 
-class ArtifactContent(SQLModel, table=True):
-    """
-    Content-centric metadata for deduplicated bytes shared across artifacts.
-
-    Each row represents a unique `(content_hash, driver)` tuple that multiple artifact
-    occurrences can reference.
-    """
-
-    __tablename__: ClassVar[str] = "artifact_content"  # pyright: ignore[reportIncompatibleVariableOverride]
-    __table_args__ = (UniqueConstraint("content_hash", "driver"),)
-
-    id: uuid.UUID = Field(
-        default_factory=uuid.uuid4,
-        primary_key=True,
-        sa_type=UUIDType,
-        sa_column_kwargs={"autoincrement": False},
-    )
-    content_hash: str = Field(
-        index=True, description="SHA256 hash identifying the content payload."
-    )
-    driver: str = Field(
-        index=True, description="Driver used to interpret the content (e.g., parquet)."
-    )
-    created_at: datetime = Field(
-        default_factory=lambda: datetime.now(UTC),
-        sa_type=DateTime,
-        description="Timestamp when this content identity was first recorded.",
-    )
-    meta: Dict[str, Any] = Field(
-        default_factory=dict,
-        sa_column=Column(JSON),
-        description="Optional content-scoped metadata such as schema fingerprints.",
-    )
-
-    def __deepcopy__(self, memo: Optional[dict[int, Any]] = None) -> "ArtifactContent":
-        """Produce a clean detached clone without inheriting dead ORM instance state."""
-        if memo is None:
-            memo = {}
-        elif id(self) in memo:
-            return memo[id(self)]
-
-        raw_values = {
-            k: self.__dict__[k] if k in self.__dict__ else getattr(self, k)
-            for k in self.__class__.model_fields
-            if not k.startswith("_")
-        }
-        raw_meta = raw_values.pop("meta", {})
-
-        cloned = self.__class__(**raw_values, meta={})
-        memo[id(self)] = cloned
-
-        cloned.meta = copy.deepcopy(raw_meta, memo)
-
-        for k, v in self.__dict__.items():
-            if not k.startswith("_") and k not in self.__class__.model_fields:
-                try:
-                    setattr(cloned, k, copy.deepcopy(v, memo))
-                except Exception:
-                    cloned.__dict__[k] = copy.deepcopy(v, memo)
-
-        cloned.__pydantic_fields_set__ = set(self.__pydantic_fields_set__)
-
-        return cloned
-
-    def __copy__(self) -> "ArtifactContent":
-        """Produce a clean shallow clone without inheriting dead ORM instance state."""
-        raw_values = {
-            k: self.__dict__[k] if k in self.__dict__ else getattr(self, k)
-            for k in self.__class__.model_fields
-            if not k.startswith("_")
-        }
-
-        cloned = self.__class__(**raw_values)
-
-        for k, v in self.__dict__.items():
-            if not k.startswith("_") and k not in self.__class__.model_fields:
-                try:
-                    setattr(cloned, k, v)
-                except Exception:
-                    cloned.__dict__[k] = v
-
-        cloned.__pydantic_fields_set__ = set(self.__pydantic_fields_set__)
-
-        return cloned
-
-    def model_copy(
-        self,
-        *,
-        update: Optional[MappingABC[str, Any]] = None,
-        deep: bool = False,
-    ) -> "ArtifactContent":
-        """Produce a clean detached clone without deepcopying ``_sa_instance_state``."""
-        cloned = self.__deepcopy__() if deep else self.__copy__()
-        if update:
-            for k, v in update.items():
-                if k in self.__class__.model_fields or not k.startswith("_"):
-                    try:
-                        setattr(cloned, k, copy.deepcopy(v) if deep else v)
-                    except Exception:
-                        cloned.__dict__[k] = copy.deepcopy(v) if deep else v
-                else:
-                    cloned.__dict__[k] = copy.deepcopy(v) if deep else v
-            cloned.__pydantic_fields_set__.update(update.keys())
-        return cloned
-
-    def __str__(self) -> str:
-        return (
-            f"ArtifactContent(hash={self.content_hash}, "
-            f"driver={self.driver}, id={self.id})"
-        )
-
-
 class ArchivedOutputs(MappingABC[str, Path]):
     """
     Mapping of archived output paths returned by archive_run_outputs(...).
@@ -1029,7 +906,6 @@ _SYSTEM_ARTIFACT_META_KEYS: frozenset[str] = frozenset(
         "is_ingested",
         "dlt_table_name",
         "recovery_roots",
-        "content_id",
         "schema_id",
         "schema_summary",
         "file_schema",

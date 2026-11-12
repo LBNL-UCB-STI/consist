@@ -23,11 +23,15 @@ Key functionalities include:
 
 import importlib
 import logging
+import os
+from pathlib import Path
 import random
 import time
 import uuid
 import pandas as pd
 from typing import (
+    TYPE_CHECKING,
+    Annotated,
     Optional,
     Any,
     Iterable,
@@ -41,14 +45,46 @@ from typing import (
     get_origin,
     cast,
 )
-from sqlalchemy import JSON, inspect as sa_inspect
+from sqlalchemy import JSON
 from sqlmodel import SQLModel
+from typing_extensions import Protocol, runtime_checkable
+
+from consist.core.persistence import lookup_live_db_by_path
 from consist.models.artifact import Artifact
 from consist.models.run import Run
 from consist.core.netcdf_utils import resolve_netcdf_engine
 from consist.core.gtfs import load_gtfs_member_df
 from consist.tools.file_batches import yield_file_batches
 from consist.types import DriverType
+
+if TYPE_CHECKING:
+    from consist.core.persistence import DatabaseManager
+
+
+@runtime_checkable
+class _HasMatrixAttrs(Protocol):
+    attrs: Any
+
+
+@runtime_checkable
+class _HasTableNameAttr(Protocol):
+    __tablename__: str
+
+
+@runtime_checkable
+class _HasAdditiveSchemaAttr(Protocol):
+    __consist_additive_schema__: Any
+
+
+@runtime_checkable
+class _HasSaColumnAttr(Protocol):
+    sa_column: Any
+
+
+@runtime_checkable
+class _HasColTypeAttr(Protocol):
+    type: Any
+
 
 # Optional dependency: `dlt` is only required when using ingestion helpers.
 try:
@@ -329,7 +365,7 @@ def _handle_openmatrix_metadata(path: str) -> Iterable[Dict[str, Any]]:
                         "n_cols": matrix.shape[1] if len(matrix.shape) >= 2 else None,
                         "attributes": (
                             _json_dumps(dict(matrix.attrs))
-                            if hasattr(matrix, "attrs")
+                            if isinstance(matrix, _HasMatrixAttrs)
                             else "{}"
                         ),
                     }
@@ -551,12 +587,14 @@ def _handle_csv_path(path: str, ctx: Dict[str, Any]) -> Tuple[Any, bool]:
 def ingest_artifact(
     artifact: "Artifact",
     run_context: "Run",
-    db_path: str,
-    data_iterable: Optional[Union[Iterable[Any], str, pd.DataFrame]] = None,
+    db_path: Optional[Union[str, os.PathLike[str]]] = None,
+    data_iterable: Optional[Union[Iterable[Any], str, Path, pd.DataFrame]] = None,
     schema_model: Optional[Type[SQLModel]] = None,
     lock_retries: int = 20,
     lock_base_sleep_seconds: float = 0.1,
     lock_max_sleep_seconds: float = 2.0,
+    *,
+    db: Optional["DatabaseManager"] = None,
 ) -> Tuple[Any, str]:
     """
     Ingests artifact data into a DuckDB database using the `dlt` (Data Load Tool) library.
@@ -610,10 +648,22 @@ def ingest_artifact(
             'Install with `pip install "consist[ingest]"`.'
         )
 
+    resolved_db = db
+    if resolved_db is None and db_path is not None and os.fspath(db_path) != ":memory:":
+        resolved_db = lookup_live_db_by_path(db_path)
+
+    if resolved_db is not None:
+        if resolved_db.read_only:
+            raise PermissionError("Cannot ingest into a read-only DatabaseManager")
+        if resolved_db._tx_depth != 0:
+            raise RuntimeError(
+                "Cannot borrow DuckDB connection for dlt inside an active transaction()"
+            )
+
     # 1. Resolve Data Source (Streaming Batches)
     data_source: Iterable[Any]
-    if isinstance(data_iterable, str):
-        file_path = data_iterable
+    if isinstance(data_iterable, (str, Path)):
+        file_path = os.fspath(data_iterable)
 
         if artifact.driver == "parquet":
             data_source = _yield_parquet_batches(file_path)
@@ -701,21 +751,18 @@ def ingest_artifact(
 
     # 2. Configure dlt Pipeline
     schema_table_name = (
-        getattr(schema_model, "__tablename__", None)
-        if schema_model is not None
+        schema_model.__tablename__
+        if schema_model is not None and isinstance(schema_model, _HasTableNameAttr)
         else None
     )
     desired_table_name = str(schema_table_name or artifact.key)
 
-    pipeline_uid = uuid.uuid4().hex[:8]
-    pipeline = dlt.pipeline(
-        pipeline_name=f"consist_ingest_{pipeline_uid}",
-        destination=dlt.destinations.duckdb(f"{db_path}"),
-        dataset_name="global_tables",
-    )
-
     # 3. Validation Setup
-    additive_schema = bool(getattr(schema_model, "__consist_additive_schema__", False))
+    additive_schema = bool(
+        schema_model.__consist_additive_schema__
+        if schema_model is not None and isinstance(schema_model, _HasAdditiveSchemaAttr)
+        else False
+    )
     allowed_keys: Optional[Set[str]] = None
     if schema_model and not additive_schema:
         allowed_keys = set(schema_model.model_fields.keys())
@@ -811,21 +858,36 @@ def ingest_artifact(
         schema_contract=schema_contract,
     )
 
-    # 6. Run with retries for transient DuckDB file lock conflicts.
-    # If load fails after extraction/normalization, retry pipeline.load() so we
-    # do not depend on replaying the original input iterator.
-    try:
-        info = pipeline.run(resource)
-    except Exception as exc:
-        if not _is_retryable_duckdb_lock_error(exc):
-            raise
-        info = _retry_pipeline_load(
-            pipeline,
-            retries=lock_retries,
-            lock_base_sleep_seconds=lock_base_sleep_seconds,
-            lock_max_sleep_seconds=lock_max_sleep_seconds,
-            exc=exc,
+    # 6. Run over borrowed single DuckDB connection when available, or standalone file path.
+    pipeline_uid = uuid.uuid4().hex[:8]
+    if resolved_db is not None:
+        with resolved_db.borrow_for_dlt() as conn:
+            pipeline = dlt.pipeline(
+                pipeline_name=f"consist_ingest_{pipeline_uid}",
+                destination=dlt.destinations.duckdb(credentials=conn),
+                dataset_name="global_tables",
+            )
+            info = pipeline.run(resource)
+    else:
+        if db_path is None:
+            raise ValueError("Either db or db_path is required for dlt ingestion.")
+        pipeline = dlt.pipeline(
+            pipeline_name=f"consist_ingest_{pipeline_uid}",
+            destination=dlt.destinations.duckdb(os.fspath(db_path)),
+            dataset_name="global_tables",
         )
+        try:
+            info = pipeline.run(resource)
+        except Exception as exc:
+            if not _is_retryable_duckdb_lock_error(exc):
+                raise
+            info = _retry_pipeline_load(
+                pipeline,
+                retries=lock_retries,
+                lock_base_sleep_seconds=lock_base_sleep_seconds,
+                lock_max_sleep_seconds=lock_max_sleep_seconds,
+                exc=exc,
+            )
 
     real_table_name = pipeline.default_schema.naming.normalize_table_identifier(
         str(desired_table_name)
@@ -859,7 +921,7 @@ def _sqlmodel_to_dlt_columns(model: Type[SQLModel]) -> Dict[str, Dict[str, Any]]
             return {annotation}
         if origin in {list, dict, tuple}:
             return {origin}
-        if getattr(origin, "__name__", "") == "Annotated":
+        if origin is Annotated:
             args = get_args(annotation)
             return _normalize_types(args[0]) if args else {annotation}
         args = get_args(annotation)
@@ -872,19 +934,14 @@ def _sqlmodel_to_dlt_columns(model: Type[SQLModel]) -> Dict[str, Dict[str, Any]]
             normalized |= _normalize_types(arg)
         return normalized or {annotation}
 
-    mapper = sa_inspect(model, raiseerr=False)
-    sa_columns = mapper.columns if mapper is not None else {}
     columns: Dict[str, Dict[str, Any]] = {}
     for name, field in model.model_fields.items():
-        sa_col = sa_columns.get(name)
+        sa_col = field.sa_column if isinstance(field, _HasSaColumnAttr) else None
+        sa_type = sa_col.type if isinstance(sa_col, _HasColTypeAttr) else None
         py_type = field.annotation
         normalized = _normalize_types(py_type)
         dlt_type = "text"
-        if (
-            (sa_col is not None and isinstance(sa_col.type, JSON))
-            or dict in normalized
-            or list in normalized
-        ):
+        if isinstance(sa_type, JSON) or dict in normalized or list in normalized:
             dlt_type = "json"
         elif float in normalized:
             dlt_type = "double"

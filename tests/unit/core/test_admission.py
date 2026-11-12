@@ -23,7 +23,6 @@ from consist.core.admission import (
     hash_semantics_for_new_artifact,
 )
 from consist.models.artifact import Artifact
-from consist.models.run import RunArtifactLink
 
 
 FULL_FILE_SHA256 = {
@@ -46,9 +45,7 @@ def _complete_run(tracker, run_id: str, *, status: str = "completed") -> None:
         run = tracker.get_run(run_id)
         assert run is not None
         run.status = status
-        with tracker.db.session_scope() as session:
-            session.add(run)
-            session.commit()
+        tracker.db.sync_run(run)
 
 
 def _record_input(
@@ -68,12 +65,7 @@ def _record_input(
         hash=digest,
         meta={} if semantics is None else {"hash_semantics": semantics},
     )
-    with tracker.db.session_scope() as session:
-        session.add(artifact)
-        session.add(
-            RunArtifactLink(run_id=run_id, artifact_id=artifact.id, direction=direction)
-        )
-        session.commit()
+    tracker.db.sync_artifact(artifact, run_id=run_id, direction=direction)
 
 
 def _assert_observation(report: AdmissionReport, text: str) -> None:

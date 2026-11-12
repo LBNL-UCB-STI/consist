@@ -7,7 +7,6 @@ import logging
 import numpy as np
 import pandas as pd
 import pytest
-from sqlalchemy import text
 
 import consist
 from consist.core.tracker import Tracker
@@ -60,41 +59,38 @@ def test_schema_evolution_and_comparison(tmp_path):
 
     logging.info("[Analysis] Comparing Scenarios via SQL...")
 
-    with tracker.engine.connect() as conn:
-        query = text(
-            """
-            SELECT
-                consist_run_id,
-                COUNT(*) as count,
-                AVG(income) as avg_income,
-                SUM(case when mode='ev' then 1 else 0 end) as ev_count,
-                AVG(ev_subsidy) as avg_subsidy
-            FROM v_persons
-            GROUP BY consist_run_id
-            ORDER BY avg_income
+    results = tracker.run_query(
         """
-        )
+        SELECT
+            consist_run_id,
+            COUNT(*) as count,
+            AVG(income) as avg_income,
+            SUM(case when mode='ev' then 1 else 0 end) as ev_count,
+            AVG(ev_subsidy) as avg_subsidy
+        FROM v_persons
+        GROUP BY consist_run_id
+        ORDER BY avg_income
+        """
+    )
 
-        results = conn.execute(query).fetchall()
-
+    logging.info(
+        f"\n{'Run ID':<15} {'Count':<10} {'Avg Inc':<12} {'EVs':<8} {'Avg Sub (Schema Check)'}"
+    )
+    logging.info("-" * 70)
+    for row in results:
+        run_id = row[0]
+        avg_sub = f"${row[4]:.2f}" if row[4] is not None else "NULL"
         logging.info(
-            f"\n{'Run ID':<15} {'Count':<10} {'Avg Inc':<12} {'EVs':<8} {'Avg Sub (Schema Check)'}"
+            f"{run_id:<15} {row[1]:<10} ${row[2]:<11,.0f} {row[3]:<8} {avg_sub}"
         )
-        logging.info("-" * 70)
-        for row in results:
-            run_id = row[0]
-            avg_sub = f"${row[4]:.2f}" if row[4] is not None else "NULL"
-            logging.info(
-                f"{run_id:<15} {row[1]:<10} ${row[2]:<11,.0f} {row[3]:<8} {avg_sub}"
-            )
 
-        assert len(results) == 2
-        run_ids = [r[0] for r in results]
-        assert "run_baseline" in run_ids
-        assert "run_policy" in run_ids
+    assert len(results) == 2
+    run_ids = [r[0] for r in results]
+    assert "run_baseline" in run_ids
+    assert "run_policy" in run_ids
 
-        base_row = next(r for r in results if r[0] == "run_baseline")
-        policy_row = next(r for r in results if r[0] == "run_policy")
+    base_row = next(r for r in results if r[0] == "run_baseline")
+    policy_row = next(r for r in results if r[0] == "run_policy")
 
-        assert base_row[4] is None, "Baseline should have NULL subsidy"
-        assert policy_row[4] is not None, "Policy should have computed subsidy"
+    assert base_row[4] is None, "Baseline should have NULL subsidy"
+    assert policy_row[4] is not None, "Policy should have computed subsidy"

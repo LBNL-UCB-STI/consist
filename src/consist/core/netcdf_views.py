@@ -4,92 +4,32 @@ Consist NetCDF Metadata View Module
 This module provides the `NetCdfMetadataView` class, which allows querying
 NetCDF metadata stored in the DuckDB catalog. It enables exploration of
 variable structures, dimensions, and attributes across multiple runs.
-
-Key functionalities include:
--   **Variable Discovery**: List all variables in NetCDF artifacts across runs
--   **Dimension Exploration**: Query dimension sizes and coordinate information
--   **Attribute Access**: Retrieve metadata attributes for variables
--   **Cross-Run Analysis**: Compare variable structures across different runs
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+import json
 import logging
-import re
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import pandas as pd
-from sqlalchemy import text
+
+from consist.core.stores import get_hot_data_db
+from consist.core.views import (
+    _SAFE_IDENTIFIER_RE as _SAFE_IDENTIFIER_RE,
+    _qualified_table,
+    _validate_identifier,
+)
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
 
-_SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-
-def _validate_identifier(identifier: str, *, label: str) -> str:
-    if not _SAFE_IDENTIFIER_RE.fullmatch(identifier):
-        raise ValueError(
-            f"Invalid {label}. Only letters, numbers, and underscores are allowed, "
-            "and the identifier must not start with a number."
-        )
-    return identifier
-
-
-def _quote_ident(identifier: str) -> str:
-    return '"' + identifier.replace('"', '""') + '"'
-
-
-def _qualified_table(schema: str, table: str) -> str:
-    safe_schema = _validate_identifier(schema, label="schema")
-    safe_table = _validate_identifier(table, label="concept_key")
-    return f"{_quote_ident(safe_schema)}.{_quote_ident(safe_table)}"
-
 
 class NetCdfMetadataView:
-    """
-    A view factory for querying NetCDF metadata from Consist's DuckDB catalog.
-
-    This class allows users to explore the structure and attributes of NetCDF files
-    that have been logged and ingested as artifacts. It queries the `netcdf_catalog`
-    table to retrieve information about variables, coordinates, dimensions, and
-    their attributes across different runs.
-
-    Attributes
-    ----------
-    tracker : Tracker
-        An instance of the Consist `Tracker`, providing access to the database
-        engine for querying artifact and run metadata.
-
-    Example
-    -------
-    ```python
-    view = NetCdfMetadataView(tracker)
-
-    # List all variables in a NetCDF artifact
-    variables = view.get_variables("climate", year=2024)
-    print(variables[["variable_name", "dims", "shape", "run_id"]])
-
-    # Get unique dimensions
-    dims = view.get_dimensions("climate")
-    print(dims)  # {"lat": 180, "lon": 360, "time": 100}
-
-    # Find variables with specific attributes
-    attrs = view.get_attributes("climate", variable_name="temperature")
-    print(attrs)
-    ```
-    """
+    """View factory for querying NetCDF metadata from Consist's DuckDB catalog."""
 
     def __init__(self, tracker: Tracker) -> None:
-        """
-        Initializes the NetCdfMetadataView with a reference to the Consist Tracker.
-
-        Parameters
-        ----------
-        tracker : Tracker
-            An instance of the Consist `Tracker`, providing access to the database
-            for querying NetCDF metadata.
-        """
         self.tracker = tracker
 
     def get_variables(
@@ -99,103 +39,119 @@ class NetCdfMetadataView:
         year: Optional[int] = None,
         variable_type: Optional[str] = None,
     ) -> pd.DataFrame:
-        """
-        Returns a DataFrame of all variables in NetCDF artifacts.
-
-        This method queries the `netcdf_catalog` table for all variables
-        associated with a given artifact key. Results can be filtered by
-        run ID, year, and variable type (data or coordinate).
-
-        Parameters
-        ----------
-        concept_key : str
-            The semantic key (artifact key) identifying the NetCDF artifact.
-        run_ids : Optional[List[str]], optional
-            Optional list of run IDs to include. If None, all runs are included.
-        year : Optional[int], optional
-            Optional year to filter by. If None, all years are included.
-        variable_type : Optional[str], optional
-            Optional filter for variable type: "data" or "coordinate".
-            If None, both types are returned.
-
-        Returns
-        -------
-        pd.DataFrame
-            A DataFrame with columns:
-            - variable_name: Name of the variable or coordinate
-            - variable_type: "data" or "coordinate"
-            - dims: List of dimension names (as string)
-            - shape: List of dimension sizes (as string)
-            - dtype: Data type of the variable
-            - attributes: JSON attributes (as string)
-            - run_id: ID of the run that logged the artifact
-            - year: Year of the run
-            - iteration: Iteration of the run
-
-        Raises
-        ------
-        RuntimeError
-            If the Tracker instance does not have a configured database connection.
-        """
-        if not self.tracker.engine:
+        """Returns a DataFrame of all variables in NetCDF artifacts."""
+        db = get_hot_data_db(self.tracker)
+        if db is None:
             raise RuntimeError("Database connection required.")
-        base_table = _qualified_table("global_tables", concept_key)
-        dims_table = _qualified_table("global_tables", f"{concept_key}__dims")
-        shape_table = _qualified_table("global_tables", f"{concept_key}__shape")
+        _validate_identifier(concept_key, label="concept_key")
+        if not db.has_table(concept_key, table_schema="global_tables"):
+            return pd.DataFrame()
 
-        query = f"""
-            WITH dims AS (
+        base_table = _qualified_table("global_tables", concept_key)
+        dims_name = f"{concept_key}__dims"
+        shape_name = f"{concept_key}__shape"
+        has_dims = db.has_table(dims_name, table_schema="global_tables")
+        has_shape = db.has_table(shape_name, table_schema="global_tables")
+
+        if has_dims:
+            dims_table = _qualified_table("global_tables", dims_name)
+            dims_cte = f"""
                 SELECT
                     _dlt_parent_id,
                     list(value ORDER BY _dlt_list_idx) AS dims
                 FROM {dims_table}
                 GROUP BY _dlt_parent_id
-            ),
-            shape AS (
+            """
+        else:
+            dims_cte = (
+                "SELECT CAST(NULL AS VARCHAR) AS _dlt_parent_id, "
+                "CAST([] AS VARCHAR[]) AS dims WHERE FALSE"
+            )
+
+        if has_shape:
+            shape_table = _qualified_table("global_tables", shape_name)
+            shape_cte = f"""
                 SELECT
                     _dlt_parent_id,
                     list(value ORDER BY _dlt_list_idx) AS shape
                 FROM {shape_table}
                 GROUP BY _dlt_parent_id
+            """
+        else:
+            shape_cte = (
+                "SELECT CAST(NULL AS VARCHAR) AS _dlt_parent_id, "
+                "CAST([] AS BIGINT[]) AS shape WHERE FALSE"
             )
+
+        has_art_col = db.has_table_column(
+            table_name=concept_key,
+            column_name="consist_artifact_id",
+            table_schema="global_tables",
+        )
+        has_run_col = db.has_table_column(
+            table_name=concept_key,
+            column_name="consist_run_id",
+            table_schema="global_tables",
+        )
+        params: list[Any] = []
+        if has_art_col and has_run_col:
+            artifact_join = (
+                "JOIN main.artifact a ON ("
+                "TRY_CAST(nc.consist_artifact_id AS UUID) = a.id "
+                "OR (nc.consist_artifact_id IS NULL AND a.key = ? "
+                "AND CAST(nc.consist_run_id AS VARCHAR) = a.run_id)"
+                ")"
+            )
+            params.append(concept_key)
+        elif has_art_col:
+            artifact_join = "JOIN main.artifact a ON TRY_CAST(nc.consist_artifact_id AS UUID) = a.id"
+        elif has_run_col:
+            artifact_join = (
+                "JOIN main.artifact a ON (a.key = ? "
+                "AND CAST(nc.consist_run_id AS VARCHAR) = a.run_id)"
+            )
+            params.append(concept_key)
+        else:
+            return pd.DataFrame()
+
+        query = f"""
+            WITH dims AS ({dims_cte}),
+            shape AS ({shape_cte})
             SELECT
                 nc.variable_name,
                 nc.variable_type,
-                d.dims,
-                s.shape,
+                COALESCE(d.dims, CAST([] AS VARCHAR[])) AS dims,
+                COALESCE(s.shape, CAST([] AS BIGINT[])) AS shape,
                 nc.dtype,
                 nc.attributes,
-                r.id as run_id,
+                COALESCE(r.id, a.run_id) AS run_id,
                 r.year,
                 r.iteration
             FROM {base_table} nc
             LEFT JOIN dims d ON d._dlt_parent_id = nc._dlt_id
             LEFT JOIN shape s ON s._dlt_parent_id = nc._dlt_id
-            JOIN artifact a ON nc.consist_artifact_id = CAST(a.id AS TEXT)
-            JOIN run r ON a.run_id = r.id
+            {artifact_join}
+            LEFT JOIN main.run r ON a.run_id = r.id
             WHERE TRUE
         """
 
-        params: Dict[str, str | int] = {}
-
         if run_ids:
-            placeholders = ",".join([f":{i}" for i in range(len(run_ids))])
-            query += f" AND r.id IN ({placeholders})"
-            for i, rid in enumerate(run_ids):
-                params[str(i)] = rid
+            placeholders = ", ".join("?" for _ in run_ids)
+            query += f" AND COALESCE(r.id, a.run_id) IN ({placeholders})"
+            params.extend(run_ids)
 
         if year is not None:
-            query += " AND r.year = :year"
-            params["year"] = year
+            query += " AND r.year = ?"
+            params.append(int(year))
 
         if variable_type:
-            query += " AND nc.variable_type = :var_type"
-            params["var_type"] = variable_type
+            query += " AND nc.variable_type = ?"
+            params.append(variable_type)
 
         query += " ORDER BY r.year, r.iteration, nc.variable_name"
 
         try:
-            return pd.read_sql(text(query), self.tracker.engine, params=params)
+            return db.fetchdf(query, params)
         except Exception as e:
             logging.warning(
                 f"[Consist] Failed to query NetCDF metadata for {concept_key}: {e}"
@@ -207,39 +163,12 @@ class NetCdfMetadataView:
         concept_key: str,
         run_id: Optional[str] = None,
     ) -> Dict[str, int]:
-        """
-        Returns a dictionary of unique dimension names and their maximum sizes.
-
-        This method extracts dimension information from the NetCDF metadata catalog
-        and aggregates them across variables (or within a specific run).
-
-        Parameters
-        ----------
-        concept_key : str
-            The semantic key identifying the NetCDF artifact.
-        run_id : Optional[str], optional
-            Optional run ID to filter to. If None, returns max dimensions across all runs.
-
-        Returns
-        -------
-        Dict[str, int]
-            A dictionary mapping dimension names (e.g., "lat", "lon", "time")
-            to their maximum sizes across all variables.
-
-        Example
-        -------
-        ```python
-        dims = view.get_dimensions("climate")
-        print(dims)  # {"lat": 180, "lon": 360, "time": 100}
-        ```
-        """
+        """Returns a dictionary of unique dimension names and their maximum sizes."""
         vars_df = self.get_variables(concept_key, run_ids=[run_id] if run_id else None)
-
         if vars_df.empty:
             return {}
 
         dimensions: Dict[str, int] = {}
-
         for _, row in vars_df.iterrows():
             try:
                 dims_value = row["dims"]
@@ -248,20 +177,25 @@ class NetCdfMetadataView:
                 if isinstance(dims_value, list) and isinstance(shape_value, list):
                     dims_list = dims_value
                     shape_list = shape_value
+                elif (
+                    isinstance(dims_value, Iterable)
+                    and not isinstance(dims_value, (str, bytes))
+                    and isinstance(shape_value, Iterable)
+                    and not isinstance(shape_value, (str, bytes))
+                ):
+                    dims_list = list(dims_value)
+                    shape_list = list(shape_value)
                 else:
-                    # Parse dims and shape from string representation
-                    # Example: "['lat', 'lon']" -> ['lat', 'lon']
-                    # Example: "[180, 360]" -> [180, 360]
-                    import json
-
                     dims_list = json.loads(str(dims_value).replace("'", '"'))
                     shape_list = json.loads(str(shape_value).replace("'", '"'))
 
                 for dim_name, dim_size in zip(dims_list, shape_list):
-                    if dim_name not in dimensions:
-                        dimensions[dim_name] = dim_size
+                    key = str(dim_name)
+                    size = int(dim_size)
+                    if key not in dimensions:
+                        dimensions[key] = size
                     else:
-                        dimensions[dim_name] = max(dimensions[dim_name], dim_size)
+                        dimensions[key] = max(dimensions[key], size)
             except Exception as e:
                 logging.debug(f"[Consist] Failed to parse dims/shape: {e}")
                 continue
@@ -273,21 +207,7 @@ class NetCdfMetadataView:
         concept_key: str,
         run_ids: Optional[List[str]] = None,
     ) -> pd.DataFrame:
-        """
-        Returns only data variables (not coordinates).
-
-        Parameters
-        ----------
-        concept_key : str
-            The semantic key identifying the NetCDF artifact.
-        run_ids : Optional[List[str]], optional
-            Optional list of run IDs to include.
-
-        Returns
-        -------
-        pd.DataFrame
-            Variables filtered to type == "data".
-        """
+        """Returns only data variables (not coordinates)."""
         return self.get_variables(concept_key, run_ids=run_ids, variable_type="data")
 
     def get_coordinates(
@@ -295,21 +215,7 @@ class NetCdfMetadataView:
         concept_key: str,
         run_ids: Optional[List[str]] = None,
     ) -> pd.DataFrame:
-        """
-        Returns only coordinate variables.
-
-        Parameters
-        ----------
-        concept_key : str
-            The semantic key identifying the NetCDF artifact.
-        run_ids : Optional[List[str]], optional
-            Optional list of run IDs to include.
-
-        Returns
-        -------
-        pd.DataFrame
-            Variables filtered to type == "coordinate".
-        """
+        """Returns only coordinate variables."""
         return self.get_variables(
             concept_key, run_ids=run_ids, variable_type="coordinate"
         )
@@ -319,33 +225,9 @@ class NetCdfMetadataView:
         concept_key: str,
         variable_name: Optional[str] = None,
         run_id: Optional[str] = None,
-    ) -> Optional[Dict]:
-        """
-        Returns attributes for a specific variable or all variables in an artifact.
-
-        Parameters
-        ----------
-        concept_key : str
-            The semantic key identifying the NetCDF artifact.
-        variable_name : Optional[str], optional
-            Optional variable name to filter to. If None, returns all variables.
-        run_id : Optional[str], optional
-            Optional run ID to filter to.
-
-        Returns
-        -------
-        Optional[Dict]
-            A dictionary of attributes, or None if variable not found.
-
-        Example
-        -------
-        ```python
-        attrs = view.get_attributes("climate", variable_name="temperature")
-        print(attrs)  # {"units": "K", "long_name": "Average Temperature"}
-        ```
-        """
+    ) -> Optional[Dict[str, Any]]:
+        """Returns attributes for a specific variable or the first variable in an artifact."""
         vars_df = self.get_variables(concept_key, run_ids=[run_id] if run_id else None)
-
         if vars_df.empty:
             return None
 
@@ -358,8 +240,6 @@ class NetCdfMetadataView:
             var_row = vars_df.iloc[0]
 
         try:
-            import json
-
             attrs_str = var_row["attributes"]
             if isinstance(attrs_str, str):
                 return json.loads(attrs_str.replace("'", '"'))
@@ -369,44 +249,12 @@ class NetCdfMetadataView:
             return None
 
     def summary(self, concept_key: str, run_id: Optional[str] = None) -> str:
-        """
-        Returns a human-readable summary of the NetCDF structure.
-
-        Parameters
-        ----------
-        concept_key : str
-            The semantic key identifying the NetCDF artifact.
-        run_id : Optional[str], optional
-            Optional run ID to summarize.
-
-        Returns
-        -------
-        str
-            A formatted summary of the NetCDF structure.
-
-        Example
-        -------
-        ```python
-        print(view.summary("climate"))
-        # Output:
-        # NetCDF: climate
-        # Data Variables (3):
-        #   - temperature [lat, lon, time]: float32
-        #   - humidity [lat, lon, time]: float32
-        #   - pressure [lat, lon]: float32
-        # Coordinates (3):
-        #   - lat [lat]: float64 (180)
-        #   - lon [lon]: float64 (360)
-        #   - time [time]: float64 (100)
-        ```
-        """
+        """Returns a human-readable summary of the NetCDF structure."""
         vars_df = self.get_variables(concept_key, run_ids=[run_id] if run_id else None)
-
         if vars_df.empty:
             return f"NetCDF: {concept_key} (No data found)"
 
         lines = [f"NetCDF: {concept_key}"]
-
         data_vars = vars_df[vars_df["variable_type"] == "data"]
         coords = vars_df[vars_df["variable_type"] == "coordinate"]
 
@@ -414,7 +262,9 @@ class NetCdfMetadataView:
             lines.append(f"\nData Variables ({len(data_vars)}):")
             for _, row in data_vars.iterrows():
                 dims_value = row["dims"]
-                if isinstance(dims_value, list):
+                if isinstance(dims_value, Iterable) and not isinstance(
+                    dims_value, (str, bytes)
+                ):
                     dims_str = ", ".join(map(str, dims_value))
                 else:
                     dims_str = str(dims_value).strip("[]").replace("'", "")
@@ -424,13 +274,17 @@ class NetCdfMetadataView:
             lines.append(f"\nCoordinates ({len(coords)}):")
             for _, row in coords.iterrows():
                 dims_value = row["dims"]
-                if isinstance(dims_value, list):
+                if isinstance(dims_value, Iterable) and not isinstance(
+                    dims_value, (str, bytes)
+                ):
                     dims_str = ", ".join(map(str, dims_value))
                 else:
                     dims_str = str(dims_value).strip("[]").replace("'", "")
 
                 shape_value = row["shape"]
-                if isinstance(shape_value, list):
+                if isinstance(shape_value, Iterable) and not isinstance(
+                    shape_value, (str, bytes)
+                ):
                     shape_str = ", ".join(map(str, shape_value))
                 else:
                     shape_str = str(shape_value).strip("[]")

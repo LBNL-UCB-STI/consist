@@ -848,12 +848,7 @@ def test_archive_directory_and_shapefile_under_separate_workspace_mount(
     legacy_run = tracker.get_run("legacy_ws_mount_run")
     assert legacy_run is not None
     legacy_run.meta.pop("mounts", None)
-    with tracker.db.session_scope() as session:
-        db_run = session.get(type(legacy_run), "legacy_ws_mount_run")
-        if db_run is not None:
-            db_run.meta = dict(legacy_run.meta)
-            session.add(db_run)
-            session.commit()
+    tracker.db.sync_run(legacy_run)
 
     archive_root_2 = tmp_path / "archive_store_2"
     archived_2 = tracker.archive_run_outputs(

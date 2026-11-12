@@ -2,13 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Dict, Iterable, Tuple, TypedDict, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from sqlmodel import Session, and_, or_, select
-
-from consist.models.artifact import Artifact
-from consist.models.run import Run, RunArtifactLink
-from consist.models.run_config_kv import RunConfigKV
+from consist.core.persistence import DatabaseManager
 
 UTC = timezone.utc
 
@@ -35,285 +31,340 @@ class SeedSample(TypedDict):
 
 
 def _seed_base_dataset(
-    session: Session,
+    db: DatabaseManager,
     *,
     total_runs: int,
     runs_per_scenario: int,
     chunk_size: int,
 ) -> SeedSample:
+    del chunk_size
     base_time = datetime.now(UTC)
 
     size_10k = min(10_000, total_runs)
     size_50k = min(50_000, total_runs)
     size_100k = total_runs
 
-    sample: Dict[str, object] = {
-        "scale_sizes": {
-            "scale_10k": size_10k,
-            "scale_50k": size_50k,
-            "scale_100k": size_100k,
-        }
-    }
-
-    runs: list[Run] = []
-    artifacts: list[Artifact] = []
-    links: list[RunArtifactLink] = []
-
-    for i in range(total_runs):
-        run_id = f"run_{i:07d}"
-        scenario_id = f"scenario_{i // runs_per_scenario:05d}"
-        model_name = f"model_{i % 5}"
-
-        tags = ["scale_100k"]
-        if i < size_50k:
-            tags.append("scale_50k")
-        if i < size_10k:
-            tags.append("scale_10k")
-        if i % 7 == 0:
-            tags.append("tagged")
-
-        meta = {"region": "west"} if i % 10 == 0 else {"region": "east"}
-
-        run = Run(
-            id=run_id,
-            parent_run_id=scenario_id,
-            status="completed",
-            model_name=model_name,
-            year=2020 + (i % 3),
-            iteration=i % runs_per_scenario,
-            tags=tags,
-            config_hash=f"cfg_{i % 200}",
-            input_hash=f"in_{i % 500}",
-            git_hash=f"git_{i % 3}",
-            signature=f"sig_{i % 1000}",
-            meta=meta,
-            started_at=base_time,
-            ended_at=base_time,
-            created_at=base_time,
-            updated_at=base_time,
+    with db.transaction() as cur:
+        cur.execute(
+            """
+            CREATE TEMP TABLE _seed_batch AS
+            SELECT
+                i,
+                'run_' || lpad(CAST(i AS VARCHAR), 7, '0') AS run_id,
+                'scenario_' || lpad(CAST(i // ? AS VARCHAR), 5, '0') AS scenario_id,
+                'model_' || CAST(i % 5 AS VARCHAR) AS model_name,
+                uuid() AS art_id,
+                'artifact_' || CAST(i AS VARCHAR) AS art_key,
+                'outputs://artifact_' || CAST(i AS VARCHAR) || '.parquet' AS art_uri,
+                'hash_' || CAST(i AS VARCHAR) AS art_digest
+            FROM range(0, ?) t(i)
+            """,
+            [runs_per_scenario, total_runs],
         )
-        runs.append(run)
-
-        artifact = Artifact(
-            key=f"artifact_{i}",
-            container_uri=f"outputs://artifact_{i}.parquet",
-            driver="parquet",
-            hash=f"hash_{i}",
-            run_id=run_id,
-            created_at=base_time,
-        )
-        artifacts.append(artifact)
-        links.append(
-            RunArtifactLink(run_id=run_id, artifact_id=artifact.id, direction="output")
-        )
-
-        if i == 0:
-            sample["cache_tuple"] = (run.config_hash, run.input_hash, run.git_hash)
-            sample["scenario_id"] = scenario_id
-        if i == total_runs // 2:
-            sample["lookup_key"] = artifact.key
-            sample["lookup_hash"] = artifact.hash
-
-        if len(runs) >= chunk_size:
-            session.add_all(runs)
-            session.add_all(artifacts)
-            session.add_all(links)
-            session.commit()
-            runs.clear()
-            artifacts.clear()
-            links.clear()
-
-    if runs:
-        session.add_all(runs)
-        session.add_all(artifacts)
-        session.add_all(links)
-        session.commit()
+        try:
+            cur.execute(
+                """
+                INSERT INTO main.run (
+                    id, parent_run_id, status, cacheable, model_name, year, iteration,
+                    tags, config_hash, input_hash, git_hash, signature, meta,
+                    started_at, ended_at, created_at, updated_at
+                )
+                SELECT
+                    run_id,
+                    scenario_id,
+                    'completed',
+                    TRUE,
+                    model_name,
+                    2020 + (i % 3),
+                    i % ?,
+                    to_json(list_filter([
+                        'scale_100k',
+                        CASE WHEN i < ? THEN 'scale_50k' END,
+                        CASE WHEN i < ? THEN 'scale_10k' END,
+                        CASE WHEN i % 7 = 0 THEN 'tagged' END
+                    ], x -> x IS NOT NULL)),
+                    'cfg_' || CAST(i % 200 AS VARCHAR),
+                    'in_' || CAST(i % 500 AS VARCHAR),
+                    'git_' || CAST(i % 3 AS VARCHAR),
+                    'sig_' || CAST(i % 1000 AS VARCHAR),
+                    CASE
+                        WHEN i % 10 = 0 THEN CAST('{"region":"west"}' AS JSON)
+                        ELSE CAST('{"region":"east"}' AS JSON)
+                    END,
+                    ?, ?, ?, ?
+                FROM _seed_batch
+                """,
+                [
+                    runs_per_scenario,
+                    size_50k,
+                    size_10k,
+                    base_time,
+                    base_time,
+                    base_time,
+                    base_time,
+                ],
+            )
+            cur.execute(
+                """
+                INSERT INTO main.artifact (
+                    id, key, uri, driver, digest, member, run_id,
+                    parent_artifact_id, facet_id, meta, created_at
+                )
+                SELECT
+                    art_id,
+                    art_key,
+                    art_uri,
+                    'parquet',
+                    art_digest,
+                    NULL,
+                    run_id,
+                    NULL,
+                    NULL,
+                    CAST('{}' AS JSON),
+                    ?
+                FROM _seed_batch
+                """,
+                [base_time],
+            )
+            cur.execute(
+                """
+                INSERT INTO main.run_artifact_link (
+                    run_id, artifact_id, direction, role, is_implicit
+                )
+                SELECT
+                    run_id,
+                    art_id,
+                    'output',
+                    art_key,
+                    FALSE
+                FROM _seed_batch
+                """
+            )
+        finally:
+            cur.execute("DROP TABLE IF EXISTS _seed_batch")
 
     scenario_count = total_runs // runs_per_scenario
     if total_runs % runs_per_scenario:
         scenario_count += 1
 
-    sample["total_runs"] = total_runs
-    sample["scenario_count"] = scenario_count
+    mid = total_runs // 2
+    sample: Dict[str, object] = {
+        "scale_sizes": {
+            "scale_10k": size_10k,
+            "scale_50k": size_50k,
+            "scale_100k": size_100k,
+        },
+        "cache_tuple": ("cfg_0", "in_0", "git_0"),
+        "scenario_id": "scenario_00000",
+        "lookup_key": f"artifact_{mid}",
+        "lookup_hash": f"hash_{mid}",
+        "total_runs": total_runs,
+        "scenario_count": scenario_count,
+    }
     return cast(SeedSample, sample)
 
 
-def _seed_deep_lineage(session: Session, *, depth: int) -> UUID:
+def _seed_deep_lineage(db: DatabaseManager, *, depth: int) -> UUID:
     base_time = datetime.now(UTC)
-    prev_artifact: Artifact | None = None
+    prev_art_id: UUID | None = None
+    prev_key: str | None = None
 
-    for i in range(depth):
-        run_id = f"lineage_run_{i:03d}"
-        run = Run(
-            id=run_id,
-            status="completed",
-            model_name="lineage",
-            config_hash=None,
-            git_hash=None,
-            tags=["lineage"],
-            created_at=base_time,
-            updated_at=base_time,
-            started_at=base_time,
-            ended_at=base_time,
-        )
-
-        output_artifact = Artifact(
-            key=f"lineage_out_{i:03d}",
-            container_uri=f"outputs://lineage_out_{i:03d}.parquet",
-            driver="parquet",
-            hash=f"lineage_hash_{i:03d}",
-            run_id=run_id,
-            created_at=base_time,
-        )
-
-        session.add(run)
-        session.add(output_artifact)
-        session.add(
-            RunArtifactLink(
-                run_id=run_id, artifact_id=output_artifact.id, direction="output"
-            )
-        )
-
-        if prev_artifact is not None:
-            session.add(
-                RunArtifactLink(
-                    run_id=run_id, artifact_id=prev_artifact.id, direction="input"
+    with db.transaction() as cur:
+        for i in range(depth):
+            run_id = f"lineage_run_{i:03d}"
+            out_id = uuid4()
+            out_key = f"lineage_out_{i:03d}"
+            cur.execute(
+                """
+                INSERT INTO main.run (
+                    id, status, cacheable, model_name, tags, meta,
+                    started_at, ended_at, created_at, updated_at
                 )
+                VALUES (?, 'completed', TRUE, 'lineage', CAST('["lineage"]' AS JSON), CAST('{}' AS JSON), ?, ?, ?, ?)
+                """,
+                [run_id, base_time, base_time, base_time, base_time],
             )
+            cur.execute(
+                """
+                INSERT INTO main.artifact (
+                    id, key, uri, driver, digest, run_id, meta, created_at
+                )
+                VALUES (?, ?, ?, 'parquet', ?, ?, CAST('{}' AS JSON), ?)
+                """,
+                [
+                    out_id,
+                    out_key,
+                    f"outputs://lineage_out_{i:03d}.parquet",
+                    f"lineage_hash_{i:03d}",
+                    run_id,
+                    base_time,
+                ],
+            )
+            cur.execute(
+                """
+                INSERT INTO main.run_artifact_link (
+                    run_id, artifact_id, direction, role, is_implicit
+                )
+                VALUES (?, ?, 'output', ?, FALSE)
+                """,
+                [run_id, out_id, out_key],
+            )
+            if prev_art_id is not None and prev_key is not None:
+                cur.execute(
+                    """
+                    INSERT INTO main.run_artifact_link (
+                        run_id, artifact_id, direction, role, is_implicit
+                    )
+                    VALUES (?, ?, 'input', ?, FALSE)
+                    """,
+                    [run_id, prev_art_id, prev_key],
+                )
+            prev_art_id = out_id
+            prev_key = out_key
 
-        prev_artifact = output_artifact
-
-    session.commit()
-    if prev_artifact is None:
+    if prev_art_id is None:
         raise RuntimeError("Failed to create deep lineage artifacts.")
-    return prev_artifact.id
+    return prev_art_id
 
 
-def _seed_wide_lineage(session: Session, *, input_count: int) -> UUID:
+def _seed_wide_lineage(db: DatabaseManager, *, input_count: int) -> UUID:
     base_time = datetime.now(UTC)
     run_id = "wide_run"
+    out_id = uuid4()
 
-    run = Run(
-        id=run_id,
-        status="completed",
-        model_name="wide_inputs",
-        config_hash=None,
-        git_hash=None,
-        tags=["wide"],
-        created_at=base_time,
-        updated_at=base_time,
-        started_at=base_time,
-        ended_at=base_time,
-    )
-    output_artifact = Artifact(
-        key="wide_output",
-        container_uri="outputs://wide_output.parquet",
-        driver="parquet",
-        hash="wide_output_hash",
-        run_id=run_id,
-        created_at=base_time,
-    )
-
-    session.add(run)
-    session.add(output_artifact)
-    session.add(
-        RunArtifactLink(
-            run_id=run_id, artifact_id=output_artifact.id, direction="output"
-        )
-    )
-
-    inputs: list[Artifact] = []
-    links: list[RunArtifactLink] = []
-    for i in range(input_count):
-        input_artifact = Artifact(
-            key=f"wide_input_{i:03d}",
-            container_uri=f"inputs://wide_input_{i:03d}.parquet",
-            driver="parquet",
-            hash=f"wide_input_hash_{i:03d}",
-            created_at=base_time,
-        )
-        inputs.append(input_artifact)
-        links.append(
-            RunArtifactLink(
-                run_id=run_id, artifact_id=input_artifact.id, direction="input"
+    with db.transaction() as cur:
+        cur.execute(
+            """
+            INSERT INTO main.run (
+                id, status, cacheable, model_name, tags, meta,
+                started_at, ended_at, created_at, updated_at
             )
+            VALUES (?, 'completed', TRUE, 'wide_inputs', CAST('["wide"]' AS JSON), CAST('{}' AS JSON), ?, ?, ?, ?)
+            """,
+            [run_id, base_time, base_time, base_time, base_time],
+        )
+        cur.execute(
+            """
+            INSERT INTO main.artifact (
+                id, key, uri, driver, digest, run_id, meta, created_at
+            )
+            VALUES (?, 'wide_output', 'outputs://wide_output.parquet', 'parquet', 'wide_output_hash', ?, CAST('{}' AS JSON), ?)
+            """,
+            [out_id, run_id, base_time],
+        )
+        cur.execute(
+            """
+            INSERT INTO main.run_artifact_link (
+                run_id, artifact_id, direction, role, is_implicit
+            )
+            VALUES (?, ?, 'output', 'wide_output', FALSE)
+            """,
+            [run_id, out_id],
         )
 
-    session.add_all(inputs)
-    session.add_all(links)
-    session.commit()
+        for i in range(input_count):
+            in_id = uuid4()
+            in_key = f"wide_input_{i:03d}"
+            cur.execute(
+                """
+                INSERT INTO main.artifact (
+                    id, key, uri, driver, digest, run_id, meta, created_at
+                )
+                VALUES (?, ?, ?, 'parquet', ?, NULL, CAST('{}' AS JSON), ?)
+                """,
+                [
+                    in_id,
+                    in_key,
+                    f"inputs://wide_input_{i:03d}.parquet",
+                    f"wide_input_hash_{i:03d}",
+                    base_time,
+                ],
+            )
+            cur.execute(
+                """
+                INSERT INTO main.run_artifact_link (
+                    run_id, artifact_id, direction, role, is_implicit
+                )
+                VALUES (?, ?, 'input', ?, FALSE)
+                """,
+                [run_id, in_id, in_key],
+            )
 
-    return output_artifact.id
+    return out_id
 
 
-def _seed_diff_runs(session: Session, *, num_keys: int) -> Tuple[str, str, int]:
+def _seed_diff_runs(db: DatabaseManager, *, num_keys: int) -> Tuple[str, str, int]:
     base_time = datetime.now(UTC)
     run_a_id = "diff_run_a"
     run_b_id = "diff_run_b"
     model_name = "diff_model"
+    changed_count = (num_keys + 9) // 10 if num_keys > 0 else 0
 
-    run_a = Run(
-        id=run_a_id,
-        status="completed",
-        model_name=model_name,
-        config_hash=None,
-        git_hash=None,
-        tags=["diff"],
-        created_at=base_time,
-        updated_at=base_time,
-        started_at=base_time,
-        ended_at=base_time,
-    )
-    run_b = Run(
-        id=run_b_id,
-        status="completed",
-        model_name=model_name,
-        config_hash=None,
-        git_hash=None,
-        tags=["diff"],
-        created_at=base_time,
-        updated_at=base_time,
-        started_at=base_time,
-        ended_at=base_time,
-    )
-    session.add(run_a)
-    session.add(run_b)
-
-    rows: list[RunConfigKV] = []
-    changed_count = 0
-    for i in range(num_keys):
-        key = f"param_{i:04d}"
-        value_a = float(i)
-        value_b = float(i + 1) if i % 10 == 0 else float(i)
-        if i % 10 == 0:
-            changed_count += 1
-
-        rows.append(
-            RunConfigKV(
-                run_id=run_a_id,
-                facet_id=f"facet_{run_a_id}",
-                namespace=model_name,
-                key=key,
-                value_type="int",
-                value_num=value_a,
-                created_at=base_time,
+    with db.transaction() as cur:
+        for rid in (run_a_id, run_b_id):
+            facet_id = f"facet_{rid}"
+            cur.execute(
+                """
+                INSERT INTO main.run (
+                    id, status, cacheable, model_name, facet_id, tags, meta,
+                    started_at, ended_at, created_at, updated_at
+                )
+                VALUES (?, 'completed', TRUE, ?, ?, CAST('["diff"]' AS JSON), CAST('{}' AS JSON), ?, ?, ?, ?)
+                """,
+                [rid, model_name, facet_id, base_time, base_time, base_time, base_time],
             )
-        )
-        rows.append(
-            RunConfigKV(
-                run_id=run_b_id,
-                facet_id=f"facet_{run_b_id}",
-                namespace=model_name,
-                key=key,
-                value_type="int",
-                value_num=value_b,
-                created_at=base_time,
+            cur.execute(
+                """
+                INSERT INTO main.config_facet (
+                    id, namespace, schema_name, schema_version, json, created_at
+                )
+                VALUES (?, ?, 'diff_schema', '1', CAST('{}' AS JSON), ?)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                [facet_id, model_name, base_time],
             )
+        cur.execute(
+            """
+            INSERT INTO main.run_config_kv (
+                run_id, facet_id, namespace, key, value_type,
+                value_str, value_num, value_bool, value_json, created_at
+            )
+            SELECT
+                ?,
+                ?,
+                ?,
+                'param_' || lpad(CAST(i AS VARCHAR), 4, '0'),
+                'int',
+                NULL,
+                CAST(i AS DOUBLE),
+                NULL,
+                NULL,
+                ?
+            FROM range(0, ?) t(i)
+            """,
+            [run_a_id, f"facet_{run_a_id}", model_name, base_time, num_keys],
         )
-
-    for batch in _chunked(rows, 5_000):
-        session.add_all(batch)
-        session.commit()
+        cur.execute(
+            """
+            INSERT INTO main.run_config_kv (
+                run_id, facet_id, namespace, key, value_type,
+                value_str, value_num, value_bool, value_json, created_at
+            )
+            SELECT
+                ?,
+                ?,
+                ?,
+                'param_' || lpad(CAST(i AS VARCHAR), 4, '0'),
+                'int',
+                NULL,
+                CASE WHEN i % 10 = 0 THEN CAST(i + 1 AS DOUBLE) ELSE CAST(i AS DOUBLE) END,
+                NULL,
+                NULL,
+                ?
+            FROM range(0, ?) t(i)
+            """,
+            [run_b_id, f"facet_{run_b_id}", model_name, base_time, num_keys],
+        )
 
     return run_a_id, run_b_id, changed_count
 
@@ -333,27 +384,24 @@ def _lineage_run_depth(node: Dict[str, object]) -> int:
     return depth
 
 
-def _count_artifacts_keyset(session: Session, *, batch_size: int) -> int:
+def _count_artifacts_keyset(db: DatabaseManager, *, batch_size: int) -> int:
     last_created = None
     last_id = None
     total = 0
     while True:
-        stmt = (
-            select(Artifact.id, Artifact.created_at)
-            .order_by(Artifact.created_at, Artifact.id)
-            .limit(batch_size)
-        )
-        if last_created is not None and last_id is not None:
-            stmt = stmt.where(
-                or_(
-                    Artifact.created_at > last_created,
-                    and_(
-                        Artifact.created_at == last_created,
-                        Artifact.id > last_id,
-                    ),
-                )
+        if last_created is None or last_id is None:
+            batch = db.fetchall(
+                "SELECT id, created_at FROM main.artifact "
+                "ORDER BY created_at ASC, id ASC LIMIT ?",
+                [batch_size],
             )
-        batch = session.exec(stmt).all()
+        else:
+            batch = db.fetchall(
+                "SELECT id, created_at FROM main.artifact "
+                "WHERE created_at > ? OR (created_at = ? AND id > ?) "
+                "ORDER BY created_at ASC, id ASC LIMIT ?",
+                [last_created, last_created, last_id, batch_size],
+            )
         if not batch:
             break
         total += len(batch)

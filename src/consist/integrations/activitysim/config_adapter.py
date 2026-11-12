@@ -25,8 +25,7 @@ from typing import (
     Union,
 )
 
-from sqlalchemy.sql import Executable
-from sqlmodel import SQLModel, col
+from sqlmodel import SQLModel
 
 from consist.core.config_canonicalization import (
     ArtifactSpec,
@@ -42,6 +41,7 @@ from consist.core.config_canonicalization import (
     compute_config_pack_hash,
 )
 from consist.core.identity import IdentityManager
+from consist.core.queries import ParameterizedSQL
 from consist.digest import canonical_json_sha256, file_sha256
 from consist.integrations._config_adapter_shared import (
     OverrideRunHooks as _shared_OverrideRunHooks,
@@ -1446,17 +1446,26 @@ class ActivitySimConfigAdapter:
     def _normalize_where(where: Optional[Union[Iterable[Any], Any]]) -> list[Any]:
         if where is None:
             return []
+        if (
+            isinstance(where, tuple)
+            and len(where) == 2
+            and isinstance(where[0], str)
+            and not isinstance(where[1], (str, bytes))
+        ):
+            return [where]
         if isinstance(where, (list, tuple, set)):
             return list(where)
         return [where]
 
     @staticmethod
-    def _resolve_value_column(table: type[SQLModel], value_column: str) -> Any:
-        if not hasattr(table, value_column):
+    def _resolve_value_column(
+        table: type[SQLModel], value_column: str
+    ) -> tuple[type[SQLModel], str]:
+        if value_column not in table.model_fields:
             raise ValueError(
                 f"Unknown value_column {value_column!r} for {table.__name__}."
             )
-        return getattr(table, value_column)
+        return (table, value_column)
 
     def run_link_query(
         self,
@@ -1466,7 +1475,7 @@ class ActivitySimConfigAdapter:
         where: Optional[Union[Iterable[Any], Any]] = None,
         join_on: Optional[Iterable[str]] = None,
         table_name: Optional[str] = None,
-    ) -> Executable:
+    ) -> ParameterizedSQL:
         """
         Build a run-linked query for a config cache table.
         """
@@ -1490,7 +1499,7 @@ class ActivitySimConfigAdapter:
         join_on: Optional[Iterable[str]] = None,
         table_name: Optional[str] = None,
         tracker: Optional["Tracker"] = None,
-    ) -> list:
+    ) -> list[Any]:
         """
         Execute a run-linked query for a config cache table.
         """
@@ -1515,24 +1524,25 @@ class ActivitySimConfigAdapter:
         columns: Optional[Iterable[Any]] = None,
         where: Optional[Union[Iterable[Any], Any]] = None,
         join_on: Optional[Iterable[str]] = None,
-    ) -> Executable:
+    ) -> ParameterizedSQL:
         """
         Build a query for ActivitySim constants joined to runs.
 
         Defaults to selecting (run_id, value_column) when columns is not provided.
         """
-        clauses: list[Any] = []
+        filters: dict[str, Any] = {}
         if key is not None:
-            clauses.append(ActivitySimConstantsCache.key == key)
+            filters["key"] = key
         if file_name is not None:
-            clauses.append(ActivitySimConstantsCache.file_name == file_name)
+            filters["file_name"] = file_name
+        clauses: list[Any] = [filters] if filters else []
         clauses.extend(self._normalize_where(where))
 
         if columns is None:
             value_attr = self._resolve_value_column(
                 ActivitySimConstantsCache, value_column
             )
-            columns = [ActivitySimConfigIngestRunLink.run_id, value_attr]
+            columns = [(ActivitySimConfigIngestRunLink, "run_id"), value_attr]
 
         return self.run_link_query(
             ActivitySimConstantsCache,
@@ -1551,7 +1561,7 @@ class ActivitySimConfigAdapter:
         where: Optional[Union[Iterable[Any], Any]] = None,
         join_on: Optional[Iterable[str]] = None,
         tracker: Optional["Tracker"] = None,
-    ) -> list:
+    ) -> list[Any]:
         """
         Fetch ActivitySim constants joined to runs.
 
@@ -1561,13 +1571,14 @@ class ActivitySimConfigAdapter:
             value_attr = self._resolve_value_column(
                 ActivitySimConstantsCache, value_column
             )
-            columns = [ActivitySimConfigIngestRunLink.run_id, value_attr]
+            columns = [(ActivitySimConfigIngestRunLink, "run_id"), value_attr]
 
-        clauses: list[Any] = []
+        filters: dict[str, Any] = {}
         if key is not None:
-            clauses.append(ActivitySimConstantsCache.key == key)
+            filters["key"] = key
         if file_name is not None:
-            clauses.append(ActivitySimConstantsCache.file_name == file_name)
+            filters["file_name"] = file_name
+        clauses: list[Any] = [filters] if filters else []
         clauses.extend(self._normalize_where(where))
 
         return self.run_link_rows(
@@ -1612,26 +1623,27 @@ class ActivitySimConfigAdapter:
         columns: Optional[Iterable[Any]] = None,
         where: Optional[Union[Iterable[Any], Any]] = None,
         join_on: Optional[Iterable[str]] = None,
-    ) -> Executable:
+    ) -> ParameterizedSQL:
         """
         Build a query for ActivitySim coefficients joined to runs.
 
         Defaults to selecting (run_id, value_column) when columns is not provided.
         """
-        clauses: list[Any] = []
+        filters: dict[str, Any] = {}
         if coefficient is not None:
-            clauses.append(ActivitySimCoefficientsCache.coefficient_name == coefficient)
+            filters["coefficient_name"] = coefficient
         if file_name is not None:
-            clauses.append(ActivitySimCoefficientsCache.file_name == file_name)
+            filters["file_name"] = file_name
         if segment is not None:
-            clauses.append(ActivitySimCoefficientsCache.segment == segment)
+            filters["segment"] = segment
+        clauses: list[Any] = [filters] if filters else []
         clauses.extend(self._normalize_where(where))
 
         if columns is None:
             value_attr = self._resolve_value_column(
                 ActivitySimCoefficientsCache, value_column
             )
-            columns = [ActivitySimConfigIngestRunLink.run_id, value_attr]
+            columns = [(ActivitySimConfigIngestRunLink, "run_id"), value_attr]
 
         return self.run_link_query(
             ActivitySimCoefficientsCache,
@@ -1651,7 +1663,7 @@ class ActivitySimConfigAdapter:
         where: Optional[Union[Iterable[Any], Any]] = None,
         join_on: Optional[Iterable[str]] = None,
         tracker: Optional["Tracker"] = None,
-    ) -> list:
+    ) -> list[Any]:
         """
         Fetch ActivitySim coefficients joined to runs.
 
@@ -1661,15 +1673,16 @@ class ActivitySimConfigAdapter:
             value_attr = self._resolve_value_column(
                 ActivitySimCoefficientsCache, value_column
             )
-            columns = [ActivitySimConfigIngestRunLink.run_id, value_attr]
+            columns = [(ActivitySimConfigIngestRunLink, "run_id"), value_attr]
 
-        clauses: list[Any] = []
+        filters: dict[str, Any] = {}
         if coefficient is not None:
-            clauses.append(ActivitySimCoefficientsCache.coefficient_name == coefficient)
+            filters["coefficient_name"] = coefficient
         if file_name is not None:
-            clauses.append(ActivitySimCoefficientsCache.file_name == file_name)
+            filters["file_name"] = file_name
         if segment is not None:
-            clauses.append(ActivitySimCoefficientsCache.segment == segment)
+            filters["segment"] = segment
+        clauses: list[Any] = [filters] if filters else []
         clauses.extend(self._normalize_where(where))
 
         return self.run_link_rows(
@@ -1741,20 +1754,19 @@ class ActivitySimConfigAdapter:
         value_attr = self._resolve_value_column(
             ActivitySimCoefficientsCache, value_column
         )
-        clauses: list[Any] = [
-            col(ActivitySimCoefficientsCache.coefficient_name).in_(coeff_list)
-        ]
+        filters: dict[str, Any] = {"coefficient_name": coeff_list}
         if file_name is not None:
-            clauses.append(ActivitySimCoefficientsCache.file_name == file_name)
+            filters["file_name"] = file_name
         if segment is not None:
-            clauses.append(ActivitySimCoefficientsCache.segment == segment)
+            filters["segment"] = segment
+        clauses: list[Any] = [filters]
         clauses.extend(self._normalize_where(where))
 
         rows = self.run_link_rows(
             ActivitySimCoefficientsCache,
             columns=[
-                ActivitySimConfigIngestRunLink.run_id,
-                ActivitySimCoefficientsCache.coefficient_name,
+                (ActivitySimConfigIngestRunLink, "run_id"),
+                (ActivitySimCoefficientsCache, "coefficient_name"),
                 value_attr,
             ],
             where=clauses,
@@ -1810,6 +1822,84 @@ class ActivitySimConfigAdapter:
             run_ids.sort()
 
         return combos
+
+    def probabilities_query(
+        self,
+        *,
+        key: Optional[str] = None,
+        file_name: Optional[str] = None,
+        row_index: Optional[int] = None,
+        value_column: str = "value_num",
+        table: type[SQLModel] = ActivitySimProbabilitiesEntriesCache,
+        columns: Optional[Iterable[Any]] = None,
+        where: Optional[Union[Iterable[Any], Any]] = None,
+        join_on: Optional[Iterable[str]] = None,
+    ) -> ParameterizedSQL:
+        """
+        Build a query for ActivitySim probability entries joined to runs.
+
+        Defaults to selecting (run_id, value_column) when columns is not provided.
+        """
+        filters: dict[str, Any] = {}
+        if key is not None:
+            filters["key"] = key
+        if file_name is not None:
+            filters["file_name"] = file_name
+        if row_index is not None:
+            filters["row_index"] = row_index
+        clauses: list[Any] = [filters] if filters else []
+        clauses.extend(self._normalize_where(where))
+
+        if columns is None:
+            value_attr = self._resolve_value_column(table, value_column)
+            columns = [(ActivitySimConfigIngestRunLink, "run_id"), value_attr]
+
+        return self.run_link_query(
+            table,
+            columns=columns,
+            where=clauses,
+            join_on=join_on,
+        )
+
+    def probabilities_rows(
+        self,
+        *,
+        key: Optional[str] = None,
+        file_name: Optional[str] = None,
+        row_index: Optional[int] = None,
+        value_column: str = "value_num",
+        table: type[SQLModel] = ActivitySimProbabilitiesEntriesCache,
+        columns: Optional[Iterable[Any]] = None,
+        where: Optional[Union[Iterable[Any], Any]] = None,
+        join_on: Optional[Iterable[str]] = None,
+        tracker: Optional["Tracker"] = None,
+    ) -> list[Any]:
+        """
+        Fetch ActivitySim probability entries joined to runs.
+
+        Defaults to selecting (run_id, value_column) when columns is not provided.
+        """
+        if columns is None:
+            value_attr = self._resolve_value_column(table, value_column)
+            columns = [(ActivitySimConfigIngestRunLink, "run_id"), value_attr]
+
+        filters: dict[str, Any] = {}
+        if key is not None:
+            filters["key"] = key
+        if file_name is not None:
+            filters["file_name"] = file_name
+        if row_index is not None:
+            filters["row_index"] = row_index
+        clauses: list[Any] = [filters] if filters else []
+        clauses.extend(self._normalize_where(where))
+
+        return self.run_link_rows(
+            table,
+            columns=columns,
+            where=clauses,
+            join_on=join_on,
+            tracker=tracker,
+        )
 
     @staticmethod
     def _collapse_run_values(

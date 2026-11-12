@@ -585,7 +585,7 @@ def test_action_v2_content_binding_survives_later_caller_hash_logging_after_reop
     assert binding["mode"] == "content-v1"
     assert binding["artifact_id"] == str(trusted.id)
 
-    tracker.db.engine.dispose()
+    tracker.close()
     reopened = Tracker(run_dir=tmp_path / "runs", db_path=db_path)
     persisted = reopened.db.get_artifact(UUID(binding["artifact_id"]))
 
@@ -621,7 +621,7 @@ def test_action_v2_records_caller_hash_input_as_legacy_after_reopen(
         execution_options=ExecutionOptions(input_binding="none"),
     )
 
-    tracker.db.engine.dispose()
+    tracker.close()
     reopened = Tracker(run_dir=tmp_path / "runs", db_path=db_path)
     persisted = reopened.db.get_artifact(untrusted.id)
     binding = reopened.get_run(result.run.id).identity_summary["input_identity"][

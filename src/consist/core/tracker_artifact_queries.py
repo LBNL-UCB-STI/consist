@@ -61,14 +61,22 @@ class TrackerArtifactQueryService(_TrackerServiceBase):
         Returns
         -------
         List[Artifact]
-            Artifacts with the same ``content_id`` as the target artifact.
+            Artifacts sharing the same verified content identity or digest+driver.
         """
         if not self.db:
             return []
         target = self._resolve_artifact_ref(artifact)
-        if target is None or target.content_id is None:
+        if target is None:
             return []
-        artifacts = self.db.find_artifacts_by_content_id(target.content_id)
+        meta = target.meta if isinstance(target.meta, dict) else {}
+        content_identity = meta.get("content_identity")
+        artifacts = self.db.find_artifacts_by_content_identity(
+            content_identity=content_identity
+            if isinstance(content_identity, str)
+            else None,
+            digest=target.hash,
+            driver=target.driver,
+        )
         for item in artifacts:
             set_tracker_ref(item, self._tracker)
         return artifacts
@@ -87,14 +95,22 @@ class TrackerArtifactQueryService(_TrackerServiceBase):
         Returns
         -------
         List[str]
-            Run ids linked to output artifacts sharing the same ``content_id``.
+            Run ids linked to output artifacts sharing the same content identity.
         """
         if not self.db:
             return []
         target = self._resolve_artifact_ref(artifact)
-        if target is None or target.content_id is None:
+        if target is None:
             return []
-        return self.db.find_runs_producing_content(target.content_id)
+        meta = target.meta if isinstance(target.meta, dict) else {}
+        content_identity = meta.get("content_identity")
+        return self.db.find_runs_producing_content_identity(
+            content_identity=content_identity
+            if isinstance(content_identity, str)
+            else None,
+            digest=target.hash,
+            driver=target.driver,
+        )
 
     def get_child_artifacts(
         self, parent: Union[Artifact, str, uuid.UUID]

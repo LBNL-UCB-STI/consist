@@ -226,7 +226,7 @@ def test_shell_completion_falls_back_to_empty_on_query_failure(tmp_path) -> None
     ):
         shell = ConsistShell(tracker)
 
-    with patch("consist.cli._tracker_session", side_effect=RuntimeError("db down")):
+    with patch("consist.cli._require_db", side_effect=RuntimeError("db down")):
         assert shell.complete_show("", "show ", 5, 5) == []
         assert shell.complete_artifacts("", "artifacts ", 10, 10) == []
         assert shell.complete_preview("", "preview ", 8, 8) == []
@@ -277,9 +277,8 @@ def test_shell_hash_lookup_reports_run_scoped_miss(tmp_path, capsys) -> None:
     ):
         shell = ConsistShell(tracker)
 
-    with patch("consist.cli._tracker_session") as tracker_session:
-        session = tracker_session.return_value.__enter__.return_value
-        session.exec.return_value.all.return_value = []
+    with patch("consist.cli._require_db") as require_db:
+        require_db.return_value.fetchall.return_value = []
         resolved = shell._lookup_artifact_by_hash_prefix(
             "deadbeef", command_name="preview", run_id="run-123"
         )
@@ -302,9 +301,8 @@ def test_shell_hash_lookup_does_not_inherit_last_artifact_run_scope(
         shell = ConsistShell(tracker)
     shell._last_artifact_run_id = "run-123"
 
-    with patch("consist.cli._tracker_session") as tracker_session:
-        session = tracker_session.return_value.__enter__.return_value
-        session.exec.return_value.all.return_value = []
+    with patch("consist.cli._require_db") as require_db:
+        require_db.return_value.fetchall.return_value = []
         resolved = shell._lookup_artifact_by_hash_prefix(
             "deadbeef", command_name="preview"
         )
@@ -340,9 +338,11 @@ def test_shell_hash_lookup_reports_ambiguity_with_candidates(tmp_path, capsys) -
         ),
     ]
 
-    with patch("consist.cli._tracker_session") as tracker_session:
-        session = tracker_session.return_value.__enter__.return_value
-        session.exec.return_value.all.return_value = matches
+    with (
+        patch("consist.cli._require_db") as require_db,
+        patch("consist.cli._hydrate_artifact_row", side_effect=matches),
+    ):
+        require_db.return_value.fetchall.return_value = [("row-1",), ("row-2",)]
         resolved = shell._lookup_artifact_by_hash_prefix(
             "deadbeef", command_name="schema_profile", run_id="run-a"
         )
@@ -628,11 +628,11 @@ def test_shell_runs_json_mode_uses_output_json(tmp_path) -> None:
     )
 
     with (
-        patch("consist.cli._tracker_session") as tracker_session,
+        patch("consist.cli._require_db") as require_db,
         patch("consist.cli.queries.get_runs", return_value=[fake_run]),
         patch("consist.cli.output_json") as output_json_mock,
     ):
-        tracker_session.return_value.__enter__.return_value = MagicMock()
+        require_db.return_value = MagicMock()
         shell.do_runs("--json")
 
     output_json_mock.assert_called_once()

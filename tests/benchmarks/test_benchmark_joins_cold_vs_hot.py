@@ -21,7 +21,6 @@ import numpy as np
 import time
 import os
 import gc
-from sqlmodel import text
 
 import consist
 from consist import Run
@@ -239,17 +238,15 @@ def test_comparative_join_benchmark(tmp_path: Path):
         # Create View over raw Parquet files
         tracker.create_view("v_bench_cold", "results")
 
-        query = text(
+        res_consist_cold = tracker.run_query(
             """
             SELECT a.category, AVG(b.val - a.val) as avg_delta
             FROM v_bench_cold a
             JOIN v_bench_cold b ON a.id = b.id
             WHERE a.consist_run_id = 'run_a' AND b.consist_run_id = 'run_b'
             GROUP BY 1 ORDER BY 1
-        """
+            """
         )
-        with tracker.engine.connect() as conn:
-            res_consist_cold = conn.execute(query).fetchall()
 
     # =========================================================================
     # BENCHMARK 4: CONSIST (Hot / Native)
@@ -286,17 +283,15 @@ def test_comparative_join_benchmark(tmp_path: Path):
         # (Since artifacts are now marked 'is_ingested', this view points to global_tables.results)
         tracker.create_view("v_bench_hot", "results")
 
-        query_hot = text(
+        res_consist_hot = tracker.run_query(
             """
             SELECT a.category, AVG(b.val - a.val) as avg_delta
             FROM v_bench_hot a
             JOIN v_bench_hot b ON a.id = b.id
             WHERE a.consist_run_id = 'run_a' AND b.consist_run_id = 'run_b'
             GROUP BY 1 ORDER BY 1
-        """
+            """
         )
-        with tracker.engine.connect() as conn:
-            res_consist_hot = conn.execute(query_hot).fetchall()
 
     # =========================================================================
     # VERIFICATION

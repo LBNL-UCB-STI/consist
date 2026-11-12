@@ -127,6 +127,7 @@ def test_schema_capture_file_passes_mount_overrides_to_tracker(tmp_path) -> None
         "mock.db",
         run_dir=None,
         mounts={"workspace": str(workspace_root.resolve())},
+        read_only=False,
     )
 
 
@@ -266,7 +267,7 @@ def test_artifacts_accepts_run_dir_for_moved_run_roots(
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text("a,b\n1,2\n", encoding="utf-8")
         tracker.log_output(output_path, key="results")
-    tracker.engine.dispose()
+    tracker.close()
 
     monkeypatch.chdir(repo_root)
     result = runner.invoke(

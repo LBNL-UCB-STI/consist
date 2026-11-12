@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
-from sqlmodel import Session
 import pytest
 
 from consist.core.tracker import Tracker
@@ -73,7 +72,9 @@ def test_h5_lineage_hashing_demo(tracker: Tracker, run_dir: Path) -> None:
 
     assert container_repeat.id != container_v1.id
     assert container_repeat.hash == container_v1.hash
-    assert container_repeat.content_id == container_v1.content_id
+    assert container_repeat.meta.get("content_identity") == container_v1.meta.get(
+        "content_identity"
+    )
     assert container_repeat.meta.get("table_hashes_checked") is True
     assert all("table_hash" in t.meta for t in tables_repeat)
 
@@ -167,16 +168,15 @@ def test_h5_lineage_prefers_content_id_when_hash_missing(
             direction="input",
         )
 
-    assert container_v1.content_id is not None
+    assert container_v1.meta.get("content_identity") is not None
     assert tables_v1 and all("table_hash" in t.meta for t in tables_v1)
 
     # Clear the prior container's file hash while preserving content identity.
-    with Session(tracker.engine) as session:
-        db_row = session.get(type(container_v1), container_v1.id)
-        assert db_row is not None
-        db_row.hash = None
-        session.add(db_row)
-        session.commit()
+    assert tracker.db is not None
+    tracker.db.execute(
+        "UPDATE main.artifact SET digest = NULL WHERE id = ?",
+        [container_v1.id],
+    )
 
     with tracker.start_run(
         "h5_demo_ci_v1_repeat", model="demo", tags=["h5_ci", "repeat"]
@@ -188,6 +188,8 @@ def test_h5_lineage_prefers_content_id_when_hash_missing(
         )
 
     # Content identity should remain stable; table hashing should have been performed.
-    assert container_repeat.content_id == container_v1.content_id
+    assert container_repeat.meta.get("content_identity") == container_v1.meta.get(
+        "content_identity"
+    )
     assert container_repeat.meta.get("table_hashes_checked") is True
     assert tables_repeat and all("table_hash" in t.meta for t in tables_repeat)

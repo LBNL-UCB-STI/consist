@@ -9,6 +9,7 @@ import hashlib
 import json
 import inspect
 import fnmatch
+import subprocess
 import warnings
 from dataclasses import dataclass
 from collections.abc import Mapping
@@ -279,6 +280,82 @@ class IdentityManager:
         code_version = f"{sha}-dirty-{dirty_hash}"
         return code_version, f"dirty:{code_version}"
 
+    def _cli_git_run(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", "-C", str(self.project_root), *args],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def _cli_git_code_version(self) -> tuple[str, str]:
+        try:
+            rev = self._cli_git_run("rev-parse", "--verify", "HEAD")
+        except (FileNotFoundError, OSError) as exc:
+            raise CodeIdentityUnavailableError(
+                mode="repo_git",
+                reason=f"GitPython is not installed and git CLI is unavailable: {exc}.",
+                guidance=(
+                    'Install GitPython with `pip install "consist[git]"` or ensure '
+                    "`git` is on PATH inside a Git repository with at least one commit."
+                ),
+            ) from exc
+
+        if rev.returncode != 0:
+            detail = (rev.stderr or rev.stdout or "").strip()
+            reason = (
+                f"Could not resolve a Git commit from project root {self.project_root}"
+            )
+            if detail and detail != str(self.project_root):
+                reason += f": {detail}"
+            raise CodeIdentityUnavailableError(
+                mode="repo_git",
+                reason=f"{reason}.",
+                guidance=(
+                    "Set project_root to a Git repository with at least one commit."
+                ),
+            )
+
+        sha = rev.stdout.strip()
+        status = self._cli_git_run("status", "--porcelain", "--untracked-files=no")
+        if status.returncode != 0:
+            detail = (status.stderr or status.stdout or "").strip()
+            raise CodeIdentityUnavailableError(
+                mode="repo_git",
+                reason=(
+                    f"Could not inspect Git working tree at {self.project_root}: {detail}."
+                ),
+                guidance=(
+                    "Set project_root to a Git repository with at least one commit."
+                ),
+            )
+
+        if not status.stdout.strip():
+            return sha, f"clean:{sha}"
+
+        diff_head_proc = self._cli_git_run("diff", "HEAD", "--", "*.py")
+        if diff_head_proc.returncode == 0:
+            diff_head = diff_head_proc.stdout.rstrip("\r\n")
+        else:
+            fallback_proc = self._cli_git_run("diff", "--", "*.py")
+            diff_head = (
+                fallback_proc.stdout.rstrip("\r\n")
+                if fallback_proc.returncode == 0
+                else ""
+            )
+        diff_cached_proc = self._cli_git_run("diff", "--cached", "--", "*.py")
+        diff_cached = (
+            diff_cached_proc.stdout.rstrip("\r\n")
+            if diff_cached_proc.returncode == 0
+            else ""
+        )
+        dirty_payload = "\n\n".join([sha, diff_cached, diff_head])
+        dirty_hash = hashlib.sha256(
+            dirty_payload.encode("utf-8", errors="replace")
+        ).hexdigest()[:12]
+        code_version = f"{sha}-dirty-{dirty_hash}"
+        return code_version, f"dirty:{code_version}"
+
     def get_code_version(self) -> str:
         """
         Retrieves the global 'Code Identity' using the Git Commit SHA.
@@ -295,6 +372,7 @@ class IdentityManager:
             repository that can be inspected.
         """
         code_version: str
+        fingerprint: str
         git_module = _get_git()
         if git_module is None:
             raise CodeIdentityUnavailableError(
@@ -494,6 +572,59 @@ class IdentityManager:
                 extra_deps=extra_deps,
             ),
         )
+
+    def resolve_fallback_code_identity_without_gitpython(
+        self,
+        *,
+        extra_deps: Optional[List[str]] = None,
+    ) -> CodeIdentityResolution:
+        """Best-effort code identity when optional ``consist[git]`` is not installed."""
+        try:
+            code_version, fingerprint = self._cli_git_code_version()
+            self._repo_git_code_version_cache = code_version
+            self._repo_git_code_version_fingerprint_cache = fingerprint
+            return CodeIdentityResolution(mode="repo_git", digest=code_version)
+        except CodeIdentityUnavailableError:
+            pass
+
+        consist_pkg_dir = Path(__file__).resolve().parents[1]
+        frame = inspect.currentframe()
+        try:
+            cur = frame.f_back if frame is not None else None
+            while cur is not None:
+                filename = cur.f_code.co_filename
+                if filename and not filename.startswith("<"):
+                    candidate = Path(filename)
+                    try:
+                        resolved = candidate.resolve()
+                    except OSError:
+                        resolved = None
+                    if (
+                        resolved is not None
+                        and resolved.is_file()
+                        and consist_pkg_dir not in resolved.parents
+                    ):
+                        hashes = [f"mod:{self.compute_file_checksum(str(resolved))}"]
+                        if extra_deps:
+                            for dep in extra_deps:
+                                full_path = self.project_root / dep
+                                if full_path.exists():
+                                    hashes.append(
+                                        f"dep:{dep}:{self.compute_file_checksum(str(full_path))}"
+                                    )
+                                else:
+                                    hashes.append(f"dep:{dep}:MISSING")
+                        composite = "|".join(sorted(hashes))
+                        digest = hashlib.sha256(composite.encode("utf-8")).hexdigest()
+                        return CodeIdentityResolution(
+                            mode="callable_module",
+                            digest=digest,
+                        )
+                cur = cur.f_back
+        finally:
+            del frame
+
+        return CodeIdentityResolution(mode="repo_git", digest="untracked")
 
     # --- Component 2: Config Identity ---
 

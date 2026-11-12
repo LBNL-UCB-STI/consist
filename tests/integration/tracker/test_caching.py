@@ -324,7 +324,7 @@ def test_log_output_reuses_same_uri_when_enabled(tracker, tmp_path, caplog):
     assert reused.id != first.id
     assert reused.run_id == "run_output_reuse_same_uri_b"
     assert reused.hash == first.hash
-    assert reused.content_id == first.content_id
+    assert reused.meta.get("content_identity") == first.meta.get("content_identity")
     same_content = tracker.find_artifacts_with_same_content(reused.id)
     assert {artifact.id for artifact in same_content} == {first.id, reused.id}
     producing_runs = tracker.find_runs_producing_same_content(reused.id)
@@ -372,7 +372,7 @@ def test_log_output_reuses_any_uri_when_enabled(tracker, tmp_path, caplog):
         )
 
     assert reused.id != first.id
-    assert reused.content_id == first.content_id
+    assert reused.meta.get("content_identity") == first.meta.get("content_identity")
     assert any(
         "reuse_scope='any_uri' is ignored for outputs" in record.message
         for record in caplog.records

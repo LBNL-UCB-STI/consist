@@ -2709,7 +2709,14 @@ class ScenarioContext:
         )
         tracker_config_dict = child_tracker_config.model_dump()
 
-        with executor_cls(max_workers=max_workers) as executor:
+        from contextlib import nullcontext
+
+        suspend_ctx = (
+            self.tracker.db.suspend_for_subprocesses()
+            if self.tracker.db is not None
+            else nullcontext()
+        )
+        with suspend_ctx, executor_cls(max_workers=max_workers) as executor:
             futures = {
                 executor.submit(execute_worker_run, tracker_config_dict, spec): (
                     idx,

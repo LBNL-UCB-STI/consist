@@ -35,15 +35,16 @@ def _artifact(
     inputs explicit at each call site.
     """
 
+    meta = {"content_identity": str(content_id)} if content_id is not None else {}
     return Artifact(
         key=key,
         run_id=run_id,
         container_uri=container_uri,
         driver=driver,
         hash=hash_value,
-        content_id=content_id,
         table_path=table_path,
         array_path=array_path,
+        meta=meta,
     )
 
 

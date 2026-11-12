@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from sqlmodel import Session, select
+from typing_extensions import Protocol, runtime_checkable
 
 from consist.core.materialize import materialize_artifacts
 from consist.core.tracker import Tracker
@@ -40,10 +40,20 @@ from consist.integrations.containers.models import (
     _hash_environment,
 )
 from consist.models.artifact import Artifact
-from consist.models.run import RunArtifactLink
 from consist.types import ArtifactRef
 
 logger = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class _HasResolveImageDigest(Protocol):
+    def resolve_image_digest(self, image: str) -> str: ...
+
+
+@runtime_checkable
+class _HasAllowExternalPaths(Protocol):
+    allow_external_paths: bool
+
 
 MAX_CONTAINER_COMMAND_LENGTH = 10_000
 
@@ -67,7 +77,8 @@ class ContainerResult:
 
 def _resolve_image_digest(backend, image: str, pull_latest: bool) -> str:
     """Resolve image digest (backend handles pull_latest internally if supported)."""
-    if getattr(backend, "resolve_image_digest", None):
+    del pull_latest
+    if isinstance(backend, _HasResolveImageDigest):
         return backend.resolve_image_digest(image)
     return image
 
@@ -83,8 +94,7 @@ def _hash_inputs(tracker: Tracker, items: Sequence[ArtifactRef]) -> List[str]:
                 if run:
                     if run.config_hash:
                         sig_parts.append(f"conf:{run.config_hash}")
-            # Intentional hash usage: container signatures need a portable content
-            # fingerprint, not a tracker-local ``content_id``.
+            # Container signatures use a portable content digest fingerprint.
             if item.hash:
                 sig_parts.append(f"hash:{item.hash}")
             if not sig_parts:
@@ -214,7 +224,12 @@ def _validate_host_path(
 def _ensure_output_within_run_dir(
     path: Path, tracker: Tracker, *, strict_mounts: bool
 ) -> None:
-    if getattr(tracker, "allow_external_paths", False) or (not strict_mounts):
+    allow_ext = (
+        bool(tracker.allow_external_paths)
+        if isinstance(tracker, _HasAllowExternalPaths)
+        else False
+    )
+    if allow_ext or (not strict_mounts):
         return
     base_dir = tracker.run_dir.resolve()
     resolved = path.resolve()
@@ -296,18 +311,19 @@ def _reuse_or_execute_container(
         if set(requested_outputs).issubset(set(cached_outputs)):
             logger.info(f"✅ [Consist] Container cache hit: {run_id} -> {cached.id}")
             # Re-link cached artifacts to current run for provenance (inputs + outputs).
-            if tracker.db and tracker.engine:
-                with Session(tracker.engine) as session:
-                    links = session.exec(
-                        select(RunArtifactLink).where(
-                            RunArtifactLink.run_id == cached.id
-                        )
-                    ).all()
-                for link in links:
+            if tracker.db is not None:
+                link_rows = tracker.db.fetchall(
+                    "SELECT artifact_id, direction, role, is_implicit "
+                    "FROM run_artifact_link WHERE run_id = ?",
+                    [cached.id],
+                )
+                for art_id, direction, role, is_implicit in link_rows:
                     tracker.db.link_artifact_to_run(
-                        artifact_id=link.artifact_id,
+                        artifact_id=art_id,
                         run_id=run_id,
-                        direction=link.direction,
+                        direction=str(direction),
+                        role=str(role or ""),
+                        is_implicit=bool(is_implicit),
                     )
 
             # Materialize requested outputs onto the host so callers see expected files.
@@ -634,7 +650,7 @@ def run_container(
                     **log_kwargs,
                 )
                 try:
-                    object.__setattr__(logged, "_abs_path", str(path_obj))
+                    logged._abs_path = str(path_obj)
                 except Exception:
                     continue
             else:

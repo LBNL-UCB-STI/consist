@@ -13,12 +13,11 @@ from typing import (
     Mapping,
     NamedTuple,
     Optional,
-    Protocol,
     Sequence,
     TYPE_CHECKING,
     Union,
-    runtime_checkable,
 )
+from typing_extensions import Protocol, runtime_checkable
 
 from sqlmodel import SQLModel
 

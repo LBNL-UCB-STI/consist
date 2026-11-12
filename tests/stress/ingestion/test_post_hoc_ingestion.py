@@ -23,7 +23,6 @@ import consist
 from consist.core.tracker import Tracker
 from consist.models.run import Run
 from consist.models.artifact import Artifact
-from sqlmodel import text
 
 N_ROWS = 1_000_000
 
@@ -134,13 +133,13 @@ def test_offline_ingestion(tmp_path):
     # Create view using the restored artifact key
     tracker.create_view("v_weather", "weather_data")
 
-    with tracker.engine.connect() as conn:
-        # Check that 'consist_run_id' matches the original HPC run
-        query = text("SELECT consist_run_id, COUNT(*) FROM v_weather GROUP BY 1")
-        row = conn.execute(query).fetchone()
+    # Check that 'consist_run_id' matches the original HPC run
+    row = tracker.run_query(
+        "SELECT consist_run_id, COUNT(*) FROM v_weather GROUP BY 1"
+    )[0]
 
-        logging.info(f"   -> Found data for Run ID: {row[0]}")
-        logging.info(f"   -> Row Count: {row[1]}")
+    logging.info(f"   -> Found data for Run ID: {row[0]}")
+    logging.info(f"   -> Row Count: {row[1]}")
 
-        assert row[0] == "run_hpc_01"
-        assert row[1] == N_ROWS
+    assert row[0] == "run_hpc_01"
+    assert row[1] == N_ROWS

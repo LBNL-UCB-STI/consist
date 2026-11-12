@@ -1,6 +1,7 @@
 import logging
 from pathlib import Path
-from typing import Optional, Protocol, runtime_checkable
+from typing import Optional
+from typing_extensions import Protocol, runtime_checkable
 
 from consist.models.artifact import Artifact
 from consist.models.run import ConsistRecord

@@ -534,14 +534,9 @@ def test_beam_canonicalize_ingests_gtfs_tables(gtfs_tracker, tmp_path: Path):
     assert bundle_artifact is not None
     assert bundle_artifact.driver == "gtfs"
 
-    if gtfs_tracker.engine is None:
-        raise AssertionError("Tracker engine missing; DB tests require DuckDB.")
-
-    with gtfs_tracker.engine.begin() as connection:
-        count = connection.exec_driver_sql(
-            "SELECT COUNT(*) FROM global_tables.trips"
-        ).scalar_one()
-    assert count == 2
+    assert gtfs_tracker.db is not None
+    df = gtfs_tracker.query_df("SELECT COUNT(*) AS count FROM global_tables.trips")
+    assert int(df.iloc[0]["count"]) == 2
 
 
 def test_beam_canonicalization_snapshot_omits_unlogged_gtfs_directory_delegate(

@@ -344,12 +344,12 @@ class ArtifactManager:
             logging.warning(
                 "[Consist] reuse_if_unchanged on outputs is deprecated; "
                 "a new artifact row is always created now and identical bytes share "
-                "identity via ArtifactContent (content_id)."
+                "content digest identity."
             )
             if reuse_scope == "any_uri":
                 logging.warning(
                     "[Consist] reuse_scope='any_uri' is ignored for outputs; "
-                    "content_id equality governs deduplication instead."
+                    "digest equality governs deduplication instead."
                 )
 
         def _clone_artifact(
@@ -370,28 +370,6 @@ class ArtifactManager:
             if parent_artifact_id_override is not None:
                 updates["parent_artifact_id"] = parent_artifact_id_override
             return artifact.model_copy(deep=True, update=updates or None)
-
-        def _attach_content_id(artifact: Artifact) -> None:
-            effective_driver = driver or artifact.driver
-            content_identity = artifact.meta.get("content_identity")
-            if (
-                not isinstance(content_identity, str)
-                or effective_driver is None
-                or self.tracker.db is None
-            ):
-                return
-            try:
-                content_row = self.tracker.db.get_or_create_artifact_content(
-                    content_hash=content_identity,
-                    driver=effective_driver,
-                )
-                artifact.content_id = content_row.id
-            except Exception as exc:
-                logging.warning(
-                    "[Consist] Failed to record artifact content identity for %s: %s",
-                    artifact.key,
-                    exc,
-                )
 
         def _record_identity_evidence(artifact: Artifact) -> None:
             """Persist only identities that the logged semantics can prove."""
@@ -622,7 +600,6 @@ class ArtifactManager:
                 # caller-supplied override is a distinct, untrusted observation,
                 # so it must not rewrite that persisted artifact's identity.
                 artifact_obj.id = uuid.uuid4()
-                artifact_obj.content_id = None
                 artifact_obj.run_id = None
                 artifact_obj.created_at = datetime.now(timezone.utc)
         if mount_scheme and "mount_scheme" not in artifact_obj.meta:
@@ -631,7 +608,6 @@ class ArtifactManager:
             artifact_obj.meta["mount_root"] = mount_root
 
         _record_identity_evidence(artifact_obj)
-        _attach_content_id(artifact_obj)
 
         artifact_obj.abs_path = resolved_abs_path
         return artifact_obj
@@ -888,19 +864,26 @@ class ArtifactManager:
                 if prior_container is None:
                     should_hash_tables = True
                 else:
-                    # Prefer content identity when available. This allows table hashing
-                    # to proceed even if a file hash is missing on one side.
+                    prior_meta = (
+                        prior_container.meta
+                        if isinstance(prior_container.meta, Mapping)
+                        else {}
+                    )
+                    current_meta = (
+                        container.meta if isinstance(container.meta, Mapping) else {}
+                    )
+                    prior_ci = prior_meta.get("content_identity")
+                    current_ci = current_meta.get("content_identity")
                     if (
-                        getattr(prior_container, "content_id", None) is not None
-                        and getattr(container, "content_id", None) is not None
+                        isinstance(prior_ci, str)
+                        and prior_ci
+                        and isinstance(current_ci, str)
+                        and current_ci
                     ):
-                        should_hash_tables = (
-                            prior_container.content_id == container.content_id
-                        )
+                        should_hash_tables = prior_ci == current_ci
                         if not should_hash_tables:
                             skip_reason = "content_identity_changed"
                     elif prior_container.hash and container.hash:
-                        # Fallback to legacy hash equality when content identity is not available.
                         should_hash_tables = prior_container.hash == container.hash
                         if not should_hash_tables:
                             skip_reason = "file_hash_changed"

@@ -38,11 +38,7 @@ def _create_persisted_artifact(
         meta=dict(meta or {}),
     )
     if tracker.db is not None:
-        with tracker.db.session_scope() as session:
-            session.add(art)
-            session.commit()
-            session.refresh(art)
-            session.expunge(art)
+        tracker.db.sync_artifact(art)
     return art
 
 

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 import logging
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 import shutil
-import uuid
 from typing import Any, Dict, Optional
+import uuid
 
 from consist.core._db_ops_base import _DatabaseOpsBase
 
@@ -19,14 +19,7 @@ def snapshot_sidecar_path(destination: Path) -> Path:
 
 
 class DatabaseSnapshotOps(_DatabaseOpsBase):
-    """
-    Snapshot and atomic file-write helpers extracted from ``DatabaseManager``.
-
-    The implementation still delegates through the concrete owning
-    ``DatabaseManager`` for engine access and retry behavior. The split is meant
-    to isolate snapshot concerns, not to define a finalized independent
-    persistence layer yet.
-    """
+    """Snapshot and atomic file-write helpers backed by ``DatabaseManager``."""
 
     def _unlink_temp_path(self, temp_path: Path) -> None:
         try:
@@ -63,20 +56,15 @@ class DatabaseSnapshotOps(_DatabaseOpsBase):
         checkpoint: bool = True,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Path:
-        if self.db_path == ":memory:":
+        if self._db.db_path == ":memory:":
             raise ValueError("Cannot snapshot an in-memory DuckDB database.")
 
-        source_db_path = Path(self.db_path)
+        source_db_path = Path(self._db.db_path)
         destination = Path(dest_path)
         destination.parent.mkdir(parents=True, exist_ok=True)
 
         if checkpoint:
-
-            def _checkpoint() -> None:
-                with self.engine.begin() as conn:
-                    conn.exec_driver_sql("CHECKPOINT")
-
-            self.execute_with_retry(_checkpoint, operation_name="snapshot_checkpoint")
+            self._db.checkpoint()
 
         self._atomic_copy_file(source_db_path, destination)
 
