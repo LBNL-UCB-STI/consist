@@ -28,7 +28,7 @@ import struct
 import sys
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
-from typing_extensions import Protocol, runtime_checkable
+from typing_extensions import Buffer, Protocol, runtime_checkable
 import unicodedata
 
 if TYPE_CHECKING:
@@ -1672,7 +1672,7 @@ def _update_h5_array_chunk(hasher: Any, chunk: Any) -> None:
                     _update_h5_array_chunk(hasher, item)
                 else:
                     contig_item = np.ascontiguousarray(item)
-                    view = memoryview(contig_item).cast("B")
+                    view = memoryview(cast(Buffer, contig_item)).cast("B")
                     hasher.update(struct.pack("<Q", len(view)))
                     hasher.update(view)
             else:
@@ -1681,7 +1681,7 @@ def _update_h5_array_chunk(hasher: Any, chunk: Any) -> None:
                 hasher.update(struct.pack("<I", len(raw)))
                 hasher.update(raw)
         return
-    hasher.update(memoryview(np.ascontiguousarray(arr)).cast("B"))
+    hasher.update(memoryview(cast(Buffer, np.ascontiguousarray(arr))).cast("B"))
 
 
 def _hash_h5_dataset_node(
@@ -1968,7 +1968,7 @@ def _compute_logical_matrices_container_hex(
     suffix = path.suffix.lower()
     if suffix == ".b2nd":
         blosc2 = importlib.import_module("blosc2")
-        arr = blosc2.open(str(path), mode="r")
+        arr: Any = blosc2.open(str(path), mode="r")
         matrix_name = str(options.get("matrix_name") or member or path.stem)
         hasher = hashlib.sha256()
         if policy.lookup_policy == "single_int32_zone_number":
@@ -2181,7 +2181,7 @@ def resolve_default_scheme(
             return "dir_manifest_v1:sha256"
         return explicit_scheme
 
-    if driver in DIGEST_DRIVERS:
+    if driver is not None and driver in DIGEST_DRIVERS:
         return driver
     if driver == "logical_matrices_canonical":
         return "logical_matrices_canonical_v1:sha256"

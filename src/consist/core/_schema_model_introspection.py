@@ -23,8 +23,9 @@ def optional_model_table_name(model_cls: type[BaseModel]) -> str | None:
     """Return explicit/declared SQL table name for ``BaseModel`` / ``SQLModel`` classes, else ``None``."""
     if not isinstance(model_cls, type) or not issubclass(model_cls, BaseModel):
         return None
+    cls_any: Any = model_cls
     try:
-        raw = model_cls.__tablename__  # type: ignore[attr-defined]
+        raw = cls_any.__tablename__
     except AttributeError:
         raw = None
     if isinstance(raw, str) and raw:
@@ -106,8 +107,9 @@ def is_additive_schema_model(model_cls: type[BaseModel] | None) -> bool:
 
 def field_sa_column(field_info: PydanticFieldInfo | Any) -> Any:
     """Return underlying SQLAlchemy ``Column`` when attached to a ``SQLModel`` field."""
+    fi_any: Any = field_info
     try:
-        sa_col = field_info.sa_column
+        sa_col = fi_any.sa_column
     except AttributeError:
         return None
     if sa_col is None or sa_col is PydanticUndefined:
@@ -136,8 +138,9 @@ def field_sql_column_name(attr_name: str, field_info: PydanticFieldInfo | Any) -
 
 def field_is_primary_key(field_info: PydanticFieldInfo | Any) -> bool:
     """Return True when a field is marked as primary key."""
+    fi_any: Any = field_info
     try:
-        if field_info.primary_key is True:
+        if fi_any.primary_key is True:
             return True
     except AttributeError:
         pass
@@ -251,8 +254,9 @@ def field_duckdb_type(field_info: PydanticFieldInfo) -> str:
 
 def field_foreign_key_target(field_info: PydanticFieldInfo | Any) -> str | None:
     """Extract ``table.column`` foreign-key target from a Pydantic or SQLModel field if present."""
+    fi_any: Any = field_info
     try:
-        fk_attr = field_info.foreign_key
+        fk_attr = fi_any.foreign_key
     except AttributeError:
         fk_attr = None
     if isinstance(fk_attr, str) and fk_attr:

@@ -853,7 +853,7 @@ class ArtifactManager:
                     container_updates["table_hashes_skip_reason"] = "disabled"
                 elif prior_container is not None and skip_reason is not None:
                     container_updates["table_hashes_skip_reason"] = skip_reason
-            container = container.with_meta(**container_updates)
+            container = container.with_meta(container_updates, merge=True)
             self.tracker.current_consist.replace_artifact(container)
 
             if discover_tables:
@@ -916,7 +916,7 @@ class ArtifactManager:
                         reusing_cached_children = True
                         policy_updates = _container_policy_updates(meta)
                         if policy_updates:
-                            container = container.with_meta(**policy_updates)
+                            container = container.with_meta(policy_updates, merge=True)
                             self.tracker.current_consist.replace_artifact(container)
                             if self.tracker.db is not None:
                                 self.tracker.db.update_artifact_meta(

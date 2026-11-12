@@ -55,11 +55,20 @@ class ArtifactRecordLike(ArtifactLike, Protocol):
     loaders, identity helpers, and schema-aware workflows.
     """
 
-    id: Any
-    key: str
-    digest: Any
-    member: Optional[str]
-    meta: Mapping[str, Any]
+    @property
+    def id(self) -> Any: ...
+
+    @property
+    def key(self) -> str: ...
+
+    @property
+    def digest(self) -> Any: ...
+
+    @property
+    def member(self) -> Optional[str]: ...
+
+    @property
+    def meta(self) -> Mapping[str, Any]: ...
 
     @property
     def driver(self) -> str: ...
@@ -71,6 +80,9 @@ class ArtifactRecordLike(ArtifactLike, Protocol):
 @runtime_checkable
 class ArtifactResolver(Protocol):
     """Runtime resolution and loading service backing ``Artifact`` convenience methods."""
+
+    @property
+    def fs(self) -> Any: ...
 
     def resolve_uri(self, uri: str) -> str: ...
 

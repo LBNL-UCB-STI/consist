@@ -25,6 +25,7 @@ from typing import (
     Literal,
     Optional,
     cast,
+    overload,
 )
 
 from pydantic_core import core_schema
@@ -108,6 +109,18 @@ def _wrap_owned_meta_dict(raw_meta: Optional[dict[str, Any]]) -> MappingABC[str,
         if isinstance(v, (dict, list)):
             raw_meta[k] = _wrap_owned_meta_value(v)
     return MappingProxyType(raw_meta)
+
+
+@overload
+def _coerce_uuid(
+    value: uuid.UUID | str | None, *, default_new: Literal[True]
+) -> uuid.UUID: ...
+
+
+@overload
+def _coerce_uuid(
+    value: uuid.UUID | str | None, *, default_new: Literal[False]
+) -> Optional[uuid.UUID]: ...
 
 
 def _coerce_uuid(
@@ -316,8 +329,9 @@ class _ArtifactMeta(type):
             None if _resolver_ref is None else _coerce_resolver_ref(_resolver_ref)
         )
 
-        obj = cls.__new__(cls)
-        cls.__init__(
+        artifact_cls = cast("type[Artifact]", cls)
+        obj = object.__new__(artifact_cls)
+        Artifact.__init__(
             obj,
             id=resolved_id,
             key=key,

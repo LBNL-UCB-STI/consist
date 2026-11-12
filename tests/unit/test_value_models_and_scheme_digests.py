@@ -17,6 +17,7 @@ import time
 from types import MappingProxyType
 import uuid
 
+import duckdb
 import h5py
 import numpy as np
 import pandas as pd
@@ -1362,6 +1363,7 @@ class TestEdgeCaseHardeningAndIsolation:
 
         # Works both via original handle and via a fresh Tracker resolving recovery_roots from DB
         rel = consist.load(art, tracker=tracker)
+        assert isinstance(rel, duckdb.DuckDBPyRelation)
         pd.testing.assert_frame_equal(rel.df(), expected_df)
         tracker.close()
 
@@ -1370,6 +1372,7 @@ class TestEdgeCaseHardeningAndIsolation:
         assert db_art is not None
         assert db_art.abs_path is None
         rel_fresh = consist.load(db_art, tracker=fresh_tracker)
+        assert isinstance(rel_fresh, duckdb.DuckDBPyRelation)
         pd.testing.assert_frame_equal(rel_fresh.df(), expected_df)
 
         # Corrupt archived file and confirm digest verification fails closed
@@ -1527,6 +1530,56 @@ class TestEdgeCaseHardeningAndIsolation:
         assert tbl_leaf.driver == "h5_table"
         assert tbl_leaf.digest is not None
         assert tbl_leaf.digest.scheme == "h5_fixed_v1:sha256"
+
+        # 6b. Cached HDF5 container child reuse merges container policy updates cleanly
+        policy_h5 = tracker.run_dir / "outputs" / "policy_cached.h5"
+        with h5py.File(policy_h5, "w") as h5f:
+            h5f.create_dataset("scores", data=np.array([1.0, 2.0, 3.0]))
+
+        with tracker.start_run("h5_policy_r1", model="sim", config={"seed": 7}):
+            tracker.log_h5_container(
+                policy_h5,
+                key="policy_store",
+                direction="output",
+                custom_note="preserved",
+            )
+
+        with tracker.start_run("h5_policy_r2", model="sim", config={"seed": 7}):
+            assert tracker.is_cached
+            cached_container, cached_children = tracker.log_h5_container(
+                policy_h5,
+                key="policy_store",
+                direction="output",
+                container_recovery_unit="parent_file",
+                child_recovery_policy="descriptive_only",
+                representation_policy={
+                    "tabular_parquet": {
+                        "role": "derived_inspection_cache",
+                        "complete_for_rebuild": False,
+                    }
+                },
+            )
+        assert len(cached_children) == 1
+        assert cached_container.meta["is_container"] is True
+        assert cached_container.meta["container_recovery_unit"] == "parent_file"
+        assert cached_container.meta["child_recovery_policy"] == "descriptive_only"
+        assert cached_container.meta["representation_policy"] == {
+            "tabular_parquet": {
+                "role": "derived_inspection_cache",
+                "complete_for_rebuild": False,
+            }
+        }
+        assert tracker.db is not None
+        persisted_container = tracker.db.get_artifact(cached_container.id)
+        assert persisted_container is not None
+        assert persisted_container.meta["container_recovery_unit"] == "parent_file"
+        assert persisted_container.meta["child_recovery_policy"] == "descriptive_only"
+        assert persisted_container.meta["representation_policy"] == {
+            "tabular_parquet": {
+                "role": "derived_inspection_cache",
+                "complete_for_rebuild": False,
+            }
+        }
         tracker.close()
 
         # 7. Subprocess import isolation: importing consist.models.artifact does not load SQLAlchemy/SQLModel

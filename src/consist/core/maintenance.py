@@ -2328,7 +2328,7 @@ class DatabaseMaintenance:
 
     @classmethod
     def _schema_observation_source(
-        cls, *, summary_json: dict[str, Any], artifact_meta: dict[str, Any]
+        cls, *, summary_json: Mapping[str, Any], artifact_meta: Mapping[str, Any]
     ) -> str:
         for raw in (
             summary_json.get("source"),
@@ -2342,7 +2342,7 @@ class DatabaseMaintenance:
 
     @staticmethod
     def _schema_observation_sample_rows(
-        *, summary_json: dict[str, Any], artifact_meta: dict[str, Any]
+        *, summary_json: Mapping[str, Any], artifact_meta: Mapping[str, Any]
     ) -> Optional[int]:
         for raw in (
             summary_json.get("sample_rows"),
@@ -3178,8 +3178,8 @@ class DatabaseMaintenance:
         self,
         scheme: str,
         *,
-        run_meta: dict[str, Any],
-        artifact_meta: dict[str, Any],
+        run_meta: Mapping[str, Any],
+        artifact_meta: Mapping[str, Any],
         fallback_mounts: Optional[Mapping[str, Sequence[Path]]] = None,
     ) -> list[Path]:
         roots: list[Path] = []

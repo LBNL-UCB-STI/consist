@@ -1844,9 +1844,9 @@ class TrackerArchiveService(_TrackerServiceBase):
                         matched = file_sha256(expected_path_resolved) == content_hash
                     if not matched:
                         mismatches.append("content_hash")
-                elif not verify_digest(
+                elif artifact.digest is None or not verify_digest(
                     expected_path_resolved,
-                    artifact.digest,  # type: ignore[arg-type]
+                    artifact.digest,
                     driver=artifact.driver,
                     member=artifact.member,
                 ):

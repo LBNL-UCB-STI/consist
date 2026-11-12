@@ -3291,7 +3291,7 @@ def load(
     # 1. Resolve Tracker
     explicit_tracker = tracker is not None
     attached_tracker: Optional[Tracker] = None
-    resolver = artifact.resolver
+    resolver = artifact.resolver if isinstance(artifact, Artifact) else None
     if isinstance(resolver, Tracker):
         attached_tracker = resolver
 

@@ -5,6 +5,7 @@ import shutil
 from typing import Any, cast
 from unittest.mock import ANY
 
+import pandas as pd
 import pytest
 
 import consist
@@ -295,6 +296,7 @@ def test_hydrated_shapefile_bundle_loads_through_native_driver(
     item = hydrated["places"]
     assert consist.is_spatial_artifact(item.artifact)
     restored = consist.load(item.artifact, db_fallback="never")
+    assert isinstance(restored, pd.DataFrame)
     assert restored["name"].tolist() == ["one", "two"]
 
 
