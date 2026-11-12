@@ -26,7 +26,6 @@ from consist.digest import (
     PRESERVE_CANONICAL_POLICY,
     ArrayCanonicalizationPolicy,
     LogicalProfileName,
-    MatrixContainerSummary,
     _decode_attr_value,
     _resolve_h5_group,
     canonicalize_float16_array,
@@ -54,11 +53,7 @@ __all__ = [
     "FLOAT32_MATRICES_V1_POLICY",
     "PRESERVE_CANONICAL_POLICY",
     "ArrayCanonicalizationPolicy",
-    "ArtifactProvenanceSidecar",
     "LogicalProfileName",
-    "MatrixContainerSummary",
-    "admission_directory_identity",
-    "artifact_provenance_sidecar_path",
     "canonicalize_float16_array",
     "canonicalize_float32_array",
     "canonicalize_float64_array",
@@ -76,56 +71,12 @@ __all__ = [
 ]
 
 
-def admission_directory_identity(path: str | Path) -> str:
-    """Compute Consist's canonical directory manifest digest string ``dir_manifest_v1:sha256:<hex>``."""
-    return str(compute_digest(Path(path), options={"scheme": "dir_manifest_v1:sha256"}))
-
-
 @dataclass(frozen=True, slots=True)
-class ArtifactProvenanceSidecar:
-    """
-    Portable ``.provenance.json`` sidecar representation.
+class _MatrixContainerSummary:
+    """Domain-agnostic structural and cryptographic summary of an array container."""
 
-    Attributes
-    ----------
-    schema_version : str
-        Sidecar schema version identifier (``"consist.artifact_provenance.v1"``).
-    artifact_name : str
-        Basename of the described artifact.
-    artifact_format : str
-        Detected artifact format (``"omx"``, ``"h5"``, ``"zarr"``, ``"directory"``,
-        or ``"file"``).
-    container_identity : str
-        Container-level admission identity (``sha256:file:<hex>`` or
-        ``sha256:manifest-v1:<hex>``).
-    size_bytes : int
-        Total byte size of the artifact.
-    logical_identity : str or None
-        Canonical logical array identity (``sha256:logical_matrices:<hex>``),
-        if available.
-    logical_profile : {"preserve_canonical", "float32_matrices_v1"}
-        Canonicalization profile associated with ``logical_identity``.
-    shape : tuple[int, ...] or None
-        Shape of the primary matrix/variable, if available.
-    coord_keys : tuple[str, ...]
-        Sorted lookup or coordinate names.
-    variable_count : int
-        Number of data matrices/variables in the container.
-    variable_names : tuple[str, ...]
-        Sorted names of data matrices/variables.
-    producer_run_id : str or None, optional
-        Run ID of the producer run, if supplied.
-    producer_meta : Mapping[str, Any]
-        Additional producer metadata recorded in the sidecar.
-    root_attributes : Mapping[str, Any]
-        Decoded root attributes from the container.
-    facets : Mapping[str, Any]
-        Extracted facet dictionary from ``key_facet_parser``, if supplied.
-    """
-
-    schema_version: str
-    artifact_name: str
-    artifact_format: str
+    artifact_path: str
+    artifact_format: Literal["omx", "h5", "zarr", "directory", "file"]
     container_identity: str
     size_bytes: int
     logical_identity: str | None
@@ -134,8 +85,6 @@ class ArtifactProvenanceSidecar:
     coord_keys: tuple[str, ...]
     variable_count: int
     variable_names: tuple[str, ...]
-    producer_run_id: str | None = None
-    producer_meta: Mapping[str, Any] = field(default_factory=dict)
     root_attributes: Mapping[str, Any] = field(default_factory=dict)
     facets: Mapping[str, Any] = field(default_factory=dict)
 
@@ -146,7 +95,7 @@ def inspect_matrix_container(
     policy: ArrayCanonicalizationPolicy | LogicalProfileName = "preserve_canonical",
     compute_logical_hash: bool = False,
     key_facet_parser: Callable[[str], Mapping[str, Any]] | None = None,
-) -> MatrixContainerSummary:
+) -> _MatrixContainerSummary:
     """
     Inspect an OMX, HDF5, or Zarr container without domain-specific coupling.
 
@@ -198,7 +147,9 @@ def inspect_matrix_container(
         artifact_format: Literal["omx", "h5", "zarr", "directory", "file"] = (
             "zarr" if is_zarr else "directory"
         )
-        container_identity = admission_directory_identity(p)
+        container_identity = str(
+            compute_digest(p, options={"scheme": "dir_manifest_v1:sha256"})
+        )
         size_bytes = sum(
             f.stat().st_size for f in p.rglob("*") if f.is_file() and not f.is_symlink()
         )
@@ -307,7 +258,7 @@ def inspect_matrix_container(
                     parsed_facets.setdefault(fkey, set()).add(fval)
         facets = {fkey: sorted(vals) for fkey, vals in sorted(parsed_facets.items())}
 
-    return MatrixContainerSummary(
+    return _MatrixContainerSummary(
         artifact_path=str(p),
         artifact_format=artifact_format,
         container_identity=container_identity,
@@ -321,24 +272,6 @@ def inspect_matrix_container(
         root_attributes=root_attrs,
         facets=facets,
     )
-
-
-def artifact_provenance_sidecar_path(artifact_path: str | Path) -> Path:
-    """
-    Return the co-located ``<artifact>.provenance.json`` path.
-
-    Parameters
-    ----------
-    artifact_path : str or pathlib.Path
-        Path to the target file or directory artifact.
-
-    Returns
-    -------
-    pathlib.Path
-        Sibling path named ``<artifact_path.name>.provenance.json``.
-    """
-    p = Path(artifact_path)
-    return p.parent / f"{p.name}.provenance.json"
 
 
 def write_artifact_provenance_sidecar(
@@ -420,7 +353,7 @@ def write_artifact_provenance_sidecar(
         "container_metadata": metadata,
     }
 
-    sidecar_path = artifact_provenance_sidecar_path(p)
+    sidecar_path = p.parent / f"{p.name}.provenance.json"
     sidecar_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = sidecar_path.parent / f".tmp_{sidecar_path.name}.{os.getpid()}"
     tmp_path.write_text(

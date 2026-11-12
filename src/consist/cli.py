@@ -1157,14 +1157,14 @@ def db_fix_status(
 def _render_schema_profile(
     schema: "ArtifactSchema", fields: List["ArtifactSchemaField"]
 ) -> None:
-    summary = getattr(schema, "summary_json", None) or {}
+    summary = schema.summary_json or {}
     table = Table()
     table.add_column("Column", style="cyan")
     table.add_column("Type", style="magenta")
     table.add_column("Nullable", style="green")
 
     for field in fields:
-        nullable = "yes" if getattr(field, "nullable", True) else "no"
+        nullable = "yes" if field.nullable else "no"
         table.add_row(str(field.name), str(field.logical_type), nullable)
 
     console.print(table)
@@ -2269,14 +2269,14 @@ def _render_artifact_query_table(results: List[Dict[str, Any]]) -> None:
 
 
 def _render_run_details(run: "Run") -> None:
-    """Shared logic for displaying run details, config, and metadata."""
+    """Shared logic for displaying run details and metadata."""
     info = Table.grid(padding=(0, 2))
     info.add_column(style="bold cyan")
     info.add_column()
 
-    run_id = getattr(run, "id", None) or "[dim]unknown[/dim]"
-    model_name = getattr(run, "model_name", None) or "[dim]unknown[/dim]"
-    status_value = getattr(run, "status", None) or "unknown"
+    run_id = run.id or "[dim]unknown[/dim]"
+    model_name = run.model_name or "[dim]unknown[/dim]"
+    status_value = run.status or "unknown"
     status_style = (
         "green"
         if status_value == "completed"
@@ -2289,41 +2289,27 @@ def _render_run_details(run: "Run") -> None:
     info.add_row("Model", model_name)
     info.add_row("Status", f"[{status_style}]{status_value}[/]")
 
-    parent_id = getattr(run, "parent_run_id", None)
-    if parent_id:
-        info.add_row("Parent", parent_id)
+    if run.parent_run_id:
+        info.add_row("Parent", run.parent_run_id)
 
-    scenario_value = getattr(run, "parent_run_id", None)
-    if scenario_value:
-        info.add_row("Scenario", scenario_value)
-
-    if getattr(run, "year", None):
+    if run.year:
         info.add_row("Year", str(run.year))
 
-    created_at = getattr(run, "created_at", None)
-    if created_at:
-        info.add_row("Created", created_at.strftime("%Y-%m-%d %H:%M:%S"))
+    if run.created_at:
+        info.add_row("Created", run.created_at.strftime("%Y-%m-%d %H:%M:%S"))
 
-    if getattr(run, "duration_seconds", None):
+    if run.duration_seconds:
         info.add_row("Duration", f"{run.duration_seconds:.2f}s")
 
-    if getattr(run, "tags", None):
+    if run.tags:
         info.add_row("Tags", ", ".join(run.tags))
 
-    signature = getattr(run, "signature", None)
-    if signature:
-        info.add_row("Signature", signature[:16] + "...")
+    if run.signature:
+        info.add_row("Signature", run.signature[:16] + "...")
 
     console.print(Panel(info, title="Run Details", border_style="cyan"))
 
-    config_data = getattr(run, "config", None)
-    if config_data:
-        import json
-
-        console.print("\n[bold]Configuration:[/]")
-        console.print(Panel(json.dumps(config_data, indent=2), border_style="dim"))
-
-    if getattr(run, "meta", None):
+    if run.meta:
         console.print("\n[bold]Metadata:[/]")
         meta_table = Table(show_header=False, box=None)
         meta_table.add_column(style="yellow")
@@ -3566,7 +3552,11 @@ def _load_artifact_with_diagnostics(
             # Avoid loading the full file when we only need a small preview.
             load_kwargs["nrows"] = n_rows
         return consist.load(
-            artifact, tracker=tracker, db_fallback="always", **load_kwargs
+            artifact,
+            tracker=tracker,
+            db_fallback="always",
+            allow_recovery_roots=trust_db,
+            **load_kwargs,
         )
 
     def _load_from_base(
@@ -4775,9 +4765,8 @@ class ConsistShell(cmd.Cmd):
             self._last_artifact_run_id = run_id
             self._last_artifact_ids = []
             for artifact in rendered:
-                artifact_id = getattr(artifact, "id", None)
-                if artifact_id is not None:
-                    self._last_artifact_ids.append(str(artifact_id))
+                if artifact.id is not None:
+                    self._last_artifact_ids.append(str(artifact.id))
             if self._last_artifact_ids:
                 console.print(
                     "[dim]Tip: use preview @<n>, schema_profile @<n>, or "

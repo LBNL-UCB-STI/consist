@@ -187,7 +187,6 @@ if TYPE_CHECKING:
     )
     from consist.protocols import (
         ArtifactLike,
-        RunIdentifiedResultLike,
         RunResultLike,
         ScenarioLike,
         TrackerLike,
@@ -314,7 +313,6 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "RunContext": ("consist.api", "RunContext"),
     "RunCouplerSnapshot": ("consist.models.run", "RunCouplerSnapshot"),
     "RunFieldIndex": ("consist.core.indexing", "RunFieldIndex"),
-    "RunIdentifiedResultLike": ("consist.protocols", "RunIdentifiedResultLike"),
     "RunOutputRecoveryCopiesRegistration": (
         "consist.core.materialize",
         "RunOutputRecoveryCopiesRegistration",
@@ -442,7 +440,6 @@ _DEPRECATED_TOP_LEVEL_EXPORTS: dict[str, tuple[str, str]] = {
     "AdmissionReference": ("consist.admission", "AdmissionReference"),
     "AdmissionReport": ("consist.admission", "AdmissionReport"),
     "ArrayCanonicalizationPolicy": ("consist.digest", "ArrayCanonicalizationPolicy"),
-    "ArtifactProvenanceSidecar": ("consist.admission", "ArtifactProvenanceSidecar"),
     "DeclaredDigestExpectation": ("consist.admission", "DeclaredDigestExpectation"),
     "FLOAT32_MATRICES_V1_POLICY": ("consist.digest", "FLOAT32_MATRICES_V1_POLICY"),
     "GTFS_SCHEMAS": ("consist.gtfs", "GTFS_SCHEMAS"),
@@ -464,18 +461,8 @@ _DEPRECATED_TOP_LEVEL_EXPORTS: dict[str, tuple[str, str]] = {
     "GtfsStops": ("consist.gtfs", "GtfsStops"),
     "GtfsTransfers": ("consist.gtfs", "GtfsTransfers"),
     "GtfsTrips": ("consist.gtfs", "GtfsTrips"),
-    "MatrixContainerSummary": ("consist.admission", "MatrixContainerSummary"),
     "PRESERVE_CANONICAL_POLICY": ("consist.digest", "PRESERVE_CANONICAL_POLICY"),
     "PriorRunExpectation": ("consist.admission", "PriorRunExpectation"),
-    "admission_directory_identity": (
-        "consist.admission",
-        "admission_directory_identity",
-    ),
-    "admission_file_identity": ("consist.admission", "admission_file_identity"),
-    "artifact_provenance_sidecar_path": (
-        "consist.admission",
-        "artifact_provenance_sidecar_path",
-    ),
     "canonicalize_float32_array": ("consist.digest", "canonicalize_float32_array"),
     "canonicalize_float64_array": ("consist.digest", "canonicalize_float64_array"),
     "canonicalize_float_array": ("consist.digest", "canonicalize_float_array"),
@@ -592,7 +579,6 @@ __all__ = [
     "RunContext",
     "RunCouplerSnapshot",
     "RunFieldIndex",
-    "RunIdentifiedResultLike",
     "RunOutputRecoveryCopiesRegistration",
     "RunResult",
     "RunResultLike",
@@ -704,7 +690,7 @@ def __getattr__(name: str) -> Any:
     if name in _CORE_EXPORTS:
         module_path, attr_name = _CORE_EXPORTS[name]
         module = importlib.import_module(module_path)
-        val = module.__dict__[attr_name]
+        val = vars(module)[attr_name]
         globals()[name] = val
         return val
 
@@ -716,7 +702,7 @@ def __getattr__(name: str) -> Any:
             stacklevel=2,
         )
         module = importlib.import_module(target_mod)
-        return module.__dict__[target_attr]
+        return vars(module)[target_attr]
 
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 

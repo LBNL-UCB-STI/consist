@@ -29,7 +29,7 @@ from typing import (
 
 from pydantic_core import core_schema
 
-from consist.digest import Digest, _HEX64_RE, canonical_json_str
+from consist.digest import Digest, _HEX64_RE
 from consist.protocols import (
     ArtifactResolver,
     resolve_active_or_default_resolver,
@@ -37,12 +37,14 @@ from consist.protocols import (
 from consist.types import DriverType
 
 UTC = timezone.utc
+_UNSET: Any = object()
 
 if TYPE_CHECKING:
     import pandas as pd
 
 
 def _deep_copy_meta_value(value: Any) -> Any:
+    """Return a plain JSON/pickle-safe mutable copy unwrapping any ``MappingProxyType``."""
     if value is None or isinstance(value, (bool, int, float, str, Digest)):
         return value
     if isinstance(value, MappingABC):
@@ -57,11 +59,55 @@ def _deep_copy_meta_value(value: Any) -> Any:
 _EMPTY_META: MappingABC[str, Any] = MappingProxyType({})
 
 
+def _freeze_meta_value(value: Any) -> Any:
+    """Deep-freeze nested mappings into ``MappingProxyType`` while defensive-copying sequences."""
+    if value is None or isinstance(value, (bool, int, float, str, Digest)):
+        return value
+    if isinstance(value, MappingABC):
+        if not value:
+            return _EMPTY_META
+        return MappingProxyType(
+            {str(k): _freeze_meta_value(v) for k, v in value.items()}
+        )
+    if isinstance(value, list):
+        return [_freeze_meta_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_freeze_meta_value(item) for item in value)
+    return copy.deepcopy(value)
+
+
 def _freeze_meta_mapping(raw_meta: MappingABC[str, Any] | None) -> MappingABC[str, Any]:
     if not raw_meta:
         return _EMPTY_META
-    copied = {str(k): _deep_copy_meta_value(v) for k, v in raw_meta.items()}
-    return MappingProxyType(copied)
+    return MappingProxyType(
+        {str(k): _freeze_meta_value(v) for k, v in raw_meta.items()}
+    )
+
+
+def _wrap_owned_meta_value(value: Any) -> Any:
+    """Wrap an already-owned ``json.loads`` tree in ``MappingProxyType`` without re-copying."""
+    if isinstance(value, dict):
+        if not value:
+            return _EMPTY_META
+        for k, v in value.items():
+            if isinstance(v, (dict, list)):
+                value[k] = _wrap_owned_meta_value(v)
+        return MappingProxyType(value)
+    if isinstance(value, list):
+        for idx, item in enumerate(value):
+            if isinstance(item, (dict, list)):
+                value[idx] = _wrap_owned_meta_value(item)
+        return value
+    return value
+
+
+def _wrap_owned_meta_dict(raw_meta: Optional[dict[str, Any]]) -> MappingABC[str, Any]:
+    if not raw_meta:
+        return _EMPTY_META
+    for k, v in raw_meta.items():
+        if isinstance(v, (dict, list)):
+            raw_meta[k] = _wrap_owned_meta_value(v)
+    return MappingProxyType(raw_meta)
 
 
 def _coerce_uuid(
@@ -121,7 +167,7 @@ def _coerce_legacy_v04_hash(
     cleaned = raw_hash.strip()
     if not cleaned:
         return None
-    if cleaned.startswith("sha256:logical_matrices:v1:"):
+    if cleaned.lower().startswith("sha256:logical_matrices:v1:"):
         _, _, hex_part = cleaned.rpartition(":")
         if _HEX64_RE.fullmatch(hex_part):
             profile = meta.get("logical_profile")
@@ -131,27 +177,41 @@ def _coerce_legacy_v04_hash(
                 else "logical_matrices_canonical_v1:sha256"
             )
             return Digest(scheme, hex_part.lower())
-    if ":" in cleaned:
+    bare_candidate: Optional[str] = None
+    if cleaned.lower().startswith("sha256:") and _HEX64_RE.fullmatch(cleaned[7:]):
+        bare_candidate = cleaned[7:].lower()
+    elif ":" in cleaned:
+        scheme_part, _, hex_part = cleaned.rpartition(":")
+        normalized_candidate = (
+            f"{scheme_part}:{hex_part.lower()}"
+            if _HEX64_RE.fullmatch(hex_part)
+            else cleaned
+        )
         try:
-            return Digest.parse(cleaned)
+            return Digest.parse(normalized_candidate)
         except ValueError:
             meta.setdefault("legacy_v04_hash", cleaned)
             return None
-    if _HEX64_RE.fullmatch(cleaned):
-        hex_lower = cleaned.lower()
+    elif _HEX64_RE.fullmatch(cleaned):
+        bare_candidate = cleaned.lower()
+
+    if bare_candidate is not None:
         if (
             meta.get("directory_artifact") is True
             or meta.get("file_bundle_artifact") is True
             or driver in {"zarr", "shapefile", "directory"}
         ):
-            return Digest("dir_manifest_v1:sha256", hex_lower)
-        if meta.get("artifact_set") == "output_set" or driver == "output_set":
-            return Digest("output_set_v1:sha256", hex_lower)
+            return Digest("dir_manifest_v1:sha256", bare_candidate)
+        if meta.get("artifact_set") in {True, "output_set"} or driver in {
+            "artifact_set",
+            "output_set",
+        }:
+            return Digest("output_set_v1:sha256", bare_candidate)
         if driver == "h5_table":
-            return Digest("h5_fixed_v1:sha256", hex_lower)
+            return Digest("h5_fixed_v1:sha256", bare_candidate)
         if driver in {"h5", "hdf5"} and member is not None:
-            return Digest("h5_dataset_v1:sha256", hex_lower)
-        return Digest("sha256:file", hex_lower)
+            return Digest("h5_dataset_v1:sha256", bare_candidate)
+        return Digest("sha256:file", bare_candidate)
     meta.setdefault("legacy_v04_hash", cleaned)
     return None
 
@@ -298,7 +358,7 @@ class Artifact(metaclass=_ArtifactMeta):
     run_id : str | None
         Producing run ID, or ``None`` for external inputs.
     parent_artifact_id : uuid.UUID | None
-        Parent container/set artifact artifact ID for child member artifacts.
+        Parent container/set artifact ID for child member artifacts.
     facet_id : str | None
         Optional persisted ``ArtifactFacet`` identifier.
     created_at : datetime
@@ -358,22 +418,92 @@ class Artifact(metaclass=_ArtifactMeta):
         )
 
     def __hash__(self) -> int:
-        meta_token = canonical_json_str(self.meta) if self.meta else ""
         return hash(
             (
                 self.id,
                 self.key,
                 self.uri,
                 self.driver,
-                self.digest,
                 self.member,
+                self.digest,
                 self.run_id,
                 self.parent_artifact_id,
                 self.facet_id,
                 self.created_at,
-                meta_token,
             )
         )
+
+    def _fast_clone(
+        self,
+        *,
+        uri: Any = _UNSET,
+        digest: Any = _UNSET,
+        member: Any = _UNSET,
+        run_id: Any = _UNSET,
+        facet_id: Any = _UNSET,
+        meta: Any = _UNSET,
+        _abs_path: Any = _UNSET,
+        _resolver_ref: Any = _UNSET,
+    ) -> "Artifact":
+        """O(1) internal clone bypassing metaclass signature/meta re-freezing."""
+        cls = type(self)
+        obj = object.__new__(cls)
+        cls.__init__(
+            obj,
+            id=self.id,
+            key=self.key,
+            uri=self.uri if uri is _UNSET else uri,
+            driver=self.driver,
+            digest=self.digest if digest is _UNSET else digest,
+            member=self.member if member is _UNSET else member,
+            run_id=self.run_id if run_id is _UNSET else run_id,
+            parent_artifact_id=self.parent_artifact_id,
+            facet_id=self.facet_id if facet_id is _UNSET else facet_id,
+            created_at=self.created_at,
+            meta=self.meta if meta is _UNSET else meta,
+            _abs_path=self._abs_path if _abs_path is _UNSET else _abs_path,
+            _resolver_ref=(
+                self._resolver_ref if _resolver_ref is _UNSET else _resolver_ref
+            ),
+        )
+        return obj
+
+    @classmethod
+    def _from_trusted_db_row(
+        cls,
+        *,
+        id: uuid.UUID,
+        key: str,
+        uri: str,
+        driver: str,
+        digest: Optional[Digest],
+        member: Optional[str],
+        run_id: Optional[str],
+        parent_artifact_id: Optional[uuid.UUID],
+        facet_id: Optional[str],
+        created_at: datetime,
+        owned_meta: Optional[dict[str, Any]],
+        resolver_ref: Optional[weakref.ReferenceType[ArtifactResolver]] = None,
+    ) -> "Artifact":
+        """Hydrate directly from a validated DB row without deep-copying ``owned_meta``."""
+        obj = object.__new__(cls)
+        cls.__init__(
+            obj,
+            id=id,
+            key=key,
+            uri=uri,
+            driver=driver,
+            digest=digest,
+            member=member,
+            run_id=run_id,
+            parent_artifact_id=parent_artifact_id,
+            facet_id=facet_id,
+            created_at=created_at,
+            meta=_wrap_owned_meta_dict(owned_meta),
+            _abs_path=None,
+            _resolver_ref=resolver_ref,
+        )
+        return obj
 
     # --- Immutable Copy / Update Builders ---
 
@@ -391,13 +521,13 @@ class Artifact(metaclass=_ArtifactMeta):
                 merged.update(meta)
             if updates:
                 merged.update(updates)
-            return replace(self, meta=merged)
+            return self._fast_clone(meta=_freeze_meta_mapping(merged))
         base: dict[str, Any] = (
             dict(meta) if meta is not None else (dict(self.meta) if updates else {})
         )
         if updates:
             base.update(updates)
-        return replace(self, meta=base)
+        return self._fast_clone(meta=_freeze_meta_mapping(base))
 
     def with_digest(self, digest: Digest | str | None) -> "Artifact":
         """Return a new ``Artifact`` with an updated ``Digest``."""
@@ -406,34 +536,38 @@ class Artifact(metaclass=_ArtifactMeta):
             if isinstance(digest, Digest) or digest is None
             else Digest.parse(digest)
         )
-        return replace(self, digest=parsed)
+        return self._fast_clone(digest=parsed)
 
     def with_uri(self, uri: str) -> "Artifact":
         """Return a new ``Artifact`` with an updated ``uri``."""
-        return replace(self, uri=uri)
+        if type(uri) is not str and not isinstance(uri, str):
+            raise TypeError(f"Artifact.uri must be str, got {type(uri).__name__}")
+        return self._fast_clone(uri=uri)
 
     def with_member(self, member: Optional[str]) -> "Artifact":
         """Return a new ``Artifact`` with an updated ``member``."""
-        return replace(self, member=member)
+        return self._fast_clone(member=member)
 
     def with_run_id(self, run_id: Optional[str]) -> "Artifact":
         """Return a new ``Artifact`` with an updated ``run_id``."""
-        return replace(self, run_id=run_id)
+        return self._fast_clone(run_id=run_id)
 
     def with_facet_id(self, facet_id: Optional[str]) -> "Artifact":
         """Return a new ``Artifact`` with an updated ``facet_id``."""
-        return replace(self, facet_id=facet_id)
+        return self._fast_clone(facet_id=facet_id)
 
     def with_abs_path(self, abs_path: str | Path | None) -> "Artifact":
         """Return a new ``Artifact`` carrying a resolved local ``_abs_path`` hint."""
-        return replace(
-            self,
-            _abs_path=str(abs_path) if abs_path is not None else None,
+        resolved_abs = (
+            None
+            if abs_path is None
+            else (abs_path if type(abs_path) is str else str(abs_path))
         )
+        return self._fast_clone(_abs_path=resolved_abs)
 
     def with_resolver(self, resolver: ArtifactResolver | Any | None) -> "Artifact":
         """Return a new ``Artifact`` weakly bound to ``resolver``."""
-        return replace(self, _resolver_ref=_coerce_resolver_ref(resolver))
+        return self._fast_clone(_resolver_ref=_coerce_resolver_ref(resolver))
 
     # --- Runtime Resolver & Path Delegation ---
 
@@ -469,45 +603,14 @@ class Artifact(metaclass=_ArtifactMeta):
     @property
     def path(self) -> Path:
         """Resolve this artifact to a filesystem ``Path`` via ``ArtifactResolver``."""
-        resolved_abs = self.abs_path
-        if resolved_abs:
-            abs_candidate = Path(resolved_abs)
-            try:
-                if abs_candidate.exists():
-                    return abs_candidate
-            except OSError:
-                pass
-
-        bound_resolver = (
-            self._resolver_ref() if self._resolver_ref is not None else None
-        )
-        target_resolver = (
-            bound_resolver
-            if bound_resolver is not None
-            else resolve_active_or_default_resolver()
-        )
-        if target_resolver is not None:
-            if isinstance(target_resolver, ArtifactResolver):
-                try:
-                    return target_resolver.resolve_artifact_path(self)
-                except (ValueError, RuntimeError, OSError, TypeError):
-                    pass
-            try:
-                resolved = Path(target_resolver.resolve_uri(self.uri))
-                if resolved.exists() or not resolved_abs:
-                    return resolved
-            except (ValueError, RuntimeError, OSError, TypeError):
-                pass
-
-        if resolved_abs:
-            return Path(resolved_abs)
-        return Path(self.uri)
+        return self.as_path(None)
 
     def as_path(self, tracker: Optional[Any] = None) -> Path:
         """Resolve this artifact to a filesystem ``Path`` using ``tracker`` or attached resolver."""
+        resolved_abs = self.abs_path
+        attached = self._resolver_ref() if self._resolver_ref is not None else None
         if tracker is not None:
-            resolved_abs = self.abs_path
-            attached = self._resolver_ref() if self._resolver_ref is not None else None
+            target_resolver: Optional[Any] = tracker
             override = (
                 tracker.artifact_abs_path_override(self)
                 if isinstance(tracker, ArtifactResolver)
@@ -517,35 +620,48 @@ class Artifact(metaclass=_ArtifactMeta):
                 override is not None and override[0] == self._abs_path
             )
             effective_abs = override[1] if has_tracker_override else resolved_abs
-            if effective_abs and (attached is tracker or has_tracker_override):
-                abs_candidate = Path(effective_abs)
-                try:
-                    if abs_candidate.exists():
-                        return abs_candidate
-                except OSError:
-                    pass
-            if attached is not tracker and not has_tracker_override:
-                try:
-                    resolved = Path(tracker.resolve_uri(self.uri))
-                    if resolved.exists() or not effective_abs:
-                        return resolved
-                except (ValueError, RuntimeError, OSError, TypeError):
-                    pass
-            if isinstance(tracker, ArtifactResolver):
-                try:
-                    return tracker.resolve_artifact_path(self)
-                except (ValueError, RuntimeError, OSError, TypeError):
-                    pass
+        else:
+            target_resolver = (
+                attached
+                if attached is not None
+                else resolve_active_or_default_resolver()
+            )
+            has_tracker_override = False
+            effective_abs = resolved_abs
+
+        if effective_abs and (
+            tracker is None or attached is tracker or has_tracker_override
+        ):
+            abs_candidate = Path(effective_abs)
             try:
-                resolved = Path(tracker.resolve_uri(self.uri))
+                if abs_candidate.exists():
+                    return abs_candidate
+            except OSError:
+                pass
+        elif tracker is not None and target_resolver is not None:
+            try:
+                resolved = Path(target_resolver.resolve_uri(self.uri))
                 if resolved.exists() or not effective_abs:
                     return resolved
             except (ValueError, RuntimeError, OSError, TypeError):
                 pass
-            if effective_abs:
-                return Path(effective_abs)
-            return Path(self.uri)
-        return self.path
+
+        if target_resolver is not None:
+            if isinstance(target_resolver, ArtifactResolver):
+                try:
+                    return target_resolver.resolve_artifact_path(self)
+                except (ValueError, RuntimeError, OSError, TypeError):
+                    pass
+            try:
+                resolved = Path(target_resolver.resolve_uri(self.uri))
+                if resolved.exists() or not effective_abs:
+                    return resolved
+            except (ValueError, RuntimeError, OSError, TypeError):
+                pass
+
+        if effective_abs:
+            return Path(effective_abs)
+        return Path(self.uri)
 
     def ensure_local_path(
         self,
@@ -589,7 +705,7 @@ class Artifact(metaclass=_ArtifactMeta):
         if active is not None and isinstance(active, ArtifactResolver):
             try:
                 return active.artifact_recovery_roots(self)
-            except Exception:
+            except (OSError, RuntimeError, ValueError, TypeError, LookupError):
                 pass
         return extract_recovery_roots_from_meta(self.meta)
 
@@ -602,7 +718,7 @@ class Artifact(metaclass=_ArtifactMeta):
                 if resolver_obj is not None
                 else self.path
             )
-        except Exception:
+        except (OSError, RuntimeError, ValueError, TypeError):
             primary_path = self.path
 
         locations = [
@@ -626,7 +742,7 @@ class Artifact(metaclass=_ArtifactMeta):
                 else extract_recovery_roots_from_meta(self.meta)
             )
             roots = fs.normalize_recovery_roots(raw_roots)
-        except Exception:
+        except (AttributeError, OSError, RuntimeError, ValueError, TypeError):
             return ArtifactAccessibility(locations=tuple(locations))
 
         for index, root in enumerate(roots, start=1):
@@ -694,18 +810,9 @@ class Artifact(metaclass=_ArtifactMeta):
         )
 
     @property
-    def is_H5(self) -> bool:
-        """Return True if the artifact uses an HDF5 driver."""
-        return self.driver in ("h5", "hdf5", "h5_table")
-
-    @property
     def created_at_iso(self) -> Optional[str]:
         """Return ``created_at`` as an ISO-8601 string."""
         return self.created_at.isoformat() if self.created_at else None
-
-    def get_meta(self, key: str, default: Any = None) -> Any:
-        """Safely retrieve a value from ``meta``."""
-        return self.meta.get(key, default)
 
     # --- Serialization & Pydantic Integration (0 SQL queries) ---
 
@@ -833,18 +940,8 @@ class Artifact(metaclass=_ArtifactMeta):
         handler: Any,
     ) -> core_schema.CoreSchema:
         del source_type, handler
-
-        def _validate(value: Any) -> "Artifact":
-            if isinstance(value, cls):
-                return value
-            if isinstance(value, MappingABC):
-                return cls.from_json_dict(value)
-            raise ValueError(
-                f"Expected Artifact or mapping, got {type(value).__name__}"
-            )
-
         return core_schema.no_info_plain_validator_function(
-            _validate,
+            cls.model_validate,
             serialization=core_schema.plain_serializer_function_ser_schema(
                 lambda inst: inst.to_json_dict(),
                 return_schema=core_schema.dict_schema(),
@@ -858,12 +955,12 @@ class Artifact(metaclass=_ArtifactMeta):
         return f"Artifact(key={self.key}, path={self.uri})"
 
     def __copy__(self) -> "Artifact":
-        return replace(self)
+        return self._fast_clone()
 
     def __deepcopy__(self, memo: Optional[dict[int, Any]] = None) -> "Artifact":
         if memo is not None and id(self) in memo:
             return cast("Artifact", memo[id(self)])
-        cloned = replace(self, meta=copy.deepcopy(dict(self.meta), memo))
+        cloned = self._fast_clone(meta=_freeze_meta_mapping(self.meta))
         if memo is not None:
             memo[id(self)] = cloned
         return cloned
@@ -882,7 +979,7 @@ class Artifact(metaclass=_ArtifactMeta):
                 self.parent_artifact_id,
                 self.facet_id,
                 self.created_at,
-                dict(self.meta),
+                _deep_copy_meta_value(self.meta),
                 self._abs_path,
             ),
         )

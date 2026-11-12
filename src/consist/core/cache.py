@@ -4,7 +4,6 @@ import shutil
 import tempfile
 import uuid
 from collections.abc import Mapping
-from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
@@ -901,7 +900,7 @@ def hydrate_cache_hit_outputs(
     )
 
     for key, art in list(cached_items.outputs.items()):
-        cloned = deepcopy(art).with_resolver(tracker)
+        cloned = art.with_resolver(tracker)
         cached_items.outputs[key] = cloned
         record.outputs.append(cloned)
 

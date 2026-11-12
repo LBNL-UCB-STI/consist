@@ -18,9 +18,9 @@ from typing import (
     Literal,
     Mapping,
     Optional,
-    Protocol,
     Sequence,
 )
+from typing_extensions import Protocol
 
 from consist.digest import canonical_json_sha256, file_sha256
 

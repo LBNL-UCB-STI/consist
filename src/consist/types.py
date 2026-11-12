@@ -30,26 +30,13 @@ from typing import (
 from pydantic import BaseModel
 from typing_extensions import Protocol, runtime_checkable
 
+from consist.protocols import ArtifactLike, RunResultLike
+
 FacetDict: TypeAlias = Mapping[str, Any]
 FacetLike: TypeAlias = Union[FacetDict, BaseModel]
 SchemaModel: TypeAlias = type[BaseModel]
 
 PathLike: TypeAlias = Union[str, Path]
-
-
-@runtime_checkable
-class _ArtifactPathCarrier(Protocol):
-    @property
-    def path(self) -> Path: ...
-
-    @property
-    def uri(self) -> str: ...
-
-
-@runtime_checkable
-class _OutputsCarrier(Protocol):
-    outputs: Mapping[str, Any]
-
 
 ArtifactRef: TypeAlias = Union[Any, PathLike]
 RunInputRef: TypeAlias = Union[Any, PathLike]
@@ -179,9 +166,9 @@ class BindingResult:
                 f"BindingResult input {name!r} is not an Artifact "
                 f"(got {type(value).__name__})."
             )
-        if isinstance(value, _ArtifactPathCarrier):
+        if isinstance(value, ArtifactLike):
             return value
-        if isinstance(value, _OutputsCarrier) and isinstance(value.outputs, Mapping):
+        if isinstance(value, RunResultLike) and isinstance(value.outputs, Mapping):
             return resolve_output_from_mapping(value.outputs)
         raise TypeError(
             f"BindingResult input {name!r} is not an Artifact "

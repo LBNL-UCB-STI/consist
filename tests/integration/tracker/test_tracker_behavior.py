@@ -124,11 +124,11 @@ def test_tracker_robustness_to_missing_input_file(tracker, caplog):
 
     assert data["run"]["id"] == run_id
     assert data["run"]["input_hash"] == "error"
-    assert data["run"]["signature"] == "error"
+    assert data["run"]["signature"] is None
     assert data["run"]["status"] == "completed"
 
     run = tracker.get_run(run_id)
     assert run is not None
     assert run.input_hash == "error"
-    assert run.signature == "error"
+    assert run.signature is None
     assert run.status == "completed"

@@ -9,7 +9,6 @@ from consist.core.admission import (
     AdmissionReport,
     DeclaredDigestExpectation,
     PriorRunExpectation,
-    admission_file_identity,
     check_admission_reference,
     check_admission_reference_expected_identity,
     check_admission_reference_prior_run_expectation,
@@ -20,27 +19,19 @@ from consist.core.admission import (
 )
 from consist.core.logical_array_identity import (
     ARTIFACT_PROVENANCE_SCHEMA_VERSION,
-    ArtifactProvenanceSidecar,
-    admission_directory_identity,
-    artifact_provenance_sidecar_path,
     inspect_matrix_container,
     read_artifact_provenance_sidecar,
     write_artifact_provenance_sidecar,
 )
-from consist.digest import Digest, MatrixContainerSummary
+from consist.digest import Digest
 
 __all__ = [
     "ARTIFACT_PROVENANCE_SCHEMA_VERSION",
     "AdmissionReference",
     "AdmissionReport",
-    "ArtifactProvenanceSidecar",
     "DeclaredDigestExpectation",
     "Digest",
-    "MatrixContainerSummary",
     "PriorRunExpectation",
-    "admission_directory_identity",
-    "admission_file_identity",
-    "artifact_provenance_sidecar_path",
     "check_admission_reference",
     "check_admission_reference_expected_identity",
     "check_admission_reference_prior_run_expectation",

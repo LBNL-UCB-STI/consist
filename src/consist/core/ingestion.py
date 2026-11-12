@@ -168,6 +168,7 @@ def ingest_artifact(
         if isinstance(tracker, _TrackerCls):
             if tracker._last_consist is not None:
                 tracker._last_consist.replace_artifact(updated_artifact)
+            tracker._replace_live_coupler_artifact(updated_artifact)
             tracker._run_artifacts_cache.clear()
 
     return info

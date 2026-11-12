@@ -521,18 +521,29 @@ def test_directory_manifest_rejects_symlink(tmp_path: Path) -> None:
         build_directory_manifest(root)
 
 
-def test_directory_manifest_rejects_symlinked_ancestor(tmp_path: Path) -> None:
+def test_directory_manifest_allows_symlinked_ancestor_but_rejects_symlink_root(
+    tmp_path: Path,
+) -> None:
     real_parent = tmp_path / "real"
     root = real_parent / "raw_od_skims.zarr"
     root.mkdir(parents=True)
-    linked_parent = tmp_path / "linked"
+    (root / "0.0").write_bytes(b"skim")
+    linked_parent = tmp_path / "linked_mount"
+    linked_root = tmp_path / "linked_skims.zarr"
     try:
         linked_parent.symlink_to(real_parent, target_is_directory=True)
+        linked_root.symlink_to(root, target_is_directory=True)
     except OSError as exc:
         pytest.skip(f"symlinks are unavailable in this environment: {exc}")
 
+    # Symlinked mount/OS ancestor (like macOS /tmp -> private/tmp or HPC /scratch) succeeds
+    assert build_directory_manifest(
+        linked_parent / root.name
+    ) == build_directory_manifest(root)
+
+    # Symlinked artifact root itself is rejected
     with pytest.raises(ValueError, match="symlink"):
-        build_directory_manifest(linked_parent / root.name)
+        build_directory_manifest(linked_root)
 
 
 def test_directory_validation_rejects_extra_or_changed_members(tmp_path: Path) -> None:

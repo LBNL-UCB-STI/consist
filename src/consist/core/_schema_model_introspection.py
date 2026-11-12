@@ -7,6 +7,7 @@ import uuid
 
 from pydantic import BaseModel
 from pydantic.fields import FieldInfo as PydanticFieldInfo
+from pydantic_core import PydanticUndefined
 
 
 def _field_extra_mapping(field_info: PydanticFieldInfo | Any) -> Mapping[str, Any]:
@@ -109,7 +110,7 @@ def field_sa_column(field_info: PydanticFieldInfo | Any) -> Any:
         sa_col = field_info.sa_column
     except AttributeError:
         return None
-    if sa_col is None or sa_col.__class__.__name__ == " PydanticUndefinedType":
+    if sa_col is None or sa_col is PydanticUndefined:
         return None
     if type(sa_col).__module__.startswith("sqlalchemy"):
         return sa_col
@@ -271,6 +272,8 @@ def field_foreign_key_target(field_info: PydanticFieldInfo | Any) -> str | None:
         return None
     if not foreign_keys:
         return None
+    from sqlalchemy.exc import SQLAlchemyError
+
     for fk in foreign_keys:
         try:
             target_fullname = fk.target_fullname
@@ -280,7 +283,7 @@ def field_foreign_key_target(field_info: PydanticFieldInfo | Any) -> str | None:
             return target_fullname
         try:
             col = fk.column
-        except Exception:
+        except (AttributeError, SQLAlchemyError):
             col = None
         if col is not None:
             return str(col)

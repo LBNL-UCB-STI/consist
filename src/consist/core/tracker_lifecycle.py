@@ -739,11 +739,15 @@ class RunLifecycleCoordinator:
                             ),
                         }
                     run.input_hash = input_hash
-                    run.signature = tracker.identity.calculate_run_signature(
-                        code_hash=git_hash,
-                        config_hash=config_hash,
-                        input_hash=input_hash,
-                    )
+                    if input_hash in (None, "", "error"):
+                        run.signature = None
+                        run.cacheable = False
+                    else:
+                        run.signature = tracker.identity.calculate_run_signature(
+                            code_hash=git_hash,
+                            config_hash=config_hash,
+                            input_hash=input_hash,
+                        )
                     _log_timing("compute_input_hash", t0)
             except Exception as exc:
                 logging.warning(
@@ -752,7 +756,8 @@ class RunLifecycleCoordinator:
                     exc,
                 )
                 run.input_hash = "error"
-                run.signature = "error"
+                run.signature = None
+                run.cacheable = False
 
         cached_output_ids: Optional[List[uuid.UUID]] = None
 
@@ -760,8 +765,15 @@ class RunLifecycleCoordinator:
             with _track_begin_run_phase("cache.lookup"):
                 cache_key = (
                     (run.config_hash, run.input_hash, run.git_hash)
-                    if run.config_hash and run.input_hash and run.git_hash
+                    if (
+                        run.config_hash not in (None, "", "error")
+                        and run.input_hash not in (None, "", "error")
+                        and run.git_hash not in (None, "", "error")
+                    )
                     else None
+                )
+                lookup_signature = (
+                    run.signature if run.signature not in (None, "", "error") else None
                 )
                 if debug_cache:
                     logging.info(
@@ -790,7 +802,7 @@ class RunLifecycleCoordinator:
                         config_h,
                         input_h,
                         git_h,
-                        signature=run.signature,
+                        signature=lookup_signature,
                     )
                     _log_timing("find_matching_run", t0)
                     local_candidate = tracker._local_cache_index.get(cache_key)
@@ -811,7 +823,7 @@ class RunLifecycleCoordinator:
                                 config_hash=config_h,
                                 input_hash=input_h,
                                 git_hash=git_h,
-                                signature=run.signature,
+                                signature=lookup_signature,
                             )
                         _log_timing("find_matching_run", t0)
 

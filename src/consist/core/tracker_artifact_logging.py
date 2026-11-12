@@ -191,11 +191,12 @@ class ArtifactLoggingCoordinator:
                 "artifact_directory is not a content driver; use artifact_kind='directory'."
             )
 
-        is_path_output = direction == "output" and isinstance(path, (str, Path))
+        is_path_target = isinstance(path, (str, Path))
+        is_path_output = direction == "output" and is_path_target
         inferred_zarr = is_path_output and (
             driver == "zarr" or Path(path).suffix.lower() == ".zarr"
         )
-        inferred_shapefile = is_path_output and (
+        inferred_shapefile = is_path_target and (
             driver == "shapefile" or Path(path).suffix.lower() == ".shp"
         )
         requested_directory = meta.get("directory_artifact") is True
@@ -225,32 +226,46 @@ class ArtifactLoggingCoordinator:
                 "directory_manifest": manifest,
                 "directory_manifest_version": manifest["version"],
             }
-        elif inferred_shapefile:
-            if not is_path_output:
-                raise TypeError(
-                    "immutable shapefile outputs must be logged from a path."
+        elif driver == "shapefile" and not is_path_target and direction == "output":
+            raise TypeError("immutable shapefile outputs must be logged from a path.")
+        elif inferred_shapefile and (
+            direction == "output"
+            or (
+                Path(path).is_file()
+                and not (content_hash is not None and not validate_content_hash)
+            )
+        ):
+            shp_manifest: dict[str, Any] | None = None
+            if direction == "output":
+                shp_manifest = build_shapefile_bundle_manifest(Path(path))
+            else:
+                try:
+                    shp_manifest = build_shapefile_bundle_manifest(Path(path))
+                except ValueError:
+                    shp_manifest = None
+            if shp_manifest is not None:
+                expected_digest = Digest(
+                    "dir_manifest_v1:sha256", shp_manifest["tree_hash"]
                 )
-            manifest = build_shapefile_bundle_manifest(Path(path))
-            expected_digest = Digest("dir_manifest_v1:sha256", manifest["tree_hash"])
-            if content_hash is not None and str(content_hash) not in {
-                manifest["tree_hash"],
-                str(expected_digest),
-            }:
-                raise ValueError(
-                    "shapefile output content_hash must match its bundle tree hash."
-                )
-            driver = "shapefile"
-            digest = expected_digest
-            content_hash = None
-            force_hash_override = False
-            validate_content_hash = False
-            meta = {
-                **meta,
-                "file_bundle_artifact": True,
-                "file_bundle_entry": Path(path).name,
-                "file_bundle_manifest": manifest,
-                "file_bundle_manifest_version": manifest["version"],
-            }
+                if content_hash is not None and str(content_hash) not in {
+                    shp_manifest["tree_hash"],
+                    str(expected_digest),
+                }:
+                    raise ValueError(
+                        "shapefile content_hash must match its bundle tree hash."
+                    )
+                driver = "shapefile"
+                digest = expected_digest
+                content_hash = None
+                force_hash_override = False
+                validate_content_hash = False
+                meta = {
+                    **meta,
+                    "file_bundle_artifact": True,
+                    "file_bundle_entry": Path(path).name,
+                    "file_bundle_manifest": shp_manifest,
+                    "file_bundle_manifest_version": shp_manifest["version"],
+                }
 
         run_id = tracker.current_consist.run.id if direction == "output" else None
 

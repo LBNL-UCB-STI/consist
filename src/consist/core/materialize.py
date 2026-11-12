@@ -1507,11 +1507,19 @@ def _verify_scalar_artifact_digest(
         return False
     if expected_digest.scheme not in DIGEST_DRIVERS:
         return False
+    meta = artifact.meta if isinstance(artifact.meta, MappingABC) else {}
+    options: dict[str, Any] = {}
+    member_paths = meta.get("output_set_member_paths")
+    if isinstance(member_paths, MappingABC):
+        options["member_paths"] = member_paths
+    if meta.get("file_bundle_artifact") is True:
+        options["shapefile_bundle"] = True
     return verify_digest(
         candidate_path,
         expected_digest,
         driver=artifact.driver,
         member=artifact.member,
+        options=options or None,
     )
 
 
@@ -1687,6 +1695,26 @@ def _portable_artifact_digest(tracker: "Tracker", artifact: Artifact) -> Digest 
     return digest
 
 
+def _reject_symlink_from_source_root(source_path: Path, relative_path: Path) -> None:
+    root = source_path
+    for _ in relative_path.parts:
+        parent = root.parent
+        if parent == root:
+            break
+        root = parent
+    current = root
+    if current.is_symlink():
+        raise ValueError(
+            f"directory artifact source contains a symlink component: {current}"
+        )
+    for part in relative_path.parts:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError(
+                f"directory artifact source contains a symlink component: {current}"
+            )
+
+
 def _path_has_symlink_component(path: Path) -> bool:
     candidate = path if path.is_absolute() else path.absolute()
     current = Path(candidate.anchor)
@@ -1742,7 +1770,10 @@ def materialize_artifact(
             "validate_content_hash must be one of 'never', 'if-present', or 'always'."
         )
 
-    if artifact.driver == "h5_table":
+    if artifact.driver == "h5_table" or (
+        artifact.driver in {"h5", "hdf5"}
+        and (artifact.parent_artifact_id is not None or artifact.member is not None)
+    ):
         parent = tracker.get_parent_artifact(artifact)
         policy_validation = validate_recovery_registration_policy(
             artifact,
@@ -3362,7 +3393,10 @@ def execute_planned_output_hydration(
             _validate_allowed_base(item.destination, allowed_base)
 
             if _is_directory_artifact(item.artifact):
-                if item.source_path is None or not item.source_path.exists():
+                if item.source_path is None:
+                    raise FileNotFoundError(f"source path missing ({item.source_path})")
+                _reject_symlink_from_source_root(item.source_path, item.relative_path)
+                if not item.source_path.exists():
                     raise FileNotFoundError(f"source path missing ({item.source_path})")
                 manifest = _directory_artifact_manifest(item.artifact)
                 materialized = materialize_directory_tree(
@@ -3388,7 +3422,15 @@ def execute_planned_output_hydration(
                 continue
 
             if _is_file_bundle_artifact(item.artifact):
-                if item.source_path is None or not item.source_path.exists():
+                if item.source_path is None:
+                    raise FileNotFoundError(f"source path missing ({item.source_path})")
+                bundle_rel = (
+                    item.relative_path
+                    if item.source_path.name == item.relative_path.name
+                    else item.relative_path.parent
+                )
+                _reject_symlink_from_source_root(item.source_path, bundle_rel)
+                if not item.source_path.exists():
                     raise FileNotFoundError(f"source path missing ({item.source_path})")
                 entry, manifest = _shapefile_bundle_metadata(item.artifact)
                 materialized = materialize_shapefile_bundle(

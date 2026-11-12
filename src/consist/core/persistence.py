@@ -182,6 +182,23 @@ def _parse_optional_json_list_str(raw: Any) -> Optional[list[str]]:
     return None
 
 
+def _merge_persisted_artifact_meta(
+    base_meta: Mapping[str, Any], current_meta: Mapping[str, Any]
+) -> dict[str, Any]:
+    merged_meta = dict(base_meta)
+    merged_meta.update(current_meta)
+    base_roots = base_meta.get("recovery_roots")
+    current_roots = current_meta.get("recovery_roots")
+    if isinstance(base_roots, list) and base_roots:
+        combined_roots = list(base_roots)
+        if isinstance(current_roots, list):
+            for root in current_roots:
+                if root not in combined_roots:
+                    combined_roots.append(root)
+        merged_meta["recovery_roots"] = combined_roots
+    return merged_meta
+
+
 def _json_default(value: Any) -> Any:
     if isinstance(value, (Path, os.PathLike)):
         return os.fspath(value)
@@ -539,17 +556,19 @@ def _hydrate_run_row(row: Sequence[Any]) -> Run:
 
 
 def _hydrate_artifact_row(row: Sequence[Any]) -> Artifact:
-    return Artifact(
+    raw_digest = row[4]
+    parsed_digest = Digest.parse(str(raw_digest)) if raw_digest is not None else None
+    return Artifact._from_trusted_db_row(
         id=_coerce_uuid(row[0]),
         key=str(row[1]),
         uri=str(row[2]),
         driver=str(row[3]),
-        digest=str(row[4]) if row[4] is not None else None,
+        digest=parsed_digest,
         member=str(row[5]) if row[5] is not None else None,
         run_id=str(row[6]) if row[6] is not None else None,
         parent_artifact_id=_coerce_optional_uuid(row[7]),
         facet_id=str(row[8]) if row[8] is not None else None,
-        meta=_parse_json_dict(row[9]),
+        owned_meta=_parse_json_dict(row[9]),
         created_at=_ensure_non_null_utc_dt(row[10]),
     )
 
@@ -2123,8 +2142,9 @@ class DatabaseManager:
                 if replace or updates is artifact.meta:
                     merged_meta = {} if replace else dict(current_meta)
                 else:
-                    merged_meta = dict(base_meta)
-                    merged_meta.update(current_meta)
+                    merged_meta = _merge_persisted_artifact_meta(
+                        base_meta, current_meta
+                    )
                 for key, value in updates.items():
                     if value is None:
                         merged_meta.pop(key, None)
@@ -2263,14 +2283,15 @@ class DatabaseManager:
             "SELECT meta FROM artifact WHERE id = ?",
             [_coerce_uuid(artifact.id)],
         ).fetchone()
-        current_meta = (
-            _parse_json_dict(existing_row[0])
-            if existing_row is not None
-            else dict(artifact.meta or {})
-        )
-        current_meta.update(artifact.meta or {})
-        current_meta.update(meta_updates)
-        return artifact.with_meta(current_meta, merge=False)
+        current_meta = dict(artifact.meta or {})
+        if existing_row is not None:
+            merged_meta = _merge_persisted_artifact_meta(
+                _parse_json_dict(existing_row[0]), current_meta
+            )
+        else:
+            merged_meta = current_meta
+        merged_meta.update(meta_updates)
+        return artifact.with_meta(merged_meta, merge=False)
 
     def upsert_config_facet(self, facet: ConfigFacet) -> None:
         """Upsert a ``ConfigFacet`` deduplicated by ``facet.id``."""
@@ -2295,11 +2316,6 @@ class DatabaseManager:
                             "UPDATE run SET facet_id = ? WHERE id = ?",
                             [facet.id, rid],
                         )
-
-    def upsert_artifact_facet(self, facet: ArtifactFacet) -> None:
-        """Upsert an ``ArtifactFacet`` deduplicated by ``facet.id``."""
-        with self.transaction() as cur:
-            self._upsert_artifact_facet_locked(cur, facet)
 
     def persist_artifact_facet_bundle(
         self,
@@ -2897,6 +2913,8 @@ class DatabaseManager:
         if member is not None:
             clauses.append("a.member = ?")
             params.append(member)
+        elif driver in {"h5", "hdf5"}:
+            clauses.append("a.member IS NULL")
 
         with _DB_CALL_PROFILER.track("find_latest_artifact_at_uri"):
             row = self.fetchone(
@@ -2940,7 +2958,10 @@ class DatabaseManager:
                 _, l_driver, l_member = lookup
                 if l_driver is not None and art.driver != l_driver:
                     continue
-                if l_member is not None and art.member != l_member:
+                if l_member is not None:
+                    if art.member != l_member:
+                        continue
+                elif l_driver in {"h5", "hdf5"} and art.member is not None:
                     continue
                 results[lookup] = art
         return results
@@ -3140,6 +3161,15 @@ class DatabaseManager:
         self, config_hash: str, input_hash: str, git_hash: str
     ) -> Optional[Run]:
         """Return the newest cacheable completed run matching ``(config_hash, input_hash, git_hash)``."""
+        if (
+            not config_hash
+            or not input_hash
+            or not git_hash
+            or config_hash == "error"
+            or input_hash == "error"
+            or git_hash == "error"
+        ):
+            return None
         with _DB_CALL_PROFILER.track("cache_lookup"):
             row = self.fetchone(
                 "WITH cand AS MATERIALIZED ("
@@ -3147,6 +3177,7 @@ class DatabaseManager:
                 ") "
                 "SELECT * FROM cand r "
                 "WHERE r.input_hash = ? AND r.git_hash = ? "
+                "AND r.input_hash != 'error' "
                 "AND r.status = 'completed' AND r.cacheable = TRUE "
                 f"ORDER BY {recent_run_order_by_sql('r')} LIMIT 1",
                 [config_hash, input_hash, git_hash],
@@ -3157,6 +3188,15 @@ class DatabaseManager:
         self, config_hash: str, input_hash: str, git_hash: str
     ) -> list[Run]:
         """Return all cacheable completed runs matching ``(config_hash, input_hash, git_hash)`` newest first."""
+        if (
+            not config_hash
+            or not input_hash
+            or not git_hash
+            or config_hash == "error"
+            or input_hash == "error"
+            or git_hash == "error"
+        ):
+            return []
         with _DB_CALL_PROFILER.track("cache_lookup_candidates"):
             rows = self.fetchall(
                 "WITH cand AS MATERIALIZED ("
@@ -3164,6 +3204,7 @@ class DatabaseManager:
                 ") "
                 "SELECT * FROM cand r "
                 "WHERE r.input_hash = ? AND r.git_hash = ? "
+                "AND r.input_hash != 'error' "
                 "AND r.status = 'completed' AND r.cacheable = TRUE "
                 f"ORDER BY {recent_run_order_by_sql('r')}",
                 [config_hash, input_hash, git_hash],
@@ -3184,12 +3225,15 @@ class DatabaseManager:
 
     def find_run_by_signature(self, signature: str) -> Optional[Run]:
         """Find the newest cacheable completed run by composite ``signature``."""
+        if not signature or signature == "error":
+            return None
         row = self.fetchone(
             "WITH cand AS MATERIALIZED ("
             f"SELECT {_RUN_SELECT_COLS} FROM run r WHERE r.signature = ?"
             ") "
             "SELECT * FROM cand r "
-            "WHERE r.status = 'completed' AND r.cacheable = TRUE "
+            "WHERE r.signature != 'error' AND r.input_hash != 'error' "
+            "AND r.status = 'completed' AND r.cacheable = TRUE "
             f"ORDER BY {recent_run_order_by_sql('r')} LIMIT 1",
             [signature],
         )
@@ -3197,16 +3241,33 @@ class DatabaseManager:
 
     def find_runs_by_signature(self, signature: str) -> list[Run]:
         """Return all cacheable completed runs matching ``signature`` newest first."""
+        if not signature or signature == "error":
+            return []
         rows = self.fetchall(
             "WITH cand AS MATERIALIZED ("
             f"SELECT {_RUN_SELECT_COLS} FROM run r WHERE r.signature = ?"
             ") "
             "SELECT * FROM cand r "
-            "WHERE r.status = 'completed' AND r.cacheable = TRUE "
+            "WHERE r.signature != 'error' AND r.input_hash != 'error' "
+            "AND r.status = 'completed' AND r.cacheable = TRUE "
             f"ORDER BY {recent_run_order_by_sql('r')}",
             [signature],
         )
         return [_hydrate_run_row(r) for r in rows]
+
+    def get_artifact_meta_by_ids(
+        self, artifact_ids: Sequence[uuid.UUID | str]
+    ) -> dict[uuid.UUID, dict[str, Any]]:
+        """Fetch persisted ``meta`` dictionaries for multiple artifacts in one query."""
+        coerced = list(dict.fromkeys(_coerce_uuid(aid) for aid in artifact_ids))
+        if not coerced:
+            return {}
+        placeholders = ", ".join("?" for _ in coerced)
+        rows = self.fetchall(
+            f"SELECT id, meta FROM artifact WHERE id IN ({placeholders})",
+            coerced,
+        )
+        return {_coerce_uuid(r[0]): _parse_json_dict(r[1]) for r in rows}
 
     def get_artifacts_by_ids(
         self, artifact_ids: Sequence[uuid.UUID | str]

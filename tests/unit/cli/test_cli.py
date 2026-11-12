@@ -362,26 +362,31 @@ def test_show_uses_renderer(mock_db_session):
         render_details.assert_called_once()
 
 
-def test_render_run_details_includes_config_and_meta(capsys):
-    run = MagicMock()
-    run.id = "run_details"
-    run.model_name = "demo_model"
-    run.status = "completed"
-    run.parent_run_id = "scenario_a"
-    run.year = 2030
-    run.created_at = datetime(2025, 1, 1, 12, 0)
-    run.duration_seconds = 300.0
-    run.tags = ["dev", "test"]
-    run.signature = "abcdef1234567890"
-    run.config = {"threshold": 0.5}
-    run.meta = {"note": "hello"}
+def test_render_run_details_includes_meta(capsys):
+    run = Run(
+        id="run_details",
+        model_name="demo_model",
+        config_hash="cfg_hash",
+        git_hash="git_hash",
+        status="completed",
+        parent_run_id="scenario_a",
+        year=2030,
+        started_at=datetime(2025, 1, 1, 12, 0),
+        ended_at=datetime(2025, 1, 1, 12, 5),
+        created_at=datetime(2025, 1, 1, 12, 0),
+        tags=["dev", "test"],
+        signature="abcdef1234567890",
+        meta={"note": "hello"},
+    )
 
     _render_run_details(run)
 
     out = capsys.readouterr().out
     assert "Run Details" in out
-    assert "Configuration" in out
-    assert "threshold" in out
+    assert "Parent" in out
+    assert "scenario_a" in out
+    assert "Scenario" not in out
+    assert "300.00s" in out
     assert "Metadata:" in out
     assert "note" in out
 

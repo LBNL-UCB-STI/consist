@@ -346,6 +346,21 @@ class Tracker:
                 return db_roots
         return meta_roots
 
+    def _replace_live_coupler_artifact(self, updated: Artifact) -> None:
+        """Replace matching in-memory ``Artifact`` handles across active/tracked ``Coupler``s."""
+        active = self._compat_attr("_active_coupler")
+        raw_couplers = self._compat_attr("_couplers")
+        couplers = list(raw_couplers) if raw_couplers is not None else []
+        if active is not None and not any(c is active for c in couplers):
+            couplers = [active, *couplers]
+        if not couplers:
+            return
+        bound = updated.with_resolver(self)
+        for coupler in couplers:
+            for coupler_key, art in list(coupler.items()):
+                if isinstance(art, Artifact) and art.id == updated.id:
+                    coupler._artifacts[coupler_key] = bound
+
     @classmethod
     def from_config(cls, config: TrackerConfig) -> "Tracker":
         """

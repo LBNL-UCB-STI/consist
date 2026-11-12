@@ -24,10 +24,20 @@ from consist.types import (
     VALID_MATERIALIZE_DB_FALLBACK as _VALID_MATERIALIZE_DB_FALLBACK,
     VALID_MATERIALIZE_ON_MISSING as _VALID_MATERIALIZE_ON_MISSING,
     normalize_materialize_output_keys,
+    resolve_output_from_mapping,
     validate_materialize_option,
 )
 
 UTC = timezone.utc
+
+
+def _normalize_utc_datetime(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
 
 CanonicalRunMetaField = Literal["stage", "phase"]
 CouplerSnapshotPhase = Literal["init", "pre", "post"]
@@ -72,6 +82,13 @@ class RunBindingInvocation(BaseModel):
     binding_json: str
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
+    @field_validator("created_at", mode="after")
+    @classmethod
+    def _ensure_utc_created_at(cls, value: datetime) -> datetime:
+        normalized = _normalize_utc_datetime(value)
+        assert normalized is not None
+        return normalized
+
 
 class RunCouplerSnapshot(BaseModel):
     """Relational snapshot of ``ScenarioContext.coupler`` bindings at a run boundary."""
@@ -84,6 +101,13 @@ class RunCouplerSnapshot(BaseModel):
     artifact_id: uuid.UUID
     producer_run_id: Optional[str] = None
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    @field_validator("updated_at", mode="after")
+    @classmethod
+    def _ensure_utc_updated_at(cls, value: datetime) -> datetime:
+        normalized = _normalize_utc_datetime(value)
+        assert normalized is not None
+        return normalized
 
 
 class Run(BaseModel):
@@ -141,6 +165,11 @@ class Run(BaseModel):
     ended_at: Optional[datetime] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    @field_validator("started_at", "ended_at", "created_at", "updated_at", mode="after")
+    @classmethod
+    def _ensure_utc_timestamps(cls, value: Optional[datetime]) -> Optional[datetime]:
+        return _normalize_utc_datetime(value)
 
     @property
     def is_cache_hit(self) -> bool:
@@ -372,30 +401,7 @@ def resolve_run_result_output(
     run_result: RunResult, key: Optional[str] = None
 ) -> Artifact:
     """Resolve one output artifact from a ``RunResult``."""
-    output_keys = list(run_result.outputs.keys())
-    available_keys = ", ".join(repr(item) for item in output_keys) or "<none>"
-
-    if key is not None:
-        if key in run_result.outputs:
-            return run_result.outputs[key]
-        raise KeyError(
-            f"RunResult output key {key!r} was not found. Available keys: {available_keys}."
-        )
-
-    if len(output_keys) == 1:
-        return run_result.outputs[output_keys[0]]
-
-    if not output_keys:
-        raise ValueError(
-            "RunResult has no outputs. Select an explicit output with "
-            "consist.ref(..., key='...')."
-        )
-
-    raise ValueError(
-        "RunResult has multiple outputs. Select an explicit output with "
-        "consist.ref(..., key='...'). "
-        f"Available keys: {available_keys}."
-    )
+    return resolve_output_from_mapping(run_result.outputs, key=key)
 
 
 @dataclass(slots=True)

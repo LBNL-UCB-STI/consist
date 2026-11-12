@@ -17,9 +17,9 @@ from typing import (
     Iterator,
     Mapping,
     MutableMapping,
-    Protocol,
     TypeVar,
 )
+from typing_extensions import Protocol
 
 
 class DeclaredOutputLike(Protocol):

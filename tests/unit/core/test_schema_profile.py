@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -164,7 +165,10 @@ def test_profile_and_persist_ingested_schema(tracker, sample_csv):
         assert len(observations) == 2
 
         if "schema_profile" in artifact.meta:
-            json.dumps(artifact.meta["schema_profile"])
+            json.dumps(
+                artifact.meta["schema_profile"],
+                default=lambda o: dict(o) if isinstance(o, Mapping) else str(o),
+            )
 
 
 def test_profile_duckdb_table_truncates_fields_for_wide_tables(tracker):

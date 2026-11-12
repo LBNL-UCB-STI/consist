@@ -5,11 +5,14 @@ from __future__ import annotations
 import ast
 import copy
 from dataclasses import FrozenInstanceError
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
 import pickle
+import subprocess
+import sys
+import tempfile
 import time
 from types import MappingProxyType
 import uuid
@@ -41,8 +44,14 @@ from consist.digest import (
 import consist.models as consist_models
 from consist.models.artifact import Artifact
 from consist.models.run import Run
-from consist.protocols import ArtifactLike, ArtifactRecordLike, ArtifactResolver
-from consist.types import OutputSet
+from consist.protocols import (
+    ArtifactLike,
+    ArtifactRecordLike,
+    ArtifactResolver,
+    bind_active_resolver,
+    get_active_resolver,
+)
+from consist.types import FilenamePattern, IntCapture, OutputSet
 
 
 # ---------------------------------------------------------------------------
@@ -938,3 +947,601 @@ class TestProvenanceJsonZeroSqlAndRebuildRoundTrip:
         assert art_v05.digest == Digest("h5_fixed_v1:sha256", hex_c)
         assert art_v05.meta["source"] == "v05"
         tracker.close()
+
+
+# ---------------------------------------------------------------------------
+# 7. Edge-Case Hardening, Recovery Roots, Admission, & Import Isolation
+# ---------------------------------------------------------------------------
+
+
+class TestEdgeCaseHardeningAndIsolation:
+    """Verify cache error guards, directory/output_set admission, recovery roots, and lazy SQLModel imports."""
+
+    def test_error_input_hash_prevents_false_cache_hits_and_remote_caller_supplied_hashes_deterministically(
+        self, tmp_path: Path
+    ) -> None:
+        tracker = Tracker(
+            run_dir=tmp_path / "runs",
+            db_path=str(tmp_path / "provenance.duckdb"),
+        )
+        missing_a = Artifact(
+            key="ext_a",
+            uri="inputs://missing_a.parquet",
+            driver="parquet",
+            digest=None,
+        )
+        missing_b = Artifact(
+            key="ext_b",
+            uri="inputs://missing_b.parquet",
+            driver="parquet",
+            digest=None,
+        )
+
+        with tracker.start_run(
+            "missing_run_1",
+            model="model_alpha",
+            inputs=[missing_a],
+            cache_mode="reuse",
+        ) as t1:
+            assert not t1.is_cached
+            run1 = t1.current_consist.run
+            assert run1.input_hash == "error"
+            assert run1.signature is None
+
+        persisted_1 = tracker.get_run("missing_run_1")
+        assert persisted_1 is not None
+        assert persisted_1.signature is None
+        assert tracker.db.find_matching_run("error", "error", "error") is None
+        assert tracker.db.find_run_by_signature("error") is None
+
+        with tracker.start_run(
+            "missing_run_2",
+            model="model_beta",
+            inputs=[missing_b],
+            cache_mode="reuse",
+        ) as t2:
+            assert not t2.is_cached
+            assert t2.current_consist.run.signature is None
+
+        # Remote s3:// external Artifact with caller_supplied_v1:sha256 hashes deterministically
+        remote_1 = Artifact(
+            key="remote_skims",
+            uri="s3://sim-bucket/skims_v1.parquet",
+            driver="parquet",
+            digest=Digest("caller_supplied_v1:sha256", "ab" * 32),
+        )
+        remote_2 = Artifact(
+            key="remote_skims",
+            uri="s3://sim-bucket/skims_v2.parquet",
+            driver="parquet",
+            digest=Digest("caller_supplied_v1:sha256", "ab" * 32),
+        )
+        h1 = tracker.identity.compute_input_hash([remote_1])
+        h1_repeat = tracker.identity.compute_input_hash([remote_1])
+        h2 = tracker.identity.compute_input_hash([remote_2])
+        assert h1 != "error"
+        assert h1 == h1_repeat
+        assert h1 != h2
+        tracker.close()
+
+    def test_check_artifact_identity_verifies_zarr_directory_and_output_set_artifacts(
+        self, tmp_path: Path
+    ) -> None:
+        from consist.core.admission import check_artifact_identity
+
+        tracker = Tracker(
+            run_dir=tmp_path / "runs",
+            db_path=str(tmp_path / "provenance.duckdb"),
+        )
+        zarr_dir = tracker.run_dir / "outputs" / "skims.zarr"
+        zarr_dir.mkdir(parents=True)
+        (zarr_dir / ".zgroup").write_text('{"zarr_format": 2}\n', encoding="utf-8")
+        (zarr_dir / "0.0").write_bytes(b"\x01\x02\x03\x04")
+
+        plain_dir = tracker.run_dir / "outputs" / "bundle_dir"
+        plain_dir.mkdir(parents=True)
+        (plain_dir / "part_0.csv").write_text("id,val\n1,10\n", encoding="utf-8")
+
+        outset_dir = tracker.run_dir / "outputs" / "annual_set"
+        outset_dir.mkdir(parents=True)
+        (outset_dir / "year_2025.csv").write_text("v\n1\n", encoding="utf-8")
+        (outset_dir / "year_2030.csv").write_text("v\n2\n", encoding="utf-8")
+
+        def _produce() -> None:
+            return None
+
+        result = tracker.run(
+            fn=_produce,
+            name="produce_dirs",
+            output_paths={"skims": zarr_dir},
+            output_sets={
+                "annual": OutputSet(
+                    root=outset_dir,
+                    include=FilenamePattern.glob("year_*.csv").with_captures(
+                        IntCapture(name="year", wildcard=1)
+                    ),
+                )
+            },
+        )
+        with tracker.start_run("produce_plain_dir", model="dir_step"):
+            dir_art = tracker.log_output(
+                plain_dir, key="bundle_dir", directory_artifact=True
+            )
+
+        assert dir_art.key == "bundle_dir"
+
+        assert (
+            check_artifact_identity(
+                execution_path=zarr_dir,
+                expected_run_id=result.run.id,
+                artifact_key="skims",
+                tracker=tracker,
+            ).outcome
+            == "verified"
+        )
+        assert (
+            check_artifact_identity(
+                execution_path=plain_dir,
+                expected_run_id="produce_plain_dir",
+                artifact_key="bundle_dir",
+                tracker=tracker,
+            ).outcome
+            == "verified"
+        )
+        assert (
+            check_artifact_identity(
+                execution_path=outset_dir,
+                expected_run_id=result.run.id,
+                artifact_key="annual",
+                tracker=tracker,
+            ).outcome
+            == "verified"
+        )
+
+        # Mutate each on disk and confirm mismatch detection
+        (zarr_dir / "0.0").write_bytes(b"\x99\x99")
+        (plain_dir / "part_0.csv").write_text("id,val\n1,999\n", encoding="utf-8")
+        (outset_dir / "year_2030.csv").write_text("v\n999\n", encoding="utf-8")
+
+        assert (
+            check_artifact_identity(
+                execution_path=zarr_dir,
+                expected_run_id=result.run.id,
+                artifact_key="skims",
+                tracker=tracker,
+            ).outcome
+            == "mismatched"
+        )
+        assert (
+            check_artifact_identity(
+                execution_path=plain_dir,
+                expected_run_id="produce_plain_dir",
+                artifact_key="bundle_dir",
+                tracker=tracker,
+            ).outcome
+            == "mismatched"
+        )
+        assert (
+            check_artifact_identity(
+                execution_path=outset_dir,
+                expected_run_id=result.run.id,
+                artifact_key="annual",
+                tracker=tracker,
+            ).outcome
+            == "mismatched"
+        )
+        tracker.close()
+
+    def test_manifest_handles_symlinked_os_ancestor_while_rejecting_target_or_child_symlinks(
+        self, tmp_path: Path
+    ) -> None:
+        from consist.digest import build_shapefile_manifest_v1
+
+        real_mount = tmp_path / "real_scratch"
+        real_mount.mkdir()
+        linked_mount = tmp_path / "scratch_link"
+        try:
+            linked_mount.symlink_to(real_mount, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        # Directory and shapefile under a symlinked mount parent (like macOS /tmp or HPC /scratch) succeed
+        zarr_under_mount = linked_mount / "skims.zarr"
+        zarr_under_mount.mkdir()
+        (zarr_under_mount / "chunk0").write_bytes(b"payload")
+        manifest = build_manifest_v1(zarr_under_mount)
+        assert len(manifest["entries"]) == 1
+
+        shp_under_mount = linked_mount / "roads.shp"
+        shp_under_mount.write_bytes(b"shp")
+        (linked_mount / "roads.shx").write_bytes(b"shx")
+        (linked_mount / "roads.dbf").write_bytes(b"dbf")
+        shp_manifest = build_shapefile_manifest_v1(shp_under_mount)
+        assert len(shp_manifest["entries"]) == 3
+
+        # Also verify directly inside /tmp when writable (macOS /tmp -> private/tmp)
+        if Path("/tmp").exists() and os.access("/tmp", os.W_OK):
+            with tempfile.TemporaryDirectory(dir="/tmp") as raw_tmp:
+                tmp_root = Path(raw_tmp)
+                sub_dir = tmp_root / "tmp_store.zarr"
+                sub_dir.mkdir()
+                (sub_dir / "data").write_bytes(b"ok")
+                assert len(build_manifest_v1(sub_dir)["entries"]) == 1
+
+                tmp_shp = tmp_root / "parcels.shp"
+                tmp_shp.write_bytes(b"shp")
+                (tmp_root / "parcels.shx").write_bytes(b"shx")
+                (tmp_root / "parcels.dbf").write_bytes(b"dbf")
+                assert len(build_shapefile_manifest_v1(tmp_shp)["entries"]) == 3
+
+        # Symlinked artifact root itself is rejected
+        root_link = tmp_path / "linked_target.zarr"
+        root_link.symlink_to(real_mount / "skims.zarr", target_is_directory=True)
+        with pytest.raises(ValueError, match="symlink"):
+            build_manifest_v1(root_link)
+
+        # Child symlink inside tree is rejected
+        outside = tmp_path / "outside.txt"
+        outside.write_text("secret\n", encoding="utf-8")
+        (real_mount / "skims.zarr" / "escape").symlink_to(outside)
+        with pytest.raises(ValueError, match="symlink"):
+            build_manifest_v1(zarr_under_mount)
+
+    def test_repeated_archive_append_on_immutable_artifact_handle_preserves_roots_and_db_meta(
+        self, tmp_path: Path
+    ) -> None:
+        tracker = Tracker(
+            run_dir=tmp_path / "runs",
+            db_path=str(tmp_path / "provenance.duckdb"),
+            schemas=[TripRowBaseModel],
+        )
+        pq_path = tracker.run_dir / "outputs" / "trips.parquet"
+        pq_path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            {
+                "trip_id": [1],
+                "origin_taz": [10],
+                "purpose": ["work"],
+                "distance_km": [4.0],
+            }
+        ).to_parquet(pq_path, index=False)
+
+        with tracker.start_run("archive_append_run", model="sim"):
+            stale_handle = tracker.log_output(pq_path, key="trips_bm")
+            tracker.ingest(stale_handle, schema=TripRowBaseModel)
+
+        arch1 = tmp_path / "archive_1"
+        arch2 = tmp_path / "archive_2"
+        # Pass the SAME pre-ingest, pre-archive immutable handle to both calls
+        tracker.archive_artifact(stale_handle, arch1, mode="copy", append=True)
+        tracker.archive_artifact(stale_handle, arch2, mode="copy", append=True)
+
+        reloaded = tracker.db.get_artifact(stale_handle.id)
+        assert reloaded is not None
+        assert reloaded.meta.get("is_ingested") is True
+        roots = reloaded.meta.get("recovery_roots")
+        assert isinstance(roots, list)
+        assert str(arch1.resolve()) in roots
+        assert str(arch2.resolve()) in roots
+        tracker.close()
+
+    def test_artifact_hash_eq_invariant_nested_frozen_meta_and_pickle_round_trip(
+        self, tmp_path: Path
+    ) -> None:
+        fixed_id = uuid.uuid4()
+        fixed_ts = datetime(2026, 2, 1, 12, 0, tzinfo=timezone.utc)
+        digest = Digest("sha256:file", "ab" * 32)
+
+        a_int = Artifact(
+            id=fixed_id,
+            key="k",
+            uri="outputs://k.parquet",
+            driver="parquet",
+            digest=digest,
+            created_at=fixed_ts,
+            meta={"x": 1},
+        )
+        a_float = Artifact(
+            id=fixed_id,
+            key="k",
+            uri="outputs://k.parquet",
+            driver="parquet",
+            digest=digest,
+            created_at=fixed_ts,
+            meta={"x": 1.0},
+        )
+        a_bool = Artifact(
+            id=fixed_id,
+            key="k",
+            uri="outputs://k.parquet",
+            driver="parquet",
+            digest=digest,
+            created_at=fixed_ts,
+            meta={"x": True},
+        )
+        assert a_int == a_float == a_bool
+        assert hash(a_int) == hash(a_float) == hash(a_bool)
+
+        a_with_dt = Artifact(
+            id=fixed_id,
+            key="k",
+            uri="outputs://k.parquet",
+            driver="parquet",
+            digest=digest,
+            created_at=fixed_ts,
+            meta={"logged_at": fixed_ts, "nested": {"level": {"v": 42}}},
+        )
+        assert isinstance(hash(a_with_dt), int)
+        assert isinstance(a_with_dt.meta["nested"], MappingProxyType)
+        assert isinstance(a_with_dt.meta["nested"]["level"], MappingProxyType)
+        with pytest.raises(TypeError):
+            a_with_dt.meta["nested"]["k"] = 2  # type: ignore[index]
+
+        tracker = Tracker(
+            run_dir=tmp_path / "runs",
+            db_path=str(tmp_path / "provenance.duckdb"),
+        )
+        bound = a_with_dt.with_resolver(tracker)
+        assert bound.resolver is tracker
+        restored = pickle.loads(pickle.dumps(bound))
+        assert restored == bound
+        assert restored.resolver is None
+        assert isinstance(restored.meta["nested"], MappingProxyType)
+        assert restored.meta["nested"]["level"]["v"] == 42
+        tracker.close()
+
+    def test_positional_and_named_input_roles_use_disjoint_namespaces(
+        self, tmp_path: Path
+    ) -> None:
+        from consist.core.run_resolution import InputBindingRole
+
+        tracker = Tracker(
+            run_dir=tmp_path / "runs",
+            db_path=str(tmp_path / "provenance.duckdb"),
+        )
+        sample = tmp_path / "in.csv"
+        sample.write_text("a\n1\n", encoding="utf-8")
+        art = tracker.artifacts.create_artifact(
+            sample, None, key="in", direction="input"
+        )
+
+        h_pos = tracker.identity.compute_input_hash(
+            [art],
+            binding_roles=[
+                InputBindingRole(kind="positional", role="0", input_index=0)
+            ],
+            path_resolver=tracker.resolve_uri,
+        )
+        h_named = tracker.identity.compute_input_hash(
+            [art],
+            binding_roles=[
+                InputBindingRole(kind="named", role="positional:0", input_index=0)
+            ],
+            path_resolver=tracker.resolve_uri,
+        )
+        h_dep = tracker.identity.compute_input_hash(
+            [art],
+            binding_roles=[
+                InputBindingRole(kind="dependency", role="0", input_index=0)
+            ],
+            path_resolver=tracker.resolve_uri,
+        )
+        h_named_dep = tracker.identity.compute_input_hash(
+            [art],
+            binding_roles=[
+                InputBindingRole(kind="named", role="dependency:0", input_index=0)
+            ],
+            path_resolver=tracker.resolve_uri,
+        )
+
+        assert h_pos != "error"
+        assert h_named != "error"
+        assert h_pos != h_named
+        assert h_dep != h_named_dep
+        tracker.close()
+
+    def test_consist_load_falls_back_to_verified_recovery_root_after_archive_move(
+        self, tmp_path: Path
+    ) -> None:
+        db_file = str(tmp_path / "provenance.duckdb")
+        tracker = Tracker(
+            run_dir=tmp_path / "runs",
+            db_path=db_file,
+        )
+        pq_path = tracker.run_dir / "outputs" / "moved.parquet"
+        pq_path.parent.mkdir(parents=True, exist_ok=True)
+        expected_df = pd.DataFrame({"id": [1, 2], "score": [10.5, 20.5]})
+        expected_df.to_parquet(pq_path, index=False)
+
+        with tracker.start_run("move_archive_run", model="sim"):
+            art = tracker.log_output(pq_path, key="moved")
+
+        archive_dir = tmp_path / "cold_archive"
+        tracker.archive_artifact(art, archive_dir, mode="move")
+        assert not pq_path.exists()
+
+        # Works both via original handle and via a fresh Tracker resolving recovery_roots from DB
+        rel = consist.load(art, tracker=tracker)
+        pd.testing.assert_frame_equal(rel.df(), expected_df)
+        tracker.close()
+
+        fresh_tracker = Tracker(run_dir=tmp_path / "runs", db_path=db_file)
+        db_art = fresh_tracker.db.get_artifact(art.id)
+        assert db_art is not None
+        assert db_art.abs_path is None
+        rel_fresh = consist.load(db_art, tracker=fresh_tracker)
+        pd.testing.assert_frame_equal(rel_fresh.df(), expected_df)
+
+        # Corrupt archived file and confirm digest verification fails closed
+        archived_file = archive_dir / "outputs" / "moved.parquet"
+        archived_file.write_bytes(b"corrupted parquet bytes")
+        with pytest.raises(ValueError, match="failed digest verification"):
+            consist.load(db_art, tracker=fresh_tracker)
+        fresh_tracker.close()
+
+    def test_input_shapefile_attaches_bundle_manifest_and_archives_cleanly(
+        self, tmp_path: Path
+    ) -> None:
+        tracker = Tracker(
+            run_dir=tmp_path / "runs",
+            db_path=str(tmp_path / "provenance.duckdb"),
+        )
+        shp_dir = tracker.run_dir / "inputs"
+        shp_dir.mkdir(parents=True, exist_ok=True)
+        shp_path = shp_dir / "zones.shp"
+        shp_path.write_bytes(b"geometry")
+        (shp_dir / "zones.shx").write_bytes(b"index")
+        (shp_dir / "zones.dbf").write_bytes(b"attributes")
+
+        with tracker.start_run("shp_input_run", model="gis"):
+            in_shp = tracker.log_input(shp_path, key="zones_in")
+
+        assert in_shp.driver == "shapefile"
+        assert in_shp.digest is not None
+        assert in_shp.digest.scheme == "dir_manifest_v1:sha256"
+        assert in_shp.meta.get("file_bundle_artifact") is True
+        assert in_shp.meta.get("file_bundle_entry") == "zones.shp"
+        assert "file_bundle_manifest" in in_shp.meta
+
+        archive_dir = tmp_path / "shp_archive"
+        dest = tracker.archive_artifact(in_shp, archive_dir, mode="copy")
+        assert (dest / "zones.shp").is_file()
+        assert (dest / "zones.shx").is_file()
+        assert (dest / "zones.dbf").is_file()
+        tracker.close()
+
+    def test_legacy_coercion_utc_timestamps_coupler_ingest_h5_leaf_driver_and_lazy_models(
+        self, tmp_path: Path
+    ) -> None:
+        from consist.core.coupler import Coupler
+
+        # 1. Legacy v0.4 OutputSet + uppercase sha256:<HEX> coercion
+        upper_hex = "AB" * 32
+        outset_art = Artifact.from_json_dict(
+            {
+                "key": "legacy_set",
+                "container_uri": "outputs://annual",
+                "driver": "artifact_set",
+                "hash": upper_hex,
+                "meta": {"artifact_set": True},
+            }
+        )
+        assert outset_art.digest == Digest("output_set_v1:sha256", upper_hex.lower())
+
+        prefixed_upper = Artifact.from_json_dict(
+            {
+                "key": "legacy_file",
+                "container_uri": "outputs://data.bin",
+                "driver": "binary",
+                "hash": f"sha256:{upper_hex}",
+            }
+        )
+        assert prefixed_upper.digest == Digest("sha256:file", upper_hex.lower())
+
+        # 2. Run naive and non-UTC offset timestamps normalize to UTC
+        plus_two = timezone(timedelta(hours=2))
+        run_obj = Run(
+            id="tz_run",
+            model_name="m",
+            config_hash="00" * 32,
+            git_hash="11" * 32,
+            started_at=datetime(2026, 3, 1, 14, 0, tzinfo=plus_two),
+            ended_at=datetime(2026, 3, 1, 12, 5),
+            created_at=datetime(2026, 3, 1, 12, 0),
+            updated_at=datetime(2026, 3, 1, 14, 5, tzinfo=plus_two),
+        )
+        assert run_obj.started_at == datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
+        assert run_obj.ended_at == datetime(2026, 3, 1, 12, 5, tzinfo=timezone.utc)
+        assert run_obj.created_at.tzinfo == timezone.utc
+        assert run_obj.updated_at == datetime(2026, 3, 1, 12, 5, tzinfo=timezone.utc)
+
+        # 3. Logical matrix string policy "preserve_canonical_v1" + .nc container
+        xr = pytest.importorskip("xarray")
+        nc_path = tmp_path / "skims.nc"
+        ds = xr.Dataset(
+            {"time": (("orig", "dest"), np.array([[1.0, 2.0], [3.0, 4.0]]))},
+            coords={"zone_number": ("orig", np.array([101, 102], dtype=np.int32))},
+        )
+        ds.to_netcdf(nc_path)
+        nc_digest = compute_digest(
+            nc_path,
+            driver="logical_matrices_canonical",
+            options={"policy": "preserve_canonical_v1"},
+        )
+        assert nc_digest.scheme == "logical_matrices_canonical_v1:sha256"
+
+        # 4. Between-step Coupler sync on ingest() when current_consist is None
+        tracker = Tracker(
+            run_dir=tmp_path / "runs",
+            db_path=str(tmp_path / "provenance.duckdb"),
+            schemas=[TripRowBaseModel],
+        )
+        coupler = Coupler(tracker=tracker)
+        pq_path = tracker.run_dir / "outputs" / "trips.parquet"
+        pq_path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            {
+                "trip_id": [1],
+                "origin_taz": [1],
+                "purpose": ["work"],
+                "distance_km": [2.5],
+            }
+        ).to_parquet(pq_path, index=False)
+        with tracker.start_run("step_1", model="sim"):
+            step_art = tracker.log_output(pq_path, key="trips_bm")
+        coupler.set("trips_bm", step_art)
+        assert tracker.current_consist is None
+        assert coupler["trips_bm"].meta.get("is_ingested") is not True
+        tracker.ingest(step_art, schema=TripRowBaseModel)
+        assert coupler["trips_bm"].meta.get("is_ingested") is True
+
+        # 5. bind_active_resolver ContextVar token reset
+        other_tracker = Tracker(run_dir=tmp_path / "other_runs")
+        assert get_active_resolver() is None
+        with bind_active_resolver(tracker):
+            assert get_active_resolver() is tracker
+            with bind_active_resolver(other_tracker):
+                assert get_active_resolver() is other_tracker
+            assert get_active_resolver() is tracker
+        assert get_active_resolver() is None
+
+        # 6. scan_h5_container aligns leaf driver with digest scheme
+        h5_path = tracker.run_dir / "outputs" / "mixed.h5"
+        pd.DataFrame({"id": [1, 2], "name": ["a", "b"]}).to_hdf(
+            h5_path, key="pytables_tbl", mode="w", format="table"
+        )
+        with h5py.File(h5_path, "a") as h5f:
+            h5f.create_dataset("raw_matrix", data=np.arange(6, dtype=np.float64))
+
+        with tracker.start_run("h5_scan_run", model="sim"):
+            _, children = tracker.log_h5_container(
+                h5_path, key="mixed", hash_tables="always"
+            )
+        by_member = {c.member: c for c in children}
+        raw_leaf = by_member["raw_matrix"]
+        assert raw_leaf.driver == "h5"
+        assert raw_leaf.digest is not None
+        assert raw_leaf.digest.scheme == "h5_dataset_v1:sha256"
+
+        tbl_leaf = by_member["pytables_tbl/table"]
+        assert tbl_leaf.driver == "h5_table"
+        assert tbl_leaf.digest is not None
+        assert tbl_leaf.digest.scheme == "h5_fixed_v1:sha256"
+        tracker.close()
+
+        # 7. Subprocess import isolation: importing consist.models.artifact does not load SQLAlchemy/SQLModel
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys, consist.models.artifact; "
+                    "assert 'sqlalchemy' not in sys.modules, list(sys.modules); "
+                    "assert 'sqlmodel' not in sys.modules, list(sys.modules)"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode == 0, proc.stderr

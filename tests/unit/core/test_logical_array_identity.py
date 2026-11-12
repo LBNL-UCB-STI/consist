@@ -15,7 +15,6 @@ import consist
 from consist.core.admission import (
     DeclaredDigestExpectation,
     PriorRunExpectation,
-    admission_file_identity,
     check_expected_identity,
     check_prior_run_expectation,
 )
@@ -24,7 +23,6 @@ from consist.core.logical_array_identity import (
     FLOAT32_MATRICES_V1_POLICY,
     PRESERVE_CANONICAL_POLICY,
     ArrayCanonicalizationPolicy,
-    admission_directory_identity,
     canonicalize_float32_array,
     canonicalize_float64_array,
     canonicalize_float_array,
@@ -36,7 +34,7 @@ from consist.core.logical_array_identity import (
     read_artifact_provenance_sidecar,
     write_artifact_provenance_sidecar,
 )
-from consist.digest import Digest
+from consist.digest import Digest, compute_digest
 from consist.models.artifact import Artifact
 
 
@@ -356,9 +354,9 @@ def test_admission_auto_fast_path_and_cross_format_logical_fallback(
         )
         h5f.create_group("lookup").create_dataset("zone_number", data=zones)
 
-    assert admission_file_identity(omx_producer) != admission_file_identity(
-        omx_repacked
-    )
+    assert compute_digest(
+        omx_producer, options={"scheme": "sha256:file"}
+    ) != compute_digest(omx_repacked, options={"scheme": "sha256:file"})
 
     ds = xr.Dataset(
         data_vars={"DIST": (("otaz", "dtaz"), mat)},
@@ -473,7 +471,9 @@ def test_declared_digest_supports_manifest_v1_and_logical_matrices(
     )
     ds.to_zarr(zarr_path)
 
-    manifest_id = admission_directory_identity(zarr_path)
+    manifest_id = str(
+        compute_digest(zarr_path, options={"scheme": "dir_manifest_v1:sha256"})
+    )
     logical_id = normalize_logical_matrices_identity(
         compute_zarr_logical_matrices_sha256(zarr_path)
     )

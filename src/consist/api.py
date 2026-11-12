@@ -159,16 +159,6 @@ def _get_gpd() -> Optional[ModuleType]:
 T = TypeVar("T", bound=BaseModel)
 
 
-class OpenMatrixFileLike(Protocol):
-    """Minimal file-like surface for OpenMatrix/HDF5 access."""
-
-    def __contains__(self, key: object) -> bool: ...
-
-    def __getitem__(self, key: str) -> Any: ...
-
-    def close(self) -> None: ...
-
-
 LoadResult = Union[
     duckdb.DuckDBPyRelation,
     pd.DataFrame,
@@ -3132,6 +3122,7 @@ def load(
     tracker: Optional["Tracker"] = None,
     *,
     db_fallback: str = "inputs-only",
+    allow_recovery_roots: bool = True,
     **kwargs: Any,
 ) -> XarrayDatasetType: ...
 
@@ -3142,6 +3133,7 @@ def load(
     tracker: Optional["Tracker"] = None,
     *,
     db_fallback: str = "inputs-only",
+    allow_recovery_roots: bool = True,
     **kwargs: Any,
 ) -> XarrayDatasetType: ...
 
@@ -3152,6 +3144,7 @@ def load(
     tracker: Optional["Tracker"] = None,
     *,
     db_fallback: str = "inputs-only",
+    allow_recovery_roots: bool = True,
     **kwargs: Any,
 ) -> XarrayDatasetType: ...
 
@@ -3162,6 +3155,7 @@ def load(
     tracker: Optional["Tracker"] = None,
     *,
     db_fallback: str = "inputs-only",
+    allow_recovery_roots: bool = True,
     **kwargs: Any,
 ) -> GeoDataFrameType: ...
 
@@ -3172,6 +3166,7 @@ def load(
     tracker: Optional["Tracker"] = None,
     *,
     db_fallback: str = "inputs-only",
+    allow_recovery_roots: bool = True,
     **kwargs: Any,
 ) -> pd.HDFStore: ...
 
@@ -3183,6 +3178,7 @@ def load(
     *,
     db_fallback: str = "inputs-only",
     columns: Optional[Sequence[str]] = None,
+    allow_recovery_roots: bool = True,
     **kwargs: Any,
 ) -> duckdb.DuckDBPyRelation: ...
 
@@ -3194,6 +3190,7 @@ def load(
     *,
     db_fallback: str = "inputs-only",
     columns: Optional[Sequence[str]] = None,
+    allow_recovery_roots: bool = True,
     **kwargs: Any,
 ) -> duckdb.DuckDBPyRelation: ...
 
@@ -3205,6 +3202,7 @@ def load(
     *,
     db_fallback: str = "inputs-only",
     columns: Optional[Sequence[str]] = None,
+    allow_recovery_roots: bool = True,
     **kwargs: Any,
 ) -> duckdb.DuckDBPyRelation: ...
 
@@ -3216,6 +3214,7 @@ def load(
     *,
     db_fallback: str = "inputs-only",
     columns: Optional[Sequence[str]] = None,
+    allow_recovery_roots: bool = True,
     **kwargs: Any,
 ) -> LoadResult: ...
 
@@ -3227,6 +3226,7 @@ def load(
     *,
     db_fallback: str = "inputs-only",
     columns: Optional[Sequence[str]] = None,
+    allow_recovery_roots: bool = True,
     **kwargs: Any,
 ) -> LoadResult: ...
 
@@ -3237,6 +3237,7 @@ def load(
     *,
     db_fallback: str = "inputs-only",
     columns: Optional[Sequence[str]] = None,
+    allow_recovery_roots: bool = True,
     **kwargs: Any,
 ) -> LoadResult:
     """
@@ -3360,10 +3361,27 @@ def load(
     if Path(path).exists():
         return _load_from_disk(str(path), artifact.driver, **load_kwargs)
 
+    # 3b. Try Archive / Recovery Roots Load when workspace copy was moved or cleaned
+    if (
+        allow_recovery_roots
+        and isinstance(tracker, Tracker)
+        and isinstance(artifact, Artifact)
+    ):
+        recovered_path, saw_digest_mismatch = _resolve_archive_recovery_path(
+            artifact, tracker
+        )
+        if recovered_path is not None:
+            return _load_from_disk(str(recovered_path), artifact.driver, **load_kwargs)
+        if saw_digest_mismatch:
+            raise ValueError(
+                f"Archived copy for artifact '{artifact.key}' (ID: {artifact.id}) "
+                f"failed digest verification ({artifact.digest})."
+            )
+
     # 4. Try Database Load (Priority 2 - Ghost Mode)
     if (
         not artifact.meta.get("is_ingested", False)
-        and tracker is not None
+        and isinstance(tracker, Tracker)
         and tracker.db is not None
     ):
         db_artifact = tracker.db.get_artifact(artifact.id)
@@ -3435,6 +3453,62 @@ def load(
         f" - Database: Not Ingested\n"
         f"The run that produced this output may need to be re-run."
     )
+
+
+def _resolve_archive_recovery_path(
+    artifact: Artifact,
+    tracker: Tracker,
+) -> tuple[Path | None, bool]:
+    """Locate and digest-verify an archived copy via ``recovery_roots`` if present."""
+    from consist.core.materialize import (
+        _verify_scalar_artifact_digest,
+        find_existing_recovery_source_path,
+    )
+    from consist.digest import DIGEST_DRIVERS
+
+    saw_digest_mismatch = False
+    has_verifiable_digest = (
+        artifact.digest is not None
+        and artifact.digest.scheme in DIGEST_DRIVERS
+        and artifact.digest.scheme
+        not in {
+            "caller_supplied_v1:sha256",
+            "stat_file_v1:sha256",
+            "stat_dir_v1:sha256",
+        }
+    )
+
+    def _validate_candidate(candidate: Path) -> bool:
+        nonlocal saw_digest_mismatch
+        if not has_verifiable_digest or artifact.digest is None:
+            return True
+        if _verify_scalar_artifact_digest(candidate, artifact, artifact.digest):
+            return True
+        saw_digest_mismatch = True
+        return False
+
+    _, recovered_path, _ = find_existing_recovery_source_path(
+        tracker,
+        artifact=artifact,
+        run=None,
+        source_root=None,
+        source_validator=_validate_candidate,
+    )
+    if (
+        recovered_path is None
+        and artifact.parent_artifact_id is not None
+        and tracker.db is not None
+    ):
+        parent_artifact = tracker.db.get_artifact(artifact.parent_artifact_id)
+        if parent_artifact is not None:
+            _, recovered_path, _ = find_existing_recovery_source_path(
+                tracker,
+                artifact=parent_artifact,
+                run=None,
+                source_root=None,
+                source_validator=_validate_candidate,
+            )
+    return recovered_path, saw_digest_mismatch
 
 
 def _load_from_disk(path: str, driver: str, **kwargs: Any) -> LoadResult:

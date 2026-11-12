@@ -444,28 +444,7 @@ def build_output_set_manifest(
 
 def compute_output_set_manifest_digest(manifest: Mapping[str, Any]) -> Digest:
     """Compute the ``output_set_v1:sha256`` ``Digest`` from a parsed OutputSet manifest."""
-    raw_members = manifest.get("members")
-    if not isinstance(raw_members, Sequence) or isinstance(raw_members, (str, bytes)):
-        raise ValueError("OutputSet manifest must contain a 'members' sequence.")
-    pairs: list[tuple[str, Digest]] = []
-    for entry in raw_members:
-        if not isinstance(entry, Mapping):
-            raise ValueError("OutputSet manifest member entry must be a mapping.")
-        member_key = entry.get("key")
-        if not isinstance(member_key, str) or not member_key:
-            raise ValueError("OutputSet manifest member entry is missing 'key'.")
-        raw_digest = entry.get("digest")
-        if isinstance(raw_digest, str) and raw_digest:
-            member_digest = Digest.parse(raw_digest)
-        else:
-            raw_hash = entry.get("content_hash")
-            if not isinstance(raw_hash, str) or not raw_hash:
-                raise ValueError(
-                    f"OutputSet manifest member {member_key!r} is missing 'digest'."
-                )
-            member_digest = Digest("sha256:file", raw_hash)
-        pairs.append((member_key, member_digest))
-    return compute_digest(None, driver="output_set", options={"members": pairs})
+    return compute_digest(None, driver="output_set", options={"manifest": manifest})
 
 
 def register_output_sets(

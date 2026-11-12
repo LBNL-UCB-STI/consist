@@ -2145,10 +2145,10 @@ class DatabaseMaintenance:
         *,
         run_id: str,
         run_facet: Any,
-        run_meta: dict[str, Any],
+        run_meta: Mapping[str, Any],
         namespace: str,
     ) -> None:
-        if not isinstance(run_facet, dict) or not run_facet:
+        if not isinstance(run_facet, Mapping) or not run_facet:
             return
 
         facet_id = self._coerce_non_empty_str(run_meta.get("config_facet_id"))
@@ -2182,13 +2182,13 @@ class DatabaseMaintenance:
         self,
         *,
         artifact_id: uuid.UUID,
-        artifact_meta: dict[str, Any],
+        artifact_meta: Mapping[str, Any],
         default_namespace: str,
     ) -> None:
         facet_payload = artifact_meta.get("artifact_facet")
-        if not isinstance(facet_payload, dict) or not facet_payload:
+        if not isinstance(facet_payload, Mapping) or not facet_payload:
             fallback_payload = artifact_meta.get("facet")
-            if isinstance(fallback_payload, dict) and fallback_payload:
+            if isinstance(fallback_payload, Mapping) and fallback_payload:
                 facet_payload = fallback_payload
             else:
                 return
@@ -2227,7 +2227,7 @@ class DatabaseMaintenance:
         self,
         *,
         artifact_id: uuid.UUID,
-        artifact_meta: dict[str, Any],
+        artifact_meta: Mapping[str, Any],
         run_id: str,
     ) -> None:
         schema_id = self._coerce_non_empty_str(artifact_meta.get("schema_id"))
@@ -2235,10 +2235,10 @@ class DatabaseMaintenance:
             return
 
         summary = artifact_meta.get("schema_summary")
-        summary_json = summary if isinstance(summary, dict) else {}
+        summary_json = dict(summary) if isinstance(summary, Mapping) else {}
 
         profile = artifact_meta.get("schema_profile")
-        profile_json = profile if isinstance(profile, dict) else None
+        profile_json = dict(profile) if isinstance(profile, Mapping) else None
 
         existing_schema_row = self.db.fetchone(
             "SELECT summary_json, profile_json FROM artifact_schema WHERE id = ?",
@@ -3197,7 +3197,7 @@ class DatabaseMaintenance:
             _add_path(self._normalize_mount_root_path(self._mounts[scheme]))
 
         mounts_raw = run_meta.get("mounts")
-        if isinstance(mounts_raw, dict):
+        if isinstance(mounts_raw, Mapping):
             mount_root = mounts_raw.get(scheme)
             if isinstance(mount_root, str) and mount_root:
                 _add_path(self._normalize_mount_root_path(mount_root))

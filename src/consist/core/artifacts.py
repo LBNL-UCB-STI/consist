@@ -28,7 +28,12 @@ from consist.core.container_policy import (
 from consist.core.drivers import ARRAY_DRIVERS, TABLE_DRIVERS
 from consist.core.logical_array_identity import open_h5py_read_only
 from consist.core.validation import validate_artifact_key
-from consist.digest import Digest, build_manifest_v1, compute_digest
+from consist.digest import (
+    Digest,
+    build_manifest_v1,
+    build_shapefile_manifest_v1,
+    compute_digest,
+)
 from consist.models.artifact import Artifact
 from consist.types import (
     ArtifactRef,
@@ -63,6 +68,7 @@ class _DigestResolutionState:
     caller_raw_token: Optional[str] = None
     computed_digest: Optional[Digest] = None
     computed_dir_manifest: Optional[dict[str, Any]] = None
+    computed_shp_manifest: Optional[dict[str, Any]] = None
     attempted_compute: bool = False
     caller_supplied: bool = False
     override_applied: bool = False
@@ -226,7 +232,6 @@ class ArtifactManager:
             )
         meta.pop("hash_semantics", None)
         meta.pop("content_identity", None)
-        meta.pop("observation_identity", None)
 
         directory_flag = bool(meta.get("directory_artifact")) or bool(
             meta.get("file_bundle_artifact")
@@ -322,18 +327,39 @@ class ArtifactManager:
                         )
                 else:
                     effective_driver = driver
-                    if effective_driver in {"h5", "hdf5"} and member is None:
-                        effective_driver = "file"
-                    elif effective_driver == "shapefile" and not meta.get(
-                        "file_bundle_artifact"
-                    ):
-                        effective_driver = "file"
-                    digest_state.computed_digest = compute_digest(
-                        target,
-                        driver=effective_driver,
-                        member=member,
-                        options={"hashing_strategy": strategy},
-                    )
+                    if effective_driver == "shapefile" and strategy != "fast":
+                        shp_manifest: Optional[dict[str, Any]] = None
+                        if meta.get("file_bundle_artifact"):
+                            shp_manifest = build_shapefile_manifest_v1(target)
+                        elif target.is_file():
+                            try:
+                                shp_manifest = build_shapefile_manifest_v1(target)
+                            except ValueError:
+                                shp_manifest = None
+                        if shp_manifest is not None:
+                            digest_state.computed_shp_manifest = shp_manifest
+                            digest_state.computed_digest = Digest(
+                                "dir_manifest_v1:sha256",
+                                shp_manifest["tree_hash"],
+                            )
+                        else:
+                            digest_state.computed_digest = compute_digest(
+                                target,
+                                driver="file",
+                                member=member,
+                                options={"hashing_strategy": strategy},
+                            )
+                    else:
+                        if effective_driver in {"h5", "hdf5"} and member is None:
+                            effective_driver = "file"
+                        elif effective_driver == "shapefile":
+                            effective_driver = "file"
+                        digest_state.computed_digest = compute_digest(
+                            target,
+                            driver=effective_driver,
+                            member=member,
+                            options={"hashing_strategy": strategy},
+                        )
             except Exception as exc:
                 if raise_on_error:
                     raise ValueError(
@@ -445,6 +471,17 @@ class ArtifactManager:
                             digest_state.effective_digest is not None
                             and parent.digest == digest_state.effective_digest
                         )
+                    elif driver == "shapefile":
+                        if digest_state.effective_digest is None:
+                            _ensure_digest()
+                        should_reuse = (
+                            digest_state.effective_digest is not None
+                            and parent.digest == digest_state.effective_digest
+                            and (
+                                digest_state.computed_shp_manifest is None
+                                or "file_bundle_manifest" in parent.meta
+                            )
+                        )
                     elif driver in {"h5_table", "gtfs"}:
                         should_reuse = (
                             digest_state.effective_digest is not None
@@ -477,6 +514,16 @@ class ArtifactManager:
                     meta["directory_manifest"] = digest_state.computed_dir_manifest
                     meta["directory_manifest_version"] = (
                         digest_state.computed_dir_manifest["version"]
+                    )
+                if (
+                    digest_state.computed_shp_manifest is not None
+                    and "file_bundle_manifest" not in meta
+                ):
+                    meta["file_bundle_artifact"] = True
+                    meta["file_bundle_entry"] = Path(resolved_abs_path).name
+                    meta["file_bundle_manifest"] = digest_state.computed_shp_manifest
+                    meta["file_bundle_manifest_version"] = (
+                        digest_state.computed_shp_manifest["version"]
                     )
                 if digest_state.caller_raw_token is not None:
                     meta["caller_supplied_hash"] = digest_state.caller_raw_token
@@ -513,6 +560,7 @@ class ArtifactManager:
                     if (digest_state.caller_supplied and not validate_content_hash)
                     else "computed"
                 ),
+                digest=artifact_obj.digest,
             )
             meta_changed = True
         elif digest_state.caller_supplied_override_applied:
@@ -520,6 +568,7 @@ class ArtifactManager:
                 path=None,
                 hashing_strategy=self.tracker.identity.hashing_strategy,
                 source="caller_supplied",
+                digest=artifact_obj.digest,
             )
             if digest_state.caller_raw_token is not None:
                 meta_updates["caller_supplied_hash"] = digest_state.caller_raw_token
@@ -537,6 +586,7 @@ class ArtifactManager:
                     path=Path(resolved_abs_path),
                     hashing_strategy=self.tracker.identity.hashing_strategy,
                     source="computed",
+                    digest=artifact_obj.digest,
                 )
                 meta_changed = True
             artifact_obj = replace(
@@ -561,15 +611,12 @@ class ArtifactManager:
         if artifact_obj.digest is not None and not is_caller_source:
             if artifact_obj.digest.scheme not in _WEAK_OBSERVATION_SCHEMES:
                 meta_updates["content_identity"] = str(artifact_obj.digest)
-                meta_updates.pop("observation_identity", None)
                 meta_changed = True
-            else:
+            elif "content_identity" in meta_updates:
                 meta_updates.pop("content_identity", None)
-                meta_updates["observation_identity"] = str(artifact_obj.digest)
                 meta_changed = True
-        elif is_caller_source:
+        elif is_caller_source and "content_identity" in meta_updates:
             meta_updates.pop("content_identity", None)
-            meta_updates.pop("observation_identity", None)
             meta_changed = True
 
         if meta_changed:
@@ -622,18 +669,36 @@ class ArtifactManager:
                         table_meta["description"] = child_spec.description
                     if child_spec and child_spec.metadata:
                         table_meta.update(dict(child_spec.metadata))
+                    is_pytables_table = obj.dtype.names is not None or obj.attrs.get(
+                        "CLASS"
+                    ) in {b"TABLE", "TABLE"}
+                    leaf_driver = "h5_table" if is_pytables_table else "h5"
                     if hash_tables:
                         try:
-                            table_digest = compute_digest(
-                                path_obj,
-                                driver="h5",
-                                member=name,
-                                options={
-                                    "dataset": obj,
-                                    "chunk_rows": table_hash_chunk_rows,
-                                },
-                            )
-                        except Exception as exc:
+                            if leaf_driver == "h5_table":
+                                table_digest = compute_digest(
+                                    path_obj,
+                                    driver="h5_table",
+                                    member=name,
+                                    options={"chunk_rows": table_hash_chunk_rows},
+                                )
+                            else:
+                                table_digest = compute_digest(
+                                    path_obj,
+                                    driver="h5",
+                                    member=name,
+                                    options={
+                                        "dataset": obj,
+                                        "chunk_rows": table_hash_chunk_rows,
+                                    },
+                                )
+                        except (
+                            OSError,
+                            ValueError,
+                            RuntimeError,
+                            KeyError,
+                            TypeError,
+                        ) as exc:
                             logging.warning(
                                 "[Consist] Failed to hash HDF5 dataset %s: %s",
                                 name,
@@ -651,7 +716,7 @@ class ArtifactManager:
                         run_id=container.run_id,
                         key=table_key,
                         direction=direction,
-                        driver="h5_table",
+                        driver=leaf_driver,
                         member=name,
                         digest=table_digest,
                         skip_digest=not hash_tables,
@@ -673,7 +738,7 @@ class ArtifactManager:
                     table_artifacts.append((table_art, prepared_bundle))
 
                 f.visititems(visit_datasets)
-        except Exception as exc:
+        except (OSError, ValueError, RuntimeError, KeyError) as exc:
             logging.warning("[Consist] Failed to discover HDF5 tables: %s", exc)
 
         return table_artifacts
@@ -727,7 +792,7 @@ class ArtifactManager:
                 prior_container = self.tracker.db.find_latest_artifact_at_uri(
                     uri, driver="h5", include_inputs=True
                 )
-            except Exception:
+            except (OSError, ValueError, RuntimeError):
                 prior_container = None
 
         with self.tracker.persistence.batch_artifact_writes():

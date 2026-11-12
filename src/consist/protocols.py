@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 from typing import (
+    TYPE_CHECKING,
     Any,
     Callable,
     Iterator,
@@ -22,9 +23,11 @@ from typing import (
     Optional,
     Sequence,
 )
+import weakref
 from typing_extensions import Protocol, runtime_checkable
 
-from consist.types import ArtifactRef, OutputPathRef, OutputSet
+if TYPE_CHECKING:
+    from consist.types import ArtifactRef, OutputPathRef, OutputSet
 
 
 @runtime_checkable
@@ -34,6 +37,12 @@ class ArtifactLike(Protocol):
 
     @property
     def uri(self) -> str: ...
+
+
+@runtime_checkable
+class RunResultLike(Protocol):
+    outputs: Mapping[str, ArtifactLike]
+    cache_hit: bool
 
 
 @runtime_checkable
@@ -87,7 +96,9 @@ class ArtifactResolver(Protocol):
     ) -> Optional[tuple[Optional[str], Optional[str]]]: ...
 
 
-_ACTIVE_RESOLVER_STACK: ContextVar[Sequence[ArtifactResolver]] = ContextVar(
+_ResolverSlot = weakref.ReferenceType[ArtifactResolver] | ArtifactResolver
+
+_ACTIVE_RESOLVER_STACK: ContextVar[Sequence[_ResolverSlot]] = ContextVar(
     "consist_active_resolver_stack", default=()
 )
 _DEFAULT_RESOLVER: ContextVar[Optional[ArtifactResolver]] = ContextVar(
@@ -95,16 +106,33 @@ _DEFAULT_RESOLVER: ContextVar[Optional[ArtifactResolver]] = ContextVar(
 )
 
 
+def _to_resolver_slot(resolver: ArtifactResolver) -> _ResolverSlot:
+    try:
+        return weakref.ref(resolver)
+    except TypeError:
+        return resolver
+
+
+def _unwrap_resolver_slot(slot: _ResolverSlot) -> Optional[ArtifactResolver]:
+    if isinstance(slot, weakref.ReferenceType):
+        return slot()
+    return slot
+
+
 def get_active_resolver() -> Optional[ArtifactResolver]:
-    """Return the innermost active ``ArtifactResolver`` or ``None``."""
+    """Return the innermost live active ``ArtifactResolver`` or ``None``."""
     stack = _ACTIVE_RESOLVER_STACK.get()
-    return stack[-1] if stack else None
+    for slot in reversed(stack):
+        resolved = _unwrap_resolver_slot(slot)
+        if resolved is not None:
+            return resolved
+    return None
 
 
 def push_active_resolver(resolver: ArtifactResolver) -> None:
     """Push an ``ArtifactResolver`` onto the active context stack."""
     stack = _ACTIVE_RESOLVER_STACK.get()
-    _ACTIVE_RESOLVER_STACK.set((*stack, resolver))
+    _ACTIVE_RESOLVER_STACK.set((*stack, _to_resolver_slot(resolver)))
 
 
 def pop_active_resolver() -> Optional[ArtifactResolver]:
@@ -112,7 +140,7 @@ def pop_active_resolver() -> Optional[ArtifactResolver]:
     stack = _ACTIVE_RESOLVER_STACK.get()
     if not stack:
         return None
-    resolver = stack[-1]
+    resolver = _unwrap_resolver_slot(stack[-1])
     _ACTIVE_RESOLVER_STACK.set(stack[:-1])
     return resolver
 
@@ -141,35 +169,13 @@ def resolve_active_or_default_resolver() -> Optional[ArtifactResolver]:
 
 @contextmanager
 def bind_active_resolver(resolver: ArtifactResolver) -> Iterator[ArtifactResolver]:
-    """Temporarily push ``resolver`` onto the active resolver stack."""
-    push_active_resolver(resolver)
+    """Temporarily push ``resolver`` onto the active resolver stack via ContextVar token reset."""
+    stack = _ACTIVE_RESOLVER_STACK.get()
+    token = _ACTIVE_RESOLVER_STACK.set((*stack, _to_resolver_slot(resolver)))
     try:
         yield resolver
     finally:
-        pop_active_resolver()
-
-
-@runtime_checkable
-class RunLike(Protocol):
-    id: str
-    model_name: str
-    status: str
-    config_hash: Optional[str]
-    input_hash: Optional[str]
-    git_hash: Optional[str]
-    signature: Optional[str]
-    meta: Mapping[str, Any]
-
-
-@runtime_checkable
-class RunResultLike(Protocol):
-    outputs: Mapping[str, ArtifactLike]
-    cache_hit: bool
-
-
-@runtime_checkable
-class RunIdentifiedResultLike(RunResultLike, Protocol):
-    run: RunLike
+        _ACTIVE_RESOLVER_STACK.reset(token)
 
 
 @runtime_checkable

@@ -76,6 +76,7 @@ class ArtifactSchemaManager:
             self.tracker.current_consist.replace_artifact(updated)
         if self.tracker._last_consist is not None:
             self.tracker._last_consist.replace_artifact(updated)
+        self.tracker._replace_live_coupler_artifact(updated)
         self.tracker._run_artifacts_cache.clear()
         return updated
 

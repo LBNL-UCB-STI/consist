@@ -23,11 +23,11 @@ from typing import (
     Literal,
     Mapping,
     Optional,
-    Protocol,
     TYPE_CHECKING,
     Union,
     cast,
 )
+from typing_extensions import Protocol
 import uuid
 import warnings
 

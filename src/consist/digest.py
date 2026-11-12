@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import closing
 import dataclasses
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 import hashlib
 import importlib
@@ -337,19 +337,23 @@ def _normalize_manifest_relative_path(path: str | Path) -> str:
     return normalized
 
 
-def _reject_manifest_symlink_components(path: Path, *, label: str) -> None:
-    candidate = Path(path)
-    for component in (candidate, *candidate.parents):
-        if component.is_symlink():
-            raise ValueError(
-                f"directory artifact {label} contains a symlink component: {component}"
-            )
+def _resolve_manifest_root(path: Path | str, *, label: str) -> Path:
+    raw_path = Path(path).expanduser()
+    if raw_path.is_symlink():
+        raise ValueError(
+            f"directory artifact {label} contains a symlink component: {raw_path}"
+        )
+    canonical = raw_path.parent.resolve() / raw_path.name
+    if canonical.is_symlink():
+        raise ValueError(
+            f"directory artifact {label} contains a symlink component: {canonical}"
+        )
+    return canonical
 
 
 def build_manifest_v1(root: Path | str) -> dict[str, Any]:
     """Build a deterministic v1 manifest for a regular-file directory tree."""
-    root_path = Path(root).expanduser().absolute()
-    _reject_manifest_symlink_components(root_path, label="root")
+    root_path = _resolve_manifest_root(root, label="root")
     if not root_path.is_dir():
         raise ValueError(f"directory artifact root must be a directory: {root_path}")
 
@@ -394,10 +398,14 @@ def build_manifest_v1(root: Path | str) -> dict[str, Any]:
 
 def build_shapefile_manifest_v1(shapefile: Path | str) -> dict[str, Any]:
     """Build a deterministic v1 manifest for a ``.shp`` file and all same-stem sidecars."""
-    shapefile_path = Path(shapefile).expanduser().absolute()
-    root = shapefile_path.parent
-    _reject_manifest_symlink_components(root, label="shapefile bundle root")
-    shapefile_name = shapefile_path.name
+    raw_shapefile = Path(shapefile).expanduser()
+    if raw_shapefile.is_symlink():
+        raise ValueError(f"shapefile bundle cannot contain a symlink: {raw_shapefile}")
+    root = raw_shapefile.parent.resolve()
+    shapefile_name = raw_shapefile.name
+    shapefile_path = root / shapefile_name
+    if shapefile_path.is_symlink():
+        raise ValueError(f"shapefile bundle cannot contain a symlink: {shapefile_path}")
     if Path(shapefile_name).name != shapefile_name:
         raise ValueError(f"unsafe shapefile bundle entry name: {shapefile_name}")
     if shapefile_path.suffix.lower() != ".shp":
@@ -643,7 +651,7 @@ def digest_table(
     header_parts = [profile.encode("utf-8")] + [col.encode("utf-8") for col in columns]
     hasher.update(_DELIMITER_FIELD.join(header_parts) + _DELIMITER_RECORD)
 
-    for batch in table.to_batches():
+    for batch in table.to_batches(max_chunksize=16_384):
         batch_dict = batch.to_pydict()
         num_rows = batch.num_rows
         for row_idx in range(num_rows):
@@ -777,10 +785,10 @@ FLOAT32_MATRICES_V1_POLICY = ArrayCanonicalizationPolicy(
 
 
 def resolve_canonicalization_policy(
-    policy: ArrayCanonicalizationPolicy | LogicalProfileName | None = None,
+    policy: ArrayCanonicalizationPolicy | LogicalProfileName | str | None = None,
 ) -> ArrayCanonicalizationPolicy:
     """Resolve a profile name or policy instance to an ``ArrayCanonicalizationPolicy``."""
-    if policy is None or policy == "preserve_canonical":
+    if policy is None or policy in ("preserve_canonical", "preserve_canonical_v1"):
         return PRESERVE_CANONICAL_POLICY
     if policy == "float32_matrices_v1":
         return FLOAT32_MATRICES_V1_POLICY
@@ -1619,25 +1627,9 @@ def _decode_attr_value(val: Any) -> Any:
     return str(val)
 
 
-@dataclass(frozen=True, slots=True)
-class MatrixContainerSummary:
-    """Domain-agnostic structural and cryptographic summary of an array container."""
-
-    artifact_path: str
-    artifact_format: Literal["omx", "h5", "zarr", "directory", "file"]
-    container_identity: str
-    size_bytes: int
-    logical_identity: str | None
-    logical_profile: LogicalProfileName
-    shape: tuple[int, ...] | None
-    coord_keys: tuple[str, ...]
-    variable_count: int
-    variable_names: tuple[str, ...]
-    root_attributes: Mapping[str, Any] = field(default_factory=dict)
-    facets: Mapping[str, Any] = field(default_factory=dict)
-
-
 # --- HDF5 Dataset (`h5_dataset_v1:sha256`), PyTables (`h5_fixed_v1:sha256`), & OutputSet (`output_set_v1:sha256`) ---
+
+_H5_STREAM_TARGET_BYTES = 8 * 1024 * 1024
 
 
 def _hash_h5_attrs(hasher: Any, node: Any) -> None:
@@ -1645,11 +1637,7 @@ def _hash_h5_attrs(hasher: Any, node: Any) -> None:
     if node_attrs is None:
         _update_string(hasher, "attrs:0")
         return
-    try:
-        attr_keys = sorted(str(k) for k in node_attrs.keys())
-    except Exception:
-        _update_string(hasher, "attrs:0")
-        return
+    attr_keys = sorted(str(k) for k in node_attrs.keys())
     _update_string(hasher, f"attrs:{len(attr_keys)}")
     for attr_key in attr_keys:
         _update_string(hasher, attr_key)
@@ -1676,13 +1664,24 @@ def _update_h5_array_chunk(hasher: Any, chunk: Any) -> None:
                 hasher.update(b"\x02")
                 hasher.update(struct.pack("<I", len(raw)))
                 hasher.update(raw)
+            elif isinstance(item, np.ndarray):
+                hasher.update(b"\x04")
+                _update_string(hasher, str(item.dtype))
+                _update_string(hasher, _format_shape(tuple(int(d) for d in item.shape)))
+                if item.dtype.hasobject:
+                    _update_h5_array_chunk(hasher, item)
+                else:
+                    contig_item = np.ascontiguousarray(item)
+                    view = memoryview(contig_item).cast("B")
+                    hasher.update(struct.pack("<Q", len(view)))
+                    hasher.update(view)
             else:
                 raw = canonical_json_str(_decode_attr_value(item)).encode("utf-8")
                 hasher.update(b"\x03")
                 hasher.update(struct.pack("<I", len(raw)))
                 hasher.update(raw)
         return
-    hasher.update(np.ascontiguousarray(arr).tobytes(order="C"))
+    hasher.update(memoryview(np.ascontiguousarray(arr)).cast("B"))
 
 
 def _hash_h5_dataset_node(
@@ -1709,11 +1708,14 @@ def _hash_h5_dataset_node(
 
     rows_per_chunk = chunk_rows
     if rows_per_chunk is None:
+        trailing_elems = math.prod(shape[1:]) if len(shape) > 1 else 1
+        row_bytes = max(1, int(trailing_elems) * max(1, int(dtype.itemsize)))
+        budget_rows = max(1, _H5_STREAM_TARGET_BYTES // row_bytes)
         chunks = dataset.chunks if isinstance(dataset.chunks, tuple) else None
         if chunks and chunks[0]:
-            rows_per_chunk = int(chunks[0])
+            rows_per_chunk = min(int(chunks[0]), budget_rows)
         else:
-            rows_per_chunk = min(1024, total_rows)
+            rows_per_chunk = min(1024, total_rows, budget_rows)
     step = max(1, int(rows_per_chunk))
     for start in range(0, total_rows, step):
         end = min(total_rows, start + step)
@@ -1955,12 +1957,66 @@ def _driver_h5_dataset_v1(
     )
 
 
+def _compute_logical_matrices_container_hex(
+    path: Path,
+    *,
+    member: str | None,
+    policy: ArrayCanonicalizationPolicy,
+    chunk_rows: int,
+    options: Mapping[str, Any],
+) -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".b2nd":
+        blosc2 = importlib.import_module("blosc2")
+        arr = blosc2.open(str(path), mode="r")
+        matrix_name = str(options.get("matrix_name") or member or path.stem)
+        hasher = hashlib.sha256()
+        if policy.lookup_policy == "single_int32_zone_number":
+            import numpy as np
+
+            shape = tuple(int(d) for d in arr.shape)
+            zone_count = shape[0] if len(shape) >= 1 else 0
+            zone_vec = np.arange(1, zone_count + 1, dtype="<i4")
+            _stream_dataset_into_hasher(
+                hasher,
+                "lookup/zone_number",
+                zone_vec,
+                dtype_policy="preserve",
+                canonicalize_float_bits=False,
+                chunk_rows=chunk_rows,
+            )
+        _stream_dataset_into_hasher(
+            hasher,
+            matrix_name,
+            arr[:],
+            dtype_policy=policy.dtype_policy,
+            canonicalize_float_bits=policy.canonicalize_float_bits,
+            include_na_attribute=policy.include_na_attribute,
+            chunk_rows=chunk_rows,
+        )
+        return hasher.hexdigest()
+    if path.is_dir():
+        return compute_zarr_logical_matrices_sha256(
+            path, policy=policy, chunk_rows=chunk_rows
+        )
+    if suffix in {".nc", ".nc4", ".cdf", ".netcdf"}:
+        xr = importlib.import_module("xarray")
+        with xr.open_dataset(path) as ds:
+            return _compute_zarr_logical_matrices_sha256_from_xarray(
+                ds,
+                policy=policy,
+                chunk_rows=chunk_rows,
+            )
+    return compute_omx_logical_matrices_sha256(
+        path, policy=policy, chunk_rows=chunk_rows
+    )
+
+
 def _driver_logical_matrices_canonical_v1(
     path: Path | None,
     member: str | None,
     options: Mapping[str, Any] | None,
 ) -> Digest:
-    del member
     if path is None:
         raise ValueError(
             "logical_matrices_canonical_v1:sha256 requires a container path."
@@ -1969,18 +2025,17 @@ def _driver_logical_matrices_canonical_v1(
     chunk_rows = int(opts.get("chunk_rows", _DEFAULT_CHUNK_ROWS))
     policy_opt = opts.get("policy")
     policy = (
-        policy_opt
-        if isinstance(policy_opt, ArrayCanonicalizationPolicy)
+        resolve_canonicalization_policy(policy_opt)
+        if policy_opt is not None
         else PRESERVE_CANONICAL_POLICY
     )
-    if path.is_dir():
-        hex_val = compute_zarr_logical_matrices_sha256(
-            path, policy=policy, chunk_rows=chunk_rows
-        )
-    else:
-        hex_val = compute_omx_logical_matrices_sha256(
-            path, policy=policy, chunk_rows=chunk_rows
-        )
+    hex_val = _compute_logical_matrices_container_hex(
+        path,
+        member=member,
+        policy=policy,
+        chunk_rows=chunk_rows,
+        options=opts,
+    )
     return Digest("logical_matrices_canonical_v1:sha256", hex_val)
 
 
@@ -1989,26 +2044,49 @@ def _driver_logical_matrices_f32_v1(
     member: str | None,
     options: Mapping[str, Any] | None,
 ) -> Digest:
-    del member
     if path is None:
         raise ValueError("logical_matrices_f32_v1:sha256 requires a container path.")
     opts = options or {}
     chunk_rows = int(opts.get("chunk_rows", _DEFAULT_CHUNK_ROWS))
     policy_opt = opts.get("policy")
     policy = (
-        policy_opt
-        if isinstance(policy_opt, ArrayCanonicalizationPolicy)
+        resolve_canonicalization_policy(policy_opt)
+        if policy_opt is not None
         else FLOAT32_MATRICES_V1_POLICY
     )
-    if path.is_dir():
-        hex_val = compute_zarr_logical_matrices_sha256(
-            path, policy=policy, chunk_rows=chunk_rows
-        )
-    else:
-        hex_val = compute_omx_logical_matrices_sha256(
-            path, policy=policy, chunk_rows=chunk_rows
-        )
+    hex_val = _compute_logical_matrices_container_hex(
+        path,
+        member=member,
+        policy=policy,
+        chunk_rows=chunk_rows,
+        options=opts,
+    )
     return Digest("logical_matrices_f32_v1:sha256", hex_val)
+
+
+def _parse_output_set_manifest_members(
+    payload: Mapping[str, Any],
+) -> list[tuple[str, str | Digest]]:
+    raw_members = payload.get("members")
+    if not isinstance(raw_members, Sequence) or isinstance(raw_members, (str, bytes)):
+        raise ValueError("OutputSet manifest must contain a 'members' sequence.")
+    pairs: list[tuple[str, str | Digest]] = []
+    for entry in raw_members:
+        if not isinstance(entry, Mapping):
+            raise ValueError("OutputSet manifest member entry must be a mapping.")
+        m_key = entry.get("key") or entry.get("relative_path")
+        if not isinstance(m_key, str) or not m_key:
+            raise ValueError("OutputSet manifest member entry is missing 'key'.")
+        m_digest = entry.get("digest") or entry.get("content_digest")
+        if isinstance(m_digest, str) and m_digest:
+            pairs.append((m_key, Digest.parse(m_digest)))
+            continue
+        c_hash = entry.get("content_hash")
+        if isinstance(c_hash, str) and c_hash:
+            pairs.append((m_key, Digest("sha256:file", c_hash)))
+            continue
+        raise ValueError(f"OutputSet manifest member {m_key!r} is missing 'digest'.")
+    return pairs
 
 
 def _driver_output_set_v1(
@@ -2021,6 +2099,11 @@ def _driver_output_set_v1(
     members = opts.get("members")
     if members is not None:
         return compute_output_set_digest(members)
+    manifest_opt = opts.get("manifest")
+    if isinstance(manifest_opt, Mapping):
+        return compute_output_set_digest(
+            _parse_output_set_manifest_members(manifest_opt)
+        )
     member_paths = opts.get("member_paths")
     if path is not None and path.is_dir() and isinstance(member_paths, Mapping):
         computed_pairs: list[tuple[str, Digest]] = []
@@ -2036,26 +2119,12 @@ def _driver_output_set_v1(
         return compute_output_set_digest(computed_pairs)
     if path is not None and path.is_file():
         payload = json.loads(path.read_text(encoding="utf-8"))
-        raw_members = payload.get("members")
-        if isinstance(raw_members, Sequence):
-            pairs: list[tuple[str, str]] = []
-            for entry in raw_members:
-                if not isinstance(entry, Mapping):
-                    raise ValueError("Invalid OutputSet manifest member entry.")
-                m_key = entry.get("key") or entry.get("relative_path")
-                m_digest = entry.get("digest") or entry.get("content_digest")
-                if not isinstance(m_key, str) or not isinstance(m_digest, str):
-                    c_hash = entry.get("content_hash")
-                    if isinstance(m_key, str) and isinstance(c_hash, str):
-                        m_digest = f"sha256:file:{c_hash}"
-                    else:
-                        raise ValueError(
-                            "OutputSet manifest member entry requires string key and digest."
-                        )
-                pairs.append((m_key, m_digest))
-            return compute_output_set_digest(pairs)
+        if isinstance(payload, Mapping):
+            return compute_output_set_digest(
+                _parse_output_set_manifest_members(payload)
+            )
     raise ValueError(
-        "output_set_v1:sha256 requires options={'members': ...}, directory + options={'member_paths': ...}, or an OutputSet manifest path."
+        "output_set_v1:sha256 requires options={'members': ...}, options={'manifest': ...}, directory + options={'member_paths': ...}, or an OutputSet manifest path."
     )
 
 
@@ -2112,7 +2181,20 @@ def resolve_default_scheme(
             return "dir_manifest_v1:sha256"
         return explicit_scheme
 
-    if driver in {"output_set", "artifact_set"} or opts.get("members") is not None:
+    if driver in DIGEST_DRIVERS:
+        return driver
+    if driver == "logical_matrices_canonical":
+        return "logical_matrices_canonical_v1:sha256"
+    if driver == "logical_matrices_f32":
+        return "logical_matrices_f32_v1:sha256"
+    if driver == "ctd1":
+        return "ctd1:sha256"
+
+    if (
+        driver in {"output_set", "artifact_set"}
+        or opts.get("members") is not None
+        or opts.get("manifest") is not None
+    ):
         return "output_set_v1:sha256"
 
     if opts.get("dataset") is not None:
@@ -2133,7 +2215,13 @@ def resolve_default_scheme(
             h5py = importlib.import_module("h5py")
             with open_h5py_read_only(path, h5py_module=h5py) as h5f:
                 _, node = _resolve_h5_member_node(h5f, member)
-                if isinstance(node, h5py.Group):
+                if isinstance(node, h5py.Group) or (
+                    isinstance(node, h5py.Dataset)
+                    and (
+                        node.dtype.names is not None
+                        or node.attrs.get("CLASS") in {b"TABLE", "TABLE"}
+                    )
+                ):
                     return "h5_fixed_v1:sha256"
                 return "h5_dataset_v1:sha256"
         return "h5_fixed_v1:sha256" if driver == "h5_table" else "h5_dataset_v1:sha256"
@@ -2204,7 +2292,6 @@ __all__ = [
     "ConcurrentMutationError",
     "Digest",
     "LogicalProfileName",
-    "MatrixContainerSummary",
     "build_manifest_v1",
     "build_shapefile_manifest_v1",
     "canonical_json_sha256",

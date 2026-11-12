@@ -135,12 +135,20 @@ class TrackerArchiveService(_TrackerServiceBase):
     def _verify_file_against_artifact_digest(path: Path, artifact: Artifact) -> bool:
         if artifact.digest is None:
             return False
+        meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
+        options: dict[str, Any] = {}
+        member_paths = meta.get("output_set_member_paths")
+        if isinstance(member_paths, Mapping):
+            options["member_paths"] = member_paths
+        if meta.get("file_bundle_artifact") is True:
+            options["shapefile_bundle"] = True
         try:
             return verify_digest(
                 path,
                 artifact.digest,
                 driver=artifact.driver,
                 member=artifact.member,
+                options=options or None,
             )
         except (ValueError, OSError):
             return False
@@ -394,34 +402,47 @@ class TrackerArchiveService(_TrackerServiceBase):
                 "Cannot update artifact recovery roots: tracker has no database configured."
             )
 
-        incoming = self.fs.normalize_recovery_roots(roots)
-        existing = self.fs.normalize_recovery_roots(
-            (artifact.meta or {}).get("recovery_roots")
+        db_meta_map = (
+            self.db.get_artifact_meta_by_ids([artifact.id])
+            if artifact.id is not None
+            else {}
         )
+        persisted_meta = (
+            db_meta_map.get(artifact.id) if artifact.id is not None else None
+        )
+        base_meta = dict(artifact.meta or {})
+        if persisted_meta is not None:
+            base_meta.update(persisted_meta)
+
+        incoming = self.fs.normalize_recovery_roots(roots)
+        existing_raw = (
+            persisted_meta.get("recovery_roots")
+            if persisted_meta is not None and "recovery_roots" in persisted_meta
+            else (artifact.meta or {}).get("recovery_roots")
+        )
+        existing = self.fs.normalize_recovery_roots(existing_raw)
         normalized = incoming
         if append:
             normalized = self.fs.normalize_recovery_roots([*existing, *incoming])
 
         if not normalized:
-            current_meta = dict(artifact.meta or {})
-            current_meta.pop("recovery_roots", None)
+            base_meta.pop("recovery_roots", None)
             self.db.update_artifact_meta(
                 artifact, {"recovery_roots": None}, raise_on_error=True
             )
-            updated = artifact.with_meta(current_meta).with_resolver(self.tracker)
+            updated = artifact.with_meta(base_meta).with_resolver(self.tracker)
             if artifact.id is not None:
-                self._sync_active_run_artifacts_meta({str(artifact.id): current_meta})
+                self._sync_active_run_artifacts_meta({str(artifact.id): base_meta})
             self._run_artifacts_cache.clear()
             return updated
 
         self.db.update_artifact_meta(
             artifact, {"recovery_roots": normalized}, raise_on_error=True
         )
-        next_meta = dict(artifact.meta or {})
-        next_meta["recovery_roots"] = normalized
-        updated = artifact.with_meta(next_meta).with_resolver(self.tracker)
+        base_meta["recovery_roots"] = normalized
+        updated = artifact.with_meta(base_meta).with_resolver(self.tracker)
         if artifact.id is not None:
-            self._sync_active_run_artifacts_meta({str(artifact.id): next_meta})
+            self._sync_active_run_artifacts_meta({str(artifact.id): base_meta})
         self._run_artifacts_cache.clear()
         return updated
 
@@ -716,7 +737,7 @@ class TrackerArchiveService(_TrackerServiceBase):
             has_archive_root = any(
                 Path(root).resolve() == archive_root
                 for root in self.fs.normalize_recovery_roots(
-                    (artifact.meta or {}).get("recovery_roots")
+                    self.tracker.artifact_recovery_roots(artifact)
                 )
             ) or (
                 isinstance(artifact.abs_path, str)
@@ -1480,6 +1501,22 @@ class TrackerArchiveService(_TrackerServiceBase):
             self._remove_output_set_sources(plan)
         return plan.destination
 
+    @staticmethod
+    def _reject_symlink_under_archive_root(
+        archive_root_path: Path, relative_path: Path
+    ) -> None:
+        current = archive_root_path
+        if current.is_symlink():
+            raise ValueError(
+                f"archive destination contains a symlink component: {current}"
+            )
+        for part in relative_path.parts:
+            current = current / part
+            if current.is_symlink():
+                raise ValueError(
+                    f"archive destination contains a symlink component: {current}"
+                )
+
     def _archive_directory_artifact(
         self,
         artifact: Artifact,
@@ -1511,6 +1548,7 @@ class TrackerArchiveService(_TrackerServiceBase):
             )
 
         archive_root_path = Path(archive_root).expanduser().absolute()
+        self._reject_symlink_under_archive_root(archive_root_path, relative_path)
         destination = archive_root_path / relative_path
         published = materialize_directory_tree_with_rollback_info(
             source_path,
@@ -1575,6 +1613,7 @@ class TrackerArchiveService(_TrackerServiceBase):
             )
 
         archive_root_path = Path(archive_root).expanduser().absolute()
+        self._reject_symlink_under_archive_root(archive_root_path, relative_path)
         destination = archive_root_path / relative_path
         source_bundle_root = resolve_file_bundle_root(source_path)
         published = materialize_shapefile_bundle(
@@ -1721,7 +1760,7 @@ class TrackerArchiveService(_TrackerServiceBase):
 
         parent = (
             self.get_parent_artifact(artifact)
-            if artifact.driver == "h5_table"
+            if artifact.driver == "h5_table" or artifact.parent_artifact_id is not None
             else None
         )
         policy_validation = validate_recovery_registration_policy(
@@ -1868,19 +1907,32 @@ class TrackerArchiveService(_TrackerServiceBase):
             )
 
         incoming = self.fs.normalize_recovery_roots(roots)
-        updates: dict[str, tuple[Artifact, dict[str, Any]]] = {}
+        validated_artifacts: list[Artifact] = []
         for artifact in artifacts:
             if not isinstance(artifact, Artifact):
                 raise TypeError("artifact must be an Artifact instance.")
             if artifact.id is None:
                 raise ValueError("artifact must have an id.")
-            existing = self.fs.normalize_recovery_roots(
-                (artifact.meta or {}).get("recovery_roots")
+            validated_artifacts.append(artifact)
+
+        db_meta_by_id = self.db.get_artifact_meta_by_ids(
+            [a.id for a in validated_artifacts]
+        )
+        updates: dict[str, tuple[Artifact, dict[str, Any]]] = {}
+        for artifact in validated_artifacts:
+            persisted_meta = db_meta_by_id.get(artifact.id)
+            next_meta = dict(artifact.meta or {})
+            if persisted_meta is not None:
+                next_meta.update(persisted_meta)
+            existing_raw = (
+                persisted_meta.get("recovery_roots")
+                if persisted_meta is not None and "recovery_roots" in persisted_meta
+                else (artifact.meta or {}).get("recovery_roots")
             )
+            existing = self.fs.normalize_recovery_roots(existing_raw)
             normalized = incoming
             if append:
                 normalized = self.fs.normalize_recovery_roots([*existing, *incoming])
-            next_meta = dict(artifact.meta or {})
             if normalized:
                 next_meta["recovery_roots"] = normalized
             else:
@@ -2912,7 +2964,7 @@ class TrackerArchiveService(_TrackerServiceBase):
             (
                 artifact,
                 self.fs.normalize_recovery_roots(
-                    (artifact.meta or {}).get("recovery_roots")
+                    self.tracker.artifact_recovery_roots(artifact)
                 ),
                 artifact.abs_path,
             )

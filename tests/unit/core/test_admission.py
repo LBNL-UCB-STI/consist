@@ -273,14 +273,14 @@ def test_prior_run_admission_hashes_a_successful_candidate_once(
         digest=_sha256(source.read_bytes()),
         semantics=FULL_FILE_SHA256,
     )
-    original = admission.admission_file_identity
+    original = admission.compute_digest
     calls: list[Path] = []
 
-    def counted_identity(path: str | Path) -> str:
+    def counted_digest(path, *args, **kwargs):
         calls.append(Path(path))
-        return original(path)
+        return original(path, *args, **kwargs)
 
-    monkeypatch.setattr(admission, "admission_file_identity", counted_identity)
+    monkeypatch.setattr(admission, "compute_digest", counted_digest)
 
     report = check_artifact_identity(
         tracker,

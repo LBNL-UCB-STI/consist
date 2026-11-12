@@ -71,7 +71,14 @@ class OpenLineageEmitter:
         payload = self._build_event(event_type, run, inputs, outputs, error)
         self._options.path.parent.mkdir(parents=True, exist_ok=True)
         with open(self._options.path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
+            handle.write(
+                json.dumps(
+                    payload,
+                    ensure_ascii=True,
+                    default=lambda o: dict(o) if isinstance(o, Mapping) else str(o),
+                )
+                + "\n"
+            )
 
     def _build_event(
         self,

@@ -11,6 +11,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from consist.digest import (
+    _MANIFEST_VERSION,
+    _SHAPEFILE_REQUIRED_SUFFIXES,
+    _normalize_manifest_relative_path as _normalize_relative_path,
+    _resolve_manifest_root,
     build_manifest_v1,
     build_shapefile_manifest_v1,
     canonical_json_sha256,
@@ -18,10 +22,6 @@ from consist.digest import (
 
 if TYPE_CHECKING:
     from consist.models.artifact import Artifact
-
-
-_MANIFEST_VERSION = 1
-_SHAPEFILE_REQUIRED_SUFFIXES = frozenset({".shp", ".shx", ".dbf"})
 
 
 def build_directory_manifest(root: Path) -> dict[str, Any]:
@@ -43,8 +43,12 @@ def validate_shapefile_bundle_root(
 ) -> None:
     """Raise unless a bundle root exactly matches a persisted Shapefile manifest."""
     normalized_manifest = validate_directory_manifest(manifest)
-    root_path = Path(root).expanduser().absolute()
-    _reject_symlink_components(root_path, label="shapefile bundle root")
+    raw_root = Path(root).expanduser()
+    if (raw_root / shapefile_name).is_symlink():
+        raise ValueError(
+            f"shapefile bundle cannot contain a symlink: {raw_root / shapefile_name}"
+        )
+    root_path = raw_root.resolve()
     expected_entries = _validate_shapefile_bundle_manifest(
         shapefile_name,
         normalized_manifest,
@@ -82,9 +86,13 @@ def materialize_shapefile_bundle(
     exact pre-existing bundle is retained.
     """
     normalized_manifest = validate_directory_manifest(manifest)
-    source_root_path = Path(source_root)
+    raw_source_root = Path(source_root).expanduser()
+    if (raw_source_root / shapefile_name).is_symlink():
+        raise ValueError(
+            f"shapefile bundle cannot contain a symlink: {raw_source_root / shapefile_name}"
+        )
+    source_root_path = raw_source_root.resolve()
     destination_root_path = Path(destination_root)
-    _reject_symlink_components(source_root_path, label="shapefile bundle source")
     if validate_shapefile_bundle_destination(
         destination_root_path,
         shapefile_name,
@@ -144,14 +152,9 @@ def validate_shapefile_bundle_destination(
     preserve_existing: bool,
 ) -> bool:
     """Validate a requested Shapefile bundle root before source bytes are needed."""
-    destination_root_path = Path(destination_root)
-    _reject_symlink_components(
-        destination_root_path.parent, label="shapefile bundle destination"
+    destination_root_path = _resolve_manifest_root(
+        destination_root, label="shapefile bundle destination"
     )
-    if destination_root_path.is_symlink():
-        raise ValueError(
-            f"shapefile bundle destination cannot be a symlink: {destination_root_path}"
-        )
     if not destination_root_path.exists():
         return False
     if not destination_root_path.is_dir():
@@ -517,14 +520,8 @@ def materialize_directory_tree_with_rollback_info(
     back without destroying pre-existing files.
     """
     normalized_manifest = validate_directory_manifest(manifest)
-    source_path = Path(source)
-    destination_path = Path(destination)
-    _reject_symlink_components(source_path, label="source")
-    _reject_symlink_components(destination_path.parent, label="destination")
-    if destination_path.is_symlink():
-        raise ValueError(
-            f"directory artifact destination cannot be a symlink: {destination_path}"
-        )
+    source_path = _resolve_manifest_root(source, label="source")
+    destination_path = _resolve_manifest_root(destination, label="destination")
     if destination_path.exists():
         if not destination_path.is_dir():
             raise ValueError(
@@ -672,12 +669,7 @@ def validate_directory_destination(
     raise ``ValueError``.
     """
     normalized_manifest = validate_directory_manifest(manifest)
-    destination_path = Path(destination)
-    _reject_symlink_components(destination_path.parent, label="destination")
-    if destination_path.is_symlink():
-        raise ValueError(
-            f"directory artifact destination cannot be a symlink: {destination_path}"
-        )
+    destination_path = _resolve_manifest_root(destination, label="destination")
     if not destination_path.exists():
         return False
     if not destination_path.is_dir():
@@ -820,24 +812,3 @@ def _validate_manifest(manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
                 )
             parent = parent.parent
     return normalized_entries
-
-
-def _normalize_relative_path(path: str | Path) -> str:
-    candidate = Path(path)
-    if candidate.is_absolute():
-        raise ValueError(f"unsafe directory artifact member path: {path}")
-    normalized = candidate.as_posix()
-    if not normalized or normalized == ".":
-        raise ValueError(f"unsafe directory artifact member path: {path}")
-    if any(part in {"", ".", ".."} for part in candidate.parts):
-        raise ValueError(f"unsafe directory artifact member path: {path}")
-    return normalized
-
-
-def _reject_symlink_components(path: Path, *, label: str) -> None:
-    candidate = Path(path)
-    for component in (candidate, *candidate.parents):
-        if component.is_symlink():
-            raise ValueError(
-                f"directory artifact {label} contains a symlink component: {component}"
-            )

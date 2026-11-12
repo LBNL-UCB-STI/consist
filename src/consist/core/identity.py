@@ -715,11 +715,29 @@ class IdentityManager:
                 sig_parts.append(f"digest:{artifact.digest}")
             return "provenance_v1:" + "|".join(sig_parts), "provenance", fallback_reason
 
-        if not path_resolver:
+        resolved_path = path_resolver(artifact.uri) if path_resolver else None
+        has_local_target = False
+        if resolved_path is not None:
+            try:
+                has_local_target = Path(resolved_path).exists()
+            except OSError:
+                has_local_target = False
+        if (
+            not has_local_target
+            and artifact.digest is not None
+            and artifact.digest.scheme == "caller_supplied_v1:sha256"
+        ):
+            base = f"caller_supplied_v1:{artifact.digest.hex}|uri:{artifact.uri}"
+            token = (
+                f"{base}#member={artifact.member}"
+                if artifact.member is not None
+                else base
+            )
+            return token, "provenance", "caller_supplied_hash"
+        if resolved_path is None:
             raise ValueError(
                 f"Cannot hash raw artifact '{artifact.uri}' without a path_resolver."
             )
-        resolved_path = path_resolver(artifact.uri)
         computed = compute_digest(
             resolved_path,
             driver=artifact.driver,
@@ -763,8 +781,6 @@ class IdentityManager:
 
     @staticmethod
     def _format_binding_role(role: "InputBindingRole") -> str:
-        if role.kind == "named":
-            return str(role.role)
         return f"{role.kind}:{role.role}"
 
     def describe_input_bindings(

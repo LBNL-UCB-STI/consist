@@ -804,7 +804,8 @@ def test_artifact_deepcopy_and_copy_on_transient_instance():
     assert deep_cloned.abs_path == "/tmp/transient.csv"
     assert deep_cloned.resolver is tracker
 
-    deep_cloned.meta["nested"]["inner_key"] = "modified"
+    with pytest.raises(TypeError):
+        deep_cloned.meta["nested"]["inner_key"] = "modified"
     deep_cloned.meta["list"].append(4)
     assert art.meta["nested"]["inner_key"] == "inner_val"
     assert art.meta["list"] == [1, 2, 3]

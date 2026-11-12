@@ -405,7 +405,7 @@ class TestInputHashing:
         expected_token = (
             f"provenance_v1:driver:csv|key:data|run:producer|digest:{digest}"
         )
-        expected_hash = canonical_json_sha256([("data", expected_token)])
+        expected_hash = canonical_json_sha256([("named:data", expected_token)])
 
         assert in_hash == expected_hash
         assert bindings[0]["evidence"] == {

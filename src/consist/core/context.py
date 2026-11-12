@@ -15,6 +15,7 @@ from consist.protocols import (
     _ACTIVE_RESOLVER_STACK,
     _DEFAULT_RESOLVER,
     ArtifactResolver,
+    bind_active_resolver,
     get_active_resolver,
     get_default_resolver,
     pop_active_resolver,
@@ -66,10 +67,17 @@ def set_default_tracker(tracker: Optional["Tracker"]) -> Optional["Tracker"]:
 
 
 @contextmanager
+def active_artifact_resolver(resolver: ArtifactResolver) -> Iterator[ArtifactResolver]:
+    """Temporarily bind ``resolver`` onto the active ``ArtifactResolver`` stack."""
+    with bind_active_resolver(resolver) as bound:
+        yield bound
+
+
+@contextmanager
 def use_tracker(tracker: "Tracker") -> Iterator["Tracker"]:
     """Temporarily set the default ``Tracker`` within a scoped context."""
-    previous = set_default_tracker(tracker)
+    token = _DEFAULT_RESOLVER.set(cast("Optional[ArtifactResolver]", tracker))
     try:
         yield tracker
     finally:
-        set_default_tracker(previous)
+        _DEFAULT_RESOLVER.reset(token)

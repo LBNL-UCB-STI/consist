@@ -17,10 +17,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-from consist.core.logical_array_identity import (
-    LogicalProfileName,
-    admission_directory_identity,
-)
+from consist.core.logical_array_identity import LogicalProfileName
 from consist.core.persistence import DatabaseManager
 from consist.digest import (
     Digest,
@@ -36,7 +33,6 @@ if TYPE_CHECKING:
 
 ADMISSION_REPORT_SCHEMA_VERSION = 3
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}")
-_FILE_IDENTITY = re.compile(r"sha256:file:[0-9a-f]{64}")
 _GIT_LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1\n"
 
 _LOGICAL_MATRIX_SCHEMES = frozenset(
@@ -360,6 +356,7 @@ def hash_semantics_for_new_artifact(
     path: Path | None,
     hashing_strategy: str,
     source: Literal["computed", "caller_supplied"],
+    digest: Digest | None = None,
 ) -> dict[str, object]:
     """Describe provenance semantics of a newly logged artifact digest."""
     if source == "caller_supplied":
@@ -369,6 +366,23 @@ def hash_semantics_for_new_artifact(
             "kind": "unknown",
             "digest_contract": "unknown",
             "source": "caller_supplied",
+        }
+
+    if digest is not None and digest.scheme == "dir_manifest_v1:sha256":
+        return {
+            "version": 1,
+            "algorithm": "sha256",
+            "kind": "directory",
+            "digest_contract": "manifest_v1",
+            "source": "manifest_v1",
+        }
+    if digest is not None and digest.scheme == "output_set_v1:sha256":
+        return {
+            "version": 1,
+            "algorithm": "sha256",
+            "kind": "output_set",
+            "digest_contract": "output_set_v1",
+            "source": "output_set_v1",
         }
 
     assert path is not None
@@ -413,11 +427,6 @@ def hash_semantics_for_new_artifact(
     }
 
 
-def admission_file_identity(path: str | Path) -> str:
-    """Compute the canonical file digest string ``sha256:file:<hex>`` via ``compute_digest``."""
-    return str(compute_digest(Path(path), options={"scheme": "sha256:file"}))
-
-
 def _is_git_lfs_pointer(path: Path) -> bool:
     with path.open("rb") as source:
         return source.read(len(_GIT_LFS_POINTER_PREFIX)) == _GIT_LFS_POINTER_PREFIX
@@ -433,23 +442,7 @@ def _resolved_path(path: Path) -> str | None:
 def _known_admission_identity(artifact: Artifact) -> Digest | None:
     """Return a trusted content-addressed ``Digest`` when artifact provenance proves it."""
     meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
-    if isinstance(meta.get("admission_file_identity"), str):
-        explicit_identity = meta["admission_file_identity"]
-        if _FILE_IDENTITY.fullmatch(explicit_identity):
-            return Digest.parse(explicit_identity)
-    if isinstance(meta.get("admission_identity"), str):
-        try:
-            return _parse_admission_digest(
-                meta["admission_identity"],
-                logical_profile=(
-                    meta["logical_profile"]
-                    if meta.get("logical_profile")
-                    in ("preserve_canonical", "float32_matrices_v1")
-                    else "preserve_canonical"
-                ),
-            )
-        except ValueError:
-            pass
+    digest = artifact.digest
 
     semantics = meta.get("hash_semantics")
     if isinstance(semantics, Mapping):
@@ -459,8 +452,17 @@ def _known_admission_identity(artifact: Artifact) -> Digest | None:
             "computed_fast",
             "computed_fast_directory",
             "computed_unknown",
-            "computed_full_directory",
         }:
+            return None
+        if (
+            sem_source == "computed_full_directory"
+            and (
+                digest is None
+                or digest.scheme
+                not in {"dir_manifest_v1:sha256", "output_set_v1:sha256"}
+            )
+            and meta.get("directory_artifact") is not True
+        ):
             return None
 
     if meta.get("directory_artifact") is True:
@@ -468,16 +470,13 @@ def _known_admission_identity(artifact: Artifact) -> Digest | None:
         if isinstance(manifest, Mapping):
             tree_hash = manifest.get("tree_hash")
             if isinstance(tree_hash, str) and _SHA256_HEX.fullmatch(tree_hash):
-                if artifact.digest is None or artifact.digest.hex == tree_hash:
+                if digest is None or digest.hex == tree_hash:
                     return Digest("dir_manifest_v1:sha256", tree_hash)
+        if digest is not None and digest.scheme == "dir_manifest_v1:sha256":
+            return digest
         return None
 
-    digest = artifact.digest
-    if digest is None:
-        return None
-    if digest.scheme not in _SUPPORTED_ADMISSION_SCHEMES:
-        return None
-    if digest.scheme == "sha256:file" and meta.get("legacy_untrusted_digest") is True:
+    if digest is None or digest.scheme not in _SUPPORTED_ADMISSION_SCHEMES:
         return None
     return digest
 
@@ -581,7 +580,7 @@ class _CandidateObservation:
 
 
 def _observe_candidate(path: str | Path) -> _CandidateObservation:
-    """Read one regular-file candidate once using ``admission_file_identity``."""
+    """Read one regular-file candidate once via ``compute_digest``."""
     candidate = Path(path).expanduser()
     physical_target_path = _resolved_path(candidate)
     if not candidate.is_file():
@@ -606,7 +605,9 @@ def _observe_candidate(path: str | Path) -> _CandidateObservation:
         return _CandidateObservation(
             execution_path=candidate,
             physical_target_path=physical_target_path,
-            observed_identity=Digest.parse(admission_file_identity(candidate)),
+            observed_identity=compute_digest(
+                candidate, options={"scheme": "sha256:file"}
+            ),
         )
     except OSError as exc:
         return _CandidateObservation(
@@ -625,6 +626,7 @@ def _observe_candidate_for_scheme(
     scheme: str,
     member: str | None = None,
     logical_profile: LogicalProfileName = "preserve_canonical",
+    member_paths: Mapping[str, Any] | None = None,
 ) -> _CandidateObservation:
     """Observe a candidate path through ``compute_digest`` for ``scheme``."""
     if scheme == "sha256:file":
@@ -633,77 +635,51 @@ def _observe_candidate_for_scheme(
     candidate = Path(path).expanduser()
     physical_target_path = _resolved_path(candidate)
 
+    def _fail(obs: str, reason: str) -> _CandidateObservation:
+        return _CandidateObservation(
+            execution_path=candidate,
+            physical_target_path=physical_target_path,
+            observed_identity=None,
+            outcome="unreadable",
+            observations=(obs,),
+            reason=reason,
+        )
+
     if scheme == "dir_manifest_v1:sha256":
-        if candidate.suffix.lower() == ".shp":
-            if not candidate.is_file():
-                return _CandidateObservation(
-                    execution_path=candidate,
-                    physical_target_path=physical_target_path,
-                    observed_identity=None,
-                    outcome="unreadable",
-                    observations=("file_unreadable",),
-                    reason="Shapefile bundle admission requires a readable .shp file.",
-                )
-            try:
-                digest = compute_digest(
-                    candidate,
-                    driver="shapefile",
-                    options={
-                        "scheme": "dir_manifest_v1:sha256",
-                        "shapefile_bundle": True,
-                    },
-                )
-                return _CandidateObservation(
-                    execution_path=candidate,
-                    physical_target_path=physical_target_path,
-                    observed_identity=digest,
-                )
-            except (OSError, ValueError) as exc:
-                return _CandidateObservation(
-                    execution_path=candidate,
-                    physical_target_path=physical_target_path,
-                    observed_identity=None,
-                    outcome="unreadable",
-                    observations=("directory_unreadable",),
-                    reason=str(exc),
-                )
-        if not candidate.is_dir():
-            return _CandidateObservation(
-                execution_path=candidate,
-                physical_target_path=physical_target_path,
-                observed_identity=None,
-                outcome="unreadable",
-                observations=("directory_unreadable",),
-                reason="Directory manifest admission requires a readable directory.",
+        is_shp = candidate.suffix.lower() == ".shp"
+        if is_shp and not candidate.is_file():
+            return _fail(
+                "file_unreadable",
+                "Shapefile bundle admission requires a readable .shp file.",
+            )
+        if not is_shp and not candidate.is_dir():
+            return _fail(
+                "directory_unreadable",
+                "Directory manifest admission requires a readable directory.",
             )
         try:
-            identity_str = admission_directory_identity(candidate)
+            opts: dict[str, Any] = {"scheme": "dir_manifest_v1:sha256"}
+            if is_shp:
+                opts["shapefile_bundle"] = True
             return _CandidateObservation(
                 execution_path=candidate,
                 physical_target_path=physical_target_path,
-                observed_identity=Digest.parse(identity_str),
+                observed_identity=compute_digest(
+                    candidate,
+                    driver="shapefile" if is_shp else None,
+                    options=opts,
+                ),
             )
         except (OSError, ValueError) as exc:
-            return _CandidateObservation(
-                execution_path=candidate,
-                physical_target_path=physical_target_path,
-                observed_identity=None,
-                outcome="unreadable",
-                observations=("directory_unreadable",),
-                reason=str(exc),
-            )
+            return _fail("directory_unreadable", str(exc))
 
     if scheme in _LOGICAL_MATRIX_SCHEMES:
         if not candidate.exists() or (
             not candidate.is_file() and not candidate.is_dir()
         ):
-            return _CandidateObservation(
-                execution_path=candidate,
-                physical_target_path=physical_target_path,
-                observed_identity=None,
-                outcome="unreadable",
-                observations=("file_unreadable",),
-                reason="Logical matrix admission requires an existing OMX/HDF5 file or Zarr directory.",
+            return _fail(
+                "file_unreadable",
+                "Logical matrix admission requires an existing OMX/HDF5/NetCDF file or Zarr directory.",
             )
         try:
             if candidate.is_file() and _is_git_lfs_pointer(candidate):
@@ -721,24 +697,38 @@ def _observe_candidate_for_scheme(
                 else logical_profile
             )
             effective_scheme = logical_matrices_scheme_for_policy(effective_profile)
-            digest = compute_digest(
-                candidate,
-                options={"scheme": effective_scheme, "policy": effective_profile},
-            )
             return _CandidateObservation(
                 execution_path=candidate,
                 physical_target_path=physical_target_path,
-                observed_identity=digest,
+                observed_identity=compute_digest(
+                    candidate,
+                    member=member,
+                    options={"scheme": effective_scheme, "policy": effective_profile},
+                ),
             )
         except (OSError, KeyError, ValueError, RuntimeError) as exc:
+            return _fail("logical_container_unreadable", str(exc))
+
+    if (
+        scheme == "output_set_v1:sha256"
+        and candidate.is_dir()
+        and member_paths is not None
+    ):
+        try:
             return _CandidateObservation(
                 execution_path=candidate,
                 physical_target_path=physical_target_path,
-                observed_identity=None,
-                outcome="unreadable",
-                observations=("logical_container_unreadable",),
-                reason=str(exc),
+                observed_identity=compute_digest(
+                    candidate,
+                    driver="output_set",
+                    options={
+                        "scheme": "output_set_v1:sha256",
+                        "member_paths": member_paths,
+                    },
+                ),
             )
+        except (OSError, KeyError, ValueError, RuntimeError) as exc:
+            return _fail("directory_unreadable", str(exc))
 
     if scheme in {
         "h5_fixed_v1:sha256",
@@ -747,13 +737,9 @@ def _observe_candidate_for_scheme(
         "output_set_v1:sha256",
     }:
         if not candidate.is_file():
-            return _CandidateObservation(
-                execution_path=candidate,
-                physical_target_path=physical_target_path,
-                observed_identity=None,
-                outcome="unreadable",
-                observations=("file_unreadable",),
-                reason=f"Admission for {scheme} requires a readable regular file.",
+            return _fail(
+                "file_unreadable",
+                f"Admission for {scheme} requires a readable regular file.",
             )
         try:
             if _is_git_lfs_pointer(candidate):
@@ -765,25 +751,17 @@ def _observe_candidate_for_scheme(
                     observations=("looks_like_git_lfs_pointer",),
                     recommended_action="Run git lfs pull to materialize the file bytes.",
                 )
-            digest = compute_digest(
-                candidate,
-                member=member,
-                options={"scheme": scheme},
-            )
             return _CandidateObservation(
                 execution_path=candidate,
                 physical_target_path=physical_target_path,
-                observed_identity=digest,
+                observed_identity=compute_digest(
+                    candidate,
+                    member=member,
+                    options={"scheme": scheme},
+                ),
             )
         except (OSError, KeyError, ValueError, RuntimeError) as exc:
-            return _CandidateObservation(
-                execution_path=candidate,
-                physical_target_path=physical_target_path,
-                observed_identity=None,
-                outcome="unreadable",
-                observations=("file_unreadable",),
-                reason=str(exc),
-            )
+            return _fail("file_unreadable", str(exc))
 
     raise ValueError(f"Unsupported admission digest scheme: {scheme!r}")
 
@@ -1245,7 +1223,9 @@ def check_artifact_identity(
                     expected_direction=expected_direction,
                     source_tracker_db=source_db_str,
                 )
-            corroborated = Digest.parse(admission_file_identity(expected_path))
+            corroborated = compute_digest(
+                expected_path, options={"scheme": "sha256:file"}
+            )
         except OSError as exc:
             return _report(
                 outcome="unverified",
@@ -1299,17 +1279,19 @@ def check_artifact_identity(
                 source_tracker_db=source_db_str,
                 logical_profile=resolved_logical_profile,
             )
-        if file_observation is None:
+        if file_observation is None and not candidate.is_dir():
             file_observation = _observe_candidate(execution_path)
-            return _report_candidate_failure(
-                file_observation,
-                expected_source="prior_run",
-                expected_run_id=expected_run_id,
-                artifact_key=artifact_key,
-                input_role=role,
-                expected_direction=expected_direction,
-                source_tracker_db=source_db_str,
-            )
+            if file_observation.observed_identity is None:
+                return _report_candidate_failure(
+                    file_observation,
+                    expected_source="prior_run",
+                    expected_run_id=expected_run_id,
+                    artifact_key=artifact_key,
+                    input_role=role,
+                    expected_direction=expected_direction,
+                    source_tracker_db=source_db_str,
+                )
+            observed_file_id_str = str(file_observation.observed_identity)
         return _report(
             outcome="unverified",
             execution_path=candidate,
@@ -1323,6 +1305,12 @@ def check_artifact_identity(
             source_tracker_db=source_db_str,
         )
 
+    artifact_meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
+    raw_member_paths = artifact_meta.get("output_set_member_paths")
+    member_paths_opt = (
+        raw_member_paths if isinstance(raw_member_paths, Mapping) else None
+    )
+
     if expected_identity.scheme == "sha256:file" and file_observation is not None:
         container_observation = file_observation
     else:
@@ -1331,6 +1319,7 @@ def check_artifact_identity(
             scheme=expected_identity.scheme,
             member=artifact.member,
             logical_profile=resolved_logical_profile,
+            member_paths=member_paths_opt,
         )
 
     if container_observation.observed_identity is not None:
