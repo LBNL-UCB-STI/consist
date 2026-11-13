@@ -66,7 +66,7 @@ def _create_persisted_artifact(
 
 
 def test_default_backward_compatibility_and_noop_parity(tmp_path: Path) -> None:
-    """Verify default backward-compatibility and Noop parity with new kwargs."""
+    """Verify default backward-compatibility and ephemeral scenario parity with new kwargs."""
     db_path = tmp_path / "test.duckdb"
     tracker = Tracker(run_dir=tmp_path / "run", db_path=db_path)
 

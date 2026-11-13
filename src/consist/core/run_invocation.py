@@ -382,35 +382,29 @@ def _resolve_param_annotation(fn: Any, raw_annotation: Any) -> Any:
 
 
 _PARAM_BINDING_CACHE: weakref.WeakKeyDictionary[
-    Any, Dict[str, ParameterBindingKind]
+    Any, tuple[Dict[str, ParameterBindingKind], frozenset[str]]
 ] = weakref.WeakKeyDictionary()
 
 
-def infer_parameter_binding_kinds(fn: Any) -> Dict[str, ParameterBindingKind]:
-    """
-    Resolve step parameter binding kinds per parameter.
-
-    Resolves each parameter independently so a closure ``NameError`` on one
-    parameter does not abort type resolution for the remaining parameters.
-    Unwraps ``Annotated[T, ...]`` and ``Optional[T]`` / ``T | None``, and
-    excludes reserved/injected parameters (``ctx``, ``_consist_ctx``,
-    ``runtime_kwargs``, ``self``, ``cls``).
-    """
+def _resolve_binding_info(
+    fn: Any,
+) -> tuple[Dict[str, ParameterBindingKind], frozenset[str]]:
     if fn is None or not callable(fn):
-        return {}
+        return {}, frozenset()
     try:
         cached = _PARAM_BINDING_CACHE.get(fn)
         if cached is not None:
-            return dict(cached)
+            return dict(cached[0]), cached[1]
     except TypeError:
         pass
 
     try:
         sig = inspect.signature(fn)
     except (TypeError, ValueError):
-        return {}
+        return {}, frozenset()
 
     result: Dict[str, ParameterBindingKind] = {}
+    pyarrow_params: set[str] = set()
     for param_name, param in sig.parameters.items():
         if param_name in _RESERVED_BINDING_PARAMS:
             continue
@@ -425,12 +419,29 @@ def infer_parameter_binding_kinds(fn: Any) -> Dict[str, ParameterBindingKind]:
         kind = _classify_annotation(resolved_ann)
         if kind is not None:
             result[param_name] = kind
+            if kind == "loaded" and _matches_pyarrow_table_annotation(resolved_ann):
+                pyarrow_params.add(param_name)
 
+    frozen_pa = frozenset(pyarrow_params)
     try:
-        _PARAM_BINDING_CACHE[fn] = dict(result)
+        _PARAM_BINDING_CACHE[fn] = (dict(result), frozen_pa)
     except TypeError:
         pass
-    return result
+    return result, frozen_pa
+
+
+def infer_parameter_binding_kinds(fn: Any) -> Dict[str, ParameterBindingKind]:
+    """
+    Resolve step parameter binding kinds per parameter.
+
+    Resolves each parameter independently so a closure ``NameError`` on one
+    parameter does not abort type resolution for the remaining parameters.
+    Unwraps ``Annotated[T, ...]`` and ``Optional[T]`` / ``T | None``, and
+    excludes reserved/injected parameters (``ctx``, ``_consist_ctx``,
+    ``runtime_kwargs``, ``self``, ``cls``).
+    """
+    kinds, _ = _resolve_binding_info(fn)
+    return kinds
 
 
 def infer_path_annotated_parameters(fn: Any) -> frozenset[str]:
@@ -477,16 +488,8 @@ def _matches_pyarrow_table_annotation(annotation: Any) -> bool:
 
 def is_pyarrow_table_annotation(fn: Any, param_name: str) -> bool:
     """Return True if ``param_name`` on ``fn`` is annotated as ``pyarrow.Table``."""
-    if fn is None or not callable(fn):
-        return False
-    try:
-        param = inspect.signature(fn).parameters.get(param_name)
-    except (TypeError, ValueError):
-        return False
-    if param is None or param.annotation is inspect.Parameter.empty:
-        return False
-    resolved_ann = _resolve_param_annotation(fn, param.annotation)
-    return _matches_pyarrow_table_annotation(resolved_ann)
+    _, pyarrow_params = _resolve_binding_info(fn)
+    return param_name in pyarrow_params
 
 
 @dataclass(frozen=True, slots=True)
@@ -873,8 +876,6 @@ def resolve_run_invocation(
         inject_context = False
     if output_mismatch is None:
         output_mismatch = "warn"
-    if output_missing is None:
-        output_missing = "warn"
 
     if executor not in {"python", "container"}:
         raise ValueError(

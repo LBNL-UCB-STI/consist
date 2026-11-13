@@ -79,9 +79,8 @@ tracker-owning execution entry points:
 - `consist.start_run(...)`
 
 `consist.scenario(...)` remains a deliberate exception. It is still a top-level
-workflow entry point, but it carries meaningful API-level behavior beyond
-simple forwarding, including the `enabled=False` noop branch and the scenario
-ergonomics used throughout examples and multi-step workflows.
+workflow entry point, providing scenario context ergonomics used throughout
+examples and multi-step workflows (use `Tracker()` for Ephemeral Mode).
 
 ## Run/trace identity kwargs (public surface)
 

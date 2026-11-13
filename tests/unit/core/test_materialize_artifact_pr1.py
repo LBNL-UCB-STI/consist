@@ -105,7 +105,7 @@ def _create_stub_tracker(
 
 
 # =========================================================================
-# 1. Coupler.pop, CouplerView.pop, NoopCoupler.pop
+# 1. Coupler.pop, CouplerView.pop
 # =========================================================================
 
 

@@ -4,6 +4,7 @@ import builtins
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import time
 from typing import (
     Any,
     Iterable,
@@ -16,7 +17,7 @@ from typing import (
 import warnings
 
 from consist.core.validation import validate_artifact_key
-from consist.location import DirTreeStat
+from consist.location import FileStat
 from consist.models.artifact import Artifact
 from consist.protocols import ArtifactLike
 
@@ -266,27 +267,30 @@ class Coupler:
             return value
 
         if resolved_path.is_dir():
-            tree_stat = DirTreeStat.capture_dir(resolved_path)
-            stat_key: tuple[Any, ...] = (
-                "dir",
-                str(resolved_path),
-                tree_stat.file_count,
-                tree_stat.total_bytes,
-                tree_stat.max_mtime_ns,
-            )
-        else:
-            st = resolved_path.stat()
-            stat_key = (
-                "file",
-                str(resolved_path),
-                st.st_size,
-                st.st_mtime_ns,
-                st.st_ino,
+            return tracker.artifacts.create_artifact(
+                resolved_path,
+                run_id=None,
+                key=key,
+                direction="input",
+                reuse_if_unchanged=True,
             )
 
-        cached = self._stat_cache.get(stat_key)
-        if cached is not None:
-            return cached
+        now_ns = time.time_ns()
+        fstat = FileStat.capture(resolved_path, observed_at_ns=now_ns)
+        is_racy = (
+            fstat.racy or (now_ns - max(fstat.mtime_ns, fstat.ctime_ns)) < 2_000_000_000
+        )
+        stat_key: tuple[Any, ...] = (
+            "file",
+            key,
+            str(resolved_path),
+            fstat._stat_tuple(),
+        )
+
+        if not is_racy:
+            cached = self._stat_cache.get(stat_key)
+            if cached is not None:
+                return cached
 
         artifact = tracker.artifacts.create_artifact(
             resolved_path,
@@ -295,7 +299,8 @@ class Coupler:
             direction="input",
             reuse_if_unchanged=True,
         )
-        self._stat_cache[stat_key] = artifact
+        if not is_racy:
+            self._stat_cache[stat_key] = artifact
         return artifact
 
     def set(self, key: str, artifact: Any) -> Any:

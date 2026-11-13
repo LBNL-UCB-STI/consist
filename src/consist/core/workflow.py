@@ -1876,11 +1876,21 @@ class ScenarioContext:
             and execution_options.load_inputs is True
         ):
             requested_input_binding = "loaded"
+        declared_out_keys: set[str] = set()
+        if isinstance(outputs, Mapping):
+            declared_out_keys.update(str(k) for k in outputs.keys())
+        if isinstance(output_paths, Mapping):
+            declared_out_keys.update(str(k) for k in output_paths.keys())
         if requested_input_binding in {"loaded", "paths"} or (
             fn is not None
             and any(
                 kind in {"path", "loaded"}
-                for kind in infer_parameter_binding_kinds(fn).values()
+                and param_name not in declared_out_keys
+                and (
+                    not isinstance(invocation_inputs, Mapping)
+                    or param_name in invocation_inputs
+                )
+                for param_name, kind in infer_parameter_binding_kinds(fn).items()
             )
         ):
             invocation_inputs = self._promote_inputs_for_binding(

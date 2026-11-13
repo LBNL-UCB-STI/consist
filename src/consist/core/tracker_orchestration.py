@@ -224,6 +224,8 @@ def _hdf5_member_digest(path: Path, member: str) -> Optional[str]:
 def _snapshot_pre_step_outputs(
     declared_target_paths: Mapping[str, Path],
     declared_output_specs: Mapping[str, DeclaredOutputSpec],
+    *,
+    skip_pre_hash: bool = False,
 ) -> Dict[str, tuple[str, Any, Optional[str]]]:
     """Capture pre-step stat + content/member digest for pre-existing declared outputs."""
     snapshots: Dict[str, tuple[str, Any, Optional[str]]] = {}
@@ -245,13 +247,15 @@ def _snapshot_pre_step_outputs(
             snapshots[role] = (
                 "hdf5_member",
                 FileStat.capture(target_path),
-                _hdf5_member_digest(target_path, spec.artifact_spec.member),
+                None
+                if skip_pre_hash
+                else _hdf5_member_digest(target_path, spec.artifact_spec.member),
             )
         else:
             snapshots[role] = (
                 "file",
                 FileStat.capture(target_path),
-                _sha256_file(target_path),
+                None if skip_pre_hash else _sha256_file(target_path),
             )
     return snapshots
 
@@ -289,19 +293,19 @@ def _verify_outputs_not_stale(
                 art_spec is not None
                 and art_spec.member is not None
                 and isinstance(pre_stat, FileStat)
+                and post_stat._stat_tuple() == pre_stat._stat_tuple()
+                and (
+                    pre_digest is None
+                    or _hdf5_member_digest(target_path, art_spec.member) == pre_digest
+                )
             ):
-                post_digest = _hdf5_member_digest(target_path, art_spec.member)
-                if (
-                    post_stat._stat_tuple() == pre_stat._stat_tuple()
-                    and post_digest == pre_digest
-                ):
-                    raise StaleOutputError(role=role, path=target_path)
+                raise StaleOutputError(role=role, path=target_path)
         else:
             post_stat = FileStat.capture(target_path)
             if (
                 isinstance(pre_stat, FileStat)
                 and post_stat._stat_tuple() == pre_stat._stat_tuple()
-                and _sha256_file(target_path) == pre_digest
+                and (pre_digest is None or _sha256_file(target_path) == pre_digest)
             ):
                 raise StaleOutputError(role=role, path=target_path)
 
@@ -611,23 +615,23 @@ class RunTraceCoordinator:
                 parent_run_id=parent_run_id,
                 tags=tags,
             )
-            if declared_output_specs is not None:
+            cached_specs = (
+                declared_output_specs
+                if declared_output_specs is not None
+                else (
+                    normalize_declared_outputs_mapping(output_paths)
+                    if output_paths is not None
+                    else None
+                )
+            )
+            if cached_specs is not None:
                 materialize_cached_output_paths = {
                     str(output_key): self._helpers.resolve_output_path(
                         tracker,
                         spec.raw_value,
                         output_base_dir,
                     )
-                    for output_key, spec in declared_output_specs.items()
-                }
-            if output_paths is not None:
-                materialize_cached_output_paths = {
-                    str(output_key): self._helpers.resolve_output_path(
-                        tracker,
-                        _output_spec_path(ref),
-                        output_base_dir,
-                    )
-                    for output_key, ref in output_paths.items()
+                    for output_key, spec in cached_specs.items()
                 }
             if output_sets is not None:
                 materialize_cached_output_set_roots = {
@@ -778,9 +782,15 @@ class RunTraceCoordinator:
                 "loaded",
             }
             if not needs_pre_step_hydration and fn is not None:
+                declared_out_keys = set(invocation.declared_output_specs or ()) | set(
+                    invocation.output_paths or ()
+                )
                 param_kinds = infer_parameter_binding_kinds(fn)
                 needs_pre_step_hydration = any(
-                    kind in {"path", "loaded"} for kind in param_kinds.values()
+                    kind in {"path", "loaded"}
+                    and param_name not in declared_out_keys
+                    and (not isinstance(inputs, Mapping) or param_name in inputs)
+                    for param_name, kind in param_kinds.items()
                 )
             if needs_pre_step_hydration:
                 cache_hydration = "inputs-missing"
@@ -1910,7 +1920,11 @@ class RunTraceCoordinator:
             ) from exc
 
         pre_step_snapshots = (
-            _snapshot_pre_step_outputs(declared_target_paths, declared_output_specs)
+            _snapshot_pre_step_outputs(
+                declared_target_paths,
+                declared_output_specs,
+                skip_pre_hash=tracker.is_ephemeral,
+            )
             if declared_target_paths and declared_output_specs
             else {}
         )
@@ -1929,7 +1943,7 @@ class RunTraceCoordinator:
             captured_outputs = {a.key: a for a in cap.artifacts}
         else:
             result = fn_callable(**call_kwargs)
-            if declared_output_specs and result is not None:
+            if declared_output_specs is not None and result is not None:
                 raise ValueError(
                     f"Run {resolved_name!r} declared outputs={{role: path}} mapping and must return None, "
                     f"got {type(result).__name__}."
