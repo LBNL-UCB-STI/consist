@@ -43,6 +43,8 @@ from consist.core.context import (
     use_tracker as _use_tracker,
 )
 from consist.core.decorators import (
+    MetaValue,
+    OutputPathRef,
     define_step as define_step_decorator,
     require_runtime_kwargs as require_runtime_kwargs_decorator,
 )
@@ -126,7 +128,6 @@ if TYPE_CHECKING:
         StagedInput,
         StagedInputsResult,
     )
-    from consist.core.step_context import StepContext
     from consist.runset import RunSet
     from ibis.backends.duckdb import Backend as IbisDuckDBBackend
     from ibis.expr.types import Table as IbisTable
@@ -422,34 +423,34 @@ def set_current_tracker(tracker: Optional["Tracker"]) -> Optional["Tracker"]:
 
 def define_step(
     *,
-    model: Optional[str] = None,
-    name_template: Optional[str] = None,
-    outputs: Optional[list[str]] = None,
-    schema_outputs: Optional[list[str]] = None,
-    output_paths: Optional[Mapping[str, Any]] = None,
-    output_sets: Optional[Mapping[str, OutputSet]] = None,
-    inputs: Optional[Union[Mapping[str, Any], Iterable[Any]]] = None,
-    input_keys: Optional[Union[Iterable[str], str]] = None,
-    optional_input_keys: Optional[Union[Iterable[str], str]] = None,
-    config: Optional[Dict[str, Any]] = None,
-    adapter: Optional[
-        Union["ConfigAdapter", Callable[["StepContext"], "ConfigAdapter"]]
-    ] = None,
-    identity_inputs: Optional[IdentityInputs] = None,
-    facet: Optional[Any] = None,
-    facet_index: Optional[bool] = None,
-    cache_mode: Optional[str] = None,
-    cache_hydration: Optional[str] = None,
-    cache_version: Optional[int] = None,
-    validate_cached_outputs: Optional[str] = None,
-    input_binding: Optional[InputBindingMode] = None,
-    load_inputs: Optional[bool] = None,
-    tags: Optional[list[str]] = None,
-    facet_from: Optional[list[str]] = None,
-    facet_schema_version: Optional[Union[str, int]] = None,
-    description: Optional[str] = None,
+    model: Optional[MetaValue[str]] = None,
+    name_template: Optional[MetaValue[str]] = None,
+    outputs: Optional[MetaValue[Union[Sequence[str], Mapping[str, OutputPathRef]]]] = (
+        None
+    ),
+    schema_outputs: Optional[MetaValue[List[str]]] = None,
+    output_paths: Optional[MetaValue[Mapping[str, Any]]] = None,
+    output_sets: Optional[MetaValue[Mapping[str, OutputSet]]] = None,
+    inputs: Optional[MetaValue[Union[Mapping[str, Any], Iterable[Any]]]] = None,
+    input_keys: Optional[MetaValue[Union[Iterable[str], str]]] = None,
+    optional_input_keys: Optional[MetaValue[Union[Iterable[str], str]]] = None,
+    config: Optional[MetaValue[Dict[str, Any]]] = None,
+    adapter: Optional[MetaValue["ConfigAdapter"]] = None,
+    identity_inputs: Optional[MetaValue[IdentityInputs]] = None,
+    facet: Optional[MetaValue[Any]] = None,
+    facet_index: Optional[MetaValue[bool]] = None,
+    cache_mode: Optional[MetaValue[str]] = None,
+    cache_hydration: Optional[MetaValue[str]] = None,
+    cache_version: Optional[MetaValue[int]] = None,
+    validate_cached_outputs: Optional[MetaValue[str]] = None,
+    input_binding: Optional[MetaValue[InputBindingMode]] = None,
+    load_inputs: Optional[MetaValue[bool]] = None,
+    tags: Optional[MetaValue[List[str]]] = None,
+    facet_from: Optional[MetaValue[List[str]]] = None,
+    facet_schema_version: Optional[MetaValue[Union[str, int]]] = None,
+    description: Optional[MetaValue[str]] = None,
     **extra: Any,
-):
+) -> Callable[[Callable], Callable]:
     """
     Attach metadata to a function without changing execution behavior.
 
