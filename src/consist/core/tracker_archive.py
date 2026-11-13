@@ -1190,10 +1190,58 @@ class TrackerArchiveService(_TrackerServiceBase):
             )
         return source_path
 
+    def _attach_output_set_child_abs_path(
+        self,
+        child: Artifact,
+        *,
+        known_abs_paths: Mapping[str, str],
+        prefer_current_mount: bool,
+    ) -> Artifact:
+        """Preserve hydrated/current-mount paths on freshly queried OutputSet children."""
+        if child.abs_path is not None:
+            return child
+        if child.key in known_abs_paths:
+            return child.with_abs_path(known_abs_paths[child.key])
+        if prefer_current_mount:
+            try:
+                resolved_candidate = Path(self.resolve_uri(child.uri))
+            except (ValueError, RuntimeError, OSError, TypeError):
+                return child
+            if resolved_candidate.exists():
+                return child.with_abs_path(str(resolved_candidate.resolve()))
+        return child
+
+    def _output_set_candidate_has_members(
+        self, artifact: Artifact, candidate_dir: Path
+    ) -> bool:
+        """Return True when a current-mount OutputSet directory contains its members."""
+        if not candidate_dir.is_dir():
+            return False
+        children = self.tracker.get_child_artifacts(artifact)
+        if not children:
+            return True
+        parent_relative = self.fs.get_remappable_relative_path(artifact.uri)
+        if parent_relative is None:
+            return False
+        for child in children:
+            child_relative = self.fs.get_remappable_relative_path(child.uri)
+            if child_relative is None:
+                return False
+            try:
+                rel_member = child_relative.relative_to(parent_relative)
+            except ValueError:
+                return False
+            if not (candidate_dir / rel_member).exists():
+                return False
+        return True
+
     def _build_output_set_archive_plan(
         self,
         artifact: Artifact,
         archive_root: str | os.PathLike[str],
+        *,
+        known_abs_paths: Mapping[str, str] = {},
+        prefer_current_mount: bool = False,
     ) -> _OutputSetArchivePlan:
         """Validate a persisted OutputSet graph before changing archive bytes."""
         metadata = artifact.meta if isinstance(artifact.meta, Mapping) else {}
@@ -1306,7 +1354,14 @@ class TrackerArchiveService(_TrackerServiceBase):
                 f"OutputSet parent {artifact.key!r} has an incomplete manifest."
             )
 
-        children = self.tracker.get_child_artifacts(artifact)
+        children = [
+            self._attach_output_set_child_abs_path(
+                child,
+                known_abs_paths=known_abs_paths,
+                prefer_current_mount=prefer_current_mount,
+            )
+            for child in self.tracker.get_child_artifacts(artifact)
+        ]
         if any(
             (child.meta if isinstance(child.meta, Mapping) else {}).get(
                 "output_set_member"
@@ -1472,6 +1527,9 @@ class TrackerArchiveService(_TrackerServiceBase):
         self,
         selected: Mapping[str, Artifact],
         archive_root: str | os.PathLike[str],
+        *,
+        known_abs_paths: Mapping[str, str] = {},
+        prefer_current_mount: bool = False,
     ) -> tuple[
         dict[str, _OutputSetArchivePlan],
         dict[str, _NestedOutputSetScalar],
@@ -1479,7 +1537,12 @@ class TrackerArchiveService(_TrackerServiceBase):
     ]:
         """Validate selected OutputSets and their nested-output overlap contract."""
         output_set_plans = {
-            key: self._build_output_set_archive_plan(artifact, archive_root)
+            key: self._build_output_set_archive_plan(
+                artifact,
+                archive_root,
+                known_abs_paths=known_abs_paths,
+                prefer_current_mount=prefer_current_mount,
+            )
             for key, artifact in selected.items()
             if self._is_output_set_parent(artifact)
         }
@@ -2887,12 +2950,24 @@ class TrackerArchiveService(_TrackerServiceBase):
                     resolved_candidate = Path(self.resolve_uri(artifact.uri))
                 except (ValueError, RuntimeError, OSError, TypeError):
                     continue
-                if resolved_candidate.exists():
+                if self._is_output_set_parent(artifact):
+                    if self._output_set_candidate_has_members(
+                        artifact, resolved_candidate
+                    ):
+                        selected[key] = artifact.with_abs_path(
+                            str(resolved_candidate.resolve())
+                        )
+                elif resolved_candidate.exists():
                     selected[key] = artifact.with_abs_path(
                         str(resolved_candidate.resolve())
                     )
         output_set_plans, nested_scalars, nested_directories = (
-            self._build_selected_output_set_archive_plans(selected, archive_root)
+            self._build_selected_output_set_archive_plans(
+                selected,
+                archive_root,
+                known_abs_paths=known_abs_paths,
+                prefer_current_mount=(mode == "copy"),
+            )
         )
         archived_by_key: dict[str, Path] = {}
         for key, plan in output_set_plans.items():
