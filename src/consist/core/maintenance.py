@@ -1448,6 +1448,13 @@ class DatabaseMaintenance:
         include_snapshots: bool,
         dry_run: bool = False,
     ) -> MergeResult:
+        """Merge a shard database into the destination database.
+
+        `dlt`-managed ``global_tables.*`` schemas (including ``_dlt_load_id`` and
+        ``_dlt_id``) are cloned automatically into a fresh destination database, so
+        do not pre-create bare SQL ``global_tables.*`` tables on a fresh
+        destination prior to merging `dlt`-ingested shards.
+        """
         shard_path = Path(shard_path)
         if not shard_path.exists():
             raise ValueError(f"Shard database does not exist: {shard_path}")

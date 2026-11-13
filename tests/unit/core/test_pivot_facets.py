@@ -110,3 +110,17 @@ def test_pivot_facets_normalizes_numpy_scalars(tracker) -> None:
 
     assert by_run["run_numpy"]["alpha"] == pytest.approx(0.7)
     assert by_run["run_numpy"]["beta"] == pytest.approx(7)
+
+
+def test_parameterized_sql_rejects_mapping_and_str_params() -> None:
+    from consist import ParameterizedSQL
+
+    valid = ParameterizedSQL(sql="SELECT ? AS x", params=[1])
+    assert valid.params == (1,)
+
+    with pytest.raises(TypeError, match="positional sequence/tuple"):
+        ParameterizedSQL(sql="SELECT $x", params={"x": 1})  # type: ignore[arg-type]
+
+    for bad in ("foo", b"foo", bytearray(b"foo")):
+        with pytest.raises(TypeError, match="sequence/iterable of parameters"):
+            ParameterizedSQL(sql="SELECT ?", params=bad)  # type: ignore[arg-type]

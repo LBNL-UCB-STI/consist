@@ -692,6 +692,17 @@ class ParameterizedSQL(metaclass=_NormalizedFrozenMeta):
         params = kwargs.get("params", ())
         if not isinstance(sql, str):
             raise TypeError(f"sql must be a str, got {type(sql).__name__}")
+        if isinstance(params, Mapping):
+            raise TypeError(
+                "ParameterizedSQL.params expects a positional sequence/tuple; "
+                "pass a dict directly to tracker.query_rows(sql, params) or "
+                "tracker.query_df(sql, params) for named parameters."
+            )
+        if isinstance(params, (str, bytes, bytearray)):
+            raise TypeError(
+                f"ParameterizedSQL.params must be a sequence/iterable of parameters, "
+                f"not {type(params).__name__}"
+            )
         kwargs["params"] = params if isinstance(params, tuple) else tuple(params)
         return kwargs
 
