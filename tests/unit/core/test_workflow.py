@@ -738,9 +738,8 @@ def test_scenario_step_run_completion_archive_default_and_override(
         TypeError,
         match="step_run_completion_archive must be a RunCompletionArchivePolicy",
     ):
-        with consist.scenario(
-            "bad_noop_archive_scen",
-            enabled=False,
+        with Tracker().scenario(
+            "bad_ephemeral_archive_scen",
             step_run_completion_archive="/tmp/not_policy",  # type: ignore[arg-type]
         ):
             pass
@@ -948,13 +947,12 @@ def test_scenario_log_meta_outside_active_scenario_raises_runtime_error(
     with pytest.raises(RuntimeError, match="Scenario not active"):
         sc.log_meta(stage="after_exit")
 
-    with consist.scenario("sc_noop", enabled=False) as noop_sc:
-        assert isinstance(noop_sc.meta, MappingProxyType)
-        assert dict(noop_sc.meta) == {}
+    with Tracker().scenario("sc_ephemeral") as ephem_sc:
+        assert isinstance(ephem_sc.meta, MappingProxyType)
         with pytest.raises(TypeError):
-            noop_sc.meta["x"] = 1  # type: ignore[index]
-        assert noop_sc.log_meta(stage="noop") is None
-        assert dict(noop_sc.meta) == {}
+            ephem_sc.meta["x"] = 1  # type: ignore[index]
+        ephem_sc.log_meta(stage="ephemeral")
+        assert ephem_sc.meta["stage"] == "ephemeral"
 
 
 def test_scenario_positional_arguments_preserve_legacy_positions(

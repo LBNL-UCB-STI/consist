@@ -160,7 +160,6 @@ For class-level equivalents, see [Tracker](tracker.md) and
         - to_df
         - active_relation_count
         - set_current_tracker
-        - noop_scenario
         - RelationConnectionLeakWarning
         - is_dataframe_artifact
         - is_tabular_artifact

@@ -8,14 +8,37 @@ both execution paths share the same normalization logic.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Union
+import inspect
+import os
+from pathlib import Path, PurePath
+import sys
+import types
+from typing import (
+    Annotated,
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Union,
+    get_args,
+    get_origin,
+)
+import weakref
+
+import pandas as pd
 
 from consist.core.error_messages import format_problem_cause_fix
 from consist.core.metadata_resolver import MetadataResolver, ResolvedStepIdentity
 from consist.core.run_options import merge_run_options
 from consist.core.settings import ConsistSettings
+from consist.models.artifact import Artifact
 from consist.models.run import ConsistRecord
+from consist.protocols import ArtifactLike
 from consist.types import (
     CacheOptions,
     CodeIdentityMode,
@@ -23,6 +46,7 @@ from consist.types import (
     FacetLike,
     InputBindingMode,
     IdentityInputs,
+    OutputArtifactSpec,
     OutputPolicyOptions,
     OutputPathRef,
     OutputSet,
@@ -30,6 +54,442 @@ from consist.types import (
     RunCompletionArchivePolicy,
     RunInputRef,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class DeclaredOutputSpec:
+    """Normalized specification for a single ``outputs={role: path}`` entry."""
+
+    role: str
+    raw_value: Union[str, Path]
+    is_dir: bool
+    artifact_spec: Optional[OutputArtifactSpec] = None
+
+
+def normalize_declared_outputs_mapping(
+    outputs: Mapping[str, Any],
+) -> Dict[str, DeclaredOutputSpec]:
+    """Validate and normalize an ``outputs={role: path | OutputArtifactSpec}`` mapping."""
+    specs: Dict[str, DeclaredOutputSpec] = {}
+    for raw_role, raw_target in outputs.items():
+        if (
+            not isinstance(raw_role, str)
+            or not raw_role
+            or raw_role.strip() != raw_role
+        ):
+            raise ValueError(
+                format_problem_cause_fix(
+                    problem=(
+                        "outputs mapping keys must be non-empty strings without "
+                        f"surrounding whitespace. Received {raw_role!r}."
+                    ),
+                    cause="An invalid output role key was supplied.",
+                    fix="Use clean string role keys such as outputs={'cleaned': out_path}.",
+                )
+            )
+        artifact_spec: Optional[OutputArtifactSpec] = None
+        path_target: Any = raw_target
+        if isinstance(raw_target, OutputArtifactSpec):
+            artifact_spec = raw_target
+            path_target = raw_target.path
+        if not isinstance(path_target, (str, Path, os.PathLike)):
+            raise TypeError(
+                format_problem_cause_fix(
+                    problem=(
+                        f"outputs[{raw_role!r}] must be a str, Path, or OutputArtifactSpec "
+                        f"with a filesystem path/URI. Received {type(raw_target).__name__}."
+                    ),
+                    cause=(
+                        "Symmetric outputs={role: path} mappings require filesystem "
+                        "paths, URI strings, or OutputArtifactSpec instances."
+                    ),
+                    fix=(
+                        f"Pass a Path, path string, or OutputArtifactSpec for outputs[{raw_role!r}], e.g. "
+                        f"outputs={{'{raw_role}': Path('out.parquet')}}."
+                    ),
+                )
+            )
+        raw_str = (
+            path_target if isinstance(path_target, str) else os.fspath(path_target)
+        )
+        is_dir = isinstance(raw_str, str) and raw_str.endswith(("/", "\\"))
+        if (
+            artifact_spec is not None
+            and isinstance(artifact_spec.meta, Mapping)
+            and artifact_spec.meta.get("directory_artifact") is True
+        ):
+            is_dir = True
+        normalized_value: Union[str, Path] = (
+            path_target
+            if isinstance(path_target, (str, Path))
+            else Path(os.fspath(path_target))
+        )
+        specs[raw_role] = DeclaredOutputSpec(
+            role=raw_role,
+            raw_value=normalized_value,
+            is_dir=is_dir,
+            artifact_spec=artifact_spec,
+        )
+    return specs
+
+
+def resolve_declared_output_target_path(
+    spec: DeclaredOutputSpec,
+    *,
+    default_base_dir: Path,
+    resolve_uri_fn: Optional[Callable[[str], Optional[str]]] = None,
+) -> Path:
+    """Resolve a ``DeclaredOutputSpec`` into an absolute filesystem ``Path``."""
+    raw_value = spec.raw_value
+    if isinstance(raw_value, str) and "://" in raw_value and resolve_uri_fn is not None:
+        resolved_uri = resolve_uri_fn(raw_value)
+        target = Path(resolved_uri) if resolved_uri else Path(raw_value)
+    else:
+        target = Path(raw_value)
+    if not target.is_absolute():
+        target = default_base_dir / target
+    return target.resolve()
+
+
+def prepare_declared_output_targets(
+    specs: Mapping[str, DeclaredOutputSpec],
+    *,
+    default_base_dir: Path,
+    resolve_path_fn: Optional[Callable[[Union[str, Path]], Path]] = None,
+    resolve_uri_fn: Optional[Callable[[str], Optional[str]]] = None,
+) -> Dict[str, Path]:
+    """Resolve and pre-create parent/target directories for ``DeclaredOutputSpec`` entries."""
+    targets: Dict[str, Path] = {}
+    for role, spec in specs.items():
+        if resolve_path_fn is not None:
+            target_path = resolve_path_fn(spec.raw_value)
+        else:
+            target_path = resolve_declared_output_target_path(
+                spec,
+                default_base_dir=default_base_dir,
+                resolve_uri_fn=resolve_uri_fn,
+            )
+        if spec.is_dir:
+            target_path.mkdir(parents=True, exist_ok=True)
+        else:
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+        targets[role] = target_path
+    return targets
+
+
+def build_declared_outputs_identity(
+    specs: Mapping[str, DeclaredOutputSpec],
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Build the canonical step-identity payload for ``outputs={role: path}``.
+
+    Includes sorted role keys, directory vs. file semantics (``is_dir``),
+    full filename (``name``, preserving multi-dot stems like ``sim.2020.parquet``
+    and distinguishing ``a.csv`` from ``b.csv``), and lowercase extensions (``ext``).
+    Parent directory is excluded so relocating a workspace does not invalidate hits.
+    """
+    payload: Dict[str, Dict[str, Any]] = {}
+    for role in sorted(specs.keys()):
+        spec = specs[role]
+        raw_str = str(spec.raw_value).rstrip("/\\")
+        path_obj = Path(raw_str)
+        ext = "".join(path_obj.suffixes).lower()
+        payload[role] = {
+            "is_dir": bool(spec.is_dir),
+            "name": path_obj.name,
+            "ext": ext,
+        }
+    return payload
+
+
+ParameterBindingKind = Literal["artifact", "path", "loaded"]
+
+_RESERVED_BINDING_PARAMS = frozenset(
+    {"ctx", "_consist_ctx", "runtime_kwargs", "self", "cls"}
+)
+
+_ARTIFACT_ANNOTATION_STRINGS = frozenset(
+    {
+        "Artifact",
+        "consist.Artifact",
+        "consist.models.artifact.Artifact",
+        "ArtifactLike",
+        "consist.protocols.ArtifactLike",
+    }
+)
+
+_PATH_ANNOTATION_STRINGS = frozenset(
+    {
+        "Path",
+        "pathlib.Path",
+        "PurePath",
+        "pathlib.PurePath",
+        "PosixPath",
+        "pathlib.PosixPath",
+        "WindowsPath",
+        "pathlib.WindowsPath",
+        "os.PathLike",
+        "PathLike",
+    }
+)
+
+_DATASET_ANNOTATION_STRINGS = frozenset(
+    {
+        "DataFrame",
+        "pd.DataFrame",
+        "pandas.DataFrame",
+        "pandas.core.frame.DataFrame",
+        "GeoDataFrame",
+        "gpd.GeoDataFrame",
+        "geopandas.GeoDataFrame",
+        "geopandas.geodataframe.GeoDataFrame",
+        "Dataset",
+        "xr.Dataset",
+        "xarray.Dataset",
+        "xarray.core.dataset.Dataset",
+        "Table",
+        "pa.Table",
+        "pyarrow.Table",
+        "pyarrow.lib.Table",
+    }
+)
+
+
+def _optional_loaded_dataset_types() -> tuple[type[Any], ...]:
+    types_list: list[type[Any]] = [pd.DataFrame]
+    if "geopandas" in sys.modules:
+        try:
+            import geopandas as gpd
+
+            types_list.append(gpd.GeoDataFrame)
+        except ImportError:
+            pass
+    if "xarray" in sys.modules:
+        try:
+            import xarray as xr
+
+            types_list.append(xr.Dataset)
+        except ImportError:
+            pass
+    if "pyarrow" in sys.modules:
+        try:
+            import pyarrow as pa
+
+            types_list.append(pa.Table)
+        except ImportError:
+            pass
+    return tuple(types_list)
+
+
+def _unwrap_string_annotation(raw: str) -> str:
+    cleaned = raw.strip()
+    for prefix in ("Annotated[", "typing.Annotated["):
+        if cleaned.startswith(prefix) and cleaned.endswith("]"):
+            inner = cleaned[len(prefix) : -1]
+            depth = 0
+            for idx, ch in enumerate(inner):
+                if ch in "([":
+                    depth += 1
+                elif ch in ")]":
+                    depth -= 1
+                elif ch == "," and depth == 0:
+                    return _unwrap_string_annotation(inner[:idx])
+    for prefix in ("Optional[", "typing.Optional["):
+        if cleaned.startswith(prefix) and cleaned.endswith("]"):
+            return _unwrap_string_annotation(cleaned[len(prefix) : -1])
+    if "|" in cleaned:
+        parts = [
+            part.strip()
+            for part in cleaned.split("|")
+            if part.strip() not in {"None", "NoneType"}
+        ]
+        if len(parts) == 1:
+            return _unwrap_string_annotation(parts[0])
+    return cleaned
+
+
+def _classify_annotation(annotation: Any) -> Optional[ParameterBindingKind]:
+    if annotation is inspect.Parameter.empty or annotation is None:
+        return None
+    if isinstance(annotation, str):
+        cleaned = _unwrap_string_annotation(annotation)
+        if cleaned in _ARTIFACT_ANNOTATION_STRINGS:
+            return "artifact"
+        if (
+            cleaned in _PATH_ANNOTATION_STRINGS
+            or cleaned.startswith(("os.PathLike[", "PathLike["))
+            and cleaned.endswith("]")
+        ):
+            return "path"
+        if cleaned in _DATASET_ANNOTATION_STRINGS:
+            return "loaded"
+        return None
+
+    origin = get_origin(annotation)
+    if origin is Annotated:
+        args = get_args(annotation)
+        return _classify_annotation(args[0]) if args else None
+    if origin is Union or origin is types.UnionType:
+        non_none = [arg for arg in get_args(annotation) if arg is not type(None)]
+        if not non_none:
+            return None
+        kinds = [_classify_annotation(arg) for arg in non_none]
+        if kinds[0] is not None and all(k == kinds[0] for k in kinds):
+            return kinds[0]
+        return None
+
+    if annotation in (Artifact, ArtifactLike):
+        return "artifact"
+    if isinstance(annotation, type) and issubclass(annotation, Artifact):
+        return "artifact"
+
+    if annotation in (Path, PurePath, os.PathLike):
+        return "path"
+    if isinstance(annotation, type) and issubclass(annotation, (PurePath, os.PathLike)):
+        return "path"
+    if origin in (Path, PurePath, os.PathLike) or (
+        isinstance(origin, type) and issubclass(origin, (PurePath, os.PathLike))
+    ):
+        return "path"
+
+    dataset_types = _optional_loaded_dataset_types()
+    if annotation in dataset_types or (
+        isinstance(annotation, type) and issubclass(annotation, dataset_types)
+    ):
+        return "loaded"
+    if origin in dataset_types or (
+        isinstance(origin, type) and issubclass(origin, dataset_types)
+    ):
+        return "loaded"
+    return None
+
+
+def _resolve_param_annotation(fn: Any, raw_annotation: Any) -> Any:
+    if not isinstance(raw_annotation, str):
+        return raw_annotation
+    globalns: Dict[str, Any] = {}
+    if isinstance(fn, types.FunctionType):
+        globalns = fn.__globals__
+    else:
+        mod_name = type(fn).__module__ if not callable(fn) else fn.__module__
+        mod = sys.modules.get(mod_name)
+        if mod is not None:
+            globalns = mod.__dict__
+    try:
+        return eval(raw_annotation, globalns, {})
+    except Exception:
+        return raw_annotation
+
+
+_PARAM_BINDING_CACHE: weakref.WeakKeyDictionary[
+    Any, tuple[Dict[str, ParameterBindingKind], frozenset[str]]
+] = weakref.WeakKeyDictionary()
+
+
+def _resolve_binding_info(
+    fn: Any,
+) -> tuple[Dict[str, ParameterBindingKind], frozenset[str]]:
+    if fn is None or not callable(fn):
+        return {}, frozenset()
+    try:
+        cached = _PARAM_BINDING_CACHE.get(fn)
+        if cached is not None:
+            return dict(cached[0]), cached[1]
+    except TypeError:
+        pass
+
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return {}, frozenset()
+
+    result: Dict[str, ParameterBindingKind] = {}
+    pyarrow_params: set[str] = set()
+    for param_name, param in sig.parameters.items():
+        if param_name in _RESERVED_BINDING_PARAMS:
+            continue
+        if param.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
+            continue
+        if param.annotation is inspect.Parameter.empty:
+            continue
+        resolved_ann = _resolve_param_annotation(fn, param.annotation)
+        kind = _classify_annotation(resolved_ann)
+        if kind is not None:
+            result[param_name] = kind
+            if kind == "loaded" and _matches_pyarrow_table_annotation(resolved_ann):
+                pyarrow_params.add(param_name)
+
+    frozen_pa = frozenset(pyarrow_params)
+    try:
+        _PARAM_BINDING_CACHE[fn] = (dict(result), frozen_pa)
+    except TypeError:
+        pass
+    return result, frozen_pa
+
+
+def infer_parameter_binding_kinds(fn: Any) -> Dict[str, ParameterBindingKind]:
+    """
+    Resolve step parameter binding kinds per parameter.
+
+    Resolves each parameter independently so a closure ``NameError`` on one
+    parameter does not abort type resolution for the remaining parameters.
+    Unwraps ``Annotated[T, ...]`` and ``Optional[T]`` / ``T | None``, and
+    excludes reserved/injected parameters (``ctx``, ``_consist_ctx``,
+    ``runtime_kwargs``, ``self``, ``cls``).
+    """
+    kinds, _ = _resolve_binding_info(fn)
+    return kinds
+
+
+def infer_path_annotated_parameters(fn: Any) -> frozenset[str]:
+    """Return parameter names of ``fn`` annotated as ``Path`` / ``os.PathLike``."""
+    return frozenset(
+        name
+        for name, kind in infer_parameter_binding_kinds(fn).items()
+        if kind == "path"
+    )
+
+
+def infer_dataframe_annotated_parameters(fn: Any) -> frozenset[str]:
+    """Return parameter names of ``fn`` annotated as a loaded dataset type."""
+    return frozenset(
+        name
+        for name, kind in infer_parameter_binding_kinds(fn).items()
+        if kind == "loaded"
+    )
+
+
+def _matches_pyarrow_table_annotation(annotation: Any) -> bool:
+    if isinstance(annotation, str):
+        cleaned = _unwrap_string_annotation(annotation)
+        return cleaned in {"Table", "pa.Table", "pyarrow.Table", "pyarrow.lib.Table"}
+    origin = get_origin(annotation)
+    if origin is Annotated:
+        args = get_args(annotation)
+        return _matches_pyarrow_table_annotation(args[0]) if args else False
+    if origin is Union or origin is types.UnionType:
+        non_none = [arg for arg in get_args(annotation) if arg is not type(None)]
+        return bool(non_none) and all(
+            _matches_pyarrow_table_annotation(arg) for arg in non_none
+        )
+    if "pyarrow" not in sys.modules:
+        return False
+    try:
+        import pyarrow as pa
+    except ImportError:
+        return False
+    return annotation is pa.Table or (
+        isinstance(annotation, type) and issubclass(annotation, pa.Table)
+    )
+
+
+def is_pyarrow_table_annotation(fn: Any, param_name: str) -> bool:
+    """Return True if ``param_name`` on ``fn`` is annotated as ``pyarrow.Table``."""
+    _, pyarrow_params = _resolve_binding_info(fn)
+    return param_name in pyarrow_params
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +620,24 @@ class ResolvedRunInvocation:
     container: Optional[Mapping[str, Any]]
     runtime_kwargs: Optional[Dict[str, Any]]
     inject_context: Union[bool, str]
+    declared_output_specs: Optional[Dict[str, DeclaredOutputSpec]] = None
+    requested_input_binding: Optional[InputBindingMode] = None
+
+    @property
+    def outputs_for_delegation(
+        self,
+    ) -> Optional[Union[Sequence[str], Mapping[str, OutputPathRef]]]:
+        """Return declared outputs in the shape expected when delegating to ``Tracker.run``/``trace``."""
+        if self.declared_output_specs is not None:
+            return {
+                role: (
+                    spec.artifact_spec
+                    if spec.artifact_spec is not None
+                    else spec.raw_value
+                )
+                for role, spec in self.declared_output_specs.items()
+            }
+        return self.outputs
 
 
 def _resolve_input_binding(
@@ -236,7 +714,7 @@ def resolve_run_invocation(
     iteration: Optional[int],
     phase: Optional[str],
     stage: Optional[str],
-    outputs: Optional[List[str]],
+    outputs: Optional[Union[Sequence[str], Mapping[str, OutputPathRef]]],
     output_paths: Optional[Mapping[str, OutputPathRef]],
     output_sets: Optional[Mapping[str, OutputSet]],
     cache_options: Optional[CacheOptions],
@@ -398,8 +876,6 @@ def resolve_run_invocation(
         inject_context = False
     if output_mismatch is None:
         output_mismatch = "warn"
-    if output_missing is None:
-        output_missing = "warn"
 
     if executor not in {"python", "container"}:
         raise ValueError(
@@ -589,6 +1065,32 @@ def resolve_run_invocation(
         resolved_cache_mode = "reuse"
     if resolved_validate_cached_outputs is None:
         resolved_validate_cached_outputs = "lazy"
+
+    declared_output_specs: Optional[Dict[str, DeclaredOutputSpec]] = None
+    resolved_outputs_list: Optional[List[str]]
+    if isinstance(resolved.outputs, Mapping):
+        if resolved.output_paths is not None:
+            raise ValueError(
+                format_problem_cause_fix(
+                    problem=(
+                        "Cannot specify both outputs={...} mapping and output_paths={...}."
+                    ),
+                    cause=(
+                        "outputs={role: path} is the unified symmetric replacement "
+                        "for output_paths."
+                    ),
+                    fix="Use outputs={role: path} alone and remove output_paths.",
+                )
+            )
+        declared_output_specs = normalize_declared_outputs_mapping(resolved.outputs)
+        resolved_outputs_list = list(declared_output_specs.keys())
+    else:
+        resolved_outputs_list = (
+            list(resolved.outputs) if resolved.outputs is not None else None
+        )
+
+    if output_missing is None:
+        output_missing = "error" if declared_output_specs is not None else "warn"
     if cache_hydration_failure not in {"warn", "miss"}:
         raise ValueError("cache_hydration_failure must be one of: 'warn', 'miss'")
     if cache_hydration_failure == "miss" and resolved.cache_hydration not in {
@@ -763,7 +1265,7 @@ def resolve_run_invocation(
         inputs=resolved.inputs,
         input_keys=resolved.input_keys,
         optional_input_keys=resolved.optional_input_keys,
-        outputs=resolved.outputs,
+        outputs=resolved_outputs_list,
         output_paths=resolved.output_paths,
         output_sets=(
             dict(resolved.output_sets) if resolved.output_sets is not None else None
@@ -801,4 +1303,14 @@ def resolve_run_invocation(
         container=container,
         runtime_kwargs=runtime_kwargs_dict,
         inject_context=inject_context,
+        declared_output_specs=declared_output_specs,
+        requested_input_binding=(
+            resolved.input_binding
+            if resolved.input_binding is not None
+            else (
+                "loaded"
+                if resolved.load_inputs is True
+                else ("none" if resolved.load_inputs is False else None)
+            )
+        ),
     )

@@ -421,7 +421,7 @@ class Tracker:
 
     def __init__(
         self,
-        run_dir: Path,
+        run_dir: Optional[Union[str, os.PathLike[str]]] = None,
         db_path: Optional[str | os.PathLike[str]] = None,
         mounts: Optional[Dict[str, str]] = None,
         archive_mounts: Optional[Mapping[str, str | os.PathLike[str]]] = None,
@@ -501,7 +501,18 @@ class Tracker:
             The namespace identifier for OpenLineage datasets and jobs.
         """
         is_ro = bool(read_only or access_mode == "read_only")
-        self.fs = FileSystemManager(run_dir, mounts, create_run_dir=not is_ro)
+        configured_db_path = os.fspath(db_path) if db_path is not None else None
+        self.is_ephemeral: bool = configured_db_path is None and run_dir is None
+        effective_run_dir: Optional[Union[str, Path]] = (
+            Path(os.fspath(run_dir))
+            if run_dir is not None
+            else (Path.cwd() if configured_db_path is not None else None)
+        )
+        self.fs = FileSystemManager(
+            effective_run_dir,
+            mounts,
+            create_run_dir=(not is_ro and not self.is_ephemeral),
+        )
 
         self.mounts = self.fs.mounts
         self.archive_mounts = {
@@ -521,7 +532,6 @@ class Tracker:
             allow_external_paths = _env_bool("CONSIST_ALLOW_EXTERNAL_PATHS", False)
         self.allow_external_paths = bool(allow_external_paths)
 
-        configured_db_path = os.fspath(db_path) if db_path is not None else None
         self._original_db_path: str | None = configured_db_path
         if isinstance(local_snapshot, str) and not local_snapshot.strip():
             raise ValueError("local_snapshot cannot be an empty string.")
@@ -596,8 +606,9 @@ class Tracker:
         self._compat_db: DatabaseManager | None = None
         self._compat_db_path: str | None = effective_db_path
 
+        effective_hashing_strategy = "fast" if self.is_ephemeral else hashing_strategy
         self.identity = IdentityManager(
-            project_root=project_root, hashing_strategy=hashing_strategy
+            project_root=project_root, hashing_strategy=effective_hashing_strategy
         )
         self._strict_binding_context: ContextVar[
             _StrictBindingInvocationContext | None
@@ -1824,7 +1835,7 @@ class Tracker:
         phase: Optional[str] = None,
         stage: Optional[str] = None,
         parent_run_id: Optional[str] = None,
-        outputs: Optional[List[str]] = None,
+        outputs: Optional[Union[Sequence[str], Mapping[str, OutputPathRef]]] = None,
         output_paths: Optional[Mapping[str, OutputPathRef]] = None,
         output_sets: Optional[Mapping[str, OutputSet]] = None,
         profile_file_schema: bool | Literal["if_changed"] | None = None,
@@ -2079,7 +2090,7 @@ class Tracker:
         name: str,
         model: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
-        outputs: Optional[List[str]] = None,
+        outputs: Optional[Union[Sequence[str], Mapping[str, OutputPathRef]]] = None,
         execution_options: Optional[ExecutionOptions] = None,
         strict: bool = True,
         identity_inputs: IdentityInputs = None,
@@ -2280,7 +2291,7 @@ class Tracker:
         year: Optional[int] = None,
         iteration: Optional[int] = None,
         parent_run_id: Optional[str] = None,
-        outputs: Optional[List[str]] = None,
+        outputs: Optional[Union[Sequence[str], Mapping[str, OutputPathRef]]] = None,
         output_paths: Optional[Mapping[str, OutputPathRef]] = None,
         capture_dir: Optional[Path] = None,
         capture_pattern: str = "*",

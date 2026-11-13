@@ -276,6 +276,7 @@ class OutputArtifactSpec(metaclass=_NormalizedFrozenMeta):
     path: ArtifactRef
     schema: SchemaModel | None = None
     driver: str | None = None
+    member: str | None = None
     facet: FacetLike | None = None
     facet_schema_version: str | int | None = None
     facet_index: bool = False

@@ -176,7 +176,7 @@ class FileSystemManager:
 
     def __init__(
         self,
-        run_dir: Union[str, Path],
+        run_dir: Optional[Union[str, Path]] = None,
         mounts: Optional[Dict[str, str]] = None,
         *,
         create_run_dir: bool = True,
@@ -186,16 +186,21 @@ class FileSystemManager:
 
         Parameters
         ----------
-        run_dir : Union[str, Path]
-            Directory where run logs and artifacts are stored.
+        run_dir : Optional[Union[str, Path]], optional
+            Directory where run logs and artifacts are stored. When ``None``,
+            falls back to the current working directory without creating a
+            directory on disk (used by Ephemeral Mode).
         mounts : Optional[Dict[str, str]], optional
             Mapping from scheme name (e.g., ``"inputs"``) to absolute path.
         create_run_dir : bool, default True
             Whether to create ``run_dir`` on disk during initialization.
         """
+        self._has_explicit_run_dir = run_dir is not None
         # Force absolute resolve to prevent /var vs /private/var mismatches
-        self.run_dir = Path(run_dir).resolve()
-        if create_run_dir:
+        self.run_dir = (
+            Path(run_dir).resolve() if run_dir is not None else Path.cwd().resolve()
+        )
+        if create_run_dir and self._has_explicit_run_dir:
             self.run_dir.mkdir(parents=True, exist_ok=True)
         self.mounts = mounts or {}
         self._ws_id_cache: Optional[tuple[Path, str]] = None

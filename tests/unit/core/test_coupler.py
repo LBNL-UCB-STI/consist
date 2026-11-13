@@ -7,7 +7,6 @@ from typing import cast
 import pytest
 
 from consist.core.coupler import Coupler
-from consist.core.noop import NoopRunContext
 from consist.models.artifact import Artifact
 
 
@@ -162,19 +161,25 @@ def test_coupler_set_from_artifact_with_real_artifact() -> None:
 
 def test_coupler_set_from_artifact_with_artifact_like() -> None:
     """Test set_from_artifact with an artifact-like object (has .path and .uri)."""
-    from consist.core.noop import NoopArtifact
+    from dataclasses import dataclass
+
+    @dataclass
+    class _ArtifactLikeStub:
+        key: str
+        path: Path
+        uri: str
 
     coupler = Coupler()
-    noop_art = NoopArtifact(
+    stub_art = _ArtifactLikeStub(
         key="persons",
         path=Path("workspace/persons.parquet"),
         uri="workspace://persons.parquet",
     )
 
-    result = coupler.set_from_artifact("persons", noop_art)
+    result = coupler.set_from_artifact("persons", stub_art)
 
-    assert result == noop_art
-    assert coupler.get("persons") == noop_art
+    assert result == stub_art
+    assert coupler.get("persons") == stub_art
 
 
 def test_coupler_set_from_artifact_with_path() -> None:
@@ -197,20 +202,6 @@ def test_coupler_set_from_artifact_with_string_path() -> None:
 
     assert result == path_str
     assert coupler.get("data") == path_str
-
-
-def test_noop_run_context_preserves_member() -> None:
-    ctx = NoopRunContext()
-    artifact = Artifact(
-        key="members",
-        uri="workspace://members.h5",
-        driver="h5_table",
-        member="/tables/members",
-    )
-
-    noop_artifact = ctx.log_artifact(artifact, key="members")
-
-    assert noop_artifact.member == "/tables/members"
 
 
 def test_coupler_view_sets_namespaced_keys_and_preserves_global_access() -> None:
@@ -323,15 +314,21 @@ def test_coupler_view_pop() -> None:
 
 
 def test_coupler_path_supports_path_string_and_artifact_like() -> None:
-    from consist.core.noop import NoopArtifact
+    from dataclasses import dataclass
+
+    @dataclass
+    class _ArtifactLikeStub:
+        key: str
+        path: Path
+        uri: str
 
     coupler = Coupler()
     coupler.set_from_artifact("as_path", Path("workspace/data.csv"))
     coupler.set_from_artifact("as_str", "workspace/other.csv")
     coupler.set_from_artifact(
-        "as_noop",
-        NoopArtifact(
-            key="as_noop",
+        "as_stub",
+        _ArtifactLikeStub(
+            key="as_stub",
             path=Path("workspace/persons.parquet"),
             uri="workspace://persons.parquet",
         ),
@@ -339,7 +336,7 @@ def test_coupler_path_supports_path_string_and_artifact_like() -> None:
 
     assert coupler.path("as_path") == Path("workspace/data.csv")
     assert coupler.path("as_str") == Path("workspace/other.csv")
-    assert coupler.path("as_noop") == Path("workspace/persons.parquet")
+    assert coupler.path("as_stub") == Path("workspace/persons.parquet")
 
     coupler.tracker = type(
         "TrackerStub",

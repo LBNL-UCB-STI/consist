@@ -20,6 +20,7 @@ from typing import (
     Literal,
     Mapping,
     Iterator,
+    Sequence,
     Union,
     cast,
     Tuple,
@@ -55,7 +56,10 @@ from consist.core.resolved_binding import (
     step_contract_identity,
     trusted_digest_from_artifact,
 )
-from consist.core.run_invocation import resolve_run_invocation
+from consist.core.run_invocation import (
+    infer_parameter_binding_kinds,
+    resolve_run_invocation,
+)
 from consist.core.run_options import resolve_trace_output_policy
 from consist.digest import normalize_json
 from consist.types import (
@@ -1667,7 +1671,7 @@ class ScenarioContext:
         phase: Optional[str] = None,
         stage: Optional[str] = None,
         parent_run_id: Optional[str] = None,
-        outputs: Optional[List[str]] = None,
+        outputs: Optional[Union[Sequence[str], Mapping[str, OutputPathRef]]] = None,
         output_paths: Optional[Mapping[str, OutputPathRef]] = None,
         output_sets: Optional[Mapping[str, OutputSet]] = None,
         profile_file_schema: bool | Literal["if_changed"] | None = None,
@@ -1872,10 +1876,26 @@ class ScenarioContext:
             and execution_options.load_inputs is True
         ):
             requested_input_binding = "loaded"
-        if requested_input_binding in {"loaded", "paths"}:
+        declared_out_keys: set[str] = set()
+        if isinstance(outputs, Mapping):
+            declared_out_keys.update(str(k) for k in outputs.keys())
+        if isinstance(output_paths, Mapping):
+            declared_out_keys.update(str(k) for k in output_paths.keys())
+        if requested_input_binding in {"loaded", "paths"} or (
+            fn is not None
+            and any(
+                kind in {"path", "loaded"}
+                and param_name not in declared_out_keys
+                and (
+                    not isinstance(invocation_inputs, Mapping)
+                    or param_name in invocation_inputs
+                )
+                for param_name, kind in infer_parameter_binding_kinds(fn).items()
+            )
+        ):
             invocation_inputs = self._promote_inputs_for_binding(
                 invocation_inputs,
-                requested_input_binding,
+                requested_input_binding or "paths",
             )
 
         resolved_invocation = resolve_run_invocation(
@@ -1926,7 +1946,7 @@ class ScenarioContext:
         resolved_tags = resolved_invocation.tags
         resolved_facet = resolved_invocation.facet
         resolved_facet_index = resolved_invocation.facet_index
-        resolved_outputs = resolved_invocation.outputs
+        resolved_outputs = resolved_invocation.outputs_for_delegation
         resolved_output_paths = resolved_invocation.output_paths
         resolved_inputs = resolved_invocation.inputs
         resolved_input_keys = resolved_invocation.input_keys
@@ -2168,7 +2188,7 @@ class ScenarioContext:
         year: Optional[int] = None,
         iteration: Optional[int] = None,
         parent_run_id: Optional[str] = None,
-        outputs: Optional[List[str]] = None,
+        outputs: Optional[Union[Sequence[str], Mapping[str, OutputPathRef]]] = None,
         output_paths: Optional[Mapping[str, OutputPathRef]] = None,
         capture_dir: Optional[Path] = None,
         capture_pattern: str = "*",
@@ -2260,7 +2280,7 @@ class ScenarioContext:
         resolved_identity_inputs = resolved_invocation.identity_inputs
         resolved_tags = self._merge_step_tags(resolved_invocation.tags)
         resolved_facet = self._merge_step_facet(resolved_invocation.facet)
-        resolved_outputs = resolved_invocation.outputs
+        resolved_outputs = resolved_invocation.outputs_for_delegation
         resolved_output_paths = self._resolve_output_paths(
             resolved_invocation.output_paths
         )

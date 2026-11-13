@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping as MappingABC
 from contextlib import contextmanager
 from dataclasses import dataclass
+import hashlib
 import inspect
 import logging
 from pathlib import Path
@@ -23,6 +24,7 @@ from typing import (
     Literal,
     Mapping,
     Optional,
+    Sequence,
     TYPE_CHECKING,
     Union,
     cast,
@@ -34,10 +36,25 @@ import warnings
 import pandas as pd
 from pydantic import BaseModel
 
-from consist.core.error_messages import format_problem_cause_fix
+from consist.core.error_messages import (
+    MissingOutputError,
+    StaleOutputError,
+    format_problem_cause_fix,
+)
 from consist.core.output_sets import register_output_sets, validate_cached_output_sets
 from consist.core.output_sets import build_output_set_captures_identity
-from consist.core.run_invocation import resolve_run_invocation
+from consist.core.run_invocation import (
+    DeclaredOutputSpec,
+    build_declared_outputs_identity,
+    infer_parameter_binding_kinds,
+    is_pyarrow_table_annotation,
+    normalize_declared_outputs_mapping,
+    prepare_declared_output_targets,
+    resolve_declared_output_target_path,
+    resolve_run_invocation,
+)
+from consist.core.tracker_recovery import resolve_verified_local_path
+from consist.location import DirTreeStat, FileStat
 from consist.core.run_options import (
     resolve_runtime_kwargs_alias,
     resolve_trace_output_policy,
@@ -162,6 +179,135 @@ class RunInvocationContext:
     requested_input_artifact_ids: Optional[Mapping[str, str]]
     run_id: str
     start_kwargs: Dict[str, Any]
+    declared_output_specs: Optional[Dict[str, DeclaredOutputSpec]] = None
+    requested_input_binding: Optional[InputBindingMode] = None
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while chunk := f.read(1024 * 1024):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _hdf5_member_digest(path: Path, member: str) -> Optional[str]:
+    try:
+        import h5py
+    except ImportError:
+        return None
+    normalized = member.lstrip("/")
+    try:
+        with h5py.File(path, "r") as handle:
+            if normalized not in handle:
+                return None
+            obj = handle[normalized]
+            h = hashlib.sha256()
+            h.update(normalized.encode("utf-8"))
+            if isinstance(obj, h5py.Dataset):
+                h.update(str(obj.shape).encode("utf-8"))
+                h.update(str(obj.dtype).encode("utf-8"))
+                h.update(obj[()].tobytes())
+            elif isinstance(obj, h5py.Group):
+                for child_name in sorted(obj.keys()):
+                    child = obj[child_name]
+                    h.update(child_name.encode("utf-8"))
+                    if isinstance(child, h5py.Dataset):
+                        h.update(str(child.shape).encode("utf-8"))
+                        h.update(str(child.dtype).encode("utf-8"))
+                        h.update(child[()].tobytes())
+            return h.hexdigest()
+    except Exception:
+        return None
+
+
+def _snapshot_pre_step_outputs(
+    declared_target_paths: Mapping[str, Path],
+    declared_output_specs: Mapping[str, DeclaredOutputSpec],
+    *,
+    skip_pre_hash: bool = False,
+) -> Dict[str, tuple[str, Any, Optional[str]]]:
+    """Capture pre-step stat + content/member digest for pre-existing declared outputs."""
+    snapshots: Dict[str, tuple[str, Any, Optional[str]]] = {}
+    for role, target_path in declared_target_paths.items():
+        if not target_path.exists():
+            continue
+        spec = declared_output_specs[role]
+        if spec.is_dir or target_path.is_dir():
+            snapshots[role] = (
+                "dir",
+                DirTreeStat.capture_dir(target_path),
+                None,
+            )
+        elif (
+            spec.artifact_spec is not None
+            and spec.artifact_spec.member
+            and target_path.suffix.lower() in {".h5", ".hdf5", ".hdf"}
+        ):
+            snapshots[role] = (
+                "hdf5_member",
+                FileStat.capture(target_path),
+                None
+                if skip_pre_hash
+                else _hdf5_member_digest(target_path, spec.artifact_spec.member),
+            )
+        else:
+            snapshots[role] = (
+                "file",
+                FileStat.capture(target_path),
+                None if skip_pre_hash else _sha256_file(target_path),
+            )
+    return snapshots
+
+
+def _dir_tree_signature(tree: DirTreeStat) -> tuple[Any, ...]:
+    return (
+        tree.file_count,
+        tree.total_bytes,
+        tree.max_mtime_ns,
+        tree.subdirs,
+        tuple((name, fs._stat_tuple()) for name, fs in tree.entries),
+    )
+
+
+def _verify_outputs_not_stale(
+    snapshots: Mapping[str, tuple[str, Any, Optional[str]]],
+    declared_target_paths: Mapping[str, Path],
+    declared_output_specs: Mapping[str, DeclaredOutputSpec],
+) -> None:
+    """Raise ``StaleOutputError`` if a pre-existing output was untouched by the step."""
+    for role, (kind, pre_stat, pre_digest) in snapshots.items():
+        target_path = declared_target_paths[role]
+        if not target_path.exists():
+            continue
+        if kind == "dir":
+            post_tree = DirTreeStat.capture_dir(target_path)
+            if isinstance(pre_stat, DirTreeStat) and _dir_tree_signature(
+                post_tree
+            ) == _dir_tree_signature(pre_stat):
+                raise StaleOutputError(role=role, path=target_path)
+        elif kind == "hdf5_member":
+            post_stat = FileStat.capture(target_path)
+            art_spec = declared_output_specs[role].artifact_spec
+            if (
+                art_spec is not None
+                and art_spec.member is not None
+                and isinstance(pre_stat, FileStat)
+                and post_stat._stat_tuple() == pre_stat._stat_tuple()
+                and (
+                    pre_digest is None
+                    or _hdf5_member_digest(target_path, art_spec.member) == pre_digest
+                )
+            ):
+                raise StaleOutputError(role=role, path=target_path)
+        else:
+            post_stat = FileStat.capture(target_path)
+            if (
+                isinstance(pre_stat, FileStat)
+                and post_stat._stat_tuple() == pre_stat._stat_tuple()
+                and (pre_digest is None or _sha256_file(target_path) == pre_digest)
+            ):
+                raise StaleOutputError(role=role, path=target_path)
 
 
 def _output_spec_path(ref: OutputPathRef) -> ArtifactRef:
@@ -184,6 +330,7 @@ def _output_spec_log_kwargs(
         "schema": ref.schema,
         "strict_schema": False,
         "driver": ref.driver,
+        "member": ref.member,
         "facet": ref.facet,
         "facet_schema_version": ref.facet_schema_version,
         "facet_index": ref.facet_index,
@@ -381,6 +528,10 @@ class RunTraceCoordinator:
         capture_identity = build_output_set_captures_identity(output_sets)
         if capture_identity is not None:
             identity_overrides["__consist_output_set_captures__"] = capture_identity
+        if invocation.declared_output_specs is not None:
+            identity_overrides["__consist_declared_outputs__"] = (
+                build_declared_outputs_identity(invocation.declared_output_specs)
+            )
         if identity_overrides:
             start_kwargs["_consist_identity_config_overrides"] = identity_overrides
         requested_mode = requested_input_materialization_mode or (
@@ -416,6 +567,7 @@ class RunTraceCoordinator:
         validate_cached_outputs: Optional[str] = None,
         output_paths: Optional[Mapping[str, OutputPathRef]],
         output_sets: Optional[Mapping[str, OutputSet]],
+        declared_output_specs: Optional[Mapping[str, DeclaredOutputSpec]] = None,
         run_id: str,
         model: str,
         description: Optional[str],
@@ -429,21 +581,25 @@ class RunTraceCoordinator:
         materialize_cached_output_set_roots: Optional[Dict[str, Path]] = None
         materialize_cached_outputs_dir: Optional[Path] = None
         if cache_hydration == "outputs-requested":
-            if output_paths is None and output_sets is None:
+            if (
+                output_paths is None
+                and output_sets is None
+                and declared_output_specs is None
+            ):
                 if validate_cached_outputs == "eager":
                     return {}, None, None
                 raise ValueError(
                     format_problem_cause_fix(
                         problem=(
                             "cache_hydration='outputs-requested' requires "
-                            "output_paths or output_sets."
+                            "output_paths (or outputs={role: path} / output_sets)."
                         ),
                         cause=(
                             "Requested-output hydration needs explicit destination "
                             "paths."
                         ),
                         fix=(
-                            "Declare output_paths={key: path} or "
+                            "Declare outputs={key: path}, output_paths={key: path}, or "
                             "output_sets={key: OutputSet(root=...)} when using "
                             "cache_hydration='outputs-requested'."
                         ),
@@ -459,14 +615,23 @@ class RunTraceCoordinator:
                 parent_run_id=parent_run_id,
                 tags=tags,
             )
-            if output_paths is not None:
+            cached_specs = (
+                declared_output_specs
+                if declared_output_specs is not None
+                else (
+                    normalize_declared_outputs_mapping(output_paths)
+                    if output_paths is not None
+                    else None
+                )
+            )
+            if cached_specs is not None:
                 materialize_cached_output_paths = {
                     str(output_key): self._helpers.resolve_output_path(
                         tracker,
-                        _output_spec_path(ref),
+                        spec.raw_value,
                         output_base_dir,
                     )
-                    for output_key, ref in output_paths.items()
+                    for output_key, spec in cached_specs.items()
                 }
             if output_sets is not None:
                 materialize_cached_output_set_roots = {
@@ -520,7 +685,7 @@ class RunTraceCoordinator:
         phase: Optional[str],
         stage: Optional[str],
         parent_run_id: Optional[str],
-        outputs: Optional[List[str]],
+        outputs: Optional[Union[Sequence[str], Mapping[str, OutputPathRef]]],
         output_paths: Optional[Mapping[str, OutputPathRef]],
         output_sets: Optional[Mapping[str, OutputSet]],
         profile_file_schema: bool | Literal["if_changed"] | None,
@@ -612,7 +777,23 @@ class RunTraceCoordinator:
 
         cache_hydration = invocation.cache_hydration
         if cache_hydration is None and input_binding != "none":
-            cache_hydration = "inputs-missing"
+            needs_pre_step_hydration = invocation.requested_input_binding in {
+                "paths",
+                "loaded",
+            }
+            if not needs_pre_step_hydration and fn is not None:
+                declared_out_keys = set(invocation.declared_output_specs or ()) | set(
+                    invocation.output_paths or ()
+                )
+                param_kinds = infer_parameter_binding_kinds(fn)
+                needs_pre_step_hydration = any(
+                    kind in {"path", "loaded"}
+                    and param_name not in declared_out_keys
+                    and (not isinstance(inputs, Mapping) or param_name in inputs)
+                    for param_name, kind in param_kinds.items()
+                )
+            if needs_pre_step_hydration:
+                cache_hydration = "inputs-missing"
 
         if (
             invocation.input_keys is not None
@@ -684,6 +865,7 @@ class RunTraceCoordinator:
             validate_cached_outputs=invocation.validate_cached_outputs,
             output_paths=invocation.output_paths,
             output_sets=invocation.output_sets,
+            declared_output_specs=invocation.declared_output_specs,
             run_id=run_id,
             model=invocation.model,
             description=invocation.description,
@@ -773,6 +955,8 @@ class RunTraceCoordinator:
             requested_input_artifact_ids=requested_input_artifact_ids,
             run_id=run_id,
             start_kwargs=start_kwargs,
+            declared_output_specs=invocation.declared_output_specs,
+            requested_input_binding=invocation.requested_input_binding,
         )
 
     @staticmethod
@@ -1027,56 +1211,95 @@ class RunTraceCoordinator:
         if updated_any:
             tracker._flush_json()
 
-    def _log_declared_output_paths(
+    def _log_declared_output_specs(
         self,
         *,
         tracker: "Tracker",
         resolved_name: str,
-        output_paths: Optional[Mapping[str, OutputPathRef]],
+        declared_output_specs: Optional[Mapping[str, DeclaredOutputSpec]] = None,
+        output_paths: Optional[Mapping[str, OutputPathRef]] = None,
         output_base_dir: Path,
         profile_file_schema: bool | Literal["if_changed"] | None,
+        output_missing: Literal["warn", "error", "ignore"] = "warn",
         on_missing_outputs: Callable[[str, List[str]], None],
     ) -> Dict[str, Artifact]:
         outputs_map: Dict[str, Artifact] = {}
-        if output_paths is None:
+        if not declared_output_specs and not output_paths:
+            return outputs_map
+        if declared_output_specs and tracker.is_cached:
             return outputs_map
 
-        with tracker.persistence.batch_artifact_writes():
+        # Unify legacy output_paths={k: ref} and outputs={k: path_or_spec} into one loop.
+        entries: list[
+            tuple[str, ArtifactRef, Optional[OutputArtifactSpec], bool, bool]
+        ] = []
+        if declared_output_specs:
+            for role, spec in declared_output_specs.items():
+                entries.append(
+                    (role, spec.raw_value, spec.artifact_spec, spec.is_dir, True)
+                )
+        if output_paths:
             for output_key, ref in output_paths.items():
-                output_ref = _output_spec_path(ref)
+                artifact_spec = ref if isinstance(ref, OutputArtifactSpec) else None
+                entries.append(
+                    (
+                        str(output_key),
+                        _output_spec_path(ref),
+                        artifact_spec,
+                        False,
+                        False,
+                    )
+                )
+
+        with tracker.persistence.batch_artifact_writes():
+            for role, raw_ref, artifact_spec, is_dir, strict_missing_error in entries:
                 ref_path = self._helpers.resolve_output_path(
-                    tracker, output_ref, output_base_dir
+                    tracker, raw_ref, output_base_dir
                 )
                 if not ref_path.exists():
                     if (
                         tracker.is_cached
                         and tracker.current_consist is not None
                         and any(
-                            art.key == output_key
-                            for art in tracker.current_consist.outputs
+                            art.key == role for art in tracker.current_consist.outputs
                         )
                     ):
                         continue
-                    on_missing_outputs(f"Run {resolved_name!r}", [str(output_key)])
+                    if strict_missing_error:
+                        if output_missing == "error":
+                            raise MissingOutputError(role=role, path=ref_path)
+                        if output_missing == "warn":
+                            logging.warning(
+                                "[Consist] Run %r missing output %r at %s",
+                                resolved_name,
+                                role,
+                                ref_path,
+                            )
+                    else:
+                        on_missing_outputs(f"Run {resolved_name!r}", [role])
                     continue
+
+                spec_or_ref: OutputPathRef = (
+                    artifact_spec if artifact_spec is not None else raw_ref
+                )
                 log_kwargs = _output_spec_log_kwargs(
-                    ref,
+                    spec_or_ref,
                     default_profile_file_schema=profile_file_schema,
                 )
+                if strict_missing_error and (is_dir or ref_path.is_dir()):
+                    log_kwargs["directory_artifact"] = True
                 if (
                     tracker.current_consist is not None
                     and not tracker.is_cached
-                    and output_key in tracker.current_consist._pending_output_meta
+                    and role in tracker.current_consist._pending_output_meta
                 ):
-                    pending_entry = tracker.current_consist._pending_output_meta[
-                        output_key
-                    ]
+                    pending_entry = tracker.current_consist._pending_output_meta[role]
                     if (
                         not pending_entry.merge
-                        and isinstance(ref, OutputArtifactSpec)
-                        and ref.meta
+                        and artifact_spec is not None
+                        and artifact_spec.meta
                     ):
-                        for meta_key in ref.meta.keys():
+                        for meta_key in artifact_spec.meta.keys():
                             if meta_key not in (
                                 "directory_artifact",
                                 "directory_allow_extra_files",
@@ -1090,17 +1313,17 @@ class RunTraceCoordinator:
                             pending_entry.meta[dir_flag], bool
                         ):
                             log_kwargs[dir_flag] = pending_entry.meta[dir_flag]
-                if isinstance(output_ref, Artifact):
-                    outputs_map[output_key] = tracker.log_artifact(
-                        output_ref,
-                        key=output_key,
+                if isinstance(raw_ref, Artifact):
+                    outputs_map[role] = tracker.log_artifact(
+                        raw_ref,
+                        key=role,
                         direction="output",
                         **log_kwargs,
                     )
                 else:
-                    outputs_map[output_key] = tracker.log_artifact(
+                    outputs_map[role] = tracker.log_artifact(
                         ref_path,
-                        key=output_key,
+                        key=role,
                         direction="output",
                         **log_kwargs,
                     )
@@ -1116,6 +1339,8 @@ class RunTraceCoordinator:
         outputs: Optional[List[str]],
         output_paths: Optional[Mapping[str, OutputPathRef]],
         output_sets: Optional[Mapping[str, OutputSet]],
+        declared_output_specs: Optional[Mapping[str, DeclaredOutputSpec]] = None,
+        output_missing: Literal["warn", "error", "ignore"] = "warn",
         profile_file_schema: bool | Literal["if_changed"] | None,
         result: Any,
         captured_outputs: Mapping[str, Artifact],
@@ -1123,12 +1348,14 @@ class RunTraceCoordinator:
         on_output_mismatch: Callable[[str], bool],
     ) -> Dict[str, Artifact]:
         output_base_dir = tracker.run_artifact_dir()
-        outputs_map = self._log_declared_output_paths(
+        outputs_map = self._log_declared_output_specs(
             tracker=tracker,
             resolved_name=resolved_name,
+            declared_output_specs=declared_output_specs,
             output_paths=output_paths,
             output_base_dir=output_base_dir,
             profile_file_schema=profile_file_schema,
+            output_missing=output_missing,
             on_missing_outputs=on_missing_outputs,
         )
 
@@ -1427,8 +1654,11 @@ class RunTraceCoordinator:
         runtime_kwargs_dict: Optional[Mapping[str, Any]],
         inject_context: Optional[Union[bool, str]],
         input_binding: InputBindingMode,
+        requested_input_binding: Optional[InputBindingMode] = None,
         input_artifacts_by_key: Dict[str, Artifact],
         requested_input_paths: Optional[Mapping[str, Path]],
+        declared_output_specs: Optional[Mapping[str, DeclaredOutputSpec]] = None,
+        output_paths: Optional[Mapping[str, OutputPathRef]] = None,
         capture_dir: Optional[Path],
         capture_pattern: str,
         canonicalization: Optional["CanonicalizationSnapshot"] = None,
@@ -1523,7 +1753,31 @@ class RunTraceCoordinator:
         has_var_kw = any(
             p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
         )
+        param_binding_kinds = infer_parameter_binding_kinds(fn_callable)
         call_kwargs: Dict[str, Any] = {}
+
+        declared_target_paths: Dict[str, Path] = {}
+        if declared_output_specs:
+            output_base_dir = tracker.run_artifact_dir()
+            declared_target_paths = prepare_declared_output_targets(
+                declared_output_specs,
+                default_base_dir=output_base_dir,
+                resolve_path_fn=lambda raw_ref: self._helpers.resolve_output_path(
+                    tracker, raw_ref, output_base_dir
+                ),
+            )
+        elif output_paths:
+            output_base_dir = tracker.run_artifact_dir()
+            legacy_specs = normalize_declared_outputs_mapping(output_paths)
+            for role, spec in legacy_specs.items():
+                if role in params or has_var_kw:
+                    target = resolve_declared_output_target_path(
+                        spec,
+                        default_base_dir=output_base_dir,
+                        resolve_uri_fn=tracker.resolve_uri,
+                    )
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    declared_target_paths[role] = target
 
         if "config" in params and "config" not in runtime_kwargs and config is not None:
             call_kwargs["config"] = (
@@ -1552,15 +1806,33 @@ class RunTraceCoordinator:
                     if artifact.resolver is None:
                         artifact = artifact.with_resolver(tracker)
                         input_artifacts_by_key[param_name] = artifact
-                    if input_binding == "paths":
+                    explicit_param_kind = param_binding_kinds.get(param_name)
+                    if explicit_param_kind is not None:
+                        effective_kind = explicit_param_kind
+                    elif requested_input_binding == "paths":
+                        effective_kind = "path"
+                    elif requested_input_binding == "loaded":
+                        effective_kind = "loaded"
+                    else:
+                        effective_kind = "artifact"
+
+                    if effective_kind == "path":
                         if (
                             requested_input_paths
                             and param_name in requested_input_paths
                         ):
-                            artifact_path = Path(requested_input_paths[param_name])
+                            artifact_path: Optional[Path] = Path(
+                                requested_input_paths[param_name]
+                            )
                         else:
-                            artifact_path = artifact.path
-                        if not artifact_path.exists():
+                            artifact_path = resolve_verified_local_path(
+                                tracker, artifact
+                            )
+                            if artifact_path is None:
+                                fallback_path = artifact.path
+                                if fallback_path.exists():
+                                    artifact_path = fallback_path
+                        if artifact_path is None or not artifact_path.exists():
                             raise ValueError(
                                 format_problem_cause_fix(
                                     problem=(
@@ -1579,20 +1851,37 @@ class RunTraceCoordinator:
                                 )
                             )
                         call_kwargs[param_name] = artifact_path
-                    else:
+                    elif effective_kind == "loaded":
                         if artifact.driver in DriverType.tabular_drivers():
                             from consist.api import load_df
 
-                            call_kwargs[param_name] = load_df(artifact, tracker=tracker)
+                            loaded_val: Any = load_df(artifact, tracker=tracker)
                         else:
-                            call_kwargs[param_name] = tracker.load(artifact)
+                            loaded_val = tracker.load(artifact)
+                        if is_pyarrow_table_annotation(
+                            fn_callable, param_name
+                        ) and isinstance(loaded_val, pd.DataFrame):
+                            import pyarrow as pa
+
+                            loaded_val = pa.Table.from_pandas(loaded_val)
+                        call_kwargs[param_name] = loaded_val
+                    else:
+                        call_kwargs[param_name] = artifact
                     continue
+            if param_name in declared_target_paths:
+                call_kwargs[param_name] = declared_target_paths[param_name]
+                continue
             if param_name in config_dict:
                 call_kwargs[param_name] = config_dict[param_name]
 
         for runtime_key, runtime_value in runtime_kwargs.items():
             if runtime_key not in call_kwargs:
                 call_kwargs[runtime_key] = runtime_value
+
+        if has_var_kw and declared_target_paths:
+            for role, target_path in declared_target_paths.items():
+                if role not in call_kwargs:
+                    call_kwargs[role] = target_path
 
         if inject_context:
             ctx_name = (
@@ -1630,6 +1919,16 @@ class RunTraceCoordinator:
                 f"Tracker.run could not bind arguments for {resolved_name!r}: {exc}"
             ) from exc
 
+        pre_step_snapshots = (
+            _snapshot_pre_step_outputs(
+                declared_target_paths,
+                declared_output_specs,
+                skip_pre_hash=tracker.is_ephemeral,
+            )
+            if declared_target_paths and declared_output_specs
+            else {}
+        )
+
         captured_outputs: Dict[str, Artifact] = {}
         if capture_dir is not None:
             with active_tracker.capture_outputs(
@@ -1644,6 +1943,16 @@ class RunTraceCoordinator:
             captured_outputs = {a.key: a for a in cap.artifacts}
         else:
             result = fn_callable(**call_kwargs)
+            if declared_output_specs is not None and result is not None:
+                raise ValueError(
+                    f"Run {resolved_name!r} declared outputs={{role: path}} mapping and must return None, "
+                    f"got {type(result).__name__}."
+                )
+
+        if pre_step_snapshots and declared_output_specs:
+            _verify_outputs_not_stale(
+                pre_step_snapshots, declared_target_paths, declared_output_specs
+            )
 
         return result, captured_outputs
 
@@ -1676,7 +1985,7 @@ class RunTraceCoordinator:
         phase: Optional[str] = None,
         stage: Optional[str] = None,
         parent_run_id: Optional[str] = None,
-        outputs: Optional[List[str]] = None,
+        outputs: Optional[Union[Sequence[str], Mapping[str, OutputPathRef]]] = None,
         output_paths: Optional[Mapping[str, OutputPathRef]] = None,
         output_sets: Optional[Mapping[str, OutputSet]] = None,
         profile_file_schema: bool | Literal["if_changed"] | None = None,
@@ -1923,8 +2232,11 @@ class RunTraceCoordinator:
                         inject_context=inject_context,
                         canonicalization=canonicalization,
                         input_binding=input_binding,
+                        requested_input_binding=context.requested_input_binding,
                         input_artifacts_by_key=input_artifacts_by_key,
                         requested_input_paths=requested_input_paths,
+                        declared_output_specs=context.declared_output_specs,
+                        output_paths=output_paths,
                         capture_dir=capture_dir,
                         capture_pattern=capture_pattern,
                     )
@@ -1934,9 +2246,11 @@ class RunTraceCoordinator:
                         current_consist=current_consist,
                         fn=fn,
                         resolved_name=resolved_name,
-                        outputs=outputs,
+                        outputs=context.outputs,
                         output_paths=output_paths,
                         output_sets=output_sets,
+                        declared_output_specs=context.declared_output_specs,
+                        output_missing=output_missing,
                         profile_file_schema=context.profile_file_schema,
                         result=result,
                         captured_outputs=captured_outputs,
@@ -1989,7 +2303,7 @@ class RunTraceCoordinator:
         year: Optional[int] = None,
         iteration: Optional[int] = None,
         parent_run_id: Optional[str] = None,
-        outputs: Optional[List[str]] = None,
+        outputs: Optional[Union[Sequence[str], Mapping[str, OutputPathRef]]] = None,
         output_paths: Optional[Mapping[str, OutputPathRef]] = None,
         capture_dir: Optional[Path] = None,
         capture_pattern: str = "*",
@@ -2188,6 +2502,7 @@ class RunTraceCoordinator:
             cache_hydration=cache_hydration,
             output_paths=resolved_invocation.output_paths,
             output_sets=resolved_invocation.output_sets,
+            declared_output_specs=resolved_invocation.declared_output_specs,
             run_id=run_id,
             model=resolved_invocation.model,
             description=resolved_invocation.description,
@@ -2264,16 +2579,21 @@ class RunTraceCoordinator:
                 else:
                     yield active_tracker
             finally:
-                self._log_declared_output_paths(
+                self._log_declared_output_specs(
                     tracker=tracker,
                     resolved_name=resolved_name,
+                    declared_output_specs=resolved_invocation.declared_output_specs,
                     output_paths=resolved_invocation.output_paths,
                     output_base_dir=output_base_dir,
                     profile_file_schema=None,
+                    output_missing=output_missing,
                     on_missing_outputs=_handle_missing_outputs,
                 )
 
-                if resolved_invocation.outputs:
+                if (
+                    resolved_invocation.outputs
+                    and not resolved_invocation.declared_output_specs
+                ):
                     logged_outputs = {
                         artifact.key: artifact for artifact in current_consist.outputs
                     }

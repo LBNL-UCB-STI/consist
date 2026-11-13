@@ -85,7 +85,7 @@ implementation work inside Consist itself.
 - Do not hide true dependencies in `runtime_kwargs`, globals, or undeclared
   filesystem reads.
 - Do not debug cached-output problems without checking `cache_hydration`,
-  `cache_hydration_failure`, `output_paths`, `validate_cached_outputs`, and the
+  `cache_hydration_failure`, `outputs`, `validate_cached_outputs`, and the
   artifact URI.
 - Treat `cache_hydration_failure="miss"` as an opt-in all-or-miss policy for
   `cache_hydration="outputs-requested"`; it does not choose a recovery source

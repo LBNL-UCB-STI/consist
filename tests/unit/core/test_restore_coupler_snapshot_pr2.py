@@ -12,7 +12,6 @@ from consist.core.directory_artifacts import (
     build_directory_manifest,
     build_shapefile_bundle_manifest,
 )
-from consist.core.noop import NoopScenarioContext
 from consist.core.tracker import Tracker
 from consist.core.workflow import RestoredCouplerSnapshotResult
 from consist.models.artifact import Artifact
@@ -67,37 +66,37 @@ def _create_persisted_artifact(
 
 
 def test_default_backward_compatibility_and_noop_parity(tmp_path: Path) -> None:
-    """Verify default backward-compatibility and Noop parity with new kwargs."""
+    """Verify default backward-compatibility and ephemeral scenario parity with new kwargs."""
     db_path = tmp_path / "test.duckdb"
     tracker = Tracker(run_dir=tmp_path / "run", db_path=db_path)
 
-    # 1. NoopScenarioContext parity
-    noop_sc = NoopScenarioContext("noop_test")
-    noop_sc.coupler.set("prior_key", "prior_value")
+    # 1. Ephemeral Tracker scenario parity
+    ephem_tracker = Tracker()
+    with ephem_tracker.scenario("ephemeral_test") as ephem_sc:
+        ephem_sc.coupler.set("prior_key", "prior_value")
 
-    res_noop = noop_sc.restore_coupler_snapshot(
-        target_root=tmp_path / "target",
-        source_root=tmp_path / "source",
-        remappable_schemes={"beam_input": "beam/input"},
-        prune_unrecoverable=True,
-        validate_content_hash="never",
-    )
-    assert isinstance(res_noop, RestoredCouplerSnapshotResult)
-    assert isinstance(res_noop, Mapping)
-    assert res_noop == RestoredCouplerSnapshotResult()
-    assert res_noop != RestoredCouplerSnapshotResult(pruned_keys=("x",))
-    assert dict(res_noop) == {}
-    assert len(res_noop) == 0
-    assert not res_noop
-    # Coupler should retain prior key since clear_existing was False
-    assert "prior_key" in noop_sc.coupler
+        res_ephem = ephem_sc.restore_coupler_snapshot(
+            target_root=tmp_path / "target",
+            source_root=tmp_path / "source",
+            remappable_schemes={"beam_input": "beam/input"},
+            prune_unrecoverable=True,
+            validate_content_hash="never",
+        )
+        assert isinstance(res_ephem, RestoredCouplerSnapshotResult)
+        assert isinstance(res_ephem, Mapping)
+        assert res_ephem == RestoredCouplerSnapshotResult()
+        assert res_ephem != RestoredCouplerSnapshotResult(pruned_keys=("x",))
+        assert dict(res_ephem) == {}
+        assert len(res_ephem) == 0
+        assert not res_ephem
+        # Coupler should retain prior key since clear_existing was False
+        assert "prior_key" in ephem_sc.coupler
 
-    res_noop_clear = noop_sc.restore_coupler_snapshot(
-        clear_existing=True,
-        prune_unrecoverable=True,
-    )
-    assert res_noop_clear == RestoredCouplerSnapshotResult()
-    assert len(noop_sc.coupler) == 0
+        res_ephem_clear = ephem_sc.restore_coupler_snapshot(
+            clear_existing=True,
+            prune_unrecoverable=True,
+        )
+        assert res_ephem_clear == RestoredCouplerSnapshotResult()
 
     # 2. Standard ScenarioContext without target_root or prune_unrecoverable
     data_file = tmp_path / "run" / "data.csv"

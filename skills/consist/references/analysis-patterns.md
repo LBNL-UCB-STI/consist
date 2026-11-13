@@ -23,7 +23,7 @@
   when you need a concrete local dataframe from one known output.
 - Use `RunSet` or `consist.run_set(...)` when the task is run comparison,
   alignment, recency selection, or config diffs.
-- Use `tracker.views.*`, `run_query(...)`, and `pivot_facets(...)` when you need
+- Use `tracker.views.*`, `query_df(...)` / `query_rows(...)`, and `pivot_facets(...)` when you need
   lower-level SQLModel/SQL control or facet-only run summaries.
 
 Terminology: `RunSet` is for selecting and comparing multiple runs.
@@ -173,7 +173,7 @@ query = (
     .group_by(VPerson.consist_scenario_id, VPerson.consist_year)
 )
 
-rows = consist.run_query(query, tracker=tracker)
+rows = consist.query_rows(query, tracker=tracker)
 ```
 
 Use `pivot_facets(...)` when you want a wide, parameter-comparison table from
@@ -209,7 +209,7 @@ Good use cases:
 - `load_df(...)` prefers the original file when it still exists.
 - Use `db_fallback="always"` when the artifact was ingested and the original
   file may have moved or been deleted.
-- Inspect `artifact.container_uri` and use `tracker.resolve_uri(...)` when the
+- Inspect `artifact.uri` and use `tracker.resolve_uri(...)` when the
   stored path no longer matches the current host layout.
 - If artifacts display mounted URIs such as `data://...`, `--trust-db` can
   recover stored mount roots when inspecting the same trusted provenance
