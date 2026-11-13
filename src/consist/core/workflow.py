@@ -2056,8 +2056,14 @@ class ScenarioContext:
         promoted_inputs = self._promote_inputs_for_binding(
             resolved_inputs, resolved_input_binding
         )
+        if binding is not None:
+            effective_input_keys = input_keys
+            effective_optional_input_keys = optional_input_keys
+        else:
+            effective_input_keys = resolved_input_keys
+            effective_optional_input_keys = resolved_optional_input_keys
         resolved_inputs = self._resolve_inputs(
-            promoted_inputs, resolved_input_keys, resolved_optional_input_keys
+            promoted_inputs, effective_input_keys, effective_optional_input_keys
         )
         resolved_output_paths = self._resolve_output_paths(resolved_output_paths)
 

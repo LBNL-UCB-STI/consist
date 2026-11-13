@@ -18,7 +18,7 @@ import warnings
 
 from consist.core.validation import validate_artifact_key
 from consist.location import FileStat
-from consist.models.artifact import Artifact
+from consist.models.artifact import Artifact, resolve_active_or_default_resolver
 from consist.protocols import ArtifactLike
 
 if TYPE_CHECKING:
@@ -479,11 +479,17 @@ class Coupler:
         if artifact is None:
             return None
         if isinstance(artifact, Artifact):
-            if not self.tracker:
+            if self.tracker is not None:
+                return artifact.as_path(self.tracker)
+            if (
+                artifact._abs_path is None
+                and artifact.resolver is None
+                and resolve_active_or_default_resolver() is None
+            ):
                 raise RuntimeError(
                     f"Cannot resolve path for {key!r}: no tracker attached to Coupler."
                 )
-            return Path(self.tracker.resolve_uri(artifact.uri))
+            return artifact.as_path()
         if isinstance(artifact, (Path, str, os.PathLike)):
             raw_str = (
                 os.fspath(artifact) if isinstance(artifact, os.PathLike) else artifact

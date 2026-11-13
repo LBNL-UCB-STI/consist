@@ -194,11 +194,13 @@ def test_declared_outputs_identity_and_config_cleanliness(tmp_path: Path) -> Non
 
 
 def test_output_paths_alias_normalizes_to_outputs(tmp_path: Path) -> None:
-    """output_paths= works as a thin compatibility alias for outputs=."""
+    """Legacy output_paths= logs declared outputs without injecting parameter paths."""
     tracker = Tracker(run_dir=tmp_path / "runs", db_path=tmp_path / "prov.duckdb")
 
-    def writer(out: Path) -> None:
-        out.write_text("via_alias", encoding="utf-8")
+    def writer() -> None:
+        out_path = tracker.run_artifact_dir() / "alias.txt"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text("via_alias", encoding="utf-8")
 
     res = tracker.run(
         fn=writer,

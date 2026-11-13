@@ -32,7 +32,7 @@ FileIdentity = Digest
 
 def admission_file_identity(path: str | Path) -> str:
     """Compute canonical ``sha256:file:<hex>`` admission identity for a file."""
-    return str(Digest("sha256:file", digest_file(path)))
+    return digest_file(path)
 
 
 __all__ = [

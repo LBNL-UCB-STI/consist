@@ -484,7 +484,7 @@ def test_explicit_tracker_load_ignores_artifact_runtime_path(tmp_path: Path) -> 
     source_b.write_text("value\n1\n")
     loaded = cast(Any, consist.load(artifact, tracker=tracker_b, db_fallback="never"))
 
-    assert loaded.fetchone() == (1,)
+    assert loaded.fetchall()[0] == (1,)
 
 
 def test_legacy_shapefile_artifact_cannot_be_archived_or_hydrated(

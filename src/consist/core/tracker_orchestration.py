@@ -51,7 +51,6 @@ from consist.core.run_invocation import (
     is_pyarrow_table_annotation,
     normalize_declared_outputs_mapping,
     prepare_declared_output_targets,
-    resolve_declared_output_target_path,
     resolve_run_invocation,
 )
 from consist.core.tracker_recovery import resolve_verified_local_path
@@ -182,6 +181,7 @@ class RunInvocationContext:
     start_kwargs: Dict[str, Any]
     declared_output_specs: Optional[Dict[str, DeclaredOutputSpec]] = None
     requested_input_binding: Optional[InputBindingMode] = None
+    declared_input_roles: frozenset[str] = frozenset()
 
 
 def _sha256_file(path: Path) -> str:
@@ -918,6 +918,33 @@ class RunTraceCoordinator:
             profile_file_schema=profile_file_schema,
         )
 
+        declared_input_role_set: set[str] = set()
+        for raw_keys in (invocation.input_keys, invocation.optional_input_keys):
+            if isinstance(raw_keys, str):
+                declared_input_role_set.add(raw_keys)
+            elif raw_keys is not None:
+                declared_input_role_set.update(str(k) for k in raw_keys)
+        if isinstance(invocation.inputs, Mapping):
+            declared_input_role_set.update(str(k) for k in invocation.inputs.keys())
+        if fn is not None:
+            from consist.core.decorators import StepDefinition
+
+            try:
+                fn_dict = fn.__dict__
+            except AttributeError:
+                fn_dict = {}
+            step_def = fn_dict.get("__consist_step__")
+            if isinstance(step_def, StepDefinition):
+                for raw_keys in (step_def.input_keys, step_def.optional_input_keys):
+                    if isinstance(raw_keys, str):
+                        declared_input_role_set.add(raw_keys)
+                    elif isinstance(raw_keys, Iterable):
+                        declared_input_role_set.update(str(k) for k in raw_keys)
+                if isinstance(step_def.inputs, Mapping):
+                    declared_input_role_set.update(
+                        str(k) for k in step_def.inputs.keys()
+                    )
+
         return RunInvocationContext(
             resolved_name=resolved_name,
             config=invocation.config,
@@ -950,6 +977,7 @@ class RunTraceCoordinator:
             start_kwargs=start_kwargs,
             declared_output_specs=invocation.declared_output_specs,
             requested_input_binding=invocation.requested_input_binding,
+            declared_input_roles=frozenset(declared_input_role_set),
         )
 
     @staticmethod
@@ -1692,6 +1720,7 @@ class RunTraceCoordinator:
         capture_dir: Optional[Path],
         capture_pattern: str,
         canonicalization: Optional["CanonicalizationSnapshot"] = None,
+        declared_input_roles: frozenset[str] = frozenset(),
     ) -> tuple[Any, Dict[str, Artifact]]:
         """
         Execute one Python callable inside prepared run context.
@@ -1796,18 +1825,6 @@ class RunTraceCoordinator:
                     tracker, raw_ref, output_base_dir
                 ),
             )
-        elif output_paths:
-            output_base_dir = tracker.run_artifact_dir()
-            legacy_specs = normalize_declared_outputs_mapping(output_paths)
-            for role, spec in legacy_specs.items():
-                if role in params or has_var_kw:
-                    target = resolve_declared_output_target_path(
-                        spec,
-                        default_base_dir=output_base_dir,
-                        resolve_uri_fn=tracker.resolve_uri,
-                    )
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    declared_target_paths[role] = target
 
         if "config" in params and "config" not in runtime_kwargs and config is not None:
             call_kwargs["config"] = (
@@ -1898,7 +1915,10 @@ class RunTraceCoordinator:
                     else:
                         call_kwargs[param_name] = artifact
                     continue
-            if param_name in declared_target_paths:
+            if (
+                param_name in declared_target_paths
+                and param_name not in declared_input_roles
+            ):
                 call_kwargs[param_name] = declared_target_paths[param_name]
                 continue
             if param_name in config_dict:
@@ -1910,7 +1930,7 @@ class RunTraceCoordinator:
 
         if has_var_kw and declared_target_paths:
             for role, target_path in declared_target_paths.items():
-                if role not in call_kwargs:
+                if role not in call_kwargs and role not in declared_input_roles:
                     call_kwargs[role] = target_path
 
         if inject_context:
@@ -2269,6 +2289,7 @@ class RunTraceCoordinator:
                         output_paths=output_paths,
                         capture_dir=capture_dir,
                         capture_pattern=capture_pattern,
+                        declared_input_roles=context.declared_input_roles,
                     )
 
                     outputs_map = self._normalize_run_outputs(

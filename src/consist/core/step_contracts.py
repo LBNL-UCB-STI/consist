@@ -2,7 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Union,
+)
 
 from consist.core.metadata_resolver import MetadataResolver
 from consist.core.run_options import merge_run_options
@@ -134,7 +144,7 @@ def resolve_step_contract(
     iteration: Optional[int] = None,
     phase: Optional[str] = None,
     stage: Optional[str] = None,
-    outputs: Optional[List[str]] = None,
+    outputs: Optional[Union[Sequence[str], Mapping[str, OutputPathRef]]] = None,
     output_paths: Optional[Mapping[str, OutputPathRef]] = None,
     output_sets: Optional[Mapping[str, OutputSet]] = None,
     cache_options: Optional[CacheOptions] = None,

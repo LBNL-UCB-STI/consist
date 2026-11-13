@@ -327,3 +327,72 @@ def test_removed_v04_exports_raise_migration_errors(tmp_path: Path) -> None:
         from consist import noop_scenario  # noqa: F401
     with pytest.raises(ImportError, match="db_session"):
         from consist import db_session  # noqa: F401
+
+
+def test_legacy_output_paths_does_not_inject_and_optional_input_not_overwritten_by_output(
+    tmp_path: Path,
+) -> None:
+    """Legacy output_paths= does not inject parameters, and omitted optional inputs are not overwritten by outputs."""
+    from typing import Optional
+
+    tracker = Tracker(run_dir=tmp_path / "runs", db_path=tmp_path / "prov.duckdb")
+
+    seen_legacy: list[Any] = []
+
+    def legacy_step(out: Optional[Path] = None) -> None:
+        seen_legacy.append(out)
+        target = tracker.run_artifact_dir() / "legacy.txt"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("ok", encoding="utf-8")
+
+    tracker.run(fn=legacy_step, name="legacy", output_paths={"out": "legacy.txt"})
+    assert seen_legacy == [None]
+
+    seen_optional: list[Any] = []
+
+    @consist.define_step(
+        optional_input_keys=["data"],
+        outputs={"data": "collision.txt"},
+    )
+    def optional_collision_step(data: Optional[Path] = None) -> None:
+        seen_optional.append(data)
+        target = tracker.run_artifact_dir() / "collision.txt"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("written", encoding="utf-8")
+
+    with tracker.scenario("sc_collision") as sc:
+        sc.run(fn=optional_collision_step)
+    assert seen_optional == [None]
+
+
+def test_scenario_run_binding_result_authoritative_inputs(tmp_path: Path) -> None:
+    """ScenarioContext.run(binding=BindingResult(...)) does not backfill @define_step keys from coupler."""
+    from typing import Optional
+    from consist.core.workflow import BindingResult
+
+    tracker = Tracker(run_dir=tmp_path / "runs", db_path=tmp_path / "prov.duckdb")
+    a_file = tmp_path / "a.txt"
+    b_file = tmp_path / "b.txt"
+    a_file.write_text("a", encoding="utf-8")
+    b_file.write_text("b", encoding="utf-8")
+
+    seen: dict[str, Any] = {}
+
+    @consist.define_step(
+        input_keys=["a"],
+        optional_input_keys=["b"],
+    )
+    def step(a: Path, b: Optional[Path] = None) -> None:
+        seen["a"] = a
+        seen["b"] = b
+
+    with tracker.scenario("sc_binding") as sc:
+        with tracker.start_run("seed", model="seed"):
+            art_a = tracker.log_input(a_file, key="a")
+            art_b = tracker.log_input(b_file, key="b")
+        sc.coupler.set("b", art_b)
+
+        sc.run(fn=step, binding=BindingResult(inputs={"a": art_a}))
+
+    assert seen["a"] == a_file
+    assert seen["b"] is None

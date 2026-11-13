@@ -345,3 +345,30 @@ def test_coupler_path_supports_path_string_and_artifact_like() -> None:
     )()
     coupler.set_from_artifact("as_uri_str", "inputs://table.parquet")
     assert coupler.path("as_uri_str") == Path("/resolved/table.parquet")
+
+
+def test_coupler_path_uses_artifact_as_path_recovery_fallback(tmp_path: Path) -> None:
+    from consist.core.tracker import Tracker
+
+    primary_runs = tmp_path / "primary_runs"
+    recovery_root = tmp_path / "recovery"
+
+    tracker = Tracker(
+        run_dir=primary_runs,
+        db_path=tmp_path / "prov.duckdb",
+    )
+    with tracker.start_run("seed", model="seed"):
+        src = tracker.run_artifact_dir() / "recovered.csv"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_text("v\n1\n", encoding="utf-8")
+        art = tracker.log_output(src, key="recovered")
+
+    archived_path = Path(tracker.archive_artifact(art, recovery_root, mode="copy"))
+    src.unlink()
+    assert not src.exists()
+    assert archived_path.exists()
+
+    coupler = Coupler(tracker=tracker)
+    coupler.set("recovered", art)
+
+    assert coupler.path("recovered") == archived_path
