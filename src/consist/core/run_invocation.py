@@ -8,6 +8,7 @@ both execution paths share the same normalization logic.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import importlib
 import inspect
 import os
 from pathlib import Path, PurePath
@@ -259,7 +260,7 @@ def _optional_loaded_dataset_types() -> tuple[type[Any], ...]:
     types_list: list[type[Any]] = [pd.DataFrame]
     if "geopandas" in sys.modules:
         try:
-            import geopandas as gpd  # type: ignore[import-not-found]  # ty: ignore[unresolved-import]
+            gpd = importlib.import_module("geopandas")
 
             types_list.append(gpd.GeoDataFrame)
         except ImportError:
