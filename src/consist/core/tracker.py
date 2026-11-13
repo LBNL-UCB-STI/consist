@@ -2989,6 +2989,7 @@ class Tracker:
         facet: Optional[FacetLike] = None,
         facet_schema_version: Optional[Union[str, int]] = None,
         facet_index: bool = False,
+        hashing_strategy: Optional[Literal["full", "fast"]] = None,
         **meta: Any,
     ) -> Artifact:
         """
@@ -3014,6 +3015,7 @@ class Tracker:
             facet=facet,
             facet_schema_version=facet_schema_version,
             facet_index=facet_index,
+            hashing_strategy=hashing_strategy,
             **meta,
         )
 

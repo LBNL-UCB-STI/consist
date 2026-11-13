@@ -444,6 +444,36 @@ def _known_admission_identity(artifact: Artifact) -> Digest | None:
     meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
     digest = artifact.digest
 
+    raw_explicit = meta.get("admission_identity") or meta.get("admission_file_identity")
+    if isinstance(raw_explicit, (str, Digest)):
+        candidate_raw: str | Digest = raw_explicit
+        if isinstance(raw_explicit, str):
+            stripped = raw_explicit.strip()
+            if stripped.startswith("sha256:manifest-v1:"):
+                candidate_raw = "dir_manifest_v1:sha256:" + stripped.removeprefix(
+                    "sha256:manifest-v1:"
+                )
+        raw_profile = meta.get("logical_profile")
+        logical_profile: LogicalProfileName = (
+            raw_profile
+            if raw_profile in ("preserve_canonical", "float32_matrices_v1")
+            else "preserve_canonical"
+        )
+        try:
+            return _parse_admission_digest(
+                candidate_raw, logical_profile=logical_profile
+            )
+        except (ValueError, TypeError):
+            pass
+
+    if meta.get("directory_artifact") is True:
+        manifest = meta.get("directory_manifest")
+        if isinstance(manifest, Mapping):
+            tree_hash = manifest.get("tree_hash")
+            if isinstance(tree_hash, str) and _SHA256_HEX.fullmatch(tree_hash):
+                if digest is None or digest.hex == tree_hash:
+                    return Digest("dir_manifest_v1:sha256", tree_hash)
+
     semantics = meta.get("hash_semantics")
     if isinstance(semantics, Mapping):
         sem_source = semantics.get("source")
@@ -466,12 +496,6 @@ def _known_admission_identity(artifact: Artifact) -> Digest | None:
             return None
 
     if meta.get("directory_artifact") is True:
-        manifest = meta.get("directory_manifest")
-        if isinstance(manifest, Mapping):
-            tree_hash = manifest.get("tree_hash")
-            if isinstance(tree_hash, str) and _SHA256_HEX.fullmatch(tree_hash):
-                if digest is None or digest.hex == tree_hash:
-                    return Digest("dir_manifest_v1:sha256", tree_hash)
         if digest is not None and digest.scheme == "dir_manifest_v1:sha256":
             return digest
         return None

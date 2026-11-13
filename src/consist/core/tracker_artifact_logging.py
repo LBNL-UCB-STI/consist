@@ -167,6 +167,7 @@ class ArtifactLoggingCoordinator:
         known_latest_artifact_at_uri: Optional[Artifact] = None,
         latest_artifact_lookup_done: bool = False,
         link_role: Optional[str] = None,
+        hashing_strategy: Optional[Literal["full", "fast"]] = None,
         **meta: Any,
     ) -> Artifact:
         """Log one artifact while preserving tracker run-state invariants."""
@@ -296,6 +297,7 @@ class ArtifactLoggingCoordinator:
                 known_latest_artifact_at_uri=known_latest_artifact_at_uri,
                 latest_artifact_lookup_done=latest_artifact_lookup_done,
                 strict_schema=strict_schema,
+                hashing_strategy=hashing_strategy,
                 **meta,
             )
         with _track_begin_run_phase("input_binding.prepare_facet"):

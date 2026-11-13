@@ -333,6 +333,7 @@ def _output_spec_log_kwargs(
             else ref.profile_file_schema
         ),
         "file_schema_sample_rows": ref.file_schema_sample_rows,
+        "hashing_strategy": ref.hashing_strategy,
     }
     if ref.meta is not None:
         kwargs.update(dict(ref.meta))
@@ -1336,6 +1337,12 @@ class RunTraceCoordinator:
                             pending_entry.meta[dir_flag], bool
                         ):
                             log_kwargs[dir_flag] = pending_entry.meta[dir_flag]
+                    if "hashing_strategy" in pending_entry.meta and pending_entry.meta[
+                        "hashing_strategy"
+                    ] in ("full", "fast"):
+                        log_kwargs["hashing_strategy"] = pending_entry.meta[
+                            "hashing_strategy"
+                        ]
                 if isinstance(raw_ref, Artifact):
                     outputs_map[role] = tracker.log_artifact(
                         raw_ref,

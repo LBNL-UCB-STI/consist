@@ -243,7 +243,7 @@ tracker and workflow surfaces. See [GTFS Support](../integrations/gtfs.md).
 ### Execution contracts and options
 
 - `consist.ArtifactSpec` / `consist.OutputArtifactSpec` (rich declared-output
-  metadata for `Tracker.run(output_paths=...)`, including `OutputArtifactSpec.for_directory(...)` and `allow_extra_files=True`)
+  metadata for `Tracker.run(output_paths=...)` / `outputs={role: spec}`, including `OutputArtifactSpec.for_directory(...)`, `allow_extra_files=True`, and per-output `hashing_strategy="full" | "fast"`)
 - `consist.FilenamePattern`, `consist.IntCapture`, `consist.EnumCapture`, and `consist.StringCapture`
   (capture-aware output-set declarations for `OutputSet(include=...)`)
 - `consist.CacheOptions`, `consist.OutputPolicyOptions`, `consist.ExecutionOptions`, `consist.RunCompletionArchivePolicy`

@@ -1184,3 +1184,177 @@ def test_declared_digest_report_rejects_direction_and_source_db() -> None:
             expected_source="declared_digest",
             source_tracker_db="/path/to/db.duckdb",
         )
+
+
+def test_cross_tracker_fast_producer_with_explicit_admission_identity_metadata(
+    tmp_path: Path,
+) -> None:
+    """Fast-hashed artifacts with explicit admission metadata verify cross-tracker."""
+    producer_db = tmp_path / "fast_producer.duckdb"
+    consumer_db = tmp_path / "consumer.duckdb"
+    producer_out = tmp_path / "skim.bin"
+    producer_out.write_bytes(b"beam-skim-payload")
+    bad_out = tmp_path / "skim_bad.bin"
+    bad_out.write_bytes(b"beam-skim-bad")
+    expected_digest = consist.digest_file(producer_out)
+
+    with Tracker(
+        run_dir=tmp_path / "prod_runs",
+        db_path=str(producer_db),
+        hashing_strategy="fast",
+    ) as producer:
+        with producer.start_run("fast-prod-1", model="beam"):
+            art_file_id = producer.log_artifact(
+                producer_out,
+                key="skim_file_id",
+                direction="output",
+                admission_file_identity=str(expected_digest),
+            )
+            art_generic_id = producer.log_artifact(
+                producer_out,
+                key="skim_generic_id",
+                direction="output",
+                admission_identity=str(expected_digest),
+            )
+            art_malformed = producer.log_artifact(
+                bad_out,
+                key="skim_malformed",
+                direction="output",
+                admission_file_identity="not-a-digest",
+            )
+            assert art_file_id.digest is not None
+            assert art_file_id.digest.scheme == "stat_file_v1:sha256"
+            assert art_generic_id.digest is not None
+            assert art_malformed.digest is not None
+
+    candidate = tmp_path / "consumer_skim.bin"
+    candidate.write_bytes(b"beam-skim-payload")
+    tampered = tmp_path / "tampered_skim.bin"
+    tampered.write_bytes(b"tampered-payload")
+
+    with Tracker(run_dir=tmp_path / "cons_runs", db_path=str(consumer_db)) as consumer:
+        for key in ("skim_file_id", "skim_generic_id"):
+            verified = check_admission_reference_prior_run_expectation(
+                consumer,
+                reference=AdmissionReference(
+                    artifact_key=key, execution_path=candidate
+                ),
+                expectation=PriorRunExpectation(
+                    expected_run_id="fast-prod-1",
+                    artifact_key=key,
+                    expected_direction="output",
+                    source_tracker_db=producer_db,
+                ),
+            )
+            assert verified.outcome == "verified"
+            assert verified.expected_artifact_id == str(expected_digest)
+
+            mismatched = check_admission_reference_prior_run_expectation(
+                consumer,
+                reference=AdmissionReference(artifact_key=key, execution_path=tampered),
+                expectation=PriorRunExpectation(
+                    expected_run_id="fast-prod-1",
+                    artifact_key=key,
+                    expected_direction="output",
+                    source_tracker_db=producer_db,
+                ),
+            )
+            assert mismatched.outcome == "mismatched"
+
+        unverified = check_admission_reference_prior_run_expectation(
+            consumer,
+            reference=AdmissionReference(
+                artifact_key="skim_malformed", execution_path=bad_out
+            ),
+            expectation=PriorRunExpectation(
+                expected_run_id="fast-prod-1",
+                artifact_key="skim_malformed",
+                expected_direction="output",
+                source_tracker_db=producer_db,
+            ),
+        )
+        assert unverified.outcome == "unverified"
+        assert "expected_artifact_unverifiable" in unverified.observations
+
+
+def test_output_artifact_spec_per_output_hashing_strategy_full_and_fast(
+    tmp_path: Path,
+) -> None:
+    """OutputArtifactSpec.hashing_strategy overrides tracker-level hashing strategy."""
+    from consist.types import OutputArtifactSpec
+
+    with pytest.raises(ValueError, match="hashing_strategy must be 'full' or 'fast'"):
+        OutputArtifactSpec(path=tmp_path / "bad.txt", hashing_strategy="bogus")  # type: ignore[arg-type]
+
+    fast_db = tmp_path / "fast_tracker.duckdb"
+    handoff_path = tmp_path / "handoff.bin"
+
+    def _write_handoff() -> None:
+        handoff_path.write_bytes(b"cross-run-handoff-bytes")
+
+    with Tracker(
+        run_dir=tmp_path / "fast_runs",
+        db_path=str(fast_db),
+        hashing_strategy="fast",
+    ) as fast_tracker:
+        result = fast_tracker.run(
+            fn=_write_handoff,
+            name="produce_handoff",
+            run_id="fast-full-output-1",
+            outputs={
+                "handoff": OutputArtifactSpec(
+                    path=handoff_path,
+                    hashing_strategy="full",
+                )
+            },
+        )
+        handoff_art = result.outputs["handoff"]
+        assert handoff_art.digest is not None
+        assert handoff_art.digest.scheme == "sha256:file"
+        assert handoff_art.meta["hash_semantics"]["source"] == "computed_full"
+        assert consist.trusted_digest_from_artifact(handoff_art) == handoff_art.digest
+
+    with Tracker(
+        run_dir=tmp_path / "cons_runs",
+        db_path=str(tmp_path / "cons.duckdb"),
+    ) as consumer:
+        report = check_admission_reference_prior_run_expectation(
+            consumer,
+            reference=AdmissionReference(
+                artifact_key="handoff", execution_path=handoff_path
+            ),
+            expectation=PriorRunExpectation(
+                expected_run_id="fast-full-output-1",
+                artifact_key="handoff",
+                expected_direction="output",
+                source_tracker_db=fast_db,
+            ),
+        )
+        assert report.outcome == "verified"
+
+    full_db = tmp_path / "full_tracker.duckdb"
+    large_path = tmp_path / "large.bin"
+
+    def _write_large() -> None:
+        large_path.write_bytes(b"large-intermediate-bytes")
+
+    with Tracker(
+        run_dir=tmp_path / "full_runs",
+        db_path=str(full_db),
+        hashing_strategy="full",
+    ) as full_tracker:
+        result_fast = full_tracker.run(
+            fn=_write_large,
+            name="produce_fast",
+            run_id="full-fast-output-1",
+            outputs={
+                "fast_out": OutputArtifactSpec(
+                    path=large_path,
+                    hashing_strategy="fast",
+                )
+            },
+        )
+        fast_art = result_fast.outputs["fast_out"]
+        assert fast_art.digest is not None
+        assert fast_art.digest.scheme == "stat_file_v1:sha256"
+        assert fast_art.meta["hash_semantics"]["source"] == "computed_fast"

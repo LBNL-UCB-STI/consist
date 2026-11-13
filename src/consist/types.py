@@ -285,15 +285,26 @@ class OutputArtifactSpec(metaclass=_NormalizedFrozenMeta):
     meta: Mapping[str, Any] | None = None
     directory: bool = False
     allow_extra_files: bool = False
+    hashing_strategy: Literal["full", "fast"] | None = None
 
     @classmethod
     def _normalize_fields(cls, kwargs: dict[str, Any]) -> dict[str, Any]:
         directory = kwargs.get("directory", False)
         allow_extra_files = kwargs.get("allow_extra_files", False)
+        hashing_strategy = kwargs.get("hashing_strategy")
         if not isinstance(directory, bool):
             raise TypeError("OutputArtifactSpec.directory must be a bool.")
         if not isinstance(allow_extra_files, bool):
             raise TypeError("OutputArtifactSpec.allow_extra_files must be a bool.")
+        if hashing_strategy is not None:
+            if not isinstance(hashing_strategy, str):
+                raise TypeError(
+                    "OutputArtifactSpec.hashing_strategy must be 'full', 'fast', or None."
+                )
+            if hashing_strategy not in ("full", "fast"):
+                raise ValueError(
+                    f"OutputArtifactSpec.hashing_strategy must be 'full' or 'fast', got {hashing_strategy!r}."
+                )
 
         raw_meta = kwargs.get("meta")
         merged_meta: dict[str, Any] = dict(raw_meta) if raw_meta is not None else {}
