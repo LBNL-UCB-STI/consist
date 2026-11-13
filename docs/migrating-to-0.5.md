@@ -144,6 +144,12 @@ facet_df = tracker.query_df(q.sql, q.params)
 - **Ephemeral Mode (`Tracker()` with `db_path=None, run_dir=None`)** replaces `NoopTracker`: it creates no directories, writes no database or `consist.json`, and uses lightweight file-stat fingerprints with sub-millisecond overhead.
 - **JSON-Only Mode (`Tracker(run_dir=..., db_path=None)`)** writes full SHA-256 digests and `consist.json` snapshots without opening DuckDB, so distributed workers can later be reconstructed into a central database via `tracker.rebuild_from_json()`.
 
+### Practical 0.5 Ergonomics & Gotchas
+
+- **JSON-serializing nested `Artifact.meta`:** `Artifact.meta` is deep-frozen into `MappingProxyType` and `FrozenList`, so a shallow `dict(artifact.meta)` leaves nested mappings as `MappingProxyType` (which `json.dumps(...)` rejects). Use `artifact.meta_dict()`, `artifact.to_json_dict()["meta"]`, or `consist.digest.normalize_json(artifact.meta)` for a plain JSON-serializable `dict`.
+- **In-process DuckDB `read_only=True` conflicts:** DuckDB raises a configuration error if a read-write `Tracker` and a separate `duckdb.connect(db_path, read_only=True)` connection open the same file in the same process. Use `Tracker(..., access_mode="read_only")` (which coordinates live connections via `lookup_live_db_by_path`), or close the writer first with `tracker.close()` / `with Tracker(...) as tracker:`.
+- **`archive_run_outputs` with external outputs:** Artifacts written outside `Tracker.run_dir` must be backed by configured `mounts={...}` on the `Tracker` so `archive_run_outputs(...)` can resolve their mounted URIs and recreate relative paths under `archive_root`.
+
 ---
 
 ## 4. Multi-Environment Safety

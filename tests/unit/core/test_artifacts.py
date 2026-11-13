@@ -1036,3 +1036,36 @@ def test_artifact_tracker_property_and_ensure_local_path(
         )
         is None
     )
+
+
+def test_artifact_meta_dict_returns_deep_unfrozen_json_serializable_copy() -> None:
+    import json
+
+    art = Artifact(
+        key="nested_meta",
+        uri="workspace://nested.parquet",
+        driver="parquet",
+        meta={
+            "nested": {"a": 1, "items": [{"b": 2}, (3, 4)]},
+            "tags": ["x", "y"],
+        },
+    )
+
+    unfrozen = art.meta_dict()
+    assert isinstance(unfrozen, dict)
+    assert isinstance(unfrozen["nested"], dict)
+    assert isinstance(unfrozen["nested"]["items"], list)
+    assert isinstance(unfrozen["nested"]["items"][0], dict)
+    assert isinstance(unfrozen["nested"]["items"][1], list)
+    assert isinstance(unfrozen["tags"], list)
+
+    dumped = json.dumps(unfrozen)
+    assert json.loads(dumped) == {
+        "nested": {"a": 1, "items": [{"b": 2}, [3, 4]]},
+        "tags": ["x", "y"],
+    }
+
+    unfrozen["nested"]["a"] = 999
+    unfrozen["tags"].append("z")
+    assert art.meta["nested"]["a"] == 1
+    assert list(art.meta["tags"]) == ["x", "y"]

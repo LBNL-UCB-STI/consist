@@ -372,3 +372,27 @@ def test_coupler_path_uses_artifact_as_path_recovery_fallback(tmp_path: Path) ->
     coupler.set("recovered", art)
 
     assert coupler.path("recovered") == archived_path
+
+
+def test_coupler_mutable_mapping_protocol_delitem_and_to_dict() -> None:
+    from collections.abc import Mapping, MutableMapping
+
+    coupler = Coupler()
+    assert isinstance(coupler, Mapping)
+    assert isinstance(coupler, MutableMapping)
+
+    art_a = _artifact(key="a", uri="workspace://a.csv")
+    art_b = _artifact(key="b", uri="workspace://b.csv")
+    coupler["a"] = art_a
+    coupler["b"] = art_b
+
+    assert dict(coupler) == {"a": art_a, "b": art_b}
+    assert coupler.to_dict() == {"a": art_a, "b": art_b}
+    assert coupler.get("missing", art_a) is art_a
+
+    del coupler["a"]
+    assert "a" not in coupler
+    assert list(coupler.keys()) == ["b"]
+
+    with pytest.raises(KeyError):
+        del coupler["a"]

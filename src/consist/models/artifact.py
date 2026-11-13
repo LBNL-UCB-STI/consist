@@ -45,16 +45,25 @@ if TYPE_CHECKING:
     import pandas as pd
 
 
-def _deep_copy_meta_value(value: Any) -> Any:
+def _deep_copy_meta_value(value: Any, *, convert_tuples: bool = False) -> Any:
     """Return a plain JSON/pickle-safe mutable copy unwrapping frozen meta containers."""
     if value is None or isinstance(value, (bool, int, float, str, Digest)):
         return value
     if isinstance(value, MappingABC):
-        return {str(k): _deep_copy_meta_value(v) for k, v in value.items()}
-    if isinstance(value, (list, FrozenList)):
-        return [_deep_copy_meta_value(item) for item in value]
+        return {
+            str(k): _deep_copy_meta_value(v, convert_tuples=convert_tuples)
+            for k, v in value.items()
+        }
+    if isinstance(value, (list, FrozenList)) or (
+        convert_tuples and isinstance(value, tuple)
+    ):
+        return [
+            _deep_copy_meta_value(item, convert_tuples=convert_tuples) for item in value
+        ]
     if isinstance(value, tuple):
-        return tuple(_deep_copy_meta_value(item) for item in value)
+        return tuple(
+            _deep_copy_meta_value(item, convert_tuples=convert_tuples) for item in value
+        )
     return copy.deepcopy(value)
 
 
@@ -858,6 +867,13 @@ class Artifact(metaclass=_ArtifactMeta):
         return self.created_at.isoformat() if self.created_at else None
 
     # --- Serialization & Pydantic Integration (0 SQL queries) ---
+
+    def meta_dict(self) -> dict[str, Any]:
+        """Return a deep-unfrozen plain ``dict`` copy of ``self.meta``."""
+        return {
+            str(k): _deep_copy_meta_value(v, convert_tuples=True)
+            for k, v in self.meta.items()
+        }
 
     def to_json_dict(self) -> dict[str, Any]:
         """Serialize all persisted fields into a JSON-ready dict using pure memory reads."""

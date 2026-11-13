@@ -161,6 +161,7 @@ if TYPE_CHECKING:
         ResolvedBinding,
         ResolvedBindingBuilder,
         TrackedArtifactLocator,
+        trusted_digest_from_artifact,
     )
     from consist.core.step_contracts import (
         StepContract,
@@ -176,6 +177,7 @@ if TYPE_CHECKING:
     )
     from consist.digest import (
         Digest,
+        digest_file,
     )
     from consist.models.artifact import (
         ArchivedOutputs,
@@ -360,6 +362,7 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "current_tracker": ("consist.api", "current_tracker"),
     "define_step": ("consist.api", "define_step"),
     "diff_coupler_snapshots": ("consist.api", "diff_coupler_snapshots"),
+    "digest_file": ("consist.digest", "digest_file"),
     "ensure_local_path": ("consist.api", "ensure_local_path"),
     "evict_artifact": ("consist.api", "evict_artifact"),
     "exec": ("consist.api", "exec"),
@@ -436,6 +439,10 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "start_run": ("consist.api", "start_run"),
     "to_df": ("consist.api", "to_df"),
     "trace": ("consist.api", "trace"),
+    "trusted_digest_from_artifact": (
+        "consist.core.resolved_binding",
+        "trusted_digest_from_artifact",
+    ),
     "undo_migrate_database": ("consist.api", "undo_migrate_database"),
     "use_tracker": ("consist.api", "use_tracker"),
 }
@@ -619,6 +626,7 @@ __all__ = [
     "current_tracker",
     "define_step",
     "diff_coupler_snapshots",
+    "digest_file",
     "ensure_local_path",
     "evict_artifact",
     "exec",
@@ -686,6 +694,7 @@ __all__ = [
     "start_run",
     "to_df",
     "trace",
+    "trusted_digest_from_artifact",
     "undo_migrate_database",
     "use_tracker",
 ]

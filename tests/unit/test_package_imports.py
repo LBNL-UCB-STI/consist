@@ -114,3 +114,14 @@ def test_dir_contains_curated_symbols() -> None:
     assert "admission" in dir_symbols
     assert "Tracker" in dir_symbols
     assert "Run" in dir_symbols
+    assert "digest_file" in dir_symbols
+    assert "trusted_digest_from_artifact" in dir_symbols
+
+
+def test_digest_file_and_trusted_digest_top_level_exports() -> None:
+    """Verify digest_file and trusted_digest_from_artifact are exported from consist."""
+    from consist.core.resolved_binding import trusted_digest_from_artifact
+    from consist.digest import digest_file
+
+    assert consist.digest_file is digest_file
+    assert consist.trusted_digest_from_artifact is trusted_digest_from_artifact
