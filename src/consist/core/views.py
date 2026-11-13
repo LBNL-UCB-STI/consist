@@ -695,34 +695,13 @@ class ViewFactory:
         *,
         hydrate_missing: bool = True,
     ) -> Optional[Path]:
-        primary_path = Path(self.tracker.resolve_uri(record.artifact.uri))
-        if primary_path.exists():
-            return primary_path
+        from consist.core.tracker_recovery import resolve_verified_local_path
 
-        if record.artifact.abs_path:
-            abs_candidate = Path(record.artifact.abs_path)
-            if abs_candidate.exists():
-                return abs_candidate
-
-        if record.run is not None:
-            try:
-                historical_path = self.tracker.resolve_historical_path(
-                    record.artifact, record.run
-                )
-                if historical_path.exists():
-                    return historical_path
-            except (OSError, ValueError):
-                pass
-
-        if record.artifact.recovery_roots:
-            try:
-                best_location = record.artifact.accessibility(
-                    self.tracker
-                ).best_location
-                if best_location is not None and best_location.exists:
-                    return best_location.path
-            except (OSError, ValueError):
-                pass
+        verified = resolve_verified_local_path(
+            self.tracker, record.artifact, allow_recovery_roots=True
+        )
+        if verified is not None:
+            return verified
 
         if hydrate_missing and record.artifact.recovery_roots:
             ensured_path = record.artifact.ensure_local_path(

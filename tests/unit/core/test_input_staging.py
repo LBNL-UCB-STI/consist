@@ -26,12 +26,17 @@ def _tracker(
     resolve_uri,
     allow_external_paths: bool = True,
     mounts: dict[str, str] | None = None,
+    recovery_roots_by_id: dict[object, list[str | Path]] | None = None,
 ):
+    roots_map = dict(recovery_roots_by_id or {})
     return SimpleNamespace(
         run_dir=run_dir,
         fs=FileSystemManager(run_dir, mounts),
         allow_external_paths=allow_external_paths,
         resolve_uri=resolve_uri,
+        artifact_recovery_roots=lambda art, resolve=True: list(
+            roots_map.get(art.id, [])
+        ),
         identity=SimpleNamespace(compute_file_checksum=lambda p: _checksum(p).hex),
     )
 
@@ -173,15 +178,15 @@ def test_stage_artifact_uses_recovery_roots_when_source_is_not_resolved(
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text("value\n1\n", encoding="utf-8")
     destination = tmp_path / "runs" / "staged" / "source.csv"
-    tracker = _tracker(
-        tmp_path / "runs",
-        resolve_uri=lambda _uri: str(tmp_path / "missing" / "source.csv"),
-    )
     artifact = _artifact(
         "source",
         "./inputs/source.csv",
-        meta={"recovery_roots": [archive_root]},
         hash_value=_checksum(source),
+    )
+    tracker = _tracker(
+        tmp_path / "runs",
+        resolve_uri=lambda _uri: str(tmp_path / "missing" / "source.csv"),
+        recovery_roots_by_id={artifact.id: [archive_root]},
     )
 
     result = stage_artifact(tracker, artifact, destination)

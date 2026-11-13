@@ -858,8 +858,9 @@ class RunTraceCoordinator:
             if tracker._archive_service.is_virtual_unbacked_artifact(art):
                 continue
             updated_art = synced_by_key.get(key, art)
-            meta = updated_art.meta if isinstance(updated_art.meta, MappingABC) else {}
-            roots = tracker.fs.normalize_recovery_roots(meta.get("recovery_roots"))
+            roots = tracker.fs.normalize_recovery_roots(
+                tracker.artifact_recovery_roots(updated_art)
+            )
             if archive_root_str not in roots:
                 missing_recovery_keys.append(key)
 

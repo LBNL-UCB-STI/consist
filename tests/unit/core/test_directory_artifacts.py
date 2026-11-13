@@ -349,7 +349,7 @@ def test_shapefile_bundle_archive_rolls_back_on_metadata_failure(
 
     monkeypatch.setattr(
         tracker.db,
-        "update_artifact_meta",
+        "replace_artifact_recovery_locations_bulk",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("db down")),
     )
     archive_root = tmp_path / "archive"
@@ -475,9 +475,16 @@ def test_explicit_tracker_load_ignores_artifact_runtime_path(tmp_path: Path) -> 
     with tracker_a.start_run("producer", model="test"):
         artifact = tracker_a.log_output(source_a, key="out")
 
+    # Tampered bytes in workspace_b are rejected rather than silently loading source_a
+    with pytest.raises((FileNotFoundError, ValueError), match="verification"):
+        consist.load(artifact, tracker=tracker_b, db_fallback="never")
+
+    # Removing source_a and placing matching verified bytes in workspace_b loads from workspace_b
+    source_a.unlink()
+    source_b.write_text("value\n1\n")
     loaded = cast(Any, consist.load(artifact, tracker=tracker_b, db_fallback="never"))
 
-    assert loaded.fetchone() == (2,)
+    assert loaded.fetchone() == (1,)
 
 
 def test_legacy_shapefile_artifact_cannot_be_archived_or_hydrated(
@@ -643,7 +650,7 @@ def test_directory_archive_rolls_back_on_metadata_failure(
 
     monkeypatch.setattr(
         tracker.db,
-        "update_artifact_meta",
+        "replace_artifact_recovery_locations_bulk",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("db down")),
     )
     archive_root = tmp_path / "archive"

@@ -18,6 +18,7 @@ from consist.digest import (
     build_manifest_v1,
     build_shapefile_manifest_v1,
     canonical_json_sha256,
+    is_shapefile_sidecar_filename,
 )
 
 if TYPE_CHECKING:
@@ -700,14 +701,13 @@ def _validate_shapefile_bundle_manifest(
     if shapefile_path.suffix.lower() != ".shp":
         raise ValueError(f"shapefile bundle entry must end in .shp: {shapefile_name}")
     entries = _validate_manifest(manifest)
-    expected_prefix = f"{shapefile_path.stem}."
     required_counts = {suffix: 0 for suffix in _SHAPEFILE_REQUIRED_SUFFIXES}
     for entry in entries:
         path = entry["path"]
         if (
             entry["kind"] != "file"
             or "/" in path
-            or not path.startswith(expected_prefix)
+            or not is_shapefile_sidecar_filename(path, shapefile_path.stem)
         ):
             raise ValueError("shapefile bundle manifest has invalid member layout")
         suffix = Path(path).suffix.lower()

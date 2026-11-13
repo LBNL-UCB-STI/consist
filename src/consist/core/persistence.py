@@ -4,6 +4,9 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import functools
+from importlib import resources as importlib_resources
+import itertools
 import json
 import logging
 import math
@@ -47,6 +50,15 @@ from consist.core.facet_common import flatten_facet_values
 from consist.core.provenance_writer import ProvenanceWriter
 from consist.core.run_ordering import recent_run_order_by_sql
 from consist.digest import Digest
+from consist.location import (
+    ArtifactLocationRow,
+    DirTreeStat,
+    FileStat,
+    LocationSite,
+    LocationStatus,
+    Witness,
+    witness_from_json,
+)
 from consist.models.artifact import Artifact
 from consist.models.artifact_facet import ArtifactFacet
 from consist.models.artifact_kv import ArtifactKV
@@ -187,15 +199,7 @@ def _merge_persisted_artifact_meta(
 ) -> dict[str, Any]:
     merged_meta = dict(base_meta)
     merged_meta.update(current_meta)
-    base_roots = base_meta.get("recovery_roots")
-    current_roots = current_meta.get("recovery_roots")
-    if isinstance(base_roots, list) and base_roots:
-        combined_roots = list(base_roots)
-        if isinstance(current_roots, list):
-            for root in current_roots:
-                if root not in combined_roots:
-                    combined_roots.append(root)
-        merged_meta["recovery_roots"] = combined_roots
+    merged_meta.pop("recovery_roots", None)
     return merged_meta
 
 
@@ -342,6 +346,8 @@ __all__ = [
 
 _LIVE_DB_LOCK = threading.Lock()
 _LIVE_DB_MANAGERS: dict[str, weakref.WeakSet[DatabaseManager]] = {}
+_GLOBAL_LOCATION_EPOCH = itertools.count(1)
+_DB_PATH_LOCATION_EPOCH: dict[str, int] = {}
 _TRACKED_RELATION_LOCK = threading.Lock()
 _TRACKED_RELATIONS: dict[
     str,
@@ -430,92 +436,15 @@ def has_live_writable_db_for_path(db_path: str | os.PathLike[str]) -> bool:
     )
 
 
-_CORE_SCHEMA_DDL: tuple[str, ...] = (
-    "CREATE TABLE IF NOT EXISTS consist_schema ("
-    "version INTEGER PRIMARY KEY, db_uid VARCHAR NOT NULL, updated_at TIMESTAMPTZ NOT NULL)",
-    "CREATE TABLE IF NOT EXISTS run ("
-    "id VARCHAR PRIMARY KEY, parent_run_id VARCHAR, status VARCHAR NOT NULL DEFAULT 'running', "
-    "model_name VARCHAR NOT NULL, description VARCHAR, year INTEGER, iteration INTEGER, "
-    "stage VARCHAR, phase VARCHAR, tags JSON NOT NULL DEFAULT '[]', config_hash VARCHAR, "
-    "git_hash VARCHAR, input_hash VARCHAR, signature VARCHAR, "
-    "cacheable BOOLEAN NOT NULL DEFAULT TRUE, facet_id VARCHAR, meta JSON NOT NULL DEFAULT '{}', "
-    "started_at TIMESTAMPTZ NOT NULL, ended_at TIMESTAMPTZ, "
-    "created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL)",
-    "CREATE INDEX IF NOT EXISTS ix_run_parent_run_id ON run (parent_run_id)",
-    "CREATE INDEX IF NOT EXISTS ix_run_status ON run (status)",
-    "CREATE INDEX IF NOT EXISTS ix_run_model_name ON run (model_name)",
-    "CREATE INDEX IF NOT EXISTS ix_run_config_hash ON run (config_hash)",
-    "CREATE INDEX IF NOT EXISTS ix_run_input_hash ON run (input_hash)",
-    "CREATE INDEX IF NOT EXISTS ix_run_signature ON run (signature)",
-    "CREATE TABLE IF NOT EXISTS artifact ("
-    "id UUID PRIMARY KEY, key VARCHAR NOT NULL, uri VARCHAR NOT NULL, driver VARCHAR NOT NULL, "
-    "digest VARCHAR, member VARCHAR, run_id VARCHAR, parent_artifact_id UUID, "
-    "facet_id VARCHAR, meta JSON NOT NULL DEFAULT '{}', created_at TIMESTAMPTZ NOT NULL)",
-    "CREATE INDEX IF NOT EXISTS ix_artifact_key ON artifact (key)",
-    "CREATE INDEX IF NOT EXISTS ix_artifact_uri ON artifact (uri)",
-    "CREATE INDEX IF NOT EXISTS ix_artifact_digest ON artifact (digest)",
-    "CREATE INDEX IF NOT EXISTS ix_artifact_run_id ON artifact (run_id)",
-    "CREATE INDEX IF NOT EXISTS ix_artifact_parent_artifact_id ON artifact (parent_artifact_id)",
-    "CREATE TABLE IF NOT EXISTS run_artifact_link ("
-    "run_id VARCHAR NOT NULL, artifact_id UUID NOT NULL, direction VARCHAR NOT NULL, "
-    "role VARCHAR NOT NULL DEFAULT '', is_implicit BOOLEAN NOT NULL DEFAULT FALSE, "
-    "PRIMARY KEY (run_id, artifact_id, direction, role))",
-    "CREATE INDEX IF NOT EXISTS ix_run_artifact_link_run_id ON run_artifact_link (run_id)",
-    "CREATE INDEX IF NOT EXISTS ix_run_artifact_link_artifact_id ON run_artifact_link (artifact_id)",
-    "CREATE TABLE IF NOT EXISTS run_binding_invocation ("
-    "id UUID PRIMARY KEY, requested_run_id VARCHAR NOT NULL, execution_run_id VARCHAR NOT NULL, "
-    "cache_source_run_id VARCHAR, cache_outcome VARCHAR NOT NULL, "
-    "binding_json VARCHAR NOT NULL, created_at TIMESTAMPTZ NOT NULL)",
-    "CREATE INDEX IF NOT EXISTS ix_run_binding_invocation_requested ON run_binding_invocation (requested_run_id)",
-    "CREATE TABLE IF NOT EXISTS config_facet ("
-    "id VARCHAR PRIMARY KEY, namespace VARCHAR NOT NULL, schema_name VARCHAR NOT NULL, "
-    "schema_version VARCHAR, \"json\" JSON NOT NULL DEFAULT '{}', created_at TIMESTAMPTZ NOT NULL)",
-    "CREATE INDEX IF NOT EXISTS ix_config_facet_namespace ON config_facet (namespace)",
-    "CREATE TABLE IF NOT EXISTS run_config_kv ("
-    "run_id VARCHAR NOT NULL, facet_id VARCHAR NOT NULL, namespace VARCHAR NOT NULL, "
-    "key VARCHAR NOT NULL, value_type VARCHAR NOT NULL, value_str VARCHAR, "
-    "value_num DOUBLE, value_bool BOOLEAN, value_json JSON, created_at TIMESTAMPTZ NOT NULL, "
-    "PRIMARY KEY (run_id, facet_id, namespace, key))",
-    "CREATE INDEX IF NOT EXISTS ix_run_config_kv_run_id ON run_config_kv (run_id)",
-    "CREATE TABLE IF NOT EXISTS artifact_facet ("
-    "id VARCHAR PRIMARY KEY, namespace VARCHAR, schema_name VARCHAR, schema_version VARCHAR, "
-    "\"json\" JSON NOT NULL DEFAULT '{}', created_at TIMESTAMPTZ NOT NULL)",
-    "CREATE TABLE IF NOT EXISTS artifact_kv ("
-    "artifact_id UUID NOT NULL, facet_id VARCHAR NOT NULL, key_path VARCHAR NOT NULL, "
-    "namespace VARCHAR, value_type VARCHAR NOT NULL, value_str VARCHAR, "
-    "value_num DOUBLE, value_bool BOOLEAN, value_json JSON, created_at TIMESTAMPTZ NOT NULL, "
-    "PRIMARY KEY (artifact_id, facet_id, key_path))",
-    "CREATE INDEX IF NOT EXISTS ix_artifact_kv_artifact_id ON artifact_kv (artifact_id)",
-    "CREATE INDEX IF NOT EXISTS ix_artifact_kv_key_path ON artifact_kv (key_path)",
-    "CREATE TABLE IF NOT EXISTS run_coupler_snapshot ("
-    "run_id VARCHAR NOT NULL, phase VARCHAR NOT NULL, role_key VARCHAR NOT NULL, "
-    "scenario_run_id VARCHAR NOT NULL, step_ordinal INTEGER NOT NULL DEFAULT 0, "
-    "artifact_id UUID NOT NULL, producer_run_id VARCHAR, updated_at TIMESTAMPTZ NOT NULL, "
-    "PRIMARY KEY (run_id, phase, role_key))",
-    "CREATE INDEX IF NOT EXISTS ix_run_coupler_snapshot_scenario_ordinal ON run_coupler_snapshot (scenario_run_id, step_ordinal, phase)",
-    "CREATE INDEX IF NOT EXISTS ix_run_coupler_snapshot_scenario_role ON run_coupler_snapshot (scenario_run_id, role_key)",
-    "CREATE TABLE IF NOT EXISTS artifact_schema ("
-    "id VARCHAR PRIMARY KEY, profile_version INTEGER NOT NULL DEFAULT 1, "
-    "summary_json JSON NOT NULL DEFAULT '{}', profile_json JSON, created_at TIMESTAMPTZ NOT NULL)",
-    "CREATE TABLE IF NOT EXISTS artifact_schema_field ("
-    "schema_id VARCHAR NOT NULL, ordinal_position INTEGER, name VARCHAR NOT NULL, "
-    "logical_type VARCHAR NOT NULL, nullable BOOLEAN NOT NULL DEFAULT TRUE, "
-    "stats_json JSON, is_enum BOOLEAN NOT NULL DEFAULT FALSE, enum_values_json JSON, "
-    "PRIMARY KEY (schema_id, name))",
-    "CREATE TABLE IF NOT EXISTS artifact_schema_observation ("
-    "id UUID PRIMARY KEY, artifact_id UUID NOT NULL, schema_id VARCHAR NOT NULL, "
-    "run_id VARCHAR, source VARCHAR NOT NULL, sample_rows INTEGER, observed_at TIMESTAMPTZ NOT NULL)",
-    "CREATE INDEX IF NOT EXISTS ix_artifact_schema_obs_artifact_id ON artifact_schema_observation (artifact_id)",
-    "CREATE INDEX IF NOT EXISTS ix_artifact_schema_obs_schema_id ON artifact_schema_observation (schema_id)",
-    "CREATE TABLE IF NOT EXISTS artifact_schema_relation ("
-    "schema_id VARCHAR NOT NULL, from_field VARCHAR NOT NULL, to_table VARCHAR NOT NULL, "
-    "to_field VARCHAR NOT NULL, relationship_type VARCHAR NOT NULL DEFAULT 'foreign_key', "
-    "cardinality VARCHAR, PRIMARY KEY (schema_id, from_field))",
-    "CREATE OR REPLACE VIEW consist_schema_links AS "
-    "SELECT rel.schema_id, src.summary_json->>'$.table_name' AS from_table, "
-    "rel.from_field, rel.to_table, rel.to_field, rel.relationship_type, rel.cardinality "
-    "FROM artifact_schema_relation rel JOIN artifact_schema src ON rel.schema_id = src.id",
-)
+@functools.lru_cache(maxsize=1)
+def _load_core_schema_sql() -> str:
+    """Load the static Consist v0.5 DuckDB schema DDL from ``consist.schemas``."""
+    return (
+        importlib_resources.files("consist.schemas")
+        .joinpath("schema_v2.sql")
+        .read_text(encoding="utf-8")
+    )
+
 
 _RUN_SELECT_COLS = (
     "r.id, r.parent_run_id, r.status, r.model_name, r.description, "
@@ -766,6 +695,31 @@ class DatabaseManager:
         self._suspend_hooks: list[Callable[[], None]] = []
         self._temp_views: dict[str, str] = {}
         self._temp_view_epoch: int = 0
+        self.location_epoch: int = next(_GLOBAL_LOCATION_EPOCH)
+        self._has_artifact_location_table: Optional[bool] = None
+        self._last_seen_location_epoch: Optional[tuple[Any, ...]] = None
+        self._epoch_invalidation_hooks: list[Callable[[], None]] = []
+        self._active_coord_witness: dict[
+            tuple[str, str, str, str, str],
+            tuple[Optional[str], Optional[Witness]],
+        ] = {}
+        self._location_resolution_cache: dict[
+            tuple[Any, ...],
+            tuple[
+                tuple[
+                    ArtifactLocationRow,
+                    Optional[Path],
+                    Optional[Path],
+                    Optional[Path],
+                    str,
+                    Optional[Path],
+                    str,
+                ],
+                ...,
+            ],
+        ] = {}
+        self._settled_witnesses: dict[uuid.UUID, Witness] = {}
+        self._ephemeral_stale_locations: dict[uuid.UUID, LocationStatus] = {}
         self._snapshot_ops = DatabaseSnapshotOps(self)
 
         if self._resolved_db_path is not None:
@@ -1042,8 +996,7 @@ class DatabaseManager:
         return fallback or str(uuid.uuid4())
 
     def _init_schema_locked(self, *, db_uid: Optional[str]) -> str:
-        for stmt in _CORE_SCHEMA_DDL:
-            self._con.execute(stmt)
+        self._con.execute(_load_core_schema_sql())
         existing = self._con.execute(
             "SELECT db_uid FROM consist_schema WHERE version = 2 LIMIT 1"
         ).fetchone()
@@ -1329,6 +1282,8 @@ class DatabaseManager:
                         if mgr._suspended:
                             try:
                                 mgr._reopen_single_manager_locked(deadline=deadline)
+                                mgr._has_artifact_location_table = None
+                                mgr.bump_location_epoch()
                             except BaseException as exc:
                                 if first_reopen_err is None:
                                     first_reopen_err = exc
@@ -1862,6 +1817,7 @@ class DatabaseManager:
         artifact: Artifact, *, explicit_facet_id: Optional[str] = None
     ) -> list[Any]:
         meta_for_db = dict(artifact.meta) if isinstance(artifact.meta, Mapping) else {}
+        meta_for_db.pop("recovery_roots", None)
         facet_id = explicit_facet_id or artifact.facet_id
         if facet_id is None:
             raw_fid = meta_for_db.get("artifact_facet_id")
@@ -1921,9 +1877,29 @@ class DatabaseManager:
         artifact_ids: Sequence[uuid.UUID],
         direction: str,
         roles_by_id: Optional[Mapping[uuid.UUID, str]] = None,
+        link_pairs: Optional[Sequence[tuple[uuid.UUID, str]]] = None,
         is_implicit: bool = False,
     ) -> None:
-        unique_ids = [_coerce_uuid(aid) for aid in dict.fromkeys(artifact_ids)]
+        pairs_ordered: list[tuple[uuid.UUID, str]] = []
+        seen_input_pairs: set[tuple[uuid.UUID, str]] = set()
+        if link_pairs is not None:
+            for raw_aid, raw_role in link_pairs:
+                aid = _coerce_uuid(raw_aid)
+                r_str = str(raw_role or "")
+                pair_key = (aid, r_str)
+                if pair_key not in seen_input_pairs:
+                    seen_input_pairs.add(pair_key)
+                    pairs_ordered.append(pair_key)
+        else:
+            for raw_aid in dict.fromkeys(artifact_ids):
+                aid = _coerce_uuid(raw_aid)
+                r_str = (roles_by_id.get(aid, "") if roles_by_id else "") or ""
+                pair_key = (aid, r_str)
+                if pair_key not in seen_input_pairs:
+                    seen_input_pairs.add(pair_key)
+                    pairs_ordered.append(pair_key)
+
+        unique_ids = list(dict.fromkeys(aid for aid, _ in pairs_ordered))
         if not unique_ids:
             return
         placeholders = ", ".join("?" for _ in unique_ids)
@@ -1941,28 +1917,31 @@ class DatabaseManager:
             existing_dirs.setdefault(aid, set()).add(d_str)
             existing_pairs.add((aid, d_str, r_str))
 
+        warned_aids: set[uuid.UUID] = set()
         insert_rows: list[list[Any]] = []
-        for aid in unique_ids:
+        for aid, role_val in pairs_ordered:
             prior_dirs = existing_dirs.get(aid)
             if prior_dirs:
                 if direction not in prior_dirs:
-                    prior_dir = sorted(prior_dirs)[0]
-                    logging.warning(
-                        "[Consist] Ignoring attempt to link artifact_id=%s to run_id=%s as '%s' "
-                        "because it is already linked as '%s'. "
-                        "If this step truly produces a new output, write to a new path (preferred), "
-                        "or log a distinct Artifact instance rather than reusing the same Artifact reference.",
-                        aid,
-                        run_id,
-                        direction,
-                        prior_dir,
-                    )
+                    if aid not in warned_aids:
+                        warned_aids.add(aid)
+                        prior_dir = sorted(prior_dirs)[0]
+                        logging.warning(
+                            "[Consist] Ignoring attempt to link artifact_id=%s to run_id=%s as '%s' "
+                            "because it is already linked as '%s'. "
+                            "If this step truly produces a new output, write to a new path (preferred), "
+                            "or log a distinct Artifact instance rather than reusing the same Artifact reference.",
+                            aid,
+                            run_id,
+                            direction,
+                            prior_dir,
+                        )
                     continue
-                role_val = (roles_by_id.get(aid, "") if roles_by_id else "") or ""
                 if (aid, direction, role_val) in existing_pairs or role_val == "":
                     continue
-            role_val = (roles_by_id.get(aid, "") if roles_by_id else "") or ""
             insert_rows.append([run_id, aid, direction, role_val, bool(is_implicit)])
+            existing_dirs.setdefault(aid, set()).add(direction)
+            existing_pairs.add((aid, direction, role_val))
 
         if insert_rows:
             _execute_multirow_values(
@@ -2348,6 +2327,8 @@ class DatabaseManager:
         facet: ArtifactFacet,
         meta_updates: Mapping[str, Any],
         kv_rows: Optional[List[ArtifactKV]] = None,
+        role: Optional[str] = None,
+        locations: Optional[Sequence[ArtifactLocationRow]] = None,
     ) -> Artifact:
         """Upsert an Artifact, its run link, and its facet bundle in one transaction."""
         with _DB_CALL_PROFILER.track("sync_artifact_with_facet_bundle"):
@@ -2360,12 +2341,15 @@ class DatabaseManager:
                 self._upsert_artifact_locked(
                     cur, updated_artifact, explicit_facet_id=facet.id
                 )
+                if locations:
+                    self._upsert_artifact_locations_locked(cur, locations)
+                resolved_role = updated_artifact.key if role is None else role
                 self._link_artifacts_locked(
                     cur,
                     run_id=run_id,
                     artifact_ids=[updated_artifact.id],
                     direction=direction,
-                    roles_by_id={updated_artifact.id: updated_artifact.key},
+                    link_pairs=[(updated_artifact.id, resolved_role)],
                 )
                 if kv_rows:
                     self._replace_artifact_kv_locked(cur, kv_rows)
@@ -2782,6 +2766,7 @@ class DatabaseManager:
         *,
         profile_label: Optional[str] = None,
         role: Optional[str] = None,
+        locations: Optional[Sequence[ArtifactLocationRow]] = None,
     ) -> None:
         """Upsert an Artifact and optionally link it to a Run atomically."""
         with _DB_CALL_PROFILER.track(
@@ -2789,6 +2774,8 @@ class DatabaseManager:
         ):
             with self.transaction() as cur:
                 self._upsert_artifact_locked(cur, artifact)
+                if locations:
+                    self._upsert_artifact_locations_locked(cur, locations)
                 if run_id is not None and direction is not None:
                     aid = _coerce_uuid(artifact.id)
                     resolved_role = artifact.key if role is None else role
@@ -2800,10 +2787,17 @@ class DatabaseManager:
                         roles_by_id={aid: resolved_role},
                     )
 
-    def upsert_artifact(self, artifact: Artifact) -> None:
+    def upsert_artifact(
+        self,
+        artifact: Artifact,
+        *,
+        locations: Optional[Sequence[ArtifactLocationRow]] = None,
+    ) -> None:
         """Persist an artifact that is not yet linked to a run."""
         with self.transaction() as cur:
             self._upsert_artifact_locked(cur, artifact)
+            if locations:
+                self._upsert_artifact_locations_locked(cur, locations)
 
     def sync_artifacts(
         self,
@@ -2811,6 +2805,8 @@ class DatabaseManager:
         artifacts: Sequence[Artifact],
         run_id: str,
         direction: str,
+        locations: Optional[Sequence[ArtifactLocationRow]] = None,
+        link_roles: Optional[Sequence[Optional[str]]] = None,
     ) -> None:
         """Upsert multiple Artifacts and link them to a Run in one transaction."""
         if not artifacts:
@@ -2818,10 +2814,19 @@ class DatabaseManager:
         with _DB_CALL_PROFILER.track("sync_artifacts"):
             with _track_begin_run_phase("db.sync_artifacts.transaction"):
                 deduped: dict[uuid.UUID, Artifact] = {}
-                for artifact in artifacts:
-                    deduped[_coerce_uuid(artifact.id)] = artifact
+                link_pairs: list[tuple[uuid.UUID, str]] = []
+                for idx, artifact in enumerate(artifacts):
+                    aid = _coerce_uuid(artifact.id)
+                    deduped[aid] = artifact
+                    explicit_role = (
+                        link_roles[idx]
+                        if link_roles is not None and idx < len(link_roles)
+                        else None
+                    )
+                    link_pairs.append(
+                        (aid, artifact.key if explicit_role is None else explicit_role)
+                    )
                 artifact_list = list(deduped.values())
-                roles_by_id = {_coerce_uuid(art.id): art.key for art in artifact_list}
                 with self.transaction() as cur:
                     _execute_multirow_values(
                         cur,
@@ -2832,12 +2837,14 @@ class DatabaseManager:
                             self._artifact_upsert_params(art) for art in artifact_list
                         ],
                     )
+                    if locations:
+                        self._upsert_artifact_locations_locked(cur, locations)
                     self._link_artifacts_locked(
                         cur,
                         run_id=run_id,
                         artifact_ids=list(deduped.keys()),
                         direction=direction,
-                        roles_by_id=roles_by_id,
+                        link_pairs=link_pairs,
                     )
 
     def backfill_artifact_schema_field_ordinals(self, *, schema_id: str) -> None:
@@ -3255,20 +3262,6 @@ class DatabaseManager:
         )
         return [_hydrate_run_row(r) for r in rows]
 
-    def get_artifact_meta_by_ids(
-        self, artifact_ids: Sequence[uuid.UUID | str]
-    ) -> dict[uuid.UUID, dict[str, Any]]:
-        """Fetch persisted ``meta`` dictionaries for multiple artifacts in one query."""
-        coerced = list(dict.fromkeys(_coerce_uuid(aid) for aid in artifact_ids))
-        if not coerced:
-            return {}
-        placeholders = ", ".join("?" for _ in coerced)
-        rows = self.fetchall(
-            f"SELECT id, meta FROM artifact WHERE id IN ({placeholders})",
-            coerced,
-        )
-        return {_coerce_uuid(r[0]): _parse_json_dict(r[1]) for r in rows}
-
     def get_artifacts_by_ids(
         self, artifact_ids: Sequence[uuid.UUID | str]
     ) -> List[Artifact]:
@@ -3351,19 +3344,6 @@ class DatabaseManager:
                 seen.add(art.id)
                 results.append(art)
         return results
-
-    def get_artifact_meta_by_id(
-        self, artifact_id: uuid.UUID | str
-    ) -> Optional[dict[str, Any]]:
-        """Fetch raw ``artifact.meta`` by UUID without hydrating a full ``Artifact``."""
-        try:
-            aid = _coerce_uuid(artifact_id)
-        except ValueError:
-            return None
-        row = self.fetchone("SELECT meta FROM artifact WHERE id = ?", [aid])
-        if row is None:
-            return None
-        return _parse_json_dict(row[0])
 
     def get_parent_artifact(self, child_id: uuid.UUID) -> Optional[Artifact]:
         """Return the parent artifact for ``child_id`` if recorded."""
@@ -4509,54 +4489,954 @@ class DatabaseManager:
                     rows=batch,
                 )
 
-    def prune_recovery_root_from_artifacts(
+    @staticmethod
+    def _file_stat_stamp(path: Optional[Path]) -> tuple[int, int, int, int]:
+        if path is None:
+            return (0, 0, 0, 0)
+        p_str = os.fspath(path)
+        try:
+            st = os.stat(p_str)
+            db_m, db_s = int(st.st_mtime_ns), int(st.st_size)
+        except OSError:
+            db_m, db_s = 0, 0
+        try:
+            wst = os.stat(f"{p_str}.wal")
+            wal_m, wal_s = int(wst.st_mtime_ns), int(wst.st_size)
+        except OSError:
+            wal_m, wal_s = 0, 0
+        return (db_m, db_s, wal_m, wal_s)
+
+    @property
+    def effective_location_epoch(self) -> tuple[int, int, int, int, int, int]:
+        path_epoch = (
+            _DB_PATH_LOCATION_EPOCH.get(str(self._resolved_db_path), 0)
+            if self._resolved_db_path is not None
+            else 0
+        )
+        db_m, db_s, wal_m, wal_s = (
+            self._file_stat_stamp(self._resolved_db_path)
+            if self._con_read_only
+            else (0, 0, 0, 0)
+        )
+        return (self.location_epoch, path_epoch, db_m, db_s, wal_m, wal_s)
+
+    def sync_location_epoch_caches(self) -> tuple[int, int, int, int, int, int]:
+        cur_epoch = self.effective_location_epoch
+        if self._last_seen_location_epoch != cur_epoch:
+            if self._last_seen_location_epoch is not None:
+                self._location_resolution_cache.clear()
+                self._ephemeral_stale_locations.clear()
+                self._settled_witnesses.clear()
+                self._active_coord_witness.clear()
+                for hook in self._epoch_invalidation_hooks:
+                    hook()
+            self._last_seen_location_epoch = cur_epoch
+        return cur_epoch
+
+    def bump_location_epoch(self) -> int:
+        nxt = next(_GLOBAL_LOCATION_EPOCH)
+        self.location_epoch = nxt
+        if self._resolved_db_path is not None:
+            _DB_PATH_LOCATION_EPOCH[str(self._resolved_db_path)] = nxt
+        self._location_resolution_cache.clear()
+        self._active_coord_witness.clear()
+        for hook in self._epoch_invalidation_hooks:
+            hook()
+        self._last_seen_location_epoch = self.effective_location_epoch
+        return nxt
+
+    def has_artifact_location_table(self) -> bool:
+        if self._has_artifact_location_table is None:
+            self._has_artifact_location_table = self.has_table("artifact_location")
+        return self._has_artifact_location_table
+
+    @staticmethod
+    def _witness_matches_or_settled(
+        existing: Optional[Witness], incoming: Optional[Witness]
+    ) -> bool:
+        if incoming is None:
+            return True
+        if existing is None:
+            return False
+        if existing == incoming:
+            return True
+        return not existing.racy and existing.settled() == incoming.settled()
+
+    @staticmethod
+    def _same_stat_footprint(w_a: Optional[Witness], w_b: Optional[Witness]) -> bool:
+        if isinstance(w_a, FileStat) and isinstance(w_b, FileStat):
+            return w_a.size == w_b.size and w_a.mtime_ns == w_b.mtime_ns
+        if isinstance(w_a, DirTreeStat) and isinstance(w_b, DirTreeStat):
+            return (
+                w_a.file_count == w_b.file_count
+                and w_a.total_bytes == w_b.total_bytes
+                and w_a.max_mtime_ns == w_b.max_mtime_ns
+            )
+        return False
+
+    _LOCATION_SELECT_COLS = (
+        "location_id, digest, artifact_id, site, mount_name, "
+        "mount_instance_id, uri, member, status, witness_json, observed_at_ns"
+    )
+
+    def _hydrate_location_row(self, row: Sequence[Any]) -> ArtifactLocationRow:
+        loc_id = _coerce_uuid(row[0])
+        ephemeral_status = self._ephemeral_stale_locations.get(loc_id)
+        raw_status = str(row[8]) if ephemeral_status is None else ephemeral_status
+        status: LocationStatus = (
+            "stale"
+            if raw_status == "stale"
+            else ("evicted" if raw_status == "evicted" else "active")
+        )
+        raw_site = str(row[3])
+        site: LocationSite = (
+            "archive"
+            if raw_site == "archive"
+            else (
+                "advisory"
+                if raw_site == "advisory"
+                else ("external" if raw_site == "external" else "workspace")
+            )
+        )
+        settled_witness = self._settled_witnesses.get(loc_id)
+        hydrated_witness = (
+            settled_witness
+            if settled_witness is not None
+            else witness_from_json(row[9])
+        )
+        return ArtifactLocationRow(
+            location_id=loc_id,
+            digest=str(row[1]) if row[1] is not None else None,
+            artifact_id=_coerce_optional_uuid(row[2]),
+            site=site,
+            mount_name=str(row[4]),
+            mount_instance_id=str(row[5]),
+            uri=str(row[6]),
+            member=str(row[7] or ""),
+            status=status,
+            witness=hydrated_witness,
+            observed_at_ns=int(row[10]),
+        )
+
+    @staticmethod
+    def _is_superseded_by_winner(
+        old_loc: ArtifactLocationRow, win_loc: ArtifactLocationRow
+    ) -> bool:
+        if old_loc.location_id == win_loc.location_id:
+            return False
+        if old_loc.site in ("workspace", "external"):
+            return True
+        if (
+            old_loc.digest is not None
+            and win_loc.digest is not None
+            and old_loc.digest.startswith(("stat_file_v1:", "stat_dir_v1:"))
+            and win_loc.digest.startswith(("stat_file_v1:", "stat_dir_v1:"))
+        ):
+            return (
+                old_loc.witness is not None
+                and win_loc.witness is not None
+                and not DatabaseManager._same_stat_footprint(
+                    old_loc.witness, win_loc.witness
+                )
+            )
+        if win_loc.digest is not None:
+            return old_loc.digest != win_loc.digest
+        return old_loc.digest is not None or _coerce_optional_uuid(
+            old_loc.artifact_id
+        ) != _coerce_optional_uuid(win_loc.artifact_id)
+
+    def _upsert_artifact_locations_locked(
+        self,
+        cur: duckdb.DuckDBPyConnection,
+        locations: Sequence[ArtifactLocationRow],
+    ) -> None:
+        if not locations:
+            return
+        self._has_artifact_location_table = True
+        deduped_by_id: dict[uuid.UUID, ArtifactLocationRow] = {}
+        for loc in locations:
+            deduped_by_id[_coerce_uuid(loc.location_id)] = loc
+        ordered = list(deduped_by_id.values())
+
+        winning_by_coord: dict[tuple[str, str, str, str, str], ArtifactLocationRow] = {}
+        for loc in ordered:
+            if loc.status == "active":
+                coord = (
+                    loc.site,
+                    loc.mount_name,
+                    loc.mount_instance_id,
+                    loc.uri,
+                    loc.member,
+                )
+                winning_by_coord[coord] = loc
+
+        normalized_rows: list[ArtifactLocationRow] = []
+        for loc in ordered:
+            coord = (
+                loc.site,
+                loc.mount_name,
+                loc.mount_instance_id,
+                loc.uri,
+                loc.member,
+            )
+            winner = winning_by_coord.get(coord)
+            if (
+                loc.status == "active"
+                and winner is not None
+                and self._is_superseded_by_winner(loc, winner)
+            ):
+                loc = ArtifactLocationRow(
+                    location_id=loc.location_id,
+                    digest=loc.digest,
+                    artifact_id=loc.artifact_id,
+                    site=loc.site,
+                    mount_name=loc.mount_name,
+                    mount_instance_id=loc.mount_instance_id,
+                    uri=loc.uri,
+                    member=loc.member,
+                    status="stale",
+                    witness=loc.witness,
+                    observed_at_ns=loc.observed_at_ns,
+                )
+            normalized_rows.append(loc)
+
+        incoming_lids = [_coerce_uuid(loc.location_id) for loc in normalized_rows]
+        existing_by_lid: dict[uuid.UUID, ArtifactLocationRow] = {}
+        existing_active_by_coord: dict[
+            tuple[str, str, str, str, str], list[ArtifactLocationRow]
+        ] = {}
+        for chunk_start in range(0, len(incoming_lids), 500):
+            lid_chunk = incoming_lids[chunk_start : chunk_start + 500]
+            lid_ph = ", ".join("?" for _ in lid_chunk)
+            for raw_row in cur.execute(
+                f"SELECT {self._LOCATION_SELECT_COLS} FROM artifact_location "
+                f"WHERE location_id IN ({lid_ph})",
+                lid_chunk,
+            ).fetchall():
+                hydrated = self._hydrate_location_row(raw_row)
+                existing_by_lid[hydrated.location_id] = hydrated
+
+        if winning_by_coord:
+            coord_list = list(winning_by_coord.keys())
+            for chunk_start in range(0, len(coord_list), 500):
+                coord_chunk = coord_list[chunk_start : chunk_start + 500]
+                coord_ph = ", ".join("(?, ?, ?, ?, ?)" for _ in coord_chunk)
+                coord_params: list[Any] = [val for c in coord_chunk for val in c]
+                for raw_row in cur.execute(
+                    "SELECT al.location_id, al.digest, al.artifact_id, al.site, al.mount_name, "
+                    "al.mount_instance_id, al.uri, al.member, al.status, al.witness_json, "
+                    "al.observed_at_ns FROM artifact_location AS al "
+                    f"JOIN (VALUES {coord_ph}) AS v(site, mount_name, mount_instance_id, uri, member) "
+                    "ON al.site = v.site AND al.mount_name = v.mount_name "
+                    "AND al.mount_instance_id = v.mount_instance_id "
+                    "AND al.uri = v.uri AND al.member = v.member "
+                    "WHERE al.status = 'active'",
+                    coord_params,
+                ).fetchall():
+                    hydrated = self._hydrate_location_row(raw_row)
+                    c_key = (
+                        hydrated.site,
+                        hydrated.mount_name,
+                        hydrated.mount_instance_id,
+                        hydrated.uri,
+                        hydrated.member,
+                    )
+                    existing_active_by_coord.setdefault(c_key, []).append(hydrated)
+
+        incoming_lid_set = set(incoming_lids)
+        stale_lids: list[uuid.UUID] = []
+        for coord, win_loc in winning_by_coord.items():
+            for old_loc in existing_active_by_coord.get(coord, ()):
+                if (
+                    old_loc.location_id not in incoming_lid_set
+                    and self._is_superseded_by_winner(old_loc, win_loc)
+                ):
+                    stale_lids.append(old_loc.location_id)
+
+        rows_to_upsert: list[ArtifactLocationRow] = []
+        for loc in normalized_rows:
+            lid = _coerce_uuid(loc.location_id)
+            prev = existing_by_lid.get(lid)
+            if prev is None:
+                rows_to_upsert.append(loc)
+                continue
+            digest_changed = loc.digest is not None and prev.digest != loc.digest
+            aid_changed = loc.artifact_id is not None and prev.artifact_id is None
+            witness_changed = not self._witness_matches_or_settled(
+                prev.witness, loc.witness
+            )
+            if (
+                prev.status != loc.status
+                or digest_changed
+                or aid_changed
+                or witness_changed
+            ):
+                rows_to_upsert.append(loc)
+
+        if not stale_lids and not rows_to_upsert:
+            for coord, win_loc in winning_by_coord.items():
+                prev_win = existing_by_lid.get(_coerce_uuid(win_loc.location_id))
+                eff_w = (
+                    prev_win.witness
+                    if (prev_win is not None and prev_win.witness is not None)
+                    else win_loc.witness
+                )
+                self._active_coord_witness[coord] = (win_loc.digest, eff_w)
+            return
+
+        now_ns = time.time_ns()
+        if stale_lids:
+            _execute_multirow_values(
+                cur,
+                prefix_sql=(
+                    "UPDATE artifact_location AS al "
+                    "SET status = 'stale', observed_at_ns = v.obs FROM (VALUES"
+                ),
+                row_placeholder="(CAST(? AS BIGINT), CAST(? AS UUID))",
+                suffix_sql=") AS v(obs, lid) WHERE al.location_id = v.lid",
+                rows=[[now_ns, lid] for lid in dict.fromkeys(stale_lids)],
+            )
+
+        if rows_to_upsert:
+            _execute_multirow_values(
+                cur,
+                prefix_sql=(
+                    "INSERT INTO artifact_location ("
+                    "location_id, digest, artifact_id, site, mount_name, "
+                    "mount_instance_id, uri, member, status, witness_json, observed_at_ns"
+                    ") VALUES"
+                ),
+                row_placeholder=(
+                    "(CAST(? AS UUID), CAST(? AS VARCHAR), CAST(? AS UUID), CAST(? AS VARCHAR), "
+                    "CAST(? AS VARCHAR), CAST(? AS VARCHAR), CAST(? AS VARCHAR), CAST(? AS VARCHAR), "
+                    "CAST(? AS VARCHAR), CAST(? AS JSON), CAST(? AS BIGINT))"
+                ),
+                suffix_sql=(
+                    "ON CONFLICT (location_id) DO UPDATE SET "
+                    "digest = COALESCE(EXCLUDED.digest, artifact_location.digest), "
+                    "artifact_id = COALESCE(EXCLUDED.artifact_id, artifact_location.artifact_id), "
+                    "status = EXCLUDED.status, "
+                    "witness_json = COALESCE(EXCLUDED.witness_json, artifact_location.witness_json), "
+                    "observed_at_ns = EXCLUDED.observed_at_ns"
+                ),
+                rows=[
+                    [
+                        _coerce_uuid(loc.location_id),
+                        loc.digest,
+                        _coerce_optional_uuid(loc.artifact_id),
+                        loc.site,
+                        loc.mount_name,
+                        loc.mount_instance_id,
+                        loc.uri,
+                        loc.member,
+                        loc.status,
+                        loc.witness.to_json() if loc.witness is not None else None,
+                        int(loc.observed_at_ns),
+                    ]
+                    for loc in rows_to_upsert
+                ],
+            )
+
+        for lid in stale_lids:
+            self._ephemeral_stale_locations.pop(lid, None)
+            self._settled_witnesses.pop(lid, None)
+        for loc in rows_to_upsert:
+            lid = _coerce_uuid(loc.location_id)
+            self._ephemeral_stale_locations.pop(lid, None)
+            if loc.witness is not None:
+                self._settled_witnesses.pop(lid, None)
+        self.bump_location_epoch()
+        for coord, win_loc in winning_by_coord.items():
+            self._active_coord_witness[coord] = (win_loc.digest, win_loc.witness)
+
+    def upsert_artifact_locations(
+        self, locations: Sequence[ArtifactLocationRow]
+    ) -> None:
+        if not locations:
+            return
+        with self.transaction() as cur:
+            self._upsert_artifact_locations_locked(cur, locations)
+
+    def mark_artifact_location_status(
+        self, location_id: uuid.UUID, status: LocationStatus
+    ) -> None:
+        self.mark_artifact_locations_status_bulk([location_id], status)
+
+    def mark_artifact_locations_status_bulk(
+        self, location_ids: Sequence[uuid.UUID], status: LocationStatus
+    ) -> None:
+        coerced_ids = list(dict.fromkeys(_coerce_uuid(lid) for lid in location_ids))
+        if not coerced_ids:
+            return
+        for lid in coerced_ids:
+            self._settled_witnesses.pop(lid, None)
+        if self.read_only:
+            for lid in coerced_ids:
+                if status == "active":
+                    self._ephemeral_stale_locations.pop(lid, None)
+                else:
+                    self._ephemeral_stale_locations[lid] = status
+            self.bump_location_epoch()
+            return
+        now_ns = time.time_ns()
+        with self.transaction() as cur:
+            _execute_multirow_values(
+                cur,
+                prefix_sql=(
+                    "UPDATE artifact_location AS al "
+                    "SET status = v.status, observed_at_ns = v.obs FROM (VALUES"
+                ),
+                row_placeholder="(CAST(? AS VARCHAR), CAST(? AS BIGINT), CAST(? AS UUID))",
+                suffix_sql=") AS v(status, obs, lid) WHERE al.location_id = v.lid",
+                rows=[[status, now_ns, lid] for lid in coerced_ids],
+            )
+        for lid in coerced_ids:
+            self._ephemeral_stale_locations.pop(lid, None)
+        self.bump_location_epoch()
+
+    def mark_coordinate_locations_status(
         self,
         *,
-        target_root: str,
-        retained_ids: Set[uuid.UUID],
-        normalize_fn: Callable[[Any], List[str]],
-    ) -> bool:
-        """Remove ``target_root`` from ``meta['recovery_roots']`` on non-retained artifacts."""
-        retained_coerced = {_coerce_uuid(aid) for aid in retained_ids}
+        mount_name: str,
+        mount_instance_id: str,
+        uri: str,
+        member: str = "",
+        site: Optional[str] = None,
+        artifact_id: Optional[uuid.UUID] = None,
+        status: LocationStatus = "evicted",
+    ) -> int:
+        if not self.has_artifact_location_table():
+            return 0
+        clauses = [
+            "mount_name = ?",
+            "mount_instance_id = ?",
+            "uri = ?",
+            "member = ?",
+            "status = 'active'",
+        ]
+        params: list[Any] = [mount_name, mount_instance_id, uri, member]
+        if site is not None:
+            clauses.append("site = ?")
+            params.append(site)
+        if artifact_id is not None:
+            clauses.append("artifact_id = ?")
+            params.append(_coerce_uuid(artifact_id))
+        if self.read_only:
+            matching = self.fetchall(
+                f"SELECT location_id FROM artifact_location WHERE {' AND '.join(clauses)}",
+                params,
+            )
+            if not matching:
+                return 0
+            ids = [_coerce_uuid(r[0]) for r in matching]
+            self.mark_artifact_locations_status_bulk(ids, status)
+            return len(ids)
+        now_ns = time.time_ns()
         with self.transaction() as cur:
-            if retained_coerced:
-                ordered_retained = sorted(retained_coerced, key=str)
-                ph = ", ".join("?" for _ in ordered_retained)
-                rows = cur.execute(
-                    "SELECT id, meta FROM artifact "
-                    f"WHERE id NOT IN ({ph}) AND meta IS NOT NULL",
-                    ordered_retained,
-                ).fetchall()
+            updated = cur.execute(
+                f"UPDATE artifact_location SET status = ?, observed_at_ns = ? "
+                f"WHERE {' AND '.join(clauses)} RETURNING location_id",
+                [status, now_ns, *params],
+            ).fetchall()
+        if not updated:
+            return 0
+        for (raw_lid,) in updated:
+            lid = _coerce_uuid(raw_lid)
+            self._ephemeral_stale_locations.pop(lid, None)
+            self._settled_witnesses.pop(lid, None)
+        self.bump_location_epoch()
+        return len(updated)
+
+    def get_active_coordinate_locations(
+        self,
+        *,
+        mount_name: str,
+        mount_instance_id: str,
+        uri: str,
+        site: Optional[str] = None,
+    ) -> List[ArtifactLocationRow]:
+        if not self.has_artifact_location_table():
+            return []
+        self.sync_location_epoch_caches()
+        outer_clauses = [
+            "mount_name = ?",
+            "mount_instance_id = ?",
+            "status = 'active'",
+        ]
+        params: list[Any] = [uri, mount_name, mount_instance_id]
+        if site is not None:
+            outer_clauses.insert(0, "site = ?")
+            params.insert(1, site)
+        rows = self.fetchall(
+            f"WITH hit AS MATERIALIZED ("
+            f"SELECT {self._LOCATION_SELECT_COLS} FROM artifact_location WHERE uri = ?"
+            f") SELECT {self._LOCATION_SELECT_COLS} FROM hit WHERE {' AND '.join(outer_clauses)}",
+            params,
+        )
+        return [
+            loc
+            for loc in (self._hydrate_location_row(r) for r in rows)
+            if loc.status == "active"
+        ]
+
+    def find_artifacts_for_eviction_coordinates(
+        self,
+        *,
+        artifact_ids: Sequence[uuid.UUID],
+        whole_digests: Sequence[str],
+        member_digests: Sequence[tuple[str, str]],
+    ) -> List[Artifact]:
+        """Return all ``Artifact`` rows referencing any given ID or ``(digest, member)``."""
+        unique_aids = list(dict.fromkeys(_coerce_uuid(aid) for aid in artifact_ids))
+        unique_whole = list(dict.fromkeys(str(d) for d in whole_digests if d))
+        unique_md = list(
+            dict.fromkeys((str(d), str(m)) for d, m in member_digests if d)
+        )
+        by_id: dict[uuid.UUID, Artifact] = {}
+
+        for start in range(0, len(unique_aids), 500):
+            chunk = unique_aids[start : start + 500]
+            ph = ", ".join("?" for _ in chunk)
+            for row in self.fetchall(
+                f"SELECT {_ARTIFACT_SELECT_COLS} FROM artifact a WHERE a.id IN ({ph})",
+                chunk,
+            ):
+                art = _hydrate_artifact_row(row)
+                if art.id is not None:
+                    by_id[art.id] = art
+
+        for start in range(0, len(unique_whole), 500):
+            chunk = unique_whole[start : start + 500]
+            ph = ", ".join("?" for _ in chunk)
+            for row in self.fetchall(
+                f"SELECT {_ARTIFACT_SELECT_COLS} FROM artifact a WHERE a.digest IN ({ph})",
+                chunk,
+            ):
+                art = _hydrate_artifact_row(row)
+                if art.id is not None:
+                    by_id[art.id] = art
+
+        if unique_md:
+            md_digests = list(dict.fromkeys(d for d, _ in unique_md))
+            wanted_pairs = set(unique_md)
+            for start in range(0, len(md_digests), 500):
+                chunk = md_digests[start : start + 500]
+                ph = ", ".join("?" for _ in chunk)
+                for row in self.fetchall(
+                    f"SELECT {_ARTIFACT_SELECT_COLS} FROM artifact a WHERE a.digest IN ({ph})",
+                    chunk,
+                ):
+                    art = _hydrate_artifact_row(row)
+                    if (
+                        art.id is not None
+                        and art.digest is not None
+                        and (str(art.digest), art.member or "") in wanted_pairs
+                    ):
+                        by_id[art.id] = art
+
+        return list(by_id.values())
+
+    def settle_artifact_location_witness(
+        self,
+        location_id: uuid.UUID,
+        witness: Witness,
+        *,
+        observed_at_ns: Optional[int] = None,
+    ) -> None:
+        lid = _coerce_uuid(location_id)
+        self._settled_witnesses[lid] = witness
+        if self.read_only:
+            return
+        serialized = witness.to_json()
+        with self.transaction() as cur:
+            if observed_at_ns is not None:
+                cur.execute(
+                    "UPDATE artifact_location "
+                    "SET witness_json = CAST(? AS JSON), observed_at_ns = ? "
+                    "WHERE location_id = ?",
+                    [serialized, int(observed_at_ns), lid],
+                )
             else:
-                rows = cur.execute(
-                    "SELECT id, meta FROM artifact WHERE meta IS NOT NULL"
-                ).fetchall()
-            updates: list[list[Any]] = []
-            for raw_id, raw_meta in rows:
-                meta = _parse_json_dict(raw_meta)
-                existing = normalize_fn(meta.get("recovery_roots"))
-                if target_root not in existing:
-                    continue
-                remaining = [r for r in existing if r != target_root]
-                next_meta = dict(meta)
-                if remaining:
-                    next_meta["recovery_roots"] = remaining
-                else:
-                    next_meta.pop("recovery_roots", None)
-                updates.append([_dump_json(next_meta), _coerce_uuid(raw_id)])
-            if updates:
+                cur.execute(
+                    "UPDATE artifact_location SET witness_json = CAST(? AS JSON) WHERE location_id = ?",
+                    [serialized, lid],
+                )
+
+    @staticmethod
+    def _sort_active_locations(
+        rows: List[ArtifactLocationRow], coerced_aid: Optional[uuid.UUID]
+    ) -> List[ArtifactLocationRow]:
+        def _sort_key(loc: ArtifactLocationRow) -> tuple[int, int, int, str]:
+            site_rank = (
+                0 if loc.site == "workspace" else (1 if loc.site == "external" else 2)
+            )
+            aid_rank = (
+                0 if (coerced_aid is not None and loc.artifact_id == coerced_aid) else 1
+            )
+            obs_order = (
+                -loc.observed_at_ns
+                if loc.site in ("workspace", "external")
+                else loc.observed_at_ns
+            )
+            return (site_rank, aid_rank, obs_order, str(loc.location_id))
+
+        rows.sort(key=_sort_key)
+        return rows
+
+    def get_active_artifact_locations(
+        self,
+        *,
+        artifact_id: Optional[uuid.UUID] = None,
+        digest: Optional[Digest | str] = None,
+        member: Optional[str] = None,
+    ) -> List[ArtifactLocationRow]:
+        coerced_aid = _coerce_optional_uuid(artifact_id)
+        digest_str = str(digest) if digest is not None else None
+        if coerced_aid is None and digest_str is None:
+            return []
+        if not self.has_artifact_location_table():
+            return []
+        self.sync_location_epoch_caches()
+        member_key = member or ""
+        if digest_str is not None and coerced_aid is not None:
+            rows = self.fetchall(
+                f"WITH hit AS MATERIALIZED ("
+                f"SELECT {self._LOCATION_SELECT_COLS} FROM artifact_location WHERE digest = ? "
+                f"UNION ALL "
+                f"SELECT {self._LOCATION_SELECT_COLS} FROM artifact_location WHERE artifact_id = ?"
+                f") SELECT {self._LOCATION_SELECT_COLS} FROM hit "
+                "WHERE member = ? AND status = 'active'",
+                [digest_str, coerced_aid, member_key],
+            )
+        elif digest_str is not None:
+            rows = self.fetchall(
+                f"WITH hit AS MATERIALIZED ("
+                f"SELECT {self._LOCATION_SELECT_COLS} FROM artifact_location WHERE digest = ?"
+                f") SELECT {self._LOCATION_SELECT_COLS} FROM hit "
+                "WHERE member = ? AND status = 'active'",
+                [digest_str, member_key],
+            )
+        else:
+            rows = self.fetchall(
+                f"WITH hit AS MATERIALIZED ("
+                f"SELECT {self._LOCATION_SELECT_COLS} FROM artifact_location WHERE artifact_id = ?"
+                f") SELECT {self._LOCATION_SELECT_COLS} FROM hit "
+                "WHERE member = ? AND status = 'active'",
+                [coerced_aid, member_key],
+            )
+        by_lid: dict[uuid.UUID, ArtifactLocationRow] = {}
+        for r in rows:
+            loc = self._hydrate_location_row(r)
+            if loc.status == "active":
+                by_lid[loc.location_id] = loc
+        return self._sort_active_locations(list(by_lid.values()), coerced_aid)
+
+    def has_evicted_artifact_location(
+        self,
+        *,
+        artifact_id: Optional[uuid.UUID] = None,
+        digest: Optional[Digest | str] = None,
+        member: Optional[str] = None,
+        site: Optional[str] = None,
+        mount_name: Optional[str] = None,
+        mount_instance_id: Optional[str] = None,
+        extra_mount_instance_ids: Sequence[str] = (),
+        uri: Optional[str] = None,
+    ) -> bool:
+        coerced_aid = _coerce_optional_uuid(artifact_id)
+        digest_str = str(digest) if digest is not None else None
+        if not self.has_artifact_location_table():
+            return False
+        if uri is None and coerced_aid is None and digest_str is None:
+            return False
+        member_key = member or ""
+
+        if (
+            uri is not None
+            and mount_name is not None
+            and mount_instance_id is not None
+            and site in ("workspace", "external")
+        ):
+            mount_insts = list(
+                dict.fromkeys([mount_instance_id, *extra_mount_instance_ids])
+            )
+            inst_ph = ", ".join("?" for _ in mount_insts)
+            id_clauses: list[str] = []
+            id_params: list[Any] = []
+            if coerced_aid is not None:
+                id_clauses.append("artifact_id = ?")
+                id_params.append(coerced_aid)
+            if digest_str is not None:
+                id_clauses.append("digest = ?")
+                id_params.append(digest_str)
+            id_filter = f" AND ({' OR '.join(id_clauses)})" if id_clauses else ""
+            raw_rows = self.fetchall(
+                "WITH hit AS MATERIALIZED ("
+                "SELECT location_id, digest, artifact_id, site, mount_name, "
+                "mount_instance_id, member, status "
+                "FROM artifact_location WHERE uri = ?"
+                ") SELECT location_id, status FROM hit "
+                f"WHERE site = ? AND mount_name = ? AND mount_instance_id IN ({inst_ph}) "
+                f"AND member = ?{id_filter}",
+                [uri, site, mount_name, *mount_insts, member_key, *id_params],
+            )
+        elif coerced_aid is not None:
+            raw_rows = self.fetchall(
+                "WITH hit AS MATERIALIZED ("
+                "SELECT location_id, site, member, status "
+                "FROM artifact_location WHERE artifact_id = ?"
+                ") SELECT location_id, status FROM hit "
+                "WHERE member = ? AND site IN ('workspace', 'external')",
+                [coerced_aid, member_key],
+            )
+        elif digest_str is not None:
+            raw_rows = self.fetchall(
+                "WITH hit AS MATERIALIZED ("
+                "SELECT location_id, site, member, status "
+                "FROM artifact_location WHERE digest = ?"
+                ") SELECT location_id, status FROM hit "
+                "WHERE member = ? AND site IN ('workspace', 'external')",
+                [digest_str, member_key],
+            )
+        else:
+            return False
+
+        for raw_lid, raw_status in raw_rows:
+            eff_status = self._ephemeral_stale_locations.get(
+                _coerce_uuid(raw_lid), str(raw_status)
+            )
+            if eff_status == "evicted":
+                return True
+        return False
+
+    def get_active_artifact_locations_bulk(
+        self, artifacts: Sequence[Any]
+    ) -> Dict[uuid.UUID, List[ArtifactLocationRow]]:
+        if not artifacts or not self.has_artifact_location_table():
+            return {}
+        self.sync_location_epoch_caches()
+        aids: list[uuid.UUID] = []
+        digests: list[str] = []
+        for art in artifacts:
+            aid = _coerce_optional_uuid(art.id)
+            if aid is not None:
+                aids.append(aid)
+            if art.digest is not None:
+                digests.append(str(art.digest))
+        unique_aids = list(dict.fromkeys(aids))
+        unique_digests = list(dict.fromkeys(digests))
+        if not unique_aids and not unique_digests:
+            return {}
+
+        by_lid: dict[uuid.UUID, ArtifactLocationRow] = {}
+        max_len = max(len(unique_digests), len(unique_aids))
+        for start in range(0, max_len, 500):
+            d_chunk = unique_digests[start : start + 500]
+            a_chunk = unique_aids[start : start + 500]
+            inner_queries: list[str] = []
+            params: list[Any] = []
+            if d_chunk:
+                d_ph = ", ".join("?" for _ in d_chunk)
+                inner_queries.append(
+                    f"SELECT {self._LOCATION_SELECT_COLS} FROM artifact_location "
+                    f"WHERE digest IN ({d_ph})"
+                )
+                params.extend(d_chunk)
+            if a_chunk:
+                a_ph = ", ".join("?" for _ in a_chunk)
+                inner_queries.append(
+                    f"SELECT {self._LOCATION_SELECT_COLS} FROM artifact_location "
+                    f"WHERE artifact_id IN ({a_ph})"
+                )
+                params.extend(a_chunk)
+            raw_rows = self.fetchall(
+                f"WITH hit AS MATERIALIZED ({' UNION ALL '.join(inner_queries)}) "
+                f"SELECT {self._LOCATION_SELECT_COLS} FROM hit WHERE status = 'active'",
+                params,
+            )
+            for r in raw_rows:
+                loc = self._hydrate_location_row(r)
+                if loc.status == "active":
+                    by_lid[loc.location_id] = loc
+
+        by_digest_member: dict[tuple[str, str], list[ArtifactLocationRow]] = {}
+        by_aid_member: dict[tuple[uuid.UUID, str], list[ArtifactLocationRow]] = {}
+        for loc in by_lid.values():
+            if loc.digest is not None:
+                by_digest_member.setdefault((loc.digest, loc.member), []).append(loc)
+            if loc.artifact_id is not None:
+                by_aid_member.setdefault((loc.artifact_id, loc.member), []).append(loc)
+
+        result: Dict[uuid.UUID, List[ArtifactLocationRow]] = {}
+        for art in artifacts:
+            aid = _coerce_optional_uuid(art.id)
+            if aid is None:
+                continue
+            member_key = art.member or ""
+            matched: dict[uuid.UUID, ArtifactLocationRow] = {}
+            if art.digest is not None:
+                for loc in by_digest_member.get((str(art.digest), member_key), ()):
+                    matched[loc.location_id] = loc
+            for loc in by_aid_member.get((aid, member_key), ()):
+                matched[loc.location_id] = loc
+            result[aid] = self._sort_active_locations(list(matched.values()), aid)
+        return result
+
+    def get_artifact_recovery_locations(
+        self, artifact_id: uuid.UUID
+    ) -> List[ArtifactLocationRow]:
+        coerced_aid = _coerce_uuid(artifact_id)
+        if not self.has_artifact_location_table():
+            return []
+        self.sync_location_epoch_caches()
+        rows = self.fetchall(
+            f"WITH hit AS MATERIALIZED ("
+            f"SELECT {self._LOCATION_SELECT_COLS} FROM artifact_location WHERE artifact_id = ?"
+            f") SELECT {self._LOCATION_SELECT_COLS} FROM hit "
+            "WHERE site IN ('archive', 'advisory') AND status = 'active' "
+            "ORDER BY observed_at_ns ASC, CAST(location_id AS VARCHAR) ASC",
+            [coerced_aid],
+        )
+        return [
+            loc
+            for loc in (self._hydrate_location_row(r) for r in rows)
+            if loc.status == "active"
+        ]
+
+    def get_artifacts_recovery_locations_bulk(
+        self, artifact_ids: Sequence[uuid.UUID]
+    ) -> Dict[uuid.UUID, List[ArtifactLocationRow]]:
+        coerced_aids = list(dict.fromkeys(_coerce_uuid(aid) for aid in artifact_ids))
+        if not coerced_aids or not self.has_artifact_location_table():
+            return {}
+        self.sync_location_epoch_caches()
+        by_aid: Dict[uuid.UUID, List[ArtifactLocationRow]] = {
+            aid: [] for aid in coerced_aids
+        }
+        for start in range(0, len(coerced_aids), 500):
+            chunk = coerced_aids[start : start + 500]
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = self.fetchall(
+                f"WITH hit AS MATERIALIZED ("
+                f"SELECT {self._LOCATION_SELECT_COLS} FROM artifact_location "
+                f"WHERE artifact_id IN ({placeholders})"
+                f") SELECT {self._LOCATION_SELECT_COLS} FROM hit "
+                "WHERE site IN ('archive', 'advisory') AND status = 'active' "
+                "ORDER BY observed_at_ns ASC, CAST(location_id AS VARCHAR) ASC",
+                chunk,
+            )
+            for raw_row in rows:
+                loc = self._hydrate_location_row(raw_row)
+                if loc.status == "active" and loc.artifact_id is not None:
+                    by_aid.setdefault(loc.artifact_id, []).append(loc)
+        return by_aid
+
+    def replace_artifact_recovery_locations_bulk(
+        self,
+        locations_by_artifact_id: Mapping[uuid.UUID, Sequence[ArtifactLocationRow]],
+        *,
+        require_all: bool = True,
+    ) -> None:
+        if not locations_by_artifact_id:
+            return
+        coerced_map: dict[uuid.UUID, list[ArtifactLocationRow]] = {
+            _coerce_uuid(aid): list(locs)
+            for aid, locs in locations_by_artifact_id.items()
+        }
+        ids = list(coerced_map.keys())
+        placeholders = ", ".join("?" for _ in ids)
+        now_ns = time.time_ns()
+        with self.transaction() as cur:
+            found_rows = cur.execute(
+                f"SELECT id FROM artifact WHERE id IN ({placeholders})",
+                ids,
+            ).fetchall()
+            found_ids: set[uuid.UUID] = {_coerce_uuid(r[0]) for r in found_rows}
+            if require_all:
+                missing_ids = sorted(str(aid) for aid in set(ids) - found_ids)
+                if missing_ids:
+                    raise KeyError(
+                        "Artifacts were not found for recovery root update: "
+                        + ", ".join(missing_ids)
+                    )
+            target_aids = [aid for aid in ids if aid in found_ids]
+            if not target_aids:
+                return
+            target_ph = ", ".join("?" for _ in target_aids)
+            existing_rows = cur.execute(
+                f"SELECT location_id, artifact_id FROM artifact_location "
+                f"WHERE artifact_id IN ({target_ph}) "
+                "AND site IN ('archive', 'advisory') AND status = 'active'",
+                target_aids,
+            ).fetchall()
+            kept_lids_by_aid: dict[uuid.UUID, set[uuid.UUID]] = {
+                aid: {_coerce_uuid(loc.location_id) for loc in coerced_map[aid]}
+                for aid in target_aids
+            }
+            evict_lids: list[uuid.UUID] = []
+            for raw_lid, raw_aid in existing_rows:
+                lid = _coerce_uuid(raw_lid)
+                aid = _coerce_uuid(raw_aid)
+                if lid not in kept_lids_by_aid.get(aid, set()):
+                    evict_lids.append(lid)
+            if evict_lids:
                 _execute_multirow_values(
                     cur,
                     prefix_sql=(
-                        "UPDATE artifact AS a "
-                        "SET meta = CAST(v.meta_json AS JSON) FROM (VALUES"
+                        "UPDATE artifact_location AS al "
+                        "SET status = 'evicted', observed_at_ns = v.obs FROM (VALUES"
                     ),
-                    row_placeholder="(CAST(? AS VARCHAR), CAST(? AS UUID))",
-                    suffix_sql=") AS v(meta_json, aid) WHERE a.id = v.aid",
-                    rows=updates,
+                    row_placeholder="(CAST(? AS BIGINT), CAST(? AS UUID))",
+                    suffix_sql=") AS v(obs, lid) WHERE al.location_id = v.lid",
+                    rows=[[now_ns, lid] for lid in evict_lids],
                 )
-                return True
-            return False
+                for lid in evict_lids:
+                    self._ephemeral_stale_locations.pop(lid, None)
+                    self._settled_witnesses.pop(lid, None)
+            all_new_locs = [loc for aid in target_aids for loc in coerced_map[aid]]
+            if all_new_locs:
+                self._upsert_artifact_locations_locked(cur, all_new_locs)
+            elif evict_lids:
+                self.bump_location_epoch()
+
+    def evict_recovery_root_locations(
+        self,
+        *,
+        mount_name: str,
+        mount_instance_id: str,
+        root_uri: str,
+        retained_ids: Set[uuid.UUID],
+    ) -> bool:
+        """Mark ``archive``/``advisory`` locations beneath ``root_uri`` evicted for non-retained artifacts."""
+        retained_coerced = sorted((_coerce_uuid(aid) for aid in retained_ids), key=str)
+        prefix = root_uri if root_uri.endswith("://") else root_uri.rstrip("/") + "/"
+        clauses = [
+            "site IN ('archive', 'advisory')",
+            "status = 'active'",
+            "mount_name = ?",
+            "mount_instance_id = ?",
+            "(uri = ? OR starts_with(uri, ?))",
+        ]
+        params: list[Any] = [mount_name, mount_instance_id, root_uri, prefix]
+        if retained_coerced:
+            ph = ", ".join("?" for _ in retained_coerced)
+            clauses.append(f"(artifact_id IS NULL OR artifact_id NOT IN ({ph}))")
+            params.extend(retained_coerced)
+        now_ns = time.time_ns()
+        with self.transaction() as cur:
+            rows = cur.execute(
+                f"UPDATE artifact_location SET status = 'evicted', observed_at_ns = ? "
+                f"WHERE {' AND '.join(clauses)} RETURNING location_id",
+                [now_ns, *params],
+            ).fetchall()
+            if not rows:
+                return False
+            for (raw_lid,) in rows:
+                lid = _coerce_uuid(raw_lid)
+                self._ephemeral_stale_locations.pop(lid, None)
+                self._settled_witnesses.pop(lid, None)
+            self.bump_location_epoch()
+            return True
 
     def get_artifact_kv_values_bulk(
         self,

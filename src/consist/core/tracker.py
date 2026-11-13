@@ -120,7 +120,6 @@ from consist.models.gtfs import GTFS_SCHEMAS
 from consist.models.artifact import (
     Artifact,
     ArchivedOutputs,
-    extract_recovery_roots_from_meta,
 )
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
 from consist.models.run import (
@@ -263,29 +262,51 @@ class Tracker:
             return None
         return overrides.get(artifact.id)
 
-    def resolve_artifact_path(self, artifact: Any) -> Path:
+    def resolve_artifact_path(
+        self,
+        artifact: Any,
+        *,
+        allow_recovery_roots: bool = True,
+        ignore_runtime_abs_path: bool = False,
+        now_ns: Optional[int] = None,
+    ) -> Path:
         if isinstance(artifact, Artifact):
-            override = self.artifact_abs_path_override(artifact)
-            has_override = override is not None and override[0] == artifact._abs_path
-            attached = (
-                artifact._resolver_ref() if artifact._resolver_ref is not None else None
+            from consist.core.tracker_recovery import (
+                resolve_verified_local_path_with_diagnostics,
+                verify_candidate_against_artifact,
             )
-            abs_val = override[1] if has_override else artifact.abs_path
-            if abs_val and (attached is self or has_override):
-                abs_candidate = Path(abs_val)
-                try:
-                    if abs_candidate.exists():
-                        return abs_candidate
-                except OSError:
-                    pass
+
+            resolved, saw_mismatch = resolve_verified_local_path_with_diagnostics(
+                self,
+                artifact,
+                allow_recovery_roots=allow_recovery_roots,
+                ignore_runtime_abs_path=ignore_runtime_abs_path,
+                now_ns=now_ns,
+            )
+            if resolved is not None:
+                return resolved
+
+            nominal: Optional[Path] = None
             try:
-                resolved = Path(self.resolve_uri(artifact.uri))
-                if resolved.exists() or not abs_val:
-                    return resolved
+                nominal = Path(self.resolve_uri(artifact.uri))
             except (ValueError, RuntimeError, OSError, TypeError):
-                pass
-            if abs_val:
-                return Path(abs_val)
+                nominal = Path(artifact._abs_path) if artifact._abs_path else None
+
+            if saw_mismatch or (
+                nominal is not None
+                and nominal.exists()
+                and artifact.digest is not None
+                and not verify_candidate_against_artifact(nominal, artifact)
+            ):
+                raise FileNotFoundError(
+                    f"Artifact {artifact.key!r} failed witness/digest verification "
+                    "and has no verified recovery location."
+                )
+
+            if not ignore_runtime_abs_path and artifact._abs_path:
+                return Path(artifact._abs_path)
+            if nominal is not None:
+                return nominal
             return Path(artifact.uri)
         return Path(self.resolve_uri(str(artifact)))
 
@@ -295,30 +316,19 @@ class Tracker:
         *,
         target_root: Optional[Path | str] = None,
         source_root: Optional[Path | str] = None,
+        mutable: bool = False,
         on_missing: Literal["warn", "raise"] = "warn",
     ) -> Optional[Path]:
-        resolved_target_root: Path | str = (
-            target_root if target_root is not None else self.run_dir
-        )
-        result = self.materialize_artifact(
+        from consist.core.tracker_recovery import ensure_local_artifact_path_core
+
+        return ensure_local_artifact_path_core(
+            self,
             artifact,
-            target_root=resolved_target_root,
+            target_root=target_root,
             source_root=source_root,
-            preserve_existing=True,
+            mutable=mutable,
             on_missing=on_missing,
-            allow_external_paths=True if target_root is not None else None,
         )
-        if result.path is not None and result.path.exists():
-            if isinstance(artifact, Artifact):
-                self._record_artifact_abs_path_override(artifact, str(result.path))
-            return result.path
-        if on_missing == "raise":
-            key_repr = artifact.key if isinstance(artifact, Artifact) else artifact
-            raise FileNotFoundError(
-                f"[Consist] Cannot materialize artifact {key_repr!r}: "
-                f"status={result.status}."
-            )
-        return None
 
     def load_artifact_df(self, artifact: Any, **kwargs: Any) -> Any:
         from consist.api import load_df
@@ -331,20 +341,59 @@ class Tracker:
             return "accessible" if acc.accessible else "missing"
         return "missing"
 
-    def artifact_recovery_roots(self, artifact: Any) -> list[str]:
+    def inspect_artifact_locations(self, artifact: Any) -> list[tuple[str, Path, bool]]:
         if not isinstance(artifact, Artifact):
             return []
-        meta_roots = extract_recovery_roots_from_meta(artifact.meta)
+        from consist.core.tracker_recovery import (
+            resolve_verified_local_path,
+            verify_candidate_against_artifact,
+        )
+
+        try:
+            primary_path = Path(self.resolve_uri(artifact.uri))
+        except (OSError, RuntimeError, ValueError, TypeError):
+            primary_path = Path(artifact.uri)
+
+        verified_local = resolve_verified_local_path(
+            self, artifact, allow_recovery_roots=False
+        )
+        primary_valid = verified_local is not None or (
+            primary_path.exists()
+            and verify_candidate_against_artifact(primary_path, artifact)
+        )
+        locations: list[tuple[str, Path, bool]] = [
+            ("primary", primary_path, primary_valid)
+        ]
+
+        rel = self.fs.get_remappable_relative_path(artifact.uri)
+        if rel is None:
+            return locations
+        roots = self.fs.normalize_recovery_roots(self.artifact_recovery_roots(artifact))
+        for index, root in enumerate(roots, start=1):
+            candidate = (Path(root) / rel).resolve()
+            is_valid = candidate.exists() and verify_candidate_against_artifact(
+                candidate, artifact
+            )
+            locations.append((f"recovery_root #{index}", candidate, is_valid))
+        return locations
+
+    def artifact_recovery_roots(
+        self, artifact: Any, *, resolve: bool = True
+    ) -> list[str]:
+        if not isinstance(artifact, Artifact) or artifact.id is None:
+            return []
         db = self._compat_attr("db")
-        if db is not None and artifact.id is not None:
-            live_meta = db.get_artifact_meta_by_id(artifact.id)
-            if isinstance(live_meta, Mapping) and "recovery_roots" in live_meta:
-                db_roots = extract_recovery_roots_from_meta(live_meta)
-                for root in meta_roots:
-                    if root not in db_roots:
-                        db_roots.append(root)
-                return db_roots
-        return meta_roots
+        if db is None:
+            return []
+        rows = db.get_artifact_recovery_locations(artifact.id)
+        roots: list[str] = []
+        for row in rows:
+            extracted = self.fs.extract_recovery_root_from_location_row(
+                artifact.uri, row, resolve=resolve
+            )
+            if extracted is not None and extracted not in roots:
+                roots.append(extracted)
+        return roots
 
     def _replace_live_coupler_artifact(self, updated: Artifact) -> None:
         """Replace matching in-memory ``Artifact`` handles across active/tracked ``Coupler``s."""
@@ -451,9 +500,8 @@ class Tracker:
         openlineage_namespace : Optional[str], default None
             The namespace identifier for OpenLineage datasets and jobs.
         """
-        # 1. Initialize FileSystem Service
-        # (This handles the mkdir and path resolution internally now)
-        self.fs = FileSystemManager(run_dir, mounts)
+        is_ro = bool(read_only or access_mode == "read_only")
+        self.fs = FileSystemManager(run_dir, mounts, create_run_dir=not is_ro)
 
         self.mounts = self.fs.mounts
         self.archive_mounts = {
@@ -465,7 +513,7 @@ class Tracker:
         self.openlineage_enabled = openlineage_enabled
         self.openlineage_namespace = openlineage_namespace
 
-        self.read_only = bool(read_only or access_mode == "read_only")
+        self.read_only = is_ro
         self.access_mode: AccessMode = "read_only" if self.read_only else access_mode
         self._run_subdir_fn = run_subdir_fn
         self._cache_epoch = cache_epoch
@@ -1337,9 +1385,15 @@ class Tracker:
         roots: str | os.PathLike[str] | Sequence[str | os.PathLike[str]],
         *,
         append: bool = False,
+        site: str = "advisory",
+        verified_roots: Sequence[str | os.PathLike[str]] | None = None,
     ) -> Artifact:
         return self._archive_service.set_artifact_recovery_roots(
-            artifact, roots, append=append
+            artifact,
+            roots,
+            append=append,
+            site=site,
+            verified_roots=verified_roots,
         )
 
     def archive_artifact(
@@ -1395,15 +1449,33 @@ class Tracker:
             persist=persist,
         )
 
+    def evict_artifact(
+        self,
+        artifact: Artifact,
+        *,
+        path: Optional[str | os.PathLike[str]] = None,
+        scratch_path: Optional[str | os.PathLike[str]] = None,
+    ) -> Path:
+        """Safely evict a verified local scratch copy when an archive or ingested table survives."""
+        return self._archive_service.evict_artifact(
+            artifact, path=path, scratch_path=scratch_path
+        )
+
     def _set_artifact_recovery_roots_bulk(
         self,
         artifacts: Sequence[Artifact],
         roots: str | os.PathLike[str] | Sequence[str | os.PathLike[str]],
         *,
         append: bool,
+        site: str = "advisory",
+        verified_roots: Sequence[str | os.PathLike[str]] | None = None,
     ) -> dict[str, Artifact]:
         return self._archive_service._set_artifact_recovery_roots_bulk(
-            artifacts, roots, append=append
+            artifacts,
+            roots,
+            append=append,
+            site=site,
+            verified_roots=verified_roots,
         )
 
     def register_run_output_recovery_copies(
@@ -5706,6 +5778,8 @@ class Tracker:
         direction: str,
         *,
         profile_label: Optional[str] = None,
+        role: Optional[str] = None,
+        recovery_roots: Optional[Sequence[str]] = None,
     ) -> None:
         """
         Synchronizes an `Artifact` object and its `RunArtifactLink` to the DuckDB database.
@@ -5730,6 +5804,8 @@ class Tracker:
             artifact,
             direction,
             profile_label=profile_label,
+            role=role,
+            recovery_roots=recovery_roots,
         )
 
     def history(

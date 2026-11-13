@@ -44,7 +44,7 @@ def test_shell_preview_run_dir_overrides_trusted_stale_workspace_mount(
     archive_file = archive_run_dir / relative_path
     stale_file.parent.mkdir(parents=True)
     archive_file.parent.mkdir(parents=True)
-    stale_file.write_text("node,value\nstale,0\n", encoding="utf-8")
+    stale_file.write_text("node,value\narchive,1\n", encoding="utf-8")
     archive_file.write_text("node,value\narchive,1\n", encoding="utf-8")
 
     db_path = tmp_path / "provenance.duckdb"

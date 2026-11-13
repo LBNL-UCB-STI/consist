@@ -56,6 +56,11 @@ from consist.core.drivers import (
     _normalize_columns,
 )
 from consist.core.gtfs import GTFS_BUNDLE_SOURCE_KEY, GtfsCanonicalizationResult
+from consist.core.migrate import (
+    MigrationReport as MigrationReport,
+    migrate_database as migrate_database,
+    undo_migrate_database as undo_migrate_database,
+)
 from consist.core.noop import NoopRunContext, NoopScenarioContext
 from consist.core.persistence import (
     close_tracked_relation_tokens,
@@ -1822,6 +1827,19 @@ def archive_artifact(
     )
 
 
+def evict_artifact(
+    artifact: Artifact,
+    *,
+    path: Optional[str | Path] = None,
+    scratch_path: Optional[str | Path] = None,
+    tracker: Optional["Tracker"] = None,
+) -> Path:
+    """Safely evict a verified local scratch copy when an archive or ingested table survives."""
+    return _resolve_tracker(tracker).evict_artifact(
+        artifact, path=path, scratch_path=scratch_path
+    )
+
+
 def archive_run_outputs(
     run_id: str,
     archive_root: str | Path,
@@ -3318,27 +3336,7 @@ def load(
                 "Pass it explicitly: consist.load(art, tracker=my_tracker)"
             )
 
-    # 2. Determine Physical Path
-    # If we have a tracker, use it to resolve unless a materialized runtime abs_path
-    # on the attached tracker is already present on disk.
-    if tracker:
-        if (
-            (not explicit_tracker or tracker is attached_tracker)
-            and artifact.abs_path
-            and Path(artifact.abs_path).exists()
-        ):
-            path = artifact.abs_path
-        else:
-            path = tracker.resolve_uri(artifact.uri)
-            if (
-                not Path(path).exists()
-                and artifact.abs_path
-                and Path(artifact.abs_path).exists()
-            ):
-                path = artifact.abs_path
-    else:
-        path = artifact.path
-
+    # 2. Prepare loader kwargs
     # Only pass caller-provided kwargs to the loader; artifact.meta can contain
     # flags (e.g., schema_name) not accepted by pandas/xarray readers.
     load_kwargs = dict(kwargs)
@@ -3357,26 +3355,51 @@ def load(
             if artifact.member:
                 load_kwargs["array_path"] = artifact.member
 
-    # 3. Try Disk Load (Priority 1)
-    if Path(path).exists():
-        return _load_from_disk(str(path), artifact.driver, **load_kwargs)
-
-    # 3b. Try Archive / Recovery Roots Load when workspace copy was moved or cleaned
-    if (
-        allow_recovery_roots
-        and isinstance(tracker, Tracker)
-        and isinstance(artifact, Artifact)
-    ):
-        recovered_path, saw_digest_mismatch = _resolve_archive_recovery_path(
-            artifact, tracker
+    # 3. Try Verified Disk / Archive Load (Priority 1)
+    saw_digest_mismatch = False
+    resolved_disk_path: Optional[Path] = None
+    if isinstance(tracker, Tracker) and isinstance(artifact, Artifact):
+        from consist.core.tracker_recovery import (
+            resolve_verified_local_path_with_diagnostics,
         )
-        if recovered_path is not None:
-            return _load_from_disk(str(recovered_path), artifact.driver, **load_kwargs)
-        if saw_digest_mismatch:
-            raise ValueError(
-                f"Archived copy for artifact '{artifact.key}' (ID: {artifact.id}) "
-                f"failed digest verification ({artifact.digest})."
+
+        resolved_disk_path, resolver_mismatch = (
+            resolve_verified_local_path_with_diagnostics(
+                tracker,
+                artifact,
+                allow_recovery_roots=allow_recovery_roots,
+                ignore_runtime_abs_path=(
+                    explicit_tracker and tracker is not attached_tracker
+                ),
             )
+        )
+        if resolver_mismatch:
+            saw_digest_mismatch = True
+
+        try:
+            path: str | Path = (
+                resolved_disk_path
+                if resolved_disk_path is not None
+                else tracker.resolve_uri(artifact.uri)
+            )
+        except (OSError, RuntimeError, ValueError, TypeError):
+            path = artifact.abs_path or artifact.uri
+    else:
+        if tracker:
+            path = tracker.resolve_uri(artifact.uri)
+            if (
+                not Path(path).exists()
+                and artifact.abs_path
+                and Path(artifact.abs_path).exists()
+            ):
+                path = artifact.abs_path
+        else:
+            path = artifact.path
+        if Path(path).exists():
+            resolved_disk_path = Path(path)
+
+    if resolved_disk_path is not None:
+        return _load_from_disk(str(resolved_disk_path), artifact.driver, **load_kwargs)
 
     # 4. Try Database Load (Priority 2 - Ghost Mode)
     if (
@@ -3387,6 +3410,12 @@ def load(
         db_artifact = tracker.db.get_artifact(artifact.id)
         if db_artifact is not None and db_artifact.meta.get("is_ingested", False):
             artifact = db_artifact.with_resolver(tracker)
+
+    if saw_digest_mismatch and not artifact.meta.get("is_ingested", False):
+        raise ValueError(
+            f"Artifact '{artifact.key}' (ID: {artifact.id}) "
+            f"failed digest verification ({artifact.digest})."
+        )
 
     if artifact.meta.get("is_ingested", False):
         if db_fallback not in {"inputs-only", "always", "never"}:
@@ -3413,32 +3442,76 @@ def load(
             )
 
         if db_fallback == "inputs-only":
-            if not tracker or not tracker.current_consist:
-                raise FileNotFoundError(
-                    f"Artifact '{artifact.key}' (ID: {artifact.id}) not found.\n"
-                    f" - Disk Path: {path} (Missing)\n"
-                    f" - Database: Ingested, but no active run context\n"
-                    f"Hint: call consist.load(...) within a tracker.start_run(..., inputs=[...]) context, "
-                    f"or pass db_fallback='always'."
+            evicted_to_db = False
+            if isinstance(tracker, Tracker) and tracker.db is not None:
+                m_name, m_inst, loc_uri = tracker.fs.location_coordinate_for_uri(
+                    artifact.uri
                 )
-            if tracker.is_cached:
-                raise FileNotFoundError(
-                    f"Artifact '{artifact.key}' (ID: {artifact.id}) not found.\n"
-                    f" - Disk Path: {path} (Missing)\n"
-                    f" - Database: Ingested, but current run is a cache hit\n"
-                    f"Hint: pass db_fallback='always' if you explicitly want DB recovery here."
+                loc_site = (
+                    "workspace" if m_name in ("workspace", "runs") else "external"
                 )
-            is_declared_input = any(
-                (a.id == artifact.id) or (a.uri == artifact.uri)
-                for a in tracker.current_consist.inputs
-            )
-            if not is_declared_input:
-                raise FileNotFoundError(
-                    f"Artifact '{artifact.key}' (ID: {artifact.id}) not found.\n"
-                    f" - Disk Path: {path} (Missing)\n"
-                    f" - Database: Ingested, but artifact is not a declared input to the active run\n"
-                    f"Hint: add it to inputs=[...] when starting the run, or pass db_fallback='always'."
+                extra_insts: list[str] = []
+                if isinstance(artifact, Artifact) and artifact.run_id is not None:
+                    owning_run = tracker.get_run(str(artifact.run_id))
+                    run_meta = (
+                        owning_run.meta
+                        if owning_run is not None
+                        and isinstance(owning_run.meta, MappingABC)
+                        else {}
+                    )
+                    mounts_meta = run_meta.get("mounts")
+                    hist_root = (
+                        mounts_meta.get(m_name)
+                        if isinstance(mounts_meta, MappingABC)
+                        else None
+                    ) or (
+                        run_meta.get("_physical_run_dir")
+                        if m_name in ("workspace", "runs")
+                        else None
+                    )
+                    if isinstance(hist_root, str) and hist_root:
+                        from consist.location import workspace_mount_instance_id
+
+                        hist_inst = workspace_mount_instance_id(hist_root)
+                        if hist_inst != m_inst:
+                            extra_insts.append(hist_inst)
+                evicted_to_db = tracker.db.has_evicted_artifact_location(
+                    artifact_id=artifact.id,
+                    digest=artifact.digest,
+                    member=artifact.member,
+                    site=loc_site,
+                    mount_name=m_name,
+                    mount_instance_id=m_inst,
+                    extra_mount_instance_ids=extra_insts,
+                    uri=loc_uri,
                 )
+            if not evicted_to_db:
+                if not tracker or not tracker.current_consist:
+                    raise FileNotFoundError(
+                        f"Artifact '{artifact.key}' (ID: {artifact.id}) not found.\n"
+                        f" - Disk Path: {path} (Missing)\n"
+                        f" - Database: Ingested, but no active run context\n"
+                        f"Hint: call consist.load(...) within a tracker.start_run(..., inputs=[...]) context, "
+                        f"or pass db_fallback='always'."
+                    )
+                if tracker.is_cached:
+                    raise FileNotFoundError(
+                        f"Artifact '{artifact.key}' (ID: {artifact.id}) not found.\n"
+                        f" - Disk Path: {path} (Missing)\n"
+                        f" - Database: Ingested, but current run is a cache hit\n"
+                        f"Hint: pass db_fallback='always' if you explicitly want DB recovery here."
+                    )
+                is_declared_input = any(
+                    (a.id == artifact.id) or (a.uri == artifact.uri)
+                    for a in tracker.current_consist.inputs
+                )
+                if not is_declared_input:
+                    raise FileNotFoundError(
+                        f"Artifact '{artifact.key}' (ID: {artifact.id}) not found.\n"
+                        f" - Disk Path: {path} (Missing)\n"
+                        f" - Database: Ingested, but artifact is not a declared input to the active run\n"
+                        f"Hint: add it to inputs=[...] when starting the run, or pass db_fallback='always'."
+                    )
 
         if not tracker or get_hot_data_db_path(tracker) is None:
             raise RuntimeError(
@@ -3453,62 +3526,6 @@ def load(
         f" - Database: Not Ingested\n"
         f"The run that produced this output may need to be re-run."
     )
-
-
-def _resolve_archive_recovery_path(
-    artifact: Artifact,
-    tracker: Tracker,
-) -> tuple[Path | None, bool]:
-    """Locate and digest-verify an archived copy via ``recovery_roots`` if present."""
-    from consist.core.materialize import (
-        _verify_scalar_artifact_digest,
-        find_existing_recovery_source_path,
-    )
-    from consist.digest import DIGEST_DRIVERS
-
-    saw_digest_mismatch = False
-    has_verifiable_digest = (
-        artifact.digest is not None
-        and artifact.digest.scheme in DIGEST_DRIVERS
-        and artifact.digest.scheme
-        not in {
-            "caller_supplied_v1:sha256",
-            "stat_file_v1:sha256",
-            "stat_dir_v1:sha256",
-        }
-    )
-
-    def _validate_candidate(candidate: Path) -> bool:
-        nonlocal saw_digest_mismatch
-        if not has_verifiable_digest or artifact.digest is None:
-            return True
-        if _verify_scalar_artifact_digest(candidate, artifact, artifact.digest):
-            return True
-        saw_digest_mismatch = True
-        return False
-
-    _, recovered_path, _ = find_existing_recovery_source_path(
-        tracker,
-        artifact=artifact,
-        run=None,
-        source_root=None,
-        source_validator=_validate_candidate,
-    )
-    if (
-        recovered_path is None
-        and artifact.parent_artifact_id is not None
-        and tracker.db is not None
-    ):
-        parent_artifact = tracker.db.get_artifact(artifact.parent_artifact_id)
-        if parent_artifact is not None:
-            _, recovered_path, _ = find_existing_recovery_source_path(
-                tracker,
-                artifact=parent_artifact,
-                run=None,
-                source_root=None,
-                source_validator=_validate_candidate,
-            )
-    return recovered_path, saw_digest_mismatch
 
 
 def _load_from_disk(path: str, driver: str, **kwargs: Any) -> LoadResult:

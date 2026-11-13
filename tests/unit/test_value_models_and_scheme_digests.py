@@ -542,13 +542,21 @@ class TestArtifactImmutabilityLayeringAndProtocols:
             forbidden = [
                 mod
                 for mod in imported_modules
-                if mod.startswith(("consist.models", "consist.core", "consist.api"))
+                if mod.startswith(
+                    (
+                        "consist.models",
+                        "consist.location",
+                        "consist.core",
+                        "consist.api",
+                    )
+                )
             ]
             assert forbidden == [], (
                 f"Layer-1 {path.name} has upward imports: {forbidden}"
             )
 
         layer2_files = [
+            src_root / "location.py",
             src_root / "models" / "artifact.py",
             src_root / "models" / "run.py",
             src_root / "models" / "config_facet.py",
@@ -1220,8 +1228,8 @@ class TestEdgeCaseHardeningAndIsolation:
         reloaded = tracker.db.get_artifact(stale_handle.id)
         assert reloaded is not None
         assert reloaded.meta.get("is_ingested") is True
-        roots = reloaded.meta.get("recovery_roots")
-        assert isinstance(roots, list)
+        assert "recovery_roots" not in reloaded.meta
+        roots = tracker.artifact_recovery_roots(reloaded)
         assert str(arch1.resolve()) in roots
         assert str(arch2.resolve()) in roots
         tracker.close()

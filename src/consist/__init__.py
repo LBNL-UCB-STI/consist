@@ -38,6 +38,7 @@ if TYPE_CHECKING:
         define_step,
         diff_coupler_snapshots,
         ensure_local_path,
+        evict_artifact,
         exec,
         find_latest_run,
         find_matching_run,
@@ -70,6 +71,7 @@ if TYPE_CHECKING:
         log_output,
         materialize_artifact,
         materialize_run_outputs,
+        migrate_database,
         noop_scenario,
         output_dir,
         output_path,
@@ -98,7 +100,11 @@ if TYPE_CHECKING:
         start_run,
         to_df,
         trace,
+        undo_migrate_database,
         use_tracker,
+    )
+    from consist.core.migrate import (
+        MigrationReport,
     )
     from consist.core.command_exec import (
         CommandExecutionError,
@@ -284,6 +290,7 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "IntCapture": ("consist.types", "IntCapture"),
     "MaterializationResult": ("consist.core.materialize", "MaterializationResult"),
     "MaterializedArtifact": ("consist.core.materialize", "MaterializedArtifact"),
+    "MigrationReport": ("consist.core.migrate", "MigrationReport"),
     "NoopArtifact": ("consist.core.noop", "NoopArtifact"),
     "NoopCoupler": ("consist.core.noop", "NoopCoupler"),
     "NoopRunResult": ("consist.core.noop", "NoopRunResult"),
@@ -355,6 +362,7 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "define_step": ("consist.api", "define_step"),
     "diff_coupler_snapshots": ("consist.api", "diff_coupler_snapshots"),
     "ensure_local_path": ("consist.api", "ensure_local_path"),
+    "evict_artifact": ("consist.api", "evict_artifact"),
     "exec": ("consist.api", "exec"),
     "execute_worker_run": ("consist.core.orchestration", "execute_worker_run"),
     "find_latest_run": ("consist.api", "find_latest_run"),
@@ -393,6 +401,7 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "log_output": ("consist.api", "log_output"),
     "materialize_artifact": ("consist.api", "materialize_artifact"),
     "materialize_run_outputs": ("consist.api", "materialize_run_outputs"),
+    "migrate_database": ("consist.api", "migrate_database"),
     "noop_scenario": ("consist.api", "noop_scenario"),
     "output_dir": ("consist.api", "output_dir"),
     "output_path": ("consist.api", "output_path"),
@@ -429,6 +438,7 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "start_run": ("consist.api", "start_run"),
     "to_df": ("consist.api", "to_df"),
     "trace": ("consist.api", "trace"),
+    "undo_migrate_database": ("consist.api", "undo_migrate_database"),
     "use_tracker": ("consist.api", "use_tracker"),
 }
 
@@ -559,6 +569,7 @@ __all__ = [
     "IntCapture",
     "MaterializationResult",
     "MaterializedArtifact",
+    "MigrationReport",
     "NoopArtifact",
     "NoopCoupler",
     "NoopRunResult",
@@ -612,6 +623,7 @@ __all__ = [
     "define_step",
     "diff_coupler_snapshots",
     "ensure_local_path",
+    "evict_artifact",
     "exec",
     "execute_worker_run",
     "find_latest_run",
@@ -647,6 +659,7 @@ __all__ = [
     "log_output",
     "materialize_artifact",
     "materialize_run_outputs",
+    "migrate_database",
     "noop_scenario",
     "output_dir",
     "output_path",
@@ -677,6 +690,7 @@ __all__ = [
     "start_run",
     "to_df",
     "trace",
+    "undo_migrate_database",
     "use_tracker",
 ]
 

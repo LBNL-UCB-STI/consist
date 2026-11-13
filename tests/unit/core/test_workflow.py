@@ -779,18 +779,10 @@ def test_scenario_step_run_completion_archive_default_and_override(
             ),
         )
 
-        assert res1.outputs["one"].meta.get("recovery_roots") == [
-            str(default_archive.resolve())
-        ]
-        assert res2.outputs["two"].meta.get("recovery_roots") == [
-            str(override_archive.resolve())
-        ]
-        assert sc.coupler["one"].meta.get("recovery_roots") == [
-            str(default_archive.resolve())
-        ]
-        assert sc.coupler["two"].meta.get("recovery_roots") == [
-            str(override_archive.resolve())
-        ]
+        assert res1.outputs["one"].recovery_roots == [str(default_archive.resolve())]
+        assert res2.outputs["two"].recovery_roots == [str(override_archive.resolve())]
+        assert sc.coupler["one"].recovery_roots == [str(default_archive.resolve())]
+        assert sc.coupler["two"].recovery_roots == [str(override_archive.resolve())]
 
     assert Path(
         tracker.fs.resolve_historical_path(res1.outputs["one"].uri, default_archive)
@@ -800,12 +792,8 @@ def test_scenario_step_run_completion_archive_default_and_override(
     ).exists()
     assert tracker.last_run is not None
     header_outputs = {art.key: art for art in tracker.last_run.outputs}
-    assert header_outputs["one"].meta.get("recovery_roots") == [
-        str(default_archive.resolve())
-    ]
-    assert header_outputs["two"].meta.get("recovery_roots") == [
-        str(override_archive.resolve())
-    ]
+    assert header_outputs["one"].recovery_roots == [str(default_archive.resolve())]
+    assert header_outputs["two"].recovery_roots == [str(override_archive.resolve())]
 
 
 def test_run_completion_archive_policy_failure_aborts_run_and_prevents_coupler_update(
@@ -1026,9 +1014,7 @@ def test_set_output_meta_attaches_metadata_to_declared_outputs_across_run_and_tr
         assert res.outputs["a"].meta["sidecar"] == {"v": 1}
         assert res.outputs["a"].meta["tag"] == "initial"
         assert res.outputs["a"].meta["extra"] == "merged"
-        assert res.outputs["a"].meta.get("recovery_roots") == [
-            str(archive_root.resolve())
-        ]
+        assert res.outputs["a"].recovery_roots == [str(archive_root.resolve())]
         assert "will_be" not in res.outputs["b"].meta
         assert res.outputs["b"].meta["final"] is True
 
@@ -1048,7 +1034,7 @@ def test_set_output_meta_attaches_metadata_to_declared_outputs_across_run_and_tr
 
         assert sc.coupler.require("traced_out").meta["initial"] == 1
         assert sc.coupler.require("traced_out").meta["added_in_trace"] == 2
-        assert sc.coupler.require("traced_out").meta.get("recovery_roots") == [
+        assert sc.coupler.require("traced_out").recovery_roots == [
             str(archive_root.resolve())
         ]
 
@@ -1100,7 +1086,7 @@ def test_scenario_trace_archive_opt_out_and_step_factory(
             outputs=["out"],
             execution_options=ExecutionOptions(inject_context="ctx"),
         )
-        assert r_archived.outputs["out"].meta.get("recovery_roots") == [
+        assert r_archived.outputs["out"].recovery_roots == [
             str((archive_root / "archived_step").resolve())
         ]
 
@@ -1113,6 +1099,7 @@ def test_scenario_trace_archive_opt_out_and_step_factory(
             execution_options=ExecutionOptions(inject_context="ctx"),
         )
         assert "recovery_roots" not in r_skipped_factory.outputs["out"].meta
+        assert r_skipped_factory.outputs["out"].recovery_roots == []
 
         # 3. Explicitly opted out via OutputPolicyOptions(run_completion_archive=False)
         r_opted_out = sc.run(
@@ -1124,6 +1111,7 @@ def test_scenario_trace_archive_opt_out_and_step_factory(
             output_policy=OutputPolicyOptions(run_completion_archive=False),
         )
         assert "recovery_roots" not in r_opted_out.outputs["out"].meta
+        assert r_opted_out.outputs["out"].recovery_roots == []
 
         # 4. Archived via factory in sc.trace
         with sc.trace(
@@ -1135,7 +1123,7 @@ def test_scenario_trace_archive_opt_out_and_step_factory(
             tp.write_text("t\n1\n", encoding="utf-8")
             t.log_output(tp, key="traced_file")
 
-        assert sc.coupler.require("traced_file").meta.get("recovery_roots") == [
+        assert sc.coupler.require("traced_file").recovery_roots == [
             str((archive_root / "traced_archived").resolve())
         ]
         assert sc.coupler.require("traced_file").abs_path == str(tp.resolve())
@@ -1152,6 +1140,7 @@ def test_scenario_trace_archive_opt_out_and_step_factory(
             t.log_output(tp2, key="traced_no_archive")
 
         assert "recovery_roots" not in sc.coupler.require("traced_no_archive").meta
+        assert sc.coupler.require("traced_no_archive").recovery_roots == []
 
 
 def test_set_output_meta_reserved_keys_trace_demotion_and_post_call_preservation(
@@ -1268,7 +1257,7 @@ def test_lazy_callable_archive_root_and_in_run_set_archive_root(
     discovered = state["archive_dir"]
     assert discovered is not None
     assert (discovered / "beam_out" / "events.csv").exists()
-    assert res.outputs["events"].meta["recovery_roots"] == [
+    assert res.outputs["events"].recovery_roots == [
         str(workspace.resolve()),
         str(discovered.resolve()),
     ]
@@ -1315,7 +1304,7 @@ def test_lazy_callable_archive_root_and_in_run_set_archive_root(
         execution_options=ExecutionOptions(inject_context="ctx"),
     )
     assert (in_run_archive / "beam_out" / "ctx_events.csv").exists()
-    assert res_ctx.outputs["ctx_events"].meta["recovery_roots"] == [
+    assert res_ctx.outputs["ctx_events"].recovery_roots == [
         str(in_run_archive.resolve())
     ]
 

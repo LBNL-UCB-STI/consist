@@ -226,10 +226,7 @@ class ArtifactManager:
                 member = legacy_table_path
             elif isinstance(legacy_array_path, str) and legacy_array_path:
                 member = legacy_array_path
-        if "recovery_roots" in meta:
-            meta["recovery_roots"] = self.tracker.fs.normalize_recovery_roots(
-                meta["recovery_roots"]
-            )
+        meta.pop("recovery_roots", None)
         meta.pop("hash_semantics", None)
         meta.pop("content_identity", None)
 

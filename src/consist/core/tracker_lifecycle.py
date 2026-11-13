@@ -40,6 +40,7 @@ from consist.core.cache_miss_explainer import (
 from consist.core.context import pop_tracker, push_tracker
 from consist.core.error_messages import format_problem_cause_fix
 from consist.core.resolved_binding import _validate_strict_binding_invocation_context
+from consist.core.run_resolution import format_input_link_role
 from consist.core.validation import (
     validate_config_structure,
     validate_run_meta,
@@ -592,6 +593,14 @@ class RunLifecycleCoordinator:
 
         with _track_begin_run_phase("input_binding.total"):
             if inputs:
+                role_by_input_index = (
+                    {
+                        r.input_index: format_input_link_role(r.kind, r.role)
+                        for r in input_binding_roles
+                    }
+                    if input_binding_roles is not None
+                    else {}
+                )
                 known_latest_by_index: Dict[int, Optional[Artifact]] = {}
                 if tracker.db:
                     lookup_by_index: Dict[
@@ -617,11 +626,13 @@ class RunLifecycleCoordinator:
                         }
                 with tracker.persistence.batch_artifact_writes():
                     for index, item in enumerate(inputs):
+                        item_link_role = role_by_input_index.get(index)
                         if isinstance(item, Artifact):
                             tracker._artifact_logging.log_artifact(
                                 item,
                                 direction="input",
                                 profile_file_schema=profile_file_schema,
+                                link_role=item_link_role,
                             )
                         else:
                             key = Path(item).stem
@@ -636,6 +647,7 @@ class RunLifecycleCoordinator:
                                 latest_artifact_lookup_done=(
                                     index in known_latest_by_index
                                 ),
+                                link_role=item_link_role,
                             )
 
         with _track_begin_run_phase("input_binding.parent_run_inference"):

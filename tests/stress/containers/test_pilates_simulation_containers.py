@@ -48,6 +48,7 @@ def run_simulation_scenario(
     base_trips_by_year=None,
     advance_delta_by_year=None,
     validate_cached_outputs: str = "lazy",
+    container_subdir: str | None = None,
 ):
     rng = np.random.default_rng(42)
     n_hh = 100
@@ -55,7 +56,11 @@ def run_simulation_scenario(
 
     base_trips_by_year = base_trips_by_year or {}
     advance_delta_by_year = advance_delta_by_year or {}
-    container_out_root = (tracker.run_dir / "container_out").resolve()
+    container_out_root = (
+        (tracker.run_dir / "container_out" / container_subdir).resolve()
+        if container_subdir
+        else (tracker.run_dir / "container_out").resolve()
+    )
     # Example "external config bundle" that should affect identity but not be stored in DB.
     external_cfg_dir = (
         tracker.run_dir / "external_configs" / "generate_trips"
@@ -245,8 +250,12 @@ def test_pilates_header_pattern(tmp_path: Path):
     tracker.identity.hashing_strategy = "fast"
 
     years = [2020, 2030]
-    run_simulation_scenario(tracker, "baseline", 10, years, "cold")
-    run_simulation_scenario(tracker, "high_gas", 5, years, "hot")
+    run_simulation_scenario(
+        tracker, "baseline", 10, years, "cold", container_subdir="baseline"
+    )
+    run_simulation_scenario(
+        tracker, "high_gas", 5, years, "hot", container_subdir="high_gas"
+    )
 
     # Create Hybrid Views
     tracker.create_view("v_persons", "persons")
@@ -426,8 +435,6 @@ def test_pilates_caching_scenarios(tmp_path):
     ):
         # A: baseline
         run_simulation_scenario(tracker, "A", 10, years, "cold")
-        # B: different inputs/base_trips -> no hits relative to A
-        run_simulation_scenario(tracker, "B", 15, years, "cold")
         # C: same as A but different name -> should reuse A’s work
         run_simulation_scenario(tracker, "C", 10, years, "cold")
         # D: same as A, but advance delta changes only in 2030
@@ -448,6 +455,10 @@ def test_pilates_caching_scenarios(tmp_path):
             "cold",
             base_trips_by_year={2030: 20},
         )
+        # B: different inputs/base_trips -> no hits relative to A.
+        # Run after C/D/E because scenarios share `container_out/{year}/persons.parquet`
+        # and verified locations detect when B overwrites A's 2020 file on disk.
+        run_simulation_scenario(tracker, "B", 15, years, "cold")
 
     # Helpers to inspect cache flags
     def cache_hit(parent, year, model):

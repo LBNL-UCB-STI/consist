@@ -970,19 +970,6 @@ class ScenarioContext:
             return "workspace_managed"
         return "external_mount"
 
-    def _extract_recovery_roots(
-        self,
-        artifact: Artifact,
-        source_root: Optional[Union[str, Path]] = None,
-    ) -> List[str]:
-        """Extract and preserve recovery roots, appending source_root if provided."""
-        roots: List[str] = list(artifact.recovery_roots)
-        if source_root is not None:
-            source_root_str = str(Path(source_root).resolve())
-            if source_root_str not in roots:
-                roots.append(source_root_str)
-        return roots
-
     def _check_or_materialize_local_artifact(
         self,
         art: Artifact,
@@ -992,21 +979,30 @@ class ScenarioContext:
         validate_content_hash: Literal["never", "if-present", "always"],
     ) -> MaterializedArtifact:
         """Check for local artifact presence or recover into tracker.run_dir."""
-        existing_path: Optional[Path] = None
-        try:
-            candidate = Path(self.tracker.resolve_uri(art.uri))
-            if candidate.exists():
-                existing_path = candidate
-        except (ValueError, RuntimeError, OSError, TypeError):
-            pass
+        from consist.core.tracker_recovery import resolve_verified_local_path
 
-        if existing_path is None and art.abs_path:
+        existing_path: Optional[Path] = None
+        if validate_content_hash != "never":
+            existing_path = resolve_verified_local_path(
+                self.tracker,
+                art,
+                allow_recovery_roots=False,
+                verify_digest=(validate_content_hash == "always"),
+            )
+        else:
             try:
-                candidate = Path(art.abs_path)
+                candidate = Path(self.tracker.resolve_uri(art.uri))
                 if candidate.exists():
                     existing_path = candidate
             except (ValueError, RuntimeError, OSError, TypeError):
                 pass
+            if existing_path is None and art.abs_path:
+                try:
+                    candidate = Path(art.abs_path)
+                    if candidate.exists():
+                        existing_path = candidate
+                except (ValueError, RuntimeError, OSError, TypeError):
+                    pass
 
         if existing_path is not None:
             resolved_existing = existing_path.resolve()
@@ -1323,14 +1319,18 @@ class ScenarioContext:
                     else:
                         meta["mount_root"] = str(resolved_target_root)
 
-                recovery_roots = self._extract_recovery_roots(
-                    hydrated_art, source_root=source_root
-                )
-                if recovery_roots or "recovery_roots" in meta:
-                    meta["recovery_roots"] = recovery_roots
                 hydrated_art = hydrated_art.with_meta(meta, merge=False).with_resolver(
                     self.tracker
                 )
+                if (
+                    source_root is not None
+                    and hydrated_art.id is not None
+                    and self.tracker.db is not None
+                    and not self.tracker.db.read_only
+                ):
+                    self.tracker.set_artifact_recovery_roots(
+                        hydrated_art, [str(Path(source_root).resolve())], append=True
+                    )
 
                 restored_artifacts[key] = hydrated_art
                 self.coupler.set(key, hydrated_art)

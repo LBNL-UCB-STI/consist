@@ -43,6 +43,38 @@ _LOWER_HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 _SCHEME_RE = re.compile(r"^[A-Za-z0-9_./+-]+(?::[A-Za-z0-9_./+-]+)*$")
 _MANIFEST_VERSION = 1
 _SHAPEFILE_REQUIRED_SUFFIXES = frozenset({".shp", ".shx", ".dbf"})
+SHAPEFILE_SIDECAR_SUFFIXES: frozenset[str] = frozenset(
+    {
+        ".shp",
+        ".shx",
+        ".dbf",
+        ".prj",
+        ".cpg",
+        ".qpj",
+        ".sbn",
+        ".sbx",
+        ".fbn",
+        ".fbx",
+        ".ain",
+        ".aih",
+        ".ixs",
+        ".mxs",
+        ".atx",
+        ".shp.xml",
+    }
+)
+
+
+def is_shapefile_sidecar_filename(filename: str, stem: str) -> bool:
+    """Return True if ``filename`` is a known shapefile sidecar matching ``stem`` (case-insensitive)."""
+    if not stem:
+        return False
+    lower_name = filename.lower()
+    lower_stem = stem.lower()
+    if not lower_name.startswith(f"{lower_stem}."):
+        return False
+    return lower_name[len(lower_stem) :] in SHAPEFILE_SIDECAR_SUFFIXES
+
 
 _PRIMARY_LOOKUP_KEYS = (
     "zone_number",
@@ -413,12 +445,16 @@ def build_shapefile_manifest_v1(shapefile: Path | str) -> dict[str, Any]:
     if not root.is_dir():
         raise ValueError(f"shapefile bundle root must be a directory: {root}")
 
-    stem_prefix = f"{shapefile_path.stem}."
+    stem = shapefile_path.stem
     members: list[dict[str, Any]] = []
     required_counts = {suffix: 0 for suffix in _SHAPEFILE_REQUIRED_SUFFIXES}
     with os.scandir(root) as scan:
         candidates = sorted(
-            (entry for entry in scan if entry.name.startswith(stem_prefix)),
+            (
+                entry
+                for entry in scan
+                if is_shapefile_sidecar_filename(entry.name, stem)
+            ),
             key=lambda entry: entry.name,
         )
     for candidate in candidates:

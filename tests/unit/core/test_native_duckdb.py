@@ -1021,12 +1021,12 @@ def test_artifact_member_persistence_and_bulk_meta_preserves_member(
         assert loaded_before.member == "/fields/velocity"
 
         db.replace_artifacts_meta_bulk(
-            {h5_arr.id: {"units": "m/s", "recovery_roots": ["/archive/root"]}}
+            {h5_arr.id: {"units": "m/s", "notes": "updated"}}
         )
         loaded_after = db.get_artifact(h5_arr.id)
         assert loaded_after is not None
         assert loaded_after.member == "/fields/velocity"
-        assert loaded_after.meta["recovery_roots"] == ["/archive/root"]
+        assert loaded_after.meta["notes"] == "updated"
         assert "_consist_member_kind" not in loaded_after.meta
     finally:
         db.close()
