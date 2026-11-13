@@ -295,7 +295,7 @@ def test_sync_artifacts_merges_existing_artifact_rows(tracker, run_dir: Path):
             direction="output",
         )
 
-        artifact.meta["merged_marker"] = "updated"
+        artifact = artifact.with_meta({"merged_marker": "updated"}, merge=True)
         tracker.db.sync_artifacts(
             artifacts=[artifact],
             run_id="run_existing_artifact_merge",

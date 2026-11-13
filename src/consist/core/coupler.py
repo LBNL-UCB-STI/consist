@@ -219,7 +219,10 @@ class Coupler(CouplerMapMixin[Artifact, DeclaredOutput]):
     def tracker(self, value: Optional["Tracker"]) -> None:
         self._tracker = value
         if value is not None:
-            couplers = value.__dict__.get("_couplers")
+            try:
+                couplers = value._couplers
+            except AttributeError:
+                couplers = None
             if couplers is not None:
                 couplers.add(self)
 
@@ -316,7 +319,7 @@ class Coupler(CouplerMapMixin[Artifact, DeclaredOutput]):
                 raise RuntimeError(
                     f"Cannot resolve path for {key!r}: no tracker attached to Coupler."
                 )
-            return Path(self.tracker.resolve_uri(artifact.container_uri))
+            return Path(self.tracker.resolve_uri(artifact.uri))
         if isinstance(artifact, (Path, str)):
             if self.tracker is not None and "://" in str(artifact):
                 return Path(self.tracker.resolve_uri(str(artifact)))
@@ -324,8 +327,8 @@ class Coupler(CouplerMapMixin[Artifact, DeclaredOutput]):
         if isinstance(artifact, ArtifactLike):
             if artifact.path is not None:
                 return Path(artifact.path)
-            if artifact.container_uri:
+            if artifact.uri:
                 if self.tracker is not None:
-                    return Path(self.tracker.resolve_uri(artifact.container_uri))
-                return Path(artifact.container_uri)
+                    return Path(self.tracker.resolve_uri(artifact.uri))
+                return Path(artifact.uri)
         return None

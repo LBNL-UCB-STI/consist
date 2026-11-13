@@ -327,9 +327,10 @@ def _safe_get_run_artifacts(
 ) -> Optional[Any]:
     try:
         artifacts = tracker.get_artifacts_for_run(run_id)
+        inputs = artifacts.inputs
     except Exception:
         return None
-    if getattr(artifacts, "inputs", None) is not None:
+    if inputs is not None:
         return artifacts
     return None
 
@@ -359,16 +360,11 @@ def _current_input_artifacts(tracker: CacheMissExplainerContext) -> dict[str, Ar
     return _artifact_map_from_inputs(current_consist.inputs)
 
 
-def _resolve_run_signature(
-    tracker: CacheMissExplainerContext, run_id: Optional[str]
-) -> Optional[str]:
+def _resolve_run_signature(tracker: Any, run_id: Optional[str]) -> Optional[str]:
     if not run_id:
         return None
-    resolver = getattr(tracker, "_resolve_run_signature", None)
-    if resolver is None:
-        return None
     try:
-        signature = resolver(run_id)
+        signature = tracker._resolve_run_signature(run_id)
     except Exception:
         return None
     if isinstance(signature, str):
@@ -401,19 +397,16 @@ def _artifact_change_labels(
         elif current_signature != candidate_signature:
             labels.append("upstream_run_changed")
 
-    if current.hash != candidate.hash:
-        labels.append("artifact_hash_changed")
+    if current.digest != candidate.digest:
+        labels.append("artifact_digest_changed")
 
     if _artifact_content_id(current) != _artifact_content_id(candidate):
         labels.append("artifact_content_id_changed")
 
-    if current.container_uri != candidate.container_uri:
+    if current.uri != candidate.uri:
         labels.append("input_location_changed")
 
-    if (
-        current.table_path != candidate.table_path
-        or current.array_path != candidate.array_path
-    ):
+    if current.member != candidate.member:
         labels.append("container_member_changed")
 
     return labels
@@ -464,22 +457,24 @@ def _build_input_details(
                 change_entry["current_run_signature"] = current_signature
             if candidate_signature is not None:
                 change_entry["candidate_run_signature"] = candidate_signature
-        if "artifact_hash_changed" in labels:
-            change_entry["current_hash"] = current_artifact.hash
-            change_entry["candidate_hash"] = candidate_artifact.hash
+        if "artifact_digest_changed" in labels:
+            change_entry["current_digest"] = (
+                str(current_artifact.digest) if current_artifact.digest else None
+            )
+            change_entry["candidate_digest"] = (
+                str(candidate_artifact.digest) if candidate_artifact.digest else None
+            )
         if "artifact_content_id_changed" in labels:
             change_entry["current_content_id"] = _artifact_content_id(current_artifact)
             change_entry["candidate_content_id"] = _artifact_content_id(
                 candidate_artifact
             )
         if "input_location_changed" in labels:
-            change_entry["current_container_uri"] = current_artifact.container_uri
-            change_entry["candidate_container_uri"] = candidate_artifact.container_uri
+            change_entry["current_uri"] = current_artifact.uri
+            change_entry["candidate_uri"] = candidate_artifact.uri
         if "container_member_changed" in labels:
-            change_entry["current_table_path"] = current_artifact.table_path
-            change_entry["candidate_table_path"] = candidate_artifact.table_path
-            change_entry["current_array_path"] = current_artifact.array_path
-            change_entry["candidate_array_path"] = candidate_artifact.array_path
+            change_entry["current_member"] = current_artifact.member
+            change_entry["candidate_member"] = candidate_artifact.member
         input_changes.append(change_entry)
 
     if input_changes:
@@ -592,12 +587,12 @@ def _should_include_input_details(
     return "input_hash" in set(mismatched_components)
 
 
-def _action_v2_binding_map(
+def _input_binding_map(
     run: Run,
 ) -> dict[tuple[str, str | int], Mapping[str, Any]] | None:
-    """Return well-formed persisted action-v2 bindings keyed by their role."""
+    """Return well-formed persisted input bindings keyed by their role."""
     identity = _get_run_meta_value(run, "input_identity")
-    if not isinstance(identity, Mapping) or identity.get("mode") != "action-v2":
+    if not isinstance(identity, Mapping):
         return None
     bindings = identity.get("bindings")
     if not isinstance(bindings, list):
@@ -629,22 +624,22 @@ def _binding_selector(binding: Mapping[str, Any]) -> Mapping[str, Any] | None:
     selector = binding.get("selector")
     if not isinstance(selector, Mapping):
         return None
-    if not all(key in selector for key in ("driver", "table_path", "array_path")):
+    if not all(key in selector for key in ("driver", "member")):
         return None
     return selector
 
 
-def _ordered_action_v2_role_pairs(
+def _ordered_role_pairs(
     pairs: Iterable[tuple[str, str | int]],
 ) -> list[tuple[str, str | int]]:
     """Order persisted role pairs without comparing unlike role value types."""
     return sorted(pairs, key=lambda item: (item[0], str(item[1])))
 
 
-def _action_v2_binding_details(run: Run, candidate: Run) -> dict[str, Any]:
-    """Summarize role-aware action-v2 input differences without raw identities."""
-    current_bindings = _action_v2_binding_map(run)
-    candidate_bindings = _action_v2_binding_map(candidate)
+def _input_binding_details(run: Run, candidate: Run) -> dict[str, Any]:
+    """Summarize role-aware input differences without raw identities."""
+    current_bindings = _input_binding_map(run)
+    candidate_bindings = _input_binding_map(candidate)
     if current_bindings is None or candidate_bindings is None:
         return {}
 
@@ -668,13 +663,13 @@ def _action_v2_binding_details(run: Run, candidate: Run) -> dict[str, Any]:
     changed_bindings: list[dict[str, Any]] = []
     current_roles = set(current_bindings)
     candidate_roles = set(candidate_bindings)
-    for kind, role in _ordered_action_v2_role_pairs(current_roles - candidate_roles):
+    for kind, role in _ordered_role_pairs(current_roles - candidate_roles):
         changed_bindings.append({"kind": kind, "role": role, "change": "binding_added"})
-    for kind, role in _ordered_action_v2_role_pairs(candidate_roles - current_roles):
+    for kind, role in _ordered_role_pairs(candidate_roles - current_roles):
         changed_bindings.append(
             {"kind": kind, "role": role, "change": "binding_removed"}
         )
-    for kind, role in _ordered_action_v2_role_pairs(current_roles & candidate_roles):
+    for kind, role in _ordered_role_pairs(current_roles & candidate_roles):
         current_binding = current_bindings[(kind, role)]
         candidate_binding = candidate_bindings[(kind, role)]
         if current_binding["mode"] != candidate_binding["mode"]:
@@ -711,7 +706,10 @@ def _config_facet_diff(
     current_consist = tracker.current_consist
     left_facet = {}
     if current_consist is not None:
-        facet = getattr(current_consist, "facet", None)
+        try:
+            facet = current_consist.facet
+        except AttributeError:
+            facet = None
         if isinstance(facet, dict):
             left_facet = facet
     right_facet = _safe_get_config_values(tracker, candidate.id)
@@ -1005,11 +1003,14 @@ def _best_candidate(run: Run, candidates: Sequence[Run]) -> tuple[Run | None, in
     best_score = -1
     best_created_at = None
 
+    current_components = _component_names(run)
+
     for candidate in candidates:
+        candidate_components = _component_names(candidate)
         score = sum(
             1
-            for field in _COMPONENT_FIELDS
-            if getattr(run, field) == getattr(candidate, field)
+            for field_name in _COMPONENT_FIELDS
+            if current_components[field_name] == candidate_components[field_name]
         )
         created_at = candidate.created_at
         if score > best_score:
@@ -1104,9 +1105,9 @@ class CacheMissExplainer:
             mismatched_components=mismatched,
         ):
             detail_payloads.append(_build_input_details(self._tracker, run, candidate))
-            action_v2_details = _action_v2_binding_details(run, candidate)
-            if action_v2_details:
-                detail_payloads.append({"action_v2_bindings": action_v2_details})
+            binding_details = _input_binding_details(run, candidate)
+            if binding_details:
+                detail_payloads.append({"input_bindings": binding_details})
         if code_details:
             detail_payloads.append(code_details)
         details = _merge_detail_payloads(*detail_payloads)

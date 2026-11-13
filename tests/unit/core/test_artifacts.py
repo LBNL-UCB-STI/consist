@@ -1,44 +1,47 @@
 import copy
-import gc
-import logging
 from copy import deepcopy
+from dataclasses import FrozenInstanceError, replace
+import gc
+import hashlib
+import logging
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from consist import is_spatial_artifact
-from consist.core.artifacts import ArtifactManager, _clone_artifact_for_meta_update
+from consist.core.artifacts import ArtifactManager
 from consist.core.identity import IdentityManager
 from consist.core.persistence import DatabaseManager
-from consist.models.artifact import (
-    Artifact,
-    get_tracker_ref,
-    set_tracker_ref,
-)
+from consist.digest import Digest, file_sha256
+from consist.models.artifact import Artifact
 from consist.models.artifact_facet import ArtifactFacet
 from consist.models.artifact_kv import ArtifactKV
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaObservation
 
 
 @pytest.fixture
-def mock_tracker():
+def mock_tracker(tmp_path):
     tracker = MagicMock()
     tracker.resolve_uri = lambda uri: f"/abs/{uri}"
     tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
-    tracker.identity.compute_file_checksum.return_value = "mock_hash"
+    tracker.mounts = {}
+    tracker.identity.hashing_strategy = "full"
     tracker.db = MagicMock()
+    tracker.db.find_latest_artifact_at_uri.return_value = None
     return tracker
 
 
-def test_create_artifact_stateless(mock_tracker):
+def test_create_artifact_stateless(mock_tracker, tmp_path):
+    source = tmp_path / "test.csv"
+    source.write_text("col\n1\n", encoding="utf-8")
     manager = ArtifactManager(mock_tracker)
 
-    art = manager.create_artifact(path="/tmp/test.csv", key="test", run_id="run_ABC")
+    art = manager.create_artifact(path=source, key="test", run_id="run_ABC")
 
     assert art.run_id == "run_ABC"
     assert art.key == "test"
-    assert art.hash == "mock_hash"
+    assert art.digest == Digest("sha256:file", file_sha256(source))
 
 
 def test_create_artifact_keeps_parquet_inference_non_spatial(tmp_path):
@@ -46,7 +49,7 @@ def test_create_artifact_keeps_parquet_inference_non_spatial(tmp_path):
     tracker.resolve_uri = lambda uri: f"/abs/{uri}"
     tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
     tracker.mounts = {}
-    tracker.identity.compute_file_checksum.return_value = "mock_hash"
+    tracker.identity.hashing_strategy = "full"
     tracker.db = MagicMock()
 
     path = tmp_path / "tiny.parquet"
@@ -58,18 +61,20 @@ def test_create_artifact_keeps_parquet_inference_non_spatial(tmp_path):
     assert is_spatial_artifact(artifact) is False
 
 
-def test_create_artifact_uses_precomputed_hash(mock_tracker):
+def test_create_artifact_uses_precomputed_hash(mock_tracker, tmp_path):
     manager = ArtifactManager(mock_tracker)
+    precomputed = "a" * 64
 
-    art = manager.create_artifact(
-        path="/tmp/test.csv",
-        key="test",
-        run_id="run_ABC",
-        content_hash="precomputed_hash",
-    )
+    with patch("consist.core.artifacts.compute_digest") as mock_compute:
+        art = manager.create_artifact(
+            path=tmp_path / "test.csv",
+            key="test",
+            run_id="run_ABC",
+            content_hash=precomputed,
+        )
 
-    assert art.hash == "precomputed_hash"
-    mock_tracker.identity.compute_file_checksum.assert_not_called()
+    assert art.digest == Digest("sha256:file", precomputed)
+    mock_compute.assert_not_called()
 
 
 def test_create_artifact_dir_uses_precomputed_hash(mock_tracker, tmp_path):
@@ -77,30 +82,33 @@ def test_create_artifact_dir_uses_precomputed_hash(mock_tracker, tmp_path):
     data_dir = tmp_path / "data_dir"
     data_dir.mkdir()
 
-    art = manager.create_artifact(
-        path=str(data_dir),
-        key="dir_artifact",
-        run_id="run_ABC",
-        content_hash="precomputed_hash",
-    )
+    with patch("consist.core.artifacts.build_manifest_v1") as mock_manifest:
+        art = manager.create_artifact(
+            path=str(data_dir),
+            key="dir_artifact",
+            run_id="run_ABC",
+            content_hash="precomputed_hash",
+        )
 
-    assert art.hash == "precomputed_hash"
-    mock_tracker.identity.compute_file_checksum.assert_not_called()
+    expected_opaque = hashlib.sha256(b"precomputed_hash").hexdigest()
+    assert art.digest == Digest("caller_supplied_v1:sha256", expected_opaque)
+    assert art.meta["caller_supplied_hash"] == "precomputed_hash"
+    mock_manifest.assert_not_called()
 
 
-def test_create_artifact_rejects_mismatched_validated_hash(mock_tracker):
+def test_create_artifact_rejects_mismatched_validated_hash(mock_tracker, tmp_path):
     manager = ArtifactManager(mock_tracker)
+    source = tmp_path / "test.csv"
+    source.write_text("col\n1\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match="content_hash does not match"):
         manager.create_artifact(
-            path="/tmp/test.csv",
+            path=source,
             key="test",
             run_id="run_ABC",
             content_hash="different_hash",
             validate_content_hash=True,
         )
-
-    mock_tracker.identity.compute_file_checksum.assert_called()
 
 
 def test_create_artifact_hashes_once_for_reuse_and_validation(tmp_path):
@@ -108,25 +116,29 @@ def test_create_artifact_hashes_once_for_reuse_and_validation(tmp_path):
     tracker.resolve_uri = lambda uri: f"/abs/{uri}"
     tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
     tracker.mounts = {}
-    tracker.identity.compute_file_checksum.return_value = "mock_hash"
+    tracker.identity.hashing_strategy = "full"
     tracker.db.find_latest_artifact_at_uri.return_value = None
-    tracker.db.find_latest_artifact_by_hash.return_value = None
 
     manager = ArtifactManager(tracker)
     output_path = tmp_path / "output.csv"
     output_path.write_text("a,b\n1,2\n", encoding="utf-8")
+    expected_digest = Digest("sha256:file", file_sha256(output_path))
 
-    art = manager.create_artifact(
-        path=output_path,
-        key="output",
-        run_id="run_ABC",
-        direction="output",
-        reuse_if_unchanged=True,
-        validate_content_hash=True,
-    )
+    with patch(
+        "consist.core.artifacts.compute_digest",
+        return_value=expected_digest,
+    ) as mock_compute:
+        art = manager.create_artifact(
+            path=output_path,
+            key="output",
+            run_id="run_ABC",
+            direction="output",
+            reuse_if_unchanged=True,
+            validate_content_hash=True,
+        )
 
-    assert art.hash == "mock_hash"
-    assert tracker.identity.compute_file_checksum.call_count == 1
+    assert art.digest == expected_digest
+    assert mock_compute.call_count == 1
 
 
 def test_create_artifact_does_not_dedupe_fast_file_observations(tmp_path):
@@ -135,7 +147,6 @@ def test_create_artifact_does_not_dedupe_fast_file_observations(tmp_path):
     tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
     tracker.mounts = {}
     tracker.identity.hashing_strategy = "fast"
-    tracker.identity.compute_file_checksum.return_value = "f" * 64
     tracker.db = MagicMock()
 
     source = tmp_path / "fast.csv"
@@ -147,8 +158,8 @@ def test_create_artifact_does_not_dedupe_fast_file_observations(tmp_path):
         run_id="run_a",
     )
 
-    assert "content_identity" not in artifact.meta
-    assert artifact.meta["observation_identity"] == f"stat-v1:file:{'f' * 64}"
+    assert artifact.digest is not None
+    assert artifact.digest.scheme == "stat_file_v1:sha256"
 
 
 def test_create_artifact_persists_typed_full_file_content_identity(tmp_path):
@@ -157,9 +168,6 @@ def test_create_artifact_persists_typed_full_file_content_identity(tmp_path):
     tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
     tracker.mounts = {}
     tracker.identity.hashing_strategy = "full"
-    digest = "a" * 64
-    tracker.identity.compute_file_checksum.return_value = digest
-    content_identity = f"sha256:file:{digest}"
     tracker.db = MagicMock()
 
     source = tmp_path / "full.csv"
@@ -171,7 +179,7 @@ def test_create_artifact_persists_typed_full_file_content_identity(tmp_path):
         run_id="run_a",
     )
 
-    assert artifact.meta["content_identity"] == content_identity
+    assert artifact.digest == Digest("sha256:file", file_sha256(source))
 
 
 def test_create_artifact_records_fast_directory_observation_without_content_identity(
@@ -195,8 +203,8 @@ def test_create_artifact_records_fast_directory_observation_without_content_iden
         driver="other",
     )
 
-    assert "content_identity" not in artifact.meta
-    assert artifact.meta["observation_identity"].startswith("stat-v2:directory:")
+    assert artifact.digest is not None
+    assert artifact.digest.scheme == "stat_dir_v1:sha256"
 
 
 def test_create_artifacts_share_content_identity_when_hashes_match(tmp_path):
@@ -205,17 +213,14 @@ def test_create_artifacts_share_content_identity_when_hashes_match(tmp_path):
     tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
     tracker.mounts = {"outputs": str(tmp_path)}
     tracker.identity.hashing_strategy = "full"
-    digest = "b" * 64
-    tracker.identity.compute_file_checksum.return_value = digest
-    content_identity = f"sha256:file:{digest}"
     tracker.db = MagicMock()
 
     manager = ArtifactManager(tracker)
 
     path_a = tmp_path / "a.parquet"
-    path_a.write_text("a", encoding="utf-8")
+    path_a.write_text("identical", encoding="utf-8")
     path_b = tmp_path / "b.parquet"
-    path_b.write_text("b", encoding="utf-8")
+    path_b.write_text("identical", encoding="utf-8")
 
     art_a = manager.create_artifact(
         path=path_a,
@@ -233,14 +238,10 @@ def test_create_artifacts_share_content_identity_when_hashes_match(tmp_path):
     assert art_a.id != art_b.id
     assert art_a.run_id == "run_a"
     assert art_b.run_id == "run_b"
-    assert (
-        art_a.meta["content_identity"]
-        == art_b.meta["content_identity"]
-        == content_identity
-    )
+    assert art_a.digest == art_b.digest == Digest("sha256:file", file_sha256(path_a))
 
 
-def test_legacy_artifact_hash_does_not_attach_content_identity():
+def test_legacy_artifact_without_digest_preserves_none_digest():
     tracker = MagicMock()
     tracker.resolve_uri = lambda uri: f"/abs/{uri}"
     tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
@@ -250,25 +251,26 @@ def test_legacy_artifact_hash_does_not_attach_content_identity():
 
     existing = Artifact(
         key="k",
-        container_uri="inputs://a.parquet",
+        uri="inputs://a.parquet",
         driver="parquet",
-        hash="hash_from_obj",
+        digest=None,
         run_id="run_x",
     )
 
     out = manager.create_artifact(path=existing, run_id="run_x")
 
-    assert "content_identity" not in out.meta
+    assert out.digest is None
 
 
-def test_legacy_detached_artifact_remains_without_content_identity(tmp_path, caplog):
+def test_detached_artifact_replay_preserves_digest_and_id(tmp_path, caplog):
     db = DatabaseManager(str(tmp_path / "artifact_replay.duckdb"))
     try:
+        shared_digest = Digest("sha256:file", "b" * 64)
         original = Artifact(
             key="geoid_to_zone",
-            container_uri="outputs://zones.parquet",
+            uri="outputs://zones.parquet",
             driver="parquet",
-            hash="shared_hash",
+            digest=shared_digest,
             run_id="run_a",
         )
         db.sync_artifact(original)
@@ -281,33 +283,28 @@ def test_legacy_detached_artifact_remains_without_content_identity(tmp_path, cap
         tracker = MagicMock()
         tracker.resolve_uri = lambda uri: f"/abs/{uri}"
         tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
-        tracker.identity.compute_file_checksum.return_value = "shared_hash"
         tracker.db = db
 
         manager = ArtifactManager(tracker)
         with caplog.at_level(logging.WARNING):
             out = manager.create_artifact(path=replayed, run_id="run_b")
 
-        assert out is not replayed
         assert out.id == replayed.id
-        assert out.hash == replayed.hash == "shared_hash"
-        assert "content_identity" not in out.meta
-        assert "Failed to record artifact content identity" not in caplog.text
+        assert out.digest == replayed.digest == shared_digest
         assert out.parent_artifact_id is None
     finally:
         db.close()
 
 
-def test_legacy_detached_artifact_driver_override_does_not_create_content_identity(
-    tmp_path, caplog
-):
+def test_detached_artifact_driver_override_preserves_digest(tmp_path, caplog):
     db = DatabaseManager(str(tmp_path / "artifact_driver_override.duckdb"))
     try:
+        shared_digest = Digest("sha256:file", "c" * 64)
         original = Artifact(
             key="geoid_to_zone",
-            container_uri="outputs://zones.parquet",
+            uri="outputs://zones.parquet",
             driver="parquet",
-            hash="shared_hash",
+            digest=shared_digest,
             run_id="run_a",
         )
         db.sync_artifact(original)
@@ -320,7 +317,6 @@ def test_legacy_detached_artifact_driver_override_does_not_create_content_identi
         tracker = MagicMock()
         tracker.resolve_uri = lambda uri: f"/abs/{uri}"
         tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
-        tracker.identity.compute_file_checksum.return_value = "shared_hash"
         tracker.db = db
 
         manager = ArtifactManager(tracker)
@@ -339,9 +335,7 @@ def test_legacy_detached_artifact_driver_override_does_not_create_content_identi
         assert replayed.driver == "parquet"
         assert persisted is not None
         assert persisted.driver == "csv"
-        assert "content_identity" not in persisted.meta
-        assert "content_identity" not in replayed.meta
-        assert "Failed to record artifact content identity" not in caplog.text
+        assert persisted.digest == shared_digest
     finally:
         db.close()
 
@@ -351,17 +345,17 @@ def test_create_artifact_preserves_parent_artifact_id_on_detached_clone(tmp_path
     try:
         parent_id = Artifact(
             key="container",
-            container_uri="outputs://container.h5",
+            uri="outputs://container.h5",
             driver="h5",
             run_id="run_parent",
         ).id
 
         original = Artifact(
             key="geoid_to_zone",
-            container_uri="outputs://zones.h5",
-            table_path="/zones",
+            uri="outputs://zones.h5",
+            member="/zones",
             driver="h5_table",
-            hash="shared_hash",
+            digest=Digest("h5_fixed_v1:sha256", "d" * 64),
             parent_artifact_id=parent_id,
             run_id="run_a",
             meta={"parent_id": str(parent_id)},
@@ -376,7 +370,6 @@ def test_create_artifact_preserves_parent_artifact_id_on_detached_clone(tmp_path
         tracker = MagicMock()
         tracker.resolve_uri = lambda uri: f"/abs/{uri}"
         tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
-        tracker.identity.compute_file_checksum.return_value = "shared_hash"
         tracker.db = db
 
         manager = ArtifactManager(tracker)
@@ -388,14 +381,14 @@ def test_create_artifact_preserves_parent_artifact_id_on_detached_clone(tmp_path
         db.close()
 
 
-def test_create_artifact_clones_reused_input_artifact_before_mutation(tmp_path, caplog):
+def test_create_artifact_reuses_input_artifact_immutably(tmp_path, caplog):
     db = DatabaseManager(str(tmp_path / "artifact_input_reuse.duckdb"))
     try:
         original = Artifact(
             key="geoid_to_zone",
-            container_uri="inputs://zones.parquet",
+            uri="inputs://zones.parquet",
             driver="parquet",
-            hash="shared_hash",
+            digest=Digest("sha256:file", "e" * 64),
             run_id="run_a",
         )
         db.sync_artifact(original)
@@ -408,7 +401,6 @@ def test_create_artifact_clones_reused_input_artifact_before_mutation(tmp_path, 
         tracker = MagicMock()
         tracker.resolve_uri = lambda uri: str(tmp_path / uri.split("://", 1)[1])
         tracker.fs.virtualize_path = lambda path: f"inputs://{Path(path).name}"
-        tracker.identity.compute_file_checksum.return_value = "shared_hash"
         tracker.mounts = {}
         tracker.db = MagicMock(wraps=db)
         tracker.db.find_latest_artifact_at_uri.return_value = reused_parent
@@ -424,11 +416,8 @@ def test_create_artifact_clones_reused_input_artifact_before_mutation(tmp_path, 
                 direction="input",
             )
 
-        assert out is not reused_parent
         assert out.id == reused_parent.id
-        assert "content_identity" not in reused_parent.meta
-        assert "content_identity" not in out.meta
-        assert "Failed to record artifact content identity" not in caplog.text
+        assert out.digest == reused_parent.digest
     finally:
         db.close()
 
@@ -436,11 +425,12 @@ def test_create_artifact_clones_reused_input_artifact_before_mutation(tmp_path, 
 def test_sync_artifacts_updates_meta_with_schema_dependents(tmp_path):
     db = DatabaseManager(str(tmp_path / "artifact_dependent_sync.duckdb"))
     try:
+        shared_digest = Digest("sha256:file", "1" * 64)
         original = Artifact(
             key="dependent_artifact",
-            container_uri="outputs://dependent.csv",
+            uri="outputs://dependent.csv",
             driver="csv",
-            hash="shared_hash",
+            digest=shared_digest,
             run_id="run_a",
             meta={"marker": "original"},
         )
@@ -464,9 +454,9 @@ def test_sync_artifacts_updates_meta_with_schema_dependents(tmp_path):
         merged = Artifact(
             id=artifact_id,
             key="dependent_artifact",
-            container_uri="outputs://dependent.csv",
+            uri="outputs://dependent.csv",
             driver="csv",
-            hash="shared_hash",
+            digest=shared_digest,
             run_id="run_a",
             meta={"marker": "updated"},
         )
@@ -483,11 +473,12 @@ def test_sync_artifacts_updates_meta_with_schema_dependents(tmp_path):
 def test_persist_artifact_schema_observation_bundle_with_dependents(tmp_path):
     db = DatabaseManager(str(tmp_path / "artifact_schema_observation_bundle.duckdb"))
     try:
+        shared_digest = Digest("sha256:file", "2" * 64)
         original = Artifact(
             key="bundle_artifact",
-            container_uri="outputs://bundle.csv",
+            uri="outputs://bundle.csv",
             driver="csv",
-            hash="shared_hash",
+            digest=shared_digest,
             run_id="run_a",
             meta={"marker": "original"},
         )
@@ -511,9 +502,9 @@ def test_persist_artifact_schema_observation_bundle_with_dependents(tmp_path):
         artifact = Artifact(
             id=artifact_id,
             key="bundle_artifact",
-            container_uri="outputs://bundle.csv",
+            uri="outputs://bundle.csv",
             driver="csv",
-            hash="shared_hash",
+            digest=shared_digest,
             run_id="run_a",
             meta={"marker": "updated"},
         )
@@ -541,11 +532,12 @@ def test_persist_artifact_schema_observation_bundle_with_dependents(tmp_path):
 def test_persist_artifact_schema_profile_with_dependents(tmp_path):
     db = DatabaseManager(str(tmp_path / "artifact_schema_profile.duckdb"))
     try:
+        shared_digest = Digest("sha256:file", "3" * 64)
         original = Artifact(
             key="profile_artifact",
-            container_uri="outputs://profile.csv",
+            uri="outputs://profile.csv",
             driver="csv",
-            hash="shared_hash",
+            digest=shared_digest,
             run_id="run_a",
             meta={"marker": "original"},
         )
@@ -569,9 +561,9 @@ def test_persist_artifact_schema_profile_with_dependents(tmp_path):
         artifact = Artifact(
             id=artifact_id,
             key="profile_artifact",
-            container_uri="outputs://profile.csv",
+            uri="outputs://profile.csv",
             driver="csv",
-            hash="shared_hash",
+            digest=shared_digest,
             run_id="run_a",
             meta={"marker": "updated"},
         )
@@ -602,11 +594,12 @@ def test_persist_artifact_schema_profile_with_dependents(tmp_path):
 def test_update_artifact_meta_with_dependents(tmp_path):
     db = DatabaseManager(str(tmp_path / "artifact_update_meta.duckdb"))
     try:
+        shared_digest = Digest("sha256:file", "4" * 64)
         original = Artifact(
             key="meta_artifact",
-            container_uri="outputs://meta.csv",
+            uri="outputs://meta.csv",
             driver="csv",
-            hash="shared_hash",
+            digest=shared_digest,
             run_id="run_a",
             meta={"marker": "original"},
         )
@@ -630,9 +623,9 @@ def test_update_artifact_meta_with_dependents(tmp_path):
         artifact = Artifact(
             id=artifact_id,
             key="meta_artifact",
-            container_uri="outputs://meta.csv",
+            uri="outputs://meta.csv",
             driver="csv",
-            hash="shared_hash",
+            digest=shared_digest,
             run_id="run_a",
             meta={"marker": "updated"},
         )
@@ -651,11 +644,12 @@ def test_update_artifact_meta_with_dependents(tmp_path):
 def test_persist_artifact_facet_bundle_with_dependents(tmp_path):
     db = DatabaseManager(str(tmp_path / "artifact_facet_bundle.duckdb"))
     try:
+        shared_digest = Digest("sha256:file", "5" * 64)
         original = Artifact(
             key="facet_artifact",
-            container_uri="outputs://facet.csv",
+            uri="outputs://facet.csv",
             driver="csv",
-            hash="shared_hash",
+            digest=shared_digest,
             run_id="run_a",
             meta={"marker": "original"},
         )
@@ -679,9 +673,9 @@ def test_persist_artifact_facet_bundle_with_dependents(tmp_path):
         artifact = Artifact(
             id=artifact_id,
             key="facet_artifact",
-            container_uri="outputs://facet.csv",
+            uri="outputs://facet.csv",
             driver="csv",
-            hash="shared_hash",
+            digest=shared_digest,
             run_id="run_a",
             meta={"marker": "updated"},
         )
@@ -689,7 +683,7 @@ def test_persist_artifact_facet_bundle_with_dependents(tmp_path):
             id="facet_hash",
             namespace="activitysim",
             schema_name="FacetSchema",
-            schema_version=1,
+            schema_version="1",
             facet_json={"label": "demo"},
         )
 
@@ -719,11 +713,12 @@ def test_persist_artifact_facet_bundle_with_dependents(tmp_path):
 def test_sync_artifact_with_facet_bundle_updates_meta_with_dependents(tmp_path):
     db = DatabaseManager(str(tmp_path / "artifact_sync_facet_bundle.duckdb"))
     try:
+        shared_digest = Digest("sha256:file", "6" * 64)
         original = Artifact(
             key="sync_facet_artifact",
-            container_uri="outputs://sync_facet_artifact.csv",
+            uri="outputs://sync_facet_artifact.csv",
             driver="csv",
-            hash="shared_hash",
+            digest=shared_digest,
             run_id="run_a",
             meta={"marker": "original"},
         )
@@ -747,9 +742,9 @@ def test_sync_artifact_with_facet_bundle_updates_meta_with_dependents(tmp_path):
         artifact = Artifact(
             id=artifact_id,
             key="sync_facet_artifact",
-            container_uri="outputs://sync_facet_artifact.csv",
+            uri="outputs://sync_facet_artifact.csv",
             driver="csv",
-            hash="shared_hash",
+            digest=shared_digest,
             run_id="run_a",
             meta={"marker": "updated"},
         )
@@ -757,7 +752,7 @@ def test_sync_artifact_with_facet_bundle_updates_meta_with_dependents(tmp_path):
             id="facet_hash_sync",
             namespace="activitysim",
             schema_name="FacetSchema",
-            schema_version=1,
+            schema_version="1",
             facet_json={"label": "demo"},
         )
 
@@ -786,89 +781,72 @@ def test_sync_artifact_with_facet_bundle_updates_meta_with_dependents(tmp_path):
         db.close()
 
 
-def _deref_tracker(artifact: Artifact):
-    ref = get_tracker_ref(artifact)
-    assert ref is not None
-    return ref()
-
-
 def test_artifact_deepcopy_and_copy_on_transient_instance():
     tracker = MagicMock()
-    art = Artifact(
-        key="transient",
-        container_uri="outputs://transient.csv",
-        driver="csv",
-        hash="hash123",
-        meta={"nested": {"inner_key": "inner_val"}, "list": [1, 2, 3]},
+    art = (
+        Artifact(
+            key="transient",
+            uri="outputs://transient.csv",
+            driver="csv",
+            digest=Digest("sha256:file", "7" * 64),
+            meta={"nested": {"inner_key": "inner_val"}, "list": [1, 2, 3]},
+        )
+        .with_abs_path("/tmp/transient.csv")
+        .with_resolver(tracker)
     )
-    art.abs_path = "/tmp/transient.csv"
-    set_tracker_ref(art, tracker)
 
     deep_cloned = copy.deepcopy(art)
     assert deep_cloned is not art
+    assert deep_cloned == art
     assert deep_cloned.key == art.key
-    assert deep_cloned.container_uri == art.container_uri
-    assert deep_cloned.hash == art.hash
+    assert deep_cloned.uri == art.uri
+    assert deep_cloned.digest == art.digest
     assert deep_cloned.abs_path == "/tmp/transient.csv"
-    assert _deref_tracker(deep_cloned) is tracker
-    assert deep_cloned.__pydantic_fields_set__ == art.__pydantic_fields_set__
+    assert deep_cloned.resolver is tracker
 
-    deep_cloned.meta["nested"]["inner_key"] = "modified"
+    with pytest.raises(TypeError):
+        deep_cloned.meta["nested"]["inner_key"] = "modified"
     deep_cloned.meta["list"].append(4)
     assert art.meta["nested"]["inner_key"] == "inner_val"
     assert art.meta["list"] == [1, 2, 3]
-
-    model_deep = art.model_copy(deep=True)
-    assert model_deep is not art
-    assert model_deep.abs_path == "/tmp/transient.csv"
-    assert _deref_tracker(model_deep) is tracker
-    model_deep.meta["nested"]["inner_key"] = "model_modified"
-    assert art.meta["nested"]["inner_key"] == "inner_val"
 
     shallow_cloned = copy.copy(art)
     assert shallow_cloned is not art
     assert shallow_cloned.key == art.key
     assert shallow_cloned.abs_path == "/tmp/transient.csv"
-    assert _deref_tracker(shallow_cloned) is tracker
-
-    model_shallow = art.model_copy(deep=False)
-    assert model_shallow is not art
-    assert model_shallow.key == art.key
-    assert model_shallow.abs_path == "/tmp/transient.csv"
-    assert _deref_tracker(model_shallow) is tracker
+    assert shallow_cloned.resolver is tracker
 
 
 def test_artifact_deepcopy_avoids_object_dereferenced_error_after_gc(tmp_path):
     db = DatabaseManager(str(tmp_path / "deepcopy_test.duckdb"))
     try:
         tracker = MagicMock()
-        art = Artifact(
-            key="persisted_art",
-            container_uri="outputs://persisted.csv",
-            driver="csv",
-            hash="persisted_hash",
-            run_id="run_1",
-            meta={"initial": "value", "nested": {"k": "v"}},
+        art = (
+            Artifact(
+                key="persisted_art",
+                uri="outputs://persisted.csv",
+                driver="csv",
+                digest=Digest("sha256:file", "8" * 64),
+                run_id="run_1",
+                meta={"initial": "value", "nested": {"k": "v"}},
+            )
+            .with_resolver(tracker)
+            .with_abs_path("/tmp/abs/persisted.csv")
         )
         db.sync_artifact(art)
 
-        set_tracker_ref(art, tracker)
-        art.abs_path = "/tmp/abs/persisted.csv"
-
         c_deepcopy = copy.deepcopy(art)
-        c_model_deep = art.model_copy(deep=True)
         c_copy = copy.copy(art)
-        c_model_shallow = art.model_copy(deep=False)
 
         art_id = art.id
         del art
         gc.collect()
 
-        for clone in [c_deepcopy, c_model_deep, c_copy, c_model_shallow]:
+        for clone in [c_deepcopy, c_copy]:
             assert clone.abs_path == "/tmp/abs/persisted.csv"
-            assert _deref_tracker(clone) is tracker
-            clone.meta = {"updated": "directly"}
-            assert clone.meta == {"updated": "directly"}
+            assert clone.resolver is tracker
+            updated_clone = clone.with_meta({"updated": "via_with_meta"}, merge=False)
+            assert dict(updated_clone.meta) == {"updated": "via_with_meta"}
 
         db.update_artifact_meta(
             c_deepcopy, {"db_update": "from_deepcopy"}, raise_on_error=True
@@ -876,13 +854,6 @@ def test_artifact_deepcopy_avoids_object_dereferenced_error_after_gc(tmp_path):
         persisted = db.get_artifact(art_id)
         assert persisted is not None
         assert persisted.meta["db_update"] == "from_deepcopy"
-
-        db.update_artifact_meta(
-            c_model_deep, {"db_update": "from_model_deep"}, raise_on_error=True
-        )
-        persisted = db.get_artifact(art_id)
-        assert persisted is not None
-        assert persisted.meta["db_update"] == "from_model_deep"
     finally:
         db.close()
 
@@ -893,9 +864,9 @@ def test_artifact_deepcopy_on_db_loaded_instance(tmp_path):
         tracker = MagicMock()
         art = Artifact(
             key="db_loaded_art",
-            container_uri="outputs://db_loaded.csv",
+            uri="outputs://db_loaded.csv",
             driver="csv",
-            hash="loaded_hash",
+            digest=Digest("sha256:file", "9" * 64),
             run_id="run_loaded",
             meta={"step": 1},
         )
@@ -905,20 +876,16 @@ def test_artifact_deepcopy_on_db_loaded_instance(tmp_path):
         loaded = db.get_artifact(art_id)
         assert loaded is not None
 
-        set_tracker_ref(loaded, tracker)
-        loaded.abs_path = "/path/to/loaded.csv"
-
+        loaded = loaded.with_resolver(tracker).with_abs_path("/path/to/loaded.csv")
         cloned = copy.deepcopy(loaded)
-        model_cloned = loaded.model_copy(deep=True)
 
         del loaded
         gc.collect()
 
-        for c in [cloned, model_cloned]:
-            assert c.abs_path == "/path/to/loaded.csv"
-            assert _deref_tracker(c) is tracker
-            c.meta = {"step": 2}
-            assert c.meta == {"step": 2}
+        assert cloned.abs_path == "/path/to/loaded.csv"
+        assert cloned.resolver is tracker
+        updated = cloned.with_meta({"step": 2}, merge=False)
+        assert dict(updated.meta) == {"step": 2}
     finally:
         db.close()
 
@@ -926,9 +893,9 @@ def test_artifact_deepcopy_on_db_loaded_instance(tmp_path):
 def test_artifact_deepcopy_memo_identity_preservation():
     art = Artifact(
         key="memo_test",
-        container_uri="outputs://memo.csv",
+        uri="outputs://memo.csv",
         driver="csv",
-        hash="memo_hash",
+        digest=Digest("sha256:file", "a" * 64),
         meta={"key": "val"},
     )
     container = [art, art]
@@ -939,32 +906,37 @@ def test_artifact_deepcopy_memo_identity_preservation():
     assert cloned_container[0].key == "memo_test"
 
 
-def test_artifact_model_copy_with_updates(tmp_path):
+def test_artifact_replace_updates_and_preserves_runtime_bindings(tmp_path):
     tracker = MagicMock()
-    art = Artifact(
-        key="original_key",
-        container_uri="outputs://original.csv",
-        driver="csv",
-        hash="original_hash",
-        meta={"orig": 1},
+    orig_digest = Digest("sha256:file", "b" * 64)
+    art = (
+        Artifact(
+            key="original_key",
+            uri="outputs://original.csv",
+            driver="csv",
+            digest=orig_digest,
+            meta={"orig": 1},
+        )
+        .with_abs_path("/path/to/original.csv")
+        .with_resolver(tracker)
     )
-    art.abs_path = "/path/to/original.csv"
-    set_tracker_ref(art, tracker)
 
-    cloned = art.model_copy(
-        deep=True,
-        update={"key": "updated_key", "driver": "parquet", "meta": {"orig": 2}},
+    cloned = replace(
+        art,
+        key="updated_key",
+        driver="parquet",
+        meta={"orig": 2},
     )
     gc.collect()
 
     assert cloned.key == "updated_key"
     assert cloned.driver == "parquet"
-    assert cloned.hash == "original_hash"
-    assert cloned.meta == {"orig": 2}
+    assert cloned.digest == orig_digest
+    assert dict(cloned.meta) == {"orig": 2}
     assert cloned.abs_path == "/path/to/original.csv"
-    assert _deref_tracker(cloned) is tracker
+    assert cloned.resolver is tracker
 
-    db = DatabaseManager(str(tmp_path / "model_copy_update_merge.duckdb"))
+    db = DatabaseManager(str(tmp_path / "replace_update_merge.duckdb"))
     try:
         db.sync_artifacts(artifacts=[art], run_id="run_out", direction="output")
         db.sync_artifacts(artifacts=[cloned], run_id="run_in", direction="input")
@@ -975,67 +947,24 @@ def test_artifact_model_copy_with_updates(tmp_path):
         db.close()
 
 
-def test_artifact_abs_path_setter_accepts_none():
+def test_artifact_abs_path_is_immutable_and_with_abs_path_accepts_none_and_path():
     art = Artifact(
         key="path_test",
-        container_uri="outputs://path.csv",
+        uri="outputs://path.csv",
         driver="csv",
-        hash="h",
     )
-    art.abs_path = "/test/path"
-    assert art.abs_path == "/test/path"
+    with pytest.raises((AttributeError, FrozenInstanceError)):
+        art.abs_path = "/test/path"  # type: ignore[misc]
 
-    art.abs_path = None
-    assert art.abs_path is None
+    with_str = art.with_abs_path("/test/path")
+    assert with_str.abs_path == "/test/path"
 
+    with_none = with_str.with_abs_path(None)
+    assert with_none.abs_path is None
 
-def test_cloning_helpers_delegate_safely():
-    original = Artifact(
-        key="helper_test",
-        container_uri="outputs://helper.csv",
-        driver="csv",
-        hash="helper_hash",
-        meta={"nested": {"count": 1}},
-    )
-    original.abs_path = "/tmp/helper.csv"
-
-    cloned_for_meta = _clone_artifact_for_meta_update(original)
-    assert cloned_for_meta is not original
-    assert cloned_for_meta.abs_path == "/tmp/helper.csv"
-    cloned_for_meta.meta["nested"]["count"] = 2
-    assert original.meta["nested"]["count"] == 1
-
-
-def test_artifact_deepcopy_circular_reference():
-    """Verify that deepcopy preserves instance identity on self-referential graph structures."""
-    art = Artifact(
-        key="circular_key",
-        container_uri="outputs://circular.csv",
-        driver="csv",
-        hash="h_circ",
-    )
-    art.meta = {"self": art}
-
-    cloned = copy.deepcopy(art)
-
-    assert cloned is not art
-    assert cloned.key == "circular_key"
-    assert cloned.meta["self"] is cloned
-
-
-def test_artifact_abs_path_setter_accepts_path_object():
-    """Verify abs_path setter accepts pathlib.Path objects and stores normalized string."""
-    art = Artifact(
-        key="path_test",
-        container_uri="outputs://path.csv",
-        driver="csv",
-        hash="h_path",
-    )
-    art.abs_path = Path("/data/runs/output.parquet")
-    assert art.abs_path == "/data/runs/output.parquet"
-
-    cloned = copy.deepcopy(art)
-    assert cloned.abs_path == "/data/runs/output.parquet"
+    with_path = art.with_abs_path(Path("/data/runs/output.parquet"))
+    assert with_path.abs_path == "/data/runs/output.parquet"
+    assert copy.deepcopy(with_path).abs_path == "/data/runs/output.parquet"
 
 
 def test_artifact_tracker_property_and_ensure_local_path(
@@ -1056,7 +985,7 @@ def test_artifact_tracker_property_and_ensure_local_path(
 
     unbound = Artifact(
         key="unbound",
-        container_uri="inputs://unbound.parquet",
+        uri="inputs://unbound.parquet",
         driver="parquet",
     )
     assert unbound.tracker is None
@@ -1083,7 +1012,8 @@ def test_artifact_tracker_property_and_ensure_local_path(
 
     (archive_dir / "outputs" / "households.parquet").unlink()
     custom_path.unlink()
-    artifact.abs_path = None
+    artifact = artifact.with_abs_path(None)
+    tracker._record_artifact_abs_path_override(artifact, None)
 
     assert artifact.ensure_local_path(on_missing="warn") is None
     with pytest.raises(FileNotFoundError):
@@ -1093,7 +1023,7 @@ def test_artifact_tracker_property_and_ensure_local_path(
     elsewhere_file.write_bytes(b"elsewhere")
     detached = Artifact(
         key="detached",
-        container_uri=str(elsewhere_file),
+        uri=str(elsewhere_file),
         driver="parquet",
     )
     assert detached.ensure_local_path() == elsewhere_file

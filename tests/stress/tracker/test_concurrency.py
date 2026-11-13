@@ -96,11 +96,13 @@ def test_multithread_shared_tracker_concurrency(tmp_path: Path):
             assert tracker.db is not None
             tracker.db.sync_run(run)
 
+            from consist.digest import Digest
+
             art = Artifact(
                 key=f"mt_data_{worker_id}",
-                container_uri=f"workspace://{run_id}.txt",
+                uri=f"workspace://{run_id}.txt",
                 driver="txt",
-                hash=f"{worker_id:064x}",
+                digest=Digest("sha256:file", f"{worker_id:064x}"),
                 run_id=run_id,
             )
             tracker.db.sync_artifact(art, run_id=run_id, direction="output")

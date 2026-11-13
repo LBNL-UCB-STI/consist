@@ -23,11 +23,11 @@ from typing import (
     Literal,
     Mapping,
     Optional,
-    Protocol,
     TYPE_CHECKING,
     Union,
     cast,
 )
+from typing_extensions import Protocol
 import uuid
 import warnings
 
@@ -44,7 +44,7 @@ from consist.core.run_options import (
 )
 from consist.core.run_resolution import InputBindingRole, build_input_binding_roles
 from consist.core.workflow import RunContext
-from consist.models.artifact import Artifact, get_tracker_ref, set_tracker_ref
+from consist.models.artifact import Artifact
 from consist.models.run import RunResult
 from consist.types import (
     ArtifactRef,
@@ -873,14 +873,19 @@ class RunTraceCoordinator:
         refreshed_outputs: Dict[str, Artifact] = {}
         for key, art in outputs_map.items():
             synced = synced_by_key.get(key)
+            updated = art
             if synced is not None:
-                art.meta = dict(synced.meta or {})
+                updated = updated.with_meta(dict(synced.meta), merge=False)
                 if (
-                    effective_policy.mode == "move" or art.abs_path is None
+                    effective_policy.mode == "move" or updated.abs_path is None
                 ) and synced.abs_path is not None:
-                    art.abs_path = synced.abs_path
-            set_tracker_ref(art, tracker)
-            refreshed_outputs[key] = art
+                    updated = updated.with_abs_path(synced.abs_path)
+            updated = updated.with_resolver(tracker)
+            refreshed_outputs[key] = updated
+            if current_consist is not None:
+                current_consist.replace_artifact(updated, direction="output")
+            if tracker._active_coupler is not None and key in tracker._active_coupler:
+                tracker._active_coupler.set(key, updated)
 
         tracker._flush_json()
         return refreshed_outputs
@@ -984,7 +989,9 @@ class RunTraceCoordinator:
 
             primary_art = unapplied[-1]
             existing_meta = (
-                dict(primary_art.meta) if isinstance(primary_art.meta, dict) else {}
+                dict(primary_art.meta)
+                if isinstance(primary_art.meta, MappingABC)
+                else {}
             )
             from consist.models.artifact import merge_artifact_output_meta
 
@@ -994,10 +1001,25 @@ class RunTraceCoordinator:
                 merge=entry.merge,
             )
 
-            for candidate in candidates:
-                candidate.meta = dict(merged_meta)
+            updated_primary = primary_art.with_meta(
+                dict(merged_meta), merge=False
+            ).with_resolver(tracker)
+            current_consist.outputs = [
+                c.with_meta(dict(merged_meta), merge=False).with_resolver(tracker)
+                if c.key == key
+                else c
+                for c in current_consist.outputs
+            ]
+            if key in outputs_map:
+                outputs_map[key] = (
+                    outputs_map[key]
+                    .with_meta(dict(merged_meta), merge=False)
+                    .with_resolver(tracker)
+                )
+            if tracker._active_coupler is not None and key in tracker._active_coupler:
+                tracker._active_coupler.set(key, updated_primary)
             if tracker.db is not None:
-                tracker.db.update_artifact_meta(primary_art, dict(merged_meta))
+                tracker.db.update_artifact_meta(updated_primary, dict(merged_meta))
             pending_meta_by_key.pop(key, None)
             updated_any = True
 
@@ -1526,8 +1548,9 @@ class RunTraceCoordinator:
                             param_name,
                         )
                     artifact = input_artifacts_by_key[param_name]
-                    if get_tracker_ref(artifact) is None:
-                        set_tracker_ref(artifact, tracker)
+                    if artifact.resolver is None:
+                        artifact = artifact.with_resolver(tracker)
+                        input_artifacts_by_key[param_name] = artifact
                     if input_binding == "paths":
                         if (
                             requested_input_paths

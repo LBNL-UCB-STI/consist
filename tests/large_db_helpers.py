@@ -56,7 +56,7 @@ def _seed_base_dataset(
                 uuid() AS art_id,
                 'artifact_' || CAST(i AS VARCHAR) AS art_key,
                 'outputs://artifact_' || CAST(i AS VARCHAR) || '.parquet' AS art_uri,
-                'hash_' || CAST(i AS VARCHAR) AS art_digest
+                'sha256:file:' || lpad(CAST(i AS VARCHAR), 64, '0') AS art_digest
             FROM range(0, ?) t(i)
             """,
             [runs_per_scenario, total_runs],
@@ -157,7 +157,7 @@ def _seed_base_dataset(
         "cache_tuple": ("cfg_0", "in_0", "git_0"),
         "scenario_id": "scenario_00000",
         "lookup_key": f"artifact_{mid}",
-        "lookup_hash": f"hash_{mid}",
+        "lookup_hash": f"sha256:file:{mid:064d}",
         "total_runs": total_runs,
         "scenario_count": scenario_count,
     }
@@ -195,7 +195,7 @@ def _seed_deep_lineage(db: DatabaseManager, *, depth: int) -> UUID:
                     out_id,
                     out_key,
                     f"outputs://lineage_out_{i:03d}.parquet",
-                    f"lineage_hash_{i:03d}",
+                    f"sha256:file:{i:064x}",
                     run_id,
                     base_time,
                 ],
@@ -248,7 +248,7 @@ def _seed_wide_lineage(db: DatabaseManager, *, input_count: int) -> UUID:
             INSERT INTO main.artifact (
                 id, key, uri, driver, digest, run_id, meta, created_at
             )
-            VALUES (?, 'wide_output', 'outputs://wide_output.parquet', 'parquet', 'wide_output_hash', ?, CAST('{}' AS JSON), ?)
+            VALUES (?, 'wide_output', 'outputs://wide_output.parquet', 'parquet', 'sha256:file:' || repeat('f', 64), ?, CAST('{}' AS JSON), ?)
             """,
             [out_id, run_id, base_time],
         )
@@ -276,7 +276,7 @@ def _seed_wide_lineage(db: DatabaseManager, *, input_count: int) -> UUID:
                     in_id,
                     in_key,
                     f"inputs://wide_input_{i:03d}.parquet",
-                    f"wide_input_hash_{i:03d}",
+                    f"sha256:file:{i:064x}",
                     base_time,
                 ],
             )

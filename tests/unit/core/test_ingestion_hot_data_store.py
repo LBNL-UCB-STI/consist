@@ -18,7 +18,7 @@ def _run() -> Run:
 def _artifact() -> Artifact:
     return Artifact(
         key="table",
-        container_uri="inputs://table.csv",
+        uri="inputs://table.csv",
         driver="csv",
     )
 

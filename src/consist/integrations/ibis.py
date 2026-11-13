@@ -10,7 +10,7 @@ import uuid
 import weakref
 
 import duckdb
-from sqlmodel import SQLModel
+from pydantic import BaseModel
 
 from consist.core.context import get_active_tracker, get_default_tracker
 from consist.core.stores import get_hot_data_db
@@ -154,7 +154,7 @@ def ibis_connection(
 def ibis_view(
     tracker: Tracker | None = None,
     *,
-    model: type[SQLModel],
+    model: type[BaseModel],
     key: str | None = None,
 ) -> IbisTable:
     """Create/refresh a hybrid view directly via ``ViewFactory`` and open it in Ibis."""

@@ -28,7 +28,7 @@ def test_recovery_service_stage_inputs_normalizes_destination_paths(
     artifact = Artifact(
         id=uuid.uuid4(),
         key="input",
-        container_uri="inputs://input.csv",
+        uri="inputs://input.csv",
         driver="csv",
     )
     captured: dict[str, object] = {}
@@ -74,7 +74,7 @@ def test_recovery_service_materialize_run_outputs_folds_tracker_results(
     artifact = Artifact(
         id=uuid.uuid4(),
         key="result",
-        container_uri="outputs://result.csv",
+        uri="outputs://result.csv",
         driver="csv",
     )
     restored_path = tmp_path / "restored" / "result.csv"
@@ -195,9 +195,7 @@ def test_run_completion_archive_policy_archives_outputs_on_cache_miss(
     ) == "k,v\n1,2\n"
     assert (archive_root / "outputs" / "bundle.zarr" / ".zgroup").exists()
     archived_annual_dir = Path(
-        tracker.fs.resolve_historical_path(
-            result.outputs["annual"].container_uri, archive_root
-        )
+        tracker.fs.resolve_historical_path(result.outputs["annual"].uri, archive_root)
     )
     assert (archived_annual_dir / "year_2030.csv").exists()
     assert (archived_annual_dir / "year_2040.csv").exists()
@@ -265,9 +263,7 @@ def test_run_completion_archive_policy_on_cache_hit_backfills_new_archive_root(
     assert second.outputs["annual"].meta.get("recovery_roots") == [expected_root]
     assert (archive_root / "table.csv").read_text(encoding="utf-8") == "col\n42\n"
     archived_annual_hit = Path(
-        tracker.fs.resolve_historical_path(
-            second.outputs["annual"].container_uri, archive_root
-        )
+        tracker.fs.resolve_historical_path(second.outputs["annual"].uri, archive_root)
     )
     assert (archived_annual_hit / "part_1.csv").read_text(encoding="utf-8") == "p\n1\n"
 
@@ -663,7 +659,7 @@ def test_archive_shapefile_bundle_move_to_same_destination_sets_abs_path(
     for ext in (".shp", ".shx", ".dbf"):
         (shp_dir / f"zones{ext}").unlink()
 
-    shp_art.abs_path = None
+    shp_art = shp_art.with_abs_path(None)
     # Archiving with mode="move" when source already resolves to the archive bundle root
     tracker.archive_artifact(shp_art, archive_root, mode="move")
     assert shp_art.abs_path == str((bundle_dest / "zones.shp").resolve())
@@ -699,7 +695,10 @@ def test_archive_run_outputs_filters_virtual_ingested_and_syncs_last_consist_and
                 driver="duckdb",
                 is_ingested=True,
             )
-            virtual_art.abs_path = None
+            if tracker.current_consist is not None:
+                tracker.current_consist.replace_artifact(
+                    virtual_art.with_abs_path(None)
+                )
 
         res = sc.run(
             fn=step_fn,
@@ -782,8 +781,8 @@ def test_archive_directory_and_shapefile_under_separate_workspace_mount(
         dir_art = tracker.log_output(zarr_dir, key="skims_zarr")
         shp_art = tracker.log_output(shp_dir / "zones.shp", key="zones_shp")
 
-    assert dir_art.container_uri == "workspace://beam_outputs/skims.zarr"
-    assert shp_art.container_uri == "workspace://beam_outputs/zones_bundle/zones.shp"
+    assert dir_art.uri == "workspace://beam_outputs/skims.zarr"
+    assert shp_art.uri == "workspace://beam_outputs/zones_bundle/zones.shp"
     assert "recovery_roots" not in (dir_art.meta or {})
     assert "recovery_roots" not in (shp_art.meta or {})
 
@@ -792,16 +791,16 @@ def test_archive_directory_and_shapefile_under_separate_workspace_mount(
     assert run_record is not None
     assert (
         tracker.fs.get_historical_root(
-            dir_art.container_uri,
+            dir_art.uri,
             original_run_dir=run_record.meta.get("_physical_run_dir"),
             mounts_snapshot=run_record.meta.get("mounts"),
             artifact_mount_root=dir_art.meta.get("mount_root"),
         )
         == workspace_root.resolve()
     )
-    assert tracker.fs.resolve_historical_path(
-        dir_art.container_uri, str(run_dir)
-    ) == str(zarr_dir.resolve())
+    assert tracker.fs.resolve_historical_path(dir_art.uri, str(run_dir)) == str(
+        zarr_dir.resolve()
+    )
     assert tracker.resolve_historical_path(dir_art, run_record) == Path(
         zarr_dir.resolve()
     )
@@ -841,8 +840,12 @@ def test_archive_directory_and_shapefile_under_separate_workspace_mount(
 
     # Simulate a legacy run record without mounts snapshot or artifact mount_root,
     # where original_run_dir points to run_dir (which doesn't contain beam_outputs)
-    dir_art_2.meta.pop("mount_root", None)
-    shp_art_2.meta.pop("mount_root", None)
+    dir_art_2 = dir_art_2.with_meta(
+        {k: v for k, v in dir_art_2.meta.items() if k != "mount_root"}
+    )
+    shp_art_2 = shp_art_2.with_meta(
+        {k: v for k, v in shp_art_2.meta.items() if k != "mount_root"}
+    )
     tracker.db.update_artifact_meta(dir_art_2, dir_art_2.meta)
     tracker.db.update_artifact_meta(shp_art_2, shp_art_2.meta)
     legacy_run = tracker.get_run("legacy_ws_mount_run")

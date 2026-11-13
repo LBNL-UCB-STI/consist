@@ -15,7 +15,7 @@ from consist.models.artifact import Artifact
 def _artifact(*, key: str, driver: str = "csv", is_ingested: bool = False) -> Artifact:
     return Artifact(
         key=key,
-        container_uri=f"./{key}.{driver}",
+        uri=f"./{key}.{driver}",
         driver=driver,
         meta={"is_ingested": is_ingested},
     )
@@ -218,7 +218,7 @@ def test_materialize_ingested_artifact_from_db_wraps_reflection_failure(
 ) -> None:
     artifact = Artifact(
         key="ingested_csv",
-        container_uri="./ingested_csv.csv",
+        uri="./ingested_csv.csv",
         driver="csv",
         meta={"is_ingested": True},
     )
@@ -242,7 +242,7 @@ def test_materialize_ingested_artifact_from_db_fails_when_table_has_no_columns(
 ) -> None:
     artifact = Artifact(
         key="ingested_csv",
-        container_uri="./ingested_csv.csv",
+        uri="./ingested_csv.csv",
         driver="csv",
         meta={"is_ingested": True},
     )
@@ -269,7 +269,7 @@ def test_materialize_ingested_artifact_from_db_requires_consist_artifact_id_colu
 ) -> None:
     artifact = Artifact(
         key="ingested_csv",
-        container_uri="./ingested_csv.csv",
+        uri="./ingested_csv.csv",
         driver="csv",
         meta={"is_ingested": True},
     )
@@ -293,13 +293,13 @@ def test_materialize_ingested_artifact_from_db_requires_consist_artifact_id_colu
     [
         Artifact(
             key="ingested_csv",
-            container_uri="./ingested_csv.csv",
+            uri="./ingested_csv.csv",
             driver="csv",
             meta={"is_ingested": True, "dlt_table_name": 123},
         ),
         Artifact(
             key="",
-            container_uri="./ingested_csv.csv",
+            uri="./ingested_csv.csv",
             driver="csv",
             meta={"is_ingested": True, "dlt_table_name": ""},
         ),
@@ -323,7 +323,7 @@ def test_materialize_ingested_artifact_from_db_uses_hot_data_store_db(
 ) -> None:
     artifact = Artifact(
         key="ingested_csv",
-        container_uri="./ingested_csv.csv",
+        uri="./ingested_csv.csv",
         driver="csv",
         meta={"is_ingested": True},
     )

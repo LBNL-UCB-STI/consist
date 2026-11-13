@@ -1195,9 +1195,7 @@ def test_beam_materialize_bundle_recovers_artifact_backed_member(
         )
 
     archive_root = tmp_path / "source_archive"
-    relative_path = tracker.fs.get_remappable_relative_path(
-        source_artifact.container_uri
-    )
+    relative_path = tracker.fs.get_remappable_relative_path(source_artifact.uri)
     assert relative_path is not None
     archived_source = archive_root / relative_path
     archived_source.parent.mkdir(parents=True)
@@ -1265,11 +1263,13 @@ def test_beam_materialize_bundle_rejects_symlinked_external_artifact_member(
     prepared.write_text("zone,value\n1,2\n", encoding="utf-8")
     linked = tmp_path / "linked.csv"
     linked.symlink_to(prepared)
+    from consist.digest import Digest
+
     source_artifact = Artifact(
         key="prepared_skims",
-        container_uri=f"file://{linked.absolute()}",
+        uri=f"file://{linked.absolute()}",
         driver="csv",
-        hash=tracker.identity.compute_file_checksum(prepared),
+        digest=Digest("sha256:file", tracker.identity.compute_file_checksum(prepared)),
     )
     durable_root = tmp_path / "durable"
 
@@ -1298,11 +1298,13 @@ def test_beam_materialize_bundle_stages_percent_escaped_external_artifact_uri(
     case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
     prepared = tmp_path / "prepared skims.csv"
     prepared.write_text("zone,value\n1,2\n", encoding="utf-8")
+    from consist.digest import Digest
+
     source_artifact = Artifact(
         key="prepared_skims",
-        container_uri=prepared.as_uri(),
+        uri=prepared.as_uri(),
         driver="csv",
-        hash=tracker.identity.compute_file_checksum(prepared),
+        digest=Digest("sha256:file", tracker.identity.compute_file_checksum(prepared)),
     )
 
     bundle = BeamConfigAdapter(primary_config=overlay_conf).materialize_bundle(
@@ -1575,8 +1577,8 @@ def test_beam_materialize_bundle_is_bound_as_a_downstream_input(
         {
             "destination": "inputs/prepared.csv",
             "source_artifact_id": str(source_artifact.id),
-            "source_uri": source_artifact.container_uri,
-            "source_hash": source_artifact.hash,
+            "source_uri": source_artifact.uri,
+            "source_hash": str(source_artifact.digest),
         }
     ]
     assert bundle.artifact.id in {

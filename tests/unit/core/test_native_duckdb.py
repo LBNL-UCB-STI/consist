@@ -396,34 +396,36 @@ def test_b3_purge_preserves_shared_containers_unmounted_uris_and_surviving_coupl
             )
         )
 
+        from consist.digest import Digest
+
         art_h5_purge = Artifact(
             key="h5_member_a",
-            container_uri=f"workspace://{shared_h5.name}",
-            table_path="/group_a",
+            uri=f"workspace://{shared_h5.name}",
+            member="/group_a",
             driver="h5_table",
-            hash="a" * 64,
+            digest=Digest("h5_fixed_v1:sha256", "a" * 64),
             run_id="purge_run",
         )
         art_h5_keep = Artifact(
             key="h5_member_b",
-            container_uri=f"workspace://{shared_h5.name}",
-            table_path="/group_b",
+            uri=f"workspace://{shared_h5.name}",
+            member="/group_b",
             driver="h5_table",
-            hash="b" * 64,
+            digest=Digest("h5_fixed_v1:sha256", "b" * 64),
             run_id="survive_run",
         )
         art_mounted = Artifact(
             key="custom_mount_out",
-            container_uri="inputs://custom_mounted.parquet",
+            uri="inputs://custom_mounted.parquet",
             driver="parquet",
-            hash="c" * 64,
+            digest=Digest("sha256:file", "c" * 64),
             run_id="purge_run",
         )
         art_private = Artifact(
             key="private_out",
-            container_uri=f"workspace://{private_out.name}",
+            uri=f"workspace://{private_out.name}",
             driver="parquet",
-            hash="d" * 64,
+            digest=Digest("sha256:file", "d" * 64),
             run_id="purge_run",
         )
 
@@ -607,6 +609,8 @@ def test_b16_readonly_temp_views_str_config_query_null_artifact_id_fallback_and_
                 year=2035,
             )
             writer.db.sync_run(hot_only_run)
+            from consist.digest import Digest
+
             for key, driver in (
                 ("legacy_hot", "parquet"),
                 ("legacy_nc", "netcdf"),
@@ -616,9 +620,9 @@ def test_b16_readonly_temp_views_str_config_query_null_artifact_id_fallback_and_
                 writer.db.sync_artifact(
                     Artifact(
                         key=key,
-                        container_uri=f"workspace://{key}.{driver}",
+                        uri=f"workspace://{key}.{driver}",
                         driver=driver,
-                        hash="f" * 64,
+                        digest=Digest("sha256:file", "f" * 64),
                         run_id="run_null_art",
                         meta={"is_ingested": True},
                     ),
@@ -999,41 +1003,29 @@ def test_run_container_suspends_db_for_real_subprocess_and_supports_in_process_c
         tracker.close()
 
 
-def test_artifact_member_mutual_exclusion_and_bulk_meta_preserves_member_kind(
+def test_artifact_member_persistence_and_bulk_meta_preserves_member(
     tmp_path: Path,
 ) -> None:
     db = DatabaseManager(str(tmp_path / "member_kind.duckdb"))
     try:
-        both = Artifact(
-            key="bad_dual",
-            container_uri="inputs://dual.h5",
-            driver="h5",
-            table_path="/tables/a",
-            array_path="/arrays/b",
-        )
-        with pytest.raises(ValueError, match="both table_path and array_path"):
-            db.upsert_artifact(both)
-
         h5_arr = Artifact(
             key="vel_field",
-            container_uri="outputs://sim.h5",
+            uri="outputs://sim.h5",
             driver="h5",
-            array_path="/fields/velocity",
+            member="/fields/velocity",
             meta={"units": "m/s"},
         )
         db.upsert_artifact(h5_arr)
         loaded_before = db.get_artifact(h5_arr.id)
         assert loaded_before is not None
-        assert loaded_before.array_path == "/fields/velocity"
-        assert loaded_before.table_path is None
+        assert loaded_before.member == "/fields/velocity"
 
         db.replace_artifacts_meta_bulk(
             {h5_arr.id: {"units": "m/s", "recovery_roots": ["/archive/root"]}}
         )
         loaded_after = db.get_artifact(h5_arr.id)
         assert loaded_after is not None
-        assert loaded_after.array_path == "/fields/velocity"
-        assert loaded_after.table_path is None
+        assert loaded_after.member == "/fields/velocity"
         assert loaded_after.meta["recovery_roots"] == ["/archive/root"]
         assert "_consist_member_kind" not in loaded_after.meta
     finally:

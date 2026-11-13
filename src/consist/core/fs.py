@@ -44,7 +44,7 @@ def resolve_historical_artifact_path(
         return None
     return Path(
         fs.resolve_historical_path(
-            artifact.container_uri,
+            artifact.uri,
             original_run_dir,
             mounts_snapshot=mounts_snapshot,
             artifact_mount_root=artifact_mount_root,

@@ -465,7 +465,7 @@ class TrackerRecoveryService(_TrackerServiceBase):
         strict_tree_keys = {
             key
             for key, artifact in requested_outputs.items()
-            if isinstance(artifact.meta, dict)
+            if isinstance(artifact.meta, Mapping)
             and (
                 artifact.meta.get("directory_artifact") is True
                 or artifact.meta.get("file_bundle_artifact") is True

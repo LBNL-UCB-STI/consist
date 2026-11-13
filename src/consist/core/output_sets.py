@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import fnmatch
-import hashlib
 import json
 import os
 import re
@@ -11,10 +10,10 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Literal, Mapping, Sequence, cast
 from typing_extensions import Protocol
 
-from sqlmodel import SQLModel
+from pydantic import BaseModel
 
 from consist.core.artifacts import _infer_driver_from_path
-from consist.digest import file_sha256
+from consist.digest import Digest, compute_digest, verify_digest
 from consist.models.artifact import Artifact
 from consist.types import (
     EnumCapture,
@@ -33,18 +32,19 @@ _SAFE_KEY_RE = re.compile(r"[^A-Za-z0-9_]+")
 
 class OutputSetTracker(Protocol):
     db: Any
+    current_consist: Any
 
     def log_artifact(
         self,
         path: Any,
         key: str | None = None,
         direction: str = "output",
-        schema: type[SQLModel] | None = None,
+        schema: type[BaseModel] | None = None,
         strict_schema: bool = False,
         driver: str | None = None,
-        table_path: str | None = None,
-        array_path: str | None = None,
-        content_hash: str | None = None,
+        member: str | None = None,
+        content_hash: str | Digest | None = None,
+        digest: Digest | None = None,
         force_hash_override: bool = False,
         validate_content_hash: bool = False,
         reuse_if_unchanged: bool = False,
@@ -72,6 +72,7 @@ class OutputSetMember:
     relative_path: str
     size_bytes: int
     content_hash: str
+    digest: Digest | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,12 +261,14 @@ def discover_output_set_members(output_set: OutputSet) -> list[OutputSetMember]:
         else:
             if not _matches_any(relative_path, include_patterns):
                 continue
+        member_digest = compute_digest(path, driver="file")
         members.append(
             OutputSetMember(
                 path=path,
                 relative_path=relative_path,
                 size_bytes=path.stat().st_size,
-                content_hash=file_sha256(path),
+                content_hash=member_digest.hex,
+                digest=member_digest,
             )
         )
     return sorted(members, key=lambda member: member.relative_path)
@@ -393,14 +396,17 @@ def build_output_set_manifest(
             config=config,
         )
         artifact = artifacts_by_relative_path.get(member.relative_path)
+        member_digest = (
+            member.digest
+            if member.digest is not None
+            else Digest("sha256:file", member.content_hash)
+        )
         manifest_members.append(
             {
                 "key": _member_key(key, member.relative_path),
                 "artifact_id": str(artifact.id) if artifact is not None else None,
                 "relative_path": member.relative_path,
-                "uri": (
-                    artifact.container_uri if artifact is not None else str(member.path)
-                ),
+                "uri": (artifact.uri if artifact is not None else str(member.path)),
                 "driver": (
                     artifact.driver
                     if artifact is not None
@@ -408,6 +414,7 @@ def build_output_set_manifest(
                 ),
                 "size_bytes": member.size_bytes,
                 "content_hash": member.content_hash,
+                "digest": str(member_digest),
                 "facets": facets,
             }
         )
@@ -433,6 +440,11 @@ def build_output_set_manifest(
     if not manifest["expected"]:
         manifest.pop("expected")
     return manifest
+
+
+def compute_output_set_manifest_digest(manifest: Mapping[str, Any]) -> Digest:
+    """Compute the ``output_set_v1:sha256`` ``Digest`` from a parsed OutputSet manifest."""
+    return compute_digest(None, driver="output_set", options={"manifest": manifest})
 
 
 def register_output_sets(
@@ -468,12 +480,20 @@ def register_output_sets(
             members=members,
             config=config,
         )
-        parent_manifest = build_output_set_manifest(
-            key=key,
-            output_set=resolved_output_set,
-            members=members,
-            config=config,
-            logged_members=[],
+        parent_digest = compute_digest(
+            None,
+            driver="output_set",
+            options={
+                "members": [
+                    (
+                        _member_key(key, member.relative_path),
+                        member.digest
+                        if member.digest is not None
+                        else Digest("sha256:file", member.content_hash),
+                    )
+                    for member in members
+                ]
+            },
         )
         parent = tracker.log_artifact(
             Path(resolved_output_set.root),
@@ -482,7 +502,7 @@ def register_output_sets(
             schema=resolved_output_set.schema,
             strict_schema=False,
             driver="artifact_set",
-            content_hash=_manifest_identity_hash(parent_manifest),
+            digest=parent_digest,
             force_hash_override=True,
             facet=resolved_output_set.facet,
             facet_index=True,
@@ -514,6 +534,7 @@ def register_output_sets(
                     direction="output",
                     schema=resolved_output_set.schema,
                     strict_schema=False,
+                    digest=member.digest,
                     parent_artifact_id=parent.id,
                     profile_file_schema=member_profile_file_schema,
                     file_schema_sample_rows=resolved_output_set.file_schema_sample_rows,
@@ -552,10 +573,11 @@ def register_output_sets(
             members=members,
             manifest_artifact_id=str(manifest_artifact.id),
         )
+        parent = parent.with_meta(**updates)
         if tracker.db is not None:
             tracker.db.update_artifact_meta(parent, updates, raise_on_error=True)
-        else:
-            parent.meta.update(updates)
+        if tracker.current_consist is not None:
+            tracker.current_consist.replace_artifact(parent)
         registered[key] = parent
     return registered
 
@@ -633,6 +655,7 @@ def validate_cached_output_sets(
         if parent is None:
             continue
         members: list[OutputSetMember] = []
+        child_digest_pairs: list[tuple[str, Digest]] = []
         for artifact in outputs.values():
             if artifact.parent_artifact_id != parent.id:
                 continue
@@ -643,14 +666,31 @@ def validate_cached_output_sets(
             if not isinstance(relative_path, str) or not relative_path:
                 continue
             safe_relative_path = _normalize_output_set_relative_path(relative_path)
+            if artifact.digest is not None:
+                child_digest_pairs.append((artifact.key, artifact.digest))
             members.append(
                 OutputSetMember(
                     path=Path(safe_relative_path),
                     relative_path=safe_relative_path,
                     size_bytes=0,
-                    content_hash=artifact.hash or "",
+                    content_hash=artifact.digest.hex if artifact.digest else "",
+                    digest=artifact.digest,
                 )
             )
+        if (
+            parent.digest is not None
+            and parent.digest.scheme == "output_set_v1:sha256"
+            and len(child_digest_pairs) == len(members)
+        ):
+            if not verify_digest(
+                None,
+                parent.digest,
+                driver="output_set",
+                options={"members": child_digest_pairs},
+            ):
+                raise ValueError(
+                    f"Cached OutputSet {key!r} failed output_set_v1:sha256 verification."
+                )
         resolve_output_set_expected_members(
             key=key,
             output_set=output_set,
@@ -790,7 +830,7 @@ def build_output_set_captures_identity(
     return identity or None
 
 
-def _schema_manifest(schema: type[SQLModel] | None) -> dict[str, str] | None:
+def _schema_manifest(schema: type[BaseModel] | None) -> dict[str, str] | None:
     if schema is None:
         return None
     return {"name": schema.__name__}
@@ -845,21 +885,16 @@ def _parent_metadata(
         "output_set_kind": output_set.kind,
         "member_count": len(members),
         "total_size_bytes": sum(member.size_bytes for member in members),
+        "output_set_member_paths": {
+            _member_key(key, member.relative_path): member.relative_path
+            for member in members
+        },
     }
     if manifest_artifact_id is not None:
         metadata["manifest_artifact_id"] = manifest_artifact_id
     if output_set.schema is not None:
         metadata["schema_name"] = output_set.schema.__name__
     return metadata
-
-
-def _manifest_identity_hash(manifest: Mapping[str, Any]) -> str:
-    identity_manifest = json.loads(json.dumps(manifest, sort_keys=True))
-    for member in identity_manifest.get("members", []):
-        member.pop("artifact_id", None)
-        member.pop("uri", None)
-    payload = json.dumps(identity_manifest, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _member_key(output_set_key: str, relative_path: str) -> str:

@@ -241,7 +241,7 @@ def preview_run_artifact_dir(
 
 def resolve_output_path(tracker: "Tracker", ref: ArtifactRef, base_dir: Path) -> Path:
     if isinstance(ref, Artifact):
-        raw = ref.path or tracker.resolve_uri(ref.container_uri)
+        raw = ref.path or tracker.resolve_uri(ref.uri)
         return Path(raw)
     ref_str = str(ref)
     if isinstance(ref, str) and "://" in ref_str:

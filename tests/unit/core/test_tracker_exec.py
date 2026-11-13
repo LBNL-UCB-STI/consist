@@ -313,8 +313,8 @@ def test_tracker_exec_baseline_comparison(tracker: Tracker, tmp_path: Path):
         compare_baseline=True,
     )
     assert res2.is_success
-    assert res2.outputs["out"].hash != res1.outputs["out"].hash
-    assert res2.outputs["steady"].hash == res1.outputs["steady"].hash
+    assert res2.outputs["out"].digest != res1.outputs["out"].digest
+    assert res2.outputs["steady"].digest == res1.outputs["steady"].digest
     assert res2.run.meta is not None
     cmd_meta = res2.run.meta.get("command", {})
     baseline_comp = cmd_meta.get("baseline_comparison")
@@ -345,7 +345,7 @@ def test_tracker_exec_input_modified_out_of_band_after_upstream_output(
         stream_output=False,
     )
     assert step1.is_success
-    v1_hash = step1.outputs["inter"].hash
+    v1_hash = step1.outputs["inter"].digest
 
     # Step 2 consumes intermediate.csv without out-of-band edits -> preserves upstream lineage
     step2_run1 = tracker.exec(
@@ -360,7 +360,7 @@ def test_tracker_exec_input_modified_out_of_band_after_upstream_output(
         stream_output=False,
     )
     assert step2_run1.is_success
-    assert step2_run1.inputs["inter"].hash == v1_hash
+    assert step2_run1.inputs["inter"].digest == v1_hash
     assert step2_run1.inputs["inter"].run_id == step1.run.id
 
     # Now a user edits intermediate.csv out-of-band on disk without re-running Step 1
@@ -379,7 +379,7 @@ def test_tracker_exec_input_modified_out_of_band_after_upstream_output(
         compare_baseline=True,
     )
     assert step2_run2.is_success
-    assert step2_run2.inputs["inter"].hash != v1_hash
+    assert step2_run2.inputs["inter"].digest != v1_hash
     baseline_comp = step2_run2.run.meta["command"]["baseline_comparison"]
     assert "inter" in baseline_comp["inputs"]["modified"]
     assert "final" in baseline_comp["outputs"]["modified"]

@@ -20,14 +20,12 @@ import os
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from consist.core.directory_artifacts import build_directory_manifest
 from consist.digest import (
     ARRAY_BINARY_PROTOCOL_VERSION,
     FLOAT32_MATRICES_V1_POLICY,
     PRESERVE_CANONICAL_POLICY,
     ArrayCanonicalizationPolicy,
     LogicalProfileName,
-    MatrixContainerSummary,
     _decode_attr_value,
     _resolve_h5_group,
     canonicalize_float16_array,
@@ -35,9 +33,11 @@ from consist.digest import (
     canonicalize_float64_array,
     canonicalize_float_array,
     compute_array_entry_sha256,
+    compute_digest,
     compute_logical_matrices_sha256,
     compute_omx_logical_matrices_sha256,
     compute_zarr_logical_matrices_sha256,
+    logical_matrices_scheme_for_policy,
     normalize_logical_matrices_identity,
     open_h5py_read_only,
     resolve_canonicalization_policy,
@@ -53,11 +53,7 @@ __all__ = [
     "FLOAT32_MATRICES_V1_POLICY",
     "PRESERVE_CANONICAL_POLICY",
     "ArrayCanonicalizationPolicy",
-    "ArtifactProvenanceSidecar",
     "LogicalProfileName",
-    "MatrixContainerSummary",
-    "admission_directory_identity",
-    "artifact_provenance_sidecar_path",
     "canonicalize_float16_array",
     "canonicalize_float32_array",
     "canonicalize_float64_array",
@@ -75,78 +71,12 @@ __all__ = [
 ]
 
 
-def admission_directory_identity(path: str | Path) -> str:
-    """
-    Compute Consist's canonical directory admission identity.
-
-    Parameters
-    ----------
-    path : str or pathlib.Path
-        Directory path whose deterministic tree manifest should be hashed.
-
-    Returns
-    -------
-    str
-        Self-describing directory manifest identity in the form
-        ``sha256:manifest-v1:<64 lowercase hex>``.
-
-    Raises
-    ------
-    ValueError
-        If ``path`` is not a readable directory or contains symlinks rejected by
-        Consist's directory manifest builder.
-    OSError
-        If any member file in ``path`` cannot be read.
-    """
-    manifest = build_directory_manifest(Path(path))
-    return f"sha256:manifest-v1:{manifest['tree_hash']}"
-
-
 @dataclass(frozen=True, slots=True)
-class ArtifactProvenanceSidecar:
-    """
-    Portable ``.provenance.json`` sidecar representation.
+class _MatrixContainerSummary:
+    """Domain-agnostic structural and cryptographic summary of an array container."""
 
-    Attributes
-    ----------
-    schema_version : str
-        Sidecar schema version identifier (``"consist.artifact_provenance.v1"``).
-    artifact_name : str
-        Basename of the described artifact.
-    artifact_format : str
-        Detected artifact format (``"omx"``, ``"h5"``, ``"zarr"``, ``"directory"``,
-        or ``"file"``).
-    container_identity : str
-        Container-level admission identity (``sha256:file:<hex>`` or
-        ``sha256:manifest-v1:<hex>``).
-    size_bytes : int
-        Total byte size of the artifact.
-    logical_identity : str or None
-        Canonical logical array identity (``sha256:logical_matrices:<hex>``),
-        if available.
-    logical_profile : {"preserve_canonical", "float32_matrices_v1"}
-        Canonicalization profile associated with ``logical_identity``.
-    shape : tuple[int, ...] or None
-        Shape of the primary matrix/variable, if available.
-    coord_keys : tuple[str, ...]
-        Sorted lookup or coordinate names.
-    variable_count : int
-        Number of data matrices/variables in the container.
-    variable_names : tuple[str, ...]
-        Sorted names of data matrices/variables.
-    producer_run_id : str or None, optional
-        Run ID of the producer run, if supplied.
-    producer_meta : Mapping[str, Any]
-        Additional producer metadata recorded in the sidecar.
-    root_attributes : Mapping[str, Any]
-        Decoded root attributes from the container.
-    facets : Mapping[str, Any]
-        Extracted facet dictionary from ``key_facet_parser``, if supplied.
-    """
-
-    schema_version: str
-    artifact_name: str
-    artifact_format: str
+    artifact_path: str
+    artifact_format: Literal["omx", "h5", "zarr", "directory", "file"]
     container_identity: str
     size_bytes: int
     logical_identity: str | None
@@ -155,8 +85,6 @@ class ArtifactProvenanceSidecar:
     coord_keys: tuple[str, ...]
     variable_count: int
     variable_names: tuple[str, ...]
-    producer_run_id: str | None = None
-    producer_meta: Mapping[str, Any] = field(default_factory=dict)
     root_attributes: Mapping[str, Any] = field(default_factory=dict)
     facets: Mapping[str, Any] = field(default_factory=dict)
 
@@ -167,7 +95,7 @@ def inspect_matrix_container(
     policy: ArrayCanonicalizationPolicy | LogicalProfileName = "preserve_canonical",
     compute_logical_hash: bool = False,
     key_facet_parser: Callable[[str], Mapping[str, Any]] | None = None,
-) -> MatrixContainerSummary:
+) -> _MatrixContainerSummary:
     """
     Inspect an OMX, HDF5, or Zarr container without domain-specific coupling.
 
@@ -197,13 +125,12 @@ def inspect_matrix_container(
     FileNotFoundError
         If ``path`` does not exist.
     """
-    from consist.core.admission import admission_file_identity
-
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"Artifact path does not exist: {p}")
 
     resolved_policy = resolve_canonicalization_policy(policy)
+    logical_scheme = logical_matrices_scheme_for_policy(resolved_policy)
     root_attrs: dict[str, Any] = {}
     variable_names: list[str] = []
     coord_keys: list[str] = []
@@ -220,7 +147,9 @@ def inspect_matrix_container(
         artifact_format: Literal["omx", "h5", "zarr", "directory", "file"] = (
             "zarr" if is_zarr else "directory"
         )
-        container_identity = admission_directory_identity(p)
+        container_identity = str(
+            compute_digest(p, options={"scheme": "dir_manifest_v1:sha256"})
+        )
         size_bytes = sum(
             f.stat().st_size for f in p.rglob("*") if f.is_file() and not f.is_symlink()
         )
@@ -239,14 +168,20 @@ def inspect_matrix_container(
                 logger.debug("Unable to inspect Zarr store %s: %s", p, exc)
             if "logical_identity" in root_attrs:
                 logical_identity = normalize_logical_matrices_identity(
-                    str(root_attrs["logical_identity"])
+                    str(root_attrs["logical_identity"]),
+                    policy=resolved_policy,
                 )
             if compute_logical_hash or (logical_identity is None and variable_names):
                 try:
-                    digest = compute_zarr_logical_matrices_sha256(
-                        p, policy=resolved_policy
+                    logical_identity = str(
+                        compute_digest(
+                            p,
+                            options={
+                                "scheme": logical_scheme,
+                                "policy": resolved_policy,
+                            },
+                        )
                     )
-                    logical_identity = f"sha256:logical_matrices:{digest}"
                 except Exception as exc:
                     logger.debug(
                         "Unable to compute Zarr logical hash for %s: %s", p, exc
@@ -259,12 +194,13 @@ def inspect_matrix_container(
             artifact_format = "h5"
         else:
             artifact_format = "file"
-        container_identity = admission_file_identity(p)
+        container_identity = str(compute_digest(p, options={"scheme": "sha256:file"}))
         size_bytes = p.stat().st_size
 
         if artifact_format in {"omx", "h5"}:
             try:
-                with open_h5py_read_only(p) as h5f:
+                h5py = importlib.import_module("h5py")
+                with open_h5py_read_only(p, h5py_module=h5py) as h5f:
                     root_attrs = {
                         str(k): _decode_attr_value(v) for k, v in h5f.attrs.items()
                     }
@@ -272,35 +208,41 @@ def inspect_matrix_container(
                     lookup_group = _resolve_h5_group(
                         h5f, resolved_policy.h5_lookup_group
                     )
-                    if data_group is not None and hasattr(data_group, "keys"):
+                    if isinstance(data_group, h5py.Group):
                         variable_names = sorted(
                             str(k)
                             for k in data_group.keys()
-                            if hasattr(data_group[k], "shape")
+                            if isinstance(data_group[k], h5py.Dataset)
                         )
                         if variable_names:
                             shape = tuple(
                                 int(d) for d in data_group[variable_names[0]].shape
                             )
-                    if lookup_group is not None and hasattr(lookup_group, "keys"):
+                    if isinstance(lookup_group, h5py.Group):
                         coord_keys = sorted(
                             str(k)
                             for k in lookup_group.keys()
-                            if hasattr(lookup_group[k], "shape")
+                            if isinstance(lookup_group[k], h5py.Dataset)
                         )
             except Exception as exc:
                 logger.debug("Unable to inspect HDF5/OMX file %s: %s", p, exc)
 
             if "logical_identity" in root_attrs:
                 logical_identity = normalize_logical_matrices_identity(
-                    str(root_attrs["logical_identity"])
+                    str(root_attrs["logical_identity"]),
+                    policy=resolved_policy,
                 )
             if compute_logical_hash:
                 try:
-                    digest = compute_omx_logical_matrices_sha256(
-                        p, policy=resolved_policy
+                    logical_identity = str(
+                        compute_digest(
+                            p,
+                            options={
+                                "scheme": logical_scheme,
+                                "policy": resolved_policy,
+                            },
+                        )
                     )
-                    logical_identity = f"sha256:logical_matrices:{digest}"
                 except Exception as exc:
                     logger.debug(
                         "Unable to compute OMX logical hash for %s: %s", p, exc
@@ -316,7 +258,7 @@ def inspect_matrix_container(
                     parsed_facets.setdefault(fkey, set()).add(fval)
         facets = {fkey: sorted(vals) for fkey, vals in sorted(parsed_facets.items())}
 
-    return MatrixContainerSummary(
+    return _MatrixContainerSummary(
         artifact_path=str(p),
         artifact_format=artifact_format,
         container_identity=container_identity,
@@ -330,24 +272,6 @@ def inspect_matrix_container(
         root_attributes=root_attrs,
         facets=facets,
     )
-
-
-def artifact_provenance_sidecar_path(artifact_path: str | Path) -> Path:
-    """
-    Return the co-located ``<artifact>.provenance.json`` path.
-
-    Parameters
-    ----------
-    artifact_path : str or pathlib.Path
-        Path to the target file or directory artifact.
-
-    Returns
-    -------
-    pathlib.Path
-        Sibling path named ``<artifact_path.name>.provenance.json``.
-    """
-    p = Path(artifact_path)
-    return p.parent / f"{p.name}.provenance.json"
 
 
 def write_artifact_provenance_sidecar(
@@ -429,7 +353,7 @@ def write_artifact_provenance_sidecar(
         "container_metadata": metadata,
     }
 
-    sidecar_path = artifact_provenance_sidecar_path(p)
+    sidecar_path = p.parent / f"{p.name}.provenance.json"
     sidecar_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = sidecar_path.parent / f".tmp_{sidecar_path.name}.{os.getpid()}"
     tmp_path.write_text(
@@ -483,19 +407,20 @@ def read_artifact_provenance_sidecar(sidecar_path: str | Path) -> dict[str, Any]
         if isinstance(container_meta, Mapping)
         else None
     )
-    normalized["logical_identity"] = (
-        normalize_logical_matrices_identity(str(raw_logical))
-        if raw_logical is not None
-        else None
-    )
     profile = raw.get("logical_profile") or (
         container_meta.get("logical_profile")
         if isinstance(container_meta, Mapping)
         else None
     )
-    normalized["logical_profile"] = (
+    resolved_profile: LogicalProfileName = (
         cast(LogicalProfileName, profile)
         if profile in ("preserve_canonical", "float32_matrices_v1")
         else "preserve_canonical"
+    )
+    normalized["logical_profile"] = resolved_profile
+    normalized["logical_identity"] = (
+        normalize_logical_matrices_identity(str(raw_logical), policy=resolved_profile)
+        if raw_logical is not None
+        else None
     )
     return normalized

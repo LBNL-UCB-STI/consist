@@ -71,7 +71,7 @@ def test_h5_lineage_hashing_demo(tracker: Tracker, run_dir: Path) -> None:
         )
 
     assert container_repeat.id != container_v1.id
-    assert container_repeat.hash == container_v1.hash
+    assert container_repeat.digest == container_v1.digest
     assert container_repeat.meta.get("content_identity") == container_v1.meta.get(
         "content_identity"
     )

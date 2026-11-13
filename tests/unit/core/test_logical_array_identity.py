@@ -13,11 +13,8 @@ import xarray as xr
 
 import consist
 from consist.core.admission import (
-    AdmissionIdentity,
     DeclaredDigestExpectation,
-    FileIdentity,
     PriorRunExpectation,
-    admission_file_identity,
     check_expected_identity,
     check_prior_run_expectation,
 )
@@ -26,7 +23,6 @@ from consist.core.logical_array_identity import (
     FLOAT32_MATRICES_V1_POLICY,
     PRESERVE_CANONICAL_POLICY,
     ArrayCanonicalizationPolicy,
-    admission_directory_identity,
     canonicalize_float32_array,
     canonicalize_float64_array,
     canonicalize_float_array,
@@ -38,6 +34,7 @@ from consist.core.logical_array_identity import (
     read_artifact_provenance_sidecar,
     write_artifact_provenance_sidecar,
 )
+from consist.digest import Digest, compute_digest
 from consist.models.artifact import Artifact
 
 
@@ -309,7 +306,9 @@ def test_container_inspection_and_provenance_sidecar(tmp_path: Path) -> None:
     assert sidecar_path.is_file()
     assert payload["schema_version"] == ARTIFACT_PROVENANCE_SCHEMA_VERSION
     assert payload["logical_profile"] == "preserve_canonical"
-    assert payload["logical_identity"].startswith("sha256:logical_matrices:")
+    assert payload["logical_identity"].startswith(
+        "logical_matrices_canonical_v1:sha256:"
+    )
     assert payload["container_metadata"]["facets"] == {
         "metric": ["DIST", "TIME"],
         "mode": ["CAR", "WLK"],
@@ -355,9 +354,9 @@ def test_admission_auto_fast_path_and_cross_format_logical_fallback(
         )
         h5f.create_group("lookup").create_dataset("zone_number", data=zones)
 
-    assert admission_file_identity(omx_producer) != admission_file_identity(
-        omx_repacked
-    )
+    assert compute_digest(
+        omx_producer, options={"scheme": "sha256:file"}
+    ) != compute_digest(omx_repacked, options={"scheme": "sha256:file"})
 
     ds = xr.Dataset(
         data_vars={"DIST": (("otaz", "dtaz"), mat)},
@@ -377,12 +376,11 @@ def test_admission_auto_fast_path_and_cross_format_logical_fallback(
     assert summary.logical_identity is not None
 
     _complete_run(tracker, "producer_run")
-    raw_file_hex = summary.container_identity.removeprefix("sha256:file:")
     prior_artifact = Artifact(
         key="skims",
-        container_uri="outputs://skims.omx",
+        uri="outputs://skims.omx",
         driver="openmatrix",
-        hash=raw_file_hex,
+        digest=Digest.parse(summary.container_identity),
         run_id="producer_run",
         meta={
             "hash_semantics": {
@@ -473,7 +471,9 @@ def test_declared_digest_supports_manifest_v1_and_logical_matrices(
     )
     ds.to_zarr(zarr_path)
 
-    manifest_id = admission_directory_identity(zarr_path)
+    manifest_id = str(
+        compute_digest(zarr_path, options={"scheme": "dir_manifest_v1:sha256"})
+    )
     logical_id = normalize_logical_matrices_identity(
         compute_zarr_logical_matrices_sha256(zarr_path)
     )
@@ -498,11 +498,8 @@ def test_declared_digest_supports_manifest_v1_and_logical_matrices(
     assert logical_report.observed_artifact_id == logical_id
     assert "logical_identity_verified" in logical_report.observations
 
-    # FileIdentity still strictly requires sha256:file:<hex>
-    with pytest.raises(ValueError, match="sha256:file:"):
-        FileIdentity.parse(manifest_id)
-    assert AdmissionIdentity.parse(manifest_id).kind == "manifest-v1"
-    assert AdmissionIdentity.parse(logical_id).kind == "logical_matrices"
+    assert Digest.parse(manifest_id).scheme == "dir_manifest_v1:sha256"
+    assert Digest.parse(logical_id).scheme == "logical_matrices_canonical_v1:sha256"
 
 
 def test_public_exports_include_logical_array_identity() -> None:
@@ -511,7 +508,7 @@ def test_public_exports_include_logical_array_identity() -> None:
     import consist.admission as cadmission
     import consist.digest as cdigest
 
-    assert cadmission.AdmissionIdentity is AdmissionIdentity
+    assert cadmission.Digest is Digest
     assert cadmission.inspect_matrix_container is inspect_matrix_container
     assert cadmission.check_prior_run_expectation is check_prior_run_expectation
     assert cdigest.ArrayCanonicalizationPolicy is ArrayCanonicalizationPolicy
@@ -529,7 +526,7 @@ def test_public_exports_include_logical_array_identity() -> None:
 
     with warnings.catch_warnings(record=True) as recorded:
         warnings.simplefilter("always")
-        assert consist.AdmissionIdentity is AdmissionIdentity
+        assert consist.Digest is Digest
         assert consist.ArrayCanonicalizationPolicy is ArrayCanonicalizationPolicy
         assert consist.PRESERVE_CANONICAL_POLICY is PRESERVE_CANONICAL_POLICY
         assert consist.FLOAT32_MATRICES_V1_POLICY is FLOAT32_MATRICES_V1_POLICY

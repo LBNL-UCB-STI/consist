@@ -105,7 +105,7 @@ def test_consist_ingest_delegates_without_warning(
     calls: dict[str, object] = {}
     artifact = Artifact(
         key="table",
-        container_uri="./table.csv",
+        uri="./table.csv",
         driver="csv",
         meta={},
     )

@@ -23,8 +23,9 @@ from typing import (
 )
 from urllib.parse import unquote
 
-from sqlmodel import SQLModel
+from pydantic import BaseModel
 
+from consist.core._schema_model_introspection import model_table_name
 from consist.core.config_canonicalization import (
     ArtifactSpec,
     CanonicalConfig,
@@ -53,7 +54,13 @@ from consist.core.gtfs import (
     canonicalize_gtfs_bundle,
     has_gtfs_core_members,
 )
-from consist.digest import canonical_json_sha256, file_sha256, normalize_json
+from consist.digest import (
+    Digest,
+    canonical_json_sha256,
+    file_sha256,
+    normalize_json,
+    verify_digest,
+)
 from consist.integrations._config_adapter_shared import (
     OverrideRunHooks as _shared_OverrideRunHooks,
     artifact_key_for_path as _shared_artifact_key_for_path,
@@ -66,7 +73,7 @@ from consist.integrations._config_adapter_shared import (
     run_with_config_overrides_orchestrated as _shared_run_with_config_overrides_orchestrated,
 )
 from consist.models.beam import BeamConfigCache, BeamConfigIngestRunLink
-from consist.models.artifact import Artifact, set_tracker_ref
+from consist.models.artifact import Artifact
 from consist.models.run import Run
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -105,7 +112,7 @@ _DEFAULT_OVERRIDE_RUNTIME_KWARGS: dict[str, str] = {
 @dataclass(frozen=True)
 class BeamIngestSpec:
     key: str
-    schema: type[SQLModel]
+    schema: type[BaseModel]
     table_name: Optional[str] = None
     dedupe_on_hash: bool = True
     extensions: tuple[str, ...] = (".csv", ".csv.gz", ".parquet")
@@ -184,8 +191,9 @@ def _normalize_launch_bundle_members(
             raise ValueError(f"Duplicate launch bundle destination: {destination}")
         destinations.add(destination)
         if isinstance(member.source, Artifact):
-            if not member.source.hash:
+            if member.source.digest is None:
                 raise ValueError("Staged artifact source must have a content identity.")
+            source_hash = str(member.source.digest)
             normalized.append(
                 _NormalizedBeamLaunchBundleMember(
                     destination=destination,
@@ -194,13 +202,13 @@ def _normalize_launch_bundle_members(
                     sha256=None,
                     identity={
                         "destination": destination.as_posix(),
-                        "source_hash": member.source.hash,
+                        "source_hash": source_hash,
                     },
                     provenance={
                         "destination": destination.as_posix(),
                         "source_artifact_id": str(member.source.id or ""),
-                        "source_uri": member.source.container_uri,
-                        "source_hash": member.source.hash,
+                        "source_uri": member.source.uri,
+                        "source_hash": source_hash,
                     },
                 )
             )
@@ -267,7 +275,7 @@ def _has_symlink_component(path: Path) -> bool:
 
 def _is_matching_beam_launch_bundle(artifact: Artifact, identity: str) -> bool:
     """Return whether an existing standalone artifact represents this request."""
-    meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+    meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
     return (
         meta.get("beam_launch_bundle") is True
         and meta.get("bundle_identity") == identity
@@ -277,14 +285,14 @@ def _is_matching_beam_launch_bundle(artifact: Artifact, identity: str) -> bool:
 
 def _beam_launch_bundle_directory_manifest(artifact: Artifact) -> dict[str, Any]:
     """Return the verified immutable-tree manifest for a launch bundle."""
-    meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+    meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
     manifest = meta.get("directory_manifest")
     if not isinstance(manifest, Mapping):
         raise ValueError(
             f"BEAM launch bundle {artifact.key!r} has no persisted directory manifest."
         )
     normalized = validate_directory_manifest(manifest)
-    if artifact.hash != normalized["tree_hash"]:
+    if artifact.digest is None or artifact.digest.hex != normalized["tree_hash"]:
         raise ValueError(
             f"BEAM launch bundle {artifact.key!r} manifest does not match artifact identity."
         )
@@ -310,7 +318,7 @@ def _stage_launch_bundle_artifact_member(
     if recovered.resolvable and recovered.path is not None:
         source = recovered.path
     elif recovered.status == "skipped_unmapped":
-        raw_uri = artifact.container_uri
+        raw_uri = artifact.uri
         if raw_uri.startswith("file://"):
             source = Path(unquote(raw_uri.split("://", 1)[1])).absolute()
         elif Path(raw_uri).is_absolute():
@@ -336,7 +344,9 @@ def _stage_launch_bundle_artifact_member(
             f"{artifact.key!r}"
         )
     shutil.copy2(source, destination)
-    if file_sha256(destination) != artifact.hash:
+    if artifact.digest is None or not verify_digest(
+        destination, artifact.digest, driver=artifact.driver, member=artifact.member
+    ):
         raise ValueError(
             "Artifact-backed staged member source hash does not match its "
             f"declared identity: {artifact.key!r}"
@@ -883,7 +893,7 @@ class BeamConfigAdapter:
         if existing is not None and _is_matching_beam_launch_bundle(
             existing, bundle_identity
         ):
-            set_tracker_ref(existing, tracker)
+            existing = existing.with_resolver(tracker)
             _materialize_beam_launch_bundle_tree(
                 artifact=existing,
                 source=durable_path,
@@ -954,7 +964,7 @@ class BeamConfigAdapter:
                 key="beam_launch_bundle",
                 direction="input",
                 driver="beam_launch_bundle",
-                content_hash=manifest["tree_hash"],
+                digest=Digest("dir_manifest_v1:sha256", manifest["tree_hash"]),
                 force_hash_override=True,
                 directory_artifact=True,
                 directory_manifest=manifest,
@@ -975,7 +985,7 @@ class BeamConfigAdapter:
                     member.provenance for member in normalized_members
                 ],
             )
-            set_tracker_ref(artifact, tracker)
+            artifact = artifact.with_resolver(tracker)
             tracker.db.upsert_artifact(artifact)
             _materialize_beam_launch_bundle_tree(
                 artifact=artifact,
@@ -1044,7 +1054,7 @@ class BeamConfigAdapter:
     ) -> CanonicalConfig:
         run = tracker.get_run(run_id, resolve_canonical=True)
         run_adapter: str | None = None
-        if run is not None and isinstance(run.meta, dict):
+        if run is not None and isinstance(run.meta, Mapping):
             adapter_value = run.meta.get("config_adapter")
             if isinstance(adapter_value, str) and adapter_value:
                 run_adapter = adapter_value
@@ -1196,7 +1206,7 @@ class BeamConfigAdapter:
         conf_artifacts = [
             artifact
             for artifact in artifacts.inputs.values()
-            if isinstance(artifact.meta, dict)
+            if isinstance(artifact.meta, Mapping)
             and artifact.meta.get("config_role") == "conf"
         ]
         if not conf_artifacts:
@@ -1206,7 +1216,7 @@ class BeamConfigAdapter:
                 conf_artifacts = [
                     artifact
                     for artifact in artifacts.inputs.values()
-                    if isinstance(artifact.meta, dict)
+                    if isinstance(artifact.meta, Mapping)
                     and artifact.meta.get("config_role") == "conf"
                 ]
         if not conf_artifacts:
@@ -1228,7 +1238,7 @@ class BeamConfigAdapter:
         root_dirs: list[Path] = []
         resolved_conf_paths: list[Path] = []
         for artifact in ordered_conf:
-            resolved = Path(tracker.resolve_uri(artifact.container_uri))
+            resolved = Path(tracker.resolve_uri(artifact.uri))
             if not resolved.exists():
                 raise FileNotFoundError(
                     "Config artifact exists in metadata but file is missing for "
@@ -2317,14 +2327,14 @@ def _build_tabular_ingest_specs(
     specs: list[IngestSpec] = []
     seen: set[tuple[str, Path]] = set()
     for spec in ingest_specs:
-        if not hasattr(spec.schema, "model_fields"):
-            raise ValueError("BeamIngestSpec schema must be a SQLModel.")
+        if not (isinstance(spec.schema, type) and issubclass(spec.schema, BaseModel)):
+            raise ValueError("BeamIngestSpec schema must be a BaseModel or SQLModel.")
         if spec.dedupe_on_hash and "content_hash" not in spec.schema.model_fields:
             raise ValueError(
                 f"BeamIngestSpec schema {spec.schema.__name__} must include "
                 "content_hash for dedupe_on_hash."
             )
-        table_name = spec.table_name or str(spec.schema.__tablename__)
+        table_name = spec.table_name or model_table_name(spec.schema)
         if spec.key == "*":
             raise ValueError("BeamIngestSpec key='*' is not supported.")
         value = _get_nested_value(config_tree, spec.key.split("."))

@@ -10,7 +10,7 @@ def _csv_artifact(tmp_path):
     df = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
     path = tmp_path / "data.csv"
     df.to_csv(path, index=False, sep=";")
-    return Artifact(key="data", container_uri=str(path), driver="csv")
+    return Artifact(key="data", uri=str(path), driver="csv")
 
 
 def _parquet_artifact(tmp_path):
@@ -20,14 +20,14 @@ def _parquet_artifact(tmp_path):
         df.to_parquet(path, index=False)
     except Exception:
         pytest.skip("Parquet support missing (pyarrow or fastparquet required).")
-    return Artifact(key="data", container_uri=str(path), driver="parquet")
+    return Artifact(key="data", uri=str(path), driver="parquet")
 
 
 def _json_artifact(tmp_path):
     df = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
     path = tmp_path / "data.json"
     df.to_json(path, orient="records", lines=True)
-    return Artifact(key="data", container_uri=str(path), driver="json")
+    return Artifact(key="data", uri=str(path), driver="json")
 
 
 def _h5_table_artifact(tmp_path):
@@ -40,9 +40,9 @@ def _h5_table_artifact(tmp_path):
     df.to_hdf(path, key="table", format="table", index=False)
     return Artifact(
         key="data",
-        container_uri=str(path),
+        uri=str(path),
         driver="h5_table",
-        table_path="table",
+        member="table",
     )
 
 
@@ -68,9 +68,9 @@ def _gtfs_artifact(tmp_path):
         )
     return Artifact(
         key="data",
-        container_uri=str(path),
+        uri=str(path),
         driver="gtfs",
-        table_path="trips.txt",
+        member="trips.txt",
     )
 
 

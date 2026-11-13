@@ -7,12 +7,13 @@ persistence calls, and optional facet/schema profiling side effects.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import logging
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Literal, Optional, TYPE_CHECKING, Type, Union
+from typing import Any, Dict, Literal, Optional, TYPE_CHECKING, Union
 
-from sqlmodel import SQLModel
+from pydantic import BaseModel
 
 from consist.core.cache_output_logging import (
     maybe_return_cached_output_or_demote_cache_hit,
@@ -22,7 +23,8 @@ from consist.core.directory_artifacts import (
     build_directory_manifest,
     build_shapefile_bundle_manifest,
 )
-from consist.models.artifact import Artifact, set_tracker_ref
+from consist.digest import Digest
+from consist.models.artifact import Artifact
 from consist.types import ArtifactRef, FacetLike, HasFacetSchemaVersion
 
 if TYPE_CHECKING:
@@ -86,22 +88,24 @@ class ArtifactLoggingCoordinator:
             index_kv=facet_index,
         )
 
-    def apply_inherited_run_metadata(self, artifact: Artifact) -> None:
+    def apply_inherited_run_metadata(self, artifact: Artifact) -> Artifact:
         """Mirror standard run metadata onto a newly logged artifact."""
         tracker = self._tracker
         if tracker.current_consist is None:
-            return
+            return artifact
         run_ctx = tracker.current_consist.run
         inherited_fields = {
             "year": run_ctx.year,
             "iteration": run_ctx.iteration,
             "tags": run_ctx.tags or [],
         }
-        if artifact.meta is None:
-            artifact.meta = {}
+        updates: dict[str, Any] = {}
         for inherited_key, inherited_value in inherited_fields.items():
             if inherited_value is not None and inherited_key not in artifact.meta:
-                artifact.meta[inherited_key] = inherited_value
+                updates[inherited_key] = inherited_value
+        if not updates:
+            return artifact
+        return artifact.with_meta(updates, merge=True)
 
     def attach_logged_artifact(
         self,
@@ -109,34 +113,47 @@ class ArtifactLoggingCoordinator:
         artifact: Artifact,
         direction: str,
         register_with_coupler: bool,
-    ) -> None:
+    ) -> Artifact:
         """Attach a logged artifact to the active run state and optional coupler."""
         tracker = self._tracker
-        set_tracker_ref(artifact, tracker)
+        bound = artifact.with_resolver(tracker)
         if tracker.current_consist is None:
-            return
+            return bound
         if direction == "input":
-            tracker.current_consist.inputs.append(artifact)
-            return
-        tracker.current_consist.outputs.append(artifact)
+            tracker.current_consist.inputs.append(bound)
+            return bound
+        tracker.current_consist.outputs.append(bound)
+        if register_with_coupler and tracker._active_coupler is not None and bound.key:
+            tracker._active_coupler.set(bound.key, bound)
+        return bound
+
+    def _replace_attached_artifact(
+        self, artifact: Artifact, *, direction: str
+    ) -> Artifact:
+        tracker = self._tracker
+        bound = artifact.with_resolver(tracker)
+        if tracker.current_consist is not None:
+            tracker.current_consist.replace_artifact(bound)
         if (
-            register_with_coupler
+            direction == "output"
             and tracker._active_coupler is not None
-            and artifact.key
+            and bound.key
+            and bound.key in tracker._active_coupler._artifacts
         ):
-            tracker._active_coupler.set(artifact.key, artifact)
+            tracker._active_coupler._artifacts[bound.key] = bound
+        return bound
 
     def log_artifact(
         self,
         path: ArtifactRef,
         key: Optional[str] = None,
         direction: str = "output",
-        schema: Optional[Type[SQLModel]] = None,
+        schema: Optional[type[BaseModel]] = None,
         strict_schema: bool = False,
         driver: Optional[str] = None,
-        table_path: Optional[str] = None,
-        array_path: Optional[str] = None,
-        content_hash: Optional[str] = None,
+        member: Optional[str] = None,
+        content_hash: Optional[str | Digest] = None,
+        digest: Optional[Digest] = None,
         force_hash_override: bool = False,
         validate_content_hash: bool = False,
         reuse_if_unchanged: bool = False,
@@ -151,65 +168,7 @@ class ArtifactLoggingCoordinator:
         latest_artifact_lookup_done: bool = False,
         **meta: Any,
     ) -> Artifact:
-        """Log one artifact while preserving tracker run-state invariants.
-
-        Parameters
-        ----------
-        path : ArtifactRef
-            Artifact reference to log.
-        key : str | None, optional
-            Artifact key override.
-        direction : str, default "output"
-            Link direction relative to active run ("input" or "output").
-        schema : type[SQLModel] | None, optional
-            Optional user-provided schema model.
-        strict_schema : bool, default False
-            Whether a schema tag should mark the artifact as strict.
-        driver : str | None, optional
-            Explicit driver override.
-        table_path : str | None, optional
-            Optional table path for container-backed artifacts.
-        array_path : str | None, optional
-            Optional array path for array/container-backed artifacts.
-        content_hash : str | None, optional
-            Optional precomputed artifact fingerprint override. When provided,
-            it becomes the artifact's canonical public fingerprint on
-            ``artifact.hash``.
-        force_hash_override : bool, default False
-            Whether mismatched content hash overrides are forced.
-        validate_content_hash : bool, default False
-            Whether provided content hash is validated against on-disk content.
-        reuse_if_unchanged : bool, default False
-            Deprecated for outputs. A fresh output artifact row is always created; identical
-            bytes share `content_id`. Setting this on outputs emits a warning.
-        reuse_scope : {"same_uri", "any_uri"}, default "same_uri"
-            Deprecated for outputs. `any_uri` is ignored; deduplication is governed by `content_id`.
-        parent_artifact_id : uuid.UUID | None, optional
-            Canonical parent artifact relation for child/member artifacts.
-        profile_file_schema : bool | Literal["if_changed"] | None, optional
-            Controls automatic file schema profiling behavior.
-        file_schema_sample_rows : int | None, optional
-            Sample size used for schema profiling.
-        facet : FacetLike | None, optional
-            Optional artifact facet payload.
-        facet_schema_version : str | int | None, optional
-            Optional artifact facet schema version.
-        facet_index : bool, default False
-            Whether artifact facet key/value rows are indexed.
-        **meta : Any
-            Additional artifact metadata.
-
-        Returns
-        -------
-        Artifact
-            Logged artifact record.
-
-        Notes
-        -----
-        Persistence order is deliberate: mutate in-memory run state first, flush
-        JSON snapshot second, sync artifact/link rows third, then persist optional
-        facet/schema metadata.
-        """
+        """Log one artifact while preserving tracker run-state invariants."""
         tracker = self._tracker
         tracker._ensure_write_provenance()
 
@@ -232,11 +191,12 @@ class ArtifactLoggingCoordinator:
                 "artifact_directory is not a content driver; use artifact_kind='directory'."
             )
 
-        is_path_output = direction == "output" and isinstance(path, (str, Path))
+        is_path_target = isinstance(path, (str, Path))
+        is_path_output = direction == "output" and is_path_target
         inferred_zarr = is_path_output and (
             driver == "zarr" or Path(path).suffix.lower() == ".zarr"
         )
-        inferred_shapefile = is_path_output and (
+        inferred_shapefile = is_path_target and (
             driver == "shapefile" or Path(path).suffix.lower() == ".shp"
         )
         requested_directory = meta.get("directory_artifact") is True
@@ -246,14 +206,19 @@ class ArtifactLoggingCoordinator:
                     "immutable directory outputs must be logged from a path."
                 )
             manifest = build_directory_manifest(Path(path))
-            if content_hash is not None and content_hash != manifest["tree_hash"]:
+            expected_digest = Digest("dir_manifest_v1:sha256", manifest["tree_hash"])
+            if content_hash is not None and str(content_hash) not in {
+                manifest["tree_hash"],
+                str(expected_digest),
+            }:
                 raise ValueError(
                     "directory output content_hash must match its manifest tree hash."
                 )
             if inferred_zarr:
                 driver = "zarr"
-            content_hash = manifest["tree_hash"]
-            force_hash_override = True
+            digest = expected_digest
+            content_hash = None
+            force_hash_override = False
             validate_content_hash = False
             meta = {
                 **meta,
@@ -261,27 +226,46 @@ class ArtifactLoggingCoordinator:
                 "directory_manifest": manifest,
                 "directory_manifest_version": manifest["version"],
             }
-        elif inferred_shapefile:
-            if not is_path_output:
-                raise TypeError(
-                    "immutable shapefile outputs must be logged from a path."
+        elif driver == "shapefile" and not is_path_target and direction == "output":
+            raise TypeError("immutable shapefile outputs must be logged from a path.")
+        elif inferred_shapefile and (
+            direction == "output"
+            or (
+                Path(path).is_file()
+                and not (content_hash is not None and not validate_content_hash)
+            )
+        ):
+            shp_manifest: dict[str, Any] | None = None
+            if direction == "output":
+                shp_manifest = build_shapefile_bundle_manifest(Path(path))
+            else:
+                try:
+                    shp_manifest = build_shapefile_bundle_manifest(Path(path))
+                except ValueError:
+                    shp_manifest = None
+            if shp_manifest is not None:
+                expected_digest = Digest(
+                    "dir_manifest_v1:sha256", shp_manifest["tree_hash"]
                 )
-            manifest = build_shapefile_bundle_manifest(Path(path))
-            if content_hash is not None and content_hash != manifest["tree_hash"]:
-                raise ValueError(
-                    "shapefile output content_hash must match its bundle tree hash."
-                )
-            driver = "shapefile"
-            content_hash = manifest["tree_hash"]
-            force_hash_override = True
-            validate_content_hash = False
-            meta = {
-                **meta,
-                "file_bundle_artifact": True,
-                "file_bundle_entry": Path(path).name,
-                "file_bundle_manifest": manifest,
-                "file_bundle_manifest_version": manifest["version"],
-            }
+                if content_hash is not None and str(content_hash) not in {
+                    shp_manifest["tree_hash"],
+                    str(expected_digest),
+                }:
+                    raise ValueError(
+                        "shapefile content_hash must match its bundle tree hash."
+                    )
+                driver = "shapefile"
+                digest = expected_digest
+                content_hash = None
+                force_hash_override = False
+                validate_content_hash = False
+                meta = {
+                    **meta,
+                    "file_bundle_artifact": True,
+                    "file_bundle_entry": Path(path).name,
+                    "file_bundle_manifest": shp_manifest,
+                    "file_bundle_manifest_version": shp_manifest["version"],
+                }
 
         run_id = tracker.current_consist.run.id if direction == "output" else None
 
@@ -293,9 +277,9 @@ class ArtifactLoggingCoordinator:
                 direction,
                 schema,
                 driver,
-                table_path=table_path,
-                array_path=array_path,
+                member=member,
                 content_hash=content_hash,
+                digest=digest,
                 force_hash_override=force_hash_override,
                 validate_content_hash=validate_content_hash,
                 reuse_if_unchanged=reuse_if_unchanged,
@@ -317,19 +301,19 @@ class ArtifactLoggingCoordinator:
         if isinstance(path, Artifact) and direction == "output":
             producing_run_id = artifact_obj.run_id
             if producing_run_id is None:
-                artifact_obj.run_id = run_id
+                artifact_obj = artifact_obj.with_run_id(run_id)
             elif producing_run_id != run_id:
                 logging.warning(
                     "[Consist] log_artifact received an Artifact with run_id=%s but is logging it as output of run_id=%s (artifact key=%s id=%s).",
                     producing_run_id,
                     run_id,
-                    getattr(artifact_obj, "key", None),
-                    getattr(artifact_obj, "id", None),
+                    artifact_obj.key,
+                    artifact_obj.id,
                 )
         with _track_begin_run_phase("input_binding.apply_inherited_metadata"):
-            self.apply_inherited_run_metadata(artifact_obj)
+            artifact_obj = self.apply_inherited_run_metadata(artifact_obj)
         with _track_begin_run_phase("input_binding.attach_logged_artifact"):
-            self.attach_logged_artifact(
+            artifact_obj = self.attach_logged_artifact(
                 artifact=artifact_obj,
                 direction=direction,
                 register_with_coupler=True,
@@ -339,13 +323,17 @@ class ArtifactLoggingCoordinator:
         # before DB synchronization side effects occur.
         tracker._flush_json()
         if prepared_artifact_facet_bundle is not None:
-            tracker.persistence.sync_artifact_with_facet_bundle(
+            artifact_obj = tracker.persistence.sync_artifact_with_facet_bundle(
                 artifact_obj,
                 direction,
                 facet=prepared_artifact_facet_bundle.facet,
                 meta_updates=prepared_artifact_facet_bundle.meta_updates,
                 kv_rows=prepared_artifact_facet_bundle.kv_rows,
             )
+            artifact_obj = self._replace_attached_artifact(
+                artifact_obj, direction=direction
+            )
+            tracker._flush_json()
         else:
             tracker._sync_artifact_to_db(
                 artifact_obj,
@@ -372,18 +360,18 @@ class ArtifactLoggingCoordinator:
             and tracker.current_consist is not None
         ):
             try:
-                if isinstance(artifact_obj.meta, dict) and artifact_obj.meta.get(
+                if isinstance(artifact_obj.meta, Mapping) and artifact_obj.meta.get(
                     "schema_id"
                 ):
                     return artifact_obj
                 resolved_path = artifact_obj.abs_path or tracker.resolve_uri(
-                    artifact_obj.container_uri
+                    artifact_obj.uri
                 )
                 if resolved_path:
                     resolved_driver = artifact_obj.driver
                     if resolved_driver not in ("csv", "parquet", "gtfs", "h5_table"):
                         return artifact_obj
-                    tracker.artifact_schemas.profile_file_artifact(
+                    artifact_obj = tracker.artifact_schemas.profile_file_artifact(
                         artifact=artifact_obj,
                         run=tracker.current_consist.run,
                         resolved_path=str(resolved_path),
@@ -392,10 +380,14 @@ class ArtifactLoggingCoordinator:
                         source="file",
                         reuse_if_unchanged=profile_mode == "if_changed",
                     )
+                    artifact_obj = self._replace_attached_artifact(
+                        artifact_obj, direction=direction
+                    )
+                    tracker._flush_json()
             except FileNotFoundError:
                 logging.warning(
                     "[Consist] File schema capture skipped; file not found: %s",
-                    artifact_obj.container_uri,
+                    artifact_obj.uri,
                 )
 
         if (
@@ -404,16 +396,20 @@ class ArtifactLoggingCoordinator:
             and tracker.current_consist is not None
         ):
             try:
-                tracker.artifact_schemas.profile_user_provided_schema(
+                artifact_obj = tracker.artifact_schemas.profile_user_provided_schema(
                     artifact=artifact_obj,
                     run=tracker.current_consist.run,
                     schema_model=schema,
                     source="user_provided",
                 )
+                artifact_obj = self._replace_attached_artifact(
+                    artifact_obj, direction=direction
+                )
+                tracker._flush_json()
             except Exception as exc:
                 logging.warning(
                     "[Consist] Failed to store user-provided schema for artifact=%s: %s",
-                    getattr(artifact_obj, "key", None),
+                    artifact_obj.key,
                     exc,
                 )
 

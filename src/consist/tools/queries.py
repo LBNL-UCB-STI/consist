@@ -141,13 +141,13 @@ def find_artifacts_by_params(
 
     rows: List[Dict[str, object]] = []
     for artifact in artifacts:
-        meta = artifact.meta or {}
+        meta = dict(artifact.meta) if artifact.meta else {}
         rows.append(
             {
                 "artifact": artifact,
                 "id": artifact.id,
                 "key": artifact.key,
-                "container_uri": artifact.container_uri,
+                "uri": artifact.uri,
                 "driver": artifact.driver,
                 "run_id": artifact.run_id,
                 "facet_id": meta.get("artifact_facet_id"),

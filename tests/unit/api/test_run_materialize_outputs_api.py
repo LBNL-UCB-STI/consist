@@ -31,6 +31,7 @@ from consist.api import (
 )
 from consist.api import set_artifact_recovery_roots as set_artifact_recovery_roots_api
 from consist.core.tracker import Tracker
+from consist.digest import compute_digest, compute_output_set_digest
 from consist.models.artifact import Artifact, ArchivedOutputs
 from consist.models.run import Run
 
@@ -99,7 +100,7 @@ def _hydrated_result(
             artifact=Artifact(
                 id=uuid.uuid4(),
                 key=key,
-                container_uri=f"./{key}.csv",
+                uri=f"./{key}.csv",
                 driver="csv",
                 meta={},
             ),
@@ -647,7 +648,7 @@ def test_register_artifact_recovery_copy_unmappable_layout_blocks_clearly(
     artifact = Artifact(
         id=uuid.uuid4(),
         key="absolute",
-        container_uri=str((tmp_path / "absolute.csv").resolve()),
+        uri=str((tmp_path / "absolute.csv").resolve()),
         driver="csv",
         meta={},
     )
@@ -694,7 +695,7 @@ def test_archive_artifact_unmappable_layout_has_actionable_error(
     artifact = Artifact(
         id=uuid.uuid4(),
         key="absolute",
-        container_uri=str((tmp_path / "absolute.csv").resolve()),
+        uri=str((tmp_path / "absolute.csv").resolve()),
         driver="csv",
         meta={},
     )
@@ -820,7 +821,7 @@ def test_archive_run_outputs_uses_current_configured_mount_for_run_owned_file(
         assert archived["shared"] == (archive_root / "outputs" / "shared.csv").resolve()
         assert archived["shared"].read_text(encoding="utf-8") == "historical\n"
         refreshed = tracker_b.get_run_outputs(run_id)["shared"]
-        assert refreshed.container_uri == artifact.container_uri
+        assert refreshed.uri == artifact.uri
         assert refreshed.recovery_roots == [
             str(current_workspace.resolve()),
             str(archive_root.resolve()),
@@ -1018,7 +1019,7 @@ def test_archive_run_outputs_archives_output_set_and_hydrates_from_recovery_root
 
     assert set(archived) == {"summary", "annual"}
     parent = archived.outputs["annual"]
-    parent_relative = tracker.fs.get_remappable_relative_path(parent.container_uri)
+    parent_relative = tracker.fs.get_remappable_relative_path(parent.uri)
     assert parent_relative is not None
     assert archived["annual"] == archive_root / parent_relative
     assert (archived["annual"] / "annual_2030.csv").read_text(encoding="utf-8") == (
@@ -1031,7 +1032,7 @@ def test_archive_run_outputs_archives_output_set_and_hydrates_from_recovery_root
     members = tracker.get_child_artifacts(parent)
     manifest = tracker.get_artifact(parent.meta["manifest_artifact_id"])
     assert manifest is not None
-    manifest_relative = tracker.fs.get_remappable_relative_path(manifest.container_uri)
+    manifest_relative = tracker.fs.get_remappable_relative_path(manifest.uri)
     assert manifest_relative is not None
     assert (archive_root / manifest_relative).is_file()
     for artifact in [parent, *members, manifest]:
@@ -1094,7 +1095,9 @@ def test_archive_run_outputs_preserves_compound_driver_output_set_identity(
 
     assert member_drivers == {"0.skimsOD.csv.gz": "csv", "README": "unknown"}
     assert manifest_drivers == member_drivers
-    assert parent.hash == _canonical_output_set_identity_hash(manifest_contents)
+    assert parent.digest == compute_output_set_digest(
+        (member.key, member.digest) for member in members if member.digest is not None
+    )
 
     archived = tracker.archive_run_outputs(
         result.run.id, tmp_path / "archive_compound_driver_output_set"
@@ -1572,7 +1575,7 @@ def test_archive_run_outputs_rejects_stale_output_set_manifest_before_registrati
         json.dumps(json.loads(manifest_path.read_text(encoding="utf-8"))) + "\n",
         encoding="utf-8",
     )
-    assert tracker.identity.compute_file_checksum(manifest_path) != manifest.hash
+    assert compute_digest(manifest_path, driver="json") != manifest.digest
     archive_root = tmp_path / "stale_manifest_archive_output_set"
 
     with pytest.raises(ValueError, match="manifest.*identity"):
@@ -1616,8 +1619,8 @@ def test_archive_run_outputs_cleans_output_set_bytes_when_metadata_update_fails(
     [member] = tracker.get_child_artifacts(parent)
     manifest = tracker.get_artifact(parent.meta["manifest_artifact_id"])
     assert manifest is not None
-    parent_relative = tracker.fs.get_remappable_relative_path(parent.container_uri)
-    manifest_relative = tracker.fs.get_remappable_relative_path(manifest.container_uri)
+    parent_relative = tracker.fs.get_remappable_relative_path(parent.uri)
+    manifest_relative = tracker.fs.get_remappable_relative_path(manifest.uri)
     assert parent_relative is not None
     assert manifest_relative is not None
     archive_root = tmp_path / "metadata_failure_archive_output_set"
@@ -1842,7 +1845,7 @@ def test_archive_run_output_files_rejects_symlink_recovery_root_before_resolutio
         )
 
     output_path.unlink()
-    artifact.meta = {"recovery_roots": [str(linked_root)]}
+    artifact = artifact.with_meta({"recovery_roots": [str(linked_root)]}, merge=False)
     monkeypatch.setattr(
         tracker, "get_run_outputs", lambda _run_id: {"root_linked": artifact}
     )
@@ -1899,7 +1902,7 @@ def test_archive_run_output_files_rejects_output_set_roles_before_copy(
     artifact = Artifact(
         id=uuid.uuid4(),
         key="set",
-        container_uri="./outputs/set",
+        uri="./outputs/set",
         driver="artifact_set",
         meta={"artifact_set": True},
     )
@@ -1929,7 +1932,7 @@ def test_archive_run_output_files_rejects_output_set_manifest_and_member(
     artifact = Artifact(
         id=uuid.uuid4(),
         key=key,
-        container_uri=f"./outputs/{key}.json",
+        uri=f"./outputs/{key}.json",
         driver="json",
         meta=meta,
     )
@@ -2598,7 +2601,7 @@ def test_api_register_artifact_recovery_copy_delegates_with_default_tracker(
     artifact = Artifact(
         id=uuid.uuid4(),
         key="x",
-        container_uri="./x.csv",
+        uri="./x.csv",
         driver="csv",
         meta={},
     )

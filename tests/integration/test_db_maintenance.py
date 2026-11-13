@@ -10,6 +10,7 @@ import pytest
 
 from consist.core.maintenance import DatabaseMaintenance
 from consist.core.persistence import DatabaseManager
+from consist.digest import Digest
 from consist.models.artifact import Artifact
 from consist.models.run import Run
 
@@ -49,9 +50,9 @@ def test_db_maintenance_export_merge_e2e_with_subtree_and_filtered_data(
             Artifact(
                 id=root_artifact_id,
                 key="root_out",
-                container_uri="outputs://root.parquet",
+                uri="outputs://root.parquet",
                 driver="parquet",
-                hash="a1" * 32,
+                digest=Digest("sha256:file", "a1" * 32),
                 run_id="root_run",
             ),
             run_id="root_run",
@@ -61,9 +62,9 @@ def test_db_maintenance_export_merge_e2e_with_subtree_and_filtered_data(
             Artifact(
                 id=child_artifact_id,
                 key="child_out",
-                container_uri="outputs://child.parquet",
+                uri="outputs://child.parquet",
                 driver="parquet",
-                hash="b2" * 32,
+                digest=Digest("sha256:file", "b2" * 32),
                 run_id="child_run",
             ),
             run_id="child_run",
@@ -73,9 +74,9 @@ def test_db_maintenance_export_merge_e2e_with_subtree_and_filtered_data(
             Artifact(
                 id=other_artifact_id,
                 key="other_out",
-                container_uri="outputs://other.parquet",
+                uri="outputs://other.parquet",
                 driver="parquet",
-                hash="c3" * 32,
+                digest=Digest("sha256:file", "c3" * 32),
                 run_id="other_run",
             ),
             run_id="other_run",
@@ -190,9 +191,9 @@ def test_db_maintenance_purge_e2e_dry_run_and_execute(tmp_path: Path) -> None:
             Artifact(
                 id=root_artifact_id,
                 key="root_art",
-                container_uri="outputs://root.parquet",
+                uri="outputs://root.parquet",
                 driver="parquet",
-                hash="d1" * 32,
+                digest=Digest("sha256:file", "d1" * 32),
                 run_id="purge_root",
             ),
             run_id="purge_root",
@@ -202,9 +203,9 @@ def test_db_maintenance_purge_e2e_dry_run_and_execute(tmp_path: Path) -> None:
             Artifact(
                 id=child_artifact_id,
                 key="child_art",
-                container_uri="outputs://child.parquet",
+                uri="outputs://child.parquet",
                 driver="parquet",
-                hash="d2" * 32,
+                digest=Digest("sha256:file", "d2" * 32),
                 run_id="purge_child",
             ),
             run_id="purge_child",
@@ -214,9 +215,9 @@ def test_db_maintenance_purge_e2e_dry_run_and_execute(tmp_path: Path) -> None:
             Artifact(
                 id=keep_artifact_id,
                 key="keep_art",
-                container_uri="outputs://keep.parquet",
+                uri="outputs://keep.parquet",
                 driver="parquet",
-                hash="d3" * 32,
+                digest=Digest("sha256:file", "d3" * 32),
                 run_id="keep_run",
             ),
             run_id="keep_run",
@@ -401,9 +402,9 @@ def test_db_maintenance_purge_rejects_unsafe_filesystem_targets(tmp_path: Path) 
             Artifact(
                 id=artifact_id,
                 key="unsafe_out",
-                container_uri=outside_file.resolve().as_uri(),
+                uri=outside_file.resolve().as_uri(),
                 driver="txt",
-                hash="e1" * 32,
+                digest=Digest("sha256:file", "e1" * 32),
                 run_id="unsafe_run",
             ),
             run_id="unsafe_run",
@@ -458,9 +459,9 @@ def test_db_maintenance_merge_conflict_error_mode_raises(tmp_path: Path) -> None
             Artifact(
                 id=source_artifact_id,
                 key="source_art",
-                container_uri="outputs://source.parquet",
+                uri="outputs://source.parquet",
                 driver="parquet",
-                hash="f1" * 32,
+                digest=Digest("sha256:file", "f1" * 32),
                 run_id="conflict_run",
             ),
             run_id="conflict_run",
@@ -507,9 +508,9 @@ def test_db_maintenance_merge_conflict_skip_mode_merges_non_conflicting_runs(
             Artifact(
                 id=conflict_artifact_id,
                 key="conflict_art",
-                container_uri="outputs://conflict.parquet",
+                uri="outputs://conflict.parquet",
                 driver="parquet",
-                hash="1a" * 32,
+                digest=Digest("sha256:file", "1a" * 32),
                 run_id="conflict_run",
             ),
             run_id="conflict_run",
@@ -519,9 +520,9 @@ def test_db_maintenance_merge_conflict_skip_mode_merges_non_conflicting_runs(
             Artifact(
                 id=new_artifact_id,
                 key="new_art",
-                container_uri="outputs://new.parquet",
+                uri="outputs://new.parquet",
                 driver="parquet",
-                hash="2b" * 32,
+                digest=Digest("sha256:file", "2b" * 32),
                 run_id="new_run",
             ),
             run_id="new_run",
@@ -793,9 +794,9 @@ def test_db_maintenance_merge_schema_drift_target_extra_column_still_merges(
             Artifact(
                 id=artifact_id,
                 key="drift_art",
-                container_uri="outputs://drift.parquet",
+                uri="outputs://drift.parquet",
                 driver="parquet",
-                hash="3c" * 32,
+                digest=Digest("sha256:file", "3c" * 32),
                 run_id="drift_run",
             ),
             run_id="drift_run",
@@ -986,9 +987,9 @@ def test_db_maintenance_compact_runs_after_writes_and_purge(tmp_path: Path) -> N
             Artifact(
                 id=artifact_id,
                 key="compact_art",
-                container_uri="outputs://compact.parquet",
+                uri="outputs://compact.parquet",
                 driver="parquet",
-                hash="7a" * 32,
+                digest=Digest("sha256:file", "7a" * 32),
                 run_id="compact_run",
             ),
             run_id="compact_run",

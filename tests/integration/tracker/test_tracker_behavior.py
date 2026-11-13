@@ -49,7 +49,7 @@ def test_ingest_outside_of_run_context(tracker):
     Tests that calling `tracker.ingest()` outside of an active run context
     raises a `RuntimeError`.
     """
-    dummy_artifact = Artifact(key="dummy", container_uri="dummy.csv", driver="csv")
+    dummy_artifact = Artifact(key="dummy", uri="dummy.csv", driver="csv")
 
     with pytest.raises(
         RuntimeError,
@@ -95,7 +95,7 @@ def test_tracker_db_write_failure_tolerated(tracker, monkeypatch, caplog, run_di
     assert len(json_data["outputs"]) == 1
     logged_artifact = json_data["outputs"][0]
     assert logged_artifact["key"] == test_artifact_key
-    assert logged_artifact["container_uri"].endswith("output.parquet")
+    assert logged_artifact["uri"].endswith("output.parquet")
 
     assert tracker.get_run(test_run_id) is None
     assert tracker.get_artifact(test_artifact_key) is None
@@ -124,11 +124,11 @@ def test_tracker_robustness_to_missing_input_file(tracker, caplog):
 
     assert data["run"]["id"] == run_id
     assert data["run"]["input_hash"] == "error"
-    assert data["run"]["signature"] == "error"
+    assert data["run"]["signature"] is None
     assert data["run"]["status"] == "completed"
 
     run = tracker.get_run(run_id)
     assert run is not None
     assert run.input_hash == "error"
-    assert run.signature == "error"
+    assert run.signature is None
     assert run.status == "completed"

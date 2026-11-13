@@ -28,7 +28,8 @@ from consist.core.output_sets import (
     discover_output_set_members,
 )
 from consist.core.validation import validate_artifact_key
-from consist.protocols import TrackerLike
+from consist.digest import Digest
+from consist.protocols import ArtifactLike, ArtifactRecordLike, TrackerLike
 from consist.types import ExecutionOptions, OutputSet, RunCompletionArchivePolicy
 
 from consist.models.run import Run, CouplerSnapshotPhase
@@ -46,13 +47,13 @@ class NoopArtifact:
 
     key: str
     path: Path
-    container_uri: str
+    uri: str
     meta: Dict[str, Any] = field(default_factory=dict)
     driver: str = "file"
+    digest: Optional[Digest] = None
+    member: Optional[str] = None
     run_id: Optional[str] = None
     id: Optional[str] = None
-    table_path: Optional[str] = None
-    array_path: Optional[str] = None
 
     def get_path(self) -> Path:
         return self.path
@@ -174,15 +175,12 @@ class NoopCoupler(CouplerMapMixin[Any, DeclaredOutput]):
         artifact = self.require(key) if required else self.get(key)
         if artifact is None:
             return None
-        path_getter = getattr(artifact, "get_path", None)
-        if callable(path_getter):
-            return Path(path_getter())
-        path_value = getattr(artifact, "path", None)
-        if path_value is not None:
-            return Path(path_value)
-        container_uri = getattr(artifact, "container_uri", None)
-        if container_uri is not None:
-            return Path(container_uri)
+        if isinstance(artifact, NoopArtifact):
+            return Path(artifact.get_path())
+        if isinstance(artifact, ArtifactLike):
+            return Path(artifact.path)
+        if isinstance(artifact, (Path, str)):
+            return Path(artifact)
         return None
 
 
@@ -639,31 +637,37 @@ def _build_noop_artifact(
     validate_artifact_key(key)
     if isinstance(value, NoopArtifact):
         return value
-    table_path = getattr(value, "table_path", None)
-    array_path = getattr(value, "array_path", None)
-    path_value = getattr(value, "path", None)
-    if path_value is not None:
+    if isinstance(value, ArtifactRecordLike):
         try:
-            path = Path(path_value)
+            resolved_path = Path(value.path)
         except Exception:
-            path = None
-        if path is not None:
-            return NoopArtifact(
-                key=key,
-                path=path,
-                container_uri=str(path),
-                meta=dict(meta or {}),
-                table_path=table_path,
-                array_path=array_path,
-            )
+            resolved_path = Path(value.uri)
+        return NoopArtifact(
+            key=key,
+            path=resolved_path,
+            uri=value.uri,
+            meta=dict(meta or {}),
+            driver=value.driver,
+            digest=value.digest if isinstance(value.digest, Digest) else None,
+            member=value.member,
+        )
+    if isinstance(value, ArtifactLike):
+        try:
+            resolved_path = Path(value.path)
+        except Exception:
+            resolved_path = Path(value.uri)
+        return NoopArtifact(
+            key=key,
+            path=resolved_path,
+            uri=value.uri,
+            meta=dict(meta or {}),
+        )
     path = Path(value) if value is not None else Path(key)
     return NoopArtifact(
         key=key,
         path=path,
-        container_uri=str(path),
+        uri=str(path),
         meta=dict(meta or {}),
-        table_path=table_path,
-        array_path=array_path,
     )
 
 

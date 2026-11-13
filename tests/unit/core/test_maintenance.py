@@ -120,25 +120,25 @@ def test_find_orphaned_artifacts_linked_only_to_selected_runs(
             Artifact(
                 id=orphan_single,
                 key="orphan_single",
-                container_uri="outputs://orphan_single.parquet",
+                uri="outputs://orphan_single.parquet",
                 driver="parquet",
             ),
             Artifact(
                 id=orphan_multi,
                 key="orphan_multi",
-                container_uri="outputs://orphan_multi.parquet",
+                uri="outputs://orphan_multi.parquet",
                 driver="parquet",
             ),
             Artifact(
                 id=shared,
                 key="shared",
-                container_uri="outputs://shared.parquet",
+                uri="outputs://shared.parquet",
                 driver="parquet",
             ),
             Artifact(
                 id=retained,
                 key="retained",
-                container_uri="outputs://retained.parquet",
+                uri="outputs://retained.parquet",
                 driver="parquet",
             ),
         ],
@@ -457,13 +457,13 @@ def test_inspect_reports_expected_counts_and_global_sizes(
             Artifact(
                 id=linked_artifact_id,
                 key="linked_artifact",
-                container_uri="outputs://linked.parquet",
+                uri="outputs://linked.parquet",
                 driver="parquet",
             ),
             Artifact(
                 id=orphaned_artifact_id,
                 key="orphaned_artifact",
-                container_uri="outputs://orphaned.parquet",
+                uri="outputs://orphaned.parquet",
                 driver="parquet",
             ),
         ],
@@ -588,14 +588,14 @@ def test_doctor_reports_invariant_violations(maintenance: DatabaseMaintenance) -
             Artifact(
                 id=missing_producer_artifact,
                 key="missing_producer",
-                container_uri="outputs://missing_producer.parquet",
+                uri="outputs://missing_producer.parquet",
                 driver="parquet",
                 run_id="missing_run",
             ),
             Artifact(
                 id=produced_artifact,
                 key="produced",
-                container_uri="outputs://produced.parquet",
+                uri="outputs://produced.parquet",
                 driver="parquet",
                 run_id="valid_parent",
             ),
@@ -815,7 +815,7 @@ def test_resolve_artifact_disk_paths_workspace_relative(
             Artifact(
                 id=artifact_id,
                 key="workspace_artifact",
-                container_uri="./outputs/artifact.txt",
+                uri="./outputs/artifact.txt",
                 driver="txt",
                 run_id="workspace_run",
             )
@@ -854,14 +854,14 @@ def test_resolve_artifact_disk_paths_mounted_uri_from_run_and_artifact_metadata(
             Artifact(
                 id=run_mount_artifact_id,
                 key="run_mount_artifact",
-                container_uri="inputs://dataset/run_mount.csv",
+                uri="inputs://dataset/run_mount.csv",
                 driver="csv",
                 run_id="mount_run",
             ),
             Artifact(
                 id=artifact_mount_artifact_id,
                 key="artifact_mount_artifact",
-                container_uri="inputs://dataset/artifact_mount.csv",
+                uri="inputs://dataset/artifact_mount.csv",
                 driver="csv",
                 run_id="mount_run",
                 meta={"mount_root": str(artifact_mount_root)},
@@ -892,7 +892,7 @@ def test_purge_dry_run_makes_no_db_changes(maintenance: DatabaseMaintenance) -> 
             Artifact(
                 id=artifact_id,
                 key="dry_artifact",
-                container_uri="outputs://dry_artifact.parquet",
+                uri="outputs://dry_artifact.parquet",
                 driver="parquet",
                 run_id="dry_run_target",
             )
@@ -950,14 +950,14 @@ def test_purge_delete_files_removes_files_and_directories(
             Artifact(
                 id=file_artifact_id,
                 key="delete_file_artifact",
-                container_uri="./outputs/delete_me.txt",
+                uri="./outputs/delete_me.txt",
                 driver="txt",
                 run_id="purge_delete_files_run",
             ),
             Artifact(
                 id=dir_artifact_id,
                 key="delete_dir_artifact",
-                container_uri="./outputs/delete_dir",
+                uri="./outputs/delete_dir",
                 driver="other",
                 run_id="purge_delete_files_run",
             ),
@@ -1008,7 +1008,7 @@ def test_purge_delete_files_rejects_file_uri_outside_run_dir(
             Artifact(
                 id=artifact_id,
                 key="unsafe_file_uri_artifact",
-                container_uri=outside_file.resolve().as_uri(),
+                uri=outside_file.resolve().as_uri(),
                 driver="txt",
                 run_id="unsafe_file_uri_run",
             )
@@ -1052,7 +1052,7 @@ def test_purge_delete_files_rejects_absolute_path_outside_run_dir(
             Artifact(
                 id=artifact_id,
                 key="unsafe_absolute_artifact",
-                container_uri=str(outside_file.resolve()),
+                uri=str(outside_file.resolve()),
                 driver="txt",
                 run_id="unsafe_absolute_run",
             )
@@ -1142,14 +1142,14 @@ def test_purge_delete_files_skip_mode_deletes_safe_targets_and_reports_unsafe(
             Artifact(
                 id=safe_artifact_id,
                 key="safe_artifact",
-                container_uri="./outputs/safe.txt",
+                uri="./outputs/safe.txt",
                 driver="txt",
                 run_id="skip_mode_run",
             ),
             Artifact(
                 id=unsafe_artifact_id,
                 key="unsafe_artifact",
-                container_uri=unsafe_file.resolve().as_uri(),
+                uri=unsafe_file.resolve().as_uri(),
                 driver="txt",
                 run_id="skip_mode_run",
             ),
@@ -1209,28 +1209,28 @@ def test_purge_executes_core_deletes_and_ingested_skip(
             Artifact(
                 id=orphan_root_id,
                 key="orphan_root",
-                container_uri="outputs://orphan_root.parquet",
+                uri="outputs://orphan_root.parquet",
                 driver="parquet",
                 run_id="purge_root",
             ),
             Artifact(
                 id=orphan_child_id,
                 key="orphan_child",
-                container_uri="outputs://orphan_child.parquet",
+                uri="outputs://orphan_child.parquet",
                 driver="parquet",
                 run_id="purge_child",
             ),
             Artifact(
                 id=shared_id,
                 key="shared",
-                container_uri="outputs://shared.parquet",
+                uri="outputs://shared.parquet",
                 driver="parquet",
                 run_id="purge_root",
             ),
             Artifact(
                 id=keep_id,
                 key="keep",
-                container_uri="outputs://keep.parquet",
+                uri="outputs://keep.parquet",
                 driver="parquet",
                 run_id="keep_run",
             ),
@@ -1692,21 +1692,21 @@ def test_export_copies_core_global_rows_and_snapshots(tmp_path: Path) -> None:
                 Artifact(
                     id=root_artifact_id,
                     key="root_output",
-                    container_uri="outputs://root.parquet",
+                    uri="outputs://root.parquet",
                     driver="parquet",
                     run_id="root_run",
                 ),
                 Artifact(
                     id=child_artifact_id,
                     key="child_output",
-                    container_uri="outputs://child.parquet",
+                    uri="outputs://child.parquet",
                     driver="parquet",
                     run_id="child_run",
                 ),
                 Artifact(
                     id=other_artifact_id,
                     key="other_output",
-                    container_uri="outputs://other.parquet",
+                    uri="outputs://other.parquet",
                     driver="parquet",
                     run_id="other_run",
                 ),
@@ -1933,14 +1933,14 @@ def test_export_no_children_only_copies_requested_run(tmp_path: Path) -> None:
                 Artifact(
                     id=root_artifact_id,
                     key="root_output",
-                    container_uri="outputs://root.parquet",
+                    uri="outputs://root.parquet",
                     driver="parquet",
                     run_id="root_run",
                 ),
                 Artifact(
                     id=child_artifact_id,
                     key="child_output",
-                    container_uri="outputs://child.parquet",
+                    uri="outputs://child.parquet",
                     driver="parquet",
                     run_id="child_run",
                 ),
@@ -1995,7 +1995,7 @@ def test_export_dry_run_previews_without_writes(tmp_path: Path) -> None:
                 Artifact(
                     id=artifact_id,
                     key="root_output",
-                    container_uri="outputs://root.parquet",
+                    uri="outputs://root.parquet",
                     driver="parquet",
                     run_id="root_run",
                 )
@@ -2080,7 +2080,7 @@ def test_merge_happy_path_and_conflict_skip_policy(tmp_path: Path) -> None:
                 Artifact(
                     id=artifact_id,
                     key="merge_artifact",
-                    container_uri="outputs://merge.parquet",
+                    uri="outputs://merge.parquet",
                     driver="parquet",
                     run_id="merge_run",
                 )
@@ -2228,14 +2228,14 @@ def test_merge_dry_run_previews_without_writes(tmp_path: Path) -> None:
                 Artifact(
                     id=conflict_artifact_id,
                     key="conflict_artifact",
-                    container_uri="outputs://conflict.parquet",
+                    uri="outputs://conflict.parquet",
                     driver="parquet",
                     run_id="conflict_run",
                 ),
                 Artifact(
                     id=new_artifact_id,
                     key="new_artifact",
-                    container_uri="outputs://new.parquet",
+                    uri="outputs://new.parquet",
                     driver="parquet",
                     run_id="new_run",
                 ),
@@ -2317,7 +2317,7 @@ def test_merge_tolerates_target_side_schema_drift_on_aux_tables(tmp_path: Path) 
                 Artifact(
                     id=artifact_id,
                     key="drift_artifact",
-                    container_uri="outputs://drift.parquet",
+                    uri="outputs://drift.parquet",
                     driver="parquet",
                     run_id="drift_run",
                 )

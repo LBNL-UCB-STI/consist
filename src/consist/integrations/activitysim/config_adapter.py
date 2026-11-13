@@ -25,7 +25,7 @@ from typing import (
     Union,
 )
 
-from sqlmodel import SQLModel
+from pydantic import BaseModel
 
 from consist.core.config_canonicalization import (
     ArtifactSpec,
@@ -202,7 +202,7 @@ _DEFAULT_OVERRIDE_RUNTIME_KWARGS: dict[str, str] = {
 class _FileHandler:
     predicate: Any
     table_name: str
-    schema: type[SQLModel]
+    schema: type[BaseModel]
     row_fn: Any
     row_kwargs: dict[str, Any] = field(default_factory=dict)
 
@@ -216,7 +216,7 @@ class _IngestSpecBuilder:
         self,
         *,
         table_name: str,
-        schema: type[SQLModel],
+        schema: type[BaseModel],
         row_fn: Any,
         source_path: Path,
         source_key: str,
@@ -890,7 +890,7 @@ class ActivitySimConfigAdapter:
         """
         run = tracker.get_run(run_id, resolve_canonical=True)
         run_adapter: str | None = None
-        if run is not None and isinstance(run.meta, dict):
+        if run is not None and isinstance(run.meta, Mapping):
             adapter_value = run.meta.get("config_adapter")
             if isinstance(adapter_value, str) and adapter_value:
                 run_adapter = adapter_value
@@ -1459,8 +1459,8 @@ class ActivitySimConfigAdapter:
 
     @staticmethod
     def _resolve_value_column(
-        table: type[SQLModel], value_column: str
-    ) -> tuple[type[SQLModel], str]:
+        table: type[BaseModel], value_column: str
+    ) -> tuple[type[BaseModel], str]:
         if value_column not in table.model_fields:
             raise ValueError(
                 f"Unknown value_column {value_column!r} for {table.__name__}."
@@ -1469,7 +1469,7 @@ class ActivitySimConfigAdapter:
 
     def run_link_query(
         self,
-        table: type[SQLModel],
+        table: type[BaseModel],
         *,
         columns: Optional[Iterable[Any]] = None,
         where: Optional[Union[Iterable[Any], Any]] = None,
@@ -1492,7 +1492,7 @@ class ActivitySimConfigAdapter:
 
     def run_link_rows(
         self,
-        table: type[SQLModel],
+        table: type[BaseModel],
         *,
         columns: Optional[Iterable[Any]] = None,
         where: Optional[Union[Iterable[Any], Any]] = None,
@@ -1830,7 +1830,7 @@ class ActivitySimConfigAdapter:
         file_name: Optional[str] = None,
         row_index: Optional[int] = None,
         value_column: str = "value_num",
-        table: type[SQLModel] = ActivitySimProbabilitiesEntriesCache,
+        table: type[BaseModel] = ActivitySimProbabilitiesEntriesCache,
         columns: Optional[Iterable[Any]] = None,
         where: Optional[Union[Iterable[Any], Any]] = None,
         join_on: Optional[Iterable[str]] = None,
@@ -1868,7 +1868,7 @@ class ActivitySimConfigAdapter:
         file_name: Optional[str] = None,
         row_index: Optional[int] = None,
         value_column: str = "value_num",
-        table: type[SQLModel] = ActivitySimProbabilitiesEntriesCache,
+        table: type[BaseModel] = ActivitySimProbabilitiesEntriesCache,
         columns: Optional[Iterable[Any]] = None,
         where: Optional[Union[Iterable[Any], Any]] = None,
         join_on: Optional[Iterable[str]] = None,

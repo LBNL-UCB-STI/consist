@@ -22,12 +22,12 @@ def test_run_artifacts_defaults_are_isolated() -> None:
 
     first.inputs["input"] = Artifact(
         key="input",
-        container_uri="inputs://input.csv",
+        uri="inputs://input.csv",
         driver="csv",
     )
     first.outputs["output"] = Artifact(
         key="output",
-        container_uri="outputs://output.csv",
+        uri="outputs://output.csv",
         driver="csv",
     )
 
@@ -44,14 +44,14 @@ def test_consist_record_defaults_are_isolated() -> None:
     record_a.inputs.append(
         Artifact(
             key="input",
-            container_uri="inputs://input.csv",
+            uri="inputs://input.csv",
             driver="csv",
         )
     )
     record_a.outputs.append(
         Artifact(
             key="output",
-            container_uri="outputs://output.csv",
+            uri="outputs://output.csv",
             driver="csv",
         )
     )
@@ -65,11 +65,13 @@ def test_consist_record_defaults_are_isolated() -> None:
 
 
 def test_artifact_defaults_are_isolated() -> None:
-    art_a = Artifact(key="a", container_uri="inputs://a.csv", driver="csv")
-    art_b = Artifact(key="b", container_uri="inputs://b.csv", driver="csv")
+    art_a = Artifact(key="a", uri="inputs://a.csv", driver="csv")
+    art_b = Artifact(key="b", uri="inputs://b.csv", driver="csv")
 
-    art_a.meta["alpha"] = "a"
+    updated_a = art_a.with_meta({"alpha": "a"}, merge=True)
 
+    assert updated_a.meta["alpha"] == "a"
+    assert "alpha" not in art_a.meta
     assert "alpha" not in art_b.meta
 
 

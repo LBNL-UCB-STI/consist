@@ -42,7 +42,8 @@ from typing import (
     Tuple,
     cast,
 )
-from sqlmodel import SQLModel
+from collections.abc import Mapping
+from pydantic import BaseModel
 from typing_extensions import Protocol, runtime_checkable
 
 from consist.core._schema_model_introspection import (
@@ -570,7 +571,7 @@ def ingest_artifact(
     run_context: "Run",
     db_path: Optional[Union[str, os.PathLike[str]]] = None,
     data_iterable: Optional[Union[Iterable[Any], str, Path, pd.DataFrame]] = None,
-    schema_model: Optional[Type[SQLModel]] = None,
+    schema_model: Optional[Type[BaseModel]] = None,
     lock_retries: int = 20,
     lock_base_sleep_seconds: float = 0.1,
     lock_max_sleep_seconds: float = 2.0,
@@ -653,13 +654,13 @@ def ingest_artifact(
             data_source = _yield_csv_batches(file_path)
 
         elif artifact.driver in DriverType.table_path_drivers():
-            table_path = artifact.table_path
-            if not table_path:
-                raise ValueError(f"Artifact '{artifact.key}' missing 'table_path'.")
+            member = artifact.member
+            if not member:
+                raise ValueError(f"Artifact '{artifact.key}' missing 'member'.")
             if artifact.driver == "h5_table":
-                data_source = _yield_h5_batches(file_path, table_path)
+                data_source = _yield_h5_batches(file_path, member)
             else:
-                data_source = [load_gtfs_member_df(file_path, table_path)]
+                data_source = [load_gtfs_member_df(file_path, member)]
 
         elif artifact.driver == "json":
             data_source = pd.read_json(file_path).to_dict(orient="records")
@@ -675,7 +676,7 @@ def ingest_artifact(
 
         elif artifact.driver == "geoparquet":
             spatial_mode = None
-            if isinstance(artifact.meta, dict):
+            if isinstance(artifact.meta, Mapping):
                 spatial_mode = artifact.meta.get("spatial_ingest_mode")
 
             if spatial_mode == "wkt":
@@ -688,7 +689,7 @@ def ingest_artifact(
 
         elif artifact.driver in {"geojson", "shapefile", "geopackage"}:
             spatial_mode = None
-            if isinstance(artifact.meta, dict):
+            if isinstance(artifact.meta, Mapping):
                 spatial_mode = artifact.meta.get("spatial_ingest_mode")
 
             if spatial_mode == "wkt":
@@ -870,8 +871,8 @@ def ingest_artifact(
     return info, real_table_name
 
 
-def _sqlmodel_to_dlt_columns(model: Type[SQLModel]) -> Dict[str, Dict[str, Any]]:
-    """Convert a SQLModel class definition into a ``dlt`` columns dictionary."""
+def _sqlmodel_to_dlt_columns(model: Type[BaseModel]) -> Dict[str, Dict[str, Any]]:
+    """Convert a Pydantic/SQLModel class definition into a ``dlt`` columns dictionary."""
     return schema_model_dlt_columns(model)
 
 

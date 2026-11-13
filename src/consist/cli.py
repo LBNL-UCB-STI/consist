@@ -72,6 +72,7 @@ from consist.core.persistence import (
 from consist.core.run_ordering import RECENT_RUN_ORDER_BY_SQL
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
 from consist.tools import queries
+from consist.types import DriverType
 
 from typing import TYPE_CHECKING
 
@@ -1156,14 +1157,14 @@ def db_fix_status(
 def _render_schema_profile(
     schema: "ArtifactSchema", fields: List["ArtifactSchemaField"]
 ) -> None:
-    summary = getattr(schema, "summary_json", None) or {}
+    summary = schema.summary_json or {}
     table = Table()
     table.add_column("Column", style="cyan")
     table.add_column("Type", style="magenta")
     table.add_column("Nullable", style="green")
 
     for field in fields:
-        nullable = "yes" if getattr(field, "nullable", True) else "no"
+        nullable = "yes" if field.nullable else "no"
         table.add_row(str(field.name), str(field.logical_type), nullable)
 
     console.print(table)
@@ -1320,7 +1321,7 @@ def _ensure_tracker_mounts_for_artifact(
         return
     from consist.tools.mount_diagnostics import parse_mount_uri
 
-    parsed = parse_mount_uri(artifact.container_uri)
+    parsed = parse_mount_uri(artifact.uri)
     if parsed is None:
         return
 
@@ -1332,7 +1333,7 @@ def _ensure_tracker_mounts_for_artifact(
     run, ambiguous_run_links = _get_artifact_run_for_mount_inference(
         tracker, artifact, preferred_run_id=preferred_run_id
     )
-    if run and isinstance(run.meta, dict):
+    if run and isinstance(run.meta, Mapping):
         if archive_base is not None:
             inferred.update(
                 _coerce_archive_mounts(
@@ -1364,7 +1365,7 @@ def _artifact_recovery_candidate_paths(
         return []
     fs = tracker.fs
 
-    relative_path = fs.get_remappable_relative_path(artifact.container_uri)
+    relative_path = fs.get_remappable_relative_path(artifact.uri)
     if relative_path is None:
         return []
 
@@ -1398,12 +1399,11 @@ def _load_artifact_from_resolved_path(
     load_kwargs: Dict[str, Any] = {}
     if artifact.driver == "csv" and n_rows is not None:
         load_kwargs["nrows"] = n_rows
-    table_path = artifact.table_path
-    if table_path:
-        load_kwargs["table_path"] = table_path
-    array_path = artifact.array_path
-    if array_path:
-        load_kwargs["array_path"] = array_path
+    if artifact.member:
+        if artifact.driver in DriverType.table_path_drivers():
+            load_kwargs["table_path"] = artifact.member
+        elif artifact.driver in DriverType.array_drivers():
+            load_kwargs["array_path"] = artifact.member
 
     return _load_from_disk(str(path), artifact.driver, **load_kwargs)
 
@@ -1436,7 +1436,7 @@ def _resolve_schema_capture_path(
         ):
             return
 
-    if artifact.container_uri.startswith("./"):
+    if artifact.uri.startswith("./"):
         resolution_bases, _ = _build_relative_resolution_bases(
             tracker,
             artifact,
@@ -1445,9 +1445,7 @@ def _resolve_schema_capture_path(
             trust_db=trust_db,
         )
         for label, base_dir in resolution_bases:
-            candidates.append(
-                (label, (base_dir / artifact.container_uri[2:]).resolve())
-            )
+            candidates.append((label, (base_dir / artifact.uri[2:]).resolve()))
     else:
         if trust_db:
             _append_candidate(
@@ -1456,7 +1454,7 @@ def _resolve_schema_capture_path(
             )
         _append_candidate(
             "current tracker resolution",
-            lambda: Path(tracker.resolve_uri(artifact.container_uri)).resolve(),
+            lambda: Path(tracker.resolve_uri(artifact.uri)).resolve(),
         )
 
     for label, candidate in _artifact_recovery_candidate_paths(
@@ -2185,10 +2183,10 @@ def _render_artifacts_table(
                 "[blue]Input[/blue]",
                 artifact.key,
                 str(artifact.id),
-                artifact.container_uri,
+                artifact.uri,
                 f"[{_style_artifact_access(access_status)}]{access_status}[/]",
                 artifact.driver,
-                artifact.hash[:12] if artifact.hash else "N/A",
+                artifact.digest.hex[:12] if artifact.digest else "N/A",
                 *([set_parent_key] if expand_sets else []),
             )
             ref_index += 1
@@ -2221,10 +2219,10 @@ def _render_artifacts_table(
                 "[green]Output[/green]",
                 artifact.key,
                 str(artifact.id),
-                artifact.container_uri,
+                artifact.uri,
                 f"[{_style_artifact_access(access_status)}]{access_status}[/]",
                 artifact.driver,
-                artifact.hash[:12] if artifact.hash else "N/A",
+                artifact.digest.hex[:12] if artifact.digest else "N/A",
                 *([set_parent_key] if expand_sets else []),
             )
             ref_index += 1
@@ -2264,21 +2262,21 @@ def _render_artifact_query_table(results: List[Dict[str, Any]]) -> None:
             str(row.get("driver") or "-"),
             str(row.get("facet_namespace") or "-"),
             str(row.get("facet_schema_version") or "-"),
-            str(row.get("container_uri") or ""),
+            str(row.get("uri") or ""),
         )
 
     console.print(table)
 
 
 def _render_run_details(run: "Run") -> None:
-    """Shared logic for displaying run details, config, and metadata."""
+    """Shared logic for displaying run details and metadata."""
     info = Table.grid(padding=(0, 2))
     info.add_column(style="bold cyan")
     info.add_column()
 
-    run_id = getattr(run, "id", None) or "[dim]unknown[/dim]"
-    model_name = getattr(run, "model_name", None) or "[dim]unknown[/dim]"
-    status_value = getattr(run, "status", None) or "unknown"
+    run_id = run.id or "[dim]unknown[/dim]"
+    model_name = run.model_name or "[dim]unknown[/dim]"
+    status_value = run.status or "unknown"
     status_style = (
         "green"
         if status_value == "completed"
@@ -2291,41 +2289,27 @@ def _render_run_details(run: "Run") -> None:
     info.add_row("Model", model_name)
     info.add_row("Status", f"[{status_style}]{status_value}[/]")
 
-    parent_id = getattr(run, "parent_run_id", None)
-    if parent_id:
-        info.add_row("Parent", parent_id)
+    if run.parent_run_id:
+        info.add_row("Parent", run.parent_run_id)
 
-    scenario_value = getattr(run, "parent_run_id", None)
-    if scenario_value:
-        info.add_row("Scenario", scenario_value)
-
-    if getattr(run, "year", None):
+    if run.year:
         info.add_row("Year", str(run.year))
 
-    created_at = getattr(run, "created_at", None)
-    if created_at:
-        info.add_row("Created", created_at.strftime("%Y-%m-%d %H:%M:%S"))
+    if run.created_at:
+        info.add_row("Created", run.created_at.strftime("%Y-%m-%d %H:%M:%S"))
 
-    if getattr(run, "duration_seconds", None):
+    if run.duration_seconds:
         info.add_row("Duration", f"{run.duration_seconds:.2f}s")
 
-    if getattr(run, "tags", None):
+    if run.tags:
         info.add_row("Tags", ", ".join(run.tags))
 
-    signature = getattr(run, "signature", None)
-    if signature:
-        info.add_row("Signature", signature[:16] + "...")
+    if run.signature:
+        info.add_row("Signature", run.signature[:16] + "...")
 
     console.print(Panel(info, title="Run Details", border_style="cyan"))
 
-    config_data = getattr(run, "config", None)
-    if config_data:
-        import json
-
-        console.print("\n[bold]Configuration:[/]")
-        console.print(Panel(json.dumps(config_data, indent=2), border_style="dim"))
-
-    if getattr(run, "meta", None):
+    if run.meta:
         console.print("\n[bold]Metadata:[/]")
         meta_table = Table(show_header=False, box=None)
         meta_table.add_column(style="yellow")
@@ -2645,12 +2629,12 @@ def validate(
                 trust_db=trust_db,
                 archive_base=run_dir,
             )
-            uri = artifact.container_uri
+            uri = artifact.uri
             found = False
             if uri.startswith("./"):
                 resolution_bases, _ = _build_relative_resolution_bases_for_uri(
                     tracker,
-                    container_uri=uri,
+                    uri=uri,
                     run_id=artifact.run_id,
                     db_path=resolved_db_path,
                     run_dir=run_dir,
@@ -2701,7 +2685,6 @@ def validate(
             current_meta = dict(artifact.meta or {})
             current_meta["missing_on_disk"] = True
             meta_updates[artifact.id] = current_meta
-            artifact.meta = current_meta
         db.replace_artifacts_meta_bulk(meta_updates, require_all=False)
 
     console.print(f"[yellow]⚠ Found {len(missing)} missing artifacts:[/yellow]\n")
@@ -3075,7 +3058,7 @@ def _build_relative_resolution_bases(
 ) -> tuple[List[Tuple[str, Path]], Optional[Path]]:
     return _build_relative_resolution_bases_for_uri(
         tracker,
-        container_uri=artifact.container_uri,
+        uri=artifact.uri,
         run_id=artifact.run_id,
         db_path=db_path,
         run_dir=run_dir,
@@ -3086,14 +3069,14 @@ def _build_relative_resolution_bases(
 def _build_relative_resolution_bases_for_uri(
     tracker: Tracker,
     *,
-    container_uri: str,
+    uri: str,
     run_id: Optional[str],
     db_path: Optional[str],
     run_dir: Optional[str],
     trust_db: bool,
 ) -> tuple[List[Tuple[str, Path]], Optional[Path]]:
     """Build ordered base directories for resolving relative artifact URIs."""
-    if not container_uri.startswith("./"):
+    if not uri.startswith("./"):
         return [], None
 
     bases: List[Tuple[str, Path]] = []
@@ -3118,7 +3101,7 @@ def _build_relative_resolution_bases_for_uri(
 
     db_metadata_run_dir: Optional[Path] = None
     run = tracker.get_run(run_id) if run_id else None
-    if run and isinstance(run.meta, dict):
+    if run and isinstance(run.meta, Mapping):
         candidate = run.meta.get("_physical_run_dir")
         if isinstance(candidate, str) and candidate:
             db_metadata_run_dir = _resolve_cli_path(candidate)
@@ -3139,14 +3122,14 @@ def _print_missing_artifact_file_help(
     db_metadata_run_dir: Optional[Path] = None,
     trust_db: bool = False,
 ) -> None:
-    abs_path = tracker.resolve_uri(artifact.container_uri)
+    abs_path = tracker.resolve_uri(artifact.uri)
     from consist.tools.mount_diagnostics import (
         build_mount_resolution_hint,
         format_missing_artifact_mount_help,
     )
 
     hint = build_mount_resolution_hint(
-        artifact.container_uri, artifact_meta=artifact.meta, mounts=tracker.mounts
+        artifact.uri, artifact_meta=artifact.meta, mounts=tracker.mounts
     )
     help_text = (
         format_missing_artifact_mount_help(hint, resolved_path=abs_path)
@@ -3167,9 +3150,7 @@ def _print_missing_artifact_file_help(
     if extra_lines:
         help_text = f"{help_text}\n" + "\n".join(extra_lines)
 
-    console.print(
-        f"[red]Artifact file not found at: {artifact.container_uri}[/red]\n{help_text}"
-    )
+    console.print(f"[red]Artifact file not found at: {artifact.uri}[/red]\n{help_text}")
 
 
 def _print_optional_dependency_hint(driver: str) -> None:
@@ -3201,10 +3182,10 @@ def _render_gtfs_bundle_preview(
     """Render a compact GTFS bundle summary for bundle-level preview."""
     meta = artifact.meta or {}
     is_legacy_gtfs_bundle = meta.get("gtfs_bundle") is True
-    if (artifact.driver != "gtfs" and not is_legacy_gtfs_bundle) or artifact.table_path:
+    if (artifact.driver != "gtfs" and not is_legacy_gtfs_bundle) or artifact.member:
         return False
 
-    resolved_path = Path(tracker.resolve_uri(artifact.container_uri))
+    resolved_path = Path(tracker.resolve_uri(artifact.uri))
     if not resolved_path.exists():
         _print_missing_artifact_file_help(tracker, artifact)
         return True
@@ -3230,9 +3211,9 @@ def _render_gtfs_bundle_preview(
     summary.add_column()
     summary.add_row("Artifact", artifact.key)
     summary.add_row("Type", "GTFS bundle")
-    summary.add_row("Source", artifact.container_uri)
-    if artifact.hash:
-        summary.add_row("Hash", artifact.hash[:12] + "...")
+    summary.add_row("Source", artifact.uri)
+    if artifact.digest:
+        summary.add_row("Hash", artifact.digest.hex[:12] + "...")
     summary.add_row("Members", str(len(members)))
     summary.add_row("Core tables", str(len(standard_members)))
     summary.add_row("Extensions", str(len(extra_members)))
@@ -3302,8 +3283,8 @@ def _render_gtfs_selected_service_preview(
     service_date = meta.get("service_date")
     if service_date is not None:
         summary.add_row("Service date", str(service_date))
-    if artifact.hash:
-        summary.add_row("Hash", artifact.hash[:12] + "...")
+    if artifact.digest:
+        summary.add_row("Hash", artifact.digest.hex[:12] + "...")
     if meta.get("source_bundle_hash"):
         summary.add_row("Source bundle", str(meta["source_bundle_hash"])[:12] + "...")
     if meta.get("service_slice_hash"):
@@ -3450,7 +3431,7 @@ def _resolve_artifact_json_path(
     if artifact.abs_path is not None:
         candidates.append(Path(artifact.abs_path))
     try:
-        candidates.append(Path(tracker.resolve_uri(artifact.container_uri)))
+        candidates.append(Path(tracker.resolve_uri(artifact.uri)))
     except (OSError, RuntimeError, TypeError, ValueError):
         pass
     candidates.extend(
@@ -3571,7 +3552,11 @@ def _load_artifact_with_diagnostics(
             # Avoid loading the full file when we only need a small preview.
             load_kwargs["nrows"] = n_rows
         return consist.load(
-            artifact, tracker=tracker, db_fallback="always", **load_kwargs
+            artifact,
+            tracker=tracker,
+            db_fallback="always",
+            allow_recovery_roots=trust_db,
+            **load_kwargs,
         )
 
     def _load_from_base(
@@ -3581,9 +3566,7 @@ def _load_artifact_with_diagnostics(
             _set_tracker_run_dir(tracker, base_dir)
             return _load_once()
         except FileNotFoundError:
-            attempted_paths.append(
-                (label, (base_dir / artifact.container_uri[2:]).resolve())
-            )
+            attempted_paths.append((label, (base_dir / artifact.uri[2:]).resolve()))
             return None
         finally:
             _set_tracker_run_dir(tracker, original_run_dir)
@@ -3603,7 +3586,7 @@ def _load_artifact_with_diagnostics(
         return None
 
     try:
-        if artifact.container_uri.startswith("./") and resolution_bases:
+        if artifact.uri.startswith("./") and resolution_bases:
             original_run_dir = _resolve_cli_path(tracker.run_dir)
             for label, base_dir in resolution_bases:
                 loaded = _load_from_base(base_dir, label, original_run_dir)
@@ -3812,9 +3795,9 @@ def preview(
 
     try:
         preview_label = f"Preview: {artifact_key} [dim]({artifact.driver})[/dim]"
-        if artifact.driver == "gtfs" and artifact.table_path:
+        if artifact.driver == "gtfs" and artifact.member:
             preview_label = (
-                f"Preview: {artifact_key} [dim](gtfs:{artifact.table_path})[/dim]"
+                f"Preview: {artifact_key} [dim](gtfs:{artifact.member})[/dim]"
             )
         console.print(preview_label)
 
@@ -4417,7 +4400,7 @@ class ConsistShell(cmd.Cmd):
             for artifact in matches[:5]:
                 console.print(
                     "[dim]  "
-                    f"{artifact.hash} (key={artifact.key}, id={artifact.id}, run={artifact.run_id})"
+                    f"{artifact.digest} (key={artifact.key}, id={artifact.id}, run={artifact.run_id})"
                     "[/dim]"
                 )
             return None
@@ -4782,9 +4765,8 @@ class ConsistShell(cmd.Cmd):
             self._last_artifact_run_id = run_id
             self._last_artifact_ids = []
             for artifact in rendered:
-                artifact_id = getattr(artifact, "id", None)
-                if artifact_id is not None:
-                    self._last_artifact_ids.append(str(artifact_id))
+                if artifact.id is not None:
+                    self._last_artifact_ids.append(str(artifact.id))
             if self._last_artifact_ids:
                 console.print(
                     "[dim]Tip: use preview @<n>, schema_profile @<n>, or "
@@ -5921,7 +5903,7 @@ def exec_cmd(
                         "key": k,
                         "direction": "input",
                         "path": str(art.path),
-                        "hash": art.hash,
+                        "digest": str(art.digest) if art.digest else None,
                         "id": str(art.id),
                     }
                 )
@@ -5931,7 +5913,7 @@ def exec_cmd(
                         "key": k,
                         "direction": "output",
                         "path": str(art.path),
-                        "hash": art.hash,
+                        "digest": str(art.digest) if art.digest else None,
                         "id": str(art.id),
                     }
                 )
@@ -5950,19 +5932,27 @@ def exec_cmd(
                 "stderr_path": str(result.stderr_path) if result.stderr_path else None,
                 "artifacts": artifacts_list,
                 "inputs": {
-                    k: {"path": str(art.path), "hash": art.hash, "id": str(art.id)}
+                    k: {
+                        "path": str(art.path),
+                        "digest": str(art.digest) if art.digest else None,
+                        "id": str(art.id),
+                    }
                     for k, art in result.inputs.items()
                 },
                 "outputs": {
-                    k: {"path": str(art.path), "hash": art.hash, "id": str(art.id)}
+                    k: {
+                        "path": str(art.path),
+                        "digest": str(art.digest) if art.digest else None,
+                        "id": str(art.id),
+                    }
                     for k, art in result.outputs.items()
                 },
                 "error": result.error,
             }
             if (
                 result.run
-                and result.run.meta
-                and isinstance(result.run.meta.get("command"), dict)
+                and isinstance(result.run.meta, Mapping)
+                and isinstance(result.run.meta.get("command"), Mapping)
             ):
                 cmd_meta = result.run.meta["command"]
                 if "baseline_comparison" in cmd_meta:

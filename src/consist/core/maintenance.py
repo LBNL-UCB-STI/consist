@@ -938,7 +938,7 @@ class DatabaseMaintenance:
                 run.ended_at = None
 
             if reason is not None:
-                run_meta = dict(run.meta) if isinstance(run.meta, dict) else {}
+                run_meta = dict(run.meta) if isinstance(run.meta, Mapping) else {}
                 run_meta["status_fix_reason"] = reason
                 run.meta = run_meta
 
@@ -1922,22 +1922,24 @@ class DatabaseMaintenance:
                     artifact_rows[artifact_id] = Artifact(
                         id=parsed_uuid,
                         key=artifact.key,
-                        container_uri=artifact.container_uri,
-                        table_path=artifact.table_path,
-                        array_path=artifact.array_path,
+                        uri=artifact.uri,
+                        member=artifact.member,
                         driver=artifact.driver,
-                        hash=artifact.hash,
+                        digest=artifact.digest,
+                        facet_id=artifact.facet_id,
                         parent_artifact_id=artifact.parent_artifact_id,
                         run_id=artifact.run_id,
                         meta=dict(artifact.meta)
-                        if isinstance(artifact.meta, dict)
+                        if isinstance(artifact.meta, Mapping)
                         else {},
                         created_at=artifact.created_at,
                     )
                 if artifact_id not in snapshot_artifact_meta:
                     snapshot_artifact_meta[artifact_id] = (
                         parsed_uuid,
-                        dict(artifact.meta) if isinstance(artifact.meta, dict) else {},
+                        dict(artifact.meta)
+                        if isinstance(artifact.meta, Mapping)
+                        else {},
                     )
 
             link_rows: dict[str, str] = {}
@@ -1976,7 +1978,7 @@ class DatabaseMaintenance:
                         stage = resolve_canonical_run_meta_field(run, "stage")
                         phase = resolve_canonical_run_meta_field(run, "phase")
                         meta_payload = (
-                            dict(run.meta) if isinstance(run.meta, dict) else {}
+                            dict(run.meta) if isinstance(run.meta, Mapping) else {}
                         )
                         if stage is not None:
                             meta_payload["stage"] = stage
@@ -2105,7 +2107,7 @@ class DatabaseMaintenance:
         supports_full_restore: dict[str, bool],
     ) -> None:
         with self.db.transaction():
-            run_meta = dict(run.meta) if isinstance(run.meta, dict) else {}
+            run_meta = dict(run.meta) if isinstance(run.meta, Mapping) else {}
             run_namespace = (
                 self._coerce_non_empty_str(run_meta.get("config_facet_namespace"))
                 or run.model_name
@@ -2143,10 +2145,10 @@ class DatabaseMaintenance:
         *,
         run_id: str,
         run_facet: Any,
-        run_meta: dict[str, Any],
+        run_meta: Mapping[str, Any],
         namespace: str,
     ) -> None:
-        if not isinstance(run_facet, dict) or not run_facet:
+        if not isinstance(run_facet, Mapping) or not run_facet:
             return
 
         facet_id = self._coerce_non_empty_str(run_meta.get("config_facet_id"))
@@ -2180,13 +2182,13 @@ class DatabaseMaintenance:
         self,
         *,
         artifact_id: uuid.UUID,
-        artifact_meta: dict[str, Any],
+        artifact_meta: Mapping[str, Any],
         default_namespace: str,
     ) -> None:
         facet_payload = artifact_meta.get("artifact_facet")
-        if not isinstance(facet_payload, dict) or not facet_payload:
+        if not isinstance(facet_payload, Mapping) or not facet_payload:
             fallback_payload = artifact_meta.get("facet")
-            if isinstance(fallback_payload, dict) and fallback_payload:
+            if isinstance(fallback_payload, Mapping) and fallback_payload:
                 facet_payload = fallback_payload
             else:
                 return
@@ -2225,7 +2227,7 @@ class DatabaseMaintenance:
         self,
         *,
         artifact_id: uuid.UUID,
-        artifact_meta: dict[str, Any],
+        artifact_meta: Mapping[str, Any],
         run_id: str,
     ) -> None:
         schema_id = self._coerce_non_empty_str(artifact_meta.get("schema_id"))
@@ -2233,10 +2235,10 @@ class DatabaseMaintenance:
             return
 
         summary = artifact_meta.get("schema_summary")
-        summary_json = summary if isinstance(summary, dict) else {}
+        summary_json = dict(summary) if isinstance(summary, Mapping) else {}
 
         profile = artifact_meta.get("schema_profile")
-        profile_json = profile if isinstance(profile, dict) else None
+        profile_json = dict(profile) if isinstance(profile, Mapping) else None
 
         existing_schema_row = self.db.fetchone(
             "SELECT summary_json, profile_json FROM artifact_schema WHERE id = ?",
@@ -2326,7 +2328,7 @@ class DatabaseMaintenance:
 
     @classmethod
     def _schema_observation_source(
-        cls, *, summary_json: dict[str, Any], artifact_meta: dict[str, Any]
+        cls, *, summary_json: Mapping[str, Any], artifact_meta: Mapping[str, Any]
     ) -> str:
         for raw in (
             summary_json.get("source"),
@@ -2340,7 +2342,7 @@ class DatabaseMaintenance:
 
     @staticmethod
     def _schema_observation_sample_rows(
-        *, summary_json: dict[str, Any], artifact_meta: dict[str, Any]
+        *, summary_json: Mapping[str, Any], artifact_meta: Mapping[str, Any]
     ) -> Optional[int]:
         for raw in (
             summary_json.get("sample_rows"),
@@ -3005,7 +3007,7 @@ class DatabaseMaintenance:
         protected_mount_keys: set[tuple[str, str]] = set()
 
         for surv_art in surviving_artifacts:
-            mkey = self._custom_mount_key(surv_art.container_uri)
+            mkey = self._custom_mount_key(surv_art.uri)
             if mkey is not None:
                 protected_mount_keys.add(mkey)
                 scheme, rel = mkey
@@ -3058,7 +3060,7 @@ class DatabaseMaintenance:
             artifact = artifacts_by_id.get(aid)
             if artifact is None:
                 continue
-            mkey = self._custom_mount_key(artifact.container_uri)
+            mkey = self._custom_mount_key(artifact.uri)
             if mkey is not None and mkey in protected_mount_keys:
                 continue
             run = run_for_orphaned.get(aid)
@@ -3102,13 +3104,13 @@ class DatabaseMaintenance:
         *,
         fallback_mounts: Optional[Mapping[str, Sequence[Path]]] = None,
     ) -> list[Path]:
-        uri = str(artifact.container_uri or "").strip()
+        uri = str(artifact.uri or "").strip()
         if not uri:
             return []
 
         run_dir = self._resolve_run_directory_for_artifact(run)
-        run_meta = run.meta if run and isinstance(run.meta, dict) else {}
-        artifact_meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+        run_meta = run.meta if run and isinstance(run.meta, Mapping) else {}
+        artifact_meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
         candidate_paths: list[Path] = []
         seen_candidates: set[str] = set()
 
@@ -3163,7 +3165,7 @@ class DatabaseMaintenance:
         return candidate_paths
 
     def _resolve_run_directory_for_artifact(self, run: Optional[Run]) -> Path:
-        if run and isinstance(run.meta, dict):
+        if run and isinstance(run.meta, Mapping):
             physical_run_dir = run.meta.get("_physical_run_dir")
             if isinstance(physical_run_dir, str) and physical_run_dir:
                 try:
@@ -3176,8 +3178,8 @@ class DatabaseMaintenance:
         self,
         scheme: str,
         *,
-        run_meta: dict[str, Any],
-        artifact_meta: dict[str, Any],
+        run_meta: Mapping[str, Any],
+        artifact_meta: Mapping[str, Any],
         fallback_mounts: Optional[Mapping[str, Sequence[Path]]] = None,
     ) -> list[Path]:
         roots: list[Path] = []
@@ -3195,7 +3197,7 @@ class DatabaseMaintenance:
             _add_path(self._normalize_mount_root_path(self._mounts[scheme]))
 
         mounts_raw = run_meta.get("mounts")
-        if isinstance(mounts_raw, dict):
+        if isinstance(mounts_raw, Mapping):
             mount_root = mounts_raw.get(scheme)
             if isinstance(mount_root, str) and mount_root:
                 _add_path(self._normalize_mount_root_path(mount_root))
@@ -3278,7 +3280,7 @@ class DatabaseMaintenance:
 
     def _resolve_run_snapshot_path(self, run_id: str, run: Optional[Run]) -> Path:
         run_dir = self.run_dir
-        if run and isinstance(run.meta, dict):
+        if run and isinstance(run.meta, Mapping):
             physical_run_dir = run.meta.get("_physical_run_dir")
             if isinstance(physical_run_dir, str) and physical_run_dir:
                 run_dir = Path(physical_run_dir)

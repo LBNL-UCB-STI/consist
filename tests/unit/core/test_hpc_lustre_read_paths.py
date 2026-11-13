@@ -453,7 +453,7 @@ def test_to_df_enodata_fallback_when_materialization_raises(
 ) -> None:
     pq_path = tmp_path / "lazy_enodata.parquet"
     pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]}).to_parquet(pq_path, index=False)
-    artifact = Artifact(key="lazy", container_uri=str(pq_path), driver="parquet")
+    artifact = Artifact(key="lazy", uri=str(pq_path), driver="parquet")
 
     rel = consist.load(artifact, columns=["b"], nrows=2)
     assert isinstance(rel, duckdb.DuckDBPyRelation)

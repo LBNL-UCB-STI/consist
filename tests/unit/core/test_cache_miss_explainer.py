@@ -21,12 +21,11 @@ def _artifact(
     *,
     key: str,
     run_id: str | None = None,
-    container_uri: str = "inputs://shared.csv",
+    uri: str = "inputs://shared.csv",
     driver: str = "csv",
     hash_value: str | None = None,
     content_id: uuid.UUID | None = None,
-    table_path: str | None = None,
-    array_path: str | None = None,
+    member: str | None = None,
 ) -> Artifact:
     """Create a minimal artifact for focused explainer tests.
 
@@ -34,16 +33,22 @@ def _artifact(
     fields, so this helper keeps the tests compact while making the relevant
     inputs explicit at each call site.
     """
+    import hashlib
+    from consist.digest import Digest
 
     meta = {"content_identity": str(content_id)} if content_id is not None else {}
+    digest_obj = (
+        Digest("sha256:file", hashlib.sha256(hash_value.encode("utf-8")).hexdigest())
+        if hash_value is not None
+        else None
+    )
     return Artifact(
         key=key,
         run_id=run_id,
-        container_uri=container_uri,
+        uri=uri,
         driver=driver,
-        hash=hash_value,
-        table_path=table_path,
-        array_path=array_path,
+        digest=digest_obj,
+        member=member,
         meta=meta,
     )
 
@@ -140,20 +145,19 @@ def test_cache_miss_explanation_records_action_v2_fallback_mode_change() -> None
         git_hash="code",
         meta={
             "input_identity": {
-                "mode": "action-v2",
+                "version": 1,
                 "bindings": [
                     {
                         "kind": "named",
                         "role": "data",
-                        "mode": "legacy-provenance-v1",
-                        "value": "sha256:action-v2:current-secret",
+                        "mode": "provenance",
+                        "value": "provenance_v1:current-secret",
                         "selector": {
                             "driver": "csv",
-                            "table_path": "/private/current",
-                            "array_path": None,
+                            "member": "/private/current",
                         },
                         "evidence": {
-                            "identity_strength": "legacy-provenance-v1",
+                            "identity_strength": "provenance",
                             "fallback_reason": "fast_file_observation",
                         },
                     }
@@ -170,17 +174,16 @@ def test_cache_miss_explanation_records_action_v2_fallback_mode_change() -> None
         status="completed",
         meta={
             "input_identity": {
-                "mode": "action-v2",
+                "version": 1,
                 "bindings": [
                     {
                         "kind": "named",
                         "role": "data",
-                        "mode": "content-v1",
+                        "mode": "content",
                         "value": "sha256:file:candidate-secret",
                         "selector": {
                             "driver": "csv",
-                            "table_path": "/private/candidate",
-                            "array_path": None,
+                            "member": "/private/candidate",
                         },
                     }
                 ],
@@ -201,7 +204,7 @@ def test_cache_miss_explanation_records_action_v2_fallback_mode_change() -> None
 
     explanation = CacheMissExplainer(StubTracker()).explain(current)
 
-    assert explanation.details["action_v2_bindings"] == {
+    assert explanation.details["input_bindings"] == {
         "fallback_bindings": [
             {
                 "kind": "named",
@@ -213,7 +216,7 @@ def test_cache_miss_explanation_records_action_v2_fallback_mode_change() -> None
             {"kind": "named", "role": "data", "change": "identity_mode_changed"}
         ],
     }
-    serialized = str(explanation.details["action_v2_bindings"])
+    serialized = str(explanation.details["input_bindings"])
     assert "private" not in serialized
     assert "secret" not in serialized
 
@@ -229,17 +232,16 @@ def test_cache_miss_explanation_compares_historical_action_v2_selector_metadata(
         git_hash="code",
         meta={
             "input_identity": {
-                "mode": "action-v2",
+                "version": 1,
                 "bindings": [
                     {
                         "kind": "named",
                         "role": "data",
-                        "mode": "content-v1",
+                        "mode": "content",
                         "value": "sha256:file:same",
                         "selector": {
                             "driver": "h5",
-                            "table_path": "/tables/current",
-                            "array_path": None,
+                            "member": "/tables/current",
                         },
                     }
                 ],
@@ -255,17 +257,16 @@ def test_cache_miss_explanation_compares_historical_action_v2_selector_metadata(
         status="completed",
         meta={
             "input_identity": {
-                "mode": "action-v2",
+                "version": 1,
                 "bindings": [
                     {
                         "kind": "named",
                         "role": "data",
-                        "mode": "content-v1",
+                        "mode": "content",
                         "value": "sha256:file:same",
                         "selector": {
                             "driver": "h5",
-                            "table_path": "/tables/candidate",
-                            "array_path": None,
+                            "member": "/tables/candidate",
                         },
                     }
                 ],
@@ -284,7 +285,7 @@ def test_cache_miss_explanation_compares_historical_action_v2_selector_metadata(
 
     explanation = CacheMissExplainer(StubTracker()).explain(current)
 
-    assert explanation.details["action_v2_bindings"] == {
+    assert explanation.details["input_bindings"] == {
         "changed_bindings": [
             {"kind": "named", "role": "data", "change": "selector_changed"}
         ]
@@ -295,17 +296,16 @@ def test_cache_miss_explanation_action_v2_detail_is_input_miss_only() -> None:
     def action_meta() -> dict[str, object]:
         return {
             "input_identity": {
-                "mode": "action-v2",
+                "version": 1,
                 "bindings": [
                     {
                         "kind": "named",
                         "role": "data",
-                        "mode": "content-v1",
+                        "mode": "content",
                         "value": "sha256:file:same",
                         "selector": {
                             "driver": "csv",
-                            "table_path": None,
-                            "array_path": None,
+                            "member": None,
                         },
                     }
                 ],
@@ -342,7 +342,7 @@ def test_cache_miss_explanation_action_v2_detail_is_input_miss_only() -> None:
     explanation = CacheMissExplainer(StubTracker()).explain(current)
 
     assert explanation.reason == "config_changed"
-    assert "action_v2_bindings" not in explanation.details
+    assert "input_bindings" not in explanation.details
 
 
 def test_cache_miss_explanation_ignores_malformed_action_v2_metadata() -> None:
@@ -352,7 +352,7 @@ def test_cache_miss_explanation_ignores_malformed_action_v2_metadata() -> None:
         config_hash="config",
         input_hash="current_inputs",
         git_hash="code",
-        meta={"input_identity": {"mode": "action-v2", "bindings": ["bad"]}},
+        meta={"input_identity": {"version": 1, "bindings": ["bad"]}},
     )
     candidate = Run(
         id="candidate",
@@ -361,7 +361,7 @@ def test_cache_miss_explanation_ignores_malformed_action_v2_metadata() -> None:
         input_hash="candidate_inputs",
         git_hash="code",
         status="completed",
-        meta={"input_identity": {"mode": "action-v2", "bindings": []}},
+        meta={"input_identity": {"version": 1, "bindings": []}},
     )
 
     class StubTracker:
@@ -375,7 +375,7 @@ def test_cache_miss_explanation_ignores_malformed_action_v2_metadata() -> None:
 
     explanation = CacheMissExplainer(StubTracker()).explain(current)
 
-    assert "action_v2_bindings" not in explanation.details
+    assert "input_bindings" not in explanation.details
 
 
 def test_cache_miss_explanation_records_added_and_removed_action_v2_roles() -> None:
@@ -383,12 +383,11 @@ def test_cache_miss_explanation_records_added_and_removed_action_v2_roles() -> N
         return {
             "kind": "named",
             "role": role,
-            "mode": "content-v1",
+            "mode": "content",
             "value": f"sha256:file:{role}",
             "selector": {
                 "driver": "csv",
-                "table_path": None,
-                "array_path": None,
+                "member": None,
             },
         }
 
@@ -400,7 +399,7 @@ def test_cache_miss_explanation_records_added_and_removed_action_v2_roles() -> N
         git_hash="code",
         meta={
             "input_identity": {
-                "mode": "action-v2",
+                "version": 1,
                 "bindings": [binding("added")],
             }
         },
@@ -414,7 +413,7 @@ def test_cache_miss_explanation_records_added_and_removed_action_v2_roles() -> N
         status="completed",
         meta={
             "input_identity": {
-                "mode": "action-v2",
+                "version": 1,
                 "bindings": [binding("removed")],
             }
         },
@@ -431,7 +430,7 @@ def test_cache_miss_explanation_records_added_and_removed_action_v2_roles() -> N
 
     explanation = CacheMissExplainer(StubTracker()).explain(current)
 
-    assert explanation.details["action_v2_bindings"] == {
+    assert explanation.details["input_bindings"] == {
         "changed_bindings": [
             {"kind": "named", "role": "added", "change": "binding_added"},
             {"kind": "named", "role": "removed", "change": "binding_removed"},
@@ -449,17 +448,16 @@ def test_cache_miss_explanation_compares_empty_action_v2_binding_maps() -> None:
         status="completed",
         meta={
             "input_identity": {
-                "mode": "action-v2",
+                "version": 1,
                 "bindings": [
                     {
                         "kind": "named",
                         "role": "data",
-                        "mode": "content-v1",
+                        "mode": "content",
                         "value": "sha256:file:candidate-secret",
                         "selector": {
                             "driver": "csv",
-                            "table_path": None,
-                            "array_path": None,
+                            "member": None,
                         },
                     }
                 ],
@@ -472,7 +470,7 @@ def test_cache_miss_explanation_compares_empty_action_v2_binding_maps() -> None:
         config_hash="config",
         input_hash="current_inputs",
         git_hash="code",
-        meta={"input_identity": {"mode": "action-v2", "bindings": []}},
+        meta={"input_identity": {"version": 1, "bindings": []}},
     )
 
     class StubTracker:
@@ -486,7 +484,7 @@ def test_cache_miss_explanation_compares_empty_action_v2_binding_maps() -> None:
 
     explanation = CacheMissExplainer(StubTracker()).explain(current)
 
-    assert explanation.details["action_v2_bindings"] == {
+    assert explanation.details["input_bindings"] == {
         "changed_bindings": [
             {"kind": "named", "role": "data", "change": "binding_removed"}
         ]
@@ -1191,14 +1189,14 @@ def test_cache_miss_explanation_records_content_hash_and_id_drift():
     current_input = _artifact(
         key="raw",
         run_id=None,
-        container_uri="inputs://raw_v2.csv",
+        uri="inputs://raw_v2.csv",
         hash_value="hash_v2",
         content_id=uuid.uuid4(),
     )
     candidate_input = _artifact(
         key="raw",
         run_id=None,
-        container_uri="inputs://raw_v1.csv",
+        uri="inputs://raw_v1.csv",
         hash_value="hash_v1",
         content_id=uuid.uuid4(),
     )
@@ -1239,7 +1237,7 @@ def test_cache_miss_explanation_records_content_hash_and_id_drift():
     assert explanation.reason == "inputs_changed"
     change = explanation.details["input_artifact_changes"][0]
     assert change["key"] == "raw"
-    assert "artifact_hash_changed" in change["changes"]
+    assert "artifact_digest_changed" in change["changes"]
     assert "artifact_content_id_changed" in change["changes"]
     assert "input_location_changed" in change["changes"]
 

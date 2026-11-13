@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,30 +12,12 @@ from consist.core.materialize import (
     stage_artifact,
     stage_inputs,
 )
+from consist.digest import Digest, compute_digest
 from consist.models.artifact import Artifact
 
 
-def _checksum(path: Path) -> str:
-    if path.is_dir():
-        digest = hashlib.sha256()
-        base = path.resolve()
-        for root, dirnames, filenames in os.walk(base):
-            dirnames.sort()
-            filenames.sort()
-            rel_root = Path(root).resolve().relative_to(base).as_posix()
-            digest.update(f"dir:{rel_root}".encode("utf-8"))
-            for dirname in dirnames:
-                rel_dir = Path(root, dirname).resolve().relative_to(base).as_posix()
-                digest.update(f"subdir:{rel_dir}".encode("utf-8"))
-            for filename in filenames:
-                file_path = Path(root, filename).resolve()
-                rel_file = file_path.relative_to(base).as_posix()
-                digest.update(f"file:{rel_file}".encode("utf-8"))
-                digest.update(
-                    hashlib.sha256(file_path.read_bytes()).hexdigest().encode("utf-8")
-                )
-        return digest.hexdigest()
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+def _checksum(path: Path) -> Digest:
+    return compute_digest(path, driver="directory" if path.is_dir() else "file")
 
 
 def _tracker(
@@ -51,28 +32,35 @@ def _tracker(
         fs=FileSystemManager(run_dir, mounts),
         allow_external_paths=allow_external_paths,
         resolve_uri=resolve_uri,
-        identity=SimpleNamespace(compute_file_checksum=_checksum),
+        identity=SimpleNamespace(compute_file_checksum=lambda p: _checksum(p).hex),
     )
 
 
 def _artifact(
     key: str,
-    container_uri: str,
+    uri: str,
     *,
     driver: str = "csv",
-    hash_value: str | None = None,
+    hash_value: Digest | str | None = None,
     meta: dict | None = None,
     abs_path: Path | None = None,
 ) -> Artifact:
+    digest_obj: Digest | None
+    if isinstance(hash_value, Digest) or hash_value is None:
+        digest_obj = hash_value
+    else:
+        digest_obj = Digest(
+            "sha256:file", hashlib.sha256(hash_value.encode("utf-8")).hexdigest()
+        )
     artifact = Artifact(
         key=key,
-        container_uri=container_uri,
+        uri=uri,
         driver=driver,
-        hash=hash_value,
+        digest=digest_obj,
         meta=dict(meta or {}),
     )
     if abs_path is not None:
-        artifact.abs_path = str(abs_path)
+        artifact = artifact.with_abs_path(abs_path)
     return artifact
 
 
@@ -90,7 +78,7 @@ def test_stage_artifact_copies_file_and_detaches_artifact(tmp_path: Path) -> Non
     assert result.status == "staged"
     assert result.resolvable is True
     assert result.path == destination.resolve()
-    assert result.artifact.hash == artifact.hash
+    assert result.artifact.digest == artifact.digest
     assert result.artifact.as_path() == destination.resolve()
     assert destination.read_text(encoding="utf-8") == "value\n1\n"
 
@@ -131,7 +119,7 @@ def test_stage_artifact_stages_directories(tmp_path: Path) -> None:
     result = stage_artifact(tracker, artifact, destination)
 
     assert result.status == "staged"
-    assert result.artifact.hash == artifact.hash
+    assert result.artifact.digest == artifact.digest
     assert (destination / "nested" / "data.txt").read_text(
         encoding="utf-8"
     ) == "payload"
@@ -150,7 +138,7 @@ def test_stage_artifact_preserves_missing_hash_on_detached_artifact(
     result = stage_artifact(tracker, artifact, destination)
 
     assert result.status == "staged"
-    assert result.artifact.hash is None
+    assert result.artifact.digest is None
 
 
 def test_stage_artifact_uses_runtime_abs_path_when_canonical_resolution_missing(

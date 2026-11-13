@@ -12,6 +12,7 @@ import pytest
 from typer.testing import CliRunner
 
 from consist.cli import app
+from consist.digest import Digest
 from consist.models.artifact import Artifact
 from consist.models.run import Run
 
@@ -111,10 +112,10 @@ def test_validate_fix_persists_missing_marker(cli_runner, tracker, tmp_path) -> 
     artifact = Artifact(
         id=artifact_id,
         key="missing_artifact",
-        container_uri=str(missing_path),
+        uri=str(missing_path),
         driver="txt",
         run_id="run_missing",
-        hash="hash_missing",
+        digest=Digest("sha256:file", "a1" * 32),
     )
     assert tracker.db is not None
     tracker.db.sync_artifact(artifact)
@@ -135,10 +136,10 @@ def test_validate_fix_noop_when_no_missing(cli_runner, tracker, tmp_path) -> Non
     artifact = Artifact(
         id=artifact_id,
         key="present_artifact",
-        container_uri=str(present_path),
+        uri=str(present_path),
         driver="txt",
         run_id="run_present",
-        hash="hash_present",
+        digest=Digest("sha256:file", "b2" * 32),
         meta={"existing": "value"},
     )
     assert tracker.db is not None

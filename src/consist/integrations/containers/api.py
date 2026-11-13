@@ -103,15 +103,15 @@ def _hash_inputs(tracker: Tracker, items: Sequence[ArtifactRef]) -> List[str]:
                     if run.config_hash:
                         sig_parts.append(f"conf:{run.config_hash}")
             # Container signatures use a portable content digest fingerprint.
-            if item.hash:
-                sig_parts.append(f"hash:{item.hash}")
+            if item.digest is not None:
+                sig_parts.append(f"hash:{item.digest}")
             if not sig_parts:
                 try:
-                    abs_path = Path(tracker.resolve_uri(item.container_uri))
+                    abs_path = Path(tracker.resolve_uri(item.uri))
                     file_hash = tracker.identity.compute_file_checksum(abs_path)
                     sig_parts.append(f"file:{file_hash}")
                 except Exception:
-                    sig_parts.append(f"uri:{item.container_uri}")
+                    sig_parts.append(f"uri:{item.uri}")
             hashes.append("|".join(sig_parts))
         else:
             p = Path(item).resolve()
@@ -346,7 +346,7 @@ def _reuse_or_execute_container(
                         a
                         for a in output_arts
                         if a.key == target.name
-                        or Path(a.container_uri).name == target.name
+                        or Path(a.uri).name == target.name
                         or (output_key_map and output_key_map.get(str(target)) == a.key)
                     ),
                     None,

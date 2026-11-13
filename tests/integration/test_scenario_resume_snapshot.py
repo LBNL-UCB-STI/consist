@@ -58,7 +58,7 @@ def test_scenario_mid_workflow_resumption(tmp_path: Path) -> None:
         s1.run(step1_fn, name="step_1")
         res2 = s1.run(step2_fn, name="step_2")
         step2_run_id = res2.run.id
-        step2_hash = res2.outputs["model_results"].hash
+        step2_hash = res2.outputs["model_results"].digest
 
     assert step1_executed == 1
     assert step2_executed == 1
@@ -88,7 +88,7 @@ def test_scenario_mid_workflow_resumption(tmp_path: Path) -> None:
         # - Verify scenario.coupler.get("model_results") is immediately present and identical in hash.
         model_res = s1_resumed.coupler.get("model_results")
         assert model_res is not None
-        assert model_res.hash == step2_hash
+        assert model_res.digest == step2_hash
 
         # - Execute Step 3 consuming model_results and raw_data via scenario.run(...)
         assert "raw_data" in s1_resumed.coupler
@@ -377,7 +377,7 @@ def test_scenario_resume_fallback_preserves_execution_order(
             fallback_to_completed_outputs=True,
         )
         assert "shared_role" in restored
-        assert restored["shared_role"].hash == res_a.outputs["shared_role"].hash
+        assert restored["shared_role"].digest == res_a.outputs["shared_role"].digest
 
 
 def test_scenario_diff_snapshots_across_scenarios(
@@ -454,7 +454,7 @@ def test_scenario_resume_across_tracker_instances(tmp_path: Path) -> None:
         sc1.run(year1_step, name="year1_step")
         res_y2_s1 = sc1.run(year2_step1, name="year2_step1")
         y2_s1_id = res_y2_s1.run.id
-        y2_s1_hash = res_y2_s1.outputs["usim_datastore_h5"].hash
+        y2_s1_hash = res_y2_s1.outputs["usim_datastore_h5"].digest
 
     # Simulate process death / restart by initializing a new Tracker
     # Process 2: new tracker, new scenario resuming from year2_step1
@@ -476,7 +476,7 @@ def test_scenario_resume_across_tracker_instances(tmp_path: Path) -> None:
         # Verify usim_datastore_h5 is the year 2 version
         assert "usim_datastore_h5" in sc2.coupler
         restored_ds = sc2.coupler.require("usim_datastore_h5")
-        assert restored_ds.hash == y2_s1_hash
+        assert restored_ds.digest == y2_s1_hash
 
         res_final = sc2.run(year2_step2, name="year2_step2")
 

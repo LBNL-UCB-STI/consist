@@ -113,7 +113,7 @@ def test_profile_file_artifact_skips_when_schema_id_present(tracker, tmp_path):
 
     with tracker.start_run("run_profile_skip", model="test_model"):
         art = tracker.log_artifact(path, key="data", direction="output")
-        art.meta["schema_id"] = "skip-id"
+        art = art.with_meta({"schema_id": "skip-id"})
 
         tracker.artifact_schemas.profile_file_artifact(
             artifact=art,
@@ -210,7 +210,7 @@ def test_profile_file_artifact_if_changed_prefers_content_identity(tracker, tmp_
             "UPDATE main.artifact SET digest = NULL WHERE id = ?",
             [art_b.id],
         )
-        art_b.hash = None
+        art_b = art_b.with_digest(None)
 
         tracker.artifact_schemas.profile_file_artifact(
             artifact=art_b,
@@ -243,13 +243,13 @@ def test_profile_file_artifact_if_changed_falls_back_to_hash_for_legacy_rows(
         art_a = tracker.log_artifact(path_a, key="data", direction="output")
         run_a = tracker.current_consist.run
 
-    # Simulate a legacy row: it has the same hash as the new content,
+    # Simulate a legacy row: it has the same digest as the new content,
     # but no content_identity in meta.
     legacy_artifact = type(art_a)(
         key="data_legacy",
-        container_uri="outputs://legacy_data.csv",
+        uri="outputs://legacy_data.csv",
         driver="csv",
-        hash=art_a.hash,
+        digest=art_a.digest,
         run_id=run_a.id,
         meta={},
     )
@@ -273,7 +273,7 @@ def test_profile_file_artifact_if_changed_falls_back_to_hash_for_legacy_rows(
         run_b = tracker.current_consist.run
 
         assert art_b.meta.get("content_identity") is not None
-        assert art_b.hash == art_a.hash
+        assert art_b.digest == art_a.digest
 
         tracker.artifact_schemas.profile_file_artifact(
             artifact=art_b,

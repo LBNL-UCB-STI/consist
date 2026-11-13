@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 import logging
 from typing import (
     TYPE_CHECKING,
@@ -7,11 +8,11 @@ from typing import (
     Dict,
     Optional,
     Literal,
-    Type,
-    cast,
     get_args,
     get_origin,
 )
+
+from pydantic import BaseModel
 
 from consist.core._schema_model_introspection import (
     field_foreign_key_target,
@@ -26,20 +27,17 @@ from consist.types import DriverType
 if TYPE_CHECKING:
     from consist.core.persistence import DatabaseManager
     from consist.core.tracker import Tracker
-    from sqlmodel import SQLModel
 
 
 def _schema_view_name(
     *,
     run_id: str,
-    container_uri: str,
-    table_path: Optional[str],
-    array_path: Optional[str],
+    uri: str,
+    member: Optional[str],
 ) -> str:
     base = {
-        "container_uri": container_uri,
-        "table_path": table_path,
-        "array_path": array_path,
+        "uri": uri,
+        "member": member,
     }
     digest = canonical_json_sha256(base)[:12]
     safe_run = "".join(ch for ch in run_id if ch.isalnum() or ch == "_")
@@ -72,6 +70,15 @@ class ArtifactSchemaManager:
 
     def _hot_db(self) -> DatabaseManager | None:
         return get_hot_data_db(self.tracker)
+
+    def _sync_updated_artifact(self, updated: Artifact) -> Artifact:
+        if self.tracker.current_consist is not None:
+            self.tracker.current_consist.replace_artifact(updated)
+        if self.tracker._last_consist is not None:
+            self.tracker._last_consist.replace_artifact(updated)
+        self.tracker._replace_live_coupler_artifact(updated)
+        self.tracker._run_artifacts_cache.clear()
+        return updated
 
     def _type_annotation_to_logical_type(self, annotation: Any) -> str:
         """
@@ -140,50 +147,15 @@ class ArtifactSchemaManager:
         *,
         artifact: Artifact,
         run: Run,
-        schema_model: Type[SQLModel],
+        schema_model: type[BaseModel],
         source: str = "user_provided",
-    ) -> None:
+    ) -> Artifact:
         """
-        Store a user-provided SQLModel schema as an artifact profile.
-
-        When users manually define a SQLModel class for an artifact (e.g., to add
-        FK constraints, indexes, or refined type information), this method converts
-        that model into an ArtifactSchema record. The schema is marked with source
-        "user_provided" so it can be preferred during export.
-
-        This enables a workflow where:
-        1. User profiles artifact file: profile_file_schema=True
-        2. User exports SQLModel stub from file profile
-        3. User manually edits stub (add FK, indexes, enums, etc.)
-        4. User passes edited schema back to log_artifact(schema=MySchema)
-        5. The edited schema becomes the preferred schema for export
-
-        Parameters
-        ----------
-        artifact : Artifact
-            The artifact being associated with this schema.
-        run : Run
-            The run context.
-        schema_model : Type[SQLModel]
-            The user-provided SQLModel class to store. Field types are extracted
-            from the class definition and converted to canonical logical_type strings.
-        source : str, default "user_provided"
-            Source label for the schema observation record.
-
-        Notes
-        -----
-        - The schema_id is computed as a hash of the normalized field definitions
-        - Field ordinal positions are preserved from the model definition order
-        - All fields are assumed nullable unless explicitly marked as required
-        - The schema is stored deduped: if two artifacts have identical schemas,
-          they share the same ArtifactSchema row
-        - LIMITATION: SQLAlchemy sa_column overrides (e.g., Column("PNUM", ...))
-          are not extracted; the persisted schema uses field names only. If you need
-          actual database column names, pass the schema explicitly to ingest().
+        Store a user-provided Pydantic/SQLModel schema as an artifact profile.
         """
         metadata_db = self._metadata_db()
         if metadata_db is None:
-            return
+            return artifact
 
         try:
             from consist.models.artifact_schema import (
@@ -345,7 +317,7 @@ class ArtifactSchemaManager:
                     "profile_version": 1,
                 },
             }
-            metadata_db.persist_artifact_schema_profile(
+            updated = metadata_db.persist_artifact_schema_profile(
                 artifact=artifact,
                 schema=schema_row,
                 fields=field_rows_with_schema_id,
@@ -366,6 +338,7 @@ class ArtifactSchemaManager:
                 schema_id,
                 source,
             )
+            return self._sync_updated_artifact(updated)
 
         except Exception as e:
             logging.warning(
@@ -373,6 +346,7 @@ class ArtifactSchemaManager:
                 artifact.key,
                 e,
             )
+            return artifact
 
     def profile_ingested_table(
         self,
@@ -382,19 +356,14 @@ class ArtifactSchemaManager:
         table_schema: str,
         table_name: str,
         source: str = "duckdb",
-    ) -> None:
+    ) -> Artifact:
         """
         Profile a materialized (ingested) DuckDB table and persist schema records.
-
-        Notes
-        -----
-        This is intended to capture the post-ingest schema (after dlt normalization),
-        rather than file-side dtypes.
         """
         metadata_db = self._metadata_db()
         hot_db = self._hot_db()
         if metadata_db is None or hot_db is None:
-            return
+            return artifact
 
         try:
             from consist.models.artifact_schema import (
@@ -441,17 +410,6 @@ class ArtifactSchemaManager:
                 for f in result.fields
             ]
 
-            metadata_db.upsert_artifact_schema(schema_row, field_rows, [])
-            metadata_db.insert_artifact_schema_observation(
-                ArtifactSchemaObservation(
-                    artifact_id=artifact.id,
-                    schema_id=result.schema_id,
-                    run_id=run.id,
-                    source=result.summary.get("source", source),
-                    sample_rows=result.summary.get("sample_rows"),
-                )
-            )
-
             meta_updates: Dict[str, Any] = {
                 "schema_id": result.schema_id,
                 "schema_summary": result.summary,
@@ -459,7 +417,21 @@ class ArtifactSchemaManager:
             if result.inline_profile_json is not None:
                 meta_updates["schema_profile"] = result.inline_profile_json
 
-            metadata_db.update_artifact_meta(artifact, meta_updates)
+            updated = metadata_db.persist_artifact_schema_profile(
+                artifact=artifact,
+                schema=schema_row,
+                fields=field_rows,
+                relations=[],
+                observation=ArtifactSchemaObservation(
+                    artifact_id=artifact.id,
+                    schema_id=result.schema_id,
+                    run_id=run.id,
+                    source=result.summary.get("source", source),
+                    sample_rows=result.summary.get("sample_rows"),
+                ),
+                meta_updates=meta_updates,
+            )
+            return self._sync_updated_artifact(updated)
 
         except Exception as e:
             logging.warning(
@@ -469,6 +441,7 @@ class ArtifactSchemaManager:
                 table_name,
                 e,
             )
+            return artifact
 
     def profile_file_artifact(
         self,
@@ -480,43 +453,17 @@ class ArtifactSchemaManager:
         sample_rows: Optional[int],
         reuse_if_unchanged: bool = False,
         source: str = "file",
-    ) -> None:
+    ) -> Artifact:
         """
         Profile a file-based artifact and persist schema records.
-
-        Notes
-        -----
-        This is intended to capture a lightweight file schema snapshot without ingestion.
-
-        Parameters
-        ----------
-        artifact : Artifact
-            Artifact being profiled.
-        run : Run
-            Run context for the schema observation.
-        resolved_path : str
-            Resolved filesystem path to the artifact.
-        driver : str
-            File format driver (e.g., "csv", "parquet").
-        sample_rows : Optional[int]
-            Maximum rows to sample when inferring schema.
-        reuse_if_unchanged : bool, default False
-            If True, reuse a prior schema observation when the artifact content
-            identity or digest matches.
-        source : str, default "file"
-            Source label for the schema observation.
-
-        Returns
-        -------
-        None
         """
         metadata_db = self._metadata_db()
         if metadata_db is None:
-            return
+            return artifact
 
         try:
-            if isinstance(artifact.meta, dict) and artifact.meta.get("schema_id"):
-                return
+            if isinstance(artifact.meta, Mapping) and artifact.meta.get("schema_id"):
+                return artifact
             from consist.models.artifact_schema import (
                 ArtifactSchema,
                 ArtifactSchemaField,
@@ -543,32 +490,33 @@ class ArtifactSchemaManager:
                     <= MAX_INLINE_PROFILE_BYTES
                 )
 
-            table_path = None
+            member_path = None
             if driver in DriverType.table_path_drivers():
-                table_path = artifact.table_path
-                if not table_path:
+                member_path = artifact.member
+                if not member_path:
                     logging.warning(
-                        "[Consist] Missing table_path for %s schema profile: %s",
+                        "[Consist] Missing member for %s schema profile: %s",
                         driver,
                         artifact.key,
                     )
-                    return
+                    return artifact
 
             if reuse_if_unchanged:
                 content_identity: Optional[str] = None
-                if isinstance(artifact.meta, dict):
+                if isinstance(artifact.meta, Mapping):
                     raw_ci = artifact.meta.get("content_identity")
                     if isinstance(raw_ci, str) and raw_ci:
                         content_identity = raw_ci
+                digest_str = (
+                    str(artifact.digest) if artifact.digest is not None else None
+                )
                 prior_obs = metadata_db.find_schema_observation_for_content_identity(
                     content_identity=content_identity,
-                    digest=artifact.hash,
+                    digest=digest_str,
                     driver=artifact.driver,
                 )
-                if prior_obs is None and artifact.hash:
-                    prior_obs = metadata_db.find_schema_observation_for_hash(
-                        cast(str, artifact.hash)
-                    )
+                if prior_obs is None and digest_str:
+                    prior_obs = metadata_db.find_schema_observation_for_hash(digest_str)
                 if prior_obs is not None:
                     schema_bundle = metadata_db.get_artifact_schema(
                         schema_id=prior_obs.schema_id, backfill_ordinals=False
@@ -581,7 +529,7 @@ class ArtifactSchemaManager:
                         }
                         if _is_inline_profile(schema_row.profile_json):
                             meta_updates["schema_profile"] = schema_row.profile_json
-                        metadata_db.persist_artifact_schema_observation_bundle(
+                        return metadata_db.persist_artifact_schema_observation_bundle(
                             artifact=artifact,
                             observation=ArtifactSchemaObservation(
                                 artifact_id=artifact.id,
@@ -592,19 +540,17 @@ class ArtifactSchemaManager:
                             ),
                             meta_updates=meta_updates,
                         )
-                        return
 
             result = profile_file_schema(
                 path=resolved_path,
                 driver=driver,
                 sample_rows=sample_rows,
-                table_path=table_path,
+                table_path=member_path,
                 source=source,
                 view_name=_schema_view_name(
                     run_id=str(run.id),
-                    container_uri=artifact.container_uri,
-                    table_path=table_path,
-                    array_path=artifact.array_path,
+                    uri=artifact.uri,
+                    member=artifact.member,
                 ),
             )
             truncated = result.summary.get("truncated") or {}
@@ -643,7 +589,7 @@ class ArtifactSchemaManager:
             if result.inline_profile_json is not None:
                 meta_updates["schema_profile"] = result.inline_profile_json
 
-            metadata_db.persist_artifact_schema_profile(
+            updated = metadata_db.persist_artifact_schema_profile(
                 artifact=artifact,
                 schema=schema_row,
                 fields=field_rows,
@@ -657,6 +603,7 @@ class ArtifactSchemaManager:
                 ),
                 meta_updates=meta_updates,
             )
+            return self._sync_updated_artifact(updated)
 
         except Exception as e:
             logging.warning(
@@ -665,3 +612,4 @@ class ArtifactSchemaManager:
                 resolved_path,
                 e,
             )
+            return artifact

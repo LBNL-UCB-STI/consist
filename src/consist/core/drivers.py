@@ -17,11 +17,11 @@ from typing import (
     Generic,
     Iterable,
     Optional,
-    Protocol,
     Sequence,
     Tuple,
     TypeVar,
 )
+from typing_extensions import Protocol
 
 import duckdb
 from pydantic import BaseModel
@@ -521,7 +521,7 @@ class OpenMatrixArrayDriver:
         with open_h5py_read_only(container_uri, h5py_module=h5py) as f:
             data_vars: Dict[str, Tuple[Tuple[str, str], Any]] = {}
             for name, obj in f.items():
-                if hasattr(obj, "shape"):
+                if isinstance(obj, h5py.Dataset):
                     data_vars[name] = (("row", "col"), obj[()])
             return xr_module.Dataset(data_vars=data_vars)
 

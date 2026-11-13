@@ -7,6 +7,7 @@ import pytest
 from sqlmodel import Field, SQLModel
 
 from consist import Tracker
+from consist.digest import Digest
 from consist.models.artifact import Artifact
 
 
@@ -30,9 +31,9 @@ def test_ingest_resolves_schema_from_registered_schemas(tmp_path):
     artifact = Artifact(
         id=uuid.uuid4(),
         key="artifact",
-        container_uri="inputs://data.csv",
+        uri="inputs://data.csv",
         driver="csv",
-        hash="abc",
+        digest=Digest("sha256:file", "ab" * 32),
         meta={"schema_name": "MySchema"},
     )
 
@@ -100,9 +101,9 @@ def test_ingest_ignores_whitespace_schema_name(tmp_path):
     artifact = Artifact(
         id=uuid.uuid4(),
         key="artifact",
-        container_uri="inputs://data.csv",
+        uri="inputs://data.csv",
         driver="csv",
-        hash="abc",
+        digest=Digest("sha256:file", "ab" * 32),
         meta={"schema_name": "   "},
     )
 

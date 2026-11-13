@@ -14,12 +14,17 @@ from consist.models.run import RunCouplerSnapshot
 def _create_artifact(
     *, key: str, uri: str = "workspace://test.csv", content_hash: str = "hash1"
 ) -> Artifact:
+    from consist.digest import Digest
+    import hashlib
+
     return Artifact(
         id=uuid.uuid4(),
         key=key,
-        container_uri=uri,
+        uri=uri,
         driver="csv",
-        hash=content_hash,
+        digest=Digest(
+            "sha256:file", hashlib.sha256(content_hash.encode("utf-8")).hexdigest()
+        ),
     )
 
 
@@ -102,7 +107,7 @@ def test_sync_and_get_snapshot(tracker: Tracker) -> None:
     assert "matrix" in restored
     assert "table" in restored
     assert str(restored["matrix"].id) == str(art1.id)
-    assert restored["matrix"].hash == "hash_m1"
+    assert restored["matrix"].digest == art1.digest
 
     # Verify session expunge: accessing attributes outside session succeeds
     assert restored["table"].key == "table"
@@ -135,7 +140,7 @@ def test_sync_run_coupler_snapshot_overwrite(tracker: Tracker) -> None:
     )
     s1 = db.get_run_coupler_snapshot("step_a", phase="post")
     assert set(s1.keys()) == {"role1"}
-    assert s1["role1"].hash == "h1"
+    assert s1["role1"].digest == art1.digest
 
     # Overwrite with art2 under role2
     db.sync_run_coupler_snapshot(
@@ -147,7 +152,7 @@ def test_sync_run_coupler_snapshot_overwrite(tracker: Tracker) -> None:
     )
     s2 = db.get_run_coupler_snapshot("step_a", phase="post")
     assert set(s2.keys()) == {"role2"}
-    assert s2["role2"].hash == "h2"
+    assert s2["role2"].digest == art2.digest
 
 
 def test_get_max_coupler_snapshot_ordinal(tracker: Tracker) -> None:
@@ -356,8 +361,6 @@ def test_cache_hit_captures_snapshots(tracker: Tracker, tmp_path: Path) -> None:
 def test_tracker_get_coupler_snapshot_attaches_tracker_ref(
     tracker: Tracker, tmp_path: Path
 ) -> None:
-    from consist.models.artifact import get_tracker_ref
-
     out_file = tmp_path / "ref_test.csv"
 
     def work_fn() -> None:
@@ -370,9 +373,7 @@ def test_tracker_get_coupler_snapshot_attaches_tracker_ref(
     snapshot = tracker.get_coupler_snapshot(res.run.id, phase="post", must_exist=True)
     assert "ref_art" in snapshot
     art = snapshot["ref_art"]
-    tracker_ref = get_tracker_ref(art)
-    assert tracker_ref is not None
-    assert tracker_ref() is tracker
+    assert art.resolver is tracker
     assert art.path == out_file.resolve()
 
 
@@ -487,8 +488,6 @@ def test_synthesize_filtered_does_not_backfill(
 def test_scenario_find_latest_coupler_snapshot_attaches_tracker_ref(
     tracker: Tracker, tmp_path: Path
 ) -> None:
-    from consist.models.artifact import get_tracker_ref
-
     f = tmp_path / "find_latest.csv"
 
     def step_fn() -> None:
@@ -502,9 +501,7 @@ def test_scenario_find_latest_coupler_snapshot_attaches_tracker_ref(
         _, _, arts = found
         assert "find_key" in arts
         art = arts["find_key"]
-        tracker_ref = get_tracker_ref(art)
-        assert tracker_ref is not None
-        assert tracker_ref() is tracker
+        assert art.resolver is tracker
         assert art.path == f.resolve()
 
 

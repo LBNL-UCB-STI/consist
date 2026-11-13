@@ -39,7 +39,7 @@ def test_load_from_db_uses_hot_data_store_db_path(
     artifact = Artifact(
         id=uuid4(),
         key="fallback_key",
-        container_uri=str(tmp_path / "missing.csv"),
+        uri=str(tmp_path / "missing.csv"),
         driver="csv",
         meta={"is_ingested": True, "dlt_table_name": "My Table"},
     )
@@ -68,7 +68,7 @@ def test_load_allows_hot_data_store_without_tracker_engine(
     artifact = Artifact(
         id=uuid4(),
         key="fallback_key",
-        container_uri=resolved_path,
+        uri=resolved_path,
         driver="csv",
         meta={"is_ingested": True, "dlt_table_name": "My Table"},
     )
@@ -100,7 +100,7 @@ def test_load_does_not_reconstruct_ingested_geoparquet_from_db(
     artifact = Artifact(
         id=uuid4(),
         key="parcels",
-        container_uri=resolved_path,
+        uri=resolved_path,
         driver="geoparquet",
         meta={"is_ingested": True, "dlt_table_name": "parcels"},
     )
@@ -153,7 +153,7 @@ def test_load_falls_back_to_tracker_db_path_when_hot_store_absent(
     artifact = Artifact(
         id=uuid4(),
         key="legacy_key",
-        container_uri=str(tmp_path / "missing.csv"),
+        uri=str(tmp_path / "missing.csv"),
         driver="csv",
         meta={"is_ingested": True, "dlt_table_name": "legacy_table"},
     )

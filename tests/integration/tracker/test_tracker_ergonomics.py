@@ -200,7 +200,7 @@ def test_artifact_accessibility_reports_primary_and_recovery_root(
     assert accessibility.locations[0].exists is True
     assert artifact.locations == accessibility.locations
 
-    relative_path = tracker.fs.get_remappable_relative_path(artifact.container_uri)
+    relative_path = tracker.fs.get_remappable_relative_path(artifact.uri)
     assert relative_path is not None
     archived_path = archive_root / relative_path
     archived_path.parent.mkdir(parents=True, exist_ok=True)

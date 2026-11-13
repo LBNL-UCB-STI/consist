@@ -22,9 +22,10 @@ from consist.core.config_canonicalization import (
     ConfigPlan,
     canonical_identity_from_config,
 )
-from consist.core.resolved_binding import ArtifactIdentity
+from consist.core.resolved_binding import trusted_digest_from_artifact
 from consist.core.run_resolution import InputBindingRole
 from consist.core.tracker import Tracker
+from consist.digest import Digest
 from consist.models.artifact import Artifact
 from consist.models.run import RunResult
 from consist.types import (
@@ -388,8 +389,7 @@ def test_tracker_run_path_binding_falls_back_from_stale_abs_path(tracker, sample
         run_id=None,
         key="data",
         direction="input",
-    )
-    artifact.abs_path = str(stale_path)
+    ).with_abs_path(str(stale_path))
 
     def step(data: Path) -> None:
         seen["data"] = data
@@ -481,8 +481,8 @@ def test_tracker_run_reuses_attested_content_from_distinct_producers(
         second.run.meta["input_identity"]["bindings"][0]["artifact_id"]
         != (first.run.meta["input_identity"]["bindings"][0]["artifact_id"])
     )
-    assert first.run.meta["input_identity"]["bindings"][0]["mode"] == "content-v1"
-    assert second.run.meta["input_identity"]["bindings"][0]["mode"] == "content-v1"
+    assert first.run.meta["input_identity"]["bindings"][0]["mode"] == "content"
+    assert second.run.meta["input_identity"]["bindings"][0]["mode"] == "content"
 
 
 def test_tracker_run_records_fast_input_fallback_without_content_reuse(
@@ -530,17 +530,16 @@ def test_tracker_run_records_fast_input_fallback_without_content_reuse(
     )
 
     expected_evidence = {
-        "identity_strength": "legacy-provenance-v1",
+        "identity_strength": "provenance",
         "fallback_reason": "fast_file_observation",
     }
     for result in (first, second):
         binding = result.run.meta["input_identity"]["bindings"][0]
-        assert binding["mode"] == "legacy-provenance-v1"
+        assert binding["mode"] == "provenance"
         assert binding["evidence"] == expected_evidence
         assert binding["selector"] == {
             "driver": "txt",
-            "table_path": None,
-            "array_path": None,
+            "member": None,
         }
     assert calls == ["called", "called"]
     assert first.cache_hit is False
@@ -566,11 +565,12 @@ def test_action_v2_content_binding_survives_later_caller_hash_logging_after_reop
         )
 
     def consume() -> None:
+        assert trusted.digest is not None
         tracker.log_artifact(
             trusted,
             key="usim_datastore_h5",
             direction="input",
-            content_hash=trusted.hash,
+            content_hash=trusted.digest.hex,
             force_hash_override=True,
         )
 
@@ -582,7 +582,7 @@ def test_action_v2_content_binding_survives_later_caller_hash_logging_after_reop
     )
 
     binding = result.run.meta["input_identity"]["bindings"][0]
-    assert binding["mode"] == "content-v1"
+    assert binding["mode"] == "content"
     assert binding["artifact_id"] == str(trusted.id)
 
     tracker.close()
@@ -590,7 +590,8 @@ def test_action_v2_content_binding_survives_later_caller_hash_logging_after_reop
     persisted = reopened.db.get_artifact(UUID(binding["artifact_id"]))
 
     assert persisted is not None
-    assert ArtifactIdentity.from_artifact(persisted) == ArtifactIdentity.from_artifact(
+    assert persisted.digest == trusted.digest
+    assert trusted_digest_from_artifact(persisted) == trusted_digest_from_artifact(
         trusted
     )
 
@@ -630,9 +631,9 @@ def test_action_v2_records_caller_hash_input_as_legacy_after_reopen(
 
     assert persisted is not None
     assert persisted.meta["hash_semantics"]["source"] == "caller_supplied"
-    assert binding["mode"] == "legacy-provenance-v1"
+    assert binding["mode"] == "provenance"
     assert binding["evidence"] == {
-        "identity_strength": "legacy-provenance-v1",
+        "identity_strength": "provenance",
         "fallback_reason": "caller_supplied_hash",
     }
 
@@ -642,21 +643,30 @@ def test_tracker_run_separates_same_content_container_selectors(
 ) -> None:
     container = tmp_path / "container.h5"
     container.write_bytes(b"shared container bytes")
+    shared_digest = Digest.parse(
+        str(
+            tracker.artifacts.create_artifact(
+                container, key="container_raw", driver="h5"
+            ).digest
+        )
+    )
     left = tracker.artifacts.create_artifact(
         container,
         run_id="producer_left",
         key="data",
         driver="h5",
-        table_path="/tables/left",
+        member="/tables/left",
+        digest=shared_digest,
     )
     right = tracker.artifacts.create_artifact(
         container,
         run_id="producer_right",
         key="data",
         driver="h5",
-        table_path="/tables/right",
+        member="/tables/right",
+        digest=shared_digest,
     )
-    assert left.meta["content_identity"] == right.meta["content_identity"]
+    assert left.digest == right.digest
 
     calls: list[str] = []
 
@@ -701,18 +711,16 @@ def test_tracker_run_uses_canonical_input_binding_evidence_for_action_v2(
         pass
 
     captured_binding_roles = []
-    original_compute_action_input_identity = (
-        tracker.identity.compute_action_input_identity
-    )
+    original_compute_input_hash = tracker.identity.compute_input_hash
 
-    def capture_action_input_identity(**kwargs):
-        captured_binding_roles.append(kwargs["binding_roles"])
-        return original_compute_action_input_identity(**kwargs)
+    def capture_input_hash(*args, **kwargs):
+        captured_binding_roles.append(kwargs.get("binding_roles"))
+        return original_compute_input_hash(*args, **kwargs)
 
     monkeypatch.setattr(
         tracker.identity,
-        "compute_action_input_identity",
-        capture_action_input_identity,
+        "compute_input_hash",
+        capture_input_hash,
     )
 
     first = tracker.run(
@@ -761,8 +769,8 @@ def test_tracker_run_uses_canonical_input_binding_evidence_for_action_v2(
     assert [
         (role.kind, role.role, role.input_index) for role in captured_binding_roles[0]
     ] == [("named", "alpha", 1), ("named", "zeta", 0), ("dependency", 0, 2)]
-    assert first.run.input_hash.startswith("sha256:action-v2:")
-    assert first.run.meta["input_identity"]["mode"] == "action-v2"
+    assert len(first.run.input_hash) == 64
+    assert first.run.meta["input_identity"]["version"] == 1
     assert first.run.input_hash == second.run.input_hash
     assert second.cache_hit is True
 
@@ -819,8 +827,7 @@ def test_tracker_run_action_v2_does_not_reuse_a_legacy_lifecycle_cache_key(
         inputs={"data": source},
     )
 
-    assert not legacy.input_hash.startswith("sha256:action-v2:")
-    assert action.run.input_hash.startswith("sha256:action-v2:")
+    assert legacy.input_hash != action.run.input_hash
     assert action.cache_hit is False
 
 

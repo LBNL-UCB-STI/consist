@@ -1,125 +1,83 @@
 """
-This module provides a mechanism for managing the active Consist `Tracker` instance
-within an async-safe context.
+Context-local management for the active and default Consist ``Tracker``.
 
-It uses a context-local stack (`_TRACKER_STACK`) to keep track of nested `start_run`
-contexts, ensuring that `log_artifact` and other context-dependent operations
-always refer to the correct `Tracker` instance.
+Synchronizes directly with ``consist.protocols``'s ``ArtifactResolver`` contextvars
+so ``Artifact`` convenience methods automatically see the active or default tracker
+without upward imports from Layer 1/2 into ``consist.core``.
 """
 
+from __future__ import annotations
+
 from contextlib import contextmanager
-from contextvars import ContextVar
-from typing import Iterator, Optional, Sequence, TYPE_CHECKING
+from typing import Iterator, Optional, TYPE_CHECKING, cast
+
+from consist.protocols import (
+    _ACTIVE_RESOLVER_STACK,
+    _DEFAULT_RESOLVER,
+    ArtifactResolver,
+    bind_active_resolver,
+    get_active_resolver,
+    get_default_resolver,
+    pop_active_resolver,
+    push_active_resolver,
+    set_default_resolver,
+)
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
 
-# Context-local storage for the active tracker stack
-_TRACKER_STACK: ContextVar[Sequence["Tracker"]] = ContextVar(
-    "consist_tracker_stack", default=()
-)
-_DEFAULT_TRACKER: ContextVar[Optional["Tracker"]] = ContextVar(
-    "consist_default_tracker", default=None
-)
+_TRACKER_STACK = _ACTIVE_RESOLVER_STACK
+_DEFAULT_TRACKER = _DEFAULT_RESOLVER
 
 
 def get_active_tracker() -> "Tracker":
-    """
-    Retrieves the currently active `Tracker` instance from the thread-local stack.
-
-    This function is essential for allowing Consist's API functions (e.g., `log_artifact`,
-    `ingest`) to access the correct `Tracker` instance without it needing to be
-    passed explicitly through every function call. It ensures that operations are
-    always associated with the currently active `start_run` context.
-
-    Returns
-    -------
-    Tracker
-        The `Tracker` instance that is at the top of the active tracker stack
-        for the current thread.
-
-    Raises
-    ------
-    RuntimeError
-        If no `Tracker` instance is currently active (i.e., the stack is empty).
-        This typically means Consist API functions are being called outside
-        a `with tracker.start_run():` block or a `tracker.run`/`tracker.trace`
-        (or `consist.start_run`/`consist.run`/`consist.trace`) call.
-    """
-    stack = _TRACKER_STACK.get()
-    if not stack:
+    """Return the innermost active ``Tracker`` or raise ``RuntimeError``."""
+    active = get_active_resolver()
+    if active is None:
         raise RuntimeError(
             "No active Consist run found. "
             "Ensure you are within a 'with tracker.start_run()' or "
             "'with consist.start_run(...)' block, or use tracker.run/trace "
             "or consist.run/trace."
         )
-    return stack[-1]
+    return cast("Tracker", active)
 
 
 def push_tracker(tracker: "Tracker") -> None:
-    """
-    Pushes a `Tracker` instance onto the top of the thread-local active tracker stack.
-
-    This action makes the provided `tracker` the currently active one for the
-    current thread, enabling subsequent Consist API calls to automatically
-    interact with this `Tracker` instance.
-
-    Parameters
-    ----------
-    tracker : Tracker
-        The `Tracker` instance to be made active.
-    """
-    stack = _TRACKER_STACK.get()
-    _TRACKER_STACK.set((*stack, tracker))
+    """Push ``tracker`` onto the active tracker/resolver stack."""
+    push_active_resolver(cast(ArtifactResolver, tracker))
 
 
 def pop_tracker() -> Optional["Tracker"]:
-    """
-    Removes and returns the current active `Tracker` instance from the top of the stack.
-
-    This function is typically called when a `start_run` context exits, effectively
-    deactivating the `Tracker` that was previously managing the run.
-
-    Returns
-    -------
-    Optional[Tracker]
-        The `Tracker` instance that was removed from the stack, or `None` if the
-        stack was already empty.
-    """
-    stack = _TRACKER_STACK.get()
-    if not stack:
-        return None
-    tracker = stack[-1]
-    _TRACKER_STACK.set(stack[:-1])
-    return tracker
+    """Pop and return the top ``Tracker`` from the active stack, or ``None``."""
+    return cast("Optional[Tracker]", pop_active_resolver())
 
 
 def get_default_tracker() -> Optional["Tracker"]:
-    """
-    Returns the default `Tracker` for the current context, if set.
-    """
-    return _DEFAULT_TRACKER.get()
+    """Return the default ``Tracker`` for the current context, if set."""
+    return cast("Optional[Tracker]", get_default_resolver())
 
 
 def set_default_tracker(tracker: Optional["Tracker"]) -> Optional["Tracker"]:
-    """
-    Set the default `Tracker` for the current context.
+    """Set the default ``Tracker`` for the current context and return the previous one."""
+    return cast(
+        "Optional[Tracker]",
+        set_default_resolver(cast("Optional[ArtifactResolver]", tracker)),
+    )
 
-    Returns the previous default tracker, if any.
-    """
-    previous = _DEFAULT_TRACKER.get()
-    _DEFAULT_TRACKER.set(tracker)
-    return previous
+
+@contextmanager
+def active_artifact_resolver(resolver: ArtifactResolver) -> Iterator[ArtifactResolver]:
+    """Temporarily bind ``resolver`` onto the active ``ArtifactResolver`` stack."""
+    with bind_active_resolver(resolver) as bound:
+        yield bound
 
 
 @contextmanager
 def use_tracker(tracker: "Tracker") -> Iterator["Tracker"]:
-    """
-    Temporarily set the default `Tracker` within a scoped context.
-    """
-    token = _DEFAULT_TRACKER.set(tracker)
+    """Temporarily set the default ``Tracker`` within a scoped context."""
+    token = _DEFAULT_RESOLVER.set(cast("Optional[ArtifactResolver]", tracker))
     try:
         yield tracker
     finally:
-        _DEFAULT_TRACKER.reset(token)
+        _DEFAULT_RESOLVER.reset(token)

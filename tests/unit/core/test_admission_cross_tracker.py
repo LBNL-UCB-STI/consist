@@ -62,11 +62,31 @@ def _record_artifact(
     direction: str = "input",
 ) -> Artifact:
     assert tracker.db is not None
+    from consist.digest import Digest
+
+    digest_obj: Digest | None = None
+    if digest is not None:
+        scheme = "sha256:file"
+        if isinstance(semantics, dict):
+            source_kind = semantics.get("source")
+            kind = semantics.get("kind")
+            if source_kind == "caller_supplied":
+                scheme = "caller_supplied_v1:sha256"
+            elif source_kind == "stat_fast":
+                scheme = "stat_file_v1:sha256"
+            elif kind == "directory_manifest":
+                scheme = "dir_manifest_v1:sha256"
+        hex_val = (
+            digest
+            if len(digest) == 64 and all(c in "0123456789abcdef" for c in digest)
+            else hashlib.sha256(digest.encode("utf-8")).hexdigest()
+        )
+        digest_obj = Digest(scheme, hex_val)
     artifact = Artifact(
         key=key,
-        container_uri=f"test://{source_path.name}",
+        uri=f"test://{source_path.name}",
         driver="other",
-        hash=digest,
+        digest=digest_obj,
         meta={} if semantics is None else {"hash_semantics": semantics},
     )
     tracker.db.sync_artifact(artifact, run_id=run_id, direction=direction)

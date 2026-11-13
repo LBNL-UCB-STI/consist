@@ -266,10 +266,7 @@ def test_task_decorator_workflow(tracker: Tracker, run_dir: Path):
     )
 
     # Should get the same artifact back (cache hit)
-    assert (
-        cleaned_result_2.outputs["cleaned"].container_uri
-        == cleaned_artifact.container_uri
-    )
+    assert cleaned_result_2.outputs["cleaned"].uri == cleaned_artifact.uri
 
     # Check cache hit metadata
     runs = tracker.query_rows(
