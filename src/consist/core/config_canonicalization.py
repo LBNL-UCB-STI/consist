@@ -893,7 +893,7 @@ class SupportsRunWithConfigOverrides(Protocol):
         name: str,
         model: Optional[str] = None,
         config: Optional[dict[str, Any]] = None,
-        outputs: Optional[list[str]] = None,
+        outputs: Optional[Union[Sequence[str], Mapping[str, Any]]] = None,
         execution_options: Any = None,
         strict: bool = True,
         identity_inputs: IdentityInputs = None,

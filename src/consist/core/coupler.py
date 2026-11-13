@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import builtins
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import (
     Any,
@@ -11,9 +13,10 @@ from typing import (
     Optional,
     TYPE_CHECKING,
 )
+import warnings
 
-from consist.core._coupler_shared import CouplerMapMixin
 from consist.core.validation import validate_artifact_key
+from consist.location import DirTreeStat
 from consist.models.artifact import Artifact
 from consist.protocols import ArtifactLike
 
@@ -40,7 +43,7 @@ class CouplerView:
     narrower local API for step code.
     """
 
-    def __init__(self, coupler: Any, namespace: str) -> None:
+    def __init__(self, coupler: "Coupler", namespace: str) -> None:
         self._coupler = coupler
         self.namespace = _normalize_namespace(namespace)
         self._prefix = f"{self.namespace}/"
@@ -191,23 +194,24 @@ class DeclaredOutput:
     description: Optional[str] = None
 
 
-class Coupler(CouplerMapMixin[Artifact, DeclaredOutput]):
+class Coupler:
     """
     Scenario-local helper to thread named artifacts between steps.
 
-    Coupler is intentionally small:
-    - It stores the "latest Artifact for a semantic key" in-memory.
-
-    It does not log artifacts, infer inputs/outputs, or mutate Artifacts as a side effect
-    of reads. Keep provenance operations on the Tracker.
+    Coupler stores the latest ``Artifact`` (or lazy path reference) for a
+    semantic key in memory. When a raw filesystem path or URI is stored via
+    ``set()``, hashing and verification are deferred until consumption (or
+    scenario snapshot commit), keeping ``set()`` O(1) while detecting post-``set()``
+    disk edits and keeping downstream runs cacheable.
     """
 
     def __init__(self, tracker: Optional["Tracker"] = None) -> None:
         self._tracker: Optional["Tracker"] = None
-        self._artifacts: MutableMapping[str, Artifact] = {}
+        self._artifacts: MutableMapping[str, Any] = {}
+        self._stat_cache: dict[tuple[Any, ...], Artifact] = {}
         self._declared_outputs: MutableMapping[str, DeclaredOutput] = {}
         self._warn_undefined = False
-        self._undefined_keys: set[str] = set()
+        self._undefined_keys: builtins.set[str] = builtins.set()
         self._output_descriptions: MutableMapping[str, str] = {}
         self.tracker = tracker
 
@@ -229,63 +233,218 @@ class Coupler(CouplerMapMixin[Artifact, DeclaredOutput]):
     def _validate_artifact_key(self, key: str) -> None:
         validate_artifact_key(key)
 
-    def _create_declared_output(self) -> DeclaredOutput:
-        return DeclaredOutput()
+    def _maybe_warn_undefined(self, key: str) -> None:
+        if not self._warn_undefined:
+            return
+        if key in self._declared_outputs or key in self._undefined_keys:
+            return
+        self._undefined_keys.add(key)
+        warnings.warn(
+            f"Setting undefined coupler key '{key}'. "
+            f"Declared outputs: {sorted(self._declared_outputs)}",
+            UserWarning,
+            stacklevel=2,
+        )
 
-    def set(self, key: str, artifact: Artifact) -> Artifact:
-        """Store an artifact under a validated key."""
-        return self._store_artifact(key, artifact)
+    def _resolve_lazy_entry(self, key: str, value: Any) -> Any:
+        if not isinstance(value, (Path, str, os.PathLike)):
+            return value
+        tracker = self._tracker
+        if tracker is None:
+            return value
+        raw_str = os.fspath(value) if isinstance(value, os.PathLike) else value
+        if isinstance(raw_str, str) and "://" in raw_str:
+            resolved_path = Path(tracker.resolve_uri(raw_str))
+        else:
+            resolved_path = Path(raw_str)
+            if not resolved_path.is_absolute():
+                resolved_path = (tracker.run_dir / resolved_path).resolve()
+            else:
+                resolved_path = resolved_path.resolve()
+
+        if not resolved_path.exists():
+            return value
+
+        if resolved_path.is_dir():
+            tree_stat = DirTreeStat.capture_dir(resolved_path)
+            stat_key: tuple[Any, ...] = (
+                "dir",
+                str(resolved_path),
+                tree_stat.file_count,
+                tree_stat.total_bytes,
+                tree_stat.max_mtime_ns,
+            )
+        else:
+            st = resolved_path.stat()
+            stat_key = (
+                "file",
+                str(resolved_path),
+                st.st_size,
+                st.st_mtime_ns,
+                st.st_ino,
+            )
+
+        cached = self._stat_cache.get(stat_key)
+        if cached is not None:
+            return cached
+
+        artifact = tracker.artifacts.create_artifact(
+            resolved_path,
+            run_id=None,
+            key=key,
+            direction="input",
+            reuse_if_unchanged=True,
+        )
+        self._stat_cache[stat_key] = artifact
+        return artifact
+
+    def set(self, key: str, artifact: Any) -> Any:
+        """Store an artifact or lazy path reference under a validated key."""
+        self._validate_artifact_key(key)
+        self._maybe_warn_undefined(key)
+        self._artifacts[key] = artifact
+        return artifact
 
     def set_from_artifact(self, key: str, value: Any) -> Any:
-        """
-        Set an artifact, accepting both Artifact objects and artifact-like values.
+        """Store an ``Artifact``, ``ArtifactLike``, ``Path``, or string path."""
+        return self.set(key, value)
 
-        This method is useful when integrating with optional dependencies (like noop mode)
-        where you may receive either:
-        - A real Artifact (when tracking is enabled)
-        - An artifact-like object with .path and .container_uri properties (noop mode)
-        - A Path or string (fallback)
+    def clear(self) -> None:
+        """Clear all stored artifacts."""
+        self._artifacts.clear()
+        self._stat_cache.clear()
 
-        All three forms are stored in the coupler and can be retrieved with get() or require().
+    def __len__(self) -> int:
+        return len(self._artifacts)
 
-        Parameters
-        ----------
-        key : str
-            The coupler key (e.g., "persons", "skims"). Must follow artifact-key rules.
-        value : Artifact or artifact-like or Path or str
-            The value to store. Can be a real Artifact, artifact-like object with
-            .path/.container_uri properties, a Path, or a string path.
-
-        Returns
-        -------
-        Any
-            The value that was stored.
-
-        Examples
-        --------
-        Using with optional Consist dependency:
-        ```python
-        # Works whether log_output returns Artifact or NoopArtifact
-        artifact = tracker.log_output(path, key="persons")
-        coupler.set_from_artifact("persons", artifact)
-        ```
-
-        Mixed real and fallback artifacts:
-        ```python
-        artifact = log_output(path) or path  # Fallback to path string
-        coupler.set_from_artifact("key", artifact)  # Handles both
-        ```
-        """
-        return self._store_artifact(key, value)
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._artifacts)
 
     def keys(self) -> Iterable[str]:
         return self._artifacts.keys()
 
-    def items(self) -> Iterable[tuple[str, Artifact]]:
-        return self._artifacts.items()
+    def items(self) -> Iterable[tuple[str, Any]]:
+        return [
+            (key, self._resolve_lazy_entry(key, value))
+            for key, value in self._artifacts.items()
+        ]
 
-    def values(self) -> Iterable[Artifact]:
-        return self._artifacts.values()
+    def values(self) -> Iterable[Any]:
+        return [
+            self._resolve_lazy_entry(key, value)
+            for key, value in self._artifacts.items()
+        ]
+
+    def update(
+        self, artifacts: Optional[Mapping[str, Any]] = None, /, **kwargs: Any
+    ) -> None:
+        if artifacts:
+            for key, artifact in artifacts.items():
+                self.set(key, artifact)
+        if kwargs:
+            for key, artifact in kwargs.items():
+                self.set(key, artifact)
+
+    def get(self, key: str) -> Optional[Any]:
+        self._validate_artifact_key(key)
+        if key not in self._artifacts:
+            return None
+        return self._resolve_lazy_entry(key, self._artifacts[key])
+
+    def pop(self, key: str, default: Optional[Any] = None) -> Optional[Any]:
+        self._validate_artifact_key(key)
+        if key not in self._artifacts:
+            return default
+        value = self._artifacts.pop(key)
+        return self._resolve_lazy_entry(key, value)
+
+    def require(self, key: str) -> Any:
+        artifact = self.get(key)
+        if artifact is None:
+            available = ", ".join(sorted(self._artifacts.keys())) or "<none>"
+            raise KeyError(
+                f"Coupler missing key={key!r}. Available keys: {available}. "
+                f"Did you forget to call coupler.set({key!r}, ...)?"
+            )
+        return artifact
+
+    def declare_outputs(
+        self,
+        *names: str,
+        required: bool | Mapping[str, bool] = False,
+        warn_undefined: bool = False,
+        description: Optional[Mapping[str, str]] = None,
+    ) -> None:
+        if not names:
+            return
+        if warn_undefined:
+            self._warn_undefined = True
+        if isinstance(required, Mapping):
+            required_map = {str(k): bool(v) for k, v in required.items()}
+            default_required = False
+        else:
+            required_map = {}
+            default_required = bool(required)
+        description_map = {str(k): v for k, v in (description or {}).items()}
+
+        for name in names:
+            if not isinstance(name, str):
+                raise TypeError("Coupler output names must be strings.")
+            key = name.strip()
+            if not key:
+                raise ValueError("Coupler output names cannot be empty.")
+            self._validate_artifact_key(key)
+            entry = self._declared_outputs.get(key, DeclaredOutput())
+            entry.required = entry.required or required_map.get(key, default_required)
+            if key in description_map:
+                entry.description = description_map[key]
+                self._output_descriptions[key] = description_map[key]
+            self._declared_outputs[key] = entry
+
+    def missing_declared_outputs(self) -> list[str]:
+        return sorted(
+            [
+                key
+                for key, entry in self._declared_outputs.items()
+                if entry.required
+                and (key not in self._artifacts or self._artifacts[key] is None)
+            ]
+        )
+
+    def require_outputs(
+        self,
+        *names: str,
+        required: bool | Mapping[str, bool] = True,
+        warn_undefined: bool = False,
+        description: Optional[Mapping[str, str]] = None,
+    ) -> None:
+        self.declare_outputs(
+            *names,
+            required=required,
+            warn_undefined=warn_undefined,
+            description=description,
+        )
+
+    def collect_by_keys(
+        self, artifacts: Mapping[str, Any], *keys: str, prefix: str = ""
+    ) -> dict[str, Any]:
+        if not isinstance(artifacts, Mapping):
+            raise TypeError("collect_by_keys expects a mapping of artifacts.")
+        collected: dict[str, Any] = {}
+        for key in keys:
+            if not isinstance(key, str):
+                raise TypeError("collect_by_keys keys must be strings.")
+            self._validate_artifact_key(key)
+            if key not in artifacts:
+                raise KeyError(f"Missing artifact for key {key!r}.")
+            coupler_key = f"{prefix}{key}"
+            artifact = artifacts[key]
+            self.set(coupler_key, artifact)
+            collected[coupler_key] = artifact
+        return collected
+
+    def describe_outputs(self) -> dict[str, str]:
+        return dict(self._output_descriptions)
 
     def view(self, namespace: str) -> CouplerView:
         """
@@ -299,10 +458,10 @@ class Coupler(CouplerMapMixin[Artifact, DeclaredOutput]):
     def __contains__(self, key: object) -> bool:
         return key in self._artifacts
 
-    def __getitem__(self, key: str) -> Artifact:
+    def __getitem__(self, key: str) -> Any:
         return self.require(key)
 
-    def __setitem__(self, key: str, artifact: Artifact) -> None:
+    def __setitem__(self, key: str, artifact: Any) -> None:
         self.set(key, artifact)
 
     def path(self, key: str, *, required: bool = True) -> Optional[Path]:

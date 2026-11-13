@@ -531,7 +531,12 @@ class RunLifecycleCoordinator:
                 }
 
             push_tracker(tracker)
-            tracker.current_consist = ConsistRecord(run=run, config=config_dict)
+            stored_config = {
+                key: value
+                for key, value in config_dict.items()
+                if key != "__consist_declared_outputs__"
+            }
+            tracker.current_consist = ConsistRecord(run=run, config=stored_config)
             tracker._active_run_cache_options = ActiveRunCacheOptions(
                 cache_mode=cache_mode,
                 cache_hydration=cache_hydration,

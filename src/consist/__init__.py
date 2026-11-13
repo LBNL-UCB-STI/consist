@@ -72,7 +72,6 @@ if TYPE_CHECKING:
         materialize_artifact,
         materialize_run_outputs,
         migrate_database,
-        noop_scenario,
         output_dir,
         output_path,
         pivot_facets,
@@ -118,6 +117,10 @@ if TYPE_CHECKING:
     from consist.core.coupler import (
         Coupler,
     )
+    from consist.core.error_messages import (
+        MissingOutputError,
+        StaleOutputError,
+    )
     from consist.core.indexing import (
         FacetIndex,
         RunFieldIndex,
@@ -135,13 +138,6 @@ if TYPE_CHECKING:
         RunOutputRecoveryCopiesRegistration,
         StagedInput,
         StagedInputsResult,
-    )
-    from consist.core.noop import (
-        NoopArtifact,
-        NoopCoupler,
-        NoopRunResult,
-        NoopScenarioContext,
-        NoopTracker,
     )
     from consist.core.orchestration import (
         BatchResult,
@@ -291,11 +287,7 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "MaterializationResult": ("consist.core.materialize", "MaterializationResult"),
     "MaterializedArtifact": ("consist.core.materialize", "MaterializedArtifact"),
     "MigrationReport": ("consist.core.migrate", "MigrationReport"),
-    "NoopArtifact": ("consist.core.noop", "NoopArtifact"),
-    "NoopCoupler": ("consist.core.noop", "NoopCoupler"),
-    "NoopRunResult": ("consist.core.noop", "NoopRunResult"),
-    "NoopScenarioContext": ("consist.core.noop", "NoopScenarioContext"),
-    "NoopTracker": ("consist.core.noop", "NoopTracker"),
+    "MissingOutputError": ("consist.core.error_messages", "MissingOutputError"),
     "OutputArtifactSpec": ("consist.types", "OutputArtifactSpec"),
     "OutputPathRef": ("consist.types", "OutputPathRef"),
     "OutputPolicyOptions": ("consist.types", "OutputPolicyOptions"),
@@ -329,6 +321,7 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "RunSet": ("consist.runset", "RunSet"),
     "RunSpecResult": ("consist.core.orchestration", "RunSpecResult"),
     "ScenarioLike": ("consist.protocols", "ScenarioLike"),
+    "StaleOutputError": ("consist.core.error_messages", "StaleOutputError"),
     "StagedInput": ("consist.core.materialize", "StagedInput"),
     "StagedInputsResult": ("consist.core.materialize", "StagedInputsResult"),
     "StepContract": ("consist.core.step_contracts", "StepContract"),
@@ -402,7 +395,6 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "materialize_artifact": ("consist.api", "materialize_artifact"),
     "materialize_run_outputs": ("consist.api", "materialize_run_outputs"),
     "migrate_database": ("consist.api", "migrate_database"),
-    "noop_scenario": ("consist.api", "noop_scenario"),
     "output_dir": ("consist.api", "output_dir"),
     "output_path": ("consist.api", "output_path"),
     "pivot_facets": ("consist.api", "pivot_facets"),
@@ -570,11 +562,7 @@ __all__ = [
     "MaterializationResult",
     "MaterializedArtifact",
     "MigrationReport",
-    "NoopArtifact",
-    "NoopCoupler",
-    "NoopRunResult",
-    "NoopScenarioContext",
-    "NoopTracker",
+    "MissingOutputError",
     "OutputArtifactSpec",
     "OutputPathRef",
     "OutputPolicyOptions",
@@ -596,6 +584,7 @@ __all__ = [
     "RunSet",
     "RunSpecResult",
     "ScenarioLike",
+    "StaleOutputError",
     "StagedInput",
     "StagedInputsResult",
     "StepContract",
@@ -660,7 +649,6 @@ __all__ = [
     "materialize_artifact",
     "materialize_run_outputs",
     "migrate_database",
-    "noop_scenario",
     "output_dir",
     "output_path",
     "pivot_facets",

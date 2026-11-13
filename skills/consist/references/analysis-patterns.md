@@ -209,7 +209,7 @@ Good use cases:
 - `load_df(...)` prefers the original file when it still exists.
 - Use `db_fallback="always"` when the artifact was ingested and the original
   file may have moved or been deleted.
-- Inspect `artifact.container_uri` and use `tracker.resolve_uri(...)` when the
+- Inspect `artifact.uri` and use `tracker.resolve_uri(...)` when the
   stored path no longer matches the current host layout.
 - If artifacts display mounted URIs such as `data://...`, `--trust-db` can
   recover stored mount roots when inspecting the same trusted provenance

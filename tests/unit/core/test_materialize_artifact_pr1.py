@@ -11,7 +11,6 @@ from consist.core.directory_artifacts import (
 )
 from consist.core.fs import FileSystemManager
 from consist.core.materialize import materialize_artifact
-from consist.core.noop import NoopCoupler
 from consist.digest import Digest
 from consist.models.artifact import Artifact
 
@@ -145,11 +144,6 @@ def test_coupler_and_view_pop_behavior() -> None:
 
     with pytest.raises(ValueError):
         view.pop("")
-
-    # NoopCoupler pop
-    noop = NoopCoupler()
-    assert noop.pop("anything") is None
-    assert noop.pop("anything", sentinel) == sentinel
 
 
 # =========================================================================

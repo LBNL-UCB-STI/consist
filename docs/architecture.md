@@ -1,190 +1,167 @@
-# Architecture
+# How Consist Works
 
-This page explains how Consist works under the hood: how signatures are computed, what gets stored, and how persistence is layered. Read it when you want to understand cache behavior, the data model, or the storage layout — these sections are appropriate for any user.
+Consist tracks three things about every file your workflow touches:
 
-## How Caching Works
+1. **What is it called?** Its **name** inside a step — for example, `"raw_trips"` or `"cleaned"`.
+2. **What does it contain?** Its **fingerprint** — a hash of the file's contents.
+3. **Where is it?** Its **location** — a path on disk or a table in DuckDB where those contents can be read right now.
 
-Consist identifies runs using a three-part signature:
+Consist keeps these three answers separate on purpose:
 
+- **Renaming or moving a file** changes its location, not its fingerprint.
+- **Re-running a step that produces identical bytes** creates a new run, not a new fingerprint.
+- **Swapping two inputs** changes which name points to which fingerprint, even though the files themselves did not change.
+
+An **artifact** is the handle you get back from Consist that ties all three together:
+
+| Question | Term | In code |
+| :--- | :--- | :--- |
+| What was it called when it was produced? | **Name** | `art.key` |
+| What does it contain? | **Fingerprint** | `art.digest` |
+| Where can I read it right now? | **Location** | `art.path`, `art.uri` |
+
+The same artifact can have a different name in each step that uses it; names are recorded per run.
+
+---
+
+<a id="how-caching-works"></a>
+
+## A run is a recipe
+
+When you call `tracker.run(...)` or `scenario.run(...)`, Consist builds a **signature** from the step's recipe before running your function:
+
+```mermaid
+flowchart LR
+    Code["Code"] --> Sig(["Signature"])
+    Config["Config"] --> Sig
+    Inputs["Inputs (name + fingerprint)"] --> Sig
+    Outputs["Declared outputs (name + format)"] --> Sig
+    Sig --> Result["Reuse earlier run, or execute"]
 ```
-signature = SHA256(code_hash || config_hash || input_hash)
-```
 
-| Component | Source | Notes |
-|-----------|--------|-------|
-| **Code hash** | Configurable code identity | Default `repo_git` uses Git commit/dirty state; callable modes hash the function module or source. Action orchestration also records the selected mode with its resolved digest. |
-| **Config hash** | Canonical JSON of config dict | Normalized for key order and numeric types; Pydantic models serialize deterministically |
-| **Input hash** | Bound input identity | `run(...)`, `trace(...)`, and Scenario orchestration use `sha256:action-v2:` over role-aware inputs, selectors, and the typed code identity. Trusted immutable artifacts use content identity; ambiguous inputs retain provenance-sensitive identity. Direct lifecycle calls use legacy input hashing. |
+The recipe includes:
 
-### What Changes Break Cache Hits?
+- **Code** — the identity of the function or container being executed (plus any declared extra file dependencies).
+- **Config** — the canonical JSON representation of your `config` dictionary or Pydantic model.
+- **Inputs** — each input's **name** and **fingerprint** (plus any sub-table or array selector).
+- **Declared outputs** — when outputs are declared upfront (such as `outputs={"cleaned": "cleaned.parquet"}`), their **names** and **file names/formats** (never resolved workspace paths).
 
-| What Changed | Cache Hit? | Why |
-|---|---|---|
-| Input file content | ❌ No | File hash changes → signature changes |
-| Config value | ❌ No | Config hash changes → signature changes |
-| Function code | ❌ No | Code hash changes → signature changes |
-| `runtime_kwargs` | ✅ Yes | runtime_kwargs are NOT hashed; don't affect signature |
-| Output file names | ✅ Yes | Output names don't affect signature |
-| Comments in code | Depends | Under `repo_git`, tracked comment changes affect code hash. Under `callable_source`, only comments in the callable source matter. Under `callable_module`, comments in the callable's module matter. |
+Notice what is **not** in the signature: **locations**. Consist cares *what* an input contains and *which parameter* it is passed to, not which folder or machine it currently sits in. Likewise, declared output filenames capture the requested format (`"cleaned.parquet"` vs. `"cleaned.csv"`) without baking your machine's `run_dir` path into the signature.
 
-**Lineage DAG and action identity**: Artifact links still form a directed
-lineage graph, but action cache identity does not always inherit the producing
-run's signature. For `action-v2` runs:
+---
 
-- A full-file SHA-256 or validated directory manifest identifies trusted
-  immutable content independently of which upstream run produced it.
-- The binding role and selector remain part of identity, so exchanging inputs
-  between parameters or selecting a different table or array causes a miss.
-- Weak observations or legacy hashes with ambiguous semantics fall back to
-  producer- and provenance-sensitive identity.
-- A strict Scenario run also includes its frozen binding identity.
+## When is a result reused?
 
-Consequently, changing upstream code reruns that upstream step. If the new run
-produces the same attested content, an unchanged downstream consumer can still
-hit cache; if the content changes, the downstream input identity changes and
-the consumer reruns. Legacy lifecycle and `action-v2` cache entries use separate
-identity domains and never cross-match.
+Before executing a step, Consist checks whether an earlier completed run has the same **signature**. If it does, the step is skipped, even if that run's output files have since been deleted. Consist only needs the files when something reads them: a later step that has to execute, or your own code calling `.path` or `.as_df()`.
 
-For detailed terminology, see [Core Concepts](concepts/overview.md).
+| If you change... | Reused? | Why |
+| :--- | :--- | :--- |
+| the contents of an input | No | Its fingerprint changed |
+| a config value | No | The config is part of the recipe |
+| your function's code | No | The code is part of the recipe |
+| which parameter an input goes to | No | Input names are part of the recipe |
+| a declared output's name or file format (`cleaned.parquet` -> `cleaned.csv`) | No | Declared output names and formats are part of the recipe |
+| where an input or run directory lives (moved, archived, copied) | **Yes** | Locations aren't part of the recipe |
+| an upstream step, which then produced identical output | **Yes** | Downstream steps see the same fingerprint |
+| `runtime_kwargs` | **Yes** | Treated as runtime tuning, not part of the recipe |
 
-### Cache Modes
+> [!NOTE]
+> **Containers and host volume paths:** One exception: unmounted host volume paths are part of a container step's recipe. When you map host directories through `tracker.mounts`, Consist records portable mount prefixes (`inputs://...`, `workspace://...`) so moving a mounted directory across machines still reuses cached runs; see the [Container Integration Guide](containers-guide.md) for details.
+
+### Cache modes
+
+You can control how Consist uses the cache on any run via `cache_mode`:
 
 | Mode | Behavior |
-|------|----------|
-| `reuse` (default) | Return cached result if signature matches |
-| `overwrite` | Always execute, update cache with new result |
-| `readonly` | Use cache but don't persist new results (sandbox mode) |
+| :--- | :--- |
+| `reuse` (default) | Reuse a matching prior run by signature; otherwise execute the step. |
+| `overwrite` | Always execute the step and record the new outputs as the latest result. |
+| `readonly` | Reuse matching cached runs, or execute and write output files and `consist.json` to `run_dir` without writing new records to `provenance.duckdb`. |
 
-For runnable examples and migration guidance from legacy run-policy kwargs, see [Caching & Hydration](concepts/caching-and-hydration.md).
+---
+
+## What you get on a cache hit
+
+Whether a step ran fresh or hit the cache, `tracker.run(...)` returns a `RunResult` containing output **artifacts**:
+
+```python
+result = tracker.run(
+    fn=clean_passengers,
+    inputs={"raw": "data/passengers.csv"},
+    outputs={"cleaned": "cleaned.parquet"},
+    config={"min_age": 18},
+)
+
+if result.cache_hit:
+    print("Reused cached result!")
+
+cleaned = result.outputs["cleaned"]
+print(cleaned.path)      # Current readable Path on disk
+df = cleaned.as_df()     # Load directly into a DataFrame
+```
+
+Don't build paths to output files yourself. On a cache hit, `cleaned.path` points to wherever the contents are now — whether in the original run folder or a shared archive. If no copy exists anywhere on disk, reading the file (or calling `.as_df()` without a DuckDB copy) raises `FileNotFoundError`.
 
 ### Ghost Mode
 
-Consist enables "Ghost Mode" — the ability to delete intermediate files while preserving provenance and recoverability. Content hashes stored in the database let Consist verify cached results, identify which upstream run produced a missing artifact, and re-execute only the steps needed to regenerate it. For the full guide including recovery patterns and best practices, see [Caching & Hydration](concepts/caching-and-hydration.md).
+Because Consist separates an artifact's **fingerprint** from its **location**, you can delete bulky intermediate outputs to save disk space without losing provenance ("Ghost Mode"):
+
+- **Unchanged pipelines skip every step:** In a pipeline `A → B → C`, if you delete `A`'s outputs on disk but keep `B`'s, rerunning the pipeline skips all three steps. `B`'s signature depends on the *fingerprint* of `A`'s output — which Consist still has in the database — not on the file itself.
+- **Downstream changes only need the immediate parent's output:** If you later change `C`'s code or config while `A`'s output is still deleted, `A` and `B` still hit the cache and `C` executes normally using `B`'s surviving output file, without ever regenerating `A`.
+- **Ingested tables stay readable without files:** If an intermediate artifact was ingested into DuckDB, `artifact.as_df()` (and downstream steps with `input_binding="loaded"`) can still load it directly from the database after the file on disk is gone.
+- **When a deleted file *is* needed again:** If `B` itself misses (for example, you change `B`'s code) and `A`'s output was neither archived nor ingested, `B` raises an error naming `A`'s artifact and producing `run_id` and explaining how to regenerate `A` (by running `A` with `validate_cached_outputs="eager"` or `cache_mode="overwrite"`).
 
 ---
 
-## Data Model
+## Where files live
 
-Consist uses two core entities with a many-to-many relationship:
-
-| Entity | Purpose |
-|--------|---------|
-| `Run` | Execution context: model name, config, timestamps, status, parent linkage |
-| `Artifact` | File metadata: path (as URI), canonical fingerprint (`artifact.hash`), driver, schema reference |
-| `RunArtifactLink` | Connects runs to their input and output artifacts with direction metadata |
-
-Key fields for workflow tracking:
-- `Run.parent_run_id` — Links scenario steps to their parent scenario; used as the scenario identifier in views (see `consist_scenario_id`)
-- `Run.year` — Simulation year for time-series workflows
-- `Run.tags` — String labels for filtering (stored as JSON array)
-- `Artifact.hash` — Canonical portable artifact fingerprint for downstream provenance, verification, and deduplication
-- `Artifact.content_id` — DB-local dedupe identity; not the public fingerprint surface
-
-Consist provides three strategies for tracking configuration: `config=` (hashed into the signature, stored as a JSON snapshot), `facet=` (queryable in DuckDB, does not affect the signature), and `identity_inputs=` (large external files hashed into the signature but not stored as content). For full usage, guardrails, and query examples, see [Config, Facets, and Identity Inputs](concepts/config-management.md).
-
----
-
-## Dual-Write Persistence
-
-Consist maintains two synchronized records for resilience:
-
-```mermaid
-graph TD
-    Tracker[Tracker] --> Context[Active Run Context]
-    Context --> Memo[In-Memory Model]
-    Memo --> Snapshot[consist.json Snapshot]
-    Memo --> DB[(DuckDB Database)]
-    Snapshot --- Source[Source of Truth]
-    DB --- Query[Query Engine]
-```
-
-**Write order (safety guarantee):**
-
-1. Update in-memory model
-2. Flush to `consist.json` (atomic write) ← **Source of truth**
-3. Attempt DB sync (catch errors, log warning, never crash)
-
-**JSON snapshots** (`consist.json` per run): Portable, human-readable, version-controllable. Each run directory contains a complete record that survives database corruption.
-
-**DuckDB database**: Enables fast queries across runs, artifacts, and lineage. Can be rebuilt from JSON snapshots if needed. Handles concurrent access with retry logic.
-
----
-
-## Path Virtualization
-
-Absolute paths break portability. Consist stores relative URIs and resolves them at runtime.
-For a focused guide, see [Mounts & Portability](mounts-and-portability.md).
-
-```
-User logs: /mnt/data/land_use.csv
-           ↓
-Tracker detects mount: mounts={"inputs": "/mnt/data"}
-           ↓
-Stored URI: inputs://land_use.csv
-```
-
-**Run-local paths**: For run-specific output directories, Consist typically stores
-paths relative to the run directory (for example `./outputs/...`). Historical
-resolution also accepts `workspace://...` aliases and uses metadata stored in
-`Run.meta["_physical_run_dir"]`. CLI inspection commands prefer explicit
-`--run-dir` or `--mount workspace=...` values when supplied, can combine
-`--run-dir` with persisted `Run.meta["archive_mounts"]` for promoted archives,
-and only use stored execution metadata as a fallback when requested.
-
----
-
-## Data Virtualization
-
-Consist creates **hybrid views** that transparently union ingested ("hot") DuckDB rows with raw files ("cold") on disk, so you can query across runs without loading everything into memory. Register a SQLModel schema with `Tracker(schemas=[MySchema])` to activate a view that includes provenance columns (`consist_run_id`, `consist_year`, `consist_scenario_id`, `consist_artifact_id`) for filtering and grouping.
-
-For N-dimensional data, `MatrixViewFactory` currently loads tracked **Zarr**
-stores as lazy xarray Datasets concatenated along a `run_id` dimension with
-`year`/`iteration` as coordinates. NetCDF metadata can still be cataloged
-elsewhere in Consist, but `Tracker.load_matrix(...)` is currently Zarr-focused.
-
-For schemas, ingestion, and query examples, see [DLT Loader Guide](dlt-loader-guide.md) and [Schema Export](schema-export.md).
-
----
-
-## Container Integration
-
-Containers are treated as pure functions. The run signature extends the
-standard formula with container-specific components including image digest,
-command, environment hash, backend, working directory, declared host `volumes`,
-and backend-specific extra args:
-
-```
-signature = SHA256(container_config || input_signatures)
-```
-
-Current caveat: because the container config includes resolved host volume
-paths, cross-machine cache reuse requires those host roots to stay stable too.
-Changing `/shared/team_inputs` to `/mnt/nfs/team_inputs` changes the signature
-even if the in-container mount point remains `/inputs`.
-
-Supported backends: Docker, Singularity/Apptainer. For usage details, see [Container Integration Guide](containers-guide.md).
-
----
-
-## Event Hooks
-
-Consist exposes `on_run_complete` and `on_run_failed` callbacks for external integrations (notifications, OpenLineage, etc.). Hook failures are logged but never crash the run. See [API Reference](api/advanced.md) for callback signatures and registration.
-
----
-
-## Context Stack
-
-Consist maintains a context-local stack of active trackers, allowing nested contexts and implicit tracker resolution:
+By default, each step writes its outputs into a subfolder of `run_dir`. To keep workflows portable across laptops, servers, and HPC clusters, you can configure named `mounts` on your `Tracker`:
 
 ```python
-import consist
-from consist import use_tracker
-
-with use_tracker(tracker):
-    with consist.scenario("baseline") as sc:
-        # consist.log_artifact() finds the active tracker automatically
-        with sc.step(name="simulate"):
-            consist.log_dataframe(df, key="results")  # No tracker= needed
+tracker = Tracker(
+    run_dir="./runs",
+    db_path="./provenance.duckdb",
+    mounts={
+        "inputs": "/shared/data/inputs",
+        "archive": "/mnt/nfs/project_archive",
+    },
+)
 ```
 
-This enables clean APIs where most functions don't require explicit tracker parameters.
+When a file lives inside a configured mount, Consist records its location relative to that mount (for example, `inputs://land_use.csv`). When you move to another machine and point `"inputs"` at that machine's folder, Consist resolves the location automatically. See [Mounts & Portability](mounts-and-portability.md) for the complete guide.
+
+---
+
+## What gets recorded
+
+Consist records every run in two places:
+
+1. **`consist.json` (per-run snapshot):** Written atomically inside each run directory when the step finishes. It is a self-contained, human-readable snapshot of that run's recipe, signature, input/output names, fingerprints, and initial locations at the moment the run completed.
+2. **`provenance.duckdb` (analytics and location index):** Indexes all runs, fingerprints, and current locations in DuckDB for fast lineage queries, cache lookups, and cross-run comparisons. Post-run location updates — such as archiving files to cold storage, evicting scratch directories, or promoting migrated runs — are tracked in `provenance.duckdb`. If the database is ever lost, run history and fingerprints can be reconstructed from your `consist.json` snapshots and surviving files on disk.
+
+<a id="data-virtualization"></a>
+
+### Querying across runs
+
+Because `provenance.duckdb` indexes every run and artifact, you can query outputs across dozens of scenarios or simulation years at once. Consist's **hybrid views** combine rows ingested into DuckDB with raw Parquet/CSV/Zarr files on disk in a single SQL view, tagging rows with `consist_run_id`, `consist_year`, and `consist_scenario_id`. See [Data Storage and Ingestion](concepts/data-materialization.md) and the [CLI Reference](cli-reference.md) for examples.
+
+---
+
+## Upgraded from 0.4?
+
+If you upgraded an existing project from Consist 0.4 using `consist migrate <db_path>`, Consist verifies existing files on disk and computes their v0.5 fingerprints (`Digest`). In `--quick` mode (`consist migrate <db_path> --quick`), any artifact whose v0.4 record already had a full SHA-256 hash, a directory manifest, a logical matrix hash, or an ingested DuckDB table keeps its verified status immediately.
+
+Only historical runs whose files were already deleted or overwritten, or whose v0.4 record only had a quick size-and-timestamp check (`--quick` skips re-reading these from disk), become **history-only**:
+
+- They remain **fully visible** in lineage graphs, run queries, and hybrid views.
+- They **never produce a false cache hit**, because their original file contents were not verified on disk during migration.
+- See [Upgrading to Consist 0.5](migrating-to-0.5.md) for migration options, `--dry-run`, and `consist migrate undo`.
+
+---
+
+## Going deeper
+
+- [Caching & Hydration](concepts/caching-and-hydration.md) — cache modes, materialization options, and Ghost Mode recovery patterns.
+- [Mounts & Portability](mounts-and-portability.md) — configuring portable mounts and relocating run directories across machines.
+- [Container Integration Guide](containers-guide.md) — running Docker and Apptainer steps with portable volume mounts.
+- [Internals](internals.md) — contributor reference covering the DuckDB hub-and-spokes store schema, digest schemes, location witnesses, and migration architecture.

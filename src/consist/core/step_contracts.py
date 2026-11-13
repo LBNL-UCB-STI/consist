@@ -358,8 +358,16 @@ def resolve_step_contract(
         inputs=resolved.inputs,
         input_keys=resolved.input_keys,
         optional_input_keys=resolved.optional_input_keys,
-        outputs=resolved.outputs,
-        output_paths=resolved.output_paths,
+        outputs=(
+            list(resolved.outputs.keys())
+            if isinstance(resolved.outputs, Mapping)
+            else resolved.outputs
+        ),
+        output_paths=(
+            resolved.outputs
+            if isinstance(resolved.outputs, Mapping)
+            else resolved.output_paths
+        ),
         output_sets=resolved.output_sets,
         cache_mode=resolved.cache_mode,
         cache_hydration=resolved.cache_hydration,

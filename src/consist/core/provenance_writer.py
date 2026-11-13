@@ -104,6 +104,8 @@ class ProvenanceWriter:
                     )
 
     def flush_json(self) -> None:
+        if self._tracker.is_ephemeral:
+            return
         if self._artifact_batch_depth > 0:
             self._batch_pending_json_flush = True
             return
@@ -111,15 +113,19 @@ class ProvenanceWriter:
 
     def _flush_json_now(self) -> None:
         tracker = self._tracker
-        if not tracker.current_consist:
+        if tracker.is_ephemeral or not tracker.current_consist:
             return
         self._write_record_json(tracker.current_consist)
 
     def flush_record_json(self, record: "ConsistRecord") -> None:
+        if self._tracker.is_ephemeral:
+            return
         self._write_record_json(record)
 
     def _write_record_json(self, record: "ConsistRecord") -> None:
         tracker = self._tracker
+        if tracker.is_ephemeral:
+            return
         json_str = record.model_dump_json(indent=2)
 
         safe_run_id = safe_snapshot_run_id(record.run.id)
