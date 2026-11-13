@@ -546,6 +546,103 @@ def resolve_verified_local_path_detailed(
     if db is not None:
         cached_entries = _load_cached_active_locations(tracker, artifact)
 
+        rt_str: Optional[str] = None
+        if not ignore_runtime_abs_path and artifact._abs_path:
+            attached = (
+                artifact._resolver_ref() if artifact._resolver_ref is not None else None
+            )
+            if attached is None or attached is tracker:
+                rt_str = artifact._abs_path
+
+        rt_real: Optional[str] = None
+        matches_cached_coord = False
+        matched_rows: list[
+            tuple[ArtifactLocationRow, list[tuple[Path, Optional[Path], str]]]
+        ] = []
+        normal_rows: list[
+            tuple[ArtifactLocationRow, list[tuple[Path, Optional[Path], str]]]
+        ] = []
+
+        for (
+            row,
+            primary_cand,
+            hist_cand,
+            primary_entry,
+            _primary_real,
+            hist_entry,
+            _hist_real,
+        ) in cached_entries:
+            cand_options: list[tuple[Path, Optional[Path], str]] = []
+            if primary_cand is not None:
+                cand_options.append(
+                    (
+                        primary_cand,
+                        primary_entry,
+                        _primary_real or _fast_realpath(str(primary_cand)),
+                    )
+                )
+            if allow_recovery_roots and hist_cand is not None:
+                hr = _hist_real or _fast_realpath(str(hist_cand))
+                if not cand_options or cand_options[0][2] != hr:
+                    cand_options.append((hist_cand, hist_entry, hr))
+
+            matched_idx: Optional[int] = None
+            if rt_str is not None:
+                for opt_idx, (_opt_cand, opt_entry, opt_real) in enumerate(
+                    cand_options
+                ):
+                    if opt_entry is None:
+                        continue
+                    is_match = str(opt_entry) == rt_str or opt_real == rt_str
+                    if not is_match:
+                        if rt_real is None:
+                            rt_real = _fast_realpath(rt_str)
+                        is_match = opt_real == rt_real
+                    if is_match:
+                        matches_cached_coord = True
+                        matched_idx = opt_idx
+                        break
+                if (
+                    matched_idx is None
+                    and not allow_recovery_roots
+                    and hist_entry is not None
+                ):
+                    # Still detect a match on a disallowed recovery entry so
+                    # uncached rt_cand cannot bypass allow_recovery_roots=False.
+                    is_hist_match = str(hist_entry) == rt_str or _hist_real == rt_str
+                    if not is_hist_match:
+                        if rt_real is None:
+                            rt_real = _fast_realpath(rt_str)
+                        is_hist_match = _hist_real == rt_real
+                    if is_hist_match:
+                        matches_cached_coord = True
+
+            if row.location_id in db._ephemeral_stale_locations:
+                continue
+            if not allow_recovery_roots and row.site in ("archive", "advisory"):
+                continue
+            if not cand_options:
+                continue
+
+            if matched_idx is not None:
+                if matched_idx > 0:
+                    matched_opt = cand_options.pop(matched_idx)
+                    cand_options.insert(0, matched_opt)
+                matched_rows.append((row, cand_options))
+            else:
+                normal_rows.append((row, cand_options))
+
+        if rt_str is not None and not matches_cached_coord:
+            rt_cand = Path(rt_str)
+            if rt_cand.exists():
+                if verify_candidate_against_artifact(rt_cand, artifact):
+                    return (
+                        Path(resolve_artifact_entry_path(artifact, rt_cand)),
+                        saw_mismatch,
+                        None,
+                    )
+                saw_mismatch = True
+
         def _verify_and_settle(
             cand: Path,
             loc_id: uuid.UUID,
@@ -575,139 +672,9 @@ def resolve_verified_local_path_detailed(
                 )
             return True
 
-        if not ignore_runtime_abs_path and artifact._abs_path:
-            attached = (
-                artifact._resolver_ref() if artifact._resolver_ref is not None else None
-            )
-            if attached is None or attached is tracker:
-                rt_str = artifact._abs_path
-                rt_real: Optional[str] = None
-                matches_cached_coord = False
-                matched_entry_rows: list[
-                    tuple[ArtifactLocationRow, Path, Optional[Path]]
-                ] = []
-                for (
-                    row,
-                    primary_cand,
-                    hist_cand,
-                    primary_entry,
-                    primary_real,
-                    hist_entry,
-                    hist_real,
-                ) in cached_entries:
-                    row_eligible = (
-                        row.location_id not in db._ephemeral_stale_locations
-                        and (
-                            allow_recovery_roots
-                            or row.site not in ("archive", "advisory")
-                        )
-                    )
-                    for cand_path, cand_entry, cand_real in (
-                        (primary_cand, primary_entry, primary_real),
-                        (
-                            (hist_cand, hist_entry, hist_real)
-                            if allow_recovery_roots
-                            else (None, None, "")
-                        ),
-                    ):
-                        if cand_entry is None:
-                            continue
-                        is_match = str(cand_entry) == rt_str or cand_real == rt_str
-                        if not is_match:
-                            if rt_real is None:
-                                rt_real = _fast_realpath(rt_str)
-                            is_match = cand_real == rt_real
-                        if is_match:
-                            matches_cached_coord = True
-                            if row_eligible and cand_path is not None:
-                                matched_entry_rows.append((row, cand_path, cand_entry))
-                            break
-                if matched_entry_rows:
-                    for row, cand_path, cand_entry in matched_entry_rows:
-                        effective_witness = db._settled_witnesses.get(
-                            row.location_id, row.witness
-                        )
-                        if effective_witness is not None:
-                            check_res = effective_witness.check(
-                                cand_path, now_ns=now_ns
-                            )
-                            if check_res.freshness == WitnessFreshness.FRESH:
-                                if (
-                                    not verify_digest
-                                    or verify_candidate_against_artifact(
-                                        cand_path, artifact
-                                    )
-                                ):
-                                    return (
-                                        cand_entry
-                                        if cand_entry is not None
-                                        else Path(
-                                            resolve_artifact_entry_path(
-                                                artifact, cand_path
-                                            )
-                                        ),
-                                        saw_mismatch,
-                                        row,
-                                    )
-                                saw_mismatch = True
-                                continue
-                            if check_res.freshness == WitnessFreshness.MISSING:
-                                continue
-                        if cand_path.exists():
-                            if _verify_and_settle(cand_path, row.location_id):
-                                return (
-                                    cand_entry
-                                    if cand_entry is not None
-                                    else Path(
-                                        resolve_artifact_entry_path(artifact, cand_path)
-                                    ),
-                                    saw_mismatch,
-                                    row,
-                                )
-                            saw_mismatch = True
-                elif not matches_cached_coord:
-                    rt_cand = Path(rt_str)
-                    if rt_cand.exists():
-                        if verify_candidate_against_artifact(rt_cand, artifact):
-                            return (
-                                Path(resolve_artifact_entry_path(artifact, rt_cand)),
-                                saw_mismatch,
-                                None,
-                            )
-                        saw_mismatch = True
-
         checked_reals: set[str] = set()
         failed_reals: set[str] = set()
-        for (
-            row,
-            primary_cand,
-            hist_cand,
-            primary_entry,
-            _primary_real,
-            hist_entry,
-            _hist_real,
-        ) in cached_entries:
-            if row.location_id in db._ephemeral_stale_locations:
-                continue
-            if not allow_recovery_roots and row.site in ("archive", "advisory"):
-                continue
-
-            cand_options: list[tuple[Path, Optional[Path], str]] = []
-            if primary_cand is not None:
-                cand_options.append(
-                    (
-                        primary_cand,
-                        primary_entry,
-                        _primary_real or _fast_realpath(str(primary_cand)),
-                    )
-                )
-            if allow_recovery_roots and hist_cand is not None:
-                hr = _hist_real or _fast_realpath(str(hist_cand))
-                if not cand_options or cand_options[0][2] != hr:
-                    cand_options.append((hist_cand, hist_entry, hr))
-            if not cand_options:
-                continue
-
+        for row, cand_options in (*matched_rows, *normal_rows):
             row_should_mark_stale = False
             for cand_idx, (candidate, entry_fast, cand_real) in enumerate(cand_options):
                 is_last_option = cand_idx == len(cand_options) - 1
