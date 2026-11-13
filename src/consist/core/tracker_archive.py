@@ -509,6 +509,63 @@ class TrackerArchiveService(_TrackerServiceBase):
             return True, None
         return False, None
 
+    def _has_surviving_sibling_backing(
+        self,
+        sib_art: Artifact,
+        *,
+        target_compare: Path,
+        evicted_location_ids: set[uuid.UUID],
+    ) -> tuple[bool, Optional[str], bool]:
+        if self.db is None:
+            return False, None, False
+        sib_rows = self.db.get_active_artifact_locations(
+            artifact_id=sib_art.id,
+            digest=sib_art.digest,
+            member=sib_art.member,
+        )
+        depends_on_evicted = any(
+            r.location_id in evicted_location_ids for r in sib_rows
+        )
+        if not depends_on_evicted:
+            m_name, m_inst, loc_uri = self.fs.location_coordinate_for_uri(sib_art.uri)
+            uri_cand = self.fs.resolve_location_coordinate(m_name, m_inst, loc_uri)
+            if uri_cand is not None:
+                uri_cmp = Path(
+                    os.path.realpath(
+                        resolve_file_bundle_root(uri_cand)
+                        if _is_file_bundle_artifact(sib_art)
+                        else uri_cand
+                    )
+                )
+                if uri_cmp == target_compare:
+                    depends_on_evicted = True
+
+        for row in sib_rows:
+            if row.location_id in evicted_location_ids:
+                continue
+            cand = self.fs.resolve_location_row_path(row)
+            if cand is None or not cand.exists():
+                continue
+            cand_compare = Path(
+                os.path.realpath(
+                    resolve_file_bundle_root(cand)
+                    if _is_file_bundle_artifact(sib_art)
+                    else cand
+                )
+            )
+            if cand_compare == target_compare:
+                continue
+            if verify_candidate_against_artifact(cand, sib_art):
+                return (
+                    True,
+                    resolve_artifact_entry_path(sib_art, cand),
+                    depends_on_evicted,
+                )
+
+        if self._has_verified_ingested_rows(sib_art):
+            return True, None, depends_on_evicted
+        return False, None, depends_on_evicted
+
     def evict_artifact(
         self,
         artifact: Artifact,
@@ -619,7 +676,7 @@ class TrackerArchiveService(_TrackerServiceBase):
                 "no surviving verified archive location or ingested global_tables table survives."
             )
 
-        # Shared container check (O(1) indexed on artifact_location coordinate, for both scalar and member artifacts).
+        # Shared container & shared-digest coordinate check (protects both HDF5/NetCDF members and same-digest files).
         matching_non_archive_rows: list[ArtifactLocationRow] = []
         matching_coords: set[tuple[str, str, str]] = set()
         for row in active_rows:
@@ -638,8 +695,11 @@ class TrackerArchiveService(_TrackerServiceBase):
             if cand_compare == target_compare:
                 matching_non_archive_rows.append(row)
                 matching_coords.add((row.mount_name, row.mount_instance_id, row.uri))
-        if not matching_coords:
-            m_name, m_inst, loc_uri = self.fs.location_coordinate_for_uri(artifact.uri)
+        for candidate_uri in (
+            artifact.uri,
+            self.fs.virtualize_path(str(target_compare)),
+        ):
+            m_name, m_inst, loc_uri = self.fs.location_coordinate_for_uri(candidate_uri)
             uri_cand = self.fs.resolve_location_coordinate(m_name, m_inst, loc_uri)
             if uri_cand is not None:
                 uri_compare = Path(
@@ -652,42 +712,54 @@ class TrackerArchiveService(_TrackerServiceBase):
                 if uri_compare == target_compare:
                     matching_coords.add((m_name, m_inst, loc_uri))
 
-        sibling_evictions: list[tuple[Artifact, Optional[str]]] = []
+        coord_rows_all: list[ArtifactLocationRow] = []
         evict_location_ids: set[uuid.UUID] = {
             r.location_id for r in matching_non_archive_rows
         }
-        seen_sibling_ids: set[uuid.UUID] = (
-            {artifact.id} if artifact.id is not None else set()
-        )
         for m_name, m_inst, loc_uri in matching_coords:
-            coord_rows = self.db.get_active_coordinate_locations(
+            for c_row in self.db.get_active_coordinate_locations(
                 mount_name=m_name,
                 mount_instance_id=m_inst,
                 uri=loc_uri,
-            )
-            for c_row in coord_rows:
+            ):
                 if c_row.site in ("archive", "advisory"):
                     continue
                 evict_location_ids.add(c_row.location_id)
-                if (
-                    c_row.artifact_id is not None
-                    and c_row.artifact_id not in seen_sibling_ids
-                ):
-                    seen_sibling_ids.add(c_row.artifact_id)
-                    sib_art = self.db.get_artifact(c_row.artifact_id)
-                    if sib_art is None:
-                        continue
-                    sib_ok, sib_arch = self._has_surviving_backing(
-                        sib_art, target_compare
-                    )
-                    if not sib_ok:
-                        raise ValueError(
-                            f"Refusing to evict shared container {target_path} for "
-                            f"artifact {artifact.key!r}: sibling artifact "
-                            f"{sib_art.key!r} ({sib_art.member!r}) has no surviving "
-                            "archive or ingested table."
-                        )
-                    sibling_evictions.append((sib_art, sib_arch))
+                coord_rows_all.append(c_row)
+
+        candidate_siblings = self.db.find_artifacts_for_eviction_coordinates(
+            artifact_ids=[
+                r.artifact_id for r in coord_rows_all if r.artifact_id is not None
+            ],
+            whole_digests=[
+                r.digest
+                for r in coord_rows_all
+                if r.digest is not None and r.member == ""
+            ],
+            member_digests=[
+                (r.digest, r.member)
+                for r in coord_rows_all
+                if r.digest is not None and r.member != ""
+            ],
+        )
+        sibling_evictions: list[tuple[Artifact, Optional[str]]] = []
+        for sib_art in candidate_siblings:
+            if sib_art.id == artifact.id:
+                continue
+            sib_ok, sib_arch, sib_dep = self._has_surviving_sibling_backing(
+                sib_art,
+                target_compare=target_compare,
+                evicted_location_ids=evict_location_ids,
+            )
+            if not sib_ok:
+                raise ValueError(
+                    f"Refusing to evict shared container {target_path} for "
+                    f"artifact {artifact.key!r}: sibling artifact "
+                    f"{sib_art.key!r} ({sib_art.member!r}) has no surviving "
+                    "archive or ingested table."
+                )
+            if sib_dep:
+                sibling_evictions.append((sib_art, sib_arch))
 
         evicted_resolved = Path(os.path.realpath(target_path))
         if _is_file_bundle_artifact(artifact):

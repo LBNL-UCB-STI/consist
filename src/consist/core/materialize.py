@@ -1493,6 +1493,7 @@ def _select_materialize_artifact_source(
             return resolved, resolved_kind, True, False
         if saw_mismatch:
             return None, None, True, True
+        return None, None, True, False
 
     candidate_roots: list[
         tuple[

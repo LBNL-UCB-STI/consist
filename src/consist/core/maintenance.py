@@ -26,6 +26,7 @@ from consist.core.persistence import (
     _dump_optional_json,
     lookup_live_db_by_path,
 )
+from consist.core.run_resolution import format_input_link_role
 from consist.digest import canonical_json_sha256
 from consist.location import ArtifactLocationRow, LocationSite
 from consist.models.artifact import Artifact
@@ -159,6 +160,14 @@ class DatabaseMaintenance:
         self.run_dir = Path(run_dir)
         self._mounts: dict[str, str] = (
             {str(k): str(v) for k, v in mounts.items()} if mounts else {}
+        )
+
+    @staticmethod
+    def _artifact_location_digest_match_sql(*, loc_alias: str, art_alias: str) -> str:
+        return (
+            f'{art_alias}."digest" = {loc_alias}."digest" '
+            f"AND (({loc_alias}.\"site\" IN ('archive', 'advisory') AND {loc_alias}.\"member\" = '') "
+            f'OR COALESCE({art_alias}."member", \'\') = {loc_alias}."member")'
         )
 
     def _deletion_allowed_roots(self) -> tuple[Path, ...]:
@@ -756,21 +765,23 @@ class DatabaseMaintenance:
                 )
 
             if self.db.has_artifact_location_table():
+                loc_art_match = self._artifact_location_digest_match_sql(
+                    loc_alias="al", art_alias="a"
+                )
                 if selected_orphaned_artifact_ids:
                     self.db.execute(
-                        """
+                        f"""
                         UPDATE artifact_location AS al
                         SET artifact_id = (
                             SELECT a.id FROM main.artifact AS a
-                            WHERE a.digest = al.digest
-                              AND COALESCE(a.member, '') = al.member
+                            WHERE {loc_art_match}
                             LIMIT 1
                         )
                         WHERE al.site IN ('workspace', 'external')
                           AND al.digest IS NOT NULL
                           AND CAST(al.artifact_id AS VARCHAR) IN (SELECT UNNEST(?))
                           AND EXISTS (
-                              SELECT 1 FROM main.artifact AS a WHERE a.digest = al.digest
+                              SELECT 1 FROM main.artifact AS a WHERE {loc_art_match}
                           )
                         """,
                         [selected_orphaned_artifact_ids],
@@ -783,7 +794,7 @@ class DatabaseMaintenance:
                         [selected_orphaned_artifact_ids],
                     )
                 self.db.execute(
-                    """
+                    f"""
                     DELETE FROM artifact_location AS al
                     WHERE (
                         al.artifact_id IS NULL
@@ -794,7 +805,7 @@ class DatabaseMaintenance:
                     AND (
                         al.digest IS NULL
                         OR NOT EXISTS (
-                            SELECT 1 FROM main.artifact AS a WHERE a.digest = al.digest
+                            SELECT 1 FROM main.artifact AS a WHERE {loc_art_match}
                         )
                     )
                     """
@@ -1235,24 +1246,27 @@ class DatabaseMaintenance:
                         for col in loc_cols:
                             if col == '"artifact_id"':
                                 sel_exprs.append(
-                                    'CASE WHEN CAST("artifact_id" AS VARCHAR) IN (SELECT UNNEST(?)) '
-                                    'THEN "artifact_id" ELSE NULL END AS "artifact_id"'
+                                    'CASE WHEN CAST("al"."artifact_id" AS VARCHAR) IN (SELECT UNNEST(?)) '
+                                    'THEN "al"."artifact_id" ELSE NULL END AS "artifact_id"'
                                 )
                                 sel_params.append(artifact_ids)
                             else:
-                                sel_exprs.append(col)
+                                sel_exprs.append(f'"al".{col}')
+                        export_match_sql = self._artifact_location_digest_match_sql(
+                            loc_alias='"al"', art_alias='"a"'
+                        )
                         cur.execute(
                             f"""
                             INSERT INTO {self._qualified_table_sql("artifact_location", catalog=alias)} ({col_sql})
                             SELECT {", ".join(sel_exprs)}
-                            FROM {self._qualified_table_sql("artifact_location")}
-                            WHERE CAST(artifact_id AS VARCHAR) IN (SELECT UNNEST(?))
+                            FROM {self._qualified_table_sql("artifact_location")} AS "al"
+                            WHERE CAST("al"."artifact_id" AS VARCHAR) IN (SELECT UNNEST(?))
                                OR (
-                                   digest IS NOT NULL
-                                   AND digest IN (
-                                       SELECT DISTINCT digest FROM main.artifact
-                                       WHERE CAST(id AS VARCHAR) IN (SELECT UNNEST(?))
-                                         AND digest IS NOT NULL
+                                   "al"."digest" IS NOT NULL
+                                   AND EXISTS (
+                                       SELECT 1 FROM main."artifact" AS "a"
+                                       WHERE CAST("a"."id" AS VARCHAR) IN (SELECT UNNEST(?))
+                                         AND {export_match_sql}
                                    )
                                )
                             ON CONFLICT (location_id) DO NOTHING
@@ -1771,6 +1785,15 @@ class DatabaseMaintenance:
                                     if '"observed_at_ns"' in loc_cols and upd_cols
                                     else 'ON CONFLICT ("location_id") DO NOTHING'
                                 )
+                                merge_match_sql = (
+                                    self._artifact_location_digest_match_sql(
+                                        loc_alias='"src_loc"', art_alias='"src_art"'
+                                    )
+                                    if {'"digest"', '"site"', '"member"'}.issubset(
+                                        loc_cols
+                                    )
+                                    else '"src_art"."digest" = "src_loc"."digest"'
+                                )
                                 cur.execute(
                                     f"""
                                     INSERT INTO main."artifact_location" ({col_sql})
@@ -1779,11 +1802,11 @@ class DatabaseMaintenance:
                                     WHERE CAST("src_loc"."artifact_id" AS VARCHAR) IN (SELECT UNNEST(?))
                                        OR (
                                            "src_loc"."digest" IS NOT NULL
-                                           AND "src_loc"."digest" IN (
-                                               SELECT DISTINCT "digest"
-                                               FROM {self._qualified_table_sql("artifact", catalog=alias)}
-                                               WHERE CAST("id" AS VARCHAR) IN (SELECT UNNEST(?))
-                                                 AND "digest" IS NOT NULL
+                                           AND EXISTS (
+                                               SELECT 1
+                                               FROM {self._qualified_table_sql("artifact", catalog=alias)} AS "src_art"
+                                               WHERE CAST("src_art"."id" AS VARCHAR) IN (SELECT UNNEST(?))
+                                                 AND {merge_match_sql}
                                            )
                                        )
                                     {conflict_sql}
@@ -1808,6 +1831,13 @@ class DatabaseMaintenance:
                                             AND (
                                                 al.site IN ('workspace', 'external')
                                                 OR newer.digest IS DISTINCT FROM al.digest
+                                                OR (
+                                                    (
+                                                        al.digest LIKE 'stat_file_v1:%'
+                                                        OR al.digest LIKE 'stat_dir_v1:%'
+                                                    )
+                                                    AND newer.artifact_id IS DISTINCT FROM al.artifact_id
+                                                )
                                             )
                                             AND (
                                                 newer.observed_at_ns > al.observed_at_ns
@@ -2186,30 +2216,34 @@ class DatabaseMaintenance:
             run_meta_map = run.meta if isinstance(run.meta, Mapping) else {}
             roles_by_input_aid: dict[str, list[str]] = {}
             raw_ib = run_meta_map.get("input_binding")
-            strict_cnt = 0
-            if isinstance(raw_ib, Mapping) and isinstance(raw_ib.get("bindings"), list):
-                ib_list = raw_ib["bindings"]
-                strict_cnt = len(ib_list)
-                for idx, entry in enumerate(ib_list):
-                    if not isinstance(entry, Mapping):
-                        continue
-                    role_val = str(entry.get("role") or "")
-                    aid_u = self._coerce_uuid(entry.get("artifact_id"))
-                    if aid_u is None and idx < len(record.inputs):
-                        aid_u = self._coerce_uuid(record.inputs[idx].id)
-                    if aid_u is not None:
-                        aid_s = str(aid_u)
-                        cur_roles = roles_by_input_aid.setdefault(aid_s, [])
-                        if role_val not in cur_roles:
-                            cur_roles.append(role_val)
             raw_ii = run_meta_map.get("input_identity")
-            if isinstance(raw_ii, Mapping) and isinstance(raw_ii.get("bindings"), list):
-                for idx, entry in enumerate(raw_ii["bindings"]):
-                    if not isinstance(entry, Mapping):
+            raw_sc = (
+                raw_ii.get("strict_input_count", 0)
+                if isinstance(raw_ii, Mapping)
+                else 0
+            )
+            strict_cnt = (
+                int(raw_sc)
+                if isinstance(raw_sc, int)
+                and not isinstance(raw_sc, bool)
+                and raw_sc > 0
+                else 0
+            )
+            for blk_map, offset in ((raw_ib, 0), (raw_ii, strict_cnt)):
+                if not isinstance(blk_map, Mapping) or not isinstance(
+                    blk_map.get("bindings"), list
+                ):
+                    continue
+                for idx, entry in enumerate(blk_map["bindings"]):
+                    if not isinstance(entry, Mapping) or entry.get("role") is None:
                         continue
-                    role_val = str(entry.get("role") or "")
+                    kind_raw = entry.get("kind")
+                    kind_str = kind_raw if isinstance(kind_raw, str) else None
+                    role_val = format_input_link_role(kind_str, entry.get("role"))
+                    if not role_val:
+                        continue
                     aid_u = self._coerce_uuid(entry.get("artifact_id"))
-                    eff_idx = idx + strict_cnt
+                    eff_idx = idx + offset
                     if aid_u is None and eff_idx < len(record.inputs):
                         aid_u = self._coerce_uuid(record.inputs[eff_idx].id)
                     if aid_u is not None:

@@ -71,9 +71,9 @@ CREATE TABLE IF NOT EXISTS artifact_location (
     witness_json JSON,
     observed_at_ns BIGINT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS ix_artifact_location_digest_status ON artifact_location (digest, status);
-CREATE INDEX IF NOT EXISTS ix_artifact_location_artifact_status ON artifact_location (artifact_id, status);
-CREATE INDEX IF NOT EXISTS ix_artifact_location_coord_status ON artifact_location (site, mount_name, mount_instance_id, uri, member, status);
+CREATE INDEX IF NOT EXISTS ix_artifact_location_digest ON artifact_location (digest);
+CREATE INDEX IF NOT EXISTS ix_artifact_location_artifact_id ON artifact_location (artifact_id);
+CREATE INDEX IF NOT EXISTS ix_artifact_location_uri ON artifact_location (uri);
 
 CREATE TABLE IF NOT EXISTS run_artifact_link (
     run_id VARCHAR NOT NULL,

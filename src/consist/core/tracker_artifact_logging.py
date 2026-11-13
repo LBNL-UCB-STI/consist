@@ -166,6 +166,7 @@ class ArtifactLoggingCoordinator:
         facet_index: bool = False,
         known_latest_artifact_at_uri: Optional[Artifact] = None,
         latest_artifact_lookup_done: bool = False,
+        link_role: Optional[str] = None,
         **meta: Any,
     ) -> Artifact:
         """Log one artifact while preserving tracker run-state invariants."""
@@ -336,6 +337,7 @@ class ArtifactLoggingCoordinator:
                 facet=prepared_artifact_facet_bundle.facet,
                 meta_updates=prepared_artifact_facet_bundle.meta_updates,
                 kv_rows=prepared_artifact_facet_bundle.kv_rows,
+                role=link_role,
                 recovery_roots=normalized_recovery_roots,
             )
             artifact_obj = self._replace_attached_artifact(
@@ -350,6 +352,7 @@ class ArtifactLoggingCoordinator:
                     artifact=artifact_obj,
                     direction=direction,
                 ),
+                role=link_role,
                 recovery_roots=normalized_recovery_roots,
             )
 

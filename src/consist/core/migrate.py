@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -31,6 +32,7 @@ from consist.core.persistence import (
     _quote_ident,
 )
 from consist.core.resolved_binding import _identity_payload_from_binding_evidence
+from consist.core.run_resolution import format_input_link_role
 from consist.digest import (
     Digest,
     build_manifest_v1,
@@ -40,6 +42,8 @@ from consist.digest import (
     normalize_logical_matrices_identity,
 )
 from consist.location import ArtifactLocationRow, LocationSite
+
+logger = logging.getLogger(__name__)
 
 _LOWER_HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 _WEAK_SCHEMES = frozenset(
@@ -379,6 +383,7 @@ def _migrate_artifacts_and_locations(
     ).fetchall()
 
     fs_cache: dict[tuple[Path, tuple[tuple[str, str], ...]], FileSystemManager] = {}
+    fs_by_run_id: dict[Optional[str], FileSystemManager] = {}
 
     def _get_fs(eff_rd: Path, eff_mounts: Mapping[str, str]) -> FileSystemManager:
         key = (eff_rd, tuple(sorted(eff_mounts.items())))
@@ -389,6 +394,9 @@ def _migrate_artifacts_and_locations(
         return fs_cache[key]
 
     def _fs_for_run(run_id: Optional[str]) -> FileSystemManager:
+        cached_fs = fs_by_run_id.get(run_id)
+        if cached_fs is not None:
+            return cached_fs
         rm_meta = run_meta_by_id.get(run_id) if run_id else None
         rm = rm_meta.get("mounts") if rm_meta else None
         hm = (
@@ -402,7 +410,11 @@ def _migrate_artifacts_and_locations(
             if isinstance(rrd, str) and rrd.strip()
             else None
         )
-        return _get_fs(hrd or cli_run_dir or src_path.parent, {**hm, **cli_mounts})
+        resolved_fs = _get_fs(
+            hrd or cli_run_dir or src_path.parent, {**hm, **cli_mounts}
+        )
+        fs_by_run_id[run_id] = resolved_fs
+        return resolved_fs
 
     def _probe(fs: FileSystemManager, uri: str) -> tuple[LocationSite, Optional[Path]]:
         m_name, m_inst, m_uri = fs.location_coordinate_for_uri(uri)
@@ -653,11 +665,12 @@ def _promote_run_identities_and_links(
             for idx, b in enumerate(blk_bindings):
                 if not isinstance(b, Mapping):
                     continue
-                kind, role_name = b.get("kind"), b.get("role")
-                if isinstance(kind, str) and role_name is not None:
+                kind_raw, role_name = b.get("kind"), b.get("role")
+                if role_name is not None:
+                    kind_str = kind_raw if isinstance(kind_raw, str) else None
                     aid = _resolve_aid(b, run_inputs, idx + offset)
                     if aid is not None:
-                        r_val = f"{kind}:{role_name}"
+                        r_val = format_input_link_role(kind_str, role_name)
                         lst = roles_by_aid.setdefault(aid, [])
                         if r_val not in lst:
                             lst.append(r_val)
@@ -1065,21 +1078,29 @@ def migrate_database(
                         rows=link_rows,
                     )
 
-                for v_schema, _v_name, v_sql in src_views:
-                    if not v_sql:
-                        continue
-                    s_str = str(v_schema)
+            for v_schema, _v_name, v_sql in src_views:
+                if not v_sql:
+                    continue
+                s_str = str(v_schema)
+                cleaned_sql = str(v_sql).strip()
+                if cleaned_sql.upper().startswith("CREATE VIEW "):
+                    cleaned_sql = (
+                        "CREATE OR REPLACE VIEW " + cleaned_sql[len("CREATE VIEW ") :]
+                    )
+                try:
                     if s_str != "main":
-                        cur.execute(
+                        dst_db.execute(
                             f"CREATE SCHEMA IF NOT EXISTS {_quote_ident(s_str)}"
                         )
-                    cleaned_sql = str(v_sql).strip()
-                    if cleaned_sql.upper().startswith("CREATE VIEW "):
-                        cleaned_sql = (
-                            "CREATE OR REPLACE VIEW "
-                            + cleaned_sql[len("CREATE VIEW ") :]
-                        )
-                    cur.execute(cleaned_sql)
+                    dst_db.execute(cleaned_sql)
+                except duckdb.Error as exc:
+                    logger.warning(
+                        "Skipping stale or incompatible v0.4 view %s.%s during migration: %s",
+                        s_str,
+                        _v_name,
+                        exc,
+                    )
+                else:
                     views_copied += 1
 
             dst_db.execute("CHECKPOINT")

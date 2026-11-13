@@ -3442,15 +3442,49 @@ def load(
             )
 
         if db_fallback == "inputs-only":
-            evicted_to_db = (
-                isinstance(tracker, Tracker)
-                and tracker.db is not None
-                and tracker.db.has_evicted_artifact_location(
+            evicted_to_db = False
+            if isinstance(tracker, Tracker) and tracker.db is not None:
+                m_name, m_inst, loc_uri = tracker.fs.location_coordinate_for_uri(
+                    artifact.uri
+                )
+                loc_site = (
+                    "workspace" if m_name in ("workspace", "runs") else "external"
+                )
+                extra_insts: list[str] = []
+                if isinstance(artifact, Artifact) and artifact.run_id is not None:
+                    owning_run = tracker.get_run(str(artifact.run_id))
+                    run_meta = (
+                        owning_run.meta
+                        if owning_run is not None
+                        and isinstance(owning_run.meta, MappingABC)
+                        else {}
+                    )
+                    mounts_meta = run_meta.get("mounts")
+                    hist_root = (
+                        mounts_meta.get(m_name)
+                        if isinstance(mounts_meta, MappingABC)
+                        else None
+                    ) or (
+                        run_meta.get("_physical_run_dir")
+                        if m_name in ("workspace", "runs")
+                        else None
+                    )
+                    if isinstance(hist_root, str) and hist_root:
+                        from consist.location import workspace_mount_instance_id
+
+                        hist_inst = workspace_mount_instance_id(hist_root)
+                        if hist_inst != m_inst:
+                            extra_insts.append(hist_inst)
+                evicted_to_db = tracker.db.has_evicted_artifact_location(
                     artifact_id=artifact.id,
                     digest=artifact.digest,
                     member=artifact.member,
+                    site=loc_site,
+                    mount_name=m_name,
+                    mount_instance_id=m_inst,
+                    extra_mount_instance_ids=extra_insts,
+                    uri=loc_uri,
                 )
-            )
             if not evicted_to_db:
                 if not tracker or not tracker.current_consist:
                     raise FileNotFoundError(

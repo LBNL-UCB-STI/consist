@@ -95,6 +95,8 @@ class _HasDb(Protocol):
 @runtime_checkable
 class _HasHistoryService(Protocol):
     _history_service: Any
+    current_consist: Any
+    _last_consist: Any
 
 
 @runtime_checkable
@@ -442,6 +444,30 @@ def warm_artifact_locations_cache(
         )
 
 
+def _find_sibling_outputs_for_prefetch(
+    tracker: "Tracker", artifact: Artifact
+) -> Optional[tuple[Artifact, ...]]:
+    if not isinstance(tracker, _HasHistoryService):
+        return None
+    for rec in (tracker.current_consist, tracker._last_consist):
+        if rec is not None and len(rec.outputs) > 1:
+            if any(s.id == artifact.id for s in rec.outputs):
+                return tuple(rec.outputs)
+    cache_map = tracker._history_service._run_artifacts_cache
+    if artifact.run_id is not None:
+        run_arts = cache_map.get(str(artifact.run_id))
+        if run_arts is not None and len(run_arts.outputs) > 1:
+            siblings = tuple(run_arts.outputs.values())
+            if any(s.id == artifact.id for s in siblings):
+                return siblings
+    for cached_arts in reversed(list(cache_map.values())):
+        if len(cached_arts.outputs) > 1:
+            siblings = tuple(cached_arts.outputs.values())
+            if any(s.id == artifact.id for s in siblings):
+                return siblings
+    return None
+
+
 def _load_cached_active_locations(
     tracker: "Tracker",
     artifact: Artifact,
@@ -456,17 +482,12 @@ def _load_cached_active_locations(
     cached = db._location_resolution_cache.get(cache_key)
     if cached is not None:
         return cached
-    if artifact.run_id is not None and isinstance(tracker, _HasHistoryService):
-        run_arts = tracker._history_service._run_artifacts_cache.get(
-            str(artifact.run_id)
-        )
-        if run_arts is not None and len(run_arts.outputs) > 1:
-            siblings = tuple(run_arts.outputs.values())
-            if any(s.id == artifact.id for s in siblings):
-                warm_artifact_locations_cache(tracker, siblings)
-                warmed = db._location_resolution_cache.get(cache_key)
-                if warmed is not None:
-                    return warmed
+    siblings = _find_sibling_outputs_for_prefetch(tracker, artifact)
+    if siblings is not None:
+        warm_artifact_locations_cache(tracker, siblings)
+        warmed = db._location_resolution_cache.get(cache_key)
+        if warmed is not None:
+            return warmed
     rows = db.get_active_artifact_locations(
         artifact_id=artifact.id,
         digest=artifact.digest,

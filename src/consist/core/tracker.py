@@ -5778,6 +5778,7 @@ class Tracker:
         direction: str,
         *,
         profile_label: Optional[str] = None,
+        role: Optional[str] = None,
         recovery_roots: Optional[Sequence[str]] = None,
     ) -> None:
         """
@@ -5803,6 +5804,7 @@ class Tracker:
             artifact,
             direction,
             profile_label=profile_label,
+            role=role,
             recovery_roots=recovery_roots,
         )
 

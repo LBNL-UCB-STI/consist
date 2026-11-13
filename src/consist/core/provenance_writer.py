@@ -50,7 +50,7 @@ class ProvenanceWriter:
         self._artifact_batch_depth = 0
         self._batch_pending_json_flush = False
         self._batch_pending_artifacts: list[
-            tuple["Artifact", str, Optional[tuple[str, ...]]]
+            tuple["Artifact", str, Optional[tuple[str, ...]], Optional[str]]
         ] = []
         self._batch_pending_artifact_facet_bundles: list[
             tuple[
@@ -317,11 +317,14 @@ class ProvenanceWriter:
         direction: str,
         *,
         profile_label: Optional[str] = None,
+        role: Optional[str] = None,
         recovery_roots: Optional[Sequence[str]] = None,
     ) -> None:
         roots_tuple = tuple(recovery_roots) if recovery_roots else None
         if self._artifact_batch_depth > 0:
-            self._batch_pending_artifacts.append((artifact, direction, roots_tuple))
+            self._batch_pending_artifacts.append(
+                (artifact, direction, roots_tuple, role)
+            )
             return
 
         tracker = self._tracker
@@ -330,12 +333,16 @@ class ProvenanceWriter:
                 locations = self._build_artifact_location_rows(
                     artifact, direction=direction, recovery_roots=roots_tuple
                 )
+                extra_kwargs: Dict[str, Any] = {}
+                if role is not None:
+                    extra_kwargs["role"] = role
                 tracker.db.sync_artifact(
                     artifact,
                     tracker.current_consist.run.id,
                     direction,
                     profile_label=profile_label,
                     locations=locations or None,
+                    **extra_kwargs,
                 )
             except Exception as e:
                 logging.warning("Database sync failed: %s", e)
@@ -348,6 +355,7 @@ class ProvenanceWriter:
         facet: ArtifactFacet,
         meta_updates: Dict[str, Any],
         kv_rows: Optional[List[ArtifactKV]] = None,
+        role: Optional[str] = None,
         recovery_roots: Optional[Sequence[str]] = None,
     ) -> "Artifact":
         roots_tuple = tuple(recovery_roots) if recovery_roots else None
@@ -356,7 +364,7 @@ class ProvenanceWriter:
         )
         if self._artifact_batch_depth > 0:
             self._batch_pending_artifacts.append(
-                (updated_artifact, direction, roots_tuple)
+                (updated_artifact, direction, roots_tuple, role)
             )
             self._batch_pending_artifact_facet_bundles.append(
                 (updated_artifact, facet, meta_updates, kv_rows)
@@ -369,6 +377,9 @@ class ProvenanceWriter:
                 locations = self._build_artifact_location_rows(
                     updated_artifact, direction=direction, recovery_roots=roots_tuple
                 )
+                extra_kwargs: Dict[str, Any] = {}
+                if role is not None:
+                    extra_kwargs["role"] = role
                 return tracker.db.sync_artifact_with_facet_bundle(
                     artifact,
                     tracker.current_consist.run.id,
@@ -377,6 +388,7 @@ class ProvenanceWriter:
                     meta_updates=meta_updates,
                     kv_rows=kv_rows,
                     locations=locations or None,
+                    **extra_kwargs,
                 )
             except Exception as e:
                 logging.warning("Database sync failed: %s", e)
@@ -385,7 +397,7 @@ class ProvenanceWriter:
     def _sync_artifacts_now(
         self,
         artifacts_with_direction: Sequence[
-            tuple["Artifact", str, Optional[tuple[str, ...]]]
+            tuple["Artifact", str, Optional[tuple[str, ...]], Optional[str]]
         ],
     ) -> None:
         tracker = self._tracker
@@ -394,28 +406,33 @@ class ProvenanceWriter:
 
         run_id = tracker.current_consist.run.id
         artifacts_by_direction: Dict[
-            str, List[tuple["Artifact", Optional[tuple[str, ...]]]]
+            str,
+            List[tuple["Artifact", Optional[tuple[str, ...]], Optional[str]]],
         ] = {}
-        for artifact, direction, roots_tuple in artifacts_with_direction:
+        for artifact, direction, roots_tuple, role in artifacts_with_direction:
             artifacts_by_direction.setdefault(direction, []).append(
-                (artifact, roots_tuple)
+                (artifact, roots_tuple, role)
             )
 
         for direction, items in artifacts_by_direction.items():
             try:
-                artifacts = [art for art, _ in items]
+                artifacts = [art for art, _, _ in items]
                 locations: list[ArtifactLocationRow] = []
-                for art, roots_tuple in items:
+                for art, roots_tuple, _ in items:
                     locations.extend(
                         self._build_artifact_location_rows(
                             art, direction=direction, recovery_roots=roots_tuple
                         )
                     )
+                extra_kwargs: Dict[str, Any] = {}
+                if any(role is not None for _, _, role in items):
+                    extra_kwargs["link_roles"] = [role for _, _, role in items]
                 tracker.db.sync_artifacts(
                     artifacts=artifacts,
                     run_id=run_id,
                     direction=direction,
                     locations=locations or None,
+                    **extra_kwargs,
                 )
             except Exception as e:
                 logging.warning("Database sync failed: %s", e)

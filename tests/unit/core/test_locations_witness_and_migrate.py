@@ -1364,7 +1364,7 @@ def test_migrate_atomic_swap_rollback_mounts_cli_dry_run_no_mkdir_and_strict_bin
                 [shared_aid],
             )
         )
-        assert roles == ["named:left", "named:right"]
+        assert roles == ["left", "right"]
         inv_row = check_tracker.db.fetchone(
             "SELECT binding_json FROM run_binding_invocation WHERE id = ?",
             [inv_id],
@@ -1608,6 +1608,15 @@ def test_maintenance_rebuild_producer_priority_archive_sidecar_export_merge_and_
             inputs={"left": prod_art, "right": prod_art},
             cache_options=CacheOptions(code_identity="callable_module"),
         )
+        assert tracker.db is not None
+        live_roles = sorted(
+            r[0]
+            for r in tracker.db.fetchall(
+                "SELECT role FROM run_artifact_link WHERE run_id = 'a_consumer' AND artifact_id = ?",
+                [prod_art.id],
+            )
+        )
+        assert live_roles == ["left", "right"]
 
         # Second run producing identical bytes (same digest, distinct artifact_id)
         dup_out = run_dir / "dup_out.parquet"
@@ -1780,5 +1789,614 @@ def test_view_factory_and_materialize_artifacts_reject_corrupt_or_evicted_scratc
         staged_map = materialize_artifacts(tracker, [(a2, dest_f2)], on_missing="raise")
         assert staged_map == {"trips": str(dest_f2.resolve())}
         assert pd.read_parquet(dest_f2)["trip_id"].tolist() == [3, 4]
+    finally:
+        tracker.close()
+
+
+def test_evict_artifact_shared_digest_coordinate_collision_vs_independent_file(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs"
+    db_path = tmp_path / "evict_collision.duckdb"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    tracker = Tracker(run_dir=run_dir, db_path=str(db_path))
+    try:
+        # 1. Same physical path + same digest: art1 un-ingested/un-archived, art2 ingested.
+        shared_path = run_dir / "shared.parquet"
+        df = pd.DataFrame({"metric_id": [1, 2], "score": [3.5, 4.5]})
+        df.to_parquet(shared_path)
+        raw_bytes = shared_path.read_bytes()
+
+        with tracker.start_run("r_shared_1", model="shared_evict", config={"step": 1}):
+            art1 = tracker.log_output(shared_path, key="shared_unbacked")
+
+        # Rewrite identical bytes (updating witness mtime/inode so location artifact_id updates to art2)
+        shared_path.write_bytes(raw_bytes)
+        with tracker.start_run("r_shared_2", model="shared_evict", config={"step": 2}):
+            art2 = tracker.log_output(shared_path, key="shared_ingested")
+            tracker.ingest(art2, schema=_IngestedMetricRow)
+
+        assert art1.digest == art2.digest
+        with pytest.raises(ValueError, match="shared container"):
+            tracker.evict_artifact(art2)
+        assert shared_path.is_file()
+
+        # Even if artifact_location.artifact_id is NULL (e.g. post export/merge/purge), art1 is still protected!
+        assert tracker.db is not None
+        tracker.db.execute(
+            "UPDATE artifact_location SET artifact_id = NULL WHERE uri = 'workspace://shared.parquet'"
+        )
+        with pytest.raises(ValueError, match="shared container"):
+            tracker.evict_artifact(art2)
+        assert shared_path.is_file()
+        assert art1.path == shared_path.resolve()
+
+        # 2. Same digest at an INDEPENDENT file other.parquet: evicting evictable.parquet succeeds!
+        other_path = run_dir / "other.parquet"
+        evictable_path = run_dir / "evictable.parquet"
+        df2 = pd.DataFrame({"metric_id": [10, 20], "score": [9.0, 10.0]})
+        df2.to_parquet(other_path)
+        evictable_path.write_bytes(other_path.read_bytes())
+
+        with tracker.start_run(
+            "r_indep_other", model="shared_evict", config={"step": 3}
+        ):
+            art_other = tracker.log_output(other_path, key="other_unbacked")
+
+        with tracker.start_run(
+            "r_indep_evict", model="shared_evict", config={"step": 4}
+        ):
+            art_evict = tracker.log_output(evictable_path, key="evict_ingested")
+            tracker.ingest(art_evict, schema=_IngestedMetricRow)
+
+        assert art_other.digest == art_evict.digest
+        evicted = tracker.evict_artifact(art_evict)
+        assert evicted == evictable_path.resolve()
+        assert not evictable_path.exists()
+        assert other_path.is_file()
+        assert art_other.path == other_path.resolve()
+    finally:
+        tracker.close()
+
+
+def test_migrate_database_skips_stale_cold_and_legacy_column_views_with_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    db_path = tmp_path / "cold_views_v04.duckdb"
+    live_parq = tmp_path / "transient_cold.parquet"
+    pd.DataFrame({"v": [1, 2]}).to_parquet(live_parq)
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    src_con = duckdb.connect(str(db_path))
+    try:
+        src_con.execute(
+            "CREATE TABLE run ("
+            "id VARCHAR PRIMARY KEY, parent_run_id VARCHAR, status VARCHAR, "
+            "model_name VARCHAR, config_hash VARCHAR, git_hash VARCHAR, "
+            "input_hash VARCHAR, signature VARCHAR, meta JSON, "
+            "started_at TIMESTAMPTZ, ended_at TIMESTAMPTZ, "
+            "created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ)"
+        )
+        src_con.execute(
+            "CREATE TABLE artifact ("
+            "id UUID PRIMARY KEY, key VARCHAR, container_uri VARCHAR, driver VARCHAR, "
+            "hash VARCHAR, run_id VARCHAR, meta JSON, created_at TIMESTAMPTZ)"
+        )
+        src_con.execute(
+            "INSERT INTO run VALUES ('r_v04', NULL, 'completed', 'm', 'c', 'g', NULL, NULL, '{}', ?, ?, ?, ?)",
+            [now_iso, now_iso, now_iso, now_iso],
+        )
+        src_con.execute("CREATE SCHEMA analytics")
+        src_con.execute(
+            f"CREATE VIEW stale_cold_v AS SELECT * FROM read_parquet('{live_parq.as_posix()}')"
+        )
+        src_con.execute(
+            "CREATE VIEW legacy_col_v AS SELECT id, container_uri, hash FROM artifact"
+        )
+        src_con.execute("CREATE VIEW valid_runs_v AS SELECT id FROM run")
+        src_con.execute("CREATE VIEW analytics.valid_ans_v AS SELECT 42 AS ans")
+    finally:
+        src_con.close()
+
+    # Remove the referenced Parquet file before cold migration so replay hits IOException!
+    live_parq.unlink()
+
+    with caplog.at_level("WARNING", logger="consist.core.migrate"):
+        report = migrate_database(db_path)
+
+    assert report.runs_migrated == 1
+    assert report.views_copied == 2
+    warn_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "Skipping stale or incompatible v0.4 view main.stale_cold_v" in warn_text
+    assert "Skipping stale or incompatible v0.4 view main.legacy_col_v" in warn_text
+
+    with duckdb.connect(str(db_path), read_only=True) as con:
+        assert con.execute("SELECT id FROM valid_runs_v").fetchall() == [("r_v04",)]
+        assert con.execute("SELECT ans FROM analytics.valid_ans_v").fetchall() == [
+            (42,)
+        ]
+
+
+def test_maintenance_hdf5_member_digest_isolation_and_weak_digest_merge_supersession(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs"
+    arch_dir = tmp_path / "arch"
+    db_path = tmp_path / "h5_maint.duckdb"
+    export_db = tmp_path / "h5_exported.duckdb"
+    merge_dst_db = tmp_path / "h5_merge_dst.duckdb"
+    weak_src_db = tmp_path / "weak_src.duckdb"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    arch_dir.mkdir(parents=True, exist_ok=True)
+
+    tracker = Tracker(run_dir=run_dir, db_path=str(db_path))
+    try:
+        h5_one = run_dir / "one.h5"
+        h5_two = run_dir / "two.h5"
+        with h5py.File(h5_one, "w") as hf1:
+            hf1.create_dataset("/t1", data=[100, 200, 300])
+        with h5py.File(h5_two, "w") as hf2:
+            hf2.create_dataset("/t2", data=[100, 200, 300])
+
+        with tracker.start_run("r_t1", model="h5_iso", config={"m": "t1"}):
+            art_t1 = tracker.log_h5_table(h5_one, table_path="/t1", key="t1")
+        with tracker.start_run("r_t2", model="h5_iso", config={"m": "t2"}):
+            art_t2 = tracker.log_h5_table(h5_two, table_path="/t2", key="t2")
+
+        assert art_t1.digest == art_t2.digest
+        assert art_t1.member == "/t1"
+        assert art_t2.member == "/t2"
+        assert tracker.db is not None
+        maint = DatabaseMaintenance(db=tracker.db, run_dir=run_dir)
+
+        # 1. Export(["r_t2"]) must NOT leak /t1's workspace location despite identical digest!
+        maint.export(["r_t2"], export_db, include_data=False, include_snapshots=False)
+        with duckdb.connect(str(export_db), read_only=True) as con:
+            exported_members = [
+                r[0]
+                for r in con.execute(
+                    "SELECT member FROM artifact_location ORDER BY member"
+                ).fetchall()
+            ]
+            assert exported_members == ["/t2"]
+
+        # 2. Merge into fresh DB from a shard that has an unlinked /t1 location row + selected r_t2
+        dst_tracker = Tracker(run_dir=run_dir, db_path=str(merge_dst_db))
+        try:
+            assert dst_tracker.db is not None
+            DatabaseMaintenance(db=dst_tracker.db, run_dir=run_dir).merge(
+                export_db, conflict="skip", include_snapshots=False
+            )
+            merged_members = [
+                r[0]
+                for r in dst_tracker.db.fetchall(
+                    "SELECT member FROM artifact_location ORDER BY member"
+                )
+            ]
+            assert merged_members == ["/t2"]
+        finally:
+            dst_tracker.close()
+
+        # 3. Purge(["r_t1"]) must NOT leave a zombie ('/t1', artifact_id=NULL) row!
+        maint.purge(["r_t1"], dry_run=False, delete_files=False, prune_cache=False)
+        surviving_members = [
+            (r[0], r[1])
+            for r in tracker.db.fetchall(
+                "SELECT member, status FROM artifact_location ORDER BY member"
+            )
+        ]
+        assert surviving_members == [("/t2", "active")]
+
+        # 4. Weak stat_file_v1 digest supersession in merge when artifact_id differs at same coordinate
+        weak_digest_str = "stat_file_v1:sha256:" + ("a" * 64)
+        aid_old = uuid.uuid4()
+        aid_new = uuid.uuid4()
+        old_weak_row = ArtifactLocationRow(
+            location_id=compute_location_id(
+                digest=Digest.parse(weak_digest_str),
+                artifact_id=aid_old,
+                site="archive",
+                mount_name="external",
+                mount_instance_id="fs:arch",
+                uri="file:///tmp/weak_arch.bin",
+                member="",
+            ),
+            digest=weak_digest_str,
+            artifact_id=aid_old,
+            site="archive",
+            mount_name="external",
+            mount_instance_id="fs:arch",
+            uri="file:///tmp/weak_arch.bin",
+            member="",
+            status="active",
+            witness=None,
+            observed_at_ns=1_000,
+        )
+        tracker.db.execute(
+            "INSERT INTO artifact (id, key, uri, driver, digest, member, run_id, meta, created_at) "
+            "VALUES (?, 'w_old', 'workspace://w.bin', 'binary', ?, NULL, 'r_t2', '{}', CURRENT_TIMESTAMP)",
+            [aid_old, weak_digest_str],
+        )
+        tracker.db.upsert_artifact_locations([old_weak_row])
+
+        src_weak_tracker = Tracker(run_dir=run_dir, db_path=str(weak_src_db))
+        try:
+            assert src_weak_tracker.db is not None
+            with src_weak_tracker.start_run("r_weak_src", model="weak"):
+                pass
+            src_weak_tracker.db.execute(
+                "INSERT INTO artifact (id, key, uri, driver, digest, member, run_id, meta, created_at) "
+                "VALUES (?, 'w_new', 'workspace://w.bin', 'binary', ?, NULL, 'r_weak_src', '{}', CURRENT_TIMESTAMP)",
+                [aid_new, weak_digest_str],
+            )
+            src_weak_tracker.db.execute(
+                "INSERT INTO run_artifact_link (run_id, artifact_id, direction, role, is_implicit) "
+                "VALUES ('r_weak_src', ?, 'output', 'w_new', FALSE)",
+                [aid_new],
+            )
+            new_weak_row = ArtifactLocationRow(
+                location_id=compute_location_id(
+                    digest=Digest.parse(weak_digest_str),
+                    artifact_id=aid_new,
+                    site="archive",
+                    mount_name="external",
+                    mount_instance_id="fs:arch",
+                    uri="file:///tmp/weak_arch.bin",
+                    member="",
+                ),
+                digest=weak_digest_str,
+                artifact_id=aid_new,
+                site="archive",
+                mount_name="external",
+                mount_instance_id="fs:arch",
+                uri="file:///tmp/weak_arch.bin",
+                member="",
+                status="active",
+                witness=None,
+                observed_at_ns=2_000,
+            )
+            src_weak_tracker.db.upsert_artifact_locations([new_weak_row])
+        finally:
+            src_weak_tracker.close()
+
+        maint.merge(weak_src_db, conflict="skip", include_snapshots=False)
+        weak_statuses = dict(
+            tracker.db.fetchall(
+                "SELECT artifact_id, status FROM artifact_location WHERE uri = 'file:///tmp/weak_arch.bin'"
+            )
+        )
+        assert weak_statuses[aid_old] == "stale"
+        assert weak_statuses[aid_new] == "active"
+    finally:
+        tracker.close()
+
+
+def test_unified_run_artifact_link_roles_across_live_tracker_migrate_and_rebuild(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs"
+    live_db = tmp_path / "live_roles.duckdb"
+    rebuilt_db = tmp_path / "rebuilt_roles.duckdb"
+    v04_db = tmp_path / "v04_roles.duckdb"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    tracker = Tracker(run_dir=run_dir, db_path=str(live_db))
+    try:
+        prod_file = run_dir / "prod.parquet"
+        dep_file = run_dir / "dep.parquet"
+        pd.DataFrame({"x": [1, 2]}).to_parquet(prod_file)
+        pd.DataFrame({"d": [9]}).to_parquet(dep_file)
+
+        with tracker.start_run("r_prod", model="roles_m"):
+            prod_art = tracker.log_output(prod_file, key="prod_out")
+            dep_art = tracker.log_output(dep_file, key="dep_out")
+
+        def _named_multi(left: pd.DataFrame, right: pd.DataFrame) -> None:
+            assert len(left) == len(right)
+
+        def _pos_zero() -> None:
+            return None
+
+        tracker.run(
+            fn=_named_multi,
+            name="r_named",
+            run_id="r_named",
+            inputs={"right": prod_art, "left": prod_art},
+            cache_options=CacheOptions(code_identity="callable_module"),
+        )
+        tracker.run(
+            fn=_pos_zero,
+            name="r_pos",
+            run_id="r_pos",
+            inputs=[prod_art],
+            depends_on=[dep_art],
+            execution_options=ExecutionOptions(input_binding="none"),
+            cache_options=CacheOptions(code_identity="callable_module"),
+        )
+
+        assert tracker.db is not None
+        live_links = sorted(
+            (str(r[0]), str(r[1]), str(r[2]), str(r[3]))
+            for r in tracker.db.fetchall(
+                "SELECT run_id, artifact_id, direction, role FROM run_artifact_link "
+                "WHERE run_id IN ('r_named', 'r_pos')"
+            )
+        )
+        expected_links = sorted(
+            [
+                ("r_named", str(prod_art.id), "input", "left"),
+                ("r_named", str(prod_art.id), "input", "right"),
+                ("r_pos", str(prod_art.id), "input", "positional:0"),
+                ("r_pos", str(dep_art.id), "input", "dependency:0"),
+            ]
+        )
+        assert live_links == expected_links
+
+        r_named_obj = tracker.get_run("r_named")
+        r_pos_obj = tracker.get_run("r_pos")
+        assert r_named_obj is not None and r_pos_obj is not None
+        r_named_meta = json.dumps(r_named_obj.meta)
+        r_pos_meta = json.dumps(r_pos_obj.meta)
+    finally:
+        tracker.close()
+
+    # 1. rebuild_from_json produces identical run_artifact_link rows
+    reb_tracker = Tracker(run_dir=run_dir, db_path=str(rebuilt_db))
+    try:
+        assert reb_tracker.db is not None
+        DatabaseMaintenance(db=reb_tracker.db, run_dir=run_dir).rebuild_from_json(
+            run_dir / "consist_runs", dry_run=False, mode="full"
+        )
+        rebuilt_links = sorted(
+            (str(r[0]), str(r[1]), str(r[2]), str(r[3]))
+            for r in reb_tracker.db.fetchall(
+                "SELECT run_id, artifact_id, direction, role FROM run_artifact_link "
+                "WHERE run_id IN ('r_named', 'r_pos')"
+            )
+        )
+        assert rebuilt_links == expected_links
+    finally:
+        reb_tracker.close()
+
+    # 2. migrate_database produces identical run_artifact_link rows
+    now_iso = datetime.now(timezone.utc).isoformat()
+    con = duckdb.connect(str(v04_db))
+    try:
+        con.execute(
+            "CREATE TABLE run ("
+            "id VARCHAR PRIMARY KEY, parent_run_id VARCHAR, status VARCHAR, "
+            "model_name VARCHAR, config_hash VARCHAR, git_hash VARCHAR, "
+            "input_hash VARCHAR, signature VARCHAR, meta JSON, "
+            "started_at TIMESTAMPTZ, ended_at TIMESTAMPTZ, "
+            "created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ)"
+        )
+        con.execute(
+            "CREATE TABLE artifact ("
+            "id UUID PRIMARY KEY, key VARCHAR, container_uri VARCHAR, driver VARCHAR, "
+            "hash VARCHAR, run_id VARCHAR, meta JSON, created_at TIMESTAMPTZ)"
+        )
+        con.execute(
+            "CREATE TABLE run_artifact_link ("
+            "run_id VARCHAR, artifact_id UUID, direction VARCHAR, is_implicit BOOLEAN)"
+        )
+        for rid, rmeta in (
+            ("r_prod", "{}"),
+            ("r_named", r_named_meta),
+            ("r_pos", r_pos_meta),
+        ):
+            con.execute(
+                "INSERT INTO run VALUES (?, NULL, 'completed', 'roles_m', 'cfg', 'git', NULL, NULL, ?, ?, ?, ?, ?)",
+                [rid, rmeta, now_iso, now_iso, now_iso, now_iso],
+            )
+        con.execute(
+            "INSERT INTO artifact VALUES (?, 'prod_out', 'workspace://prod.parquet', 'parquet', ?, 'r_prod', '{}', ?), "
+            "(?, 'dep_out', 'workspace://dep.parquet', 'parquet', ?, 'r_prod', '{}', ?)",
+            [
+                prod_art.id,
+                file_sha256(prod_file),
+                now_iso,
+                dep_art.id,
+                file_sha256(dep_file),
+                now_iso,
+            ],
+        )
+        con.execute(
+            "INSERT INTO run_artifact_link VALUES "
+            "('r_prod', ?, 'output', FALSE), "
+            "('r_prod', ?, 'output', FALSE), "
+            "('r_named', ?, 'input', FALSE), "
+            "('r_pos', ?, 'input', FALSE), "
+            "('r_pos', ?, 'input', FALSE)",
+            [prod_art.id, dep_art.id, prod_art.id, prod_art.id, dep_art.id],
+        )
+    finally:
+        con.close()
+
+    migrate_database(v04_db, run_dir=run_dir)
+    with duckdb.connect(str(v04_db), read_only=True) as mig_con:
+        migrated_links = sorted(
+            (str(r[0]), str(r[1]), str(r[2]), str(r[3]))
+            for r in mig_con.execute(
+                "SELECT run_id, artifact_id, direction, role FROM run_artifact_link "
+                "WHERE run_id IN ('r_named', 'r_pos')"
+            ).fetchall()
+        )
+    assert migrated_links == expected_links
+
+
+def test_load_inputs_only_rejects_externally_deleted_output_after_advisory_clear_or_sibling_eviction(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs"
+    adv_dir = tmp_path / "advisory"
+    db_path = tmp_path / "inputs_only_scope.duckdb"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    adv_dir.mkdir(parents=True, exist_ok=True)
+
+    tracker = Tracker(run_dir=run_dir, db_path=str(db_path))
+    try:
+        # 1. Externally deleted ingested output after setting & clearing advisory recovery roots
+        p_del = run_dir / "del_adv.parquet"
+        pd.DataFrame({"metric_id": [1], "score": [1.25]}).to_parquet(p_del)
+        with tracker.start_run("r_adv_clear", model="load_scope", config={"c": 1}):
+            art_del = tracker.log_output(p_del, key="del_adv")
+            tracker.ingest(art_del, schema=_IngestedMetricRow)
+
+        tracker.set_artifact_recovery_roots(art_del, [adv_dir], append=False)
+        tracker.set_artifact_recovery_roots(art_del, [], append=False)
+        p_del.unlink()
+
+        with pytest.raises(FileNotFoundError):
+            consist.load_df(art_del, tracker=tracker, db_fallback="inputs-only")
+
+        # 2. Unrelated evicted output sharing identical digest must NOT trigger silent DB fallback
+        p_s1 = run_dir / "same_1.parquet"
+        p_s2 = run_dir / "same_2.parquet"
+        pd.DataFrame({"metric_id": [2, 3], "score": [5.5, 6.5]}).to_parquet(p_s1)
+        p_s2.write_bytes(p_s1.read_bytes())
+
+        with tracker.start_run("r_same_1", model="load_scope", config={"c": 2}):
+            art_s1 = tracker.log_output(p_s1, key="s1")
+            tracker.ingest(art_s1, schema=_IngestedMetricRow)
+        with tracker.start_run("r_same_2", model="load_scope", config={"c": 3}):
+            art_s2 = tracker.log_output(p_s2, key="s2")
+            tracker.ingest(art_s2, schema=_IngestedMetricRow)
+
+        assert art_s1.digest == art_s2.digest
+        tracker.evict_artifact(art_s1)
+        # Intentional eviction on art_s1 DOES fall back cleanly
+        loaded_s1 = consist.load_df(art_s1, tracker=tracker, db_fallback="inputs-only")
+        assert sorted(loaded_s1["score"].tolist()) == [5.5, 6.5]
+
+        # External deletion of p_s2 (never evicted!) must still raise FileNotFoundError under inputs-only!
+        p_s2.unlink()
+        with pytest.raises(FileNotFoundError):
+            consist.load_df(art_s2, tracker=tracker, db_fallback="inputs-only")
+        # Explicit db_fallback="always" still recovers art_s2
+        loaded_s2 = consist.load_df(art_s2, tracker=tracker, db_fallback="always")
+        assert len(loaded_s2) >= 2
+    finally:
+        tracker.close()
+
+
+def test_duckdb_single_column_art_index_scans_and_second_cache_hit_prefetch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / "runs"
+    db_path = tmp_path / "art_index.duckdb"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    tracker = Tracker(run_dir=run_dir, db_path=str(db_path))
+    try:
+        assert tracker.db is not None
+        # Seed 4,000 rows so DuckDB's ART index scan engages deterministically on EXPLAIN ANALYZE
+        tracker.db.execute(
+            """
+            INSERT INTO artifact_location
+            SELECT uuid(),
+                   'sha256:file:' || lpad(i::VARCHAR, 64, '0'),
+                   uuid(),
+                   'workspace',
+                   'workspace',
+                   'fs:seed',
+                   'workspace://seed_' || i || '.parquet',
+                   '',
+                   'active',
+                   NULL,
+                   i
+            FROM range(4000) t(i)
+            """
+        )
+
+        # Capture exact SQL emitted by get_active_artifact_locations and get_active_coordinate_locations
+        captured_queries: list[tuple[str, list[Any]]] = []
+        orig_fetchall = tracker.db.fetchall
+
+        def _spy_fetchall(sql: str, params: Any = None) -> list[Any]:
+            if "artifact_location" in sql:
+                captured_queries.append((sql, list(params or [])))
+            return orig_fetchall(sql, params)
+
+        monkeypatch.setattr(tracker.db, "fetchall", _spy_fetchall)
+
+        probe_aid = uuid.uuid4()
+        tracker.db.get_active_artifact_locations(
+            artifact_id=probe_aid,
+            digest="sha256:file:" + ("0" * 63) + "7",
+            member="",
+        )
+        tracker.db.get_active_coordinate_locations(
+            mount_name="workspace",
+            mount_instance_id="fs:seed",
+            uri="workspace://seed_7.parquet",
+        )
+        tracker.db.has_evicted_artifact_location(
+            artifact_id=probe_aid,
+            digest="sha256:file:" + ("0" * 63) + "7",
+            member="",
+            site="workspace",
+            mount_name="workspace",
+            mount_instance_id="fs:seed",
+            uri="workspace://seed_7.parquet",
+        )
+        monkeypatch.setattr(tracker.db, "fetchall", orig_fetchall)
+
+        assert len(captured_queries) == 3
+        for sql, params in captured_queries:
+            plan_rows = tracker.db.fetchall("EXPLAIN ANALYZE " + sql, params)
+            plan_txt = "\n".join(str(r[1]) for r in plan_rows)
+            assert "Index Scan" in plan_txt, plan_txt
+            assert "Sequential Scan" not in plan_txt, plan_txt
+
+        # Verify 2nd+ cache hit (run_3 matching run_2 matching run_1) prefetches all 15 outputs in 1 query!
+        out_files = []
+        for idx in range(15):
+            fp = run_dir / f"multi_{idx}.parquet"
+            pd.DataFrame({"k": [idx]}).to_parquet(fp)
+            out_files.append(fp)
+
+        with tracker.start_run(
+            "multi_hit_1",
+            model="multi_prefetch",
+            config={"v": 1},
+            cache_mode="reuse",
+        ):
+            for idx, fp in enumerate(out_files):
+                tracker.log_output(fp, key=f"out_{idx}")
+
+        with tracker.start_run(
+            "multi_hit_2",
+            model="multi_prefetch",
+            config={"v": 1},
+            cache_mode="reuse",
+        ):
+            assert tracker.is_cached
+
+        with tracker.start_run(
+            "multi_hit_3",
+            model="multi_prefetch",
+            config={"v": 1},
+            cache_mode="reuse",
+        ):
+            assert tracker.is_cached
+            assert tracker.current_consist is not None
+            third_outputs = list(tracker.current_consist.outputs)
+
+        assert len(third_outputs) == 15
+        tracker.db._location_resolution_cache.clear()
+
+        loc_sql_count = 0
+
+        def _count_loc_fetchall(sql: str, params: Any = None) -> list[Any]:
+            nonlocal loc_sql_count
+            if "artifact_location" in sql:
+                loc_sql_count += 1
+            return orig_fetchall(sql, params)
+
+        monkeypatch.setattr(tracker.db, "fetchall", _count_loc_fetchall)
+        for art in third_outputs:
+            assert art.path.is_file()
+        assert loc_sql_count == 1
     finally:
         tracker.close()
