@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, replace
-from collections.abc import Iterator, Mapping as MappingABC, Sequence
+from collections.abc import Iterable, Iterator, Mapping as MappingABC, Sequence
 from datetime import datetime, timezone
 import logging
 from pathlib import Path
@@ -46,24 +46,68 @@ if TYPE_CHECKING:
 
 
 def _deep_copy_meta_value(value: Any) -> Any:
-    """Return a plain JSON/pickle-safe mutable copy unwrapping any ``MappingProxyType``."""
+    """Return a plain JSON/pickle-safe mutable copy unwrapping frozen meta containers."""
     if value is None or isinstance(value, (bool, int, float, str, Digest)):
         return value
     if isinstance(value, MappingABC):
         return {str(k): _deep_copy_meta_value(v) for k, v in value.items()}
-    if isinstance(value, list):
+    if isinstance(value, (list, FrozenList)):
         return [_deep_copy_meta_value(item) for item in value]
     if isinstance(value, tuple):
         return tuple(_deep_copy_meta_value(item) for item in value)
     return copy.deepcopy(value)
 
 
+class FrozenList(tuple[Any, ...], Sequence[Any]):
+    """Immutable, hashable sequence for list values inside ``Artifact.meta``."""
+
+    __slots__ = ()
+
+    def __new__(cls, iterable: Iterable[Any] = ()) -> "FrozenList":
+        if type(iterable) is cls:
+            return iterable
+        return super().__new__(
+            cls,
+            (_freeze_meta_value(item) for item in iterable),
+        )
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, (list, tuple)):
+            return len(self) == len(other) and all(
+                a == b for a, b in zip(self, other, strict=True)
+            )
+        return super().__eq__(other)
+
+    def __ne__(self, other: object) -> bool:
+        res = self.__eq__(other)
+        return res if res is NotImplemented else not res
+
+    __hash__ = tuple.__hash__
+
+    def to_list(self) -> list[Any]:
+        """Recursively convert this ``FrozenList`` into plain Python ``list``/``dict`` objects."""
+        return [_deep_copy_meta_value(item) for item in self]
+
+    def __reduce__(self) -> tuple[type["FrozenList"], tuple[tuple[Any, ...]]]:
+        return (FrozenList, (tuple(self),))
+
+    def __copy__(self) -> "FrozenList":
+        return self
+
+    def __deepcopy__(self, memo: object) -> "FrozenList":
+        return self
+
+    def __repr__(self) -> str:
+        return f"FrozenList({list(self)!r})"
+
+
 _EMPTY_META: MappingABC[str, Any] = MappingProxyType({})
+_EMPTY_FROZEN_LIST: FrozenList = FrozenList()
 
 
 def _freeze_meta_value(value: Any) -> Any:
-    """Deep-freeze nested mappings into ``MappingProxyType`` while defensive-copying sequences."""
-    if value is None or isinstance(value, (bool, int, float, str, Digest)):
+    """Deep-freeze nested mappings and lists into ``MappingProxyType`` and ``FrozenList``."""
+    if value is None or isinstance(value, (bool, int, float, str, Digest, FrozenList)):
         return value
     if isinstance(value, MappingABC):
         if not value:
@@ -72,7 +116,9 @@ def _freeze_meta_value(value: Any) -> Any:
             {str(k): _freeze_meta_value(v) for k, v in value.items()}
         )
     if isinstance(value, list):
-        return [_freeze_meta_value(item) for item in value]
+        if not value:
+            return _EMPTY_FROZEN_LIST
+        return FrozenList(value)
     if isinstance(value, tuple):
         return tuple(_freeze_meta_value(item) for item in value)
     return copy.deepcopy(value)
@@ -87,7 +133,7 @@ def _freeze_meta_mapping(raw_meta: MappingABC[str, Any] | None) -> MappingABC[st
 
 
 def _wrap_owned_meta_value(value: Any) -> Any:
-    """Wrap an already-owned ``json.loads`` tree in ``MappingProxyType`` without re-copying."""
+    """Wrap an already-owned ``json.loads`` tree in ``MappingProxyType`` and ``FrozenList``."""
     if isinstance(value, dict):
         if not value:
             return _EMPTY_META
@@ -96,10 +142,12 @@ def _wrap_owned_meta_value(value: Any) -> Any:
                 value[k] = _wrap_owned_meta_value(v)
         return MappingProxyType(value)
     if isinstance(value, list):
+        if not value:
+            return _EMPTY_FROZEN_LIST
         for idx, item in enumerate(value):
             if isinstance(item, (dict, list)):
                 value[idx] = _wrap_owned_meta_value(item)
-        return value
+        return tuple.__new__(FrozenList, value)
     return value
 
 

@@ -143,13 +143,22 @@ def _copy_non_core_tables_and_views(
         src_cols = set(
             _table_columns(cur, db_alias="v04_src", schema="main", table=tbl)
         )
-        pairs = [
-            (_quote_ident(c), _quote_ident(c))
-            if c in src_cols
-            else (_quote_ident(c), '"facet_json"')
-            for c in dst_cols
-            if c in src_cols or (c == "json" and "facet_json" in src_cols)
-        ]
+        pairs: list[tuple[str, str]] = []
+        for c in dst_cols:
+            if c in src_cols:
+                src_expr = (
+                    "COALESCE(\"json\", CAST('{}' AS JSON))"
+                    if tbl in ("config_facet", "artifact_facet") and c == "json"
+                    else _quote_ident(c)
+                )
+                pairs.append((_quote_ident(c), src_expr))
+            elif c == "json" and "facet_json" in src_cols:
+                src_expr = (
+                    "COALESCE(\"facet_json\", CAST('{}' AS JSON))"
+                    if tbl in ("config_facet", "artifact_facet")
+                    else '"facet_json"'
+                )
+                pairs.append((_quote_ident(c), src_expr))
         if pairs:
             qt = _quote_ident(tbl)
             d_sql = ", ".join(d for d, _ in pairs)
@@ -525,6 +534,7 @@ def _migrate_artifacts_and_locations(
                 local_path=primary_cand if p_ok else None,
                 uri=uri,
                 site=p_site,
+                status="active" if p_ok else "stale",
                 capture_local_witness=p_ok,
                 observed_at_ns=obs_ns,
             )
@@ -1016,7 +1026,10 @@ def migrate_database(
                         trust_v04_hashes=trust_v04_hashes,
                     )
                 finally:
-                    cur.execute("DETACH v04_src")
+                    try:
+                        cur.execute("DETACH v04_src")
+                    except duckdb.Error:
+                        pass
 
                 if artifact_insert_rows:
                     _execute_multirow_values(

@@ -1325,6 +1325,36 @@ class DatabaseMaintenance:
                         obs_params,
                     )
 
+                binding_cols = _core_columns("run_binding_invocation")
+                if binding_cols:
+                    col_sql = ", ".join(binding_cols)
+                    cur.execute(
+                        f"""
+                        INSERT INTO {self._qualified_table_sql("run_binding_invocation", catalog=alias)} ({col_sql})
+                        SELECT {col_sql}
+                        FROM {self._qualified_table_sql("run_binding_invocation")}
+                        WHERE requested_run_id IN (SELECT UNNEST(?))
+                           OR execution_run_id IN (SELECT UNNEST(?))
+                        ON CONFLICT ("id") DO NOTHING
+                        """,
+                        [selected_run_ids, selected_run_ids],
+                    )
+
+                coupler_cols = _core_columns("run_coupler_snapshot")
+                if coupler_cols:
+                    col_sql = ", ".join(coupler_cols)
+                    cur.execute(
+                        f"""
+                        INSERT INTO {self._qualified_table_sql("run_coupler_snapshot", catalog=alias)} ({col_sql})
+                        SELECT {col_sql}
+                        FROM {self._qualified_table_sql("run_coupler_snapshot")}
+                        WHERE run_id IN (SELECT UNNEST(?))
+                           OR scenario_run_id IN (SELECT UNNEST(?))
+                        ON CONFLICT ("run_id", "phase", "role_key") DO NOTHING
+                        """,
+                        [selected_run_ids, selected_run_ids],
+                    )
+
             if include_data and selected_run_ids:
                 for table in discovered_tables:
                     mode = ingested_table_modes.get(table)
@@ -1877,6 +1907,40 @@ class DatabaseMaintenance:
                                 ON CONFLICT DO NOTHING
                                 """,
                                 [runs_to_merge],
+                            )
+
+                        binding_cols = _core_columns("run_binding_invocation")
+                        if binding_cols:
+                            col_sql = ", ".join(binding_cols)
+                            sel_sql = _source_select_columns("src_bind", binding_cols)
+                            cur.execute(
+                                f"""
+                                INSERT INTO main."run_binding_invocation" ({col_sql})
+                                SELECT {sel_sql}
+                                FROM {self._qualified_table_sql("run_binding_invocation", catalog=alias)} AS "src_bind"
+                                WHERE "src_bind"."requested_run_id" IN (SELECT UNNEST(?))
+                                   OR "src_bind"."execution_run_id" IN (SELECT UNNEST(?))
+                                ON CONFLICT ("id") DO NOTHING
+                                """,
+                                [runs_to_merge, runs_to_merge],
+                            )
+
+                        coupler_cols = _core_columns("run_coupler_snapshot")
+                        if coupler_cols:
+                            col_sql = ", ".join(coupler_cols)
+                            sel_sql = _source_select_columns(
+                                "src_coupler", coupler_cols
+                            )
+                            cur.execute(
+                                f"""
+                                INSERT INTO main."run_coupler_snapshot" ({col_sql})
+                                SELECT {sel_sql}
+                                FROM {self._qualified_table_sql("run_coupler_snapshot", catalog=alias)} AS "src_coupler"
+                                WHERE "src_coupler"."run_id" IN (SELECT UNNEST(?))
+                                   OR "src_coupler"."scenario_run_id" IN (SELECT UNNEST(?))
+                                ON CONFLICT ("run_id", "phase", "role_key") DO NOTHING
+                                """,
+                                [runs_to_merge, runs_to_merge],
                             )
 
                         obs_cols = _core_columns("artifact_schema_observation")
@@ -2476,6 +2540,7 @@ class DatabaseMaintenance:
                     local_path=candidate_path if cand_exists else None,
                     uri=artifact.uri,
                     site=site,
+                    status="active" if cand_exists else "stale",
                     capture_local_witness=cand_exists,
                     observed_at_ns=obs_ns,
                 )

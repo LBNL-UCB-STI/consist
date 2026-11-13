@@ -380,10 +380,10 @@ class Coupler:
         warn_undefined: bool = False,
         description: Optional[Mapping[str, str]] = None,
     ) -> None:
-        if not names:
-            return
         if warn_undefined:
             self._warn_undefined = True
+        if not names:
+            return
         if isinstance(required, Mapping):
             required_map = {str(k): bool(v) for k, v in required.items()}
             default_required = False
@@ -476,7 +476,7 @@ class Coupler:
         This does not mutate the Artifact; it only returns a resolved Path.
         """
         artifact = self.require(key) if required else self.get(key)
-        if not artifact:
+        if artifact is None:
             return None
         if isinstance(artifact, Artifact):
             if not self.tracker:
@@ -484,10 +484,16 @@ class Coupler:
                     f"Cannot resolve path for {key!r}: no tracker attached to Coupler."
                 )
             return Path(self.tracker.resolve_uri(artifact.uri))
-        if isinstance(artifact, (Path, str)):
-            if self.tracker is not None and "://" in str(artifact):
-                return Path(self.tracker.resolve_uri(str(artifact)))
-            return Path(artifact)
+        if isinstance(artifact, (Path, str, os.PathLike)):
+            raw_str = (
+                os.fspath(artifact) if isinstance(artifact, os.PathLike) else artifact
+            )
+            if self.tracker is not None and "://" in str(raw_str):
+                return Path(self.tracker.resolve_uri(str(raw_str)))
+            resolved = Path(raw_str)
+            if not resolved.is_absolute() and self.tracker is not None:
+                return (self.tracker.run_dir / resolved).resolve()
+            return resolved
         if isinstance(artifact, ArtifactLike):
             if artifact.path is not None:
                 return Path(artifact.path)

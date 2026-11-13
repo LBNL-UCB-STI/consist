@@ -806,7 +806,10 @@ def test_artifact_deepcopy_and_copy_on_transient_instance():
 
     with pytest.raises(TypeError):
         deep_cloned.meta["nested"]["inner_key"] = "modified"
-    deep_cloned.meta["list"].append(4)
+    with pytest.raises(AttributeError):
+        deep_cloned.meta["list"].append(4)
+    with pytest.raises(TypeError):
+        deep_cloned.meta["list"][0] = 99  # type: ignore[index]
     assert art.meta["nested"]["inner_key"] == "inner_val"
     assert art.meta["list"] == [1, 2, 3]
 

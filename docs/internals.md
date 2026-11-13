@@ -80,5 +80,5 @@ Every run in Full Provenance Mode maintains two persistence records:
 `consist migrate <db_path>` upgrades a Consist `0.4.x` database to `0.5` out-of-place:
 
 1. **Out-of-place staging**: Reads the `0.4.x` database read-only and builds a verified `0.5` staging database.
-2. **Verification & `--quick` mode**: Verifies surviving files on disk (or marks unverified historical entries in `--quick` mode so they never produce unsafe cache hits).
-3. **Atomic backup & swap**: Saves the original database to `<stem>.v1-backup-YYYY-MM-DD.duckdb` and swaps the verified staging database into place, supporting `consist migrate undo <db_path>` for reversibility.
+2. **Verification & `--trust-v04-hashes`**: Verifies surviving files on disk (or trusts existing v0.4 SHA-256 hashes when `--trust-v04-hashes` is passed), marking missing/unverified historical entries so they never produce unsafe cache hits.
+3. **Atomic backup & swap**: Saves the original database to `<db_path>.v04.bak` and swaps the verified staging database into place, supporting `consist migrate undo <db_path>` for reversibility.

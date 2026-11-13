@@ -514,10 +514,10 @@ def test_simultaneous_outputs_and_output_paths_rejected(tmp_path: Path) -> None:
         )
 
 
-def test_hdf5_staleness_short_circuits_post_hash_when_stat_changes(
+def test_hdf5_staleness_verifies_member_digest_even_when_stat_changes(
     tmp_path: Path,
 ) -> None:
-    """HDF5 staleness check skips post-step _hdf5_member_digest when FileStat changed."""
+    """HDF5 staleness check verifies member digest post-step even if container FileStat changed."""
     tracker = Tracker(run_dir=tmp_path / "runs", db_path=tmp_path / "prov.duckdb")
     h5_path = tmp_path / "short.h5"
     with h5py.File(h5_path, "w") as f:
@@ -538,8 +538,8 @@ def test_hdf5_staleness_short_circuits_post_hash_when_stat_changes(
             fn=update_h5,
             outputs={"out": OutputArtifactSpec(path=h5_path, member="m1")},
         )
-        # Called once pre-step, NOT post-step because FileStat changed
-        assert mock_h5.call_count == 1
+        # Called both pre-step and post-step to ensure the member itself was updated
+        assert mock_h5.call_count == 2
 
 
 def test_artifact_input_with_path_output_skips_pre_step_hydration(

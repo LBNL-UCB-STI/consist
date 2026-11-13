@@ -200,6 +200,10 @@ if TYPE_CHECKING:
     from consist.runtime import (
         create_tracker,
     )
+    from consist.errors import (
+        ConsistError,
+        DeprecatedViewsError,
+    )
     from consist.types import (
         ArtifactSpec,
         BindingResult,
@@ -257,12 +261,14 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     ),
     "CommandExecutionError": ("consist.core.command_exec", "CommandExecutionError"),
     "CommandExecutionResult": ("consist.core.command_exec", "CommandExecutionResult"),
+    "ConsistError": ("consist.errors", "ConsistError"),
     "Coupler": ("consist.core.coupler", "Coupler"),
     "CouplerSnapshotPhase": ("consist.models.run", "CouplerSnapshotPhase"),
     "DatabaseMigrationRequired": (
         "consist.core.persistence",
         "DatabaseMigrationRequired",
     ),
+    "DeprecatedViewsError": ("consist.errors", "DeprecatedViewsError"),
     "Digest": ("consist.digest", "Digest"),
     "DriverType": ("consist.types", "DriverType"),
     "EnumCapture": ("consist.types", "EnumCapture"),
@@ -541,9 +547,11 @@ __all__ = [
     "CanonicalizationSnapshot",
     "CommandExecutionError",
     "CommandExecutionResult",
+    "ConsistError",
     "Coupler",
     "CouplerSnapshotPhase",
     "DatabaseMigrationRequired",
+    "DeprecatedViewsError",
     "Digest",
     "DriverType",
     "EnumCapture",
@@ -683,6 +691,28 @@ __all__ = [
 ]
 
 
+_REMOVED_V04_EXPORTS: dict[str, tuple[str, str]] = {
+    "NoopTracker": (
+        "consist.NoopTracker was removed in Consist v0.5.0. "
+        "Use Tracker() (Ephemeral Mode) or Tracker(run_dir=..., db_path=None) "
+        "(JSON-Only Mode) instead.",
+        "ImportError",
+    ),
+    "noop_scenario": (
+        "consist.noop_scenario() was removed in Consist v0.5.0. "
+        "Use Tracker() (Ephemeral Mode) or Tracker(run_dir=..., db_path=None) "
+        "(JSON-Only Mode) with scenario(...) instead.",
+        "ImportError",
+    ),
+    "db_session": (
+        "consist.db_session() was removed in Consist v0.5.0. "
+        "Use consist.query_df(...), consist.query_rows(...), "
+        "tracker.db_connection(), or consist.ibis_connection(tracker) instead.",
+        "ImportError",
+    ),
+}
+
+
 def __getattr__(name: str) -> Any:
     if name in ("digest", "gtfs", "admission"):
         module = importlib.import_module(f"consist.{name}")
@@ -695,6 +725,14 @@ def __getattr__(name: str) -> Any:
         val = vars(module)[attr_name]
         globals()[name] = val
         return val
+
+    if name in ("view", "register_views"):
+        module = importlib.import_module("consist.api")
+        return vars(module)[name]
+
+    if name in _REMOVED_V04_EXPORTS:
+        msg, _ = _REMOVED_V04_EXPORTS[name]
+        raise ImportError(msg)
 
     if name in _DEPRECATED_TOP_LEVEL_EXPORTS:
         target_mod, target_attr = _DEPRECATED_TOP_LEVEL_EXPORTS[name]

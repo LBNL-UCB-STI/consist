@@ -15,6 +15,7 @@ import hashlib
 import inspect
 import logging
 from pathlib import Path
+import sys
 from typing import (
     Any,
     Callable,
@@ -193,32 +194,22 @@ def _sha256_file(path: Path) -> str:
 
 def _hdf5_member_digest(path: Path, member: str) -> Optional[str]:
     try:
-        import h5py
-    except ImportError:
-        return None
-    normalized = member.lstrip("/")
-    try:
-        with h5py.File(path, "r") as handle:
-            if normalized not in handle:
-                return None
-            obj = handle[normalized]
-            h = hashlib.sha256()
-            h.update(normalized.encode("utf-8"))
-            if isinstance(obj, h5py.Dataset):
-                h.update(str(obj.shape).encode("utf-8"))
-                h.update(str(obj.dtype).encode("utf-8"))
-                h.update(obj[()].tobytes())
-            elif isinstance(obj, h5py.Group):
-                for child_name in sorted(obj.keys()):
-                    child = obj[child_name]
-                    h.update(child_name.encode("utf-8"))
-                    if isinstance(child, h5py.Dataset):
-                        h.update(str(child.shape).encode("utf-8"))
-                        h.update(str(child.dtype).encode("utf-8"))
-                        h.update(child[()].tobytes())
-            return h.hexdigest()
+        from consist.digest import compute_h5_fixed_digest
+
+        return str(compute_h5_fixed_digest(path, member=member))
     except Exception:
         return None
+
+
+def _is_pyarrow_table(value: Any) -> bool:
+    if "pyarrow" not in sys.modules:
+        return False
+    try:
+        import pyarrow as pa
+
+        return isinstance(value, pa.Table)
+    except ImportError:
+        return False
 
 
 def _snapshot_pre_step_outputs(
@@ -289,25 +280,27 @@ def _verify_outputs_not_stale(
         elif kind == "hdf5_member":
             post_stat = FileStat.capture(target_path)
             art_spec = declared_output_specs[role].artifact_spec
-            if (
-                art_spec is not None
-                and art_spec.member is not None
-                and isinstance(pre_stat, FileStat)
-                and post_stat._stat_tuple() == pre_stat._stat_tuple()
-                and (
-                    pre_digest is None
-                    or _hdf5_member_digest(target_path, art_spec.member) == pre_digest
-                )
-            ):
-                raise StaleOutputError(role=role, path=target_path)
+            if art_spec is not None and art_spec.member is not None:
+                if pre_digest is not None:
+                    if _hdf5_member_digest(target_path, art_spec.member) == pre_digest:
+                        raise StaleOutputError(role=role, path=target_path)
+                elif (
+                    isinstance(pre_stat, FileStat)
+                    and post_stat._stat_tuple() == pre_stat._stat_tuple()
+                    and not post_stat.racy
+                ):
+                    raise StaleOutputError(role=role, path=target_path)
         else:
             post_stat = FileStat.capture(target_path)
             if (
                 isinstance(pre_stat, FileStat)
                 and post_stat._stat_tuple() == pre_stat._stat_tuple()
-                and (pre_digest is None or _sha256_file(target_path) == pre_digest)
             ):
-                raise StaleOutputError(role=role, path=target_path)
+                if pre_digest is not None:
+                    if _sha256_file(target_path) == pre_digest:
+                        raise StaleOutputError(role=role, path=target_path)
+                elif not post_stat.racy:
+                    raise StaleOutputError(role=role, path=target_path)
 
 
 def _output_spec_path(ref: OutputPathRef) -> ArtifactRef:
@@ -1123,13 +1116,15 @@ class RunTraceCoordinator:
             return {output_key: logged}
 
         if isinstance(result, dict):
+            if not all(
+                isinstance(output_key, str)
+                and isinstance(output_value, (Artifact, Path))
+                for output_key, output_value in result.items()
+            ):
+                return None
             inferred: Dict[str, Artifact] = {}
             with tracker.persistence.batch_artifact_writes():
                 for output_key, output_value in result.items():
-                    if not isinstance(output_key, str):
-                        return None
-                    if not isinstance(output_value, (Artifact, Path)):
-                        return None
                     logged = RunTraceCoordinator._log_output_value(
                         tracker,
                         output_key,
@@ -1415,6 +1410,41 @@ class RunTraceCoordinator:
                         key=outputs[0],
                         profile_file_schema=True,
                     )
+            elif _is_pyarrow_table(result):
+                if len(outputs) != 1:
+                    on_output_mismatch(
+                        "Single return value does not match declared outputs."
+                    )
+                else:
+                    import pyarrow.parquet as pq
+
+                    key_name = outputs[0]
+                    if (
+                        declared_output_specs is not None
+                        and key_name in declared_output_specs
+                    ):
+                        target_path = self._helpers.resolve_output_path(
+                            tracker,
+                            declared_output_specs[key_name].raw_value,
+                            output_base_dir,
+                        )
+                    elif output_paths is not None and key_name in output_paths:
+                        target_path = self._helpers.resolve_output_path(
+                            tracker,
+                            _output_spec_path(output_paths[key_name]),
+                            output_base_dir,
+                        )
+                    else:
+                        target_path = output_base_dir / f"{key_name}.parquet"
+                    target_path.parent.mkdir(parents=True, exist_ok=True)
+                    pq.write_table(result, target_path)
+                    outputs_map[key_name] = tracker.log_artifact(
+                        target_path,
+                        key=key_name,
+                        direction="output",
+                        driver="parquet",
+                        profile_file_schema=True,
+                    )
             elif self._helpers.is_xarray_dataset(result):
                 if len(outputs) != 1:
                     on_output_mismatch(
@@ -1479,7 +1509,7 @@ class RunTraceCoordinator:
             for output_key in outputs:
                 if output_key not in outputs_map and output_key in logged_outputs:
                     outputs_map[output_key] = logged_outputs[output_key]
-        elif logged_outputs:
+        elif outputs is None and logged_outputs:
             for output_key, artifact in logged_outputs.items():
                 outputs_map.setdefault(output_key, artifact)
 

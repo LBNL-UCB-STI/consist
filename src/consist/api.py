@@ -56,6 +56,7 @@ from consist.core.drivers import (
     _normalize_columns,
 )
 from consist.core.gtfs import GTFS_BUNDLE_SOURCE_KEY, GtfsCanonicalizationResult
+from consist.errors import DeprecatedViewsError
 from consist.core.migrate import (
     MigrationReport as MigrationReport,
     migrate_database as migrate_database,
@@ -240,6 +241,51 @@ class SpatialArtifact(ArtifactLike, Protocol):
 
 
 _QueryModelT = TypeVar("_QueryModelT")
+_ViewModelT = TypeVar("_ViewModelT")
+
+
+def view(model: Type[_ViewModelT], name: Optional[str] = None) -> Type[_ViewModelT]:
+    """Deprecated stub for removed SQLModel ORM view creation."""
+    _ = (model, name)
+    msg = (
+        "consist.view(...) and SQLModel ORM hybrid views were removed in Consist v0.5.0. "
+        "Use tracker.create_view(view_name, concept_key) with consist.query_df(...) / "
+        "consist.query_rows(..., model=...), or consist.ibis_view(tracker, model=...) instead."
+    )
+    warnings.warn(msg, DeprecationWarning, stacklevel=2)
+    raise DeprecatedViewsError(msg)
+
+
+def register_views(*models: Type[Any]) -> Dict[str, Type[Any]]:
+    """Deprecated stub for removed bulk SQLModel ORM view registration."""
+    _ = models
+    msg = (
+        "consist.register_views(...) was removed in Consist v0.5.0. "
+        "Use tracker.create_view(view_name, concept_key) with consist.query_df(...) / "
+        "consist.query_rows(..., model=...), or consist.ibis_view(tracker, model=...) instead."
+    )
+    warnings.warn(msg, DeprecationWarning, stacklevel=2)
+    raise DeprecatedViewsError(msg)
+
+
+def db_session(*args: Any, **kwargs: Any) -> Any:
+    """Removed v0.4 SQLAlchemy session helper."""
+    _ = (args, kwargs)
+    raise NotImplementedError(
+        "consist.db_session() was removed in Consist v0.5.0. "
+        "Use consist.query_df(...), consist.query_rows(...), "
+        "tracker.db_connection(), or consist.ibis_connection(tracker) instead."
+    )
+
+
+def noop_scenario(*args: Any, **kwargs: Any) -> Any:
+    """Removed v0.4 no-op scenario context manager."""
+    _ = (args, kwargs)
+    raise NotImplementedError(
+        "consist.noop_scenario() was removed in Consist v0.5.0. "
+        "Use Tracker() (Ephemeral Mode) or Tracker(run_dir=..., db_path=None) "
+        "(JSON-Only Mode) with scenario(...) instead."
+    )
 
 
 @runtime_checkable

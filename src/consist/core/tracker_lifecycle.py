@@ -836,7 +836,11 @@ class RunLifecycleCoordinator:
                         signature=lookup_signature,
                     )
                     _log_timing("find_matching_run", t0)
-                    local_candidate = tracker._local_cache_index.get(cache_key)
+                    local_candidate = (
+                        tracker._local_cache_index.get(cache_key)
+                        if tracker.db is not None
+                        else None
+                    )
                     if local_candidate and all(
                         candidate.id != local_candidate.id
                         for candidate in cached_candidates
@@ -844,7 +848,9 @@ class RunLifecycleCoordinator:
                         cached_candidates.append(local_candidate)
                 else:
                     cached_run = (
-                        tracker._local_cache_index.get(cache_key) if cache_key else None
+                        tracker._local_cache_index.get(cache_key)
+                        if cache_key and tracker.db is not None
+                        else None
                     )
                     if cached_run is None:
                         t0 = time.perf_counter()
@@ -1084,7 +1090,11 @@ class RunLifecycleCoordinator:
         if cache_mode != "readonly":
             tracker._sync_run_to_db(run)
 
-        if cache_mode != "readonly" and run.status == "completed":
+        if (
+            cache_mode != "readonly"
+            and run.status == "completed"
+            and tracker.db is not None
+        ):
             cache_key = (
                 run.config_hash or "",
                 run.input_hash or "",

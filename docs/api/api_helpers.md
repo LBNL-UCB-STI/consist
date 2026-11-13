@@ -31,7 +31,8 @@ a tracker object to every call.
   `consist.archive_run_output_files`
 - Querying: `consist.find_run`, `consist.find_runs`,
   `consist.find_latest_run`, `consist.find_matching_run`,
-  `consist.find_matching_runs`, `consist.run_query`, `consist.run_set`,
+  `consist.find_matching_runs`, `consist.query_df`, `consist.query_rows`,
+  `consist.run_query`, `consist.run_set`,
   `consist.resolve_canonical_run_id`, `consist.get_run_result`,
   `consist.get_config_bundle`, `consist.get_config_values`,
   `consist.get_config_value`, `consist.config_run_query`,
@@ -91,7 +92,6 @@ For class-level equivalents, see [Tracker](tracker.md) and
       show_root_heading: false
       show_root_toc_entry: false
       members:
-        - view
         - use_tracker
         - exec
         - run
@@ -125,14 +125,14 @@ For class-level equivalents, see [Tracker](tracker.md) and
         - log_meta
         - ingest
         - canonicalize_gtfs
-        - register_views
         - find_run
         - find_runs
         - find_latest_run
         - find_matching_run
         - find_matching_runs
         - run_set
-        - db_session
+        - query_df
+        - query_rows
         - run_query
         - config_run_query
         - config_run_rows

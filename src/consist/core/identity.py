@@ -113,8 +113,6 @@ class IdentityManager:
         """
         self.project_root = Path(project_root).resolve()
         self.hashing_strategy = hashing_strategy
-        self._repo_git_code_version_cache: Optional[str] = None
-        self._repo_git_code_version_fingerprint_cache: Optional[str] = None
         self._repo_git_repo_cache: Optional[Any] = None
 
     # --- Canonical JSON utilities ---
@@ -318,8 +316,6 @@ class IdentityManager:
             If GitPython is unavailable or ``project_root`` is not inside a
             repository that can be inspected.
         """
-        code_version: str
-        fingerprint: str
         git_module = _get_git()
         if git_module is None:
             raise CodeIdentityUnavailableError(
@@ -337,14 +333,8 @@ class IdentityManager:
                 self._repo_git_repo_cache = git_module.Repo(
                     self.project_root, search_parent_directories=True
                 )
-            code_version, fingerprint = self._repo_git_code_version(
-                self._repo_git_repo_cache
-            )
-            if (
-                self._repo_git_code_version_cache is not None
-                and self._repo_git_code_version_fingerprint_cache == fingerprint
-            ):
-                return self._repo_git_code_version_cache
+            code_version, _ = self._repo_git_code_version(self._repo_git_repo_cache)
+            return code_version
         except Exception as exc:
             detail = str(exc)
             reason = (
@@ -360,14 +350,8 @@ class IdentityManager:
                 ),
             ) from exc
 
-        self._repo_git_code_version_cache = code_version
-        self._repo_git_code_version_fingerprint_cache = fingerprint
-        return code_version
-
     def clear_code_version_cache(self) -> None:
-        """Clear cached repo Git code identity for this identity manager."""
-        self._repo_git_code_version_cache = None
-        self._repo_git_code_version_fingerprint_cache = None
+        """Clear cached repo Git object for this identity manager."""
         self._repo_git_repo_cache = None
 
     def compute_callable_hash(
@@ -527,9 +511,7 @@ class IdentityManager:
     ) -> CodeIdentityResolution:
         """Best-effort code identity when optional ``consist[git]`` is not installed."""
         try:
-            code_version, fingerprint = self._cli_git_code_version()
-            self._repo_git_code_version_cache = code_version
-            self._repo_git_code_version_fingerprint_cache = fingerprint
+            code_version, _ = self._cli_git_code_version()
             return CodeIdentityResolution(mode="repo_git", digest=code_version)
         except CodeIdentityUnavailableError:
             pass

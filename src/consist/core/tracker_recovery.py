@@ -707,6 +707,8 @@ def resolve_verified_local_path_detailed(
                     continue
 
                 if not candidate.exists():
+                    if is_last_option and row.site != "advisory":
+                        row_should_mark_stale = True
                     continue
                 if _verify_and_settle(candidate, row.location_id):
                     return _win()

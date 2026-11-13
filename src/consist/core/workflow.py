@@ -1884,7 +1884,7 @@ class ScenarioContext:
         if requested_input_binding in {"loaded", "paths"} or (
             fn is not None
             and any(
-                kind in {"path", "loaded"}
+                kind in {"path", "loaded", "artifact"}
                 and param_name not in declared_out_keys
                 and (
                     not isinstance(invocation_inputs, Mapping)
@@ -2112,6 +2112,9 @@ class ScenarioContext:
                 validate_materialized_inputs=(
                     resolved_invocation.validate_materialized_inputs
                 ),
+                materialize_cached_outputs_source_root=(
+                    resolved_invocation.materialize_cached_outputs_source_root
+                ),
                 code_identity=resolved_invocation.code_identity,
                 code_identity_extra_deps=resolved_invocation.code_identity_extra_deps,
             ),
@@ -2197,6 +2200,7 @@ class ScenarioContext:
         cache_version: Optional[int] = None,
         cache_epoch: Optional[int] = None,
         validate_cached_outputs: str = "lazy",
+        validate_materialized_inputs: Optional[bool] = None,
         code_identity: Optional[CodeIdentityMode] = None,
         code_identity_extra_deps: Optional[List[str]] = None,
         output_mismatch: str = "warn",
@@ -2255,7 +2259,7 @@ class ScenarioContext:
                 cache_version=cache_version,
                 cache_epoch=cache_epoch,
                 validate_cached_outputs=validate_cached_outputs,
-                validate_materialized_inputs=None,
+                validate_materialized_inputs=validate_materialized_inputs,
                 code_identity=code_identity,
                 code_identity_extra_deps=code_identity_extra_deps,
             ),
