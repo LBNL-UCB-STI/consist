@@ -143,13 +143,22 @@ def _copy_non_core_tables_and_views(
         src_cols = set(
             _table_columns(cur, db_alias="v04_src", schema="main", table=tbl)
         )
-        pairs = [
-            (_quote_ident(c), _quote_ident(c))
-            if c in src_cols
-            else (_quote_ident(c), '"facet_json"')
-            for c in dst_cols
-            if c in src_cols or (c == "json" and "facet_json" in src_cols)
-        ]
+        pairs: list[tuple[str, str]] = []
+        for c in dst_cols:
+            if c in src_cols:
+                src_expr = (
+                    "COALESCE(\"json\", CAST('{}' AS JSON))"
+                    if tbl in ("config_facet", "artifact_facet") and c == "json"
+                    else _quote_ident(c)
+                )
+                pairs.append((_quote_ident(c), src_expr))
+            elif c == "json" and "facet_json" in src_cols:
+                src_expr = (
+                    "COALESCE(\"facet_json\", CAST('{}' AS JSON))"
+                    if tbl in ("config_facet", "artifact_facet")
+                    else '"facet_json"'
+                )
+                pairs.append((_quote_ident(c), src_expr))
         if pairs:
             qt = _quote_ident(tbl)
             d_sql = ", ".join(d for d, _ in pairs)
@@ -525,6 +534,7 @@ def _migrate_artifacts_and_locations(
                 local_path=primary_cand if p_ok else None,
                 uri=uri,
                 site=p_site,
+                status="active" if p_ok else "stale",
                 capture_local_witness=p_ok,
                 observed_at_ns=obs_ns,
             )
@@ -933,11 +943,11 @@ def migrate_database(
         views_copied = 0
         try:
             escaped_src = str(src_path).replace("'", "''")
-            with dst_db.transaction() as cur:
-                dst_cat_row = cur.execute("SELECT current_database()").fetchone()
-                dst_catalog = str(dst_cat_row[0]) if dst_cat_row else "main"
-                cur.execute(f"ATTACH '{escaped_src}' AS v04_src (READ_ONLY)")
-                try:
+            dst_db.execute(f"ATTACH '{escaped_src}' AS v04_src (READ_ONLY)")
+            try:
+                with dst_db.transaction() as cur:
+                    dst_cat_row = cur.execute("SELECT current_database()").fetchone()
+                    dst_catalog = str(dst_cat_row[0]) if dst_cat_row else "main"
                     src_tables = {
                         str(r[0])
                         for r in cur.execute(
@@ -1015,68 +1025,73 @@ def migrate_database(
                         cli_mounts=cli_mounts,
                         trust_v04_hashes=trust_v04_hashes,
                     )
-                finally:
-                    cur.execute("DETACH v04_src")
 
-                if artifact_insert_rows:
-                    _execute_multirow_values(
-                        cur,
-                        prefix_sql=dst_db._ARTIFACT_INSERT_PREFIX,
-                        row_placeholder="(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        suffix_sql=dst_db._ARTIFACT_UPSERT_SUFFIX,
-                        rows=artifact_insert_rows,
-                    )
-                if location_rows:
-                    dst_db._upsert_artifact_locations_locked(cur, location_rows)
-
-                invocations_by_exec_run: dict[str, list[tuple[uuid.UUID, str]]] = {}
-                for inv_id, exec_rid, b_json in cur.execute(
-                    "SELECT id, execution_run_id, binding_json FROM main.run_binding_invocation"
-                ).fetchall():
-                    if exec_rid and b_json:
-                        invocations_by_exec_run.setdefault(str(exec_rid), []).append(
-                            (_coerce_uuid(inv_id), str(b_json))
+                    if artifact_insert_rows:
+                        _execute_multirow_values(
+                            cur,
+                            prefix_sql=dst_db._ARTIFACT_INSERT_PREFIX,
+                            row_placeholder="(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            suffix_sql=dst_db._ARTIFACT_UPSERT_SUFFIX,
+                            rows=artifact_insert_rows,
                         )
+                    if location_rows:
+                        dst_db._upsert_artifact_locations_locked(cur, location_rows)
 
-                link_rows, run_updates, inv_updates = _promote_run_identities_and_links(
-                    run_rows=run_rows,
-                    artifacts_by_id=artifacts_by_id,
-                    raw_links=raw_links,
-                    invocations_by_exec_run=invocations_by_exec_run,
-                )
-                if run_updates:
-                    _execute_multirow_values(
-                        cur,
-                        prefix_sql=(
-                            "UPDATE main.run AS r SET input_hash = v.in_h, signature = v.sig, "
-                            "cacheable = v.cacheable, meta = CAST(v.meta AS JSON) FROM (VALUES"
-                        ),
-                        row_placeholder="(CAST(? AS VARCHAR), CAST(? AS VARCHAR), CAST(? AS BOOLEAN), CAST(? AS VARCHAR), CAST(? AS VARCHAR))",
-                        suffix_sql=") AS v(in_h, sig, cacheable, meta, rid) WHERE r.id = v.rid",
-                        rows=run_updates,
+                    invocations_by_exec_run: dict[str, list[tuple[uuid.UUID, str]]] = {}
+                    for inv_id, exec_rid, b_json in cur.execute(
+                        "SELECT id, execution_run_id, binding_json FROM main.run_binding_invocation"
+                    ).fetchall():
+                        if exec_rid and b_json:
+                            invocations_by_exec_run.setdefault(
+                                str(exec_rid), []
+                            ).append((_coerce_uuid(inv_id), str(b_json)))
+
+                    link_rows, run_updates, inv_updates = (
+                        _promote_run_identities_and_links(
+                            run_rows=run_rows,
+                            artifacts_by_id=artifacts_by_id,
+                            raw_links=raw_links,
+                            invocations_by_exec_run=invocations_by_exec_run,
+                        )
                     )
-                if inv_updates:
-                    _execute_multirow_values(
-                        cur,
-                        prefix_sql=(
-                            "UPDATE main.run_binding_invocation AS rbi SET "
-                            "binding_json = v.bjson FROM (VALUES"
-                        ),
-                        row_placeholder="(CAST(? AS VARCHAR), CAST(? AS UUID))",
-                        suffix_sql=") AS v(bjson, iid) WHERE rbi.id = v.iid",
-                        rows=inv_updates,
-                    )
-                if link_rows:
-                    _execute_multirow_values(
-                        cur,
-                        prefix_sql=(
-                            "INSERT INTO run_artifact_link "
-                            "(run_id, artifact_id, direction, role, is_implicit) VALUES"
-                        ),
-                        row_placeholder="(?, ?, ?, ?, ?)",
-                        suffix_sql="ON CONFLICT (run_id, artifact_id, direction, role) DO NOTHING",
-                        rows=link_rows,
-                    )
+                    if run_updates:
+                        _execute_multirow_values(
+                            cur,
+                            prefix_sql=(
+                                "UPDATE main.run AS r SET input_hash = v.in_h, signature = v.sig, "
+                                "cacheable = v.cacheable, meta = CAST(v.meta AS JSON) FROM (VALUES"
+                            ),
+                            row_placeholder="(CAST(? AS VARCHAR), CAST(? AS VARCHAR), CAST(? AS BOOLEAN), CAST(? AS VARCHAR), CAST(? AS VARCHAR))",
+                            suffix_sql=") AS v(in_h, sig, cacheable, meta, rid) WHERE r.id = v.rid",
+                            rows=run_updates,
+                        )
+                    if inv_updates:
+                        _execute_multirow_values(
+                            cur,
+                            prefix_sql=(
+                                "UPDATE main.run_binding_invocation AS rbi SET "
+                                "binding_json = v.bjson FROM (VALUES"
+                            ),
+                            row_placeholder="(CAST(? AS VARCHAR), CAST(? AS UUID))",
+                            suffix_sql=") AS v(bjson, iid) WHERE rbi.id = v.iid",
+                            rows=inv_updates,
+                        )
+                    if link_rows:
+                        _execute_multirow_values(
+                            cur,
+                            prefix_sql=(
+                                "INSERT INTO run_artifact_link "
+                                "(run_id, artifact_id, direction, role, is_implicit) VALUES"
+                            ),
+                            row_placeholder="(?, ?, ?, ?, ?)",
+                            suffix_sql="ON CONFLICT (run_id, artifact_id, direction, role) DO NOTHING",
+                            rows=link_rows,
+                        )
+            finally:
+                try:
+                    dst_db.execute("DETACH v04_src")
+                except duckdb.Error:
+                    pass
 
             for v_schema, _v_name, v_sql in src_views:
                 if not v_sql:

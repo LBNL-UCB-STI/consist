@@ -161,6 +161,7 @@ if TYPE_CHECKING:
         ResolvedBinding,
         ResolvedBindingBuilder,
         TrackedArtifactLocator,
+        trusted_digest_from_artifact,
     )
     from consist.core.step_contracts import (
         StepContract,
@@ -176,6 +177,7 @@ if TYPE_CHECKING:
     )
     from consist.digest import (
         Digest,
+        digest_file,
     )
     from consist.models.artifact import (
         ArchivedOutputs,
@@ -199,6 +201,10 @@ if TYPE_CHECKING:
     )
     from consist.runtime import (
         create_tracker,
+    )
+    from consist.errors import (
+        ConsistError,
+        DeprecatedViewsError,
     )
     from consist.types import (
         ArtifactSpec,
@@ -257,12 +263,14 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     ),
     "CommandExecutionError": ("consist.core.command_exec", "CommandExecutionError"),
     "CommandExecutionResult": ("consist.core.command_exec", "CommandExecutionResult"),
+    "ConsistError": ("consist.errors", "ConsistError"),
     "Coupler": ("consist.core.coupler", "Coupler"),
     "CouplerSnapshotPhase": ("consist.models.run", "CouplerSnapshotPhase"),
     "DatabaseMigrationRequired": (
         "consist.core.persistence",
         "DatabaseMigrationRequired",
     ),
+    "DeprecatedViewsError": ("consist.errors", "DeprecatedViewsError"),
     "Digest": ("consist.digest", "Digest"),
     "DriverType": ("consist.types", "DriverType"),
     "EnumCapture": ("consist.types", "EnumCapture"),
@@ -354,6 +362,7 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "current_tracker": ("consist.api", "current_tracker"),
     "define_step": ("consist.api", "define_step"),
     "diff_coupler_snapshots": ("consist.api", "diff_coupler_snapshots"),
+    "digest_file": ("consist.digest", "digest_file"),
     "ensure_local_path": ("consist.api", "ensure_local_path"),
     "evict_artifact": ("consist.api", "evict_artifact"),
     "exec": ("consist.api", "exec"),
@@ -430,6 +439,10 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "start_run": ("consist.api", "start_run"),
     "to_df": ("consist.api", "to_df"),
     "trace": ("consist.api", "trace"),
+    "trusted_digest_from_artifact": (
+        "consist.core.resolved_binding",
+        "trusted_digest_from_artifact",
+    ),
     "undo_migrate_database": ("consist.api", "undo_migrate_database"),
     "use_tracker": ("consist.api", "use_tracker"),
 }
@@ -541,9 +554,11 @@ __all__ = [
     "CanonicalizationSnapshot",
     "CommandExecutionError",
     "CommandExecutionResult",
+    "ConsistError",
     "Coupler",
     "CouplerSnapshotPhase",
     "DatabaseMigrationRequired",
+    "DeprecatedViewsError",
     "Digest",
     "DriverType",
     "EnumCapture",
@@ -611,6 +626,7 @@ __all__ = [
     "current_tracker",
     "define_step",
     "diff_coupler_snapshots",
+    "digest_file",
     "ensure_local_path",
     "evict_artifact",
     "exec",
@@ -678,9 +694,32 @@ __all__ = [
     "start_run",
     "to_df",
     "trace",
+    "trusted_digest_from_artifact",
     "undo_migrate_database",
     "use_tracker",
 ]
+
+
+_REMOVED_V04_EXPORTS: dict[str, tuple[str, str]] = {
+    "NoopTracker": (
+        "consist.NoopTracker was removed in Consist v0.5.0. "
+        "Use Tracker() (Ephemeral Mode) or Tracker(run_dir=..., db_path=None) "
+        "(JSON-Only Mode) instead.",
+        "ImportError",
+    ),
+    "noop_scenario": (
+        "consist.noop_scenario() was removed in Consist v0.5.0. "
+        "Use Tracker() (Ephemeral Mode) or Tracker(run_dir=..., db_path=None) "
+        "(JSON-Only Mode) with scenario(...) instead.",
+        "ImportError",
+    ),
+    "db_session": (
+        "consist.db_session() was removed in Consist v0.5.0. "
+        "Use consist.query_df(...), consist.query_rows(...), "
+        "tracker.db_connection(), or consist.ibis_connection(tracker) instead.",
+        "ImportError",
+    ),
+}
 
 
 def __getattr__(name: str) -> Any:
@@ -695,6 +734,14 @@ def __getattr__(name: str) -> Any:
         val = vars(module)[attr_name]
         globals()[name] = val
         return val
+
+    if name in ("view", "register_views"):
+        module = importlib.import_module("consist.api")
+        return vars(module)[name]
+
+    if name in _REMOVED_V04_EXPORTS:
+        msg, _ = _REMOVED_V04_EXPORTS[name]
+        raise ImportError(msg)
 
     if name in _DEPRECATED_TOP_LEVEL_EXPORTS:
         target_mod, target_attr = _DEPRECATED_TOP_LEVEL_EXPORTS[name]

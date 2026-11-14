@@ -105,6 +105,17 @@ def test_public_package_exports_admission_api() -> None:
         assert issubclass(recorded[0].category, DeprecationWarning)
 
 
+def test_admission_file_identity_returns_parseable_digest(tmp_path: Path) -> None:
+    import consist.admission as cadmission
+
+    target = tmp_path / "sample.bin"
+    target.write_bytes(b"consist-admission-identity")
+    identity = cadmission.admission_file_identity(target)
+    assert identity.startswith("sha256:file:")
+    parsed = cadmission.FileIdentity.parse(identity)
+    assert str(parsed) == identity
+
+
 def test_declared_digest_matching_file_is_verified_without_a_tracker(
     tmp_path: Path,
 ) -> None:

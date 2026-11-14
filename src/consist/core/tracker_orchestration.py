@@ -15,6 +15,7 @@ import hashlib
 import inspect
 import logging
 from pathlib import Path
+import sys
 from typing import (
     Any,
     Callable,
@@ -50,7 +51,6 @@ from consist.core.run_invocation import (
     is_pyarrow_table_annotation,
     normalize_declared_outputs_mapping,
     prepare_declared_output_targets,
-    resolve_declared_output_target_path,
     resolve_run_invocation,
 )
 from consist.core.tracker_recovery import resolve_verified_local_path
@@ -181,6 +181,7 @@ class RunInvocationContext:
     start_kwargs: Dict[str, Any]
     declared_output_specs: Optional[Dict[str, DeclaredOutputSpec]] = None
     requested_input_binding: Optional[InputBindingMode] = None
+    declared_input_roles: frozenset[str] = frozenset()
 
 
 def _sha256_file(path: Path) -> str:
@@ -193,32 +194,22 @@ def _sha256_file(path: Path) -> str:
 
 def _hdf5_member_digest(path: Path, member: str) -> Optional[str]:
     try:
-        import h5py
-    except ImportError:
-        return None
-    normalized = member.lstrip("/")
-    try:
-        with h5py.File(path, "r") as handle:
-            if normalized not in handle:
-                return None
-            obj = handle[normalized]
-            h = hashlib.sha256()
-            h.update(normalized.encode("utf-8"))
-            if isinstance(obj, h5py.Dataset):
-                h.update(str(obj.shape).encode("utf-8"))
-                h.update(str(obj.dtype).encode("utf-8"))
-                h.update(obj[()].tobytes())
-            elif isinstance(obj, h5py.Group):
-                for child_name in sorted(obj.keys()):
-                    child = obj[child_name]
-                    h.update(child_name.encode("utf-8"))
-                    if isinstance(child, h5py.Dataset):
-                        h.update(str(child.shape).encode("utf-8"))
-                        h.update(str(child.dtype).encode("utf-8"))
-                        h.update(child[()].tobytes())
-            return h.hexdigest()
+        from consist.digest import compute_h5_fixed_digest
+
+        return str(compute_h5_fixed_digest(path, member=member))
     except Exception:
         return None
+
+
+def _is_pyarrow_table(value: Any) -> bool:
+    if "pyarrow" not in sys.modules:
+        return False
+    try:
+        import pyarrow as pa
+
+        return isinstance(value, pa.Table)
+    except ImportError:
+        return False
 
 
 def _snapshot_pre_step_outputs(
@@ -289,25 +280,27 @@ def _verify_outputs_not_stale(
         elif kind == "hdf5_member":
             post_stat = FileStat.capture(target_path)
             art_spec = declared_output_specs[role].artifact_spec
-            if (
-                art_spec is not None
-                and art_spec.member is not None
-                and isinstance(pre_stat, FileStat)
-                and post_stat._stat_tuple() == pre_stat._stat_tuple()
-                and (
-                    pre_digest is None
-                    or _hdf5_member_digest(target_path, art_spec.member) == pre_digest
-                )
-            ):
-                raise StaleOutputError(role=role, path=target_path)
+            if art_spec is not None and art_spec.member is not None:
+                if pre_digest is not None:
+                    if _hdf5_member_digest(target_path, art_spec.member) == pre_digest:
+                        raise StaleOutputError(role=role, path=target_path)
+                elif (
+                    isinstance(pre_stat, FileStat)
+                    and post_stat._stat_tuple() == pre_stat._stat_tuple()
+                    and not post_stat.racy
+                ):
+                    raise StaleOutputError(role=role, path=target_path)
         else:
             post_stat = FileStat.capture(target_path)
             if (
                 isinstance(pre_stat, FileStat)
                 and post_stat._stat_tuple() == pre_stat._stat_tuple()
-                and (pre_digest is None or _sha256_file(target_path) == pre_digest)
             ):
-                raise StaleOutputError(role=role, path=target_path)
+                if pre_digest is not None:
+                    if _sha256_file(target_path) == pre_digest:
+                        raise StaleOutputError(role=role, path=target_path)
+                elif not post_stat.racy:
+                    raise StaleOutputError(role=role, path=target_path)
 
 
 def _output_spec_path(ref: OutputPathRef) -> ArtifactRef:
@@ -340,6 +333,7 @@ def _output_spec_log_kwargs(
             else ref.profile_file_schema
         ),
         "file_schema_sample_rows": ref.file_schema_sample_rows,
+        "hashing_strategy": ref.hashing_strategy,
     }
     if ref.meta is not None:
         kwargs.update(dict(ref.meta))
@@ -925,6 +919,33 @@ class RunTraceCoordinator:
             profile_file_schema=profile_file_schema,
         )
 
+        declared_input_role_set: set[str] = set()
+        for raw_keys in (invocation.input_keys, invocation.optional_input_keys):
+            if isinstance(raw_keys, str):
+                declared_input_role_set.add(raw_keys)
+            elif raw_keys is not None:
+                declared_input_role_set.update(str(k) for k in raw_keys)
+        if isinstance(invocation.inputs, Mapping):
+            declared_input_role_set.update(str(k) for k in invocation.inputs.keys())
+        if fn is not None:
+            from consist.core.decorators import StepDefinition
+
+            try:
+                fn_dict = fn.__dict__
+            except AttributeError:
+                fn_dict = {}
+            step_def = fn_dict.get("__consist_step__")
+            if isinstance(step_def, StepDefinition):
+                for raw_keys in (step_def.input_keys, step_def.optional_input_keys):
+                    if isinstance(raw_keys, str):
+                        declared_input_role_set.add(raw_keys)
+                    elif isinstance(raw_keys, Iterable):
+                        declared_input_role_set.update(str(k) for k in raw_keys)
+                if isinstance(step_def.inputs, Mapping):
+                    declared_input_role_set.update(
+                        str(k) for k in step_def.inputs.keys()
+                    )
+
         return RunInvocationContext(
             resolved_name=resolved_name,
             config=invocation.config,
@@ -957,6 +978,7 @@ class RunTraceCoordinator:
             start_kwargs=start_kwargs,
             declared_output_specs=invocation.declared_output_specs,
             requested_input_binding=invocation.requested_input_binding,
+            declared_input_roles=frozenset(declared_input_role_set),
         )
 
     @staticmethod
@@ -1123,13 +1145,15 @@ class RunTraceCoordinator:
             return {output_key: logged}
 
         if isinstance(result, dict):
+            if not all(
+                isinstance(output_key, str)
+                and isinstance(output_value, (Artifact, Path))
+                for output_key, output_value in result.items()
+            ):
+                return None
             inferred: Dict[str, Artifact] = {}
             with tracker.persistence.batch_artifact_writes():
                 for output_key, output_value in result.items():
-                    if not isinstance(output_key, str):
-                        return None
-                    if not isinstance(output_value, (Artifact, Path)):
-                        return None
                     logged = RunTraceCoordinator._log_output_value(
                         tracker,
                         output_key,
@@ -1313,6 +1337,12 @@ class RunTraceCoordinator:
                             pending_entry.meta[dir_flag], bool
                         ):
                             log_kwargs[dir_flag] = pending_entry.meta[dir_flag]
+                    if "hashing_strategy" in pending_entry.meta and pending_entry.meta[
+                        "hashing_strategy"
+                    ] in ("full", "fast"):
+                        log_kwargs["hashing_strategy"] = pending_entry.meta[
+                            "hashing_strategy"
+                        ]
                 if isinstance(raw_ref, Artifact):
                     outputs_map[role] = tracker.log_artifact(
                         raw_ref,
@@ -1415,6 +1445,41 @@ class RunTraceCoordinator:
                         key=outputs[0],
                         profile_file_schema=True,
                     )
+            elif _is_pyarrow_table(result):
+                if len(outputs) != 1:
+                    on_output_mismatch(
+                        "Single return value does not match declared outputs."
+                    )
+                else:
+                    import pyarrow.parquet as pq
+
+                    key_name = outputs[0]
+                    if (
+                        declared_output_specs is not None
+                        and key_name in declared_output_specs
+                    ):
+                        target_path = self._helpers.resolve_output_path(
+                            tracker,
+                            declared_output_specs[key_name].raw_value,
+                            output_base_dir,
+                        )
+                    elif output_paths is not None and key_name in output_paths:
+                        target_path = self._helpers.resolve_output_path(
+                            tracker,
+                            _output_spec_path(output_paths[key_name]),
+                            output_base_dir,
+                        )
+                    else:
+                        target_path = output_base_dir / f"{key_name}.parquet"
+                    target_path.parent.mkdir(parents=True, exist_ok=True)
+                    pq.write_table(result, target_path)
+                    outputs_map[key_name] = tracker.log_artifact(
+                        target_path,
+                        key=key_name,
+                        direction="output",
+                        driver="parquet",
+                        profile_file_schema=True,
+                    )
             elif self._helpers.is_xarray_dataset(result):
                 if len(outputs) != 1:
                     on_output_mismatch(
@@ -1479,7 +1544,7 @@ class RunTraceCoordinator:
             for output_key in outputs:
                 if output_key not in outputs_map and output_key in logged_outputs:
                     outputs_map[output_key] = logged_outputs[output_key]
-        elif logged_outputs:
+        elif outputs is None and logged_outputs:
             for output_key, artifact in logged_outputs.items():
                 outputs_map.setdefault(output_key, artifact)
 
@@ -1662,6 +1727,7 @@ class RunTraceCoordinator:
         capture_dir: Optional[Path],
         capture_pattern: str,
         canonicalization: Optional["CanonicalizationSnapshot"] = None,
+        declared_input_roles: frozenset[str] = frozenset(),
     ) -> tuple[Any, Dict[str, Artifact]]:
         """
         Execute one Python callable inside prepared run context.
@@ -1766,18 +1832,6 @@ class RunTraceCoordinator:
                     tracker, raw_ref, output_base_dir
                 ),
             )
-        elif output_paths:
-            output_base_dir = tracker.run_artifact_dir()
-            legacy_specs = normalize_declared_outputs_mapping(output_paths)
-            for role, spec in legacy_specs.items():
-                if role in params or has_var_kw:
-                    target = resolve_declared_output_target_path(
-                        spec,
-                        default_base_dir=output_base_dir,
-                        resolve_uri_fn=tracker.resolve_uri,
-                    )
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    declared_target_paths[role] = target
 
         if "config" in params and "config" not in runtime_kwargs and config is not None:
             call_kwargs["config"] = (
@@ -1868,7 +1922,10 @@ class RunTraceCoordinator:
                     else:
                         call_kwargs[param_name] = artifact
                     continue
-            if param_name in declared_target_paths:
+            if (
+                param_name in declared_target_paths
+                and param_name not in declared_input_roles
+            ):
                 call_kwargs[param_name] = declared_target_paths[param_name]
                 continue
             if param_name in config_dict:
@@ -1880,7 +1937,7 @@ class RunTraceCoordinator:
 
         if has_var_kw and declared_target_paths:
             for role, target_path in declared_target_paths.items():
-                if role not in call_kwargs:
+                if role not in call_kwargs and role not in declared_input_roles:
                     call_kwargs[role] = target_path
 
         if inject_context:
@@ -2239,6 +2296,7 @@ class RunTraceCoordinator:
                         output_paths=output_paths,
                         capture_dir=capture_dir,
                         capture_pattern=capture_pattern,
+                        declared_input_roles=context.declared_input_roles,
                     )
 
                     outputs_map = self._normalize_run_outputs(

@@ -528,6 +528,125 @@ class TestArtifactImmutabilityLayeringAndProtocols:
             best_per_item_us = min(best_per_item_us, elapsed_us)
         assert best_per_item_us < 25.0, f"Artifact init took {best_per_item_us:.2f} us"
 
+    def test_artifact_meta_deep_immutability_and_serialization(self) -> None:
+        from collections.abc import Sequence
+        from consist.models.artifact import FrozenList
+
+        caller_nested: dict[str, object] = {
+            "tags": ["a", "b"],
+            "matrix": [[1, 2], {"k": [3, 4]}],
+            "empty": [],
+            "pair": ([5, 6], {"inner": "val"}),
+        }
+        art = Artifact(
+            key="deep_meta",
+            uri="outputs://deep.parquet",
+            driver="parquet",
+            meta=caller_nested,
+        )
+
+        # Mutating caller structures after init does not affect art.meta
+        caller_nested["tags"].append("mutated")  # type: ignore[attr-defined]
+        caller_nested["matrix"][0].append(99)  # type: ignore[index]
+        caller_nested["matrix"][1]["k"].append(99)  # type: ignore[index]
+        caller_nested["pair"][0].append(99)  # type: ignore[index]
+        caller_nested["pair"][1]["inner"] = "changed"  # type: ignore[index]
+
+        assert isinstance(art.meta["tags"], FrozenList)
+        assert isinstance(art.meta["tags"], Sequence)
+        assert art.meta["tags"] == ["a", "b"]
+        assert art.meta["tags"] == ("a", "b")
+        assert art.meta["empty"] == []
+        assert art.meta["matrix"] == [[1, 2], {"k": [3, 4]}]
+        assert isinstance(art.meta["matrix"][0], FrozenList)
+        assert isinstance(art.meta["matrix"][1], MappingProxyType)
+        assert isinstance(art.meta["matrix"][1]["k"], FrozenList)
+        assert isinstance(art.meta["pair"], tuple)
+        assert isinstance(art.meta["pair"][0], FrozenList)
+        assert isinstance(art.meta["pair"][1], MappingProxyType)
+        assert art.meta["pair"][1]["inner"] == "val"
+
+        # All nested containers reject mutation
+        with pytest.raises(AttributeError):
+            art.meta["tags"].append("c")  # type: ignore[attr-defined]
+        with pytest.raises(TypeError):
+            art.meta["tags"][0] = "z"  # type: ignore[index]
+        with pytest.raises(TypeError):
+            art.meta["matrix"][0][0] = 99  # type: ignore[index]
+        with pytest.raises(TypeError):
+            art.meta["matrix"][1]["k"] = []  # type: ignore[index]
+        with pytest.raises(TypeError):
+            art.meta["matrix"][1]["k"][0] = 99  # type: ignore[index]
+
+        # JSON / Pydantic / pickle / copy / model_copy / with_meta compatibility
+        simple = Artifact(
+            key="simple_list",
+            uri="outputs://simple.parquet",
+            driver="parquet",
+            meta={"tags": ["x", "y"]},
+        )
+        assert json.loads(json.dumps(dict(simple.meta))) == {"tags": ["x", "y"]}
+
+        dumped = art.to_json_dict()
+        assert dumped["meta"] == {
+            "tags": ["a", "b"],
+            "matrix": [[1, 2], {"k": [3, 4]}],
+            "empty": [],
+            "pair": ([5, 6], {"inner": "val"}),
+        }
+        assert type(dumped["meta"]) is dict
+        assert type(dumped["meta"]["tags"]) is list
+        assert type(dumped["meta"]["matrix"][1]) is dict
+        assert json.loads(json.dumps(dumped))["meta"]["matrix"] == [
+            [1, 2],
+            {"k": [3, 4]},
+        ]
+        assert json.loads(json.dumps(dumped))["meta"]["pair"] == [
+            [5, 6],
+            {"inner": "val"},
+        ]
+
+        py_dump = art.model_dump()
+        assert type(py_dump["meta"]["tags"]) is list
+        assert type(py_dump["meta"]["matrix"][1]["k"]) is list
+
+        unpickled = pickle.loads(pickle.dumps(art))
+        assert unpickled == art
+        assert isinstance(unpickled.meta["tags"], FrozenList)
+        assert isinstance(unpickled.meta["matrix"][1]["k"], FrozenList)
+
+        updated = art.with_meta(merge=True, extra=[10, {"nested": [20]}])
+        assert isinstance(updated.meta["extra"], FrozenList)
+        assert isinstance(updated.meta["extra"][1], MappingProxyType)
+        assert isinstance(updated.meta["extra"][1]["nested"], FrozenList)
+
+        copied = art.model_copy(update={"meta": {"items": [{"x": [1]}]}})
+        assert isinstance(copied.meta["items"], FrozenList)
+        assert isinstance(copied.meta["items"][0], MappingProxyType)
+        assert isinstance(copied.meta["items"][0]["x"], FrozenList)
+
+        # DB hydration path (_from_trusted_db_row / _wrap_owned_meta_dict) also freezes lists
+        hydrated = Artifact._from_trusted_db_row(
+            id=art.id,
+            key=art.key,
+            uri=art.uri,
+            driver=art.driver,
+            digest=art.digest,
+            member=art.member,
+            run_id=art.run_id,
+            parent_artifact_id=art.parent_artifact_id,
+            facet_id=art.facet_id,
+            created_at=art.created_at,
+            owned_meta={"items": [{"nested": [1, 2]}], "empty": []},
+        )
+        assert isinstance(hydrated.meta, MappingProxyType)
+        assert isinstance(hydrated.meta["items"], FrozenList)
+        assert isinstance(hydrated.meta["items"][0], MappingProxyType)
+        assert isinstance(hydrated.meta["items"][0]["nested"], FrozenList)
+        assert hydrated.meta["empty"] == []
+        with pytest.raises(TypeError):
+            hydrated.meta["items"][0]["nested"][0] = 99  # type: ignore[index]
+
     def test_strict_layer1_and_layer2_import_dag(self) -> None:
         src_root = Path(consist.__file__).resolve().parent
 

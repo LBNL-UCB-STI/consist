@@ -43,6 +43,8 @@ from consist.core.context import (
     use_tracker as _use_tracker,
 )
 from consist.core.decorators import (
+    MetaValue,
+    OutputPathRef,
     define_step as define_step_decorator,
     require_runtime_kwargs as require_runtime_kwargs_decorator,
 )
@@ -56,6 +58,7 @@ from consist.core.drivers import (
     _normalize_columns,
 )
 from consist.core.gtfs import GTFS_BUNDLE_SOURCE_KEY, GtfsCanonicalizationResult
+from consist.errors import DeprecatedViewsError
 from consist.core.migrate import (
     MigrationReport as MigrationReport,
     migrate_database as migrate_database,
@@ -125,7 +128,6 @@ if TYPE_CHECKING:
         StagedInput,
         StagedInputsResult,
     )
-    from consist.core.step_context import StepContext
     from consist.runset import RunSet
     from ibis.backends.duckdb import Backend as IbisDuckDBBackend
     from ibis.expr.types import Table as IbisTable
@@ -240,6 +242,51 @@ class SpatialArtifact(ArtifactLike, Protocol):
 
 
 _QueryModelT = TypeVar("_QueryModelT")
+_ViewModelT = TypeVar("_ViewModelT")
+
+
+def view(model: Type[_ViewModelT], name: Optional[str] = None) -> Type[_ViewModelT]:
+    """Deprecated stub for removed SQLModel ORM view creation."""
+    _ = (model, name)
+    msg = (
+        "consist.view(...) and SQLModel ORM hybrid views were removed in Consist v0.5.0. "
+        "Use tracker.create_view(view_name, concept_key) with consist.query_df(...) / "
+        "consist.query_rows(..., model=...), or consist.ibis_view(tracker, model=...) instead."
+    )
+    warnings.warn(msg, DeprecationWarning, stacklevel=2)
+    raise DeprecatedViewsError(msg)
+
+
+def register_views(*models: Type[Any]) -> Dict[str, Type[Any]]:
+    """Deprecated stub for removed bulk SQLModel ORM view registration."""
+    _ = models
+    msg = (
+        "consist.register_views(...) was removed in Consist v0.5.0. "
+        "Use tracker.create_view(view_name, concept_key) with consist.query_df(...) / "
+        "consist.query_rows(..., model=...), or consist.ibis_view(tracker, model=...) instead."
+    )
+    warnings.warn(msg, DeprecationWarning, stacklevel=2)
+    raise DeprecatedViewsError(msg)
+
+
+def db_session(*args: Any, **kwargs: Any) -> Any:
+    """Removed v0.4 SQLAlchemy session helper."""
+    _ = (args, kwargs)
+    raise NotImplementedError(
+        "consist.db_session() was removed in Consist v0.5.0. "
+        "Use consist.query_df(...), consist.query_rows(...), "
+        "tracker.db_connection(), or consist.ibis_connection(tracker) instead."
+    )
+
+
+def noop_scenario(*args: Any, **kwargs: Any) -> Any:
+    """Removed v0.4 no-op scenario context manager."""
+    _ = (args, kwargs)
+    raise NotImplementedError(
+        "consist.noop_scenario() was removed in Consist v0.5.0. "
+        "Use Tracker() (Ephemeral Mode) or Tracker(run_dir=..., db_path=None) "
+        "(JSON-Only Mode) with scenario(...) instead."
+    )
 
 
 @runtime_checkable
@@ -376,34 +423,34 @@ def set_current_tracker(tracker: Optional["Tracker"]) -> Optional["Tracker"]:
 
 def define_step(
     *,
-    model: Optional[str] = None,
-    name_template: Optional[str] = None,
-    outputs: Optional[list[str]] = None,
-    schema_outputs: Optional[list[str]] = None,
-    output_paths: Optional[Mapping[str, Any]] = None,
-    output_sets: Optional[Mapping[str, OutputSet]] = None,
-    inputs: Optional[Union[Mapping[str, Any], Iterable[Any]]] = None,
-    input_keys: Optional[Union[Iterable[str], str]] = None,
-    optional_input_keys: Optional[Union[Iterable[str], str]] = None,
-    config: Optional[Dict[str, Any]] = None,
-    adapter: Optional[
-        Union["ConfigAdapter", Callable[["StepContext"], "ConfigAdapter"]]
-    ] = None,
-    identity_inputs: Optional[IdentityInputs] = None,
-    facet: Optional[Any] = None,
-    facet_index: Optional[bool] = None,
-    cache_mode: Optional[str] = None,
-    cache_hydration: Optional[str] = None,
-    cache_version: Optional[int] = None,
-    validate_cached_outputs: Optional[str] = None,
-    input_binding: Optional[InputBindingMode] = None,
-    load_inputs: Optional[bool] = None,
-    tags: Optional[list[str]] = None,
-    facet_from: Optional[list[str]] = None,
-    facet_schema_version: Optional[Union[str, int]] = None,
-    description: Optional[str] = None,
+    model: Optional[MetaValue[str]] = None,
+    name_template: Optional[MetaValue[str]] = None,
+    outputs: Optional[MetaValue[Union[Sequence[str], Mapping[str, OutputPathRef]]]] = (
+        None
+    ),
+    schema_outputs: Optional[MetaValue[List[str]]] = None,
+    output_paths: Optional[MetaValue[Mapping[str, Any]]] = None,
+    output_sets: Optional[MetaValue[Mapping[str, OutputSet]]] = None,
+    inputs: Optional[MetaValue[Union[Mapping[str, Any], Iterable[Any]]]] = None,
+    input_keys: Optional[MetaValue[Union[Iterable[str], str]]] = None,
+    optional_input_keys: Optional[MetaValue[Union[Iterable[str], str]]] = None,
+    config: Optional[MetaValue[Dict[str, Any]]] = None,
+    adapter: Optional[MetaValue["ConfigAdapter"]] = None,
+    identity_inputs: Optional[MetaValue[IdentityInputs]] = None,
+    facet: Optional[MetaValue[Any]] = None,
+    facet_index: Optional[MetaValue[bool]] = None,
+    cache_mode: Optional[MetaValue[str]] = None,
+    cache_hydration: Optional[MetaValue[str]] = None,
+    cache_version: Optional[MetaValue[int]] = None,
+    validate_cached_outputs: Optional[MetaValue[str]] = None,
+    input_binding: Optional[MetaValue[InputBindingMode]] = None,
+    load_inputs: Optional[MetaValue[bool]] = None,
+    tags: Optional[MetaValue[List[str]]] = None,
+    facet_from: Optional[MetaValue[List[str]]] = None,
+    facet_schema_version: Optional[MetaValue[Union[str, int]]] = None,
+    description: Optional[MetaValue[str]] = None,
     **extra: Any,
-):
+) -> Callable[[Callable], Callable]:
     """
     Attach metadata to a function without changing execution behavior.
 
@@ -1690,6 +1737,7 @@ def register_artifact_recovery_copy(
     *,
     verify: bool = True,
     content_hash: str | None = None,
+    source_root: str | Path | None = None,
     append: bool = True,
     tracker: Optional["Tracker"] = None,
 ) -> "ArtifactRecoveryCopyRegistration":
@@ -1705,6 +1753,10 @@ def register_artifact_recovery_copy(
         Whether to verify the copy's full-file SHA-256 digest.
     content_hash : str | None, optional
         Expected SHA-256 digest, taking precedence over ``artifact.digest``.
+    source_root : str | Path | None, optional
+        Optional root containing the unpromoted source file at its URI-relative
+        path, hashed only when ``verify=True``, ``content_hash is None``, and
+        ``artifact`` lacks a verifiable full digest.
     append : bool, default True
         Whether to append rather than replace recovery-root metadata.
     tracker : Tracker | None, optional
@@ -1720,11 +1772,20 @@ def register_artifact_recovery_copy(
     This function never copies bytes. Directory artifacts and HDF5 child tables
     are deliberately blocked until they have an independent recovery contract.
     """
+    if source_root is None:
+        return _resolve_tracker(tracker).register_artifact_recovery_copy(
+            artifact,
+            recovery_root,
+            verify=verify,
+            content_hash=content_hash,
+            append=append,
+        )
     return _resolve_tracker(tracker).register_artifact_recovery_copy(
         artifact,
         recovery_root,
         verify=verify,
         content_hash=content_hash,
+        source_root=source_root,
         append=append,
     )
 
@@ -1737,6 +1798,7 @@ def register_run_output_recovery_copies(
     verify: bool = True,
     append: bool = True,
     content_hashes: Mapping[str, str] | None = None,
+    source_root: str | Path | None = None,
     tracker: Optional["Tracker"] = None,
 ) -> "RunOutputRecoveryCopiesRegistration":
     """Verify and register existing recovery copies for run outputs.
@@ -1755,6 +1817,10 @@ def register_run_output_recovery_copies(
         Whether successful registrations append recovery-root metadata.
     content_hashes : mapping of str to str | None, optional
         Optional per-key SHA-256 proofs for artifacts without full hashes.
+    source_root : str | Path | None, optional
+        Optional root containing unpromoted source files at their URI-relative
+        paths, hashed only for outputs without ``content_hashes[key]`` or a
+        verifiable full digest when ``verify=True``.
     tracker : Tracker | None, optional
         Tracker used for validation and persistence.
 
@@ -1768,6 +1834,15 @@ def register_run_output_recovery_copies(
     KeyError
         If requested output or content-hash keys are unknown.
     """
+    if source_root is None:
+        return _resolve_tracker(tracker).register_run_output_recovery_copies(
+            run_id,
+            recovery_root,
+            keys=keys,
+            verify=verify,
+            append=append,
+            content_hashes=content_hashes,
+        )
     return _resolve_tracker(tracker).register_run_output_recovery_copies(
         run_id,
         recovery_root,
@@ -1775,6 +1850,7 @@ def register_run_output_recovery_copies(
         verify=verify,
         append=append,
         content_hashes=content_hashes,
+        source_root=source_root,
     )
 
 

@@ -4,18 +4,31 @@ from pathlib import Path
 
 import pandas as pd
 
+import pytest
+
 import consist
 from consist.core.tracker import Tracker
+from consist.errors import DeprecatedViewsError
 from consist.models.gtfs import GtfsTrips
 
 
 def test_legacy_view_helpers_removed_from_tracker_and_public_api(
     tracker: Tracker,
 ) -> None:
-    assert "view" not in dir(tracker)
-    assert "register_views" not in dir(tracker)
     assert "view" not in dir(consist)
     assert "register_views" not in dir(consist)
+    with pytest.warns(DeprecationWarning):
+        with pytest.raises(DeprecatedViewsError):
+            tracker.view(GtfsTrips)
+    with pytest.warns(DeprecationWarning):
+        with pytest.raises(DeprecatedViewsError):
+            tracker.register_views(GtfsTrips)
+    with pytest.warns(DeprecationWarning):
+        with pytest.raises(DeprecatedViewsError):
+            consist.view(GtfsTrips)
+    with pytest.warns(DeprecationWarning):
+        with pytest.raises(DeprecatedViewsError):
+            consist.register_views(GtfsTrips)
 
 
 def test_create_view_and_query_rows_with_typed_model(

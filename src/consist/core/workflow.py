@@ -1884,7 +1884,7 @@ class ScenarioContext:
         if requested_input_binding in {"loaded", "paths"} or (
             fn is not None
             and any(
-                kind in {"path", "loaded"}
+                kind in {"path", "loaded", "artifact"}
                 and param_name not in declared_out_keys
                 and (
                     not isinstance(invocation_inputs, Mapping)
@@ -2056,8 +2056,14 @@ class ScenarioContext:
         promoted_inputs = self._promote_inputs_for_binding(
             resolved_inputs, resolved_input_binding
         )
+        if binding is not None:
+            effective_input_keys = input_keys
+            effective_optional_input_keys = optional_input_keys
+        else:
+            effective_input_keys = resolved_input_keys
+            effective_optional_input_keys = resolved_optional_input_keys
         resolved_inputs = self._resolve_inputs(
-            promoted_inputs, resolved_input_keys, resolved_optional_input_keys
+            promoted_inputs, effective_input_keys, effective_optional_input_keys
         )
         resolved_output_paths = self._resolve_output_paths(resolved_output_paths)
 
@@ -2111,6 +2117,9 @@ class ScenarioContext:
                 validate_cached_outputs=resolved_validate_cached_outputs,
                 validate_materialized_inputs=(
                     resolved_invocation.validate_materialized_inputs
+                ),
+                materialize_cached_outputs_source_root=(
+                    resolved_invocation.materialize_cached_outputs_source_root
                 ),
                 code_identity=resolved_invocation.code_identity,
                 code_identity_extra_deps=resolved_invocation.code_identity_extra_deps,
@@ -2197,6 +2206,7 @@ class ScenarioContext:
         cache_version: Optional[int] = None,
         cache_epoch: Optional[int] = None,
         validate_cached_outputs: str = "lazy",
+        validate_materialized_inputs: Optional[bool] = None,
         code_identity: Optional[CodeIdentityMode] = None,
         code_identity_extra_deps: Optional[List[str]] = None,
         output_mismatch: str = "warn",
@@ -2255,7 +2265,7 @@ class ScenarioContext:
                 cache_version=cache_version,
                 cache_epoch=cache_epoch,
                 validate_cached_outputs=validate_cached_outputs,
-                validate_materialized_inputs=None,
+                validate_materialized_inputs=validate_materialized_inputs,
                 code_identity=code_identity,
                 code_identity_extra_deps=code_identity_extra_deps,
             ),

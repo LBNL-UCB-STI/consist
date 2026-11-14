@@ -23,8 +23,8 @@
   when you need a concrete local dataframe from one known output.
 - Use `RunSet` or `consist.run_set(...)` when the task is run comparison,
   alignment, recency selection, or config diffs.
-- Use `tracker.views.*`, `query_df(...)` / `query_rows(...)`, and `pivot_facets(...)` when you need
-  lower-level SQLModel/SQL control or facet-only run summaries.
+- Use `tracker.create_view(...)`, `query_df(...)` / `query_rows(...)`, and `pivot_facets(...)` when you need
+  lower-level DuckDB SQL control or facet-only run summaries.
 
 Terminology: `RunSet` is for selecting and comparing multiple runs.
 `OutputSet` is different: it is one logical output artifact made of multiple
@@ -142,38 +142,35 @@ instrumentation when you expect to query related artifacts together later.
 
 ## SQL Escape Hatches
 
-Use SQLModel views or raw SQL when you need exact SQL text, lower-level tracker
-internals, or a path that avoids the optional Ibis dependency.
+Use `tracker.create_view(...)` with DuckDB SQL (`query_df` / `query_rows` /
+`ParameterizedSQL`) when you need exact SQL text, lower-level tracker internals,
+or a path that avoids the optional Ibis dependency.
 
 ```python
-from sqlmodel import Field, SQLModel, func, select
 import consist
-
-
-class Person(SQLModel, table=True):
-    person_id: int = Field(primary_key=True)
-    household_id: int
-    number_of_trips: int
-
+from consist import ParameterizedSQL, Tracker
 
 tracker = Tracker(
     run_dir="./runs",
     db_path="./provenance.duckdb",
-    schemas=[Person],
 )
 
-VPerson = tracker.views.Person
-query = (
-    select(
-        VPerson.consist_scenario_id,
-        VPerson.consist_year,
-        func.avg(VPerson.number_of_trips).label("avg_trips"),
-    )
-    .where(VPerson.consist_scenario_id.in_(["baseline", "policy"]))
-    .group_by(VPerson.consist_scenario_id, VPerson.consist_year)
+tracker.create_view("v_persons", "persons")
+query = ParameterizedSQL(
+    sql="""
+        SELECT
+            consist_scenario_id,
+            consist_year,
+            AVG(number_of_trips) AS avg_trips
+        FROM v_persons
+        WHERE consist_scenario_id IN (?, ?)
+        GROUP BY consist_scenario_id, consist_year
+    """,
+    params=["baseline", "policy"],
 )
 
-rows = consist.query_rows(query, tracker=tracker)
+df = consist.query_df(query.sql, query.params, tracker=tracker)
+rows = consist.query_rows(query.sql, query.params, tracker=tracker)
 ```
 
 Use `pivot_facets(...)` when you want a wide, parameter-comparison table from

@@ -8,6 +8,7 @@ both execution paths share the same normalization logic.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import importlib
 import inspect
 import os
 from pathlib import Path, PurePath
@@ -259,7 +260,7 @@ def _optional_loaded_dataset_types() -> tuple[type[Any], ...]:
     types_list: list[type[Any]] = [pd.DataFrame]
     if "geopandas" in sys.modules:
         try:
-            import geopandas as gpd
+            gpd = importlib.import_module("geopandas")
 
             types_list.append(gpd.GeoDataFrame)
         except ImportError:
@@ -281,27 +282,50 @@ def _optional_loaded_dataset_types() -> tuple[type[Any], ...]:
     return tuple(types_list)
 
 
+def _split_top_level_args(inner: str) -> list[str]:
+    parts: list[str] = []
+    depth = 0
+    start = 0
+    for idx, ch in enumerate(inner):
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(inner[start:idx].strip())
+            start = idx + 1
+    tail = inner[start:].strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
 def _unwrap_string_annotation(raw: str) -> str:
     cleaned = raw.strip()
     for prefix in ("Annotated[", "typing.Annotated["):
         if cleaned.startswith(prefix) and cleaned.endswith("]"):
             inner = cleaned[len(prefix) : -1]
-            depth = 0
-            for idx, ch in enumerate(inner):
-                if ch in "([":
-                    depth += 1
-                elif ch in ")]":
-                    depth -= 1
-                elif ch == "," and depth == 0:
-                    return _unwrap_string_annotation(inner[:idx])
+            parts = _split_top_level_args(inner)
+            if parts:
+                return _unwrap_string_annotation(parts[0])
     for prefix in ("Optional[", "typing.Optional["):
         if cleaned.startswith(prefix) and cleaned.endswith("]"):
             return _unwrap_string_annotation(cleaned[len(prefix) : -1])
+    for prefix in ("Union[", "typing.Union["):
+        if cleaned.startswith(prefix) and cleaned.endswith("]"):
+            inner = cleaned[len(prefix) : -1]
+            non_none = [
+                part
+                for part in _split_top_level_args(inner)
+                if part not in {"None", "NoneType", "typing.NoneType"}
+            ]
+            if len(non_none) == 1:
+                return _unwrap_string_annotation(non_none[0])
     if "|" in cleaned:
         parts = [
             part.strip()
             for part in cleaned.split("|")
-            if part.strip() not in {"None", "NoneType"}
+            if part.strip() not in {"None", "NoneType", "typing.NoneType"}
         ]
         if len(parts) == 1:
             return _unwrap_string_annotation(parts[0])

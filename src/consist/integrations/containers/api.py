@@ -324,13 +324,23 @@ def _reuse_or_execute_container(
                     "FROM run_artifact_link WHERE run_id = ?",
                     [cached.id],
                 )
+                grouped_links: dict[tuple[str, bool], list[tuple[uuid.UUID, str]]] = {}
                 for art_id, direction, role, is_implicit in link_rows:
-                    tracker.db.link_artifact_to_run(
-                        artifact_id=art_id,
+                    parsed_id = (
+                        art_id
+                        if isinstance(art_id, uuid.UUID)
+                        else uuid.UUID(str(art_id))
+                    )
+                    grouped_links.setdefault(
+                        (str(direction), bool(is_implicit)), []
+                    ).append((parsed_id, str(role or "")))
+                for (direction, is_implicit), entries in grouped_links.items():
+                    tracker.db.link_artifacts_to_run_bulk(
+                        artifact_ids=[art_id for art_id, _ in entries],
                         run_id=run_id,
-                        direction=str(direction),
-                        role=str(role or ""),
-                        is_implicit=bool(is_implicit),
+                        direction=direction,
+                        roles_by_id={art_id: role for art_id, role in entries},
+                        is_implicit=is_implicit,
                     )
 
             # Materialize requested outputs onto the host so callers see expected files.

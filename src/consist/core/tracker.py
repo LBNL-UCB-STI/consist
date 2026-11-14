@@ -11,6 +11,7 @@ import shutil
 import tempfile
 from types import MappingProxyType
 import uuid
+import warnings
 import weakref
 from pathlib import Path
 from typing import (
@@ -163,6 +164,8 @@ if TYPE_CHECKING:
     from consist.runset import RunSet
     from ibis.backends.duckdb import Backend as IbisDuckDBBackend
     from ibis.expr.types import Table as IbisTable
+
+from consist.errors import DeprecatedViewsError
 
 AccessMode = Literal["standard", "analysis", "read_only"]
 _QueryModelT = TypeVar("_QueryModelT")
@@ -1431,6 +1434,7 @@ class Tracker:
         *,
         verify: bool = True,
         content_hash: str | None = None,
+        source_root: str | os.PathLike[str] | None = None,
         append: bool = True,
     ) -> ArtifactRecoveryCopyRegistration:
         return self._archive_service.register_artifact_recovery_copy(
@@ -1438,6 +1442,7 @@ class Tracker:
             recovery_root,
             verify=verify,
             content_hash=content_hash,
+            source_root=source_root,
             append=append,
         )
 
@@ -1448,6 +1453,7 @@ class Tracker:
         *,
         verify: bool,
         content_hash: str | None,
+        source_root: str | os.PathLike[str] | None = None,
         append: bool,
         persist: bool,
     ) -> ArtifactRecoveryCopyRegistration:
@@ -1456,9 +1462,14 @@ class Tracker:
             recovery_root,
             verify=verify,
             content_hash=content_hash,
+            source_root=source_root,
             append=append,
             persist=persist,
         )
+
+    def resolve_artifact_relative_path(self, artifact: Artifact) -> Optional[Path]:
+        """Return the portable run-relative ``Path`` for ``artifact.uri``."""
+        return self.fs.get_remappable_relative_path(artifact.uri)
 
     def evict_artifact(
         self,
@@ -1498,6 +1509,7 @@ class Tracker:
         verify: bool = True,
         append: bool = True,
         content_hashes: Mapping[str, str] | None = None,
+        source_root: str | os.PathLike[str] | None = None,
     ) -> RunOutputRecoveryCopiesRegistration:
         return self._archive_service.register_run_output_recovery_copies(
             run_id,
@@ -1506,6 +1518,7 @@ class Tracker:
             verify=verify,
             append=append,
             content_hashes=content_hashes,
+            source_root=source_root,
         )
 
     def archive_run_output_files(
@@ -2986,6 +2999,7 @@ class Tracker:
         facet: Optional[FacetLike] = None,
         facet_schema_version: Optional[Union[str, int]] = None,
         facet_index: bool = False,
+        hashing_strategy: Optional[Literal["full", "fast"]] = None,
         **meta: Any,
     ) -> Artifact:
         """
@@ -3011,6 +3025,7 @@ class Tracker:
             facet=facet,
             facet_schema_version=facet_schema_version,
             facet_index=facet_index,
+            hashing_strategy=hashing_strategy,
             **meta,
         )
 
@@ -4213,6 +4228,48 @@ class Tracker:
         return config_plan_service._ingest_cache_hit(table_name, content_hash)
 
     # --- View Factory ---
+
+    def view(self, model: Type[Any], key: Optional[str] = None) -> Type[Any]:
+        """Deprecated stub for removed SQLModel ORM view registration."""
+        _ = (model, key)
+        msg = (
+            "Tracker.view(...) and SQLModel ORM hybrid views were removed in Consist v0.5.0. "
+            "Use tracker.create_view(view_name, concept_key) with tracker.query_df(...) / "
+            "tracker.query_rows(..., model=...), or consist.ibis_view(tracker, model) instead."
+        )
+        warnings.warn(msg, DeprecationWarning, stacklevel=2)
+        raise DeprecatedViewsError(msg)
+
+    def register_views(self, *models: Type[Any]) -> None:
+        """Deprecated stub for removed bulk SQLModel ORM view registration."""
+        _ = models
+        msg = (
+            "Tracker.register_views(...) was removed in Consist v0.5.0. "
+            "Use tracker.create_view(view_name, concept_key) with tracker.query_df(...) / "
+            "tracker.query_rows(..., model=...), or consist.ibis_view(tracker, model) instead."
+        )
+        warnings.warn(msg, DeprecationWarning, stacklevel=2)
+        raise DeprecatedViewsError(msg)
+
+    @property
+    def views(self) -> Any:
+        """Deprecated stub for removed SQLModel ORM views namespace."""
+        msg = (
+            "Tracker.views and SQLModel ORM hybrid views were removed in Consist v0.5.0. "
+            "Use tracker.create_view(view_name, concept_key) with tracker.query_df(...) / "
+            "tracker.query_rows(..., model=...), or consist.ibis_view(tracker, model) instead."
+        )
+        warnings.warn(msg, DeprecationWarning, stacklevel=2)
+        raise DeprecatedViewsError(msg)
+
+    def db_session(self, *args: Any, **kwargs: Any) -> Any:
+        """Removed v0.4 SQLAlchemy session helper."""
+        _ = (args, kwargs)
+        raise NotImplementedError(
+            "Tracker.db_session() was removed in Consist v0.5.0. "
+            "Use tracker.query_df(...), tracker.query_rows(...), "
+            "tracker.db_connection(), or consist.ibis_connection(tracker) instead."
+        )
 
     def create_view(self, view_name: str, concept_key: str) -> Any:
         """

@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import os
 import re
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator, Mapping, Sequence
+    import duckdb
     from consist.core.persistence import DatabaseManager
     from consist.core.tracker import Tracker
+    from consist.types import ParameterizedSQL
 
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -71,6 +75,45 @@ class HotDataStore:
         db = self.db
         if db is not None:
             db.close()
+
+    def _require_db(self, operation: str) -> DatabaseManager:
+        db = self.db
+        if db is None:
+            raise RuntimeError(
+                f"HotDataStore cannot run {operation} without an attached database "
+                f"(db_path={self.db_path!r})."
+            )
+        return db
+
+    @contextmanager
+    def transaction(self) -> Iterator[duckdb.DuckDBPyConnection]:
+        """Open a poison-safe re-entrant transaction on the hot-data database."""
+        db = self._require_db("transaction")
+        with db.transaction() as con:
+            yield con
+
+    def execute(
+        self,
+        sql: str | ParameterizedSQL,
+        params: Sequence[Any] | Mapping[str, Any] | None = None,
+    ) -> None:
+        """Execute a DDL/DML statement against the hot-data database."""
+        self._require_db("execute").execute(sql, params=params)
+
+    def executemany(
+        self,
+        sql: str,
+        params_seq: Sequence[Sequence[Any]],
+    ) -> None:
+        """Execute a parameterized DML statement across multiple rows."""
+        self._require_db("executemany").executemany(sql, params_seq)
+
+    def has_table(self, table_name: str, *, table_schema: str = "main") -> bool:
+        """Return whether ``table_schema.table_name`` exists in the hot-data database."""
+        return self._require_db("has_table").has_table(
+            table_name,
+            table_schema=table_schema,
+        )
 
     def ingest_cache_hit(self, table_name: str, content_hash: str) -> bool:
         self._validate_single_store_alignment()

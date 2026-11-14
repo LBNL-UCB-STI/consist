@@ -3344,3 +3344,78 @@ def test_api_hydrate_run_outputs_to_destinations_delegates_and_is_exported(
             "db_fallback": "never",
         },
     }
+
+
+def test_register_run_output_recovery_copies_with_source_root_mixed_strategies(
+    tmp_path: Path,
+) -> None:
+    """source_root verifies fast-hashed outputs without re-hashing full sha256:file outputs."""
+    from consist.types import OutputArtifactSpec
+
+    source_run_dir = tmp_path / "scratch_run"
+    recovery_root = tmp_path / "nfs_recovery"
+    fast_src = source_run_dir / "outputs" / "fast_out.bin"
+    full_src = source_run_dir / "outputs" / "full_out.bin"
+    missing_src = source_run_dir / "outputs" / "missing_fast.bin"
+
+    def _produce() -> None:
+        fast_src.parent.mkdir(parents=True, exist_ok=True)
+        fast_src.write_bytes(b"fast-output-payload")
+        full_src.write_bytes(b"full-output-payload")
+        missing_src.write_bytes(b"missing-fast-payload")
+
+    with Tracker(
+        run_dir=source_run_dir,
+        db_path=str(tmp_path / "mixed.duckdb"),
+        hashing_strategy="fast",
+    ) as tracker:
+        res = tracker.run(
+            fn=_produce,
+            name="mixed_fast_full",
+            run_id="mixed_recovery_1",
+            outputs={
+                "fast_out": OutputArtifactSpec(path=fast_src),
+                "full_out": OutputArtifactSpec(path=full_src, hashing_strategy="full"),
+                "missing_fast": OutputArtifactSpec(path=missing_src),
+            },
+        )
+        assert res.outputs["fast_out"].digest is not None
+        assert res.outputs["fast_out"].digest.scheme == "stat_file_v1:sha256"
+        assert res.outputs["full_out"].digest is not None
+        assert res.outputs["full_out"].digest.scheme == "sha256:file"
+
+        # Copy all outputs to recovery_root, then delete full_src and missing_src from source_run_dir
+        for src in (fast_src, full_src, missing_src):
+            rel = src.relative_to(source_run_dir)
+            dest = recovery_root / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(src.read_bytes())
+
+        full_src.unlink()
+        missing_src.unlink()
+
+        reg = consist.register_run_output_recovery_copies(
+            "mixed_recovery_1",
+            recovery_root,
+            source_root=source_run_dir,
+            verify=True,
+            tracker=tracker,
+        )
+        assert reg["fast_out"].status == "registered"
+        assert reg["fast_out"].verification_succeeded is True
+        # full_out already has sha256:file so it must not touch or require source_root
+        assert reg["full_out"].status == "registered"
+        assert reg["full_out"].verification_succeeded is True
+        # missing_fast lacks sha256:file and is absent in source_root
+        assert reg["missing_fast"].status == "unverifiable_hash"
+
+        # Tampered destination bytes fail against source_root hash
+        (recovery_root / "outputs" / "fast_out.bin").write_bytes(b"tampered")
+        tampered = tracker.register_run_output_recovery_copies(
+            "mixed_recovery_1",
+            recovery_root,
+            keys=["fast_out"],
+            source_root=source_run_dir,
+            verify=True,
+        )
+        assert tampered["fast_out"].status == "hash_mismatch"

@@ -213,9 +213,21 @@ class ArtifactManager:
         known_latest_artifact_at_uri: Optional[Artifact] = None,
         latest_artifact_lookup_done: bool = False,
         strict_schema: bool = False,
+        hashing_strategy: Optional[Literal["full", "fast"]] = None,
         **meta: Any,
     ) -> Artifact:
         """Instantiate or resolve a tracked immutable ``Artifact``."""
+        meta_hashing_strategy = meta.pop("hashing_strategy", None)
+        if hashing_strategy is None:
+            hashing_strategy = meta_hashing_strategy
+        if hashing_strategy is not None:
+            if not isinstance(hashing_strategy, str):
+                raise TypeError("hashing_strategy must be 'full', 'fast', or None.")
+            if hashing_strategy not in ("full", "fast"):
+                raise ValueError(
+                    f"hashing_strategy must be 'full' or 'fast', got {hashing_strategy!r}."
+                )
+        effective_strategy = hashing_strategy or self.tracker.identity.hashing_strategy
         legacy_table_path = meta.pop("table_path", None)
         legacy_array_path = meta.pop("array_path", None)
         explicit_member_kw = meta.pop("member", None)
@@ -294,7 +306,7 @@ class ArtifactManager:
                 return None
             digest_state.attempted_compute = True
             target = Path(resolved_abs_path)
-            strategy = self.tracker.identity.hashing_strategy
+            strategy = effective_strategy
             try:
                 if target.is_dir():
                     if strategy != "fast":
@@ -551,7 +563,7 @@ class ArtifactManager:
         if is_new_artifact and artifact_obj.digest is not None and resolved_abs_path:
             meta_updates["hash_semantics"] = hash_semantics_for_new_artifact(
                 path=Path(resolved_abs_path),
-                hashing_strategy=self.tracker.identity.hashing_strategy,
+                hashing_strategy=effective_strategy,
                 source=(
                     "caller_supplied"
                     if (digest_state.caller_supplied and not validate_content_hash)
@@ -563,7 +575,7 @@ class ArtifactManager:
         elif digest_state.caller_supplied_override_applied:
             meta_updates["hash_semantics"] = hash_semantics_for_new_artifact(
                 path=None,
-                hashing_strategy=self.tracker.identity.hashing_strategy,
+                hashing_strategy=effective_strategy,
                 source="caller_supplied",
                 digest=artifact_obj.digest,
             )
@@ -581,7 +593,7 @@ class ArtifactManager:
             if resolved_abs_path:
                 meta_updates["hash_semantics"] = hash_semantics_for_new_artifact(
                     path=Path(resolved_abs_path),
-                    hashing_strategy=self.tracker.identity.hashing_strategy,
+                    hashing_strategy=effective_strategy,
                     source="computed",
                     digest=artifact_obj.digest,
                 )

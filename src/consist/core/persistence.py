@@ -818,14 +818,25 @@ class DatabaseManager:
                         sib._unregister_live_manager()
                 raise
 
-            for sib in suspended_siblings:
-                upgraded = duckdb.connect(target, read_only=False)
+            for idx, sib in enumerate(suspended_siblings):
+                upgraded: Optional[duckdb.DuckDBPyConnection] = None
                 try:
+                    upgraded = duckdb.connect(target, read_only=False)
                     self._configure_connection(upgraded)
                     sib._replay_temp_views_locked(upgraded)
                 except BaseException:
-                    upgraded.close()
-                    self._con.close()
+                    if upgraded is not None:
+                        try:
+                            upgraded.close()
+                        except duckdb.Error:
+                            pass
+                    try:
+                        self._con.close()
+                    except duckdb.Error:
+                        pass
+                    for rem_sib in suspended_siblings[idx:]:
+                        rem_sib._closed = True
+                        rem_sib._unregister_live_manager()
                     raise
                 sib._con = upgraded
                 sib._con_read_only = False
@@ -4745,13 +4756,65 @@ class DatabaseManager:
 
         incoming_lid_set = set(incoming_lids)
         stale_lids: list[uuid.UUID] = []
+        superseded_container_winners: dict[
+            tuple[str, str, str, str], ArtifactLocationRow
+        ] = {}
         for coord, win_loc in winning_by_coord.items():
+            container_superseded = False
             for old_loc in existing_active_by_coord.get(coord, ()):
                 if (
                     old_loc.location_id not in incoming_lid_set
                     and self._is_superseded_by_winner(old_loc, win_loc)
                 ):
                     stale_lids.append(old_loc.location_id)
+                    if win_loc.member == "" and win_loc.site in (
+                        "workspace",
+                        "external",
+                    ):
+                        container_superseded = True
+            if container_superseded:
+                superseded_container_winners[
+                    (
+                        win_loc.site,
+                        win_loc.mount_name,
+                        win_loc.mount_instance_id,
+                        win_loc.uri,
+                    )
+                ] = win_loc
+
+        if superseded_container_winners:
+            c_list = list(superseded_container_winners.keys())
+            for chunk_start in range(0, len(c_list), 500):
+                c_chunk = c_list[chunk_start : chunk_start + 500]
+                c_ph = ", ".join("(?, ?, ?, ?)" for _ in c_chunk)
+                c_params: list[Any] = [val for c in c_chunk for val in c]
+                for raw_row in cur.execute(
+                    "SELECT al.location_id, al.digest, al.artifact_id, al.site, al.mount_name, "
+                    "al.mount_instance_id, al.uri, al.member, al.status, al.witness_json, "
+                    "al.observed_at_ns FROM artifact_location AS al "
+                    f"JOIN (VALUES {c_ph}) AS v(site, mount_name, mount_instance_id, uri) "
+                    "ON al.site = v.site AND al.mount_name = v.mount_name "
+                    "AND al.mount_instance_id = v.mount_instance_id "
+                    "AND al.uri = v.uri "
+                    "WHERE al.status = 'active' AND al.member != ''",
+                    c_params,
+                ).fetchall():
+                    child_loc = self._hydrate_location_row(raw_row)
+                    if child_loc.location_id in incoming_lid_set:
+                        continue
+                    c_win = superseded_container_winners[
+                        (
+                            child_loc.site,
+                            child_loc.mount_name,
+                            child_loc.mount_instance_id,
+                            child_loc.uri,
+                        )
+                    ]
+                    if c_win.witness is not None and self._witness_matches_or_settled(
+                        child_loc.witness, c_win.witness
+                    ):
+                        continue
+                    stale_lids.append(child_loc.location_id)
 
         rows_to_upsert: list[ArtifactLocationRow] = []
         for loc in normalized_rows:
@@ -5344,14 +5407,17 @@ class DatabaseManager:
             for aid, locs in locations_by_artifact_id.items()
         }
         ids = list(coerced_map.keys())
-        placeholders = ", ".join("?" for _ in ids)
         now_ns = time.time_ns()
         with self.transaction() as cur:
-            found_rows = cur.execute(
-                f"SELECT id FROM artifact WHERE id IN ({placeholders})",
-                ids,
-            ).fetchall()
-            found_ids: set[uuid.UUID] = {_coerce_uuid(r[0]) for r in found_rows}
+            found_ids: set[uuid.UUID] = set()
+            for chunk_start in range(0, len(ids), 500):
+                id_chunk = ids[chunk_start : chunk_start + 500]
+                placeholders = ", ".join("?" for _ in id_chunk)
+                for r in cur.execute(
+                    f"SELECT id FROM artifact WHERE id IN ({placeholders})",
+                    id_chunk,
+                ).fetchall():
+                    found_ids.add(_coerce_uuid(r[0]))
             if require_all:
                 missing_ids = sorted(str(aid) for aid in set(ids) - found_ids)
                 if missing_ids:
@@ -5362,13 +5428,18 @@ class DatabaseManager:
             target_aids = [aid for aid in ids if aid in found_ids]
             if not target_aids:
                 return
-            target_ph = ", ".join("?" for _ in target_aids)
-            existing_rows = cur.execute(
-                f"SELECT location_id, artifact_id FROM artifact_location "
-                f"WHERE artifact_id IN ({target_ph}) "
-                "AND site IN ('archive', 'advisory') AND status = 'active'",
-                target_aids,
-            ).fetchall()
+            existing_rows: list[tuple[Any, Any]] = []
+            for chunk_start in range(0, len(target_aids), 500):
+                aid_chunk = target_aids[chunk_start : chunk_start + 500]
+                target_ph = ", ".join("?" for _ in aid_chunk)
+                existing_rows.extend(
+                    cur.execute(
+                        f"SELECT location_id, artifact_id FROM artifact_location "
+                        f"WHERE artifact_id IN ({target_ph}) "
+                        "AND site IN ('archive', 'advisory') AND status = 'active'",
+                        aid_chunk,
+                    ).fetchall()
+                )
             kept_lids_by_aid: dict[uuid.UUID, set[uuid.UUID]] = {
                 aid: {_coerce_uuid(loc.location_id) for loc in coerced_map[aid]}
                 for aid in target_aids
@@ -5419,9 +5490,11 @@ class DatabaseManager:
         ]
         params: list[Any] = [mount_name, mount_instance_id, root_uri, prefix]
         if retained_coerced:
-            ph = ", ".join("?" for _ in retained_coerced)
-            clauses.append(f"(artifact_id IS NULL OR artifact_id NOT IN ({ph}))")
-            params.extend(retained_coerced)
+            for chunk_start in range(0, len(retained_coerced), 500):
+                ret_chunk = retained_coerced[chunk_start : chunk_start + 500]
+                ph = ", ".join("?" for _ in ret_chunk)
+                clauses.append(f"(artifact_id IS NULL OR artifact_id NOT IN ({ph}))")
+                params.extend(ret_chunk)
         now_ns = time.time_ns()
         with self.transaction() as cur:
             rows = cur.execute(

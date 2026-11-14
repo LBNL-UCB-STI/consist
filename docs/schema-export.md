@@ -187,25 +187,20 @@ from consist import Tracker
 from your_pkg.models.persons import Persons
 
 tracker = Tracker(run_dir="./runs", db_path="./provenance.duckdb", schemas=[Persons])
-VPersons = tracker.views.Persons
-```
-
-### Register later
-
-```python
-from your_pkg.models.persons import Persons
-
-VPersons = tracker.view(Persons)  # registers + creates/refreshes the hybrid view
+tracker.create_view("v_persons", "persons")
 ```
 
 ### Querying
 
 ```python
-from sqlmodel import select
 import consist
 
-VPersons = tracker.views.Persons
-rows = consist.run_query(select(VPersons).limit(5), tracker=tracker)
+rows = consist.query_rows(
+    "SELECT * FROM v_persons LIMIT 5",
+    model=Persons,
+    tracker=tracker,
+)
+df = consist.query_df("SELECT * FROM v_persons LIMIT 5", tracker=tracker)
 ```
 
 Views automatically include Consist metadata columns (e.g. `consist_run_id`, `consist_year`, `consist_scenario_id`) for filtering and grouping.

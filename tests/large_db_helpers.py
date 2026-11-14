@@ -82,7 +82,7 @@ def _seed_base_dataset(
                         CASE WHEN i < ? THEN 'scale_50k' END,
                         CASE WHEN i < ? THEN 'scale_10k' END,
                         CASE WHEN i % 7 = 0 THEN 'tagged' END
-                    ], x -> x IS NOT NULL)),
+                    ], lambda x: x IS NOT NULL)),
                     'cfg_' || CAST(i % 200 AS VARCHAR),
                     'in_' || CAST(i % 500 AS VARCHAR),
                     'git_' || CAST(i % 3 AS VARCHAR),

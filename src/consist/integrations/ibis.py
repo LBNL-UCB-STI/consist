@@ -51,7 +51,7 @@ def _is_backend_connected(backend: IbisDuckDBBackend) -> bool:
     if con is None:
         return False
     try:
-        con.execute("SELECT 1")
+        con.execute("SELECT 1").fetchall()
     except duckdb.Error:
         return False
     return True

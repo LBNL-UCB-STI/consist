@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import shutil
 import uuid
 
 import pytest
@@ -13,6 +14,7 @@ from consist.core.materialize import (
 from consist.core.tracker import Tracker
 from consist.models.artifact import Artifact
 from consist.types import (
+    CacheOptions,
     ExecutionOptions,
     OutputPolicyOptions,
     OutputSet,
@@ -1391,3 +1393,155 @@ def test_cache_hit_preserves_imperative_outputs_when_output_paths_passed_and_out
         assert "declared" in sc_cached.coupler
         assert "imperative" in sc_cached.coupler
         assert "annual" in sc_cached.coupler
+
+
+def test_output_set_cold_scratch_cache_hit_with_completion_archive(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "shared.duckdb"
+    members = ("vehicles_output.RData", "households_output.RData")
+
+    def _run_once(run_tag: str) -> tuple[bool, Path]:
+        scratch_dir = tmp_path / "scratch" / run_tag
+        archive_run_dir = tmp_path / "archive" / run_tag
+        archive_root = archive_run_dir / "consist-recovery" / "atlas_step"
+        set_root = scratch_dir / "atlas" / "atlas_input" / "year2015"
+        archive_run_dir.mkdir(parents=True, exist_ok=True)
+        set_root.mkdir(parents=True, exist_ok=True)
+
+        def step_fn() -> None:
+            set_root.mkdir(parents=True, exist_ok=True)
+            (set_root / "households_output.RData").write_bytes(b"hh-rdata")
+            (set_root / "vehicles_output.RData").write_bytes(b"veh-rdata")
+
+        with Tracker(
+            run_dir=archive_run_dir,
+            db_path=db_path,
+            mounts={"workspace": str(scratch_dir)},
+            archive_mounts={"workspace": "."},
+            allow_external_paths=True,
+        ) as tracker:
+            result = tracker.run(
+                fn=step_fn,
+                name="atlas_run",
+                model="atlas",
+                config={"year": 2015},
+                output_sets={
+                    "atlas_continuation_2015": OutputSet(
+                        root=set_root,
+                        include=members,
+                        expected_members=members,
+                    )
+                },
+                cache_options=CacheOptions(
+                    cache_mode="reuse",
+                    cache_hydration="outputs-requested",
+                    code_identity="callable_module",
+                ),
+                output_policy=OutputPolicyOptions(
+                    run_completion_archive=RunCompletionArchivePolicy(
+                        archive_root=archive_root,
+                        mode="copy",
+                    )
+                ),
+            )
+            return result.cache_hit, archive_root
+
+    hit1, archive1 = _run_once("run1")
+    assert hit1 is False
+    assert any(archive1.rglob("households_output.RData"))
+
+    shutil.rmtree(tmp_path / "scratch" / "run1")
+
+    hit2, archive2 = _run_once("run2")
+    assert hit2 is True
+    assert (
+        tmp_path
+        / "scratch"
+        / "run2"
+        / "atlas"
+        / "atlas_input"
+        / "year2015"
+        / "households_output.RData"
+    ).is_file()
+    assert any(archive2.rglob("households_output.RData"))
+
+
+def test_output_set_unhydrated_cache_hit_with_preexisting_set_root_and_completion_archive(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "shared_unhydrated.duckdb"
+    members = ("vehicles_output.RData", "households_output.RData")
+
+    def _run_once(
+        run_tag: str, *, cache_hydration: str, write_unrelated_file: bool = False
+    ) -> tuple[bool, Path]:
+        scratch_dir = tmp_path / "scratch" / run_tag
+        archive_run_dir = tmp_path / "archive" / run_tag
+        archive_root = archive_run_dir / "consist-recovery" / "atlas_step"
+        set_root = scratch_dir / "atlas" / "atlas_input" / "year2015"
+        archive_run_dir.mkdir(parents=True, exist_ok=True)
+        set_root.mkdir(parents=True, exist_ok=True)
+        if write_unrelated_file:
+            (set_root / "households_preprocess.csv").write_text(
+                "id\n1\n", encoding="utf-8"
+            )
+
+        def step_fn() -> None:
+            set_root.mkdir(parents=True, exist_ok=True)
+            (set_root / "households_output.RData").write_bytes(b"hh-rdata")
+            (set_root / "vehicles_output.RData").write_bytes(b"veh-rdata")
+
+        with Tracker(
+            run_dir=archive_run_dir,
+            db_path=db_path,
+            mounts={"workspace": str(scratch_dir)},
+            archive_mounts={"workspace": "."},
+            allow_external_paths=True,
+        ) as tracker:
+            result = tracker.run(
+                fn=step_fn,
+                name="atlas_run",
+                model="atlas",
+                config={"year": 2015},
+                output_sets={
+                    "atlas_continuation_2015": OutputSet(
+                        root=set_root,
+                        include=members,
+                        expected_members=members,
+                    )
+                },
+                cache_options=CacheOptions(
+                    cache_mode="reuse",
+                    cache_hydration=cache_hydration,
+                    code_identity="callable_module",
+                ),
+                output_policy=OutputPolicyOptions(
+                    run_completion_archive=RunCompletionArchivePolicy(
+                        archive_root=archive_root,
+                        mode="copy",
+                    )
+                ),
+            )
+            return result.cache_hit, archive_root
+
+    hit1, archive1 = _run_once("run1", cache_hydration="outputs-requested")
+    assert hit1 is False
+    assert any(archive1.rglob("households_output.RData"))
+
+    shutil.rmtree(tmp_path / "scratch" / "run1")
+
+    hit2, archive2 = _run_once(
+        "run2", cache_hydration="metadata", write_unrelated_file=True
+    )
+    assert hit2 is True
+    assert not (
+        tmp_path
+        / "scratch"
+        / "run2"
+        / "atlas"
+        / "atlas_input"
+        / "year2015"
+        / "households_output.RData"
+    ).exists()
+    assert any(archive2.rglob("households_output.RData"))

@@ -149,9 +149,9 @@ Because `provenance.duckdb` indexes every run and artifact, you can query output
 
 ## Upgraded from 0.4?
 
-If you upgraded an existing project from Consist 0.4 using `consist migrate <db_path>`, Consist verifies existing files on disk and computes their v0.5 fingerprints (`Digest`). In `--quick` mode (`consist migrate <db_path> --quick`), any artifact whose v0.4 record already had a full SHA-256 hash, a directory manifest, a logical matrix hash, or an ingested DuckDB table keeps its verified status immediately.
+If you upgraded an existing project from Consist 0.4 using `consist migrate <db_path>`, Consist verifies existing files on disk and computes their v0.5 fingerprints (`Digest`). With `--trust-v04-hashes` (`consist migrate <db_path> --trust-v04-hashes`), any artifact whose v0.4 record already had a full SHA-256 hash keeps its verified status without re-hashing on disk.
 
-Only historical runs whose files were already deleted or overwritten, or whose v0.4 record only had a quick size-and-timestamp check (`--quick` skips re-reading these from disk), become **history-only**:
+Only historical runs whose files were already deleted or overwritten, or whose v0.4 record lacked a verified content hash, become **history-only**:
 
 - They remain **fully visible** in lineage graphs, run queries, and hybrid views.
 - They **never produce a false cache hit**, because their original file contents were not verified on disk during migration.

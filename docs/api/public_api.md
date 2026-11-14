@@ -243,7 +243,7 @@ tracker and workflow surfaces. See [GTFS Support](../integrations/gtfs.md).
 ### Execution contracts and options
 
 - `consist.ArtifactSpec` / `consist.OutputArtifactSpec` (rich declared-output
-  metadata for `Tracker.run(output_paths=...)`, including `OutputArtifactSpec.for_directory(...)` and `allow_extra_files=True`)
+  metadata for `Tracker.run(output_paths=...)` / `outputs={role: spec}`, including `OutputArtifactSpec.for_directory(...)`, `allow_extra_files=True`, and per-output `hashing_strategy="full" | "fast"`)
 - `consist.FilenamePattern`, `consist.IntCapture`, `consist.EnumCapture`, and `consist.StringCapture`
   (capture-aware output-set declarations for `OutputSet(include=...)`)
 - `consist.CacheOptions`, `consist.OutputPolicyOptions`, `consist.ExecutionOptions`, `consist.RunCompletionArchivePolicy`
@@ -335,8 +335,9 @@ These models are returned by, or support, `ScenarioContext.map_runs(...)`:
 
 ### Querying and views
 
-- [`consist.view`](api_helpers.md#consist.api.view)
-- [`consist.register_views`](api_helpers.md#consist.api.register_views)
+- [`Tracker.create_view(...)`](tracker.md#consist.core.tracker.Tracker.create_view)
+- [`consist.query_df`](api_helpers.md#consist.api.query_df) / [`Tracker.query_df(...)`](tracker.md#consist.core.tracker.Tracker.query_df)
+- [`consist.query_rows`](api_helpers.md#consist.api.query_rows) / [`Tracker.query_rows(...)`](tracker.md#consist.core.tracker.Tracker.query_rows)
 - [`consist.find_run`](api_helpers.md#consist.api.find_run)
 - [`consist.find_runs`](api_helpers.md#consist.api.find_runs)
 - [`consist.find_latest_run`](api_helpers.md#consist.api.find_latest_run)
@@ -356,10 +357,8 @@ These models are returned by, or support, `ScenarioContext.map_runs(...)`:
 - [`consist.get_run_result`](api_helpers.md#consist.api.get_run_result) / [`Tracker.get_run_result(...)`](tracker.md#consist.core.tracker.Tracker.get_run_result)
 - [`Tracker.print_lineage(...)`](tracker.md#consist.core.tracker.Tracker.print_lineage)
 - [`consist.run_query`](api_helpers.md#consist.api.run_query)
-- [`consist.db_session`](api_helpers.md#consist.api.db_session)
 - [`consist.pivot_facets`](api_helpers.md#consist.api.pivot_facets)
 - Indexing helpers: [`consist.index_by_field`](indexing.md#consist.core.indexing.index_by_field), [`consist.index_by_facet`](indexing.md#consist.core.indexing.index_by_facet), plus [`RunFieldIndex`](indexing.md#consist.core.indexing.RunFieldIndex) / [`FacetIndex`](indexing.md#consist.core.indexing.FacetIndex)
-- Views registry: `tracker.views` ([`ViewRegistry`](views.md#view-registry))
 - Matrix utilities: [`Tracker.load_matrix(...)`](tracker.md#consist.core.tracker.Tracker.load_matrix), [`MatrixViewFactory`](matrix.md#matrix-views)
 - Schema export: [`Tracker.export_schema_sqlmodel(...)`](tracker.md#consist.core.tracker.Tracker.export_schema_sqlmodel)
 
@@ -397,9 +396,10 @@ to Consist, start with the **Core** and **Logging/Loading** groups and reach for
 - `hydrate_run_outputs`, `hydrate_run_outputs_to_destinations`,
   `materialize_run_outputs`, `materialize_artifact`
 - `stage_artifact`, `stage_inputs`
-- `set_artifact_recovery_roots`, `register_artifact_recovery_copy`,
-  `register_run_output_recovery_copies`, `archive_artifact`, `archive_run_outputs`,
+- `set_artifact_recovery_roots`, `register_artifact_recovery_copy` (accepts optional `source_root` for unhashed fast-mode source verification),
+  `register_run_output_recovery_copies` (accepts optional `source_root`), `archive_artifact`, `archive_run_outputs`,
   `archive_current_run_outputs`, `archive_run_output_files`
+- `Artifact.relative_path` / `Artifact.as_relative_path(tracker=None)` (portable run-relative `Path` resolution)
 - `get_artifact_lineage`, `print_lineage`, `history`
 - `diff_runs`, `get_config_facet`, `get_config_facets`, `get_run_config_kv`
 - `get_config_values`, `get_config_value`, `find_runs_by_facet_kv`

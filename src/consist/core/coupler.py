@@ -18,7 +18,7 @@ import warnings
 
 from consist.core.validation import validate_artifact_key
 from consist.location import FileStat
-from consist.models.artifact import Artifact
+from consist.models.artifact import Artifact, resolve_active_or_default_resolver
 from consist.protocols import ArtifactLike
 
 if TYPE_CHECKING:
@@ -195,7 +195,7 @@ class DeclaredOutput:
     description: Optional[str] = None
 
 
-class Coupler:
+class Coupler(MutableMapping[str, Artifact]):
     """
     Scenario-local helper to thread named artifacts between steps.
 
@@ -215,6 +215,9 @@ class Coupler:
         self._undefined_keys: builtins.set[str] = builtins.set()
         self._output_descriptions: MutableMapping[str, str] = {}
         self.tracker = tracker
+
+    # MutableMapping sets __hash__ = None, but Tracker._couplers is a WeakSet.
+    __hash__ = object.__hash__
 
     @property
     def tracker(self) -> Optional["Tracker"]:
@@ -325,38 +328,24 @@ class Coupler:
     def __iter__(self) -> Iterator[str]:
         return iter(self._artifacts)
 
-    def keys(self) -> Iterable[str]:
-        return self._artifacts.keys()
+    def update(self, artifacts: Any = (), /, **kwargs: Any) -> None:
+        if artifacts is None:
+            if kwargs:
+                super().update(**kwargs)
+            return
+        super().update(artifacts, **kwargs)
 
-    def items(self) -> Iterable[tuple[str, Any]]:
-        return [
-            (key, self._resolve_lazy_entry(key, value))
-            for key, value in self._artifacts.items()
-        ]
-
-    def values(self) -> Iterable[Any]:
-        return [
-            self._resolve_lazy_entry(key, value)
-            for key, value in self._artifacts.items()
-        ]
-
-    def update(
-        self, artifacts: Optional[Mapping[str, Any]] = None, /, **kwargs: Any
-    ) -> None:
-        if artifacts:
-            for key, artifact in artifacts.items():
-                self.set(key, artifact)
-        if kwargs:
-            for key, artifact in kwargs.items():
-                self.set(key, artifact)
-
-    def get(self, key: str) -> Optional[Any]:
+    def get(self, key: Any, default: Any = None) -> Any:
         self._validate_artifact_key(key)
         if key not in self._artifacts:
-            return None
+            return default
         return self._resolve_lazy_entry(key, self._artifacts[key])
 
-    def pop(self, key: str, default: Optional[Any] = None) -> Optional[Any]:
+    def to_dict(self) -> dict[str, Any]:
+        """Return a plain ``dict`` mapping each key to its resolved artifact."""
+        return dict(self.items())
+
+    def pop(self, key: Any, default: Any = None) -> Any:
         self._validate_artifact_key(key)
         if key not in self._artifacts:
             return default
@@ -380,10 +369,10 @@ class Coupler:
         warn_undefined: bool = False,
         description: Optional[Mapping[str, str]] = None,
     ) -> None:
-        if not names:
-            return
         if warn_undefined:
             self._warn_undefined = True
+        if not names:
+            return
         if isinstance(required, Mapping):
             required_map = {str(k): bool(v) for k, v in required.items()}
             default_required = False
@@ -469,6 +458,12 @@ class Coupler:
     def __setitem__(self, key: str, artifact: Any) -> None:
         self.set(key, artifact)
 
+    def __delitem__(self, key: str) -> None:
+        self._validate_artifact_key(key)
+        if key not in self._artifacts:
+            raise KeyError(key)
+        del self._artifacts[key]
+
     def path(self, key: str, *, required: bool = True) -> Optional[Path]:
         """
         Resolve an artifact's URI to an absolute host path.
@@ -476,18 +471,30 @@ class Coupler:
         This does not mutate the Artifact; it only returns a resolved Path.
         """
         artifact = self.require(key) if required else self.get(key)
-        if not artifact:
+        if artifact is None:
             return None
         if isinstance(artifact, Artifact):
-            if not self.tracker:
+            if self.tracker is not None:
+                return artifact.as_path(self.tracker)
+            if (
+                artifact._abs_path is None
+                and artifact.resolver is None
+                and resolve_active_or_default_resolver() is None
+            ):
                 raise RuntimeError(
                     f"Cannot resolve path for {key!r}: no tracker attached to Coupler."
                 )
-            return Path(self.tracker.resolve_uri(artifact.uri))
-        if isinstance(artifact, (Path, str)):
-            if self.tracker is not None and "://" in str(artifact):
-                return Path(self.tracker.resolve_uri(str(artifact)))
-            return Path(artifact)
+            return artifact.as_path()
+        if isinstance(artifact, (Path, str, os.PathLike)):
+            raw_str = (
+                os.fspath(artifact) if isinstance(artifact, os.PathLike) else artifact
+            )
+            if self.tracker is not None and "://" in str(raw_str):
+                return Path(self.tracker.resolve_uri(str(raw_str)))
+            resolved = Path(raw_str)
+            if not resolved.is_absolute() and self.tracker is not None:
+                return (self.tracker.run_dir / resolved).resolve()
+            return resolved
         if isinstance(artifact, ArtifactLike):
             if artifact.path is not None:
                 return Path(artifact.path)
