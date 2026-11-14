@@ -1451,6 +1451,11 @@ class TrackerArchiveService(_TrackerServiceBase):
                 raise ValueError(
                     f"OutputSet source contains a symlink: {member_source}"
                 )
+            if not member_source.exists():
+                raise FileNotFoundError(
+                    f"Cannot archive OutputSet artifact {child.key!r}: "
+                    "source bytes are unavailable."
+                )
             if not member_source.is_file():
                 raise ValueError(
                     f"OutputSet member {child.key!r} source is not a regular file."
