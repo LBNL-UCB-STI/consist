@@ -14,7 +14,7 @@ from dataclasses import dataclass, replace
 from collections.abc import Iterable, Iterator, Mapping as MappingABC, Sequence
 from datetime import datetime, timezone
 import logging
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 import uuid
 import weakref
@@ -408,6 +408,36 @@ class _ArtifactMeta(type):
         return obj
 
 
+def _normalize_remappable_relative_path(rel_path: str) -> Optional[Path]:
+    """Normalize a portable relative path, returning ``None`` if unsafe or empty."""
+    candidate = rel_path.strip()
+    if not candidate:
+        return None
+    pure_path = PurePosixPath(candidate)
+    if pure_path.is_absolute() or ".." in pure_path.parts:
+        return None
+    normalized_parts = [part for part in pure_path.parts if part not in {"", "."}]
+    if not normalized_parts:
+        return None
+    return Path(*normalized_parts)
+
+
+def _remappable_relative_path_from_uri(uri: str) -> Optional[Path]:
+    """Pure fallback matching ``FileSystemManager.get_remappable_relative_path``."""
+    if uri.startswith("workspace://"):
+        return _normalize_remappable_relative_path(
+            uri.replace("workspace://", "", 1).lstrip("/")
+        )
+    if uri.startswith("./"):
+        return _normalize_remappable_relative_path(uri[2:])
+    if "://" not in uri:
+        return None
+    scheme, rel_path = uri.split("://", 1)
+    if scheme == "file":
+        return None
+    return _normalize_remappable_relative_path(rel_path.lstrip("/"))
+
+
 @dataclass(frozen=True, kw_only=True, repr=False, eq=False)
 class Artifact(metaclass=_ArtifactMeta):
     """
@@ -722,6 +752,28 @@ class Artifact(metaclass=_ArtifactMeta):
         if self._abs_path and not ignore_runtime_abs:
             return Path(self._abs_path)
         return Path(self.uri)
+
+    @property
+    def relative_path(self) -> Optional[Path]:
+        """Return the portable run-relative ``Path`` for this artifact URI, if remappable."""
+        return self.as_relative_path(None)
+
+    def as_relative_path(self, tracker: Optional[Any] = None) -> Optional[Path]:
+        """Return the portable run-relative ``Path`` using ``tracker`` or attached resolver."""
+        if tracker is not None:
+            target_resolver: Optional[Any] = tracker
+        else:
+            attached = self._resolver_ref() if self._resolver_ref is not None else None
+            target_resolver = (
+                attached
+                if attached is not None
+                else resolve_active_or_default_resolver()
+            )
+        if target_resolver is not None and isinstance(
+            target_resolver, ArtifactResolver
+        ):
+            return target_resolver.resolve_artifact_relative_path(self)
+        return _remappable_relative_path_from_uri(self.uri)
 
     def ensure_local_path(
         self,

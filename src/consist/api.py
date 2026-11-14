@@ -1737,6 +1737,7 @@ def register_artifact_recovery_copy(
     *,
     verify: bool = True,
     content_hash: str | None = None,
+    source_root: str | Path | None = None,
     append: bool = True,
     tracker: Optional["Tracker"] = None,
 ) -> "ArtifactRecoveryCopyRegistration":
@@ -1752,6 +1753,10 @@ def register_artifact_recovery_copy(
         Whether to verify the copy's full-file SHA-256 digest.
     content_hash : str | None, optional
         Expected SHA-256 digest, taking precedence over ``artifact.digest``.
+    source_root : str | Path | None, optional
+        Optional root containing the unpromoted source file at its URI-relative
+        path, hashed only when ``verify=True``, ``content_hash is None``, and
+        ``artifact`` lacks a verifiable full digest.
     append : bool, default True
         Whether to append rather than replace recovery-root metadata.
     tracker : Tracker | None, optional
@@ -1767,11 +1772,20 @@ def register_artifact_recovery_copy(
     This function never copies bytes. Directory artifacts and HDF5 child tables
     are deliberately blocked until they have an independent recovery contract.
     """
+    if source_root is None:
+        return _resolve_tracker(tracker).register_artifact_recovery_copy(
+            artifact,
+            recovery_root,
+            verify=verify,
+            content_hash=content_hash,
+            append=append,
+        )
     return _resolve_tracker(tracker).register_artifact_recovery_copy(
         artifact,
         recovery_root,
         verify=verify,
         content_hash=content_hash,
+        source_root=source_root,
         append=append,
     )
 
@@ -1784,6 +1798,7 @@ def register_run_output_recovery_copies(
     verify: bool = True,
     append: bool = True,
     content_hashes: Mapping[str, str] | None = None,
+    source_root: str | Path | None = None,
     tracker: Optional["Tracker"] = None,
 ) -> "RunOutputRecoveryCopiesRegistration":
     """Verify and register existing recovery copies for run outputs.
@@ -1802,6 +1817,10 @@ def register_run_output_recovery_copies(
         Whether successful registrations append recovery-root metadata.
     content_hashes : mapping of str to str | None, optional
         Optional per-key SHA-256 proofs for artifacts without full hashes.
+    source_root : str | Path | None, optional
+        Optional root containing unpromoted source files at their URI-relative
+        paths, hashed only for outputs without ``content_hashes[key]`` or a
+        verifiable full digest when ``verify=True``.
     tracker : Tracker | None, optional
         Tracker used for validation and persistence.
 
@@ -1815,6 +1834,15 @@ def register_run_output_recovery_copies(
     KeyError
         If requested output or content-hash keys are unknown.
     """
+    if source_root is None:
+        return _resolve_tracker(tracker).register_run_output_recovery_copies(
+            run_id,
+            recovery_root,
+            keys=keys,
+            verify=verify,
+            append=append,
+            content_hashes=content_hashes,
+        )
     return _resolve_tracker(tracker).register_run_output_recovery_copies(
         run_id,
         recovery_root,
@@ -1822,6 +1850,7 @@ def register_run_output_recovery_copies(
         verify=verify,
         append=append,
         content_hashes=content_hashes,
+        source_root=source_root,
     )
 
 

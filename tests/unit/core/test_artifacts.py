@@ -1069,3 +1069,45 @@ def test_artifact_meta_dict_returns_deep_unfrozen_json_serializable_copy() -> No
     unfrozen["tags"].append("z")
     assert art.meta["nested"]["a"] == 1
     assert list(art.meta["tags"]) == ["x", "y"]
+
+
+def test_artifact_relative_path_and_as_relative_path(tmp_path: Path) -> None:
+    from consist import Tracker
+
+    sub_mount_dir = tmp_path / "runs" / "sub_mount"
+    sub_mount_dir.mkdir(parents=True, exist_ok=True)
+    tracker = Tracker(
+        run_dir=tmp_path / "runs",
+        db_path=str(tmp_path / "rel_path.duckdb"),
+        mounts={"sub": str(sub_mount_dir)},
+    )
+    try:
+        ws = Artifact(key="ws", uri="workspace://outputs/result.txt", driver="txt")
+        dot = Artifact(key="dot", uri="./outputs/dot.txt", driver="txt")
+        sub = Artifact(key="sub", uri="sub://nested/item.csv", driver="csv")
+        file_uri = Artifact(
+            key="file", uri="file:///tmp/external/out.csv", driver="csv"
+        )
+        abs_uri = Artifact(key="abs", uri="/tmp/external/abs.csv", driver="csv")
+        traversal = Artifact(key="bad", uri="workspace://../escape.txt", driver="txt")
+
+        assert ws.relative_path == Path("outputs/result.txt")
+        assert ws.as_relative_path(tracker) == Path("outputs/result.txt")
+        assert dot.relative_path == Path("outputs/dot.txt")
+        assert dot.as_relative_path(tracker) == Path("outputs/dot.txt")
+
+        # Sub-mount under run_dir includes mount's relative prefix when resolved via tracker
+        assert sub.relative_path == Path("nested/item.csv")
+        assert sub.as_relative_path(tracker) == Path("sub_mount/nested/item.csv")
+        assert sub.with_resolver(tracker).relative_path == Path(
+            "sub_mount/nested/item.csv"
+        )
+
+        assert file_uri.relative_path is None
+        assert file_uri.as_relative_path(tracker) is None
+        assert abs_uri.relative_path is None
+        assert abs_uri.as_relative_path(tracker) is None
+        assert traversal.relative_path is None
+        assert traversal.as_relative_path(tracker) is None
+    finally:
+        tracker.close()

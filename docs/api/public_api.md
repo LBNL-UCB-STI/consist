@@ -396,9 +396,10 @@ to Consist, start with the **Core** and **Logging/Loading** groups and reach for
 - `hydrate_run_outputs`, `hydrate_run_outputs_to_destinations`,
   `materialize_run_outputs`, `materialize_artifact`
 - `stage_artifact`, `stage_inputs`
-- `set_artifact_recovery_roots`, `register_artifact_recovery_copy`,
-  `register_run_output_recovery_copies`, `archive_artifact`, `archive_run_outputs`,
+- `set_artifact_recovery_roots`, `register_artifact_recovery_copy` (accepts optional `source_root` for unhashed fast-mode source verification),
+  `register_run_output_recovery_copies` (accepts optional `source_root`), `archive_artifact`, `archive_run_outputs`,
   `archive_current_run_outputs`, `archive_run_output_files`
+- `Artifact.relative_path` / `Artifact.as_relative_path(tracker=None)` (portable run-relative `Path` resolution)
 - `get_artifact_lineage`, `print_lineage`, `history`
 - `diff_runs`, `get_config_facet`, `get_config_facets`, `get_run_config_kv`
 - `get_config_values`, `get_config_value`, `find_runs_by_facet_kv`

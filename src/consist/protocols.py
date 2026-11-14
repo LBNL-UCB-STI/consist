@@ -88,6 +88,8 @@ class ArtifactResolver(Protocol):
 
     def resolve_artifact_path(self, artifact: Any) -> Path: ...
 
+    def resolve_artifact_relative_path(self, artifact: Any) -> Optional[Path]: ...
+
     def ensure_local_artifact_path(
         self,
         artifact: Any,

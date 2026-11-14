@@ -146,6 +146,18 @@ class TrackerArchiveService(_TrackerServiceBase):
             not in {"stat_file_v1:sha256", "stat_dir_v1:sha256"}
         )
 
+    def _has_verifiable_artifact_digest(self, artifact: Artifact) -> bool:
+        return (
+            artifact.digest is not None
+            and artifact.digest.scheme
+            not in {
+                "stat_file_v1:sha256",
+                "stat_dir_v1:sha256",
+                "caller_supplied_v1:sha256",
+            }
+            and not is_unvalidated_caller_digest(artifact)
+        )
+
     def _directory_archive_sort_key(
         self, index_and_item: tuple[int, tuple[str, Artifact]]
     ) -> tuple[int, int]:
@@ -2137,6 +2149,7 @@ class TrackerArchiveService(_TrackerServiceBase):
         *,
         verify: bool = True,
         content_hash: str | None = None,
+        source_root: str | os.PathLike[str] | None = None,
         append: bool = True,
     ) -> ArtifactRecoveryCopyRegistration:
         """Verify and record an externally copied artifact recovery location.
@@ -2150,7 +2163,11 @@ class TrackerArchiveService(_TrackerServiceBase):
         verify : bool, default True
             Whether to verify the copy's full-file SHA-256 digest.
         content_hash : str | None, optional
-            Expected SHA-256 digest, taking precedence over ``artifact.hash``.
+            Expected SHA-256 digest, taking precedence over ``artifact.digest``.
+        source_root : path-like | None, optional
+            Optional root containing the unpromoted source file at its
+            URI-relative path, hashed only when ``verify=True``,
+            ``content_hash is None``, and ``artifact`` lacks a full digest.
         append : bool, default True
             Whether to append instead of replace recovery-root metadata.
 
@@ -2169,6 +2186,7 @@ class TrackerArchiveService(_TrackerServiceBase):
             recovery_root,
             verify=verify,
             content_hash=content_hash,
+            source_root=source_root,
             append=append,
             persist=True,
         )
@@ -2180,6 +2198,7 @@ class TrackerArchiveService(_TrackerServiceBase):
         *,
         verify: bool,
         content_hash: str | None,
+        source_root: str | os.PathLike[str] | None = None,
         append: bool,
         persist: bool,
     ) -> ArtifactRecoveryCopyRegistration:
@@ -2274,17 +2293,38 @@ class TrackerArchiveService(_TrackerServiceBase):
                 ),
             )
 
-        has_verifiable_digest = self._has_verifiable_content_digest(artifact)
+        has_verifiable_digest = self._has_verifiable_artifact_digest(artifact)
+        source_candidate: Path | None = None
         if verify and content_hash is None and not has_verifiable_digest:
-            return result(
-                "unverifiable_hash",
-                expected_path=expected_path_resolved,
-                message=(
-                    "Verification requested, but no full file hash is available. "
-                    "Pass content_hash=<sha256> or use verify=False to register "
-                    "the existing copy without byte verification."
-                ),
-            )
+            if source_root is None:
+                return result(
+                    "unverifiable_hash",
+                    expected_path=expected_path_resolved,
+                    message=(
+                        "Verification requested, but no full file hash is available. "
+                        "Pass content_hash=<sha256>, source_root=<path>, or use verify=False to register "
+                        "the existing copy without byte verification."
+                    ),
+                )
+            source_candidate = Path(source_root).resolve() / relative_path
+            if self._has_symlink_component(source_candidate):
+                return result(
+                    "failed",
+                    expected_path=expected_path_resolved,
+                    message=(
+                        "Symlink detected in recovery verification source: "
+                        f"{source_candidate}"
+                    ),
+                )
+            if not source_candidate.is_file():
+                return result(
+                    "unverifiable_hash",
+                    expected_path=expected_path_resolved,
+                    message=(
+                        "Verification requested, but source_root lacked a regular "
+                        f"source file at {source_candidate}."
+                    ),
+                )
         if verify:
             mismatches: list[str] = []
             try:
@@ -2300,12 +2340,20 @@ class TrackerArchiveService(_TrackerServiceBase):
                         matched = file_sha256(expected_path_resolved) == content_hash
                     if not matched:
                         mismatches.append("content_hash")
-                elif artifact.digest is None or not verify_digest(
-                    expected_path_resolved,
-                    artifact.digest,
-                    driver=artifact.driver,
-                    member=artifact.member,
-                ):
+                elif has_verifiable_digest:
+                    if artifact.digest is None or not verify_digest(
+                        expected_path_resolved,
+                        artifact.digest,
+                        driver=artifact.driver,
+                        member=artifact.member,
+                    ):
+                        mismatches.append("artifact.digest")
+                elif source_candidate is not None:
+                    if file_sha256(expected_path_resolved) != file_sha256(
+                        source_candidate
+                    ):
+                        mismatches.append("source_root")
+                else:
                     mismatches.append("artifact.digest")
             except Exception as exc:
                 return result(
@@ -2447,6 +2495,7 @@ class TrackerArchiveService(_TrackerServiceBase):
         verify: bool = True,
         append: bool = True,
         content_hashes: Mapping[str, str] | None = None,
+        source_root: str | os.PathLike[str] | None = None,
     ) -> RunOutputRecoveryCopiesRegistration:
         """Verify and record externally copied recovery locations for run outputs."""
         normalized_keys = normalize_materialize_output_keys(
@@ -2474,6 +2523,7 @@ class TrackerArchiveService(_TrackerServiceBase):
                 recovery_root,
                 verify=verify,
                 content_hash=content_hashes.get(key) if content_hashes else None,
+                source_root=source_root,
                 append=append,
                 persist=False,
             )

@@ -1434,6 +1434,7 @@ class Tracker:
         *,
         verify: bool = True,
         content_hash: str | None = None,
+        source_root: str | os.PathLike[str] | None = None,
         append: bool = True,
     ) -> ArtifactRecoveryCopyRegistration:
         return self._archive_service.register_artifact_recovery_copy(
@@ -1441,6 +1442,7 @@ class Tracker:
             recovery_root,
             verify=verify,
             content_hash=content_hash,
+            source_root=source_root,
             append=append,
         )
 
@@ -1451,6 +1453,7 @@ class Tracker:
         *,
         verify: bool,
         content_hash: str | None,
+        source_root: str | os.PathLike[str] | None = None,
         append: bool,
         persist: bool,
     ) -> ArtifactRecoveryCopyRegistration:
@@ -1459,9 +1462,14 @@ class Tracker:
             recovery_root,
             verify=verify,
             content_hash=content_hash,
+            source_root=source_root,
             append=append,
             persist=persist,
         )
+
+    def resolve_artifact_relative_path(self, artifact: Artifact) -> Optional[Path]:
+        """Return the portable run-relative ``Path`` for ``artifact.uri``."""
+        return self.fs.get_remappable_relative_path(artifact.uri)
 
     def evict_artifact(
         self,
@@ -1501,6 +1509,7 @@ class Tracker:
         verify: bool = True,
         append: bool = True,
         content_hashes: Mapping[str, str] | None = None,
+        source_root: str | os.PathLike[str] | None = None,
     ) -> RunOutputRecoveryCopiesRegistration:
         return self._archive_service.register_run_output_recovery_copies(
             run_id,
@@ -1509,6 +1518,7 @@ class Tracker:
             verify=verify,
             append=append,
             content_hashes=content_hashes,
+            source_root=source_root,
         )
 
     def archive_run_output_files(
