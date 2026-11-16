@@ -1120,22 +1120,7 @@ def migrate_database(
 
             count_row = dst_db.fetchone("SELECT COUNT(*) FROM artifact_location")
             actual_locations = (
-                len(
-                    {
-                        (
-                            r.artifact_id,
-                            r.mount_name,
-                            r.mount_instance_id,
-                            r.uri,
-                            r.member,
-                        )
-                        for r in location_rows
-                    }
-                )
-                if dry_run
-                else (
-                    int(count_row[0]) if count_row and count_row[0] is not None else 0
-                )
+                int(count_row[0]) if count_row and count_row[0] is not None else 0
             )
             dst_db.execute("CHECKPOINT")
         finally:

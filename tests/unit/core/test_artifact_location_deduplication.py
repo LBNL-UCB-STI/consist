@@ -371,3 +371,177 @@ def test_witness_preserved_on_external_to_advisory_promotion(tmp_path: Path) -> 
         assert resolved.resolve() == out_file.resolve()
     finally:
         tracker.close()
+
+
+def test_intra_batch_supersession_and_explicit_non_active_status_upsert(
+    tmp_path: Path,
+) -> None:
+    from dataclasses import replace
+    from consist.location import ArtifactLocationRow, compute_location_id
+
+    ws = tmp_path / "ws"
+    db_path = tmp_path / "prov.duckdb"
+    ws.mkdir(parents=True, exist_ok=True)
+    f = ws / "out.parquet"
+    pd.DataFrame({"x": [1]}).to_parquet(f)
+
+    tracker = Tracker(run_dir=ws, db_path=str(db_path))
+    try:
+        with tracker.start_run("r1", model="m", config={"i": 1}):
+            a1 = tracker.log_output(f, key="out")
+        pd.DataFrame({"x": [2, 3]}).to_parquet(f)
+        with tracker.start_run("r2", model="m", config={"i": 2}):
+            a2 = tracker.log_output(f, key="out")
+
+        assert tracker.db is not None
+        loc1 = ArtifactLocationRow(
+            location_id=compute_location_id(
+                digest=str(a1.digest),
+                artifact_id=a1.id,
+                site="external",
+                mount_name="custom",
+                mount_instance_id="",
+                uri="custom://shared.parquet",
+                member="",
+            ),
+            digest=str(a1.digest),
+            artifact_id=a1.id,
+            site="external",
+            mount_name="custom",
+            mount_instance_id="",
+            uri="custom://shared.parquet",
+            member="",
+            status="active",
+            witness=None,
+            observed_at_ns=1_000,
+        )
+        loc2 = ArtifactLocationRow(
+            location_id=compute_location_id(
+                digest=str(a2.digest),
+                artifact_id=a2.id,
+                site="external",
+                mount_name="custom",
+                mount_instance_id="",
+                uri="custom://shared.parquet",
+                member="",
+            ),
+            digest=str(a2.digest),
+            artifact_id=a2.id,
+            site="external",
+            mount_name="custom",
+            mount_instance_id="",
+            uri="custom://shared.parquet",
+            member="",
+            status="active",
+            witness=None,
+            observed_at_ns=2_000,
+        )
+        # Intra-batch overwrite: loc1 must become stale while loc2 stays active
+        tracker.db.upsert_artifact_locations([loc1, loc2])
+        rows = tracker.db.fetchall(
+            "SELECT artifact_id, status FROM artifact_location "
+            "WHERE uri = 'custom://shared.parquet' ORDER BY observed_at_ns ASC"
+        )
+        assert [(str(r[0]), r[1]) for r in rows] == [
+            (str(a1.id), "stale"),
+            (str(a2.id), "active"),
+        ]
+
+        # Explicit transition of loc2 to stale must not revert to active
+        tracker.db.upsert_artifact_locations([replace(loc2, status="stale")])
+        rows_after = tracker.db.fetchall(
+            "SELECT status FROM artifact_location WHERE location_id = ?",
+            [loc2.location_id],
+        )
+        assert rows_after == [("stale",)]
+    finally:
+        tracker.close()
+
+
+def test_merge_db_preserves_eviction_tombstone_over_older_advisory(
+    tmp_path: Path,
+) -> None:
+    from consist.location import ArtifactLocationRow, compute_location_id
+
+    ws1 = tmp_path / "ws1"
+    ws2 = tmp_path / "ws2"
+    db1 = tmp_path / "db1.duckdb"
+    db2 = tmp_path / "db2.duckdb"
+    ws1.mkdir(parents=True, exist_ok=True)
+    ws2.mkdir(parents=True, exist_ok=True)
+
+    f = ws1 / "item.parquet"
+    pd.DataFrame({"k": [1]}).to_parquet(f)
+
+    t1 = Tracker(run_dir=ws1, db_path=str(db1))
+    try:
+        with t1.start_run("r1", model="m"):
+            art = t1.log_output(f, key="item")
+        assert t1.db is not None
+        ev_row = ArtifactLocationRow(
+            location_id=compute_location_id(
+                digest=str(art.digest),
+                artifact_id=art.id,
+                site="archive",
+                mount_name="arch",
+                mount_instance_id="",
+                uri="arch://item.parquet",
+                member="",
+            ),
+            digest=str(art.digest),
+            artifact_id=art.id,
+            site="archive",
+            mount_name="arch",
+            mount_instance_id="",
+            uri="arch://item.parquet",
+            member="",
+            status="evicted",
+            witness=None,
+            observed_at_ns=5_000,
+        )
+        t1.db.upsert_artifact_locations([ev_row])
+    finally:
+        t1.close()
+
+    # Copy db1 to db2 before eviction? Build db2 with older unverified advisory row
+    t2 = Tracker(run_dir=ws2, db_path=str(db2))
+    try:
+        assert t2.db is not None
+        t2.db.upsert_artifact(art)
+        adv_row = ArtifactLocationRow(
+            location_id=compute_location_id(
+                digest=str(art.digest),
+                artifact_id=art.id,
+                site="advisory",
+                mount_name="arch",
+                mount_instance_id="",
+                uri="arch://item.parquet",
+                member="",
+            ),
+            digest=str(art.digest),
+            artifact_id=art.id,
+            site="advisory",
+            mount_name="arch",
+            mount_instance_id="",
+            uri="arch://item.parquet",
+            member="",
+            status="active",
+            witness=None,
+            observed_at_ns=1_000,
+        )
+        t2.db.upsert_artifact_locations([adv_row])
+    finally:
+        t2.close()
+
+    from consist.core.persistence import DatabaseManager
+
+    db1_mgr = DatabaseManager(db1)
+    try:
+        maint = DatabaseMaintenance(db=db1_mgr, run_dir=ws1)
+        maint.merge(db2, conflict="skip", include_snapshots=False)
+        merged = db1_mgr.fetchall(
+            "SELECT site, status FROM artifact_location WHERE uri = 'arch://item.parquet'"
+        )
+        assert merged == [("archive", "evicted")]
+    finally:
+        db1_mgr.close()

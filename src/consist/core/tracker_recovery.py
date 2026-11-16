@@ -379,12 +379,23 @@ def _resolve_rows_for_cache(
                     row.mount_name
                 )
                 if candidate_roots:
-                    chosen_root = candidate_roots[0]
+                    chosen_root: Optional[str] = None
+                    first_existing_root: Optional[str] = None
                     for cand_r in candidate_roots:
-                        if Path(cand_r).exists():
+                        if first_existing_root is None and Path(cand_r).exists():
+                            first_existing_root = cand_r
+                        cand_probe = tracker.fs.resolve_location_row_path(
+                            row, historical_run_dir=cand_r
+                        )
+                        if (
+                            cand_probe is not None
+                            and Path(
+                                resolve_artifact_entry_path(artifact, cand_probe)
+                            ).exists()
+                        ):
                             chosen_root = cand_r
                             break
-                    hist_dir = chosen_root
+                    hist_dir = chosen_root or first_existing_root or candidate_roots[0]
 
             if hist_dir is not None:
                 cand_from_hist = tracker.fs.resolve_location_row_path(

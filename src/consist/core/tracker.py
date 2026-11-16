@@ -403,14 +403,20 @@ class Tracker:
                 and not extracted.startswith("file://")
                 and row.mount_name not in self.fs.mounts
             ):
+                _, rel_prefix = extracted.split("://", 1)
+                clean_prefix = rel_prefix.strip("/")
                 hist_roots = db.lookup_historical_mount_roots(row.mount_name)
                 if hist_roots:
                     chosen = hist_roots[0]
                     for hr in hist_roots:
-                        if Path(hr).exists():
+                        cand_dir = Path(hr) / clean_prefix if clean_prefix else Path(hr)
+                        if cand_dir.exists():
                             chosen = hr
                             break
-                    extracted = str(Path(chosen).resolve())
+                    base_root = (
+                        Path(chosen) / clean_prefix if clean_prefix else Path(chosen)
+                    )
+                    extracted = str(base_root.resolve())
             if extracted is not None and extracted not in roots:
                 roots.append(extracted)
         return roots

@@ -26,7 +26,6 @@ from typing import (
     Tuple,
 )
 
-from consist.core.tracker_recovery import verify_candidate_against_artifact
 from consist.models.artifact import Artifact
 from consist.models.run import (
     ConsistRecord,
@@ -829,9 +828,17 @@ class ScenarioContext:
             self.coupler.set(key, artifact)
             return artifact
 
+        should_persist = True
         if isinstance(value, Artifact):
             if driver is None and content_hash is None and not meta:
                 artifact = value
+                if (
+                    self.tracker.db is not None
+                    and artifact.id is not None
+                    and artifact.id
+                    in self.tracker.db.get_existing_artifact_ids([artifact.id])
+                ):
+                    should_persist = False
             else:
                 artifact = self.tracker.artifacts.create_artifact(
                     value,
@@ -848,40 +855,22 @@ class ScenarioContext:
                     artifact = replace(
                         artifact,
                         id=uuid.uuid4(),
+                        key=key,
                         run_id=None,
                         parent_artifact_id=value.id,
                     )
         else:
             resolved_path = self.coupler._resolve_ref_path(value)
-            artifact = self.tracker.artifacts.create_artifact(
+            artifact, should_persist = self.coupler._create_verified_input_artifact(
+                key,
                 resolved_path,
-                run_id=None,
-                key=key,
-                direction="input",
                 driver=driver,
                 content_hash=content_hash,
                 reuse_if_unchanged=reuse_if_unchanged,
-                force_hash_override=content_hash is not None,
                 **meta,
             )
-            if (
-                reuse_if_unchanged
-                and artifact.id is not None
-                and not verify_candidate_against_artifact(resolved_path, artifact)
-            ):
-                artifact = self.tracker.artifacts.create_artifact(
-                    resolved_path,
-                    run_id=None,
-                    key=key,
-                    direction="input",
-                    driver=driver,
-                    content_hash=content_hash,
-                    reuse_if_unchanged=False,
-                    force_hash_override=content_hash is not None,
-                    **meta,
-                )
 
-        if self.tracker is not None:
+        if should_persist:
             self.tracker.persistence.persist_standalone_artifact(
                 artifact, direction="input"
             )

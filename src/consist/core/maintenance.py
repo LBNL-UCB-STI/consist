@@ -1867,7 +1867,10 @@ class DatabaseMaintenance:
                                             AND newer.location_id != al.location_id
                                             AND (
                                                 al.site IN ('workspace', 'external')
-                                                OR newer.artifact_id IS DISTINCT FROM al.artifact_id
+                                                OR (
+                                                    newer.digest IS NULL
+                                                    AND newer.artifact_id IS DISTINCT FROM al.artifact_id
+                                                )
                                                 OR newer.digest IS DISTINCT FROM al.digest
                                                 OR (
                                                     (
@@ -1889,29 +1892,53 @@ class DatabaseMaintenance:
                                 )
                                 cur.execute(
                                     f"""
+                                    DELETE FROM main."artifact_location" AS al
+                                    WHERE al.artifact_id IN (
+                                              SELECT artifact_id FROM {self._qualified_table_sql("artifact_location", catalog=alias)}
+                                              WHERE artifact_id IS NOT NULL
+                                          )
+                                      AND al.status = 'active'
+                                      AND al.site = 'advisory'
+                                      AND al.witness_json IS NULL
+                                      AND EXISTS (
+                                          SELECT 1 FROM main."artifact_location" AS ev
+                                          WHERE ev.status = 'evicted'
+                                            AND ev.artifact_id = al.artifact_id
+                                            AND ev.mount_name = al.mount_name
+                                            AND ev.mount_instance_id = al.mount_instance_id
+                                            AND ev.uri = al.uri
+                                            AND ev.member = al.member
+                                            AND ev.observed_at_ns >= al.observed_at_ns
+                                      )
+                                    """
+                                )
+                                cur.execute(
+                                    f"""
                                     WITH donors AS (
                                         SELECT artifact_id, mount_name, mount_instance_id, uri, member,
-                                               FIRST(digest) FILTER (WHERE digest IS NOT NULL) AS donor_digest,
+                                               digest AS donor_digest,
                                                FIRST(witness_json) FILTER (WHERE witness_json IS NOT NULL) AS donor_witness
                                         FROM main."artifact_location"
                                         WHERE artifact_id IN (
                                             SELECT artifact_id FROM {self._qualified_table_sql("artifact_location", catalog=alias)}
                                             WHERE artifact_id IS NOT NULL
                                         )
-                                        GROUP BY artifact_id, mount_name, mount_instance_id, uri, member
+                                          AND witness_json IS NOT NULL
+                                        GROUP BY artifact_id, mount_name, mount_instance_id, uri, member, digest
                                     )
                                     UPDATE main."artifact_location" AS al
-                                    SET digest = COALESCE(al.digest, d.donor_digest),
-                                        witness_json = COALESCE(al.witness_json, d.donor_witness)
+                                    SET witness_json = d.donor_witness
                                     FROM donors d
-                                    WHERE al.artifact_id = d.artifact_id
+                                    WHERE al.witness_json IS NULL
+                                      AND al.artifact_id = d.artifact_id
                                       AND al.mount_name = d.mount_name
                                       AND al.mount_instance_id = d.mount_instance_id
                                       AND al.uri = d.uri
                                       AND al.member = d.member
                                       AND (
-                                          (al.digest IS NULL AND d.donor_digest IS NOT NULL)
-                                          OR (al.witness_json IS NULL AND d.donor_witness IS NOT NULL)
+                                          al.digest IS NULL
+                                          OR d.donor_digest IS NULL
+                                          OR al.digest = d.donor_digest
                                       )
                                     """
                                 )
@@ -1919,10 +1946,6 @@ class DatabaseMaintenance:
                                     f"""
                                     WITH ranked AS (
                                         SELECT location_id,
-                                               status,
-                                               site,
-                                               witness_json,
-                                               observed_at_ns,
                                                ROW_NUMBER() OVER (
                                                    PARTITION BY artifact_id, mount_name, mount_instance_id, uri, member
                                                    ORDER BY
@@ -1939,10 +1962,7 @@ class DatabaseMaintenance:
                                                ) AS rnk,
                                                BOOL_OR(status = 'active') OVER (
                                                    PARTITION BY artifact_id, mount_name, mount_instance_id, uri, member
-                                               ) AS has_active,
-                                               MAX(CASE WHEN status = 'evicted' THEN observed_at_ns ELSE 0 END) OVER (
-                                                   PARTITION BY artifact_id, mount_name, mount_instance_id, uri, member
-                                               ) AS max_evicted_ns
+                                               ) AS has_active
                                         FROM main."artifact_location"
                                         WHERE artifact_id IN (
                                             SELECT artifact_id FROM {self._qualified_table_sql("artifact_location", catalog=alias)}
@@ -1953,21 +1973,11 @@ class DatabaseMaintenance:
                                     WHERE location_id IN (
                                         SELECT location_id FROM ranked
                                         WHERE has_active AND rnk > 1
-                                          AND NOT (
-                                              status = 'evicted'
-                                              AND observed_at_ns = max_evicted_ns
-                                              AND EXISTS (
-                                                  SELECT 1 FROM ranked r2
-                                                  WHERE r2.rnk = 1
-                                                    AND r2.site = 'advisory'
-                                                    AND r2.witness_json IS NULL
-                                                    AND r2.observed_at_ns < max_evicted_ns
-                                              )
-                                          )
                                     )
                                     """
                                 )
                                 self.db._historical_mount_cache.clear()
+                                self.db._recorded_run_archive_mounts.clear()
                                 self.db.bump_location_epoch()
 
                         cfg_facet_cols = _core_columns("config_facet")

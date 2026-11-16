@@ -474,7 +474,12 @@ class TrackerArchiveService(_TrackerServiceBase):
             )
             extra_ids: list[uuid.UUID] = []
             for row in active_rows:
-                if row.site in ("archive", "advisory"):
+                is_primary_coord = (
+                    row.mount_name == mount_name
+                    and row.mount_instance_id == mount_inst
+                    and row.uri == loc_uri
+                )
+                if row.site in ("archive", "advisory") and not is_primary_coord:
                     continue
                 cand = self.fs.resolve_location_row_path(row)
                 if cand is None:
@@ -848,6 +853,35 @@ class TrackerArchiveService(_TrackerServiceBase):
         self._run_artifacts_cache.clear()
         return evicted_resolved
 
+    def _record_recovery_mounts_for_artifacts(
+        self,
+        items: Sequence[tuple[Artifact, Sequence[ArtifactLocationRow]]],
+    ) -> None:
+        if self.db is None or self.db.read_only:
+            return
+        resolved_mounts: dict[str, str] = {}
+        seen_run_mounts: set[tuple[str, str]] = set()
+        for artifact, rows in items:
+            run_id_str = str(artifact.run_id) if artifact.run_id else None
+            for r in rows:
+                m_name = r.mount_name
+                if (
+                    m_name in ("workspace", "runs", "abs")
+                    or m_name not in self.fs.mounts
+                ):
+                    continue
+                m_path_str = resolved_mounts.get(m_name)
+                if m_path_str is None:
+                    m_path_str = str(Path(self.fs.mounts[m_name]).resolve())
+                    resolved_mounts[m_name] = m_path_str
+                    self.db.record_known_mount(m_name, m_path_str)
+                if (
+                    run_id_str is not None
+                    and (run_id_str, m_name) not in seen_run_mounts
+                ):
+                    seen_run_mounts.add((run_id_str, m_name))
+                    self.db.record_archive_mount_on_run(run_id_str, m_name, m_path_str)
+
     def set_artifact_recovery_roots(
         self,
         artifact: Artifact,
@@ -904,18 +938,7 @@ class TrackerArchiveService(_TrackerServiceBase):
             {artifact.id: new_rows},
             require_all=True,
         )
-        if not self.db.read_only:
-            for r in new_rows:
-                if (
-                    r.mount_name not in ("workspace", "runs", "abs")
-                    and r.mount_name in self.fs.mounts
-                ):
-                    m_path_str = str(Path(self.fs.mounts[r.mount_name]).resolve())
-                    self.db.record_known_mount(r.mount_name, m_path_str)
-                    if artifact.run_id:
-                        self.db.record_archive_mount_on_run(
-                            str(artifact.run_id), r.mount_name, m_path_str
-                        )
+        self._record_recovery_mounts_for_artifacts([(artifact, new_rows)])
         self._persist_snapshot_recovery_roots_for_artifacts(
             {artifact.id: (artifact, normalized)}
         )
@@ -2590,19 +2613,13 @@ class TrackerArchiveService(_TrackerServiceBase):
             locations_by_aid,
             require_all=True,
         )
-        if not self.db.read_only:
-            for artifact in validated_artifacts:
-                for r in locations_by_aid.get(artifact.id, ()):
-                    if (
-                        r.mount_name not in ("workspace", "runs", "abs")
-                        and r.mount_name in self.fs.mounts
-                    ):
-                        m_path_str = str(Path(self.fs.mounts[r.mount_name]).resolve())
-                        self.db.record_known_mount(r.mount_name, m_path_str)
-                        if artifact.run_id:
-                            self.db.record_archive_mount_on_run(
-                                str(artifact.run_id), r.mount_name, m_path_str
-                            )
+        self._record_recovery_mounts_for_artifacts(
+            [
+                (artifact, locations_by_aid.get(artifact.id, ()))
+                for artifact in validated_artifacts
+                if artifact.id is not None
+            ]
+        )
         self._persist_snapshot_recovery_roots_for_artifacts(snapshot_roots)
         self._run_artifacts_cache.clear()
         return refreshed_by_id

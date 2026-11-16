@@ -348,3 +348,71 @@ def test_seed_artifact_in_place_edit_and_unconfigured_mount(tmp_path: Path) -> N
                 sc.seed_artifact("bad", "unmounted://foo.parquet")
     finally:
         tracker.close()
+
+
+def test_in_place_edit_of_prior_run_output_does_not_return_stale_artifact(
+    tmp_path: Path,
+) -> None:
+    import os
+    import time
+
+    ws = tmp_path / "ws"
+    db_path = tmp_path / "prov.duckdb"
+    ws.mkdir(parents=True, exist_ok=True)
+
+    full_file = ws / "full.txt"
+    fast_file = ws / "fast.txt"
+    full_file.write_text("run1-full")
+    fast_file.write_text("run1-fast")
+
+    tracker = Tracker(run_dir=ws, db_path=str(db_path))
+    try:
+        with tracker.start_run("step_1", model="producer"):
+            out_full = tracker.log_output(full_file, key="full_out")
+            out_fast = tracker.log_output(
+                fast_file, key="fast_out", hashing_strategy="fast"
+            )
+        assert out_full.run_id == "step_1"
+        assert out_fast.run_id == "step_1"
+
+        now = time.time()
+        os.utime(full_file, (now - 10, now - 10))
+        os.utime(fast_file, (now - 10, now - 10))
+
+        with tracker.scenario("sc_edit_check") as sc:
+            # Metadata override on unchanged output mints a derived row without mutating step_1
+            derived = sc.seed_artifact("full_custom", full_file, tag="override")
+            assert derived.id != out_full.id
+            assert derived.parent_artifact_id == out_full.id
+            orig_db = tracker.get_artifact(out_full.id)
+            assert orig_db is not None
+            assert orig_db.key == "full_out"
+            assert "tag" not in (orig_db.meta or {})
+
+            # reuse_if_unchanged=False on unchanged output mints a fresh standalone artifact
+            forced_fresh = sc.seed_artifact(
+                "full_forced", full_file, reuse_if_unchanged=False
+            )
+            assert forced_fresh.id != out_full.id
+            assert forced_fresh.run_id is None
+
+            # Edit both files in place
+            full_file.write_text("run1-full-MODIFIED")
+            fast_file.write_text("run1-fast-MODIFIED-LONGER")
+            os.utime(full_file, (now - 5, now - 5))
+            os.utime(fast_file, (now - 5, now - 5))
+
+            seeded_full = sc.seed_artifact(
+                "full_after_edit", full_file, reuse_if_unchanged=True
+            )
+            assert seeded_full.id != out_full.id
+            assert seeded_full.digest != out_full.digest
+            assert seeded_full.run_id is None
+
+            sc.coupler.set("fast_after_edit", fast_file)
+            lazy_fast = sc.coupler["fast_after_edit"]
+            assert lazy_fast.id != out_fast.id
+            assert lazy_fast.digest != out_fast.digest
+            assert lazy_fast.run_id is None
+    finally:
+        tracker.close()

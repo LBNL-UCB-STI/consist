@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import builtins
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import os
 from pathlib import Path
 import time
@@ -14,12 +14,14 @@ from typing import (
     Optional,
     TYPE_CHECKING,
 )
+import uuid
 import warnings
 
 from typing_extensions import Protocol, runtime_checkable
 
-from consist.core.tracker_recovery import verify_candidate_against_artifact
+from consist.core.tracker_recovery import resolve_verified_local_path
 from consist.core.validation import validate_artifact_key
+from consist.digest import Digest
 from consist.location import DirTreeStat, FileStat
 from consist.models.artifact import Artifact, resolve_active_or_default_resolver
 from consist.protocols import ArtifactLike
@@ -276,7 +278,7 @@ class Coupler(MutableMapping[str, Artifact]):
                 return Path(raw)
             if (
                 isinstance(tracker, _HasMounts)
-                and scheme not in ("workspace", "runs")
+                and scheme != "workspace"
                 and scheme not in tracker.mounts
             ):
                 raise ValueError(
@@ -286,6 +288,109 @@ class Coupler(MutableMapping[str, Artifact]):
         if isinstance(tracker, _HasRunDir):
             return (tracker.run_dir / raw).resolve()
         return Path(raw)
+
+    def _create_verified_input_artifact(
+        self,
+        key: str,
+        resolved_path: Path,
+        *,
+        driver: Optional[str] = None,
+        content_hash: Optional[str | Digest] = None,
+        reuse_if_unchanged: bool = True,
+        **meta: Any,
+    ) -> tuple[Artifact, bool]:
+        tracker = self._tracker
+        assert tracker is not None
+        if not reuse_if_unchanged:
+            art = tracker.artifacts.create_artifact(
+                resolved_path,
+                run_id=None,
+                key=key,
+                direction="input",
+                driver=driver,
+                content_hash=content_hash,
+                reuse_if_unchanged=False,
+                force_hash_override=content_hash is not None,
+                known_latest_artifact_at_uri=None,
+                latest_artifact_lookup_done=True,
+                **meta,
+            )
+            return art, True
+
+        art = tracker.artifacts.create_artifact(
+            resolved_path,
+            run_id=None,
+            key=key,
+            direction="input",
+            driver=driver,
+            content_hash=content_hash,
+            reuse_if_unchanged=True,
+            force_hash_override=content_hash is not None,
+            **meta,
+        )
+        if art.run_id is None:
+            return art, True
+
+        witness_ok = False
+        if content_hash is None:
+            verified_path = resolve_verified_local_path(
+                tracker, art, allow_recovery_roots=False
+            )
+            witness_ok = verified_path is not None and os.path.realpath(
+                verified_path
+            ) == os.path.realpath(resolved_path)
+            if not witness_ok:
+                fallback_strategy = (
+                    "fast"
+                    if (
+                        "hashing_strategy" not in meta
+                        and art.digest is not None
+                        and art.digest.scheme
+                        in ("stat_file_v1:sha256", "stat_dir_v1:sha256")
+                    )
+                    else None
+                )
+                fresh = tracker.artifacts.create_artifact(
+                    resolved_path,
+                    run_id=None,
+                    key=key,
+                    direction="input",
+                    driver=driver,
+                    reuse_if_unchanged=False,
+                    known_latest_artifact_at_uri=None,
+                    latest_artifact_lookup_done=True,
+                    hashing_strategy=fallback_strategy,
+                    **meta,
+                )
+                if art.digest is None or fresh.digest != art.digest:
+                    if (
+                        fallback_strategy is not None
+                        and tracker.identity.hashing_strategy != "fast"
+                    ):
+                        fresh = tracker.artifacts.create_artifact(
+                            resolved_path,
+                            run_id=None,
+                            key=key,
+                            direction="input",
+                            driver=driver,
+                            reuse_if_unchanged=False,
+                            known_latest_artifact_at_uri=None,
+                            latest_artifact_lookup_done=True,
+                            **meta,
+                        )
+                    return fresh, True
+
+        if driver is not None or meta:
+            art = replace(
+                art,
+                id=uuid.uuid4(),
+                key=key,
+                run_id=None,
+                parent_artifact_id=art.id,
+            )
+            return art, True
+
+        return art, not (content_hash is None and witness_ok)
 
     def _resolve_lazy_entry(self, key: str, value: Any) -> Any:
         if not isinstance(value, (Path, str, os.PathLike)):
@@ -329,23 +434,9 @@ class Coupler(MutableMapping[str, Artifact]):
             if cached is not None:
                 return cached
 
-        art = tracker.artifacts.create_artifact(
-            resolved_path,
-            run_id=None,
-            key=key,
-            direction="input",
-            reuse_if_unchanged=True,
+        art, should_persist = self._create_verified_input_artifact(
+            key, resolved_path, reuse_if_unchanged=True
         )
-        if art.id is not None and not verify_candidate_against_artifact(
-            resolved_path, art
-        ):
-            art = tracker.artifacts.create_artifact(
-                resolved_path,
-                run_id=None,
-                key=key,
-                direction="input",
-                reuse_if_unchanged=False,
-            )
 
         prev = self._resolved_by_path.get((key, str(resolved_path)))
         if prev is not None and prev.digest is not None and prev.digest == art.digest:
@@ -353,7 +444,8 @@ class Coupler(MutableMapping[str, Artifact]):
                 self._stat_cache[stat_key] = prev
             return prev
 
-        tracker.persistence.persist_standalone_artifact(art, direction="input")
+        if should_persist:
+            tracker.persistence.persist_standalone_artifact(art, direction="input")
         self._resolved_by_path[(key, str(resolved_path))] = art
         if not is_racy:
             self._stat_cache[stat_key] = art
@@ -530,6 +622,7 @@ class Coupler(MutableMapping[str, Artifact]):
 
         This does not mutate the Artifact; it only returns a resolved Path.
         """
+        self._validate_artifact_key(key)
         raw_val = self._artifacts.get(key)
         if raw_val is None:
             if required:

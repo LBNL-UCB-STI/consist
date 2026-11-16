@@ -271,7 +271,23 @@ def test_historical_mount_prefers_existing_host_mount_over_nonexistent_container
     finally:
         t2.close()
 
-    # Login node: without mounts passed, must pick existing host_scratch rather than nonexistent container path
+    # Run 3 on host with a newer empty scratch directory: resolver must still find
+    # the artifact under host_scratch where the file actually exists
+    newer_empty_scratch = tmp_path / "newer_empty_scratch"
+    newer_empty_scratch.mkdir(parents=True, exist_ok=True)
+    t3 = Tracker(
+        run_dir=compute_ws,
+        db_path=str(db_path),
+        mounts={"shared": str(newer_empty_scratch)},
+    )
+    try:
+        with t3.start_run("newer_host_run", model="test", config={"r": 3}):
+            pass
+    finally:
+        t3.close()
+
+    # Login node: without mounts passed, must pick host_scratch where artifact exists
+    # AND preserve subdirectory prefix in artifact_recovery_roots / inspect_artifact_locations
     login_tracker = Tracker(
         run_dir=login_tmp,
         db_path=str(db_path),
@@ -280,6 +296,10 @@ def test_historical_mount_prefers_existing_host_mount_over_nonexistent_container
     try:
         loaded = login_tracker.get_artifact(art.id)
         assert loaded is not None
+        roots = login_tracker.artifact_recovery_roots(loaded)
+        assert str((host_scratch / "consist-recovery").resolve()) in roots
+        inspected = login_tracker.inspect_artifact_locations(loaded)
+        assert any(is_valid for _label, _path, is_valid in inspected)
         resolved = resolve_verified_local_path(
             login_tracker, loaded, allow_recovery_roots=True
         )

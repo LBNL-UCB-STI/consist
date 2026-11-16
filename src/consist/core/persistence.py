@@ -723,6 +723,7 @@ class DatabaseManager:
         self._ephemeral_stale_locations: dict[uuid.UUID, LocationStatus] = {}
         self._historical_mount_cache: dict[str, tuple[str, ...]] = {}
         self._session_known_mounts: dict[str, str] = {}
+        self._recorded_run_archive_mounts: set[tuple[str, str, str]] = set()
         self._snapshot_ops = DatabaseSnapshotOps(self)
 
         if self._resolved_db_path is not None:
@@ -1795,6 +1796,8 @@ class DatabaseManager:
             ],
         )
         self._historical_mount_cache.clear()
+        self._recorded_run_archive_mounts.clear()
+        self._location_resolution_cache.clear()
 
     def _insert_binding_invocation_locked(
         self,
@@ -4748,7 +4751,17 @@ class DatabaseManager:
                         continue
                     active_inc_candidates.append(inc)
 
-            active_existing = [ex for ex in existing_rows if ex.status == "active"]
+            explicit_non_active_lids = {
+                _coerce_uuid(inc.location_id)
+                for inc in inc_rows
+                if inc.status != "active"
+            }
+            active_existing = [
+                ex
+                for ex in existing_rows
+                if ex.status == "active"
+                and _coerce_uuid(ex.location_id) not in explicit_non_active_lids
+            ]
 
             if not active_inc_candidates and not active_existing:
                 continue
@@ -4837,25 +4850,21 @@ class DatabaseManager:
         seen_ordered_lids: set[uuid.UUID] = set()
         for loc in ordered:
             lid = _coerce_uuid(loc.location_id)
-            if lid in suppressed_incoming_lids:
-                continue
             if loc.artifact_id is not None:
                 aid = _coerce_uuid(loc.artifact_id)
                 key = (aid, loc.mount_name, loc.mount_instance_id, loc.uri, loc.member)
-                win = winning_at_coord.get(key, loc)
-                win_lid = _coerce_uuid(win.location_id)
-                if win_lid not in seen_ordered_lids:
-                    seen_ordered_lids.add(win_lid)
-                    new_ordered.append(win)
-            elif lid not in seen_ordered_lids:
+                if key in winning_at_coord:
+                    win = winning_at_coord[key]
+                    win_lid = _coerce_uuid(win.location_id)
+                    if win_lid not in seen_ordered_lids:
+                        seen_ordered_lids.add(win_lid)
+                        new_ordered.append(win)
+                    continue
+            if lid in suppressed_incoming_lids:
+                continue
+            if lid not in seen_ordered_lids:
                 seen_ordered_lids.add(lid)
                 new_ordered.append(loc)
-
-        for win in winning_at_coord.values():
-            win_lid = _coerce_uuid(win.location_id)
-            if win_lid not in seen_ordered_lids:
-                seen_ordered_lids.add(win_lid)
-                new_ordered.append(win)
 
         ordered = new_ordered
 
@@ -4873,22 +4882,62 @@ class DatabaseManager:
                 self._settled_witnesses.pop(lid, None)
 
         winning_by_coord: dict[tuple[str, str, str, str, str], ArtifactLocationRow] = {}
+        winning_idx_by_coord: dict[tuple[str, str, str, str, str], int] = {}
         physical_writers: dict[tuple[str, str, str, str], ArtifactLocationRow] = {}
-        for loc in ordered:
+        physical_writer_idx: dict[tuple[str, str, str, str], int] = {}
+        for idx, loc in enumerate(ordered):
             if loc.status == "active":
-                winning_by_coord[
-                    (
-                        loc.site,
+                s_coord = (
+                    loc.site,
+                    loc.mount_name,
+                    loc.mount_instance_id,
+                    loc.uri,
+                    loc.member,
+                )
+                winning_by_coord[s_coord] = loc
+                winning_idx_by_coord[s_coord] = idx
+                if loc.site in ("workspace", "external"):
+                    p_coord = (
                         loc.mount_name,
                         loc.mount_instance_id,
                         loc.uri,
                         loc.member,
                     )
-                ] = loc
-                if loc.site in ("workspace", "external"):
-                    physical_writers[
-                        (loc.mount_name, loc.mount_instance_id, loc.uri, loc.member)
-                    ] = loc
+                    physical_writers[p_coord] = loc
+                    physical_writer_idx[p_coord] = idx
+
+        normalized_rows: list[ArtifactLocationRow] = []
+        for idx, loc in enumerate(ordered):
+            if loc.status == "active":
+                p_coord = (
+                    loc.mount_name,
+                    loc.mount_instance_id,
+                    loc.uri,
+                    loc.member,
+                )
+                s_coord = (
+                    loc.site,
+                    loc.mount_name,
+                    loc.mount_instance_id,
+                    loc.uri,
+                    loc.member,
+                )
+                pw_win = physical_writers.get(p_coord)
+                pw_idx = physical_writer_idx.get(p_coord, -1)
+                site_win = winning_by_coord.get(s_coord)
+                site_idx = winning_idx_by_coord.get(s_coord, -1)
+                if (
+                    pw_win is not None
+                    and idx < pw_idx
+                    and self._is_superseded_by_winner(loc, pw_win)
+                ) or (
+                    site_win is not None
+                    and idx < site_idx
+                    and self._is_superseded_by_winner(loc, site_win)
+                ):
+                    loc = replace(loc, status="stale")
+            normalized_rows.append(loc)
+        ordered = normalized_rows
 
         existing_active_rows: list[ArtifactLocationRow] = []
         if physical_writers:
@@ -5572,6 +5621,8 @@ class DatabaseManager:
 
     def record_known_mount(self, mount_name: str, root_path: str) -> None:
         """Record an in-session known mount root."""
+        if self._session_known_mounts.get(mount_name) == root_path:
+            return
         self._session_known_mounts[mount_name] = root_path
         self._historical_mount_cache.pop(mount_name, None)
         self.bump_location_epoch()
@@ -5580,8 +5631,11 @@ class DatabaseManager:
         self, run_id: str, mount_name: str, root_path: str
     ) -> None:
         """Persist a named mount root into a historical run's archive_mounts metadata."""
+        self.record_known_mount(mount_name, root_path)
         if self.read_only:
-            self.record_known_mount(mount_name, root_path)
+            return
+        cache_key = (run_id, mount_name, root_path)
+        if cache_key in self._recorded_run_archive_mounts:
             return
         quoted_mount = json.dumps(mount_name)
         mount_path = f'$."mounts".{quoted_mount}'
@@ -5601,7 +5655,7 @@ class DatabaseManager:
                 )
                 self._historical_mount_cache.clear()
                 self.bump_location_epoch()
-        self.record_known_mount(mount_name, root_path)
+        self._recorded_run_archive_mounts.add(cache_key)
 
     def lookup_historical_mount_roots(self, mount_name: str) -> tuple[str, ...]:
         """Lookup historical root paths for a named mount from runs and recorded mounts."""
@@ -5721,13 +5775,13 @@ class DatabaseManager:
             target_aids = [aid for aid in ids if aid in found_ids]
             if not target_aids:
                 return
-            existing_rows: list[tuple[Any, Any, Any, Any, Any, Any, Any]] = []
+            existing_rows: list[tuple[Any, Any, Any, Any, Any, Any]] = []
             for chunk_start in range(0, len(target_aids), 500):
                 aid_chunk = target_aids[chunk_start : chunk_start + 500]
                 target_ph = ", ".join("?" for _ in aid_chunk)
                 existing_rows.extend(
                     cur.execute(
-                        f"SELECT location_id, artifact_id, mount_name, mount_instance_id, uri, member, site "
+                        f"SELECT location_id, artifact_id, mount_name, mount_instance_id, uri, member "
                         f"FROM artifact_location "
                         f"WHERE artifact_id IN ({target_ph}) "
                         "AND site IN ('archive', 'advisory') AND status = 'active'",
@@ -5749,7 +5803,7 @@ class DatabaseManager:
                 for aid in target_aids
             }
             evict_lids: list[uuid.UUID] = []
-            for raw_lid, raw_aid, m_name, m_inst, uri, member, _site in existing_rows:
+            for raw_lid, raw_aid, m_name, m_inst, uri, member in existing_rows:
                 lid = _coerce_uuid(raw_lid)
                 aid = _coerce_uuid(raw_aid)
                 if lid not in kept_lids_by_aid.get(aid, set()):
