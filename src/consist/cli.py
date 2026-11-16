@@ -287,9 +287,11 @@ def find_project_root_and_db(
     Find project root and database by walking up parent directories.
 
     Checks in each directory from start_dir up to filesystem root:
-    1. .consist/provenance.duckdb -> root is dir, db is .consist/provenance.duckdb
-    2. provenance.duckdb -> root is dir, db is provenance.duckdb
-    3. .consist/ directory -> root is dir, db is .consist/provenance.duckdb
+    1. directory / .consist / provenance.duckdb
+    2. directory / .consist / snapshots / latest / provenance.duckdb
+    3. directory / provenance.duckdb
+    4. directory / consist.json (if db_path points to an existing file)
+    5. directory / .consist directory -> root is dir, db is .consist/provenance.duckdb
     """
     try:
         start = Path(start_dir).resolve() if start_dir else Path.cwd().resolve()
@@ -298,26 +300,74 @@ def find_project_root_and_db(
         return None, None
 
     for directory in dirs:
-        consist_db = directory / ".consist" / "provenance.duckdb"
-        if _safe_is_file(consist_db):
-            return directory, consist_db
-        root_db = directory / "provenance.duckdb"
-        if _safe_is_file(root_db):
-            return directory, root_db
-        consist_dir = directory / ".consist"
-        if _safe_is_dir(consist_dir):
-            return directory, consist_db
+        cand1 = directory / ".consist" / "provenance.duckdb"
+        if _safe_is_file(cand1):
+            return directory, cand1
+
+        cand2 = directory / ".consist" / "snapshots" / "latest" / "provenance.duckdb"
+        if _safe_is_file(cand2):
+            return directory, cand2
+
+        cand3 = directory / "provenance.duckdb"
+        if _safe_is_file(cand3):
+            return directory, cand3
+
+        cand4 = directory / "consist.json"
+        if _safe_is_file(cand4):
+            try:
+                with cand4.open("r", encoding="utf-8") as f:
+                    content = f.read(1024 * 1024)
+                data = json.loads(content)
+                if isinstance(data, dict):
+                    raw_db = data.get("db_path")
+                    if isinstance(raw_db, str) and raw_db.strip():
+                        target_db = Path(raw_db.strip())
+                        if not target_db.is_absolute():
+                            target_db = directory / target_db
+                        if _safe_is_file(target_db):
+                            return directory, target_db
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError):
+                pass
+
+        cand5 = directory / ".consist"
+        if _safe_is_dir(cand5):
+            return directory, cand1
+
     return None, None
 
 
-def find_db_path(explicit_path: Optional[str] = None) -> str:
-    """Find the provenance database, checking explicit path, env, upward discovery, then defaults."""
+def find_db_path(
+    explicit_path: Optional[str] = None,
+    *,
+    start_dir: Optional[Path | str] = None,
+) -> str:
+    """Find the provenance database, checking explicit path, env, start_dir, upward discovery, then defaults."""
     if explicit_path:
         return explicit_path
 
     # Check environment variable
     if env_path := os.getenv("CONSIST_DB"):
         return env_path
+
+    # If start_dir is provided, probe start_dir first
+    if start_dir is not None:
+        try:
+            sd = Path(start_dir).resolve()
+            for cand in [
+                sd / ".consist" / "provenance.duckdb",
+                sd / ".consist" / "snapshots" / "latest" / "provenance.duckdb",
+                sd / "provenance.duckdb",
+            ]:
+                if _safe_is_file(cand):
+                    return str(cand)
+
+            _proj_root, discovered_db = find_project_root_and_db(sd)
+            if discovered_db and (
+                _safe_is_file(discovered_db) or _safe_is_dir(discovered_db.parent)
+            ):
+                return str(discovered_db)
+        except OSError:
+            pass
 
     # Check current directory
     if _safe_is_file(Path("provenance.duckdb")):
@@ -418,7 +468,7 @@ def get_tracker(
     auto_close: bool = True,
 ) -> Tracker:
     """Initializes and returns a Tracker instance."""
-    resolved_path = find_db_path(db_path)
+    resolved_path = find_db_path(db_path, start_dir=run_dir)
     if not create_if_missing and not Path(resolved_path).exists():
         console.print(f"[red]Database not found at {resolved_path}[/red]")
         console.print(
@@ -1537,7 +1587,7 @@ def schema_capture_file(
             console.print("[red]--artifact-id must be a UUID[/red]")
             raise typer.Exit(CLI_EXIT_USAGE_ERROR)
 
-    resolved_db_path = find_db_path(db_path)
+    resolved_db_path = find_db_path(db_path, start_dir=run_dir)
     mount_overrides = _resolve_mount_overrides_or_exit(mount)
     tracker = get_tracker(
         resolved_db_path,
@@ -1837,9 +1887,14 @@ def views_create(
     db_path: Optional[str] = typer.Option(
         None, help="Path to the Consist DuckDB database."
     ),
+    run_dir: Optional[str] = typer.Option(
+        None,
+        "--run-dir",
+        help=RUN_DIR_RESOLUTION_HELP,
+    ),
 ) -> None:
     """Create a selector-driven grouped hybrid view across many artifacts."""
-    tracker = get_tracker(db_path, read_only=False)
+    tracker = get_tracker(db_path, run_dir=run_dir, read_only=False)
     try:
         tracker.create_grouped_view(
             view_name=view_name,
@@ -2513,7 +2568,7 @@ def validate(
         )
         raise typer.Exit(CLI_EXIT_USAGE_ERROR)
 
-    resolved_db_path = find_db_path(db_path)
+    resolved_db_path = find_db_path(db_path, start_dir=run_dir)
     mount_overrides = _resolve_mount_overrides_or_exit(mount)
     tracker = get_tracker(
         resolved_db_path,
@@ -2580,8 +2635,9 @@ def validate(
         else:
             target_run_ids = [latest_run.id]
 
-    missing: List[Tuple[str, str, Optional[str]]] = []
+    missing: List[Tuple[str, str, Optional[str], str]] = []
     missing_artifacts: List["Artifact"] = []
+    genuinely_missing_artifacts: List["Artifact"] = []
     batch_size = 1000
     if env_batch_size := os.getenv("CONSIST_VALIDATE_BATCH_SIZE"):
         try:
@@ -2632,23 +2688,56 @@ def validate(
                     if candidate.exists():
                         found = True
                         break
+            if not found:
+                from consist.core.tracker_recovery import resolve_verified_local_path
+
+                verified_cand = resolve_verified_local_path(
+                    tracker, artifact, allow_recovery_roots=trust_db
+                )
+                if verified_cand is not None and verified_cand.exists():
+                    found = True
+            if not found:
+                try:
+                    abs_path = tracker.resolve_uri(uri)
+                    if Path(abs_path).exists():
+                        found = True
+                except (
+                    AttributeError,
+                    NotImplementedError,
+                    OSError,
+                    RuntimeError,
+                    TypeError,
+                    ValueError,
+                ):
+                    pass
+
             if found:
                 continue
-            try:
-                abs_path = tracker.resolve_uri(uri)
-                if not Path(abs_path).exists():
-                    missing.append((artifact.key, uri, artifact.run_id))
-                    missing_artifacts.append(artifact)
-            except (
-                AttributeError,
-                NotImplementedError,
-                OSError,
-                RuntimeError,
-                TypeError,
-                ValueError,
-            ):
-                missing.append((artifact.key, uri, artifact.run_id))
-                missing_artifacts.append(artifact)
+
+            from consist.tools.mount_diagnostics import parse_mount_uri
+
+            parsed_mount = parse_mount_uri(uri)
+            reason = "missing on disk"
+            is_unmounted = False
+            if parsed_mount is not None:
+                scheme, _ = parsed_mount
+                if scheme not in tracker.mounts:
+                    has_hist_root = False
+                    if tracker.db is not None:
+                        for cand_root in tracker.db.lookup_historical_mount_roots(
+                            scheme
+                        ):
+                            if Path(cand_root).exists():
+                                has_hist_root = True
+                                break
+                    if not has_hist_root:
+                        is_unmounted = True
+                        reason = f"unmounted scheme '{scheme}'"
+
+            missing.append((artifact.key, uri, artifact.run_id, reason))
+            missing_artifacts.append(artifact)
+            if not is_unmounted:
+                genuinely_missing_artifacts.append(artifact)
         finally:
             _set_tracker_mounts(tracker, original_mounts)
 
@@ -2656,9 +2745,9 @@ def validate(
         console.print("[green]✓ All artifacts validated successfully[/green]")
         return
 
-    if fix and missing_artifacts:
+    if fix and genuinely_missing_artifacts:
         meta_updates: Dict[uuid.UUID, Dict[str, Any]] = {}
-        for artifact in missing_artifacts:
+        for artifact in genuinely_missing_artifacts:
             if artifact.id in meta_updates:
                 continue
             current_meta = dict(artifact.meta or {})
@@ -2672,14 +2761,29 @@ def validate(
     table.add_column("Key", style="yellow")
     table.add_column("URI", style="dim")
     table.add_column("Run ID", style="cyan")
+    table.add_column("Status", style="red")
 
-    for key, uri, missing_run_id in missing[:50]:  # Limit display
-        table.add_row(key, uri, missing_run_id or "-")
+    for key, uri, missing_run_id, reason in missing[:50]:  # Limit display
+        table.add_row(key, uri, missing_run_id or "-", reason)
 
     console.print(table)
 
     if len(missing) > 50:
         console.print(f"\n[dim]... and {len(missing) - 50} more[/dim]")
+
+    unmounted_count = sum(
+        1 for _, _, _, r in missing if r.startswith("unmounted scheme")
+    )
+    if unmounted_count > 0:
+        console.print(
+            f"\n[dim]Note: {unmounted_count} artifact(s) have unconfigured mount scheme(s). "
+            "Use --mount <name>=<path> or --trust-db to resolve them.[/dim]"
+        )
+        if fix and not genuinely_missing_artifacts:
+            console.print(
+                "[yellow]Note: Unmounted schemes were not marked missing on disk. "
+                "Configure the required mounts using --mount to validate them.[/yellow]"
+            )
 
 
 @app.command()
@@ -2730,6 +2834,11 @@ def runs(
     db_path: Optional[str] = typer.Option(
         None, help="Path to the Consist DuckDB database."
     ),
+    run_dir: Optional[str] = typer.Option(
+        None,
+        "--run-dir",
+        help=RUN_DIR_RESOLUTION_HELP,
+    ),
     limit: int = typer.Option(10, help="Maximum number of recent runs to display."),
     json_output: bool = typer.Option(
         False, "--json", help="Output runs as JSON for scripting/testing."
@@ -2752,7 +2861,7 @@ def runs(
     """
     Lists the most recent Consist runs recorded in the provenance database.
     """
-    tracker = get_tracker(db_path)
+    tracker = get_tracker(db_path, run_dir=run_dir)
     if json_output:
         results = _query_runs_with_scenario(
             tracker,
@@ -3619,9 +3728,14 @@ def lineage(
     db_path: Optional[str] = typer.Option(
         None, help="Path to the Consist DuckDB database."
     ),
+    run_dir: Optional[str] = typer.Option(
+        None,
+        "--run-dir",
+        help=RUN_DIR_RESOLUTION_HELP,
+    ),
 ) -> None:
     """Traces and displays the full lineage of an artifact."""
-    tracker = get_tracker(db_path)
+    tracker = get_tracker(db_path, run_dir=run_dir)
     if max_depth is not None:
         lineage_data = tracker.get_artifact_lineage(artifact_key, max_depth=max_depth)
     else:
@@ -3661,9 +3775,14 @@ def summary(
     db_path: Optional[str] = typer.Option(
         None, help="Path to the Consist DuckDB database."
     ),
+    run_dir: Optional[str] = typer.Option(
+        None,
+        "--run-dir",
+        help=RUN_DIR_RESOLUTION_HELP,
+    ),
 ) -> None:
     """Displays a high-level summary of the provenance database."""
-    tracker = get_tracker(db_path)
+    tracker = get_tracker(db_path, run_dir=run_dir)
     summary_data = queries.get_summary(tracker)
 
     _render_summary(summary_data)
@@ -3704,7 +3823,7 @@ def preview(
     ),
 ) -> None:
     """Shows a small preview of an artifact or GTFS bundle summary when supported."""
-    resolved_db_path = find_db_path(db_path)
+    resolved_db_path = find_db_path(db_path, start_dir=run_dir)
     mount_overrides = _resolve_mount_overrides_or_exit(mount)
     tracker = get_tracker(
         resolved_db_path,
@@ -5477,9 +5596,14 @@ class ConsistShell(cmd.Cmd):
 def show(
     run_id: str = typer.Argument(..., help="The ID of the run to inspect."),
     db_path: Optional[str] = typer.Option(None, help="Path to the DuckDB database."),
+    run_dir: Optional[str] = typer.Option(
+        None,
+        "--run-dir",
+        help=RUN_DIR_RESOLUTION_HELP,
+    ),
 ) -> None:
     """Display detailed information about a specific run."""
-    tracker = get_tracker(db_path)
+    tracker = get_tracker(db_path, run_dir=run_dir)
     run = tracker.get_run(run_id)
     if not run:
         console.print(f"[red]Run '{run_id}' not found.[/red]")
@@ -5516,7 +5640,7 @@ def shell(
     Start an interactive shell for exploring the provenance database.
     The database is loaded once and reused across shell commands.
     """
-    resolved_db_path = find_db_path(db_path)
+    resolved_db_path = find_db_path(db_path, start_dir=run_dir)
     mount_overrides = _resolve_mount_overrides_or_exit(mount)
 
     tracker = get_tracker(
@@ -5528,7 +5652,7 @@ def shell(
     )
     resolved_db_path = tracker.db_path
     if not isinstance(resolved_db_path, str) or not resolved_db_path:
-        resolved_db_path = find_db_path(db_path)
+        resolved_db_path = find_db_path(db_path, start_dir=run_dir)
     console.print(f"[green]✓ Loaded database: {resolved_db_path}[/green]")
     if mount_overrides:
         mounts_text = ", ".join(
@@ -6013,13 +6137,50 @@ def migrate_cmd(
             parsed_mounts[m_name] = m_path
 
     try:
-        report = migrate_database(
-            Path(target_or_action),
-            run_dir=run_dir,
-            mounts=parsed_mounts or None,
-            trust_v04_hashes=trust_v04_hashes,
-            dry_run=dry_run,
-        )
+        if json_output:
+            report = migrate_database(
+                Path(target_or_action),
+                run_dir=run_dir,
+                mounts=parsed_mounts or None,
+                trust_v04_hashes=trust_v04_hashes,
+                dry_run=dry_run,
+            )
+        else:
+            from rich.progress import (
+                BarColumn,
+                Progress,
+                SpinnerColumn,
+                TaskProgressColumn,
+                TextColumn,
+            )
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TaskProgressColumn(),
+                console=console,
+                transient=True,
+            ) as progress:
+                task_id = progress.add_task("Preparing migration...", total=1)
+
+                def _cli_progress(phase: str, current: int, total: int) -> None:
+                    tot = max(total, 1)
+                    progress.update(
+                        task_id,
+                        description=f"{phase} ({current}/{tot})",
+                        total=tot,
+                        completed=current,
+                    )
+
+                report = migrate_database(
+                    Path(target_or_action),
+                    run_dir=run_dir,
+                    mounts=parsed_mounts or None,
+                    trust_v04_hashes=trust_v04_hashes,
+                    dry_run=dry_run,
+                    progress_callback=_cli_progress,
+                )
     except (FileNotFoundError, IncompatibleSchemaError, ValueError, OSError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from exc

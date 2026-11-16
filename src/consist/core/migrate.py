@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -106,6 +106,9 @@ class _MigratedArtifactInfo:
     meta: Mapping[str, Any]
 
 
+ProgressCallback = Callable[[str, int, int], None]
+
+
 def _table_columns(
     cur: duckdb.DuckDBPyConnection, *, db_alias: str, schema: str, table: str
 ) -> list[str]:
@@ -119,7 +122,11 @@ def _table_columns(
 
 
 def _copy_non_core_tables_and_views(
-    cur: duckdb.DuckDBPyConnection, *, dst_catalog: str, src_tables: set[str]
+    cur: duckdb.DuckDBPyConnection,
+    *,
+    dst_catalog: str,
+    src_tables: set[str],
+    dry_run: bool = False,
 ) -> tuple[int, list[tuple[Any, ...]]]:
     global_tables_copied = 0
     for raw_s, raw_t in cur.execute(
@@ -128,13 +135,23 @@ def _copy_non_core_tables_and_views(
     ).fetchall():
         qs, qt = _quote_ident(str(raw_s)), _quote_ident(str(raw_t))
         cur.execute(f"CREATE SCHEMA IF NOT EXISTS {qs}")
-        cur.execute(f"CREATE TABLE {qs}.{qt} AS SELECT * FROM v04_src.{qs}.{qt}")
+        if dry_run:
+            cur.execute(
+                f"CREATE TABLE {qs}.{qt} AS SELECT * FROM v04_src.{qs}.{qt} LIMIT 0"
+            )
+        else:
+            cur.execute(f"CREATE TABLE {qs}.{qt} AS SELECT * FROM v04_src.{qs}.{qt}")
         if str(raw_s) == "global_tables":
             global_tables_copied += 1
 
     for custom_tbl in sorted(src_tables - _CORE_MAIN_TABLES):
         qc = _quote_ident(custom_tbl)
-        cur.execute(f"CREATE TABLE main.{qc} AS SELECT * FROM v04_src.main.{qc}")
+        if dry_run:
+            cur.execute(
+                f"CREATE TABLE main.{qc} AS SELECT * FROM v04_src.main.{qc} LIMIT 0"
+            )
+        else:
+            cur.execute(f"CREATE TABLE main.{qc} AS SELECT * FROM v04_src.main.{qc}")
 
     for tbl in _PASSTHROUGH_CORE_TABLES:
         if tbl not in src_tables:
@@ -325,6 +342,8 @@ def _migrate_artifacts_and_locations(
     cli_run_dir: Optional[Path],
     cli_mounts: Mapping[str, str],
     trust_v04_hashes: bool,
+    dry_run: bool = False,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> tuple[
     list[list[Any]],
     list[ArtifactLocationRow],
@@ -437,8 +456,11 @@ def _migrate_artifacts_and_locations(
     artifacts_by_id: dict[uuid.UUID, _MigratedArtifactInfo] = {}
     hashed = trusted = cold = 0
     obs_base_ns = time.time_ns()
+    total_artifacts = len(raw_artifacts)
 
     for a_idx, a_row in enumerate(raw_artifacts):
+        if progress_callback:
+            progress_callback("Resolving artifacts", a_idx + 1, total_artifacts)
         art_id = _coerce_uuid(a_row[0])
         key, uri, driver = str(a_row[1]), str(a_row[2]), str(a_row[3])
         member_val = next(
@@ -916,6 +938,7 @@ def migrate_database(
     mounts: Optional[Mapping[str, str]] = None,
     trust_v04_hashes: bool = False,
     dry_run: bool = False,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> MigrationReport:
     """Migrate a Consist v0.4 DuckDB database cleanly to Consist v0.5 (schema v2)."""
     src_path = Path(db_path).expanduser().resolve()
@@ -955,10 +978,17 @@ def migrate_database(
                             "WHERE database_name = 'v04_src' AND schema_name = 'main' AND NOT internal"
                         ).fetchall()
                     }
+                    if progress_callback:
+                        progress_callback("Inspecting tables and schemas", 0, 1)
                     global_tables_copied, src_views = _copy_non_core_tables_and_views(
-                        cur, dst_catalog=dst_catalog, src_tables=src_tables
+                        cur,
+                        dst_catalog=dst_catalog,
+                        src_tables=src_tables,
+                        dry_run=dry_run,
                     )
                     _copy_v04_runs_sql(cur, src_tables)
+                    if progress_callback:
+                        progress_callback("Inspecting tables and schemas", 1, 1)
 
                     run_rows: list[
                         tuple[str, str, Optional[str], Optional[str], dict[str, Any]]
@@ -1024,6 +1054,8 @@ def migrate_database(
                         cli_run_dir=cli_run_dir,
                         cli_mounts=cli_mounts,
                         trust_v04_hashes=trust_v04_hashes,
+                        dry_run=dry_run,
+                        progress_callback=progress_callback,
                     )
 
                     if artifact_insert_rows:
@@ -1046,6 +1078,8 @@ def migrate_database(
                                 str(exec_rid), []
                             ).append((_coerce_uuid(inv_id), str(b_json)))
 
+                    if progress_callback:
+                        progress_callback("Promoting run identities", 0, len(run_rows))
                     link_rows, run_updates, inv_updates = (
                         _promote_run_identities_and_links(
                             run_rows=run_rows,
@@ -1054,6 +1088,10 @@ def migrate_database(
                             invocations_by_exec_run=invocations_by_exec_run,
                         )
                     )
+                    if progress_callback:
+                        progress_callback(
+                            "Promoting run identities", len(run_rows), len(run_rows)
+                        )
                     if run_updates:
                         _execute_multirow_values(
                             cur,
@@ -1093,8 +1131,13 @@ def migrate_database(
                 except duckdb.Error:
                     pass
 
-            for v_schema, _v_name, v_sql in src_views:
+            total_views = len(src_views)
+            if progress_callback:
+                progress_callback("Copying views", 0, total_views)
+            for v_idx, (v_schema, _v_name, v_sql) in enumerate(src_views):
                 if not v_sql:
+                    if progress_callback:
+                        progress_callback("Copying views", v_idx + 1, total_views)
                     continue
                 s_str = str(v_schema)
                 cleaned_sql = str(v_sql).strip()
@@ -1117,12 +1160,16 @@ def migrate_database(
                     )
                 else:
                     views_copied += 1
+                if progress_callback:
+                    progress_callback("Copying views", v_idx + 1, total_views)
 
             count_row = dst_db.fetchone("SELECT COUNT(*) FROM artifact_location")
             actual_locations = (
                 int(count_row[0]) if count_row and count_row[0] is not None else 0
             )
             dst_db.execute("CHECKPOINT")
+            if progress_callback:
+                progress_callback("Finalizing migration", 1, 1)
         finally:
             dst_db.close()
 
