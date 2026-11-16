@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,6 +11,47 @@ from consist.models.artifact import Artifact
 from consist.models.run import Run
 
 UTC = timezone.utc
+
+# Version of the OpenLineage core spec the emitted events conform to.
+OPENLINEAGE_SPEC_VERSION = "2-0-2"
+_SPEC_BASE = f"https://openlineage.io/spec/{OPENLINEAGE_SPEC_VERSION}/OpenLineage.json"
+
+#: ``schemaURL`` for the emitted run events (required by the spec).
+OPENLINEAGE_SCHEMA_URL = f"{_SPEC_BASE}#/$defs/RunEvent"
+
+#: ``_schemaURL`` for Consist's own (non-standard) facets.
+CONSIST_FACET_SCHEMA_URL = f"{_SPEC_BASE}#/$defs/BaseFacet"
+
+#: ``producer``/``_producer`` URI identifying Consist as the metadata producer.
+DEFAULT_PRODUCER = "https://github.com/LBNL-UCB-STI/consist"
+
+_FACETS_BASE = "https://openlineage.io/spec/facets"
+_PARENT_RUN_FACET_SCHEMA_URL = (
+    f"{_FACETS_BASE}/1-0-0/ParentRunFacet.json#/$defs/ParentRunFacet"
+)
+_ERROR_MESSAGE_RUN_FACET_SCHEMA_URL = (
+    f"{_FACETS_BASE}/1-0-0/ErrorMessageRunFacet.json#/$defs/ErrorMessageRunFacet"
+)
+_JOB_TYPE_JOB_FACET_SCHEMA_URL = (
+    f"{_FACETS_BASE}/2-0-2/JobTypeJobFacet.json#/$defs/JobTypeJobFacet"
+)
+_DOCUMENTATION_JOB_FACET_SCHEMA_URL = (
+    f"{_FACETS_BASE}/1-0-0/DocumentationJobFacet.json#/$defs/DocumentationJobFacet"
+)
+_DATASOURCE_DATASET_FACET_SCHEMA_URL = (
+    f"{_FACETS_BASE}/1-0-0/DatasourceDatasetFacet.json#/$defs/DatasourceDatasetFacet"
+)
+_DATASET_VERSION_FACET_SCHEMA_URL = (
+    f"{_FACETS_BASE}/1-0-0/DatasetVersionDatasetFacet.json"
+    "#/$defs/DatasetVersionDatasetFacet"
+)
+_SCHEMA_DATASET_FACET_SCHEMA_URL = (
+    f"{_FACETS_BASE}/1-0-0/SchemaDatasetFacet.json#/$defs/SchemaDatasetFacet"
+)
+_DOCUMENTATION_DATASET_FACET_SCHEMA_URL = (
+    f"{_FACETS_BASE}/1-0-0/DocumentationDatasetFacet.json"
+    "#/$defs/DocumentationDatasetFacet"
+)
 
 
 @dataclass(frozen=True)
@@ -24,7 +66,7 @@ class OpenLineageEmitter:
         self,
         options: OpenLineageOptions,
         *,
-        producer: str = "consist",
+        producer: str = DEFAULT_PRODUCER,
         schema_resolver: Optional[
             Callable[[Artifact], Optional[tuple[Any, list[Any]]]]
         ] = None,
@@ -93,8 +135,9 @@ class OpenLineageEmitter:
             "eventType": event_type,
             "eventTime": event_time.isoformat(),
             "producer": self._producer,
+            "schemaURL": OPENLINEAGE_SCHEMA_URL,
             "run": {
-                "runId": run.id,
+                "runId": _run_uuid(run.id, self._options.namespace),
                 "facets": self._run_facets(run, error),
             },
             "job": {
@@ -110,13 +153,23 @@ class OpenLineageEmitter:
             ],
         }
 
+    def _facet(self, schema_url: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Stamp a facet payload with the ``_producer``/``_schemaURL`` the spec requires."""
+        return {
+            "_producer": self._producer,
+            "_schemaURL": schema_url,
+            **payload,
+        }
+
     def _run_facets(self, run: Run, error: Exception | None) -> dict[str, Any]:
         facets: dict[str, Any] = {}
         if self._run_lookup and run.parent_run_id:
             parent_run = self._run_lookup(run.parent_run_id)
             parent_facet = _parent_facet(run, parent_run, self._options.namespace)
             if parent_facet:
-                facets["parent"] = parent_facet
+                facets["parent"] = self._facet(
+                    _PARENT_RUN_FACET_SCHEMA_URL, parent_facet
+                )
 
         consist_facet: dict[str, Any] = {
             "run_id": run.id,
@@ -133,49 +186,82 @@ class OpenLineageEmitter:
             extra = self._run_facet_resolver(run)
             if extra:
                 consist_facet.update(extra)
-        facets["consist"] = {k: v for k, v in consist_facet.items() if v is not None}
+        facets["consist"] = self._facet(
+            CONSIST_FACET_SCHEMA_URL,
+            {k: v for k, v in consist_facet.items() if v is not None},
+        )
 
         if error is not None:
-            facets["errorMessage"] = {
-                "message": str(error),
-                "programmingLanguage": "python",
-            }
+            facets["errorMessage"] = self._facet(
+                _ERROR_MESSAGE_RUN_FACET_SCHEMA_URL,
+                {"message": str(error), "programmingLanguage": "python"},
+            )
 
         return facets
 
     def _job_facets(self, run: Run) -> dict[str, Any]:
         facets: dict[str, Any] = {}
-        facets["jobType"] = {
-            "processingType": "consist",
-            "jobType": _job_type_for_run(run),
-        }
+        facets["jobType"] = self._facet(
+            _JOB_TYPE_JOB_FACET_SCHEMA_URL,
+            {
+                "processingType": "BATCH",
+                "integration": "CONSIST",
+                "jobType": _job_type_for_run(run),
+            },
+        )
         if run.description:
-            facets["documentation"] = {"description": run.description}
+            facets["documentation"] = self._facet(
+                _DOCUMENTATION_JOB_FACET_SCHEMA_URL,
+                {"description": run.description},
+            )
         return facets
 
     def _dataset_from_artifact(self, artifact: Artifact, run: Run) -> dict[str, Any]:
         facets: dict[str, Any] = {}
         data_source = _data_source_facet_from_artifact(artifact)
         if data_source:
-            facets["dataSource"] = data_source
+            facets["dataSource"] = self._facet(
+                _DATASOURCE_DATASET_FACET_SCHEMA_URL, data_source
+            )
         version = _dataset_version_facet_from_artifact(artifact)
         if version:
-            facets["version"] = version
+            facets["version"] = self._facet(_DATASET_VERSION_FACET_SCHEMA_URL, version)
         schema_facet = _schema_facet_from_artifact(artifact, self._schema_resolver)
         if schema_facet:
-            facets["schema"] = schema_facet
+            facets["schema"] = self._facet(
+                _SCHEMA_DATASET_FACET_SCHEMA_URL, schema_facet
+            )
         documentation = _documentation_facet_from_artifact(artifact)
         if documentation:
-            facets["documentation"] = documentation
+            facets["documentation"] = self._facet(
+                _DOCUMENTATION_DATASET_FACET_SCHEMA_URL, documentation
+            )
         consist_facet = _consist_dataset_facet(artifact)
         if consist_facet:
-            facets["consist"] = consist_facet
+            facets["consist"] = self._facet(CONSIST_FACET_SCHEMA_URL, consist_facet)
 
         return {
             "namespace": self._options.namespace,
             "name": _dataset_name_from_artifact(artifact, run),
             "facets": facets,
         }
+
+
+def _run_uuid(run_id: str, namespace: str) -> str:
+    """
+    Return an OpenLineage-compatible ``runId`` for a Consist run id.
+
+    OpenLineage requires ``run.runId`` to be a UUID, while Consist run ids are
+    human-meaningful strings (``"baseline"``, ``"step_a"``). Ids that already are
+    UUIDs are passed through; anything else is mapped to a deterministic UUIDv5 of
+    ``consist://<namespace>/<run id>``, so repeated emissions of the same run keep
+    the same OpenLineage identity. The original id stays available on the
+    ``consist`` run facet as ``run_id``.
+    """
+    try:
+        return str(uuid.UUID(str(run_id)))
+    except (AttributeError, TypeError, ValueError):
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, f"consist://{namespace}/{run_id}"))
 
 
 def _job_name_for_run(run: Run) -> str:
@@ -197,7 +283,7 @@ def _parent_facet(
         return None
     return {
         "job": {"name": _job_name_for_run(parent_run), "namespace": namespace},
-        "run": {"runId": run.parent_run_id},
+        "run": {"runId": _run_uuid(run.parent_run_id, namespace)},
     }
 
 
