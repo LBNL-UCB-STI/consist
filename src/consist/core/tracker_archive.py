@@ -978,12 +978,20 @@ class TrackerArchiveService(_TrackerServiceBase):
             append=append,
             prepend_source_mount_root=prepend_source_mount_root,
         )
+        verified_roots: list[str | Path] = [archive_root_path]
+        if (
+            mode == "copy"
+            and append
+            and prepend_source_mount_root
+            and len(recovery_roots) > 1
+        ):
+            verified_roots.append(recovery_roots[0])
         try:
             self.tracker.set_artifact_recovery_roots(
                 artifact,
                 recovery_roots,
                 append=append,
-                verified_roots=[archive_root_path],
+                verified_roots=verified_roots,
             )
         except Exception:
             if moved_from is not None and destination.exists():
@@ -1937,6 +1945,14 @@ class TrackerArchiveService(_TrackerServiceBase):
         try:
             published_directory = self._publish_output_set_directory(plan)
             published_manifest = self._publish_output_set_manifest(plan)
+            verified_roots: list[str | Path] = [archive_root_path]
+            if (
+                mode == "copy"
+                and append
+                and prepend_source_mount_root
+                and len(recovery_roots) > 1
+            ):
+                verified_roots.append(recovery_roots[0])
             self.tracker._set_artifact_recovery_roots_bulk(
                 [
                     plan.parent,
@@ -1946,7 +1962,7 @@ class TrackerArchiveService(_TrackerServiceBase):
                 ],
                 recovery_roots,
                 append=append,
-                verified_roots=[archive_root_path],
+                verified_roots=verified_roots,
             )
         except Exception:
             if published_manifest:
@@ -2046,12 +2062,20 @@ class TrackerArchiveService(_TrackerServiceBase):
             append=append,
             prepend_source_mount_root=prepend_source_mount_root,
         )
+        verified_roots: list[str | Path] = [archive_root_path]
+        if (
+            mode == "copy"
+            and append
+            and prepend_source_mount_root
+            and len(recovery_roots) > 1
+        ):
+            verified_roots.append(recovery_roots[0])
         try:
             self.tracker.set_artifact_recovery_roots(
                 artifact,
                 recovery_roots,
                 append=append,
-                verified_roots=[archive_root_path],
+                verified_roots=verified_roots,
             )
         except Exception:
             rollback_published_directory_tree(destination, published)
@@ -2116,12 +2140,20 @@ class TrackerArchiveService(_TrackerServiceBase):
             append=append,
             prepend_source_mount_root=prepend_source_mount_root,
         )
+        verified_roots: list[str | Path] = [archive_root_path]
+        if (
+            mode == "copy"
+            and append
+            and prepend_source_mount_root
+            and len(recovery_roots) > 1
+        ):
+            verified_roots.append(recovery_roots[0])
         try:
             self.tracker.set_artifact_recovery_roots(
                 artifact,
                 recovery_roots,
                 append=append,
-                verified_roots=[archive_root_path],
+                verified_roots=verified_roots,
             )
         except Exception:
             if published and destination.exists():

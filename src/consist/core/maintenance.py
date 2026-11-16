@@ -1886,6 +1886,37 @@ class DatabaseMaintenance:
                                       )
                                     """
                                 )
+                                cur.execute(
+                                    """
+                                    WITH ranked AS (
+                                        SELECT location_id,
+                                               ROW_NUMBER() OVER (
+                                                   PARTITION BY artifact_id, mount_name, mount_instance_id, uri, member
+                                                   ORDER BY
+                                                       CASE WHEN status = 'active' THEN 0 ELSE 1 END ASC,
+                                                       CASE site
+                                                           WHEN 'archive' THEN 4
+                                                           WHEN 'advisory' THEN 3
+                                                           WHEN 'external' THEN 2
+                                                           WHEN 'workspace' THEN 1
+                                                           ELSE 0
+                                                       END DESC,
+                                                       observed_at_ns DESC,
+                                                       CAST(location_id AS VARCHAR) DESC
+                                               ) AS rnk,
+                                               BOOL_OR(status = 'active') OVER (
+                                                   PARTITION BY artifact_id, mount_name, mount_instance_id, uri, member
+                                               ) AS has_active
+                                        FROM main."artifact_location"
+                                        WHERE artifact_id IS NOT NULL
+                                    )
+                                    DELETE FROM main."artifact_location"
+                                    WHERE location_id IN (
+                                        SELECT location_id FROM ranked
+                                        WHERE has_active AND rnk > 1
+                                    )
+                                    """
+                                )
                                 self.db.bump_location_epoch()
 
                         cfg_facet_cols = _core_columns("config_facet")
