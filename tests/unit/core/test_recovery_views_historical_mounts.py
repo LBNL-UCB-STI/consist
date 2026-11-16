@@ -99,8 +99,6 @@ def test_db_fallback_resolves_hyphenated_archive_mount_across_sessions(
         mounts={"lrc-scratch": str(shared_scratch)},
     )
     try:
-        with archive_tracker.start_run("archive_job", model="maint"):
-            pass
         archive_tracker.archive_run_outputs(
             "step_only",
             archive_root=shared_scratch / "consist-recovery",
@@ -228,3 +226,64 @@ def test_missing_file_warning_diagnostic_in_view_factory(
         assert "checked locations:" in msg
     finally:
         tracker.close()
+
+
+def test_historical_mount_prefers_existing_host_mount_over_nonexistent_container_mount(
+    tmp_path: Path,
+) -> None:
+    compute_ws = tmp_path / "compute_ws"
+    host_scratch = tmp_path / "host_scratch"
+    login_tmp = tmp_path / "login_tmp"
+    db_path = tmp_path / "prov.duckdb"
+
+    compute_ws.mkdir(parents=True, exist_ok=True)
+    host_scratch.mkdir(parents=True, exist_ok=True)
+    login_tmp.mkdir(parents=True, exist_ok=True)
+
+    # Run 1 on host: records host_scratch
+    t1 = Tracker(
+        run_dir=compute_ws,
+        db_path=str(db_path),
+        mounts={"shared": str(host_scratch)},
+    )
+    try:
+        out_file = compute_ws / "data.parquet"
+        pd.DataFrame({"v": [42]}).to_parquet(out_file)
+        with t1.start_run("host_run", model="test"):
+            art = t1.log_output(out_file, key="data")
+        t1.archive_artifact(
+            art,
+            host_scratch / "consist-recovery",
+            mode="move",
+        )
+    finally:
+        t1.close()
+
+    # Run 2 later in container: records a container path that doesn't exist on host
+    t2 = Tracker(
+        run_dir=compute_ws,
+        db_path=str(db_path),
+        mounts={"shared": "/nonexistent_container/scratch"},
+    )
+    try:
+        with t2.start_run("container_run", model="test"):
+            pass
+    finally:
+        t2.close()
+
+    # Login node: without mounts passed, must pick existing host_scratch rather than nonexistent container path
+    login_tracker = Tracker(
+        run_dir=login_tmp,
+        db_path=str(db_path),
+        read_only=True,
+    )
+    try:
+        loaded = login_tracker.get_artifact(art.id)
+        assert loaded is not None
+        resolved = resolve_verified_local_path(
+            login_tracker, loaded, allow_recovery_roots=True
+        )
+        assert resolved is not None and resolved.exists()
+        assert str(host_scratch) in str(resolved)
+    finally:
+        login_tracker.close()

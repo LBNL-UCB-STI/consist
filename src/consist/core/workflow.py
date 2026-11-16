@@ -26,6 +26,7 @@ from typing import (
     Tuple,
 )
 
+from consist.core.tracker_recovery import verify_candidate_against_artifact
 from consist.models.artifact import Artifact
 from consist.models.run import (
     ConsistRecord,
@@ -843,21 +844,15 @@ class ScenarioContext:
                     reuse_if_unchanged=reuse_if_unchanged,
                     **meta,
                 )
-            if self.tracker is not None:
-                self.tracker.persistence.persist_standalone_artifact(
-                    artifact, direction="input"
-                )
+                if artifact.id == value.id:
+                    artifact = replace(
+                        artifact,
+                        id=uuid.uuid4(),
+                        run_id=None,
+                        parent_artifact_id=value.id,
+                    )
         else:
-            raw_str = os.fspath(value) if isinstance(value, os.PathLike) else value
-            if isinstance(raw_str, str) and "://" in raw_str:
-                resolved_path = Path(self.tracker.resolve_uri(raw_str))
-            else:
-                resolved_path = Path(raw_str)
-                if not resolved_path.is_absolute():
-                    resolved_path = (self.tracker.run_dir / resolved_path).resolve()
-                else:
-                    resolved_path = resolved_path.resolve()
-
+            resolved_path = self.coupler._resolve_ref_path(value)
             artifact = self.tracker.artifacts.create_artifact(
                 resolved_path,
                 run_id=None,
@@ -866,13 +861,30 @@ class ScenarioContext:
                 driver=driver,
                 content_hash=content_hash,
                 reuse_if_unchanged=reuse_if_unchanged,
+                force_hash_override=content_hash is not None,
                 **meta,
             )
-            if self.tracker is not None:
-                self.tracker.persistence.persist_standalone_artifact(
-                    artifact, direction="input"
+            if (
+                reuse_if_unchanged
+                and artifact.id is not None
+                and not verify_candidate_against_artifact(resolved_path, artifact)
+            ):
+                artifact = self.tracker.artifacts.create_artifact(
+                    resolved_path,
+                    run_id=None,
+                    key=key,
+                    direction="input",
+                    driver=driver,
+                    content_hash=content_hash,
+                    reuse_if_unchanged=False,
+                    force_hash_override=content_hash is not None,
+                    **meta,
                 )
 
+        if self.tracker is not None:
+            self.tracker.persistence.persist_standalone_artifact(
+                artifact, direction="input"
+            )
         self.coupler.set(key, artifact)
         return artifact
 
@@ -1029,18 +1041,27 @@ class ScenarioContext:
         step_ordinal : Optional[int], default None
             Step ordinal within the scenario. Defaults to self._step_ordinal.
         """
-        if self.tracker.db is None:
+        if self.tracker.db is None or self.tracker.db.read_only:
             return
         target_run_id = run_id or self.run_id
         ordinal = self._step_ordinal if step_ordinal is None else step_ordinal
         artifacts = dict(self.coupler.items())
-        if not self.tracker.db.read_only:
+        candidate_ids = [
+            art.id
+            for art in artifacts.values()
+            if isinstance(art, Artifact) and art.id is not None
+        ]
+        if candidate_ids:
+            existing_ids = self.tracker.db.get_existing_artifact_ids(candidate_ids)
             for art in artifacts.values():
-                if isinstance(art, Artifact) and art.id is not None:
-                    if self.tracker.db.get_artifact(art.id) is None:
-                        self.tracker.persistence.persist_standalone_artifact(
-                            art, direction="input"
-                        )
+                if (
+                    isinstance(art, Artifact)
+                    and art.id is not None
+                    and art.id not in existing_ids
+                ):
+                    self.tracker.persistence.persist_standalone_artifact(
+                        art, direction="input"
+                    )
         self.tracker.db.sync_run_coupler_snapshot(
             run_id=target_run_id,
             phase=phase,

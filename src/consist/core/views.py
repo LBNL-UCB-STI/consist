@@ -722,6 +722,17 @@ class ViewFactory:
         include_system_columns: bool,
         missing_files: Literal["warn", "error", "skip_silent"],
     ) -> Optional[str]:
+        cold_artifacts = [
+            r.artifact
+            for r in records
+            if not (r.artifact.meta or {}).get("is_ingested")
+            and r.artifact.driver in {"parquet", "csv"}
+        ]
+        if cold_artifacts and self.tracker.db is not None:
+            from consist.core.tracker_recovery import warm_artifact_locations_cache
+
+            warm_artifact_locations_cache(self.tracker, cold_artifacts)
+
         grouped: Dict[str, List[Tuple[GroupedViewRecord, Path]]] = {}
         for record in records:
             meta = record.artifact.meta or {}
@@ -741,15 +752,23 @@ class ViewFactory:
                     extra_uris: list[str] = []
                     if self.tracker.db is not None and record.artifact.id is not None:
                         try:
-                            loc_rows = self.tracker.db.get_artifact_locations(
-                                record.artifact.id
+                            loc_rows = self.tracker.db.get_active_artifact_locations(
+                                artifact_id=record.artifact.id,
+                                digest=record.artifact.digest,
+                                member=record.artifact.member,
                             )
-                            for r in loc_rows:
-                                if (
-                                    r.uri != record.artifact.uri
-                                    and r.uri not in extra_uris
-                                ):
-                                    extra_uris.append(r.uri)
+                            if loc_rows:
+                                for r in loc_rows:
+                                    if r.uri != record.artifact.uri:
+                                        extra_uris.append(f"{r.uri} ({r.site})")
+                            else:
+                                fallback_rows = self.tracker.db.fetchall(
+                                    "SELECT uri, site FROM artifact_location WHERE artifact_id = ?",
+                                    [record.artifact.id],
+                                )
+                                for r_uri, r_site in fallback_rows:
+                                    if r_uri != record.artifact.uri:
+                                        extra_uris.append(f"{r_uri} ({r_site})")
                         except (duckdb.Error, ValueError, TypeError):
                             pass
                     if extra_uris:

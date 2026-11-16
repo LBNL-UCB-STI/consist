@@ -16,13 +16,26 @@ from typing import (
 )
 import warnings
 
+from typing_extensions import Protocol, runtime_checkable
+
+from consist.core.tracker_recovery import verify_candidate_against_artifact
 from consist.core.validation import validate_artifact_key
-from consist.location import FileStat
+from consist.location import DirTreeStat, FileStat
 from consist.models.artifact import Artifact, resolve_active_or_default_resolver
 from consist.protocols import ArtifactLike
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
+
+
+@runtime_checkable
+class _HasMounts(Protocol):
+    mounts: Mapping[str, str]
+
+
+@runtime_checkable
+class _HasRunDir(Protocol):
+    run_dir: Path
 
 
 def _normalize_namespace(namespace: str) -> str:
@@ -210,6 +223,7 @@ class Coupler(MutableMapping[str, Artifact]):
         self._tracker: Optional["Tracker"] = None
         self._artifacts: MutableMapping[str, Any] = {}
         self._stat_cache: dict[tuple[Any, ...], Artifact] = {}
+        self._resolved_by_path: dict[tuple[str, str], Artifact] = {}
         self._declared_outputs: MutableMapping[str, DeclaredOutput] = {}
         self._warn_undefined = False
         self._undefined_keys: builtins.set[str] = builtins.set()
@@ -250,70 +264,109 @@ class Coupler(MutableMapping[str, Artifact]):
             stacklevel=2,
         )
 
+    def _resolve_ref_path(self, value: str | os.PathLike[str]) -> Path:
+        raw = os.fspath(value)
+        tracker = self._tracker
+        if "://" in raw:
+            scheme, _ = raw.split("://", 1)
+            if scheme == "file":
+                p = Path(raw[len("file://") :])
+                return p.resolve() if tracker is not None else p
+            if tracker is None:
+                return Path(raw)
+            if (
+                isinstance(tracker, _HasMounts)
+                and scheme not in ("workspace", "runs")
+                and scheme not in tracker.mounts
+            ):
+                raise ValueError(
+                    f"Unconfigured mount scheme '{scheme}://' in URI {raw!r}."
+                )
+            return Path(tracker.resolve_uri(raw))
+        if isinstance(tracker, _HasRunDir):
+            return (tracker.run_dir / raw).resolve()
+        return Path(raw)
+
     def _resolve_lazy_entry(self, key: str, value: Any) -> Any:
         if not isinstance(value, (Path, str, os.PathLike)):
             return value
         tracker = self._tracker
         if tracker is None:
             return value
-        raw_str = os.fspath(value) if isinstance(value, os.PathLike) else value
-        if isinstance(raw_str, str) and "://" in raw_str:
-            resolved_path = Path(tracker.resolve_uri(raw_str))
-        else:
-            resolved_path = Path(raw_str)
-            if not resolved_path.is_absolute():
-                resolved_path = (tracker.run_dir / resolved_path).resolve()
-            else:
-                resolved_path = resolved_path.resolve()
-
+        resolved_path = self._resolve_ref_path(value)
         if not resolved_path.exists():
             return value
 
-        if resolved_path.is_dir():
-            art = tracker.artifacts.create_artifact(
-                resolved_path,
-                run_id=None,
-                key=key,
-                direction="input",
-                reuse_if_unchanged=True,
-            )
-            tracker.persistence.persist_standalone_artifact(art, direction="input")
-            return art
-
         now_ns = time.time_ns()
-        fstat = FileStat.capture(resolved_path, observed_at_ns=now_ns)
-        is_racy = (
-            fstat.racy or (now_ns - max(fstat.mtime_ns, fstat.ctime_ns)) < 2_000_000_000
-        )
-        stat_key: tuple[Any, ...] = (
-            "file",
-            key,
-            str(resolved_path),
-            fstat._stat_tuple(),
-        )
+        if resolved_path.is_dir():
+            dstat = DirTreeStat.capture_dir(resolved_path, observed_at_ns=now_ns)
+            is_racy = dstat.racy or (now_ns - dstat.max_mtime_ns) < 2_000_000_000
+            stat_key: tuple[Any, ...] = (
+                "dir",
+                key,
+                str(resolved_path),
+                dstat.file_count,
+                dstat.total_bytes,
+                dstat.max_mtime_ns,
+                dstat.entries,
+                dstat.subdirs,
+            )
+        else:
+            fstat = FileStat.capture(resolved_path, observed_at_ns=now_ns)
+            is_racy = (
+                fstat.racy
+                or (now_ns - max(fstat.mtime_ns, fstat.ctime_ns)) < 2_000_000_000
+            )
+            stat_key = (
+                "file",
+                key,
+                str(resolved_path),
+                fstat._stat_tuple(),
+            )
 
         if not is_racy:
             cached = self._stat_cache.get(stat_key)
             if cached is not None:
                 return cached
 
-        artifact = tracker.artifacts.create_artifact(
+        art = tracker.artifacts.create_artifact(
             resolved_path,
             run_id=None,
             key=key,
             direction="input",
             reuse_if_unchanged=True,
         )
-        tracker.persistence.persist_standalone_artifact(artifact, direction="input")
+        if art.id is not None and not verify_candidate_against_artifact(
+            resolved_path, art
+        ):
+            art = tracker.artifacts.create_artifact(
+                resolved_path,
+                run_id=None,
+                key=key,
+                direction="input",
+                reuse_if_unchanged=False,
+            )
+
+        prev = self._resolved_by_path.get((key, str(resolved_path)))
+        if prev is not None and prev.digest is not None and prev.digest == art.digest:
+            if not is_racy:
+                self._stat_cache[stat_key] = prev
+            return prev
+
+        tracker.persistence.persist_standalone_artifact(art, direction="input")
+        self._resolved_by_path[(key, str(resolved_path))] = art
         if not is_racy:
-            self._stat_cache[stat_key] = artifact
-        return artifact
+            self._stat_cache[stat_key] = art
+        return art
 
     def set(self, key: str, artifact: Any) -> Any:
         """Store an artifact or lazy path reference under a validated key."""
         self._validate_artifact_key(key)
         self._maybe_warn_undefined(key)
         self._artifacts[key] = artifact
+        to_pop = [k for k in self._resolved_by_path if k[0] == key]
+        for k in to_pop:
+            self._resolved_by_path.pop(k, None)
         return artifact
 
     def set_from_artifact(self, key: str, value: Any) -> Any:
@@ -324,6 +377,7 @@ class Coupler(MutableMapping[str, Artifact]):
         """Clear all stored artifacts."""
         self._artifacts.clear()
         self._stat_cache.clear()
+        self._resolved_by_path.clear()
 
     def __len__(self) -> int:
         return len(self._artifacts)
@@ -466,6 +520,9 @@ class Coupler(MutableMapping[str, Artifact]):
         if key not in self._artifacts:
             raise KeyError(key)
         del self._artifacts[key]
+        to_pop = [k for k in self._resolved_by_path if k[0] == key]
+        for k in to_pop:
+            self._resolved_by_path.pop(k, None)
 
     def path(self, key: str, *, required: bool = True) -> Optional[Path]:
         """
@@ -473,6 +530,13 @@ class Coupler(MutableMapping[str, Artifact]):
 
         This does not mutate the Artifact; it only returns a resolved Path.
         """
+        raw_val = self._artifacts.get(key)
+        if raw_val is None:
+            if required:
+                raise KeyError(f"Artifact {key!r} not found in coupler.")
+            return None
+        if isinstance(raw_val, (Path, str, os.PathLike)) and self._tracker is not None:
+            return self._resolve_ref_path(raw_val)
         artifact = self.require(key) if required else self.get(key)
         if artifact is None:
             return None
@@ -489,15 +553,7 @@ class Coupler(MutableMapping[str, Artifact]):
                 )
             return artifact.as_path()
         if isinstance(artifact, (Path, str, os.PathLike)):
-            raw_str = (
-                os.fspath(artifact) if isinstance(artifact, os.PathLike) else artifact
-            )
-            if self.tracker is not None and "://" in str(raw_str):
-                return Path(self.tracker.resolve_uri(str(raw_str)))
-            resolved = Path(raw_str)
-            if not resolved.is_absolute() and self.tracker is not None:
-                return (self.tracker.run_dir / resolved).resolve()
-            return resolved
+            return self._resolve_ref_path(artifact)
         if isinstance(artifact, ArtifactLike):
             if artifact.path is not None:
                 return Path(artifact.path)

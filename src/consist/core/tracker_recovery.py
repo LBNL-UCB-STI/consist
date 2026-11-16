@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import ctypes
 import fcntl
-import json
 import logging
 import os
 import shutil
@@ -12,8 +11,6 @@ import uuid
 from pathlib import Path
 from typing import Any, Literal, Mapping, Optional, Sequence, TYPE_CHECKING, Union
 from typing_extensions import Protocol, runtime_checkable
-
-import duckdb
 
 from consist.core._tracker_service_base import _TrackerServiceBase
 from consist.core.directory_artifacts import (
@@ -334,21 +331,19 @@ def _resolve_rows_for_cache(
                         else {}
                     )
                     mounts_meta = run_meta.get("mounts")
-                    mount_override = (
+                    arch_meta = run_meta.get("archive_mounts")
+                    m_over = (
                         mounts_meta.get(row.mount_name)
                         if isinstance(mounts_meta, Mapping)
                         else None
+                    ) or (
+                        arch_meta.get(row.mount_name)
+                        if isinstance(arch_meta, Mapping)
+                        else None
                     )
-                    if not (isinstance(mount_override, str) and mount_override):
-                        archive_mounts_meta = run_meta.get("archive_mounts")
-                        mount_override = (
-                            archive_mounts_meta.get(row.mount_name)
-                            if isinstance(archive_mounts_meta, Mapping)
-                            else None
-                        )
                     phys = (
-                        mount_override
-                        if isinstance(mount_override, str) and mount_override
+                        m_over
+                        if isinstance(m_over, str) and m_over
                         else (
                             run_meta.get("_physical_run_dir")
                             if row.mount_name in ("workspace", "runs")
@@ -380,36 +375,16 @@ def _resolve_rows_for_cache(
                 and row.mount_name not in ("workspace", "runs", "abs")
                 and tracker.db is not None
             ):
-                db_memo_key = f"db_mount:{id(tracker.db)}:{row.mount_name}"
-                if db_memo_key not in historical_run_dir_memo:
-                    found_db_mount: Optional[str] = None
-                    quoted_mount = json.dumps(row.mount_name)
-                    try:
-                        mount_path = f'$."mounts".{quoted_mount}'
-                        row_val = tracker.db.fetchone(
-                            "SELECT json_extract_string(meta, ?) AS m "
-                            "FROM run "
-                            "WHERE meta IS NOT NULL AND json_extract_string(meta, ?) IS NOT NULL "
-                            "ORDER BY created_at DESC LIMIT 1",
-                            [mount_path, mount_path],
-                        )
-                        if row_val and row_val[0]:
-                            found_db_mount = str(row_val[0])
-                        else:
-                            arch_path = f'$."archive_mounts".{quoted_mount}'
-                            row_val_arch = tracker.db.fetchone(
-                                "SELECT json_extract_string(meta, ?) AS m "
-                                "FROM run "
-                                "WHERE meta IS NOT NULL AND json_extract_string(meta, ?) IS NOT NULL "
-                                "ORDER BY created_at DESC LIMIT 1",
-                                [arch_path, arch_path],
-                            )
-                            if row_val_arch and row_val_arch[0]:
-                                found_db_mount = str(row_val_arch[0])
-                    except (duckdb.Error, ValueError, TypeError):
-                        found_db_mount = None
-                    historical_run_dir_memo[db_memo_key] = found_db_mount
-                hist_dir = historical_run_dir_memo.get(db_memo_key)
+                candidate_roots = tracker.db.lookup_historical_mount_roots(
+                    row.mount_name
+                )
+                if candidate_roots:
+                    chosen_root = candidate_roots[0]
+                    for cand_r in candidate_roots:
+                        if Path(cand_r).exists():
+                            chosen_root = cand_r
+                            break
+                    hist_dir = chosen_root
 
             if hist_dir is not None:
                 cand_from_hist = tracker.fs.resolve_location_row_path(
@@ -674,7 +649,18 @@ def resolve_verified_local_path_detailed(
             if row.location_id in db._ephemeral_stale_locations:
                 continue
             if not allow_recovery_roots and row.site in ("archive", "advisory"):
-                continue
+                p_mount, p_inst, p_uri = tracker.fs.location_coordinate_for_uri(
+                    artifact.uri
+                )
+                p_member = artifact.member or ""
+                is_primary_coord = (
+                    row.mount_name == p_mount
+                    and row.mount_instance_id == p_inst
+                    and row.uri == p_uri
+                    and row.member == p_member
+                )
+                if not is_primary_coord:
+                    continue
             if not cand_options:
                 continue
 

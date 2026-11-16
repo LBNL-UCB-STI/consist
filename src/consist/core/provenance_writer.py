@@ -358,7 +358,6 @@ class ProvenanceWriter:
         artifact: "Artifact",
         *,
         direction: str = "input",
-        recovery_roots: Optional[Sequence[str]] = None,
     ) -> None:
         """Persist an artifact and its location records without linking to a run."""
         tracker = self._tracker
@@ -368,7 +367,7 @@ class ProvenanceWriter:
             locations = self._build_artifact_location_rows(
                 artifact,
                 direction=direction,
-                recovery_roots=tuple(recovery_roots) if recovery_roots else None,
+                recovery_roots=None,
             )
             tracker.db.upsert_artifact(artifact, locations=locations or None)
         except Exception as e:

@@ -1118,6 +1118,25 @@ def migrate_database(
                 else:
                     views_copied += 1
 
+            count_row = dst_db.fetchone("SELECT COUNT(*) FROM artifact_location")
+            actual_locations = (
+                len(
+                    {
+                        (
+                            r.artifact_id,
+                            r.mount_name,
+                            r.mount_instance_id,
+                            r.uri,
+                            r.member,
+                        )
+                        for r in location_rows
+                    }
+                )
+                if dry_run
+                else (
+                    int(count_row[0]) if count_row and count_row[0] is not None else 0
+                )
+            )
             dst_db.execute("CHECKPOINT")
         finally:
             dst_db.close()
@@ -1135,7 +1154,7 @@ def migrate_database(
             artifacts_hashed=artifacts_hashed,
             artifacts_trusted=artifacts_trusted,
             artifacts_cold_unverified=artifacts_cold,
-            locations_created=len(location_rows),
+            locations_created=actual_locations,
             global_tables_copied=global_tables_copied,
             views_copied=views_copied,
         )

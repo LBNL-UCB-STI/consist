@@ -255,3 +255,119 @@ def test_merge_db_deduplicates_advisory_and_archive(tmp_path: Path) -> None:
         assert rec_rows[0][3] == "active"
     finally:
         con.close()
+
+
+def test_secondary_archive_after_source_mount_overwrite(tmp_path: Path) -> None:
+    workspace = tmp_path / "runs"
+    outputs_dir = tmp_path / "outputs"
+    archive_1 = tmp_path / "archive_1"
+    archive_2 = tmp_path / "archive_2"
+    db_path = tmp_path / "prov.duckdb"
+
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    out_file = outputs_dir / "households.parquet"
+    pd.DataFrame({"id": [1], "val": ["D1"]}).to_parquet(out_file)
+
+    tracker = Tracker(
+        run_dir=workspace,
+        db_path=str(db_path),
+        mounts={"outputs": str(outputs_dir)},
+    )
+    try:
+        # Run 1: produce D1 and copy to archive_1
+        with tracker.start_run("run_1", model="test", config={"version": 1}):
+            art1 = tracker.log_output(out_file, key="households")
+        tracker.archive_artifact(art1, archive_1, mode="copy")
+
+        # Run 2: overwrite outputs://households.parquet with D2
+        # Set mtime back 10s to avoid 2s racy file window
+        pd.DataFrame({"id": [2], "val": ["D2"]}).to_parquet(out_file)
+        import os
+        import time
+
+        now = time.time()
+        os.utime(out_file, (now - 10, now - 10))
+
+        with tracker.start_run("run_2", model="test", config={"version": 2}):
+            art2 = tracker.log_output(out_file, key="households")
+            assert art2.id != art1.id
+
+        # Now archive art1 to archive_2 (mode="copy")
+        # source_path should be taken from archive_1 (valid D1), NOT outputs_dir (overwritten with D2)
+        tracker.archive_artifact(art1, archive_2, mode="copy")
+
+        import consist
+
+        loaded_df = consist.load(art1, tracker=tracker)
+        if isinstance(loaded_df, duckdb.DuckDBPyRelation):
+            loaded_df = loaded_df.df()
+        elif not isinstance(loaded_df, pd.DataFrame):
+            loaded_df = pd.DataFrame(loaded_df)
+        assert loaded_df["val"].tolist() == ["D1"]
+
+        con = duckdb.connect(str(db_path))
+        try:
+            # art1's row at outputs://households.parquet must be stale because run_2 overwrote it
+            rows = con.execute(
+                "SELECT location_id, site, uri, status FROM artifact_location "
+                "WHERE artifact_id = ? AND uri = 'outputs://households.parquet'",
+                [str(art1.id)],
+            ).fetchall()
+            assert len(rows) == 1
+            assert rows[0][3] == "stale"
+
+            # Both archives exist and are active
+            arch_rows = con.execute(
+                "SELECT site, uri, status FROM artifact_location "
+                "WHERE artifact_id = ? AND site = 'archive'",
+                [str(art1.id)],
+            ).fetchall()
+            assert len(arch_rows) == 2
+        finally:
+            con.close()
+    finally:
+        tracker.close()
+
+
+def test_witness_preserved_on_external_to_advisory_promotion(tmp_path: Path) -> None:
+    from consist.core.tracker_recovery import resolve_verified_local_path
+
+    workspace = tmp_path / "runs"
+    outputs_dir = tmp_path / "outputs"
+    archive_dir = tmp_path / "archive"
+    db_path = tmp_path / "prov.duckdb"
+
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    out_file = outputs_dir / "data.parquet"
+    pd.DataFrame({"val": [100]}).to_parquet(out_file)
+
+    tracker = Tracker(
+        run_dir=workspace,
+        db_path=str(db_path),
+        mounts={"outputs": str(outputs_dir)},
+    )
+    try:
+        with tracker.start_run("run_1", model="test"):
+            art = tracker.log_output(out_file, key="data", hashing_strategy="fast")
+
+        # Before archival, external location has a witness
+        con = duckdb.connect(str(db_path))
+        try:
+            rows_before = con.execute(
+                "SELECT site, witness_json FROM artifact_location WHERE artifact_id = ?",
+                [str(art.id)],
+            ).fetchall()
+            assert len(rows_before) == 1
+            assert rows_before[0][1] is not None
+        finally:
+            con.close()
+
+        # Archive with mode="copy"
+        tracker.archive_artifact(art, archive_dir, mode="copy")
+
+        # Local output is untouched, resolve with allow_recovery_roots=False must succeed
+        resolved = resolve_verified_local_path(tracker, art, allow_recovery_roots=False)
+        assert resolved is not None
+        assert resolved.resolve() == out_file.resolve()
+    finally:
+        tracker.close()

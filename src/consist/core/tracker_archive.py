@@ -207,6 +207,50 @@ class TrackerArchiveService(_TrackerServiceBase):
                 return [mount_root, archive_root_path]
         return [archive_root_path]
 
+    def _verified_archive_roots_for_artifact(
+        self,
+        artifact: Artifact,
+        archive_root_path: Path,
+        *,
+        source_path: Optional[Path],
+        mode: Literal["copy", "move"],
+        append: bool,
+        prepend_source_mount_root: bool,
+    ) -> list[str | Path]:
+        verified_roots: list[str | Path] = [archive_root_path]
+        if (
+            mode == "copy"
+            and append
+            and prepend_source_mount_root
+            and source_path is not None
+        ):
+            mount_root = self._source_mount_recovery_root(artifact)
+            if mount_root is not None:
+                rel = self.fs.get_remappable_relative_path(artifact.uri)
+                if rel is not None:
+                    cand = mount_root / rel
+                    try:
+                        cand_comp = (
+                            resolve_file_bundle_root(cand)
+                            if cand.exists()
+                            and (
+                                _is_file_bundle_artifact(artifact)
+                                or artifact.driver == "shapefile"
+                            )
+                            else cand
+                        )
+                        src_comp = (
+                            resolve_file_bundle_root(source_path)
+                            if _is_file_bundle_artifact(artifact)
+                            or artifact.driver == "shapefile"
+                            else source_path
+                        )
+                        if os.path.realpath(cand_comp) == os.path.realpath(src_comp):
+                            verified_roots.append(mount_root)
+                    except (OSError, ValueError):
+                        pass
+        return verified_roots
+
     def _known_run_output_abs_paths(self, run_id: str) -> dict[str, str]:
         known: dict[str, str] = {}
         for record in (self.current_consist, self.tracker._last_consist):
@@ -860,6 +904,18 @@ class TrackerArchiveService(_TrackerServiceBase):
             {artifact.id: new_rows},
             require_all=True,
         )
+        if not self.db.read_only:
+            for r in new_rows:
+                if (
+                    r.mount_name not in ("workspace", "runs", "abs")
+                    and r.mount_name in self.fs.mounts
+                ):
+                    m_path_str = str(Path(self.fs.mounts[r.mount_name]).resolve())
+                    self.db.record_known_mount(r.mount_name, m_path_str)
+                    if artifact.run_id:
+                        self.db.record_archive_mount_on_run(
+                            str(artifact.run_id), r.mount_name, m_path_str
+                        )
         self._persist_snapshot_recovery_roots_for_artifacts(
             {artifact.id: (artifact, normalized)}
         )
@@ -978,14 +1034,14 @@ class TrackerArchiveService(_TrackerServiceBase):
             append=append,
             prepend_source_mount_root=prepend_source_mount_root,
         )
-        verified_roots: list[str | Path] = [archive_root_path]
-        if (
-            mode == "copy"
-            and append
-            and prepend_source_mount_root
-            and len(recovery_roots) > 1
-        ):
-            verified_roots.append(recovery_roots[0])
+        verified_roots = self._verified_archive_roots_for_artifact(
+            artifact,
+            archive_root_path,
+            source_path=source_path,
+            mode=mode,
+            append=append,
+            prepend_source_mount_root=prepend_source_mount_root,
+        )
         try:
             self.tracker.set_artifact_recovery_roots(
                 artifact,
@@ -1946,13 +2002,33 @@ class TrackerArchiveService(_TrackerServiceBase):
             published_directory = self._publish_output_set_directory(plan)
             published_manifest = self._publish_output_set_manifest(plan)
             verified_roots: list[str | Path] = [archive_root_path]
-            if (
-                mode == "copy"
-                and append
-                and prepend_source_mount_root
-                and len(recovery_roots) > 1
-            ):
-                verified_roots.append(recovery_roots[0])
+            if mode == "copy" and append and prepend_source_mount_root:
+                mount_root = self._source_mount_recovery_root(plan.parent)
+                if mount_root is not None:
+                    rel = self.fs.get_remappable_relative_path(plan.parent.uri)
+                    cand = (mount_root / rel) if rel is not None else None
+                    all_from_mount = (
+                        cand is not None
+                        and plan.parent_source is not None
+                        and os.path.realpath(cand)
+                        == os.path.realpath(plan.parent_source)
+                    )
+                    if all_from_mount:
+                        for member in plan.members:
+                            m_rel = self.fs.get_remappable_relative_path(
+                                member.artifact.uri
+                            )
+                            m_cand = (mount_root / m_rel) if m_rel is not None else None
+                            if (
+                                m_cand is None
+                                or member.source_path is None
+                                or os.path.realpath(m_cand)
+                                != os.path.realpath(member.source_path)
+                            ):
+                                all_from_mount = False
+                                break
+                    if all_from_mount:
+                        verified_roots.append(mount_root)
             self.tracker._set_artifact_recovery_roots_bulk(
                 [
                     plan.parent,
@@ -2062,14 +2138,14 @@ class TrackerArchiveService(_TrackerServiceBase):
             append=append,
             prepend_source_mount_root=prepend_source_mount_root,
         )
-        verified_roots: list[str | Path] = [archive_root_path]
-        if (
-            mode == "copy"
-            and append
-            and prepend_source_mount_root
-            and len(recovery_roots) > 1
-        ):
-            verified_roots.append(recovery_roots[0])
+        verified_roots = self._verified_archive_roots_for_artifact(
+            artifact,
+            archive_root_path,
+            source_path=source_path,
+            mode=mode,
+            append=append,
+            prepend_source_mount_root=prepend_source_mount_root,
+        )
         try:
             self.tracker.set_artifact_recovery_roots(
                 artifact,
@@ -2140,14 +2216,14 @@ class TrackerArchiveService(_TrackerServiceBase):
             append=append,
             prepend_source_mount_root=prepend_source_mount_root,
         )
-        verified_roots: list[str | Path] = [archive_root_path]
-        if (
-            mode == "copy"
-            and append
-            and prepend_source_mount_root
-            and len(recovery_roots) > 1
-        ):
-            verified_roots.append(recovery_roots[0])
+        verified_roots = self._verified_archive_roots_for_artifact(
+            artifact,
+            archive_root_path,
+            source_path=source_path,
+            mode=mode,
+            append=append,
+            prepend_source_mount_root=prepend_source_mount_root,
+        )
         try:
             self.tracker.set_artifact_recovery_roots(
                 artifact,
@@ -2514,6 +2590,19 @@ class TrackerArchiveService(_TrackerServiceBase):
             locations_by_aid,
             require_all=True,
         )
+        if not self.db.read_only:
+            for artifact in validated_artifacts:
+                for r in locations_by_aid.get(artifact.id, ()):
+                    if (
+                        r.mount_name not in ("workspace", "runs", "abs")
+                        and r.mount_name in self.fs.mounts
+                    ):
+                        m_path_str = str(Path(self.fs.mounts[r.mount_name]).resolve())
+                        self.db.record_known_mount(r.mount_name, m_path_str)
+                        if artifact.run_id:
+                            self.db.record_archive_mount_on_run(
+                                str(artifact.run_id), r.mount_name, m_path_str
+                            )
         self._persist_snapshot_recovery_roots_for_artifacts(snapshot_roots)
         self._run_artifacts_cache.clear()
         return refreshed_by_id

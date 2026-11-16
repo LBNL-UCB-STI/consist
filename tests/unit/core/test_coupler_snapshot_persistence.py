@@ -109,7 +109,7 @@ def test_scenario_context_seed_artifact(tmp_path: Path) -> None:
             assert tracker.db is not None
             persisted = tracker.db.get_artifact(seeded.id)
             assert persisted is not None
-            locs = tracker.db.get_artifact_locations(seeded.id)
+            locs = tracker.db.get_active_artifact_locations(artifact_id=seeded.id)
             assert len(locs) >= 1
 
             # consist.load works
@@ -183,3 +183,168 @@ def test_ephemeral_and_read_only_coupler_raw_paths(tmp_path: Path) -> None:
         assert isinstance(art, Artifact)
     finally:
         t_ro.close()
+
+
+def test_racy_directory_coupler_single_artifact_identity(tmp_path: Path) -> None:
+    ws = tmp_path / "ws"
+    db_path = tmp_path / "prov.duckdb"
+    ws.mkdir(parents=True, exist_ok=True)
+
+    persons_path = ws / "persons.parquet"
+    pd.DataFrame({"pid": [1, 2]}).to_parquet(persons_path)
+
+    dir_path = ws / "skims_dir"
+    dir_path.mkdir(parents=True, exist_ok=True)
+    (dir_path / "skim1.txt").write_text("skim-content")
+
+    out1_path = ws / "out1.parquet"
+    out2_path = ws / "out2.parquet"
+    pd.DataFrame({"a": [1]}).to_parquet(out1_path)
+    pd.DataFrame({"b": [2]}).to_parquet(out2_path)
+
+    tracker = Tracker(run_dir=ws, db_path=str(db_path))
+    try:
+        with tracker.scenario("racy_test") as sc:
+            sc.coupler.set("persons", persons_path)
+            sc.coupler.set("skims", dir_path)
+
+            p_art1 = sc.coupler["persons"]
+            s_art1 = sc.coupler["skims"]
+
+            with sc.trace("step1") as st1:
+                st1.log_output(out1_path, key="out1")
+
+            p_art2 = sc.coupler["persons"]
+            s_art2 = sc.coupler["skims"]
+            assert p_art1.id == p_art2.id
+            assert s_art1.id == s_art2.id
+
+            with sc.trace("step2") as st2:
+                st2.log_output(out2_path, key="out2")
+
+            p_art3 = sc.coupler["persons"]
+            s_art3 = sc.coupler["skims"]
+            assert p_art1.id == p_art3.id
+            assert s_art1.id == s_art3.id
+
+        con = duckdb.connect(str(db_path))
+        try:
+            # Verify exactly 1 artifact row exists for persons and skims
+            p_count = con.execute(
+                "SELECT COUNT(*) FROM artifact WHERE key = 'persons'"
+            ).fetchone()[0]
+            assert p_count == 1
+            s_count = con.execute(
+                "SELECT COUNT(*) FROM artifact WHERE key = 'skims'"
+            ).fetchone()[0]
+            assert s_count == 1
+        finally:
+            con.close()
+    finally:
+        tracker.close()
+
+
+def test_coupler_path_does_not_persist_or_hash(tmp_path: Path) -> None:
+    ws = tmp_path / "ws"
+    db_path = tmp_path / "prov.duckdb"
+    ws.mkdir(parents=True, exist_ok=True)
+
+    raw_file = ws / "raw.parquet"
+    pd.DataFrame({"x": [1]}).to_parquet(raw_file)
+
+    tracker = Tracker(run_dir=ws, db_path=str(db_path))
+    try:
+        with tracker.scenario("path_test") as sc:
+            sc.coupler.set("raw", raw_file)
+            p = sc.coupler.path("raw")
+            assert p == raw_file.resolve()
+
+        con = duckdb.connect(str(db_path))
+        try:
+            cnt = con.execute(
+                "SELECT COUNT(*) FROM artifact WHERE key = 'raw'"
+            ).fetchone()[0]
+            assert cnt == 0, (
+                f"Expected 0 artifact rows for unaccessed raw path, got {cnt}"
+            )
+        finally:
+            con.close()
+    finally:
+        tracker.close()
+
+
+def test_sync_run_coupler_snapshot_does_not_clobber_run_id_or_mutate_existing(
+    tmp_path: Path,
+) -> None:
+    ws = tmp_path / "ws"
+    db_path = tmp_path / "prov.duckdb"
+    ws.mkdir(parents=True, exist_ok=True)
+
+    f = ws / "f.parquet"
+    pd.DataFrame({"x": [1]}).to_parquet(f)
+
+    tracker = Tracker(run_dir=ws, db_path=str(db_path))
+    try:
+        with tracker.start_run("producer_run", model="test"):
+            orig_art = tracker.log_output(f, key="f")
+        assert orig_art.run_id == "producer_run"
+
+        with tracker.scenario("subsequent_scenario") as sc:
+            # Pass a copy with run_id=None or seed alias with metadata
+            copy_art = orig_art.model_copy(update={"run_id": None})
+            sc.coupler.set("f", copy_art)
+            alias_art = sc.seed_artifact("f_alias", orig_art, variant="v2")
+            assert alias_art.id != orig_art.id
+
+        con = duckdb.connect(str(db_path))
+        try:
+            row = con.execute(
+                "SELECT run_id, meta FROM artifact WHERE id = ?", [str(orig_art.id)]
+            ).fetchone()
+            assert row[0] == "producer_run", "Producer run_id was clobbered to NULL!"
+            import json
+
+            meta = json.loads(row[1]) if row[1] else {}
+            assert "variant" not in meta, (
+                "Original artifact was mutated by seed_artifact!"
+            )
+        finally:
+            con.close()
+    finally:
+        tracker.close()
+
+
+def test_seed_artifact_in_place_edit_and_unconfigured_mount(tmp_path: Path) -> None:
+    import pytest
+
+    ws = tmp_path / "ws"
+    db_path = tmp_path / "prov.duckdb"
+    ws.mkdir(parents=True, exist_ok=True)
+
+    f = ws / "data.txt"
+    f.write_text("v1")
+
+    tracker = Tracker(run_dir=ws, db_path=str(db_path))
+    try:
+        with tracker.scenario("test_edit") as sc:
+            art1 = sc.seed_artifact("d", f)
+            assert art1.digest is not None
+
+            # Edit file in place outside racy window
+            import os
+            import time
+
+            f.write_text("v2-modified")
+            now = time.time()
+            os.utime(f, (now - 10, now - 10))
+
+            art2 = sc.seed_artifact("d_edited", f, reuse_if_unchanged=True)
+            assert art2.digest != art1.digest, (
+                "Stale digest was returned after in-place edit!"
+            )
+            assert art2.id != art1.id
+
+            with pytest.raises(ValueError, match="Unconfigured mount scheme"):
+                sc.seed_artifact("bad", "unmounted://foo.parquet")
+    finally:
+        tracker.close()

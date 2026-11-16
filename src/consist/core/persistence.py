@@ -721,6 +721,8 @@ class DatabaseManager:
         ] = {}
         self._settled_witnesses: dict[uuid.UUID, Witness] = {}
         self._ephemeral_stale_locations: dict[uuid.UUID, LocationStatus] = {}
+        self._historical_mount_cache: dict[str, tuple[str, ...]] = {}
+        self._session_known_mounts: dict[str, str] = {}
         self._snapshot_ops = DatabaseSnapshotOps(self)
 
         if self._resolved_db_path is not None:
@@ -1792,6 +1794,7 @@ class DatabaseManager:
                 _ensure_non_null_utc_dt(run.updated_at),
             ],
         )
+        self._historical_mount_cache.clear()
 
     def _insert_binding_invocation_locked(
         self,
@@ -4677,40 +4680,129 @@ class DatabaseManager:
             "workspace": 1,
         }
 
-        active_by_aid_coord: dict[
+        # 1. Group incoming rows by aid_coord for all loc where artifact_id is not None
+        incoming_by_aid_coord: dict[
             tuple[uuid.UUID, str, str, str, str], list[ArtifactLocationRow]
         ] = {}
         for loc in ordered:
-            if loc.status == "active" and loc.artifact_id is not None:
+            if loc.artifact_id is not None:
                 aid = _coerce_uuid(loc.artifact_id)
                 key = (aid, loc.mount_name, loc.mount_instance_id, loc.uri, loc.member)
-                active_by_aid_coord.setdefault(key, []).append(loc)
+                incoming_by_aid_coord.setdefault(key, []).append(loc)
 
+        # 2. Query existing rows for these artifacts using WHERE artifact_id IN (...)
+        distinct_aids = list(dict.fromkeys(key[0] for key in incoming_by_aid_coord))
+        existing_by_aid_coord: dict[
+            tuple[uuid.UUID, str, str, str, str], list[ArtifactLocationRow]
+        ] = {}
+        for chunk_start in range(0, len(distinct_aids), 500):
+            aid_chunk = distinct_aids[chunk_start : chunk_start + 500]
+            aid_ph = ", ".join("?" for _ in aid_chunk)
+            for raw_row in cur.execute(
+                f"SELECT {self._LOCATION_SELECT_COLS} FROM artifact_location "
+                f"WHERE artifact_id IN ({aid_ph})",
+                aid_chunk,
+            ).fetchall():
+                hydrated = self._hydrate_location_row(raw_row)
+                if hydrated.artifact_id is not None:
+                    c_key = (
+                        _coerce_uuid(hydrated.artifact_id),
+                        hydrated.mount_name,
+                        hydrated.mount_instance_id,
+                        hydrated.uri,
+                        hydrated.member,
+                    )
+                    if c_key in incoming_by_aid_coord:
+                        existing_by_aid_coord.setdefault(c_key, []).append(hydrated)
+
+        # 3. Single-pass merge for each aid_coord
+        delete_superseded_lids: list[uuid.UUID] = []
         suppressed_incoming_lids: set[uuid.UUID] = set()
-        incoming_winners_by_aid_coord: dict[
+        winning_at_coord: dict[
             tuple[uuid.UUID, str, str, str, str], ArtifactLocationRow
         ] = {}
-        for key, group in active_by_aid_coord.items():
-            if len(group) == 1:
-                incoming_winners_by_aid_coord[key] = group[0]
-                continue
-            sorted_group = sorted(
-                group,
-                key=lambda r: (
-                    _SITE_PRECEDENCE.get(r.site, 0),
-                    int(r.observed_at_ns),
-                ),
-                reverse=True,
+
+        for key, inc_rows in incoming_by_aid_coord.items():
+            existing_rows = existing_by_aid_coord.get(key, [])
+
+            # Check eviction tombstone guard
+            evicted_existing = [ex for ex in existing_rows if ex.status == "evicted"]
+            latest_evicted_ns = (
+                max(int(ex.observed_at_ns) for ex in evicted_existing)
+                if evicted_existing
+                else -1
             )
-            winner = sorted_group[0]
+
+            # Filter incoming active candidates
+            active_inc_candidates: list[ArtifactLocationRow] = []
+            for inc in inc_rows:
+                if inc.status == "active":
+                    # Tombstone guard: do not resurrect newer evicted tombstone with older unverified advisory row
+                    if (
+                        latest_evicted_ns >= 0
+                        and inc.site == "advisory"
+                        and inc.witness is None
+                        and int(inc.observed_at_ns) <= latest_evicted_ns
+                    ):
+                        suppressed_incoming_lids.add(_coerce_uuid(inc.location_id))
+                        continue
+                    active_inc_candidates.append(inc)
+
+            active_existing = [ex for ex in existing_rows if ex.status == "active"]
+
+            if not active_inc_candidates and not active_existing:
+                continue
+
+            # Pick the winning active row
+            if active_inc_candidates:
+                sorted_inc = sorted(
+                    active_inc_candidates,
+                    key=lambda r: (
+                        _SITE_PRECEDENCE.get(r.site, 0),
+                        int(r.observed_at_ns),
+                    ),
+                    reverse=True,
+                )
+                winner = sorted_inc[0]
+            else:
+                sorted_ex = sorted(
+                    active_existing,
+                    key=lambda r: (
+                        _SITE_PRECEDENCE.get(r.site, 0),
+                        int(r.observed_at_ns),
+                    ),
+                    reverse=True,
+                )
+                winner = sorted_ex[0]
+
+            for ex in active_existing:
+                ex_rank = _SITE_PRECEDENCE.get(ex.site, 0)
+                win_rank = _SITE_PRECEDENCE.get(winner.site, 0)
+                if ex_rank > win_rank:
+                    if (
+                        ex.digest is None
+                        or winner.digest is None
+                        or ex.digest == winner.digest
+                    ):
+                        winner = ex
+
+            # Merge non-null digest and witness from ALL compatible rows at aid_coord
+            all_compatible = [
+                r
+                for r in (*inc_rows, *existing_rows)
+                if (
+                    r.digest is None
+                    or winner.digest is None
+                    or r.digest == winner.digest
+                )
+            ]
             merged_digest = winner.digest
             merged_witness = winner.witness
-            for other in sorted_group[1:]:
+            for other in all_compatible:
                 if merged_digest is None and other.digest is not None:
                     merged_digest = other.digest
                 if merged_witness is None and other.witness is not None:
                     merged_witness = other.witness
-                suppressed_incoming_lids.add(_coerce_uuid(other.location_id))
 
             if merged_digest != winner.digest or merged_witness != winner.witness:
                 new_lid = compute_location_id(
@@ -4728,276 +4820,183 @@ class DatabaseManager:
                     digest=merged_digest,
                     witness=merged_witness,
                 )
-            incoming_winners_by_aid_coord[key] = winner
 
-        if suppressed_incoming_lids:
-            new_ordered: list[ArtifactLocationRow] = []
-            seen_lids: set[uuid.UUID] = set()
-            for loc in ordered:
-                lid = _coerce_uuid(loc.location_id)
-                if lid in suppressed_incoming_lids:
-                    continue
-                aid = _coerce_optional_uuid(loc.artifact_id)
-                if aid is not None and loc.status == "active":
-                    key = (
-                        aid,
-                        loc.mount_name,
-                        loc.mount_instance_id,
-                        loc.uri,
-                        loc.member,
-                    )
-                    win = incoming_winners_by_aid_coord.get(key, loc)
-                    win_lid = _coerce_uuid(win.location_id)
-                    if win_lid not in seen_lids:
-                        seen_lids.add(win_lid)
-                        new_ordered.append(win)
-                elif lid not in seen_lids:
-                    seen_lids.add(lid)
-                    new_ordered.append(loc)
-            ordered = new_ordered
+            winning_at_coord[key] = winner
 
-        existing_by_aid_coord: dict[
-            tuple[uuid.UUID, str, str, str, str], list[ArtifactLocationRow]
-        ] = {}
-        if incoming_winners_by_aid_coord:
-            aid_coord_list = list(incoming_winners_by_aid_coord.keys())
-            for chunk_start in range(0, len(aid_coord_list), 500):
-                chunk = aid_coord_list[chunk_start : chunk_start + 500]
-                chunk_ph = ", ".join("(CAST(? AS UUID), ?, ?, ?, ?)" for _ in chunk)
-                chunk_params = [val for item in chunk for val in item]
-                for raw_row in cur.execute(
-                    "SELECT al.location_id, al.digest, al.artifact_id, al.site, al.mount_name, "
-                    "al.mount_instance_id, al.uri, al.member, al.status, al.witness_json, "
-                    "al.observed_at_ns FROM artifact_location AS al "
-                    f"JOIN (VALUES {chunk_ph}) AS v(aid, mount_name, mount_instance_id, uri, member) "
-                    "ON al.artifact_id = v.aid AND al.mount_name = v.mount_name "
-                    "AND al.mount_instance_id = v.mount_instance_id "
-                    "AND al.uri = v.uri AND al.member = v.member",
-                    chunk_params,
-                ).fetchall():
-                    hydrated = self._hydrate_location_row(raw_row)
-                    if hydrated.artifact_id is not None:
-                        c_key = (
-                            _coerce_uuid(hydrated.artifact_id),
-                            hydrated.mount_name,
-                            hydrated.mount_instance_id,
-                            hydrated.uri,
-                            hydrated.member,
-                        )
-                        existing_by_aid_coord.setdefault(c_key, []).append(hydrated)
+            # Suppress non-winning incoming rows at this coord
+            for inc in inc_rows:
+                if _coerce_uuid(inc.location_id) != _coerce_uuid(winner.location_id):
+                    suppressed_incoming_lids.add(_coerce_uuid(inc.location_id))
 
-        delete_superseded_lids: list[uuid.UUID] = []
-        replaced_ordered_map: dict[uuid.UUID, ArtifactLocationRow] = {}
-
-        for key, incoming_win in incoming_winners_by_aid_coord.items():
-            existing_rows = existing_by_aid_coord.get(key, [])
-            effective_winner = incoming_win
+            # Delete superseded existing rows in DB at this coord
             for ex in existing_rows:
-                if ex.status == "active":
-                    ex_rank = _SITE_PRECEDENCE.get(ex.site, 0)
-                    inc_rank = _SITE_PRECEDENCE.get(effective_winner.site, 0)
-                    if ex_rank > inc_rank:
-                        if (
-                            ex.digest is None
-                            or effective_winner.digest is None
-                            or ex.digest == effective_winner.digest
-                        ):
-                            m_witness = ex.witness or effective_winner.witness
-                            m_digest = ex.digest or effective_winner.digest
-                            m_lid = (
-                                compute_location_id(
-                                    digest=m_digest,
-                                    artifact_id=ex.artifact_id,
-                                    site=ex.site,
-                                    mount_name=ex.mount_name,
-                                    mount_instance_id=ex.mount_instance_id,
-                                    uri=ex.uri,
-                                    member=ex.member,
-                                )
-                                if m_digest != ex.digest
-                                else ex.location_id
-                            )
-                            effective_winner = replace(
-                                ex,
-                                location_id=m_lid,
-                                witness=m_witness,
-                                digest=m_digest,
-                            )
-            if (
-                effective_winner.location_id != incoming_win.location_id
-                or effective_winner != incoming_win
-            ):
-                replaced_ordered_map[_coerce_uuid(incoming_win.location_id)] = (
-                    effective_winner
-                )
+                if _coerce_uuid(ex.location_id) != _coerce_uuid(winner.location_id):
+                    delete_superseded_lids.append(_coerce_uuid(ex.location_id))
 
-            for ex in existing_rows:
-                if ex.location_id != effective_winner.location_id:
-                    delete_superseded_lids.append(ex.location_id)
+        new_ordered: list[ArtifactLocationRow] = []
+        seen_ordered_lids: set[uuid.UUID] = set()
+        for loc in ordered:
+            lid = _coerce_uuid(loc.location_id)
+            if lid in suppressed_incoming_lids:
+                continue
+            if loc.artifact_id is not None:
+                aid = _coerce_uuid(loc.artifact_id)
+                key = (aid, loc.mount_name, loc.mount_instance_id, loc.uri, loc.member)
+                win = winning_at_coord.get(key, loc)
+                win_lid = _coerce_uuid(win.location_id)
+                if win_lid not in seen_ordered_lids:
+                    seen_ordered_lids.add(win_lid)
+                    new_ordered.append(win)
+            elif lid not in seen_ordered_lids:
+                seen_ordered_lids.add(lid)
+                new_ordered.append(loc)
 
-        if replaced_ordered_map:
-            final_ordered: list[ArtifactLocationRow] = []
-            seen_final_lids: set[uuid.UUID] = set()
-            for loc in ordered:
-                lid = _coerce_uuid(loc.location_id)
-                rep = replaced_ordered_map.get(lid, loc)
-                rep_lid = _coerce_uuid(rep.location_id)
-                if rep_lid not in seen_final_lids:
-                    seen_final_lids.add(rep_lid)
-                    final_ordered.append(rep)
-            ordered = final_ordered
+        for win in winning_at_coord.values():
+            win_lid = _coerce_uuid(win.location_id)
+            if win_lid not in seen_ordered_lids:
+                seen_ordered_lids.add(win_lid)
+                new_ordered.append(win)
+
+        ordered = new_ordered
 
         if delete_superseded_lids:
             unique_delete_lids = list(dict.fromkeys(delete_superseded_lids))
-            for chunk_start in range(0, len(unique_delete_lids), 500):
-                del_chunk = unique_delete_lids[chunk_start : chunk_start + 500]
-                _execute_multirow_values(
-                    cur,
-                    prefix_sql="DELETE FROM artifact_location WHERE location_id IN (SELECT v.lid FROM (VALUES",
-                    row_placeholder="(CAST(? AS UUID))",
-                    suffix_sql=") AS v(lid))",
-                    rows=[[lid] for lid in del_chunk],
-                )
+            _execute_multirow_values(
+                cur,
+                prefix_sql="DELETE FROM artifact_location WHERE location_id IN (SELECT v.lid FROM (VALUES",
+                row_placeholder="(CAST(? AS UUID))",
+                suffix_sql=") AS v(lid))",
+                rows=[[lid] for lid in unique_delete_lids],
+            )
             for lid in unique_delete_lids:
                 self._ephemeral_stale_locations.pop(lid, None)
                 self._settled_witnesses.pop(lid, None)
 
         winning_by_coord: dict[tuple[str, str, str, str, str], ArtifactLocationRow] = {}
+        physical_writers: dict[tuple[str, str, str, str], ArtifactLocationRow] = {}
         for loc in ordered:
             if loc.status == "active":
-                coord = (
-                    loc.site,
-                    loc.mount_name,
-                    loc.mount_instance_id,
-                    loc.uri,
-                    loc.member,
-                )
-                winning_by_coord[coord] = loc
+                winning_by_coord[
+                    (
+                        loc.site,
+                        loc.mount_name,
+                        loc.mount_instance_id,
+                        loc.uri,
+                        loc.member,
+                    )
+                ] = loc
+                if loc.site in ("workspace", "external"):
+                    physical_writers[
+                        (loc.mount_name, loc.mount_instance_id, loc.uri, loc.member)
+                    ] = loc
 
-        normalized_rows: list[ArtifactLocationRow] = []
-        for loc in ordered:
-            coord = (
-                loc.site,
-                loc.mount_name,
-                loc.mount_instance_id,
-                loc.uri,
-                loc.member,
-            )
-            winner = winning_by_coord.get(coord)
-            if (
-                loc.status == "active"
-                and winner is not None
-                and self._is_superseded_by_winner(loc, winner)
-            ):
-                loc = ArtifactLocationRow(
-                    location_id=loc.location_id,
-                    digest=loc.digest,
-                    artifact_id=loc.artifact_id,
-                    site=loc.site,
-                    mount_name=loc.mount_name,
-                    mount_instance_id=loc.mount_instance_id,
-                    uri=loc.uri,
-                    member=loc.member,
-                    status="stale",
-                    witness=loc.witness,
-                    observed_at_ns=loc.observed_at_ns,
-                )
-            normalized_rows.append(loc)
-
-        incoming_lids = [_coerce_uuid(loc.location_id) for loc in normalized_rows]
-        existing_by_lid: dict[uuid.UUID, ArtifactLocationRow] = {}
-        existing_active_by_coord: dict[
-            tuple[str, str, str, str, str], list[ArtifactLocationRow]
-        ] = {}
-        for chunk_start in range(0, len(incoming_lids), 500):
-            lid_chunk = incoming_lids[chunk_start : chunk_start + 500]
-            lid_ph = ", ".join("?" for _ in lid_chunk)
-            for raw_row in cur.execute(
-                f"SELECT {self._LOCATION_SELECT_COLS} FROM artifact_location "
-                f"WHERE location_id IN ({lid_ph})",
-                lid_chunk,
-            ).fetchall():
-                hydrated = self._hydrate_location_row(raw_row)
-                existing_by_lid[hydrated.location_id] = hydrated
-
-        if winning_by_coord:
-            coord_list = list(winning_by_coord.keys())
-            for chunk_start in range(0, len(coord_list), 500):
-                coord_chunk = coord_list[chunk_start : chunk_start + 500]
-                coord_ph = ", ".join("(?, ?, ?, ?, ?)" for _ in coord_chunk)
-                coord_params: list[Any] = [val for c in coord_chunk for val in c]
+        existing_active_rows: list[ArtifactLocationRow] = []
+        if physical_writers:
+            pw_list = list(physical_writers.keys())
+            for chunk_start in range(0, len(pw_list), 500):
+                pw_chunk = pw_list[chunk_start : chunk_start + 500]
+                pw_ph = ", ".join("(?, ?, ?, ?)" for _ in pw_chunk)
+                pw_params = [val for item in pw_chunk for val in item]
                 for raw_row in cur.execute(
                     "SELECT al.location_id, al.digest, al.artifact_id, al.site, al.mount_name, "
                     "al.mount_instance_id, al.uri, al.member, al.status, al.witness_json, "
                     "al.observed_at_ns FROM artifact_location AS al "
-                    f"JOIN (VALUES {coord_ph}) AS v(site, mount_name, mount_instance_id, uri, member) "
+                    f"JOIN (VALUES {pw_ph}) AS v(mount_name, mount_instance_id, uri, member) "
+                    "ON al.mount_name = v.mount_name AND al.mount_instance_id = v.mount_instance_id "
+                    "AND al.uri = v.uri AND al.member = v.member "
+                    "WHERE al.status = 'active'",
+                    pw_params,
+                ).fetchall():
+                    existing_active_rows.append(self._hydrate_location_row(raw_row))
+
+        archive_winners = {
+            c: loc
+            for c, loc in winning_by_coord.items()
+            if loc.site not in ("workspace", "external")
+        }
+        if archive_winners:
+            aw_list = list(archive_winners.keys())
+            for chunk_start in range(0, len(aw_list), 500):
+                aw_chunk = aw_list[chunk_start : chunk_start + 500]
+                aw_ph = ", ".join("(?, ?, ?, ?, ?)" for _ in aw_chunk)
+                aw_params = [val for item in aw_chunk for val in item]
+                for raw_row in cur.execute(
+                    "SELECT al.location_id, al.digest, al.artifact_id, al.site, al.mount_name, "
+                    "al.mount_instance_id, al.uri, al.member, al.status, al.witness_json, "
+                    "al.observed_at_ns FROM artifact_location AS al "
+                    f"JOIN (VALUES {aw_ph}) AS v(site, mount_name, mount_instance_id, uri, member) "
                     "ON al.site = v.site AND al.mount_name = v.mount_name "
                     "AND al.mount_instance_id = v.mount_instance_id "
                     "AND al.uri = v.uri AND al.member = v.member "
                     "WHERE al.status = 'active'",
-                    coord_params,
+                    aw_params,
                 ).fetchall():
-                    hydrated = self._hydrate_location_row(raw_row)
-                    c_key = (
-                        hydrated.site,
-                        hydrated.mount_name,
-                        hydrated.mount_instance_id,
-                        hydrated.uri,
-                        hydrated.member,
-                    )
-                    existing_active_by_coord.setdefault(c_key, []).append(hydrated)
+                    existing_active_rows.append(self._hydrate_location_row(raw_row))
 
-        incoming_lid_set = set(incoming_lids)
+        incoming_lid_set = {_coerce_uuid(loc.location_id) for loc in ordered}
         stale_lids: list[uuid.UUID] = []
         superseded_container_winners: dict[
-            tuple[str, str, str, str], ArtifactLocationRow
+            tuple[str, str, str], ArtifactLocationRow
         ] = {}
-        for coord, win_loc in winning_by_coord.items():
-            container_superseded = False
-            for old_loc in existing_active_by_coord.get(coord, ()):
-                if (
-                    old_loc.location_id not in incoming_lid_set
-                    and self._is_superseded_by_winner(old_loc, win_loc)
-                ):
-                    stale_lids.append(old_loc.location_id)
-                    if win_loc.member == "" and win_loc.site in (
-                        "workspace",
-                        "external",
-                    ):
-                        container_superseded = True
-            if container_superseded:
-                superseded_container_winners[
-                    (
-                        win_loc.site,
-                        win_loc.mount_name,
-                        win_loc.mount_instance_id,
-                        win_loc.uri,
-                    )
-                ] = win_loc
+
+        for old_loc in existing_active_rows:
+            old_lid = _coerce_uuid(old_loc.location_id)
+            if old_lid in incoming_lid_set:
+                continue
+            phys_key = (
+                old_loc.mount_name,
+                old_loc.mount_instance_id,
+                old_loc.uri,
+                old_loc.member,
+            )
+            pw_win = physical_writers.get(phys_key)
+            if pw_win is not None and self._is_superseded_by_winner(old_loc, pw_win):
+                stale_lids.append(old_lid)
+                if pw_win.member == "" and pw_win.site in ("workspace", "external"):
+                    superseded_container_winners[
+                        (
+                            pw_win.mount_name,
+                            pw_win.mount_instance_id,
+                            pw_win.uri,
+                        )
+                    ] = pw_win
+                continue
+            site_key = (
+                old_loc.site,
+                old_loc.mount_name,
+                old_loc.mount_instance_id,
+                old_loc.uri,
+                old_loc.member,
+            )
+            site_win = winning_by_coord.get(site_key)
+            if site_win is not None and self._is_superseded_by_winner(
+                old_loc, site_win
+            ):
+                stale_lids.append(old_lid)
 
         if superseded_container_winners:
             c_list = list(superseded_container_winners.keys())
             for chunk_start in range(0, len(c_list), 500):
                 c_chunk = c_list[chunk_start : chunk_start + 500]
-                c_ph = ", ".join("(?, ?, ?, ?)" for _ in c_chunk)
-                c_params: list[Any] = [val for c in c_chunk for val in c]
+                c_ph = ", ".join("(?, ?, ?)" for _ in c_chunk)
+                c_params = [val for c in c_chunk for val in c]
                 for raw_row in cur.execute(
                     "SELECT al.location_id, al.digest, al.artifact_id, al.site, al.mount_name, "
                     "al.mount_instance_id, al.uri, al.member, al.status, al.witness_json, "
                     "al.observed_at_ns FROM artifact_location AS al "
-                    f"JOIN (VALUES {c_ph}) AS v(site, mount_name, mount_instance_id, uri) "
-                    "ON al.site = v.site AND al.mount_name = v.mount_name "
+                    f"JOIN (VALUES {c_ph}) AS v(mount_name, mount_instance_id, uri) "
+                    "ON al.mount_name = v.mount_name "
                     "AND al.mount_instance_id = v.mount_instance_id "
                     "AND al.uri = v.uri "
                     "WHERE al.status = 'active' AND al.member != ''",
                     c_params,
                 ).fetchall():
                     child_loc = self._hydrate_location_row(raw_row)
-                    if child_loc.location_id in incoming_lid_set:
+                    child_lid = _coerce_uuid(child_loc.location_id)
+                    if child_lid in incoming_lid_set:
                         continue
                     c_win = superseded_container_winners[
                         (
-                            child_loc.site,
                             child_loc.mount_name,
                             child_loc.mount_instance_id,
                             child_loc.uri,
@@ -5007,10 +5006,23 @@ class DatabaseManager:
                         child_loc.witness, c_win.witness
                     ):
                         continue
-                    stale_lids.append(child_loc.location_id)
+                    stale_lids.append(child_lid)
+
+        incoming_lids = list(incoming_lid_set)
+        existing_by_lid: dict[uuid.UUID, ArtifactLocationRow] = {}
+        for chunk_start in range(0, len(incoming_lids), 500):
+            lid_chunk = incoming_lids[chunk_start : chunk_start + 500]
+            lid_ph = ", ".join("?" for _ in lid_chunk)
+            for raw_row in cur.execute(
+                f"SELECT {self._LOCATION_SELECT_COLS} FROM artifact_location "
+                f"WHERE location_id IN ({lid_ph})",
+                lid_chunk,
+            ).fetchall():
+                hydrated = self._hydrate_location_row(raw_row)
+                existing_by_lid[_coerce_uuid(hydrated.location_id)] = hydrated
 
         rows_to_upsert: list[ArtifactLocationRow] = []
-        for loc in normalized_rows:
+        for loc in ordered:
             lid = _coerce_uuid(loc.location_id)
             prev = existing_by_lid.get(lid)
             if prev is None:
@@ -5029,7 +5041,10 @@ class DatabaseManager:
             ):
                 rows_to_upsert.append(loc)
 
+        did_delete = bool(delete_superseded_lids)
         if not stale_lids and not rows_to_upsert:
+            if did_delete:
+                self.bump_location_epoch()
             for coord, win_loc in winning_by_coord.items():
                 prev_win = existing_by_lid.get(_coerce_uuid(win_loc.location_id))
                 eff_w = (
@@ -5538,19 +5553,90 @@ class DatabaseManager:
             result[aid] = self._sort_active_locations(list(matched.values()), aid)
         return result
 
-    def get_artifact_locations(
-        self, artifact_id: uuid.UUID
-    ) -> List[ArtifactLocationRow]:
-        coerced_aid = _coerce_uuid(artifact_id)
-        if not self.has_artifact_location_table():
-            return []
-        self.sync_location_epoch_caches()
-        rows = self.fetchall(
-            f"SELECT {self._LOCATION_SELECT_COLS} FROM artifact_location WHERE artifact_id = ? "
-            "ORDER BY observed_at_ns ASC, CAST(location_id AS VARCHAR) ASC",
-            [coerced_aid],
-        )
-        return [self._hydrate_location_row(r) for r in rows]
+    def get_existing_artifact_ids(
+        self, artifact_ids: Sequence[uuid.UUID]
+    ) -> set[uuid.UUID]:
+        """Return the subset of artifact IDs that already exist in the database."""
+        coerced = [_coerce_uuid(aid) for aid in artifact_ids]
+        if not coerced:
+            return set()
+        found: set[uuid.UUID] = set()
+        for chunk_start in range(0, len(coerced), 500):
+            chunk = coerced[chunk_start : chunk_start + 500]
+            ph = ", ".join("?" for _ in chunk)
+            rows = self.fetchall(f"SELECT id FROM artifact WHERE id IN ({ph})", chunk)
+            for r in rows:
+                if r and r[0] is not None:
+                    found.add(_coerce_uuid(r[0]))
+        return found
+
+    def record_known_mount(self, mount_name: str, root_path: str) -> None:
+        """Record an in-session known mount root."""
+        self._session_known_mounts[mount_name] = root_path
+        self._historical_mount_cache.pop(mount_name, None)
+        self.bump_location_epoch()
+
+    def record_archive_mount_on_run(
+        self, run_id: str, mount_name: str, root_path: str
+    ) -> None:
+        """Persist a named mount root into a historical run's archive_mounts metadata."""
+        if self.read_only:
+            self.record_known_mount(mount_name, root_path)
+            return
+        quoted_mount = json.dumps(mount_name)
+        mount_path = f'$."mounts".{quoted_mount}'
+        arch_path = f'$."archive_mounts".{quoted_mount}'
+        patch_json = json.dumps({"archive_mounts": {mount_name: root_path}})
+        with self.transaction() as cur:
+            row = cur.execute(
+                "SELECT json_extract_string(meta, ?) AS m1, "
+                "json_extract_string(meta, ?) AS m2 "
+                "FROM run WHERE id = ?",
+                [mount_path, arch_path, run_id],
+            ).fetchone()
+            if row is not None and not (row[0] or row[1]):
+                cur.execute(
+                    "UPDATE run SET meta = json_merge_patch(COALESCE(meta, '{}'), ?) WHERE id = ?",
+                    [patch_json, run_id],
+                )
+                self._historical_mount_cache.clear()
+                self.bump_location_epoch()
+        self.record_known_mount(mount_name, root_path)
+
+    def lookup_historical_mount_roots(self, mount_name: str) -> tuple[str, ...]:
+        """Lookup historical root paths for a named mount from runs and recorded mounts."""
+        cached = self._historical_mount_cache.get(mount_name)
+        if cached is not None:
+            return cached
+        quoted_mount = json.dumps(mount_name)
+        mount_path = f'$."mounts".{quoted_mount}'
+        arch_path = f'$."archive_mounts".{quoted_mount}'
+        results: list[str] = []
+        known = self._session_known_mounts.get(mount_name)
+        if known and known not in results:
+            results.append(known)
+        try:
+            query = (
+                "SELECT m FROM ("
+                "  SELECT COALESCE(json_extract_string(meta, ?), json_extract_string(meta, ?)) AS m, "
+                "         (json_extract_string(meta, ?) IS NOT NULL) AS is_primary, "
+                "         MAX(created_at) AS latest_at "
+                "  FROM run "
+                "  WHERE meta IS NOT NULL "
+                "  GROUP BY m, is_primary "
+                ") WHERE m IS NOT NULL AND m != '' "
+                "ORDER BY is_primary DESC, latest_at DESC "
+                "LIMIT 10"
+            )
+            rows = self.fetchall(query, [mount_path, arch_path, mount_path])
+            for r in rows:
+                if r and r[0] and str(r[0]) not in results:
+                    results.append(str(r[0]))
+        except (duckdb.Error, ValueError, TypeError):
+            pass
+        res_tuple = tuple(results)
+        self._historical_mount_cache[mount_name] = res_tuple
+        return res_tuple
 
     def get_artifact_recovery_locations(
         self, artifact_id: uuid.UUID
@@ -5663,30 +5749,13 @@ class DatabaseManager:
                 for aid in target_aids
             }
             evict_lids: list[uuid.UUID] = []
-            delete_lids: list[uuid.UUID] = []
-            for raw_lid, raw_aid, m_name, m_inst, uri, member, site in existing_rows:
+            for raw_lid, raw_aid, m_name, m_inst, uri, member, _site in existing_rows:
                 lid = _coerce_uuid(raw_lid)
                 aid = _coerce_uuid(raw_aid)
                 if lid not in kept_lids_by_aid.get(aid, set()):
                     coord = (str(m_name), str(m_inst), str(uri), str(member))
-                    if coord in incoming_active_coords_by_aid.get(aid, set()):
-                        delete_lids.append(lid)
-                    else:
+                    if coord not in incoming_active_coords_by_aid.get(aid, set()):
                         evict_lids.append(lid)
-            if delete_lids:
-                unique_delete = list(dict.fromkeys(delete_lids))
-                for chunk_start in range(0, len(unique_delete), 500):
-                    del_chunk = unique_delete[chunk_start : chunk_start + 500]
-                    _execute_multirow_values(
-                        cur,
-                        prefix_sql="DELETE FROM artifact_location WHERE location_id IN (SELECT v.lid FROM (VALUES",
-                        row_placeholder="(CAST(? AS UUID))",
-                        suffix_sql=") AS v(lid))",
-                        rows=[[lid] for lid in del_chunk],
-                    )
-                for lid in unique_delete:
-                    self._ephemeral_stale_locations.pop(lid, None)
-                    self._settled_witnesses.pop(lid, None)
             if evict_lids:
                 _execute_multirow_values(
                     cur,
@@ -5704,7 +5773,7 @@ class DatabaseManager:
             all_new_locs = [loc for aid in target_aids for loc in coerced_map[aid]]
             if all_new_locs:
                 self._upsert_artifact_locations_locked(cur, all_new_locs)
-            elif evict_lids or delete_lids:
+            elif evict_lids:
                 self.bump_location_epoch()
 
     def evict_recovery_root_locations(
@@ -5898,6 +5967,8 @@ class DatabaseManager:
         artifacts: Optional[Mapping[str, Artifact]] = None,
     ) -> None:
         """Record a relational snapshot of the coupler for ``(run_id, phase)``."""
+        if self.read_only:
+            return
         target_artifacts = artifacts or {}
         now = datetime.now(timezone.utc)
         insert_rows: list[list[Any]] = []
@@ -5917,9 +5988,19 @@ class DatabaseManager:
                 ]
             )
         with self.transaction() as cur:
-            for artifact in target_artifacts.values():
-                if isinstance(artifact, Artifact) and artifact.id is not None:
-                    self._upsert_artifact_locked(cur, artifact)
+            artifacts_to_insert = [
+                self._artifact_upsert_params(art)
+                for art in target_artifacts.values()
+                if isinstance(art, Artifact) and art.id is not None
+            ]
+            if artifacts_to_insert:
+                _execute_multirow_values(
+                    cur,
+                    prefix_sql=self._ARTIFACT_INSERT_PREFIX,
+                    row_placeholder="(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    suffix_sql="ON CONFLICT (id) DO NOTHING",
+                    rows=artifacts_to_insert,
+                )
             cur.execute(
                 "DELETE FROM run_coupler_snapshot WHERE run_id = ? AND phase = ?",
                 [run_id, phase],

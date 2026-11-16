@@ -373,6 +373,8 @@ class Tracker:
             return locations
         roots = self.fs.normalize_recovery_roots(self.artifact_recovery_roots(artifact))
         for index, root in enumerate(roots, start=1):
+            if "://" in root and not root.startswith("file://"):
+                continue
             candidate = (Path(root) / rel).resolve()
             is_valid = candidate.exists() and verify_candidate_against_artifact(
                 candidate, artifact
@@ -394,6 +396,21 @@ class Tracker:
             extracted = self.fs.extract_recovery_root_from_location_row(
                 artifact.uri, row, resolve=resolve
             )
+            if (
+                resolve
+                and extracted is not None
+                and "://" in extracted
+                and not extracted.startswith("file://")
+                and row.mount_name not in self.fs.mounts
+            ):
+                hist_roots = db.lookup_historical_mount_roots(row.mount_name)
+                if hist_roots:
+                    chosen = hist_roots[0]
+                    for hr in hist_roots:
+                        if Path(hr).exists():
+                            chosen = hr
+                            break
+                    extracted = str(Path(chosen).resolve())
             if extracted is not None and extracted not in roots:
                 roots.append(extracted)
         return roots
