@@ -422,3 +422,115 @@ def test_validate_recovers_via_verified_artifact_locations(tmp_path: Path) -> No
     res = runner.invoke(app, ["validate", "--db-path", str(db_path), "--trust-db"])
     assert res.exit_code == 0, res.output
     assert "All artifacts validated successfully" in res.stdout
+
+
+def test_migrate_dry_run_skips_file_hashing_for_untrusted_artifacts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import duckdb
+    import consist.core.migrate as migrate_mod
+    from consist.core.migrate import migrate_database
+
+    db_path = tmp_path / "v04_fast_dry_run.duckdb"
+    run_dir = tmp_path / "runs"
+    run_dir.mkdir()
+    data_file = run_dir / "payload.csv"
+    data_file.write_text("a,b\n1,2\n", encoding="utf-8")
+
+    con = duckdb.connect(str(db_path))
+    con.execute("CREATE SCHEMA global_tables")
+    con.execute("CREATE TABLE global_tables.big_tbl (x INTEGER)")
+    con.execute("INSERT INTO global_tables.big_tbl VALUES (1), (2), (3)")
+    con.execute(
+        "CREATE TABLE run ("
+        "id VARCHAR PRIMARY KEY, model_name VARCHAR, status VARCHAR, "
+        "started_at TIMESTAMP, ended_at TIMESTAMP, year INTEGER, iteration INTEGER, "
+        "stage VARCHAR, phase VARCHAR, config_hash VARCHAR, git_hash VARCHAR, "
+        "input_hash VARCHAR, signature VARCHAR, cacheable BOOLEAN, "
+        "parent_run_id VARCHAR, meta VARCHAR, created_at TIMESTAMP, updated_at TIMESTAMP)"
+    )
+    con.execute(
+        "INSERT INTO run VALUES ('r1', 'test', 'completed', now(), now(), "
+        "NULL, NULL, NULL, NULL, 'cfg', 'git', NULL, NULL, FALSE, NULL, '{}', now(), now())"
+    )
+    art_id = str(uuid.uuid4())
+    con.execute(
+        "CREATE TABLE artifact ("
+        "id VARCHAR PRIMARY KEY, key VARCHAR, container_uri VARCHAR, driver VARCHAR, "
+        "table_path VARCHAR, array_path VARCHAR, hash VARCHAR, content_id VARCHAR, "
+        "run_id VARCHAR, parent_artifact_id VARCHAR, meta VARCHAR, created_at TIMESTAMP)"
+    )
+    con.execute(
+        "INSERT INTO artifact VALUES (?, 'payload', './payload.csv', 'csv', "
+        "NULL, NULL, NULL, NULL, 'r1', NULL, '{}', now())",
+        [art_id],
+    )
+    con.execute(
+        "CREATE TABLE run_artifact_link ("
+        "run_id VARCHAR, artifact_id VARCHAR, direction VARCHAR, role VARCHAR, is_implicit BOOLEAN)"
+    )
+    con.execute(
+        "INSERT INTO run_artifact_link VALUES ('r1', ?, 'output', '', FALSE)",
+        [art_id],
+    )
+    con.close()
+
+    def _forbid_hash(*_args, **_kwargs):
+        raise AssertionError("dry_run must not read/hash file bytes on disk")
+
+    monkeypatch.setattr(migrate_mod, "_compute_migrated_digest", _forbid_hash)
+    report = migrate_database(
+        db_path, run_dir=run_dir, trust_v04_hashes=False, dry_run=True
+    )
+    assert report.dry_run is True
+    assert report.artifacts_migrated == 1
+    assert report.artifacts_hashed == 1
+    assert report.global_tables_copied == 1
+    assert report.cacheable_runs == 1
+
+
+def test_validate_fix_without_trust_db_respects_unmounted_scheme_even_with_hist_root(
+    tmp_path: Path,
+) -> None:
+    runner = CliRunner()
+    db_path = tmp_path / "validate_hist_unmounted.duckdb"
+    run_dir = tmp_path / "run_dir"
+    hist_inputs = tmp_path / "hist_inputs"
+    run_dir.mkdir()
+    hist_inputs.mkdir()
+    (hist_inputs / "data.csv").write_text("a\n1\n", encoding="utf-8")
+
+    # Record a historical run that had 'inputs' mounted
+    t1 = Tracker(
+        run_dir=run_dir,
+        db_path=str(db_path),
+        mounts={"inputs": str(hist_inputs)},
+    )
+    with t1.start_run("r_hist", model="test"):
+        pass
+    assert t1.db is not None
+
+    # Insert an artifact on inputs:// without an artifact_location row
+    aid = uuid.uuid4()
+    art = Artifact(
+        id=aid,
+        key="hist_input_data",
+        uri="inputs://data.csv",
+        driver="csv",
+        run_id="r_hist",
+        digest=Digest("sha256:file", "cc" * 32),
+    )
+    t1.db.sync_artifact(art)
+    t1.close()
+
+    # Running validate --fix WITHOUT --trust-db or --mount must treat inputs:// as unmounted,
+    # not missing_on_disk
+    res = runner.invoke(app, ["validate", "--db-path", str(db_path), "--fix"])
+    assert res.exit_code == 0, res.output
+    assert "unmounted scheme" in res.stdout
+
+    t2 = Tracker(run_dir=run_dir, db_path=str(db_path), read_only=True)
+    refreshed = t2.get_artifact(aid)
+    assert refreshed is not None
+    assert "missing_on_disk" not in (refreshed.meta or {})
+    t2.close()

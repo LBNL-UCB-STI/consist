@@ -129,61 +129,59 @@ def _copy_non_core_tables_and_views(
     dry_run: bool = False,
 ) -> tuple[int, list[tuple[Any, ...]]]:
     global_tables_copied = 0
+    limit_clause = " LIMIT 0" if dry_run else ""
     for raw_s, raw_t in cur.execute(
         "SELECT schema_name, table_name FROM duckdb_tables() "
         "WHERE database_name = 'v04_src' AND schema_name != 'main' AND NOT internal"
     ).fetchall():
         qs, qt = _quote_ident(str(raw_s)), _quote_ident(str(raw_t))
         cur.execute(f"CREATE SCHEMA IF NOT EXISTS {qs}")
-        if dry_run:
-            cur.execute(
-                f"CREATE TABLE {qs}.{qt} AS SELECT * FROM v04_src.{qs}.{qt} LIMIT 0"
-            )
-        else:
-            cur.execute(f"CREATE TABLE {qs}.{qt} AS SELECT * FROM v04_src.{qs}.{qt}")
+        cur.execute(
+            f"CREATE TABLE {qs}.{qt} AS SELECT * FROM v04_src.{qs}.{qt}{limit_clause}"
+        )
         if str(raw_s) == "global_tables":
             global_tables_copied += 1
 
     for custom_tbl in sorted(src_tables - _CORE_MAIN_TABLES):
         qc = _quote_ident(custom_tbl)
-        if dry_run:
-            cur.execute(
-                f"CREATE TABLE main.{qc} AS SELECT * FROM v04_src.main.{qc} LIMIT 0"
-            )
-        else:
-            cur.execute(f"CREATE TABLE main.{qc} AS SELECT * FROM v04_src.main.{qc}")
-
-    for tbl in _PASSTHROUGH_CORE_TABLES:
-        if tbl not in src_tables:
-            continue
-        dst_cols = _table_columns(cur, db_alias=dst_catalog, schema="main", table=tbl)
-        src_cols = set(
-            _table_columns(cur, db_alias="v04_src", schema="main", table=tbl)
+        cur.execute(
+            f"CREATE TABLE main.{qc} AS SELECT * FROM v04_src.main.{qc}{limit_clause}"
         )
-        pairs: list[tuple[str, str]] = []
-        for c in dst_cols:
-            if c in src_cols:
-                src_expr = (
-                    "COALESCE(\"json\", CAST('{}' AS JSON))"
-                    if tbl in ("config_facet", "artifact_facet") and c == "json"
-                    else _quote_ident(c)
-                )
-                pairs.append((_quote_ident(c), src_expr))
-            elif c == "json" and "facet_json" in src_cols:
-                src_expr = (
-                    "COALESCE(\"facet_json\", CAST('{}' AS JSON))"
-                    if tbl in ("config_facet", "artifact_facet")
-                    else '"facet_json"'
-                )
-                pairs.append((_quote_ident(c), src_expr))
-        if pairs:
-            qt = _quote_ident(tbl)
-            d_sql = ", ".join(d for d, _ in pairs)
-            s_sql = ", ".join(s for _, s in pairs)
-            cur.execute(
-                f"INSERT INTO main.{qt} ({d_sql}) "
-                f"SELECT {s_sql} FROM v04_src.main.{qt} ON CONFLICT DO NOTHING"
+
+    if not dry_run:
+        for tbl in _PASSTHROUGH_CORE_TABLES:
+            if tbl not in src_tables:
+                continue
+            dst_cols = _table_columns(
+                cur, db_alias=dst_catalog, schema="main", table=tbl
             )
+            src_cols = set(
+                _table_columns(cur, db_alias="v04_src", schema="main", table=tbl)
+            )
+            pairs: list[tuple[str, str]] = []
+            for c in dst_cols:
+                if c in src_cols:
+                    src_expr = (
+                        "COALESCE(\"json\", CAST('{}' AS JSON))"
+                        if tbl in ("config_facet", "artifact_facet") and c == "json"
+                        else _quote_ident(c)
+                    )
+                    pairs.append((_quote_ident(c), src_expr))
+                elif c == "json" and "facet_json" in src_cols:
+                    src_expr = (
+                        "COALESCE(\"facet_json\", CAST('{}' AS JSON))"
+                        if tbl in ("config_facet", "artifact_facet")
+                        else '"facet_json"'
+                    )
+                    pairs.append((_quote_ident(c), src_expr))
+            if pairs:
+                qt = _quote_ident(tbl)
+                d_sql = ", ".join(d for d, _ in pairs)
+                s_sql = ", ".join(s for _, s in pairs)
+                cur.execute(
+                    f"INSERT INTO main.{qt} ({d_sql}) "
+                    f"SELECT {s_sql} FROM v04_src.main.{qt} ON CONFLICT DO NOTHING"
+                )
 
     src_views = cur.execute(
         "SELECT schema_name, view_name, sql FROM duckdb_views() "
@@ -457,9 +455,14 @@ def _migrate_artifacts_and_locations(
     hashed = trusted = cold = 0
     obs_base_ns = time.time_ns()
     total_artifacts = len(raw_artifacts)
+    progress_step = max(1, total_artifacts // 100)
 
     for a_idx, a_row in enumerate(raw_artifacts):
-        if progress_callback:
+        if progress_callback and (
+            a_idx == 0
+            or (a_idx + 1) == total_artifacts
+            or (a_idx + 1) % progress_step == 0
+        ):
             progress_callback("Resolving artifacts", a_idx + 1, total_artifacts)
         art_id = _coerce_uuid(a_row[0])
         key, uri, driver = str(a_row[1]), str(a_row[2]), str(a_row[3])
@@ -535,9 +538,17 @@ def _migrate_artifacts_and_locations(
                 if resolved_digest is not None:
                     trusted += 1
             if resolved_digest is None:
-                resolved_digest = _compute_migrated_digest(
-                    existing_cands[0], driver, member_val, meta
-                )
+                if dry_run:
+                    resolved_digest = Digest(
+                        "dir_manifest_v1:sha256"
+                        if existing_cands[0].is_dir()
+                        else "sha256:file",
+                        "0" * 64,
+                    )
+                else:
+                    resolved_digest = _compute_migrated_digest(
+                        existing_cands[0], driver, member_val, meta
+                    )
                 hashed += 1
         else:
             cold += 1
@@ -557,7 +568,7 @@ def _migrate_artifacts_and_locations(
                 uri=uri,
                 site=p_site,
                 status="active" if p_ok else "stale",
-                capture_local_witness=p_ok,
+                capture_local_witness=p_ok and not dry_run,
                 observed_at_ns=obs_ns,
             )
         )
@@ -571,7 +582,7 @@ def _migrate_artifacts_and_locations(
                     uri=uri,
                     archive_root=r_root,
                     site="archive" if r_ok else "advisory",
-                    capture_local_witness=r_ok,
+                    capture_local_witness=r_ok and not dry_run,
                     observed_at_ns=obs_ns + r_idx,
                 )
             )
@@ -1135,31 +1146,29 @@ def migrate_database(
             if progress_callback:
                 progress_callback("Copying views", 0, total_views)
             for v_idx, (v_schema, _v_name, v_sql) in enumerate(src_views):
-                if not v_sql:
-                    if progress_callback:
-                        progress_callback("Copying views", v_idx + 1, total_views)
-                    continue
-                s_str = str(v_schema)
-                cleaned_sql = str(v_sql).strip()
-                if cleaned_sql.upper().startswith("CREATE VIEW "):
-                    cleaned_sql = (
-                        "CREATE OR REPLACE VIEW " + cleaned_sql[len("CREATE VIEW ") :]
-                    )
-                try:
-                    if s_str != "main":
-                        dst_db.execute(
-                            f"CREATE SCHEMA IF NOT EXISTS {_quote_ident(s_str)}"
+                if v_sql:
+                    s_str = str(v_schema)
+                    cleaned_sql = str(v_sql).strip()
+                    if cleaned_sql.upper().startswith("CREATE VIEW "):
+                        cleaned_sql = (
+                            "CREATE OR REPLACE VIEW "
+                            + cleaned_sql[len("CREATE VIEW ") :]
                         )
-                    dst_db.execute(cleaned_sql)
-                except duckdb.Error as exc:
-                    logger.warning(
-                        "Skipping stale or incompatible v0.4 view %s.%s during migration: %s",
-                        s_str,
-                        _v_name,
-                        exc,
-                    )
-                else:
-                    views_copied += 1
+                    try:
+                        if s_str != "main":
+                            dst_db.execute(
+                                f"CREATE SCHEMA IF NOT EXISTS {_quote_ident(s_str)}"
+                            )
+                        dst_db.execute(cleaned_sql)
+                    except duckdb.Error as exc:
+                        logger.warning(
+                            "Skipping stale or incompatible v0.4 view %s.%s during migration: %s",
+                            s_str,
+                            _v_name,
+                            exc,
+                        )
+                    else:
+                        views_copied += 1
                 if progress_callback:
                     progress_callback("Copying views", v_idx + 1, total_views)
 

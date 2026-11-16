@@ -300,17 +300,14 @@ def find_project_root_and_db(
         return None, None
 
     for directory in dirs:
-        cand1 = directory / ".consist" / "provenance.duckdb"
-        if _safe_is_file(cand1):
-            return directory, cand1
-
-        cand2 = directory / ".consist" / "snapshots" / "latest" / "provenance.duckdb"
-        if _safe_is_file(cand2):
-            return directory, cand2
-
-        cand3 = directory / "provenance.duckdb"
-        if _safe_is_file(cand3):
-            return directory, cand3
+        consist_db = directory / ".consist" / "provenance.duckdb"
+        for cand in (
+            consist_db,
+            directory / ".consist" / "snapshots" / "latest" / "provenance.duckdb",
+            directory / "provenance.duckdb",
+        ):
+            if _safe_is_file(cand):
+                return directory, cand
 
         cand4 = directory / "consist.json"
         if _safe_is_file(cand4):
@@ -329,9 +326,8 @@ def find_project_root_and_db(
             except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError):
                 pass
 
-        cand5 = directory / ".consist"
-        if _safe_is_dir(cand5):
-            return directory, cand1
+        if _safe_is_dir(directory / ".consist"):
+            return directory, consist_db
 
     return None, None
 
@@ -349,32 +345,20 @@ def find_db_path(
     if env_path := os.getenv("CONSIST_DB"):
         return env_path
 
-    # If start_dir is provided, probe start_dir first
+    # If start_dir is provided, probe start_dir upward first
     if start_dir is not None:
-        try:
-            sd = Path(start_dir).resolve()
-            for cand in [
-                sd / ".consist" / "provenance.duckdb",
-                sd / ".consist" / "snapshots" / "latest" / "provenance.duckdb",
-                sd / "provenance.duckdb",
-            ]:
-                if _safe_is_file(cand):
-                    return str(cand)
-
-            _proj_root, discovered_db = find_project_root_and_db(sd)
-            if discovered_db and (
-                _safe_is_file(discovered_db) or _safe_is_dir(discovered_db.parent)
-            ):
-                return str(discovered_db)
-        except OSError:
-            pass
+        _proj_root, discovered_db = find_project_root_and_db(start_dir)
+        if discovered_db and (
+            _safe_is_file(discovered_db) or _safe_is_dir(discovered_db.parent)
+        ):
+            return str(discovered_db)
 
     # Check current directory
     if _safe_is_file(Path("provenance.duckdb")):
         return "provenance.duckdb"
 
     # Check common subdirectories
-    for subdir in [".", "data", "db", ".consist"]:
+    for subdir in ["data", "db", ".consist"]:
         candidate = Path(subdir) / "provenance.duckdb"
         if _safe_is_file(candidate):
             return str(candidate)
@@ -2635,9 +2619,12 @@ def validate(
         else:
             target_run_ids = [latest_run.id]
 
+    from consist.core.tracker_recovery import resolve_verified_local_path
+    from consist.tools.mount_diagnostics import parse_mount_uri
+
     missing: List[Tuple[str, str, Optional[str], str]] = []
-    missing_artifacts: List["Artifact"] = []
     genuinely_missing_artifacts: List["Artifact"] = []
+    hist_root_exists_cache: dict[str, bool] = {}
     batch_size = 1000
     if env_batch_size := os.getenv("CONSIST_VALIDATE_BATCH_SIZE"):
         try:
@@ -2656,14 +2643,15 @@ def validate(
         )
 
     for artifact in artifact_iter:
-        original_mounts = dict(tracker.mounts)
+        original_mounts = dict(tracker.mounts) if trust_db else None
         try:
-            _ensure_tracker_mounts_for_artifact(
-                tracker,
-                artifact,
-                trust_db=trust_db,
-                archive_base=run_dir,
-            )
+            if trust_db:
+                _ensure_tracker_mounts_for_artifact(
+                    tracker,
+                    artifact,
+                    trust_db=trust_db,
+                    archive_base=run_dir,
+                )
             uri = artifact.uri
             found = False
             if uri.startswith("./"):
@@ -2689,8 +2677,6 @@ def validate(
                         found = True
                         break
             if not found:
-                from consist.core.tracker_recovery import resolve_verified_local_path
-
                 verified_cand = resolve_verified_local_path(
                     tracker, artifact, allow_recovery_roots=trust_db
                 )
@@ -2714,8 +2700,6 @@ def validate(
             if found:
                 continue
 
-            from consist.tools.mount_diagnostics import parse_mount_uri
-
             parsed_mount = parse_mount_uri(uri)
             reason = "missing on disk"
             is_unmounted = False
@@ -2723,23 +2707,27 @@ def validate(
                 scheme, _ = parsed_mount
                 if scheme not in tracker.mounts:
                     has_hist_root = False
-                    if tracker.db is not None:
-                        for cand_root in tracker.db.lookup_historical_mount_roots(
-                            scheme
-                        ):
-                            if Path(cand_root).exists():
-                                has_hist_root = True
-                                break
+                    if trust_db and tracker.db is not None:
+                        cached_hist = hist_root_exists_cache.get(scheme)
+                        if cached_hist is None:
+                            cached_hist = any(
+                                Path(cand_root).exists()
+                                for cand_root in tracker.db.lookup_historical_mount_roots(
+                                    scheme
+                                )
+                            )
+                            hist_root_exists_cache[scheme] = cached_hist
+                        has_hist_root = cached_hist
                     if not has_hist_root:
                         is_unmounted = True
                         reason = f"unmounted scheme '{scheme}'"
 
             missing.append((artifact.key, uri, artifact.run_id, reason))
-            missing_artifacts.append(artifact)
             if not is_unmounted:
                 genuinely_missing_artifacts.append(artifact)
         finally:
-            _set_tracker_mounts(tracker, original_mounts)
+            if original_mounts is not None:
+                _set_tracker_mounts(tracker, original_mounts)
 
     if not missing:
         console.print("[green]✓ All artifacts validated successfully[/green]")
@@ -6137,50 +6125,42 @@ def migrate_cmd(
             parsed_mounts[m_name] = m_path
 
     try:
-        if json_output:
+        from rich.progress import (
+            BarColumn,
+            Progress,
+            SpinnerColumn,
+            TaskProgressColumn,
+            TextColumn,
+        )
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            console=console,
+            transient=True,
+            disable=json_output,
+        ) as progress:
+            task_id = progress.add_task("Preparing migration...", total=1)
+
+            def _cli_progress(phase: str, current: int, total: int) -> None:
+                tot = max(total, 1)
+                progress.update(
+                    task_id,
+                    description=f"{phase} ({current}/{tot})",
+                    total=tot,
+                    completed=current,
+                )
+
             report = migrate_database(
                 Path(target_or_action),
                 run_dir=run_dir,
                 mounts=parsed_mounts or None,
                 trust_v04_hashes=trust_v04_hashes,
                 dry_run=dry_run,
+                progress_callback=None if json_output else _cli_progress,
             )
-        else:
-            from rich.progress import (
-                BarColumn,
-                Progress,
-                SpinnerColumn,
-                TaskProgressColumn,
-                TextColumn,
-            )
-
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TaskProgressColumn(),
-                console=console,
-                transient=True,
-            ) as progress:
-                task_id = progress.add_task("Preparing migration...", total=1)
-
-                def _cli_progress(phase: str, current: int, total: int) -> None:
-                    tot = max(total, 1)
-                    progress.update(
-                        task_id,
-                        description=f"{phase} ({current}/{tot})",
-                        total=tot,
-                        completed=current,
-                    )
-
-                report = migrate_database(
-                    Path(target_or_action),
-                    run_dir=run_dir,
-                    mounts=parsed_mounts or None,
-                    trust_v04_hashes=trust_v04_hashes,
-                    dry_run=dry_run,
-                    progress_callback=_cli_progress,
-                )
     except (FileNotFoundError, IncompatibleSchemaError, ValueError, OSError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from exc
