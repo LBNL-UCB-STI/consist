@@ -738,10 +738,31 @@ class ViewFactory:
                 if missing_files == "error":
                     raise FileNotFoundError(abs_path)
                 if missing_files == "warn":
-                    logging.warning(
-                        "[Consist Warning] Skipping missing artifact in grouped view: %s",
-                        abs_path,
-                    )
+                    extra_uris: list[str] = []
+                    if self.tracker.db is not None and record.artifact.id is not None:
+                        try:
+                            loc_rows = self.tracker.db.get_artifact_locations(
+                                record.artifact.id
+                            )
+                            for r in loc_rows:
+                                if (
+                                    r.uri != record.artifact.uri
+                                    and r.uri not in extra_uris
+                                ):
+                                    extra_uris.append(r.uri)
+                        except Exception:
+                            pass
+                    if extra_uris:
+                        logging.warning(
+                            "[Consist Warning] Skipping missing artifact in grouped view: %s (checked locations: %s)",
+                            abs_path,
+                            ", ".join(extra_uris),
+                        )
+                    else:
+                        logging.warning(
+                            "[Consist Warning] Skipping missing artifact in grouped view: %s",
+                            abs_path,
+                        )
                 continue
 
             grouped.setdefault(driver, []).append((record, resolved_path))

@@ -5524,6 +5524,20 @@ class DatabaseManager:
             result[aid] = self._sort_active_locations(list(matched.values()), aid)
         return result
 
+    def get_artifact_locations(
+        self, artifact_id: uuid.UUID
+    ) -> List[ArtifactLocationRow]:
+        coerced_aid = _coerce_uuid(artifact_id)
+        if not self.has_artifact_location_table():
+            return []
+        self.sync_location_epoch_caches()
+        rows = self.fetchall(
+            f"SELECT {self._LOCATION_SELECT_COLS} FROM artifact_location WHERE artifact_id = ? "
+            "ORDER BY observed_at_ns ASC, CAST(location_id AS VARCHAR) ASC",
+            [coerced_aid],
+        )
+        return [self._hydrate_location_row(r) for r in rows]
+
     def get_artifact_recovery_locations(
         self, artifact_id: uuid.UUID
     ) -> List[ArtifactLocationRow]:

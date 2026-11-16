@@ -315,7 +315,7 @@ def _resolve_rows_for_cache(
             _fast_realpath(str(primary_entry)) if primary_entry is not None else ""
         )
         hist_cand: Optional[Path] = None
-        if row.site in ("workspace", "external") and row.mount_name != "abs":
+        if row.mount_name != "abs":
             hist_dir: Optional[str] = None
             if artifact.run_id is not None and (
                 primary_cand is None or row.mount_name not in ("workspace", "runs")
@@ -336,12 +336,20 @@ def _resolve_rows_for_cache(
                         if isinstance(mounts_meta, Mapping)
                         else None
                     )
+                    if not (isinstance(mount_override, str) and mount_override):
+                        archive_mounts_meta = run_meta.get("archive_mounts")
+                        mount_override = (
+                            archive_mounts_meta.get(row.mount_name)
+                            if isinstance(archive_mounts_meta, Mapping)
+                            else None
+                        )
                     phys = (
                         mount_override
                         if isinstance(mount_override, str) and mount_override
                         else (
                             run_meta.get("_physical_run_dir")
                             if row.mount_name in ("workspace", "runs")
+                            and row.site in ("workspace", "external")
                             else None
                         )
                     )
@@ -349,14 +357,56 @@ def _resolve_rows_for_cache(
                         phys if isinstance(phys, str) and phys else None
                     )
                 hist_dir = historical_run_dir_memo[memo_key]
+
             if (
                 hist_dir is None
                 and row.mount_name not in ("workspace", "runs")
                 and isinstance(artifact.meta, Mapping)
             ):
-                art_mount_root = artifact.meta.get("mount_root")
-                if isinstance(art_mount_root, str) and art_mount_root:
-                    hist_dir = art_mount_root
+                art_mount_scheme = artifact.meta.get("mount_scheme")
+                if art_mount_scheme == row.mount_name or (
+                    row.site == "external" and art_mount_scheme is None
+                ):
+                    art_mount_root = artifact.meta.get("mount_root")
+                    if isinstance(art_mount_root, str) and art_mount_root:
+                        hist_dir = art_mount_root
+
+            if (
+                hist_dir is None
+                and primary_cand is None
+                and row.mount_name not in ("workspace", "runs", "abs")
+                and tracker.db is not None
+            ):
+                db_memo_key = f"db_mount:{id(tracker.db)}:{row.mount_name}"
+                if db_memo_key not in historical_run_dir_memo:
+                    found_db_mount: Optional[str] = None
+                    try:
+                        mount_path = f"$.mounts.{row.mount_name}"
+                        row_val = tracker.db.fetchone(
+                            "SELECT json_extract_string(meta, ?) AS m "
+                            "FROM run "
+                            "WHERE meta IS NOT NULL AND json_extract_string(meta, ?) IS NOT NULL "
+                            "ORDER BY created_at DESC LIMIT 1",
+                            [mount_path, mount_path],
+                        )
+                        if row_val and row_val[0]:
+                            found_db_mount = str(row_val[0])
+                        else:
+                            arch_path = f"$.archive_mounts.{row.mount_name}"
+                            row_val_arch = tracker.db.fetchone(
+                                "SELECT json_extract_string(meta, ?) AS m "
+                                "FROM run "
+                                "WHERE meta IS NOT NULL AND json_extract_string(meta, ?) IS NOT NULL "
+                                "ORDER BY created_at DESC LIMIT 1",
+                                [arch_path, arch_path],
+                            )
+                            if row_val_arch and row_val_arch[0]:
+                                found_db_mount = str(row_val_arch[0])
+                    except Exception:
+                        found_db_mount = None
+                    historical_run_dir_memo[db_memo_key] = found_db_mount
+                hist_dir = historical_run_dir_memo.get(db_memo_key)
+
             if hist_dir is not None:
                 cand_from_hist = tracker.fs.resolve_location_row_path(
                     row, historical_run_dir=hist_dir
