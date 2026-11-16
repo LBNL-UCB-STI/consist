@@ -131,6 +131,22 @@ def test_scenario_context_seed_artifact(tmp_path: Path) -> None:
                 pd.DataFrame({"e": [5]}).to_parquet(extra_path)
                 seeded_extra = sc.seed_artifact("extra", extra_path)
                 assert sc.coupler["extra"] == seeded_extra
+
+            # Seed from an existing Artifact with content_hash, driver, and meta overrides
+            overridden = sc.seed_artifact(
+                "skims_override",
+                seeded,
+                driver="parquet",
+                content_hash="a" * 64,
+                variant="calibrated",
+            )
+            assert isinstance(overridden, Artifact)
+            assert overridden.id != seeded.id
+            assert sc.coupler["skims_override"] == overridden
+            assert overridden.meta.get("variant") == "calibrated"
+            assert overridden.digest is not None
+            assert overridden.digest.hex == "a" * 64
+            assert tracker.db.get_artifact(overridden.id) is not None
     finally:
         tracker.close()
 

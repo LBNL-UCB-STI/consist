@@ -4804,8 +4804,22 @@ class DatabaseManager:
                         ):
                             m_witness = ex.witness or effective_winner.witness
                             m_digest = ex.digest or effective_winner.digest
+                            m_lid = (
+                                compute_location_id(
+                                    digest=m_digest,
+                                    artifact_id=ex.artifact_id,
+                                    site=ex.site,
+                                    mount_name=ex.mount_name,
+                                    mount_instance_id=ex.mount_instance_id,
+                                    uri=ex.uri,
+                                    member=ex.member,
+                                )
+                                if m_digest != ex.digest
+                                else ex.location_id
+                            )
                             effective_winner = replace(
                                 ex,
+                                location_id=m_lid,
                                 witness=m_witness,
                                 digest=m_digest,
                             )

@@ -829,14 +829,19 @@ class ScenarioContext:
             return artifact
 
         if isinstance(value, Artifact):
-            artifact = value
-            if meta:
-                artifact = artifact.with_meta(meta, merge=True)
-            if driver is not None:
-                artifact = artifact.model_copy(update={"driver": driver})
-            if content_hash is not None:
-                artifact = artifact.model_copy(
-                    update={"content_hash": str(content_hash)}
+            if driver is None and content_hash is None and not meta:
+                artifact = value
+            else:
+                artifact = self.tracker.artifacts.create_artifact(
+                    value,
+                    run_id=None,
+                    key=key,
+                    direction="input",
+                    driver=driver,
+                    content_hash=content_hash,
+                    force_hash_override=content_hash is not None,
+                    reuse_if_unchanged=reuse_if_unchanged,
+                    **meta,
                 )
             if self.tracker is not None:
                 self.tracker.persistence.persist_standalone_artifact(

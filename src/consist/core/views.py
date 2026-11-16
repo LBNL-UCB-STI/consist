@@ -750,7 +750,7 @@ class ViewFactory:
                                     and r.uri not in extra_uris
                                 ):
                                     extra_uris.append(r.uri)
-                        except Exception:
+                        except (duckdb.Error, ValueError, TypeError):
                             pass
                     if extra_uris:
                         logging.warning(

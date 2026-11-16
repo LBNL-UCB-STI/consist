@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import fcntl
+import json
 import logging
 import os
 import shutil
@@ -11,6 +12,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Literal, Mapping, Optional, Sequence, TYPE_CHECKING, Union
 from typing_extensions import Protocol, runtime_checkable
+
+import duckdb
 
 from consist.core._tracker_service_base import _TrackerServiceBase
 from consist.core.directory_artifacts import (
@@ -380,8 +383,9 @@ def _resolve_rows_for_cache(
                 db_memo_key = f"db_mount:{id(tracker.db)}:{row.mount_name}"
                 if db_memo_key not in historical_run_dir_memo:
                     found_db_mount: Optional[str] = None
+                    quoted_mount = json.dumps(row.mount_name)
                     try:
-                        mount_path = f"$.mounts.{row.mount_name}"
+                        mount_path = f'$."mounts".{quoted_mount}'
                         row_val = tracker.db.fetchone(
                             "SELECT json_extract_string(meta, ?) AS m "
                             "FROM run "
@@ -392,7 +396,7 @@ def _resolve_rows_for_cache(
                         if row_val and row_val[0]:
                             found_db_mount = str(row_val[0])
                         else:
-                            arch_path = f"$.archive_mounts.{row.mount_name}"
+                            arch_path = f'$."archive_mounts".{quoted_mount}'
                             row_val_arch = tracker.db.fetchone(
                                 "SELECT json_extract_string(meta, ?) AS m "
                                 "FROM run "
@@ -402,7 +406,7 @@ def _resolve_rows_for_cache(
                             )
                             if row_val_arch and row_val_arch[0]:
                                 found_db_mount = str(row_val_arch[0])
-                    except Exception:
+                    except (duckdb.Error, ValueError, TypeError):
                         found_db_mount = None
                     historical_run_dir_memo[db_memo_key] = found_db_mount
                 hist_dir = historical_run_dir_memo.get(db_memo_key)

@@ -71,6 +71,63 @@ def test_login_node_view_and_recovery_resolves_archive_via_historical_mount(
         login_tracker.close()
 
 
+def test_db_fallback_resolves_hyphenated_archive_mount_across_sessions(
+    tmp_path: Path,
+) -> None:
+    compute_ws = tmp_path / "compute_ws"
+    shared_scratch = tmp_path / "lrc_shared_scratch"
+    login_tmp = tmp_path / "login_tmp"
+    db_path = tmp_path / "prov.duckdb"
+
+    compute_ws.mkdir(parents=True, exist_ok=True)
+    shared_scratch.mkdir(parents=True, exist_ok=True)
+    login_tmp.mkdir(parents=True, exist_ok=True)
+
+    # Step runs without lrc-scratch mount; archival runs in a session with lrc-scratch mount
+    step_tracker = Tracker(run_dir=compute_ws, db_path=str(db_path))
+    try:
+        out_file = compute_ws / "trips.parquet"
+        pd.DataFrame({"trip_id": [1, 2, 3]}).to_parquet(out_file)
+        with step_tracker.start_run("step_only", model="test"):
+            art = step_tracker.log_output(out_file, key="trips")
+    finally:
+        step_tracker.close()
+
+    archive_tracker = Tracker(
+        run_dir=compute_ws,
+        db_path=str(db_path),
+        mounts={"lrc-scratch": str(shared_scratch)},
+    )
+    try:
+        with archive_tracker.start_run("archive_job", model="maint"):
+            pass
+        archive_tracker.archive_run_outputs(
+            "step_only",
+            archive_root=shared_scratch / "consist-recovery",
+            mode="move",
+        )
+    finally:
+        archive_tracker.close()
+
+    login_tracker = Tracker(
+        run_dir=login_tmp,
+        db_path=str(db_path),
+        read_only=True,
+    )
+    try:
+        loaded = login_tracker.get_artifact(art.id)
+        assert loaded is not None
+        resolved = resolve_verified_local_path(
+            login_tracker, loaded, allow_recovery_roots=True
+        )
+        assert resolved is not None and resolved.exists()
+        login_tracker.create_view("v_trips", "trips")
+        df = login_tracker.query_df("SELECT * FROM v_trips")
+        assert len(df) == 3
+    finally:
+        login_tracker.close()
+
+
 def test_mount_scheme_mismatch_guard_does_not_misresolve_archive(
     tmp_path: Path,
 ) -> None:
