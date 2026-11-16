@@ -5903,6 +5903,9 @@ class DatabaseManager:
                 ]
             )
         with self.transaction() as cur:
+            for artifact in target_artifacts.values():
+                if isinstance(artifact, Artifact) and artifact.id is not None:
+                    self._upsert_artifact_locked(cur, artifact)
             cur.execute(
                 "DELETE FROM run_coupler_snapshot WHERE run_id = ? AND phase = ?",
                 [run_id, phase],

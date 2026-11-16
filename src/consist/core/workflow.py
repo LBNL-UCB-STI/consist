@@ -61,7 +61,7 @@ from consist.core.run_invocation import (
     resolve_run_invocation,
 )
 from consist.core.run_options import resolve_trace_output_policy
-from consist.digest import normalize_json
+from consist.digest import Digest, normalize_json
 from consist.types import (
     ArtifactRef,
     BindingResult,
@@ -776,6 +776,101 @@ class ScenarioContext:
         self._inputs[key] = artifact
         return artifact
 
+    def seed_artifact(
+        self,
+        key: str,
+        value: ArtifactRef,
+        *,
+        driver: Optional[str] = None,
+        content_hash: Optional[Union[str, Digest]] = None,
+        reuse_if_unchanged: bool = True,
+        register_input: bool = False,
+        **meta: Any,
+    ) -> Artifact:
+        """
+        Seed an artifact into the coupler before or between steps.
+
+        Parameters
+        ----------
+        key : str
+            Semantic key for the artifact.
+        value : ArtifactRef
+            Artifact instance, Path, or URI string.
+        driver : Optional[str]
+            Optional data driver hint (e.g. "parquet").
+        content_hash : Optional[Union[str, Digest]]
+            Pre-computed content hash.
+        reuse_if_unchanged : bool, default True
+            Whether to reuse an existing artifact if file is unchanged.
+        register_input : bool, default False
+            If True, also registers the artifact as a scenario header input.
+        **meta : Any
+            Additional metadata to attach to the artifact.
+
+        Returns
+        -------
+        Artifact
+            The seeded artifact.
+        """
+        self.coupler._validate_artifact_key(key)
+        if not self._header_record:
+            raise RuntimeError("Scenario not active. Use within 'with' block.")
+
+        if register_input:
+            artifact = self.add_input(
+                value,
+                key=key,
+                driver=driver,
+                content_hash=content_hash,
+                reuse_if_unchanged=reuse_if_unchanged,
+                **meta,
+            )
+            self.coupler.set(key, artifact)
+            return artifact
+
+        if isinstance(value, Artifact):
+            artifact = value
+            if meta:
+                artifact = artifact.with_meta(meta, merge=True)
+            if driver is not None:
+                artifact = artifact.model_copy(update={"driver": driver})
+            if content_hash is not None:
+                artifact = artifact.model_copy(
+                    update={"content_hash": str(content_hash)}
+                )
+            if self.tracker is not None:
+                self.tracker.persistence.persist_standalone_artifact(
+                    artifact, direction="input"
+                )
+        else:
+            raw_str = os.fspath(value) if isinstance(value, os.PathLike) else value
+            if isinstance(raw_str, str) and "://" in raw_str:
+                resolved_path = Path(self.tracker.resolve_uri(raw_str))
+            else:
+                resolved_path = Path(raw_str)
+                if not resolved_path.is_absolute():
+                    resolved_path = (self.tracker.run_dir / resolved_path).resolve()
+                else:
+                    resolved_path = resolved_path.resolve()
+
+            artifact = self.tracker.artifacts.create_artifact(
+                resolved_path,
+                run_id=None,
+                key=key,
+                direction="input",
+                driver=driver,
+                content_hash=content_hash,
+                reuse_if_unchanged=reuse_if_unchanged,
+                **meta,
+            )
+            if self.tracker is not None:
+                self.tracker.persistence.persist_standalone_artifact(
+                    artifact, direction="input"
+                )
+
+        self.coupler.set(key, artifact)
+        return artifact
+
     @property
     def meta(self) -> Mapping[str, Any]:
         """
@@ -934,6 +1029,13 @@ class ScenarioContext:
         target_run_id = run_id or self.run_id
         ordinal = self._step_ordinal if step_ordinal is None else step_ordinal
         artifacts = dict(self.coupler.items())
+        if not self.tracker.db.read_only:
+            for art in artifacts.values():
+                if isinstance(art, Artifact) and art.id is not None:
+                    if self.tracker.db.get_artifact(art.id) is None:
+                        self.tracker.persistence.persist_standalone_artifact(
+                            art, direction="input"
+                        )
         self.tracker.db.sync_run_coupler_snapshot(
             run_id=target_run_id,
             phase=phase,

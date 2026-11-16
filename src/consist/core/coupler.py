@@ -270,13 +270,15 @@ class Coupler(MutableMapping[str, Artifact]):
             return value
 
         if resolved_path.is_dir():
-            return tracker.artifacts.create_artifact(
+            art = tracker.artifacts.create_artifact(
                 resolved_path,
                 run_id=None,
                 key=key,
                 direction="input",
                 reuse_if_unchanged=True,
             )
+            tracker.persistence.persist_standalone_artifact(art, direction="input")
+            return art
 
         now_ns = time.time_ns()
         fstat = FileStat.capture(resolved_path, observed_at_ns=now_ns)
@@ -302,6 +304,7 @@ class Coupler(MutableMapping[str, Artifact]):
             direction="input",
             reuse_if_unchanged=True,
         )
+        tracker.persistence.persist_standalone_artifact(artifact, direction="input")
         if not is_racy:
             self._stat_cache[stat_key] = artifact
         return artifact

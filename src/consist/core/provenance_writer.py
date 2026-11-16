@@ -353,6 +353,27 @@ class ProvenanceWriter:
             except Exception as e:
                 logging.warning("Database sync failed: %s", e)
 
+    def persist_standalone_artifact(
+        self,
+        artifact: "Artifact",
+        *,
+        direction: str = "input",
+        recovery_roots: Optional[Sequence[str]] = None,
+    ) -> None:
+        """Persist an artifact and its location records without linking to a run."""
+        tracker = self._tracker
+        if tracker.db is None or tracker.db.read_only or artifact.id is None:
+            return
+        try:
+            locations = self._build_artifact_location_rows(
+                artifact,
+                direction=direction,
+                recovery_roots=tuple(recovery_roots) if recovery_roots else None,
+            )
+            tracker.db.upsert_artifact(artifact, locations=locations or None)
+        except Exception as e:
+            logging.warning("Database sync of standalone artifact failed: %s", e)
+
     def sync_artifact_with_facet_bundle(
         self,
         artifact: "Artifact",
