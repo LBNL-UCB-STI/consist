@@ -4291,7 +4291,7 @@ class Tracker:
         raise NotImplementedError(
             "Tracker.db_session() was removed in Consist v0.5.0. "
             "Use tracker.query_df(...), tracker.query_rows(...), "
-            "tracker.db_connection(), or consist.ibis_connection(tracker) instead."
+            "tracker.db.connection, tracker.db.transaction(), or consist.ibis_connection(tracker) instead."
         )
 
     def create_view(self, view_name: str, concept_key: str) -> Any:

@@ -716,7 +716,7 @@ _REMOVED_V04_EXPORTS: dict[str, tuple[str, str]] = {
     "db_session": (
         "consist.db_session() was removed in Consist v0.5.0. "
         "Use consist.query_df(...), consist.query_rows(...), "
-        "tracker.db_connection(), or consist.ibis_connection(tracker) instead.",
+        "tracker.db.connection, tracker.db.transaction(), or consist.ibis_connection(tracker) instead.",
         "ImportError",
     ),
 }
