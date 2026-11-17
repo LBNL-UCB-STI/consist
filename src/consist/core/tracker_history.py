@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import itertools
+from collections.abc import Mapping
 import os
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence
@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence
 import pandas as pd
 
 from consist.core._tracker_service_base import _TrackerServiceBase
-from consist.models.artifact import Artifact, set_tracker_ref
+from consist.models.artifact import Artifact
 from consist.models.run import ConsistRecord, Run, RunArtifacts, RunResult
 
 
@@ -38,7 +38,7 @@ class TrackerHistoryService(_TrackerServiceBase):
             Resolved historical filesystem path.
         """
         if not run:
-            return Path(self.resolve_uri(artifact.container_uri))
+            return Path(self.resolve_uri(artifact.uri))
 
         resolved = self.fs.resolve_historical_artifact_path(
             artifact, run, fallback_to_current_uri=True
@@ -186,9 +186,14 @@ class TrackerHistoryService(_TrackerServiceBase):
                 f"Run snapshot not found at {snapshot_path!s} for run_id={run_id}."
             )
         try:
-            return ConsistRecord.model_validate_json(
+            record = ConsistRecord.model_validate_json(
                 snapshot_path.read_text(encoding="utf-8")
             )
+            record.inputs = [art.with_resolver(self._tracker) for art in record.inputs]
+            record.outputs = [
+                art.with_resolver(self._tracker) for art in record.outputs
+            ]
+            return record
         except Exception as exc:
             if allow_missing:
                 return None
@@ -231,13 +236,13 @@ class TrackerHistoryService(_TrackerServiceBase):
 
         matching: list[Artifact] = []
         for artifact in input_artifacts:
-            meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+            meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
             if meta.get("config_role") == role:
                 matching.append(artifact)
 
         run = self.get_run(run_id)
         run_adapter: str | None = None
-        if run is not None and isinstance(run.meta, dict):
+        if run is not None and isinstance(run.meta, Mapping):
             candidate = run.meta.get("config_adapter")
             if isinstance(candidate, str) and candidate:
                 run_adapter = candidate
@@ -248,7 +253,7 @@ class TrackerHistoryService(_TrackerServiceBase):
             else:
                 filtered: list[Artifact] = []
                 for artifact in matching:
-                    meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+                    meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
                     artifact_adapters: list[str] = []
                     for key in ("config_adapter", "adapter"):
                         value = meta.get(key)
@@ -318,7 +323,7 @@ class TrackerHistoryService(_TrackerServiceBase):
                     str(artifact.id),
                 ),
             )[0]
-            resolved = Path(self.resolve_uri(selected.container_uri))
+            resolved = Path(self.resolve_uri(selected.uri))
             if resolved.exists():
                 return resolved
 
@@ -370,14 +375,13 @@ class TrackerHistoryService(_TrackerServiceBase):
         outputs = {}
 
         for artifact, direction in raw_list:
+            bound = artifact.with_resolver(self._tracker)
             if direction == "input":
-                inputs[artifact.key] = artifact
+                inputs[bound.key] = bound
             elif direction == "output":
-                outputs[artifact.key] = artifact
+                outputs[bound.key] = bound
 
         artifacts = RunArtifacts(inputs=inputs, outputs=outputs)
-        for artifact in itertools.chain(inputs.values(), outputs.values()):
-            set_tracker_ref(artifact, self._tracker)
         if run_id != current_run_id:
             self._run_artifacts_cache[run_id] = artifacts
             if len(self._run_artifacts_cache) > self._run_artifacts_cache_max_entries:
@@ -429,14 +433,14 @@ class TrackerHistoryService(_TrackerServiceBase):
             outputs = outputs_by_run_id.get(run_id, {})
             resolved_for_run: dict[str, Path] = {}
             for key, artifact in outputs.items():
-                set_tracker_ref(artifact, self._tracker)
-                primary_path = Path(self.resolve_uri(artifact.container_uri))
+                bound = artifact.with_resolver(self._tracker)
+                primary_path = Path(self.resolve_uri(bound.uri))
                 resolved_path = primary_path
                 if not primary_path.exists():
-                    if artifact.abs_path and Path(artifact.abs_path).exists():
-                        resolved_path = Path(artifact.abs_path)
+                    if bound.abs_path and Path(bound.abs_path).exists():
+                        resolved_path = Path(bound.abs_path)
                     elif run is not None:
-                        resolved_path = self.resolve_historical_path(artifact, run)
+                        resolved_path = self.resolve_historical_path(bound, run)
                 if existing_only and not resolved_path.exists():
                     continue
                 resolved_for_run[key] = resolved_path
@@ -503,7 +507,7 @@ class TrackerHistoryService(_TrackerServiceBase):
             for key, artifact in selected_outputs.items():
                 if artifact.meta.get("is_ingested", False):
                     continue
-                resolved = Path(self.resolve_uri(artifact.container_uri))
+                resolved = Path(self.resolve_uri(artifact.uri))
                 if not resolved.exists():
                     missing_paths.append(f"{key!r} -> {resolved!s}")
             if missing_paths:
@@ -513,7 +517,7 @@ class TrackerHistoryService(_TrackerServiceBase):
                 )
 
         cache_hit = (
-            bool(run.meta.get("cache_hit")) if isinstance(run.meta, dict) else False
+            bool(run.meta.get("cache_hit")) if isinstance(run.meta, Mapping) else False
         )
         return RunResult(run=run, outputs=selected_outputs, cache_hit=cache_hit)
 

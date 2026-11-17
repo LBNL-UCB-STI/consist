@@ -963,7 +963,7 @@ def test_bundle_configs_disambiguates_duplicate_directory_basenames(
 
 
 def test_constants_list_and_probabilities_dlt_ingest(tracker, tmp_path: Path):
-    from sqlmodel import Session, select
+    from consist import ParameterizedSQL
     from consist.models.activitysim import (
         ActivitySimProbabilitiesCache,
         ActivitySimProbabilitiesEntriesCache,
@@ -1000,37 +1000,37 @@ def test_constants_list_and_probabilities_dlt_ingest(tracker, tmp_path: Path):
     assert len(const_rows) == 1
     assert const_rows[0][1] == ["DRIVEALONEFREE", "SHARED2FREE"]
 
-    with Session(tracker.engine) as session:
-        prob_cache_rows = session.exec(
-            select(ActivitySimProbabilitiesCache).where(
-                ActivitySimProbabilitiesCache.file_name == "stop_frequency_probs_1.csv"
-            )
-        ).all()
-        assert len(prob_cache_rows) == 1
-        assert prob_cache_rows[0].dims == {"purpose_id": 1.0, "outbound": True}
-        assert prob_cache_rows[0].probs == {"0_stops": 0.6, "1_stop": 0.4}
+    prob_cache_rows = tracker.query_rows(
+        ParameterizedSQL(
+            "SELECT * FROM global_tables.activitysim_probabilities_cache "
+            "WHERE file_name = ?",
+            ("stop_frequency_probs_1.csv",),
+        ),
+        model=ActivitySimProbabilitiesCache,
+    )
+    assert len(prob_cache_rows) == 1
+    assert prob_cache_rows[0].dims == {"purpose_id": 1.0, "outbound": True}
+    assert prob_cache_rows[0].probs == {"0_stops": 0.6, "1_stop": 0.4}
 
     prob_rows = adapter.run_link_rows(
         ActivitySimProbabilitiesEntriesCache,
         columns=[ActivitySimProbabilitiesEntriesCache.value_num],
-        where=[
-            ActivitySimProbabilitiesEntriesCache.file_name
-            == "stop_frequency_probs_1.csv",
-            ActivitySimProbabilitiesEntriesCache.key == "0_stops",
-        ],
+        where={
+            "file_name": "stop_frequency_probs_1.csv",
+            "key": "0_stops",
+        },
         tracker=tracker,
     )
     assert len(prob_rows) == 1
-    assert prob_rows[0][0] == pytest.approx(0.6)
+    assert prob_rows[0] == pytest.approx(0.6)
 
     all_rows = adapter.run_link_rows(
         ActivitySimProbabilitiesEntriesCache,
         columns=[ActivitySimProbabilitiesEntriesCache.value_num],
-        where=[
-            ActivitySimProbabilitiesEntriesCache.file_name
-            == "stop_frequency_probs_1.csv",
-            ActivitySimProbabilitiesEntriesCache.key == "All",
-        ],
+        where={
+            "file_name": "stop_frequency_probs_1.csv",
+            "key": "All",
+        },
         tracker=tracker,
     )
     assert all_rows == []
@@ -1038,15 +1038,14 @@ def test_constants_list_and_probabilities_dlt_ingest(tracker, tmp_path: Path):
     meta_rows = adapter.run_link_rows(
         ActivitySimProbabilitiesMetaEntriesCache,
         columns=[ActivitySimProbabilitiesMetaEntriesCache.value_num],
-        where=[
-            ActivitySimProbabilitiesMetaEntriesCache.file_name
-            == "stop_frequency_probs_1.csv",
-            ActivitySimProbabilitiesMetaEntriesCache.key == "purpose_id",
-        ],
+        where={
+            "file_name": "stop_frequency_probs_1.csv",
+            "key": "purpose_id",
+        },
         tracker=tracker,
     )
     assert len(meta_rows) == 1
-    assert meta_rows[0][0] == pytest.approx(1.0)
+    assert meta_rows[0] == pytest.approx(1.0)
 
 
 def test_multi_root_csv_only_overlay_identity(tracker, tmp_path: Path):
@@ -1309,8 +1308,7 @@ def test_infix_coefficients_and_probabilities_files_ingested(tracker, tmp_path: 
             ActivitySimCoefficientTemplateRefsCache.segment,
             ActivitySimCoefficientTemplateRefsCache.referenced_coefficient,
         ],
-        where=ActivitySimCoefficientTemplateRefsCache.file_name
-        == "tour_mode_choice_coefficients_template_estb.csv",
+        where={"file_name": "tour_mode_choice_coefficients_template_estb.csv"},
         tracker=tracker,
     )
     assert len(tmpl_rows) == 1
@@ -1464,7 +1462,6 @@ def test_inherit_settings_filename_and_nondefault_primary_config(
 
 def test_sandag_template_placeholder_detection_and_rendering(tracker, tmp_path: Path):
     from consist.models.activitysim import (
-        ActivitySimConfigIngestRunLink,
         ActivitySimConstantsCache,
     )
 
@@ -1537,7 +1534,7 @@ def test_sandag_template_placeholder_detection_and_rendering(tracker, tmp_path: 
             ActivitySimConstantsCache.value_type,
             ActivitySimConstantsCache.value_num,
         ],
-        where=ActivitySimConfigIngestRunLink.run_id == "as_rendered_strict",
+        where={"run_id": "as_rendered_strict"},
         tracker=tracker,
     )
     assert len(year_rows) == 1
@@ -1548,7 +1545,7 @@ def test_sandag_template_placeholder_detection_and_rendering(tracker, tmp_path: 
         file_name="route_stops.yaml",
         key="CONSTANTS.location_settings_estb.sample_size",
         value_column="value_num",
-        where=ActivitySimConfigIngestRunLink.run_id == "as_rendered_strict",
+        where={"run_id": "as_rendered_strict"},
         tracker=tracker,
     )
     assert len(estb_rows) == 1

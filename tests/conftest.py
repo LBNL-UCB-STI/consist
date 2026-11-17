@@ -4,35 +4,12 @@ from unittest.mock import patch
 
 import pandas as pd
 import pytest
-from sqlmodel import SQLModel
 from typer.testing import CliRunner
 
-# Import core library classes
-from consist.core.tracker import Tracker
 from consist.core import context
 from consist.core.identity import IdentityManager
-
-# Import specific models
-from consist.models.run import (
-    Run,
-    RunArtifactLink,
-    RunBindingInvocation,
-    RunCouplerSnapshot,
-)
-from consist.models.artifact import Artifact, ArtifactContent
-from consist.models.artifact_facet import ArtifactFacet
-from consist.models.artifact_kv import ArtifactKV
-from consist.models.artifact_schema import (
-    ArtifactSchema,
-    ArtifactSchemaField,
-    ArtifactSchemaObservation,
-    ArtifactSchemaRelation,
-)
-from consist.models.config_facet import ConfigFacet
-from consist.models.run_config_kv import RunConfigKV
-
-
-# --- Global Test Configuration ---
+from consist.core.persistence import close_all_tracked_relations
+from consist.core.tracker import Tracker
 
 
 def pytest_addoption(parser):
@@ -45,32 +22,18 @@ def pytest_addoption(parser):
     )
 
 
-# --- Core Fixtures ---
-
-
 @pytest.fixture(autouse=True)
 def reset_context():
     """
     Automatically resets the global Consist context before and after each test.
     This prevents state (like active runs) from leaking between tests.
     """
-    if hasattr(context, "_TRACKER_STACK") and hasattr(context._TRACKER_STACK, "set"):
-        context._TRACKER_STACK.set(())
-    elif hasattr(context, "_TRACKER_STACK"):
-        context._TRACKER_STACK.clear()
-    if hasattr(context, "_DEFAULT_TRACKER") and hasattr(
-        context._DEFAULT_TRACKER, "set"
-    ):
-        context._DEFAULT_TRACKER.set(None)
+    context._TRACKER_STACK.set(())
+    context._DEFAULT_TRACKER.set(None)
     yield
-    if hasattr(context, "_TRACKER_STACK") and hasattr(context._TRACKER_STACK, "set"):
-        context._TRACKER_STACK.set(())
-    elif hasattr(context, "_TRACKER_STACK"):
-        context._TRACKER_STACK.clear()
-    if hasattr(context, "_DEFAULT_TRACKER") and hasattr(
-        context._DEFAULT_TRACKER, "set"
-    ):
-        context._DEFAULT_TRACKER.set(None)
+    context._TRACKER_STACK.set(())
+    context._DEFAULT_TRACKER.set(None)
+    close_all_tracked_relations()
 
 
 @pytest.fixture(autouse=True)
@@ -93,7 +56,7 @@ def stable_code_version(request):
 @pytest.fixture
 def run_dir(tmp_path: Path) -> Path:
     """
-    Provides a isolated temporary directory for run outputs.
+    Provides an isolated temporary directory for run outputs.
     Exposed as a fixture so tests can access the file system location directly.
     """
     path = tmp_path / "consist_runs"
@@ -103,22 +66,13 @@ def run_dir(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def tracker(request, run_dir: Path, tmp_path: Path) -> Iterator[Tracker]:
-    """
-    Provides a fresh, isolated Tracker instance for each test function.
-
-    Handles:
-    1. DB Persistence via --persist-db-path
-    2. Schema filtering (fixing the SERIAL/MockTable error)
-    3. Transaction/Table cleaning (fixing IntegrityErrors)
-    """
+    """Provides a fresh, isolated Tracker instance for each test function."""
     yield from _build_tracker(request, run_dir, tmp_path)
 
 
 @pytest.fixture
 def gtfs_tracker(request, run_dir: Path, tmp_path: Path) -> Iterator[Tracker]:
-    """
-    Provides a Tracker with built-in GTFS schemas registered.
-    """
+    """Provides a Tracker with built-in GTFS schemas registered."""
     yield from _build_tracker(request, run_dir, tmp_path, builtin_schemas=("gtfs",))
 
 
@@ -132,60 +86,28 @@ def _build_tracker(
     persist_path = request.config.getoption("--persist-db-path")
 
     if persist_path:
-        # Use the user-provided path for persistence
-        db_path = str(Path(persist_path).resolve())
+        resolved = Path(persist_path).resolve()
+        resolved.unlink(missing_ok=True)
+        Path(f"{resolved}.wal").unlink(missing_ok=True)
+        db_path = str(resolved)
     else:
-        # Standard test isolation: use a temp file
         db_path = str(tmp_path / "provenance.db")
 
-    # Initialize the Tracker
     test_tracker = Tracker(
         run_dir=run_dir,
         db_path=db_path,
         builtin_schemas=list(builtin_schemas),
     )
 
-    # Clean Slate Policy:
-    # When reusing a persistent DB across tests, drop and recreate the core tables
-    # before each test. For fresh tmp_path DBs, Tracker initialization already
-    # creates all core tables and views cleanly.
-    if persist_path and test_tracker.engine:
-        core_tables = [
-            SQLModel.metadata.tables[Run.__tablename__],
-            SQLModel.metadata.tables[Artifact.__tablename__],
-            SQLModel.metadata.tables[RunArtifactLink.__tablename__],
-            SQLModel.metadata.tables[RunBindingInvocation.__tablename__],
-            SQLModel.metadata.tables[ConfigFacet.__tablename__],
-            SQLModel.metadata.tables[RunConfigKV.__tablename__],
-            SQLModel.metadata.tables[ArtifactFacet.__tablename__],
-            SQLModel.metadata.tables[ArtifactKV.__tablename__],
-            SQLModel.metadata.tables[ArtifactSchema.__tablename__],
-            SQLModel.metadata.tables[ArtifactSchemaField.__tablename__],
-            SQLModel.metadata.tables[ArtifactSchemaObservation.__tablename__],
-            SQLModel.metadata.tables[ArtifactSchemaRelation.__tablename__],
-            SQLModel.metadata.tables[ArtifactContent.__tablename__],
-            SQLModel.metadata.tables[RunCouplerSnapshot.__tablename__],
-        ]
-        with test_tracker.engine.connect() as connection:
-            with connection.begin():
-                SQLModel.metadata.drop_all(connection, tables=core_tables)
-                SQLModel.metadata.create_all(connection, tables=core_tables)
-                # Ensure run.parent_run_id FK is NOT ENFORCED (DuckDB limitation workaround)
-                if test_tracker.db:
-                    test_tracker.db._relax_run_parent_fk()
-                    test_tracker.db._ensure_schema_links_view()
-
     yield test_tracker
 
-    # Teardown
-    if test_tracker.engine:
-        test_tracker.engine.dispose()
+    test_tracker.close()
 
 
 @pytest.fixture
-def engine(tracker: Tracker):
-    """Provides direct access to the active tracker's SQLAlchemy engine."""
-    return tracker.engine
+def db(tracker: Tracker):
+    """Provides direct access to the active tracker's DatabaseManager."""
+    return tracker.db
 
 
 @pytest.fixture

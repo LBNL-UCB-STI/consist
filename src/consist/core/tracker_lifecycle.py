@@ -40,6 +40,7 @@ from consist.core.cache_miss_explainer import (
 from consist.core.context import pop_tracker, push_tracker
 from consist.core.error_messages import format_problem_cause_fix
 from consist.core.resolved_binding import _validate_strict_binding_invocation_context
+from consist.core.run_resolution import format_input_link_role
 from consist.core.validation import (
     validate_config_structure,
     validate_run_meta,
@@ -458,17 +459,40 @@ class RunLifecycleCoordinator:
 
         identity_mode = code_identity or "repo_git"
         with _track_begin_run_phase("lifecycle.resolve_code_identity"):
-            code_identity_resolution = tracker.identity.resolve_code_identity(
-                mode=identity_mode,
-                func=code_identity_callable,
-                extra_deps=code_identity_extra_deps,
+            from consist.core.identity import (
+                CodeIdentityResolution,
+                CodeIdentityUnavailableError,
+                _get_git,
             )
-            git_hash = code_identity_resolution.digest
 
-        action_code_identity = tracker.identity.describe_code_identity(
-            mode=code_identity_resolution.mode,
-            digest=code_identity_resolution.digest,
-        )
+            if (
+                tracker.is_ephemeral
+                and identity_mode == "repo_git"
+                and not code_identity_extra_deps
+            ):
+                code_identity_resolution = CodeIdentityResolution(
+                    mode="repo_git",
+                    digest="ephemeral",
+                )
+            else:
+                try:
+                    code_identity_resolution = tracker.identity.resolve_code_identity(
+                        mode=identity_mode,
+                        func=code_identity_callable,
+                        extra_deps=code_identity_extra_deps,
+                    )
+                except CodeIdentityUnavailableError:
+                    if (
+                        code_identity is None
+                        and code_identity_callable is None
+                        and _get_git() is None
+                    ):
+                        code_identity_resolution = tracker.identity.resolve_fallback_code_identity_without_gitpython(
+                            extra_deps=code_identity_extra_deps
+                        )
+                    else:
+                        raise
+            git_hash = code_identity_resolution.digest
 
         with _track_begin_run_phase("lifecycle.create_run_and_bind_state"):
             kwargs["code_identity"] = code_identity_resolution.mode
@@ -521,7 +545,12 @@ class RunLifecycleCoordinator:
                 }
 
             push_tracker(tracker)
-            tracker.current_consist = ConsistRecord(run=run, config=config_dict)
+            stored_config = {
+                key: value
+                for key, value in config_dict.items()
+                if key != "__consist_declared_outputs__"
+            }
+            tracker.current_consist = ConsistRecord(run=run, config=stored_config)
             tracker._active_run_cache_options = ActiveRunCacheOptions(
                 cache_mode=cache_mode,
                 cache_hydration=cache_hydration,
@@ -583,10 +612,18 @@ class RunLifecycleCoordinator:
 
         with _track_begin_run_phase("input_binding.total"):
             if inputs:
+                role_by_input_index = (
+                    {
+                        r.input_index: format_input_link_role(r.kind, r.role)
+                        for r in input_binding_roles
+                    }
+                    if input_binding_roles is not None
+                    else {}
+                )
                 known_latest_by_index: Dict[int, Optional[Artifact]] = {}
                 if tracker.db:
                     lookup_by_index: Dict[
-                        int, tuple[str, Optional[str], Optional[str], Optional[str]]
+                        int, tuple[str, Optional[str], Optional[str]]
                     ] = {}
                     for index, item in enumerate(inputs):
                         if isinstance(item, Artifact):
@@ -595,7 +632,6 @@ class RunLifecycleCoordinator:
                         lookup = (
                             tracker.fs.virtualize_path(str(path_item.resolve())),
                             _infer_driver_from_path(path_item),
-                            None,
                             None,
                         )
                         lookup_by_index[index] = lookup
@@ -609,11 +645,13 @@ class RunLifecycleCoordinator:
                         }
                 with tracker.persistence.batch_artifact_writes():
                     for index, item in enumerate(inputs):
+                        item_link_role = role_by_input_index.get(index)
                         if isinstance(item, Artifact):
                             tracker._artifact_logging.log_artifact(
                                 item,
                                 direction="input",
                                 profile_file_schema=profile_file_schema,
+                                link_role=item_link_role,
                             )
                         else:
                             key = Path(item).stem
@@ -628,6 +666,7 @@ class RunLifecycleCoordinator:
                                 latest_artifact_lookup_done=(
                                     index in known_latest_by_index
                                 ),
+                                link_role=item_link_role,
                             )
 
         with _track_begin_run_phase("input_binding.parent_run_inference"):
@@ -682,50 +721,30 @@ class RunLifecycleCoordinator:
                     if role.input_index >= strict_input_count
                 ]
                 tracker._prefetch_run_signatures(ordinary_inputs)
-                action_identity = (
-                    tracker.identity.compute_resolved_binding_action_identity(
-                        ordinary_inputs=ordinary_inputs,
-                        ordinary_binding_roles=ordinary_binding_roles,
-                        strict_binding_identity=strict_binding_context.identity_digest,
-                        code_identity=action_code_identity,
-                        path_resolver=tracker.resolve_uri,
-                        signature_lookup=tracker._resolve_run_signature,
-                    )
+                input_hash = tracker.identity.compute_input_hash(
+                    ordinary_inputs,
+                    path_resolver=tracker.resolve_uri,
+                    signature_lookup=tracker._resolve_run_signature,
+                    binding_roles=ordinary_binding_roles,
+                    strict_binding_identity=strict_binding_context.identity_digest,
                 )
-                run.input_hash = action_identity.value
+                run.input_hash = input_hash
                 run.signature = tracker.identity.calculate_run_signature(
                     code_hash=git_hash,
                     config_hash=config_hash,
-                    input_hash=action_identity.value,
+                    input_hash=input_hash,
                 )
                 run.meta["input_identity"] = {
-                    "mode": "action-v2",
-                    "version": 2,
-                    "code": action_identity.code.as_payload(),
+                    "version": 1,
                     "strict_input_count": strict_input_count,
                     "ordinary_input_count": len(ordinary_inputs),
                     "strict_binding_identity": strict_binding_context.identity_digest,
-                    "bindings": [
-                        {
-                            **binding.as_payload(),
-                            "artifact_id": str(ordinary_inputs[role.input_index].id),
-                            "selector": {
-                                "driver": ordinary_inputs[role.input_index].driver,
-                                "table_path": ordinary_inputs[
-                                    role.input_index
-                                ].table_path,
-                                "array_path": ordinary_inputs[
-                                    role.input_index
-                                ].array_path,
-                            },
-                            "evidence": binding.as_evidence_payload(),
-                        }
-                        for role, binding in zip(
-                            ordinary_binding_roles,
-                            action_identity.bindings,
-                            strict=True,
-                        )
-                    ],
+                    "bindings": tracker.identity.describe_input_bindings(
+                        ordinary_inputs,
+                        binding_roles=ordinary_binding_roles,
+                        path_resolver=tracker.resolve_uri,
+                        signature_lookup=tracker._resolve_run_signature,
+                    ),
                 }
         else:
             try:
@@ -734,59 +753,32 @@ class RunLifecycleCoordinator:
                     tracker._prefetch_run_signatures(current_consist.inputs)
                     _log_timing("prefetch_run_signatures", t0)
                     t0 = time.perf_counter()
-                    if input_binding_roles is None:
-                        input_hash = tracker.identity.compute_input_hash(
-                            current_consist.inputs,
-                            path_resolver=tracker.resolve_uri,
-                            signature_lookup=tracker._resolve_run_signature,
-                        )
-                    else:
-                        action_identity = (
-                            tracker.identity.compute_action_input_identity(
-                                inputs=current_consist.inputs,
+                    input_hash = tracker.identity.compute_input_hash(
+                        current_consist.inputs,
+                        path_resolver=tracker.resolve_uri,
+                        signature_lookup=tracker._resolve_run_signature,
+                        binding_roles=input_binding_roles,
+                    )
+                    if input_binding_roles is not None:
+                        run.meta["input_identity"] = {
+                            "version": 1,
+                            "bindings": tracker.identity.describe_input_bindings(
+                                current_consist.inputs,
                                 binding_roles=input_binding_roles,
-                                code_identity=action_code_identity,
                                 path_resolver=tracker.resolve_uri,
                                 signature_lookup=tracker._resolve_run_signature,
-                            )
-                        )
-                        input_hash = action_identity.value
-                        run.meta["input_identity"] = {
-                            "mode": "action-v2",
-                            "version": 2,
-                            "code": action_identity.code.as_payload(),
-                            "bindings": [
-                                {
-                                    **binding.as_payload(),
-                                    "artifact_id": str(
-                                        current_consist.inputs[role.input_index].id
-                                    ),
-                                    "selector": {
-                                        "driver": current_consist.inputs[
-                                            role.input_index
-                                        ].driver,
-                                        "table_path": current_consist.inputs[
-                                            role.input_index
-                                        ].table_path,
-                                        "array_path": current_consist.inputs[
-                                            role.input_index
-                                        ].array_path,
-                                    },
-                                    "evidence": binding.as_evidence_payload(),
-                                }
-                                for role, binding in zip(
-                                    input_binding_roles,
-                                    action_identity.bindings,
-                                    strict=True,
-                                )
-                            ],
+                            ),
                         }
                     run.input_hash = input_hash
-                    run.signature = tracker.identity.calculate_run_signature(
-                        code_hash=git_hash,
-                        config_hash=config_hash,
-                        input_hash=input_hash,
-                    )
+                    if input_hash in (None, "", "error"):
+                        run.signature = None
+                        run.cacheable = False
+                    else:
+                        run.signature = tracker.identity.calculate_run_signature(
+                            code_hash=git_hash,
+                            config_hash=config_hash,
+                            input_hash=input_hash,
+                        )
                     _log_timing("compute_input_hash", t0)
             except Exception as exc:
                 logging.warning(
@@ -795,7 +787,8 @@ class RunLifecycleCoordinator:
                     exc,
                 )
                 run.input_hash = "error"
-                run.signature = "error"
+                run.signature = None
+                run.cacheable = False
 
         cached_output_ids: Optional[List[uuid.UUID]] = None
 
@@ -803,8 +796,15 @@ class RunLifecycleCoordinator:
             with _track_begin_run_phase("cache.lookup"):
                 cache_key = (
                     (run.config_hash, run.input_hash, run.git_hash)
-                    if run.config_hash and run.input_hash and run.git_hash
+                    if (
+                        run.config_hash not in (None, "", "error")
+                        and run.input_hash not in (None, "", "error")
+                        and run.git_hash not in (None, "", "error")
+                    )
                     else None
+                )
+                lookup_signature = (
+                    run.signature if run.signature not in (None, "", "error") else None
                 )
                 if debug_cache:
                     logging.info(
@@ -833,10 +833,14 @@ class RunLifecycleCoordinator:
                         config_h,
                         input_h,
                         git_h,
-                        signature=run.signature,
+                        signature=lookup_signature,
                     )
                     _log_timing("find_matching_run", t0)
-                    local_candidate = tracker._local_cache_index.get(cache_key)
+                    local_candidate = (
+                        tracker._local_cache_index.get(cache_key)
+                        if tracker.db is not None
+                        else None
+                    )
                     if local_candidate and all(
                         candidate.id != local_candidate.id
                         for candidate in cached_candidates
@@ -844,7 +848,9 @@ class RunLifecycleCoordinator:
                         cached_candidates.append(local_candidate)
                 else:
                     cached_run = (
-                        tracker._local_cache_index.get(cache_key) if cache_key else None
+                        tracker._local_cache_index.get(cache_key)
+                        if cache_key and tracker.db is not None
+                        else None
                     )
                     if cached_run is None:
                         t0 = time.perf_counter()
@@ -854,7 +860,7 @@ class RunLifecycleCoordinator:
                                 config_hash=config_h,
                                 input_hash=input_h,
                                 git_hash=git_h,
-                                signature=run.signature,
+                                signature=lookup_signature,
                             )
                         _log_timing("find_matching_run", t0)
 
@@ -1084,7 +1090,11 @@ class RunLifecycleCoordinator:
         if cache_mode != "readonly":
             tracker._sync_run_to_db(run)
 
-        if cache_mode != "readonly" and run.status == "completed":
+        if (
+            cache_mode != "readonly"
+            and run.status == "completed"
+            and tracker.db is not None
+        ):
             cache_key = (
                 run.config_hash or "",
                 run.input_hash or "",

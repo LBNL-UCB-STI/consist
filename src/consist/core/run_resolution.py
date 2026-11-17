@@ -41,6 +41,25 @@ class InputBindingRole:
     input_index: int
 
 
+def format_input_link_role(
+    kind: Optional[str],
+    role: Any,
+    *,
+    fallback: str = "",
+) -> str:
+    """Format canonical ``run_artifact_link.role`` for a bound or unbound input."""
+    if role is None:
+        return fallback
+    if kind in ("positional", "dependency"):
+        return f"{kind}:{role}"
+    role_str = str(role)
+    if kind == "named":
+        return role_str if role_str != "" else "named:"
+    if kind:
+        return f"{kind}:{role_str}"
+    return role_str if role_str != "" else fallback
+
+
 def build_input_binding_roles(
     inputs: Optional[Union[Mapping[str, RunInputRef], Iterable[RunInputRef]]],
     depends_on: Optional[List[RunInputRef]],
@@ -241,7 +260,7 @@ def preview_run_artifact_dir(
 
 def resolve_output_path(tracker: "Tracker", ref: ArtifactRef, base_dir: Path) -> Path:
     if isinstance(ref, Artifact):
-        raw = ref.path or tracker.resolve_uri(ref.container_uri)
+        raw = ref.path or tracker.resolve_uri(ref.uri)
         return Path(raw)
     ref_str = str(ref)
     if isinstance(ref, str) and "://" in ref_str:

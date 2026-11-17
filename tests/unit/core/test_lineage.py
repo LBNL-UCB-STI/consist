@@ -22,14 +22,14 @@ def test_build_lineage_tree():
     art_1 = Artifact(  # Produced by A
         id=uuid.uuid4(),
         key="data_v1",
-        container_uri="outputs://data_v1.csv",
+        uri="outputs://data_v1.csv",
         driver="csv",
         run_id="run_a",
     )
     art_2 = Artifact(  # Produced by B
         id=uuid.uuid4(),
         key="data_v2",
-        container_uri="outputs://data_v2.csv",
+        uri="outputs://data_v2.csv",
         driver="csv",
         run_id="run_b",
     )
@@ -90,7 +90,7 @@ def test_format_lineage_tree():
     art = Artifact(
         id=uuid.uuid4(),
         key="data_v1",
-        container_uri="outputs://data_v1.csv",
+        uri="outputs://data_v1.csv",
         run_id="run_x",
         driver="csv",
     )
@@ -110,7 +110,7 @@ def test_lineage_service_prints(monkeypatch):
     art = Artifact(
         id=uuid.uuid4(),
         key="data_v1",
-        container_uri="outputs://data_v1.csv",
+        uri="outputs://data_v1.csv",
         run_id="run_x",
         driver="csv",
     )
@@ -147,7 +147,7 @@ def test_build_lineage_missing_run_returns_stub() -> None:
     art = Artifact(
         id=uuid.uuid4(),
         key="missing",
-        container_uri="outputs://missing.csv",
+        uri="outputs://missing.csv",
         driver="csv",
         run_id="missing_run",
     )
@@ -169,14 +169,14 @@ def test_build_lineage_cycle_does_not_recurse_forever() -> None:
     art_root = Artifact(
         id=uuid.uuid4(),
         key="root",
-        container_uri="outputs://root.csv",
+        uri="outputs://root.csv",
         driver="csv",
         run_id="run_cycle",
     )
     art_cycle = Artifact(
         id=uuid.uuid4(),
         key="cycle",
-        container_uri="outputs://cycle.csv",
+        uri="outputs://cycle.csv",
         driver="csv",
         run_id="run_cycle",
     )
@@ -211,21 +211,21 @@ def test_build_lineage_tree_sets_truncated_by_depth_when_max_depth_reached() -> 
     art_1 = Artifact(
         id=uuid.uuid4(),
         key="data_v1",
-        container_uri="outputs://data_v1.csv",
+        uri="outputs://data_v1.csv",
         driver="csv",
         run_id="run_a",
     )
     art_2 = Artifact(
         id=uuid.uuid4(),
         key="data_v2",
-        container_uri="outputs://data_v2.csv",
+        uri="outputs://data_v2.csv",
         driver="csv",
         run_id="run_b",
     )
     art_leaf = Artifact(
         id=uuid.uuid4(),
         key="raw_leaf",
-        container_uri="inputs://raw_leaf.csv",
+        uri="inputs://raw_leaf.csv",
         driver="csv",
         run_id=None,
     )

@@ -8,7 +8,6 @@ import time
 import numpy as np
 import pandas as pd
 import pytest
-from sqlmodel import text
 
 import consist
 from consist.core.tracker import Tracker
@@ -74,31 +73,27 @@ def test_simulation_pipeline_stress_v2(tmp_path):
 
         logging.info("[Run 1] Running SQL Join...")
 
-        with tracker.engine.connect() as conn:
-            query = text(
-                """
-                SELECT
-                    c.mode,
-                    COUNT(*) as trips,
-                    AVG(c.income) as avg_income,
-                    AVG(z.parking_cost) as avg_parking_at_home
-                FROM v_census c
-                JOIN v_zones z ON c.home_zone_id = z.zone_id
-                GROUP BY c.mode
-                ORDER BY trips DESC
+        t_query = time.time()
+        results = tracker.run_query(
             """
-            )
-            t_query = time.time()
-            results = conn.execute(query).fetchall()
-            q_time = time.time() - t_query
+            SELECT
+                c.mode,
+                COUNT(*) as trips,
+                AVG(c.income) as avg_income,
+                AVG(z.parking_cost) as avg_parking_at_home
+            FROM v_census c
+            JOIN v_zones z ON c.home_zone_id = z.zone_id
+            GROUP BY c.mode
+            ORDER BY trips DESC
+            """
+        )
+        q_time = time.time() - t_query
 
-            logging.info(f"\n[Join Results] (Query took {q_time:.4f}s)")
-            logging.info(f"{'Mode':<10} {'Trips':<10} {'Avg Inc':<12} {'Avg Park $'}")
-            logging.info("-" * 45)
-            for row in results:
-                logging.info(
-                    f"{row[0]:<10} {row[1]:<10} ${row[2]:<11,.0f} ${row[3]:.2f}"
-                )
+        logging.info(f"\n[Join Results] (Query took {q_time:.4f}s)")
+        logging.info(f"{'Mode':<10} {'Trips':<10} {'Avg Inc':<12} {'Avg Park $'}")
+        logging.info("-" * 45)
+        for row in results:
+            logging.info(f"{row[0]:<10} {row[1]:<10} ${row[2]:<11,.0f} ${row[3]:.2f}")
 
         total_time = time.time() - t_ingest_start
         logging.info(f"\n[Run 1] Total Pipeline Time: {total_time:.2f}s")

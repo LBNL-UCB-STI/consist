@@ -7,19 +7,18 @@ from typing import cast
 import pytest
 
 from consist.core.coupler import Coupler
-from consist.core.noop import NoopRunContext
 from consist.models.artifact import Artifact
 
 
-def _artifact(*, key: str, container_uri: str = "workspace://dummy.csv") -> Artifact:
-    return Artifact(key=key, container_uri=container_uri, driver="csv")
+def _artifact(*, key: str, uri: str = "workspace://dummy.csv") -> Artifact:
+    return Artifact(key=key, uri=uri, driver="csv")
 
 
 def test_coupler_set_get_update_mapping_protocol() -> None:
     coupler = Coupler()
     art_a = _artifact(key="a")
-    art_b = _artifact(key="b", container_uri="workspace://b.csv")
-    art_c = _artifact(key="c", container_uri="workspace://c.csv")
+    art_b = _artifact(key="b", uri="workspace://b.csv")
+    art_c = _artifact(key="c", uri="workspace://c.csv")
 
     assert coupler.get("a") is None
     assert "a" not in coupler
@@ -54,7 +53,7 @@ def test_coupler_require_raises_with_available_keys() -> None:
 
 def test_coupler_path_requires_tracker() -> None:
     coupler = Coupler()
-    coupler.set("data", _artifact(key="data", container_uri="inputs://data.csv"))
+    coupler.set("data", _artifact(key="data", uri="inputs://data.csv"))
 
     with pytest.raises(RuntimeError) as excinfo:
         coupler.path("data")
@@ -62,7 +61,7 @@ def test_coupler_path_requires_tracker() -> None:
 
 
 def test_coupler_path_resolves_without_mutating_artifact() -> None:
-    art = _artifact(key="data", container_uri="inputs://data.csv")
+    art = _artifact(key="data", uri="inputs://data.csv")
     coupler = Coupler()
     coupler.tracker = type(
         "TrackerStub",
@@ -161,20 +160,26 @@ def test_coupler_set_from_artifact_with_real_artifact() -> None:
 
 
 def test_coupler_set_from_artifact_with_artifact_like() -> None:
-    """Test set_from_artifact with an artifact-like object (has .path and .container_uri)."""
-    from consist.core.noop import NoopArtifact
+    """Test set_from_artifact with an artifact-like object (has .path and .uri)."""
+    from dataclasses import dataclass
+
+    @dataclass
+    class _ArtifactLikeStub:
+        key: str
+        path: Path
+        uri: str
 
     coupler = Coupler()
-    noop_art = NoopArtifact(
+    stub_art = _ArtifactLikeStub(
         key="persons",
         path=Path("workspace/persons.parquet"),
-        container_uri="workspace://persons.parquet",
+        uri="workspace://persons.parquet",
     )
 
-    result = coupler.set_from_artifact("persons", noop_art)
+    result = coupler.set_from_artifact("persons", stub_art)
 
-    assert result == noop_art
-    assert coupler.get("persons") == noop_art
+    assert result == stub_art
+    assert coupler.get("persons") == stub_art
 
 
 def test_coupler_set_from_artifact_with_path() -> None:
@@ -197,22 +202,6 @@ def test_coupler_set_from_artifact_with_string_path() -> None:
 
     assert result == path_str
     assert coupler.get("data") == path_str
-
-
-def test_noop_run_context_preserves_table_and_array_paths() -> None:
-    ctx = NoopRunContext()
-    artifact = Artifact(
-        key="members",
-        container_uri="workspace://members.h5",
-        driver="h5_table",
-        table_path="/tables/members",
-        array_path="/groups/members",
-    )
-
-    noop_artifact = ctx.log_artifact(artifact, key="members")
-
-    assert noop_artifact.table_path == "/tables/members"
-    assert noop_artifact.array_path == "/groups/members"
 
 
 def test_coupler_view_sets_namespaced_keys_and_preserves_global_access() -> None:
@@ -265,7 +254,7 @@ def test_coupler_view_path_resolves_tracker() -> None:
         {"resolve_uri": lambda _self, uri: "/abs/beam/data.csv"},
     )()
     beam = coupler.view("beam")
-    beam.set("data", _artifact(key="data", container_uri="inputs://beam/data.csv"))
+    beam.set("data", _artifact(key="data", uri="inputs://beam/data.csv"))
 
     assert beam.path("data") == Path("/abs/beam/data.csv")
 
@@ -325,23 +314,29 @@ def test_coupler_view_pop() -> None:
 
 
 def test_coupler_path_supports_path_string_and_artifact_like() -> None:
-    from consist.core.noop import NoopArtifact
+    from dataclasses import dataclass
+
+    @dataclass
+    class _ArtifactLikeStub:
+        key: str
+        path: Path
+        uri: str
 
     coupler = Coupler()
     coupler.set_from_artifact("as_path", Path("workspace/data.csv"))
     coupler.set_from_artifact("as_str", "workspace/other.csv")
     coupler.set_from_artifact(
-        "as_noop",
-        NoopArtifact(
-            key="as_noop",
+        "as_stub",
+        _ArtifactLikeStub(
+            key="as_stub",
             path=Path("workspace/persons.parquet"),
-            container_uri="workspace://persons.parquet",
+            uri="workspace://persons.parquet",
         ),
     )
 
     assert coupler.path("as_path") == Path("workspace/data.csv")
     assert coupler.path("as_str") == Path("workspace/other.csv")
-    assert coupler.path("as_noop") == Path("workspace/persons.parquet")
+    assert coupler.path("as_stub") == Path("workspace/persons.parquet")
 
     coupler.tracker = type(
         "TrackerStub",
@@ -350,3 +345,54 @@ def test_coupler_path_supports_path_string_and_artifact_like() -> None:
     )()
     coupler.set_from_artifact("as_uri_str", "inputs://table.parquet")
     assert coupler.path("as_uri_str") == Path("/resolved/table.parquet")
+
+
+def test_coupler_path_uses_artifact_as_path_recovery_fallback(tmp_path: Path) -> None:
+    from consist.core.tracker import Tracker
+
+    primary_runs = tmp_path / "primary_runs"
+    recovery_root = tmp_path / "recovery"
+
+    tracker = Tracker(
+        run_dir=primary_runs,
+        db_path=tmp_path / "prov.duckdb",
+    )
+    with tracker.start_run("seed", model="seed"):
+        src = tracker.run_artifact_dir() / "recovered.csv"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_text("v\n1\n", encoding="utf-8")
+        art = tracker.log_output(src, key="recovered")
+
+    archived_path = Path(tracker.archive_artifact(art, recovery_root, mode="copy"))
+    src.unlink()
+    assert not src.exists()
+    assert archived_path.exists()
+
+    coupler = Coupler(tracker=tracker)
+    coupler.set("recovered", art)
+
+    assert coupler.path("recovered") == archived_path
+
+
+def test_coupler_mutable_mapping_protocol_delitem_and_to_dict() -> None:
+    from collections.abc import Mapping, MutableMapping
+
+    coupler = Coupler()
+    assert isinstance(coupler, Mapping)
+    assert isinstance(coupler, MutableMapping)
+
+    art_a = _artifact(key="a", uri="workspace://a.csv")
+    art_b = _artifact(key="b", uri="workspace://b.csv")
+    coupler["a"] = art_a
+    coupler["b"] = art_b
+
+    assert dict(coupler) == {"a": art_a, "b": art_b}
+    assert coupler.to_dict() == {"a": art_a, "b": art_b}
+    assert coupler.get("missing", art_a) is art_a
+
+    del coupler["a"]
+    assert "a" not in coupler
+    assert list(coupler.keys()) == ["b"]
+
+    with pytest.raises(KeyError):
+        del coupler["a"]

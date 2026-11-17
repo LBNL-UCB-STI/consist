@@ -280,7 +280,7 @@ def test_schema_preserves_public_fingerprint_and_external_artifact_boundaries() 
     fingerprint_description = cast(str, fingerprint.description)
     producing_run_description = cast(str, producing_run.description)
 
-    assert "Artifact.hash" in fingerprint_description
+    assert "Artifact.digest" in fingerprint_description
     assert "content- or metadata-based" in fingerprint_description
     assert "content_id" not in attributes
     assert "database-local" in fingerprint_description
@@ -349,7 +349,7 @@ def test_release_builder_writes_modular_merged_and_documented_assets(
     assert "ConsistBindingInvocationReference" in binding_merged.read_text()
     assert any("provenance" in path.as_posix() for path in reference_docs)
     assert any("binding" in path.as_posix() for path in reference_docs)
-    assert any("Artifact.hash" in path.read_text() for path in reference_docs)
+    assert any("Artifact.digest" in path.read_text() for path in reference_docs)
 
     for line in checksums.read_text().splitlines():
         digest, relative_path = line.split("  ", maxsplit=1)

@@ -1,9 +1,9 @@
 import logging
 from typing import Any, Iterable, Optional, TYPE_CHECKING, Union
 
-from sqlmodel import SQLModel
+from pydantic import BaseModel
 
-from consist.core.stores import dispose_hot_data_engine, get_hot_data_db_path
+from consist.core.stores import get_hot_data_db, get_hot_data_db_path
 from consist.models.artifact import Artifact
 from consist.models.run import Run
 
@@ -86,7 +86,7 @@ def resolve_ingest_data(
     """
     if data is not None:
         return data
-    return tracker.resolve_uri(artifact.container_uri)
+    return tracker.resolve_uri(artifact.uri)
 
 
 def ingest_artifact(
@@ -94,7 +94,7 @@ def ingest_artifact(
     tracker: "Tracker",
     artifact: Artifact,
     data: Optional[Union[Iterable[dict[str, Any]], Any]],
-    schema: Optional[type[SQLModel]],
+    schema: Optional[type[BaseModel]],
     run: Optional[Run],
     profile_schema: bool,
 ) -> Any:
@@ -126,14 +126,13 @@ def ingest_artifact(
     RuntimeError
         If no database is configured.
     """
+    hot_data_db = get_hot_data_db(tracker)
     hot_data_db_path = get_hot_data_db_path(tracker)
-    if hot_data_db_path is None:
+    if hot_data_db is None and hot_data_db_path is None:
         raise RuntimeError("Cannot ingest: db_path is not configured.")
 
     target_run = resolve_ingest_run(tracker=tracker, artifact=artifact, run=run)
     data_to_pass = resolve_ingest_data(tracker=tracker, artifact=artifact, data=data)
-
-    dispose_hot_data_engine(tracker)
 
     from consist.integrations.dlt_loader import ingest_artifact as ingest_with_dlt
 
@@ -146,19 +145,30 @@ def ingest_artifact(
         lock_retries=tracker._dlt_lock_retries,
         lock_base_sleep_seconds=tracker._dlt_lock_base_sleep_seconds,
         lock_max_sleep_seconds=tracker._dlt_lock_max_sleep_seconds,
+        db=hot_data_db,
     )
 
     if tracker.db:
-        tracker.db.update_artifact_meta(
-            artifact, {"is_ingested": True, "dlt_table_name": resource_name}
-        )
+        meta_updates = {"is_ingested": True, "dlt_table_name": resource_name}
+        tracker.db.update_artifact_meta(artifact, meta_updates)
+        updated_artifact = artifact.with_meta(meta_updates, merge=True)
 
         if profile_schema:
-            tracker.artifact_schemas.profile_ingested_table(
-                artifact=artifact,
+            updated_artifact = tracker.artifact_schemas.profile_ingested_table(
+                artifact=updated_artifact,
                 run=target_run,
                 table_schema="global_tables",
                 table_name=resource_name,
             )
+
+        if tracker.current_consist is not None:
+            tracker.current_consist.replace_artifact(updated_artifact)
+        from consist.core.tracker import Tracker as _TrackerCls
+
+        if isinstance(tracker, _TrackerCls):
+            if tracker._last_consist is not None:
+                tracker._last_consist.replace_artifact(updated_artifact)
+            tracker._replace_live_coupler_artifact(updated_artifact)
+            tracker._run_artifacts_cache.clear()
 
     return info

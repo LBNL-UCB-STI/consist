@@ -4,7 +4,6 @@ from types import SimpleNamespace
 
 import pandas as pd
 import pytest
-from sqlmodel import SQLModel
 
 from consist.core.cache import ActiveRunCacheOptions, hydrate_cache_hit_outputs
 from consist.core.materialize import (
@@ -14,15 +13,7 @@ from consist.core.materialize import (
 )
 from consist.core.tracker import Tracker
 from consist.models.artifact import Artifact
-from consist.models.artifact_schema import (
-    ArtifactSchema,
-    ArtifactSchemaField,
-    ArtifactSchemaObservation,
-    ArtifactSchemaRelation,
-)
-from consist.models.config_facet import ConfigFacet
-from consist.models.run import ConsistRecord, Run, RunArtifactLink, RunArtifacts
-from consist.models.run_config_kv import RunConfigKV
+from consist.models.run import ConsistRecord, Run, RunArtifacts
 from consist.types import (
     ArtifactSpec,
     CacheOptions,
@@ -34,24 +25,7 @@ from consist.types import (
 
 
 def _init_core_tables(tracker: Tracker) -> None:
-    core_tables = [
-        getattr(Run, "__table__"),
-        getattr(Artifact, "__table__"),
-        getattr(RunArtifactLink, "__table__"),
-        getattr(ConfigFacet, "__table__"),
-        getattr(RunConfigKV, "__table__"),
-        getattr(ArtifactSchema, "__table__"),
-        getattr(ArtifactSchemaField, "__table__"),
-        getattr(ArtifactSchemaObservation, "__table__"),
-        getattr(ArtifactSchemaRelation, "__table__"),
-    ]
-    if tracker.engine:
-        with tracker.engine.connect() as connection:
-            with connection.begin():
-                SQLModel.metadata.create_all(connection, tables=core_tables)
-                if tracker.db:
-                    tracker.db._relax_run_parent_fk()
-                    tracker.db._ensure_schema_links_view()
+    del tracker
 
 
 def test_outputs_requested_selects_complete_same_identity_candidate(
@@ -1114,7 +1088,7 @@ def test_cache_hydration_policies_end_to_end(
     # Inputs-missing should raise for ingested artifacts with unsupported drivers.
     bad_artifact = Artifact(
         key="unsupported",
-        container_uri="./outputs/unsupported.txt",
+        uri="./outputs/unsupported.txt",
         driver="txt",
         run_id=cached_a.run_id,
         meta={"is_ingested": True},
@@ -1203,10 +1177,8 @@ def test_cache_hydration_policies_end_to_end(
         ):
             pass
 
-    if tracker_a.engine:
-        tracker_a.engine.dispose()
-    if tracker_b.engine:
-        tracker_b.engine.dispose()
+    tracker_a.close()
+    tracker_b.close()
 
 
 def test_build_materialize_items_and_materialize_from_sources(tmp_path: Path) -> None:
@@ -1223,13 +1195,13 @@ def test_build_materialize_items_and_materialize_from_sources(tmp_path: Path) ->
 
     artifact = Artifact(
         key="alpha",
-        container_uri="./source.txt",
+        uri="./source.txt",
         driver="txt",
         meta={},
     )
     missing_artifact = Artifact(
         key="missing",
-        container_uri="./missing.txt",
+        uri="./missing.txt",
         driver="txt",
         meta={},
     )
@@ -1294,8 +1266,7 @@ def test_outputs_requested_permission_denied_warns_and_continues(
         for record in caplog.records
     )
 
-    if tracker.engine:
-        tracker.engine.dispose()
+    tracker.close()
 
 
 def test_inputs_missing_permission_denied_warns_and_continues(
@@ -1345,10 +1316,8 @@ def test_inputs_missing_permission_denied_warns_and_continues(
         for record in caplog.records
     )
 
-    if tracker_a.engine:
-        tracker_a.engine.dispose()
-    if tracker_b.engine:
-        tracker_b.engine.dispose()
+    tracker_a.close()
+    tracker_b.close()
 
 
 def test_inputs_missing_preserves_existing_stale_destination_by_default(
@@ -1538,7 +1507,7 @@ def test_inputs_missing_validation_preserves_existing_destination_without_hash(
         source = out_dir / "a.csv"
         source.write_text("value\nexpected\n", encoding="utf-8")
         artifact = tracker_a.log_artifact(source, key="a", direction="output")
-    artifact.hash = None
+    artifact = artifact.with_digest(None)
 
     tracker_b = Tracker(run_dir=tmp_path / "runs_b", db_path=db_path)
     _init_core_tables(tracker_b)
@@ -1750,15 +1719,11 @@ def test_outputs_requested_moved_run_dir_is_a_cache_miss(
     assert run is not None
     assert "materialized_outputs" not in (run.meta or {})
 
-    if tracker_a.engine:
-        tracker_a.engine.dispose()
-    if tracker_b.engine:
-        tracker_b.engine.dispose()
+    tracker_a.close()
+    tracker_b.close()
 
-    if tracker_a.engine:
-        tracker_a.engine.dispose()
-    if tracker_b.engine:
-        tracker_b.engine.dispose()
+    tracker_a.close()
+    tracker_b.close()
 
 
 def test_hydrate_cache_hit_outputs_records_materialized_outputs_meta(
@@ -1777,7 +1742,7 @@ def test_hydrate_cache_hit_outputs_records_materialized_outputs_meta(
 
     artifact = Artifact(
         key="a",
-        container_uri="./outputs/a.csv",
+        uri="./outputs/a.csv",
         driver="csv",
         run_id="cached",
         meta={},
@@ -1870,10 +1835,8 @@ def test_outputs_all_uses_archive_source_root_for_mirror_recovery(
         encoding="utf-8"
     ) == "value\n2\n"
 
-    if tracker_a.engine:
-        tracker_a.engine.dispose()
-    if tracker_b.engine:
-        tracker_b.engine.dispose()
+    tracker_a.close()
+    tracker_b.close()
 
 
 def test_outputs_requested_uses_archive_source_root_for_mirror_recovery(
@@ -1916,10 +1879,8 @@ def test_outputs_requested_uses_archive_source_root_for_mirror_recovery(
 
     assert requested_dest.read_text(encoding="utf-8") == "value\n1\n"
 
-    if tracker_a.engine:
-        tracker_a.engine.dispose()
-    if tracker_b.engine:
-        tracker_b.engine.dispose()
+    tracker_a.close()
+    tracker_b.close()
 
 
 def test_outputs_requested_miss_policy_handles_source_root_success_and_failure(
@@ -2133,10 +2094,8 @@ def test_outputs_all_uses_artifact_recovery_roots_without_source_root(
         encoding="utf-8"
     ) == "value\n2\n"
 
-    if tracker_a.engine:
-        tracker_a.engine.dispose()
-    if tracker_b.engine:
-        tracker_b.engine.dispose()
+    tracker_a.close()
+    tracker_b.close()
 
 
 def test_outputs_requested_uses_artifact_recovery_roots_without_source_root(
@@ -2181,10 +2140,8 @@ def test_outputs_requested_uses_artifact_recovery_roots_without_source_root(
 
     assert requested_dest.read_text(encoding="utf-8") == "value\n1\n"
 
-    if tracker_a.engine:
-        tracker_a.engine.dispose()
-    if tracker_b.engine:
-        tracker_b.engine.dispose()
+    tracker_a.close()
+    tracker_b.close()
 
 
 def test_cache_validation_accepts_archived_outputs_via_recovery_roots(
@@ -2217,10 +2174,8 @@ def test_cache_validation_accepts_archived_outputs_via_recovery_roots(
     ) as t:
         assert t.is_cached
 
-    if tracker_a.engine:
-        tracker_a.engine.dispose()
-    if tracker_b.engine:
-        tracker_b.engine.dispose()
+    tracker_a.close()
+    tracker_b.close()
 
 
 def test_outputs_all_delegates_to_run_materialization_with_preserved_layout(
@@ -2240,7 +2195,7 @@ def test_outputs_all_delegates_to_run_materialization_with_preserved_layout(
     )
     artifact = Artifact(
         key="network",
-        container_uri="outputs://beam/network.parquet",
+        uri="outputs://beam/network.parquet",
         driver="parquet",
         run_id="producer",
         meta={"mount_root": str(tmp_path / "historical_mount")},
@@ -2348,7 +2303,11 @@ def test_outputs_all_legacy_fallback_uses_artifact_recovery_roots(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    tracker = Tracker(run_dir=tmp_path / "active_runs", allow_external_paths=True)
+    tracker = Tracker(
+        run_dir=tmp_path / "active_runs",
+        db_path=str(tmp_path / "provenance.db"),
+        allow_external_paths=True,
+    )
     archive_root = tmp_path / "archive_outputs"
     archived = archive_root / "outputs" / "a.csv"
     archived.parent.mkdir(parents=True, exist_ok=True)
@@ -2356,11 +2315,14 @@ def test_outputs_all_legacy_fallback_uses_artifact_recovery_roots(
 
     artifact = Artifact(
         key="a",
-        container_uri="./outputs/a.csv",
+        uri="./outputs/a.csv",
         driver="csv",
         run_id=None,
-        meta={"recovery_roots": [str(archive_root)]},
+        meta={},
     )
+    assert tracker.db is not None
+    tracker.db.sync_artifact(artifact)
+    tracker.set_artifact_recovery_roots(artifact, [archive_root])
     run = Run(
         id="active",
         model_name="model",
@@ -2412,7 +2374,7 @@ def test_outputs_all_legacy_fallback_raises_on_missing_source(
     tracker = Tracker(run_dir=tmp_path / "active_runs", allow_external_paths=True)
     artifact = Artifact(
         key="a",
-        container_uri="./outputs/a.csv",
+        uri="./outputs/a.csv",
         driver="csv",
         run_id=None,
         meta={},
@@ -2468,7 +2430,7 @@ def test_outputs_requested_delegates_via_staging_and_warns_on_missing_keys(
     tracker = Tracker(run_dir=tmp_path / "active_runs", allow_external_paths=True)
     artifact = Artifact(
         key="a",
-        container_uri="./outputs/a.csv",
+        uri="./outputs/a.csv",
         driver="csv",
         run_id="producer",
         meta={},
@@ -2571,7 +2533,7 @@ def test_outputs_requested_source_root_does_not_warn_and_continue_on_failure(
     tracker = Tracker(run_dir=tmp_path / "active_runs", allow_external_paths=True)
     artifact = Artifact(
         key="a",
-        container_uri="./outputs/a.csv",
+        uri="./outputs/a.csv",
         driver="csv",
         run_id="producer",
         meta={},
@@ -2631,7 +2593,7 @@ def test_outputs_requested_legacy_fallback_warns_on_missing_source(
     tracker = Tracker(run_dir=tmp_path / "active_runs", allow_external_paths=True)
     artifact = Artifact(
         key="a",
-        container_uri="./outputs/a.csv",
+        uri="./outputs/a.csv",
         driver="csv",
         run_id=None,
         meta={},
@@ -2782,7 +2744,7 @@ def test_cache_hit_and_hydrated_outputs_support_set_artifact_recovery_roots(
 
     persisted = tracker_b.db.get_artifact(cached_art.id)
     assert persisted is not None
-    assert str(archive_root_1.resolve()) in persisted.meta.get("recovery_roots", [])
+    assert str(archive_root_1.resolve()) in tracker_b.artifact_recovery_roots(persisted)
 
     # 4. Output hydration path: hydrate_run_outputs produces detached clones via materialize.py
     hydrated_result = tracker_b.hydrate_run_outputs(
@@ -2797,14 +2759,12 @@ def test_cache_hit_and_hydrated_outputs_support_set_artifact_recovery_roots(
     tracker_b.set_artifact_recovery_roots(hydrated_art, [archive_root_2], append=True)
     persisted_after = tracker_b.db.get_artifact(hydrated_art.id)
     assert persisted_after is not None
-    assert str(archive_root_2.resolve()) in persisted_after.meta.get(
-        "recovery_roots", []
+    assert str(archive_root_2.resolve()) in tracker_b.artifact_recovery_roots(
+        persisted_after
     )
 
-    if tracker_a.engine:
-        tracker_a.engine.dispose()
-    if tracker_b.engine:
-        tracker_b.engine.dispose()
+    tracker_a.close()
+    tracker_b.close()
 
 
 def test_inputs_missing_validation_preserves_valid_and_rehydrates_corrupted_directory_input(
@@ -2893,10 +2853,8 @@ def test_inputs_missing_validation_preserves_valid_and_rehydrates_corrupted_dire
     ):
         assert (destination / "nested" / "0.0").read_bytes() == b"corrupted-historical"
 
-    if tracker_a.engine:
-        tracker_a.engine.dispose()
-    if tracker_b.engine:
-        tracker_b.engine.dispose()
+    tracker_a.close()
+    tracker_b.close()
 
 
 def test_outputs_requested_rejects_corrupted_directory_candidate_and_recovers_from_archive(
@@ -2973,12 +2931,9 @@ def test_outputs_requested_rejects_corrupted_directory_candidate_and_recovers_fr
     hydrated_path = Path(third.run.meta["materialized_outputs"]["skims"])
     assert (hydrated_path / "nested" / "0.0").read_bytes() == b"skim-2"
 
-    if tracker_a.engine:
-        tracker_a.engine.dispose()
-    if tracker_b.engine:
-        tracker_b.engine.dispose()
-    if tracker_c.engine:
-        tracker_c.engine.dispose()
+    tracker_a.close()
+    tracker_b.close()
+    tracker_c.close()
 
 
 def test_outputs_requested_replaces_stale_and_rolls_back_directory_destination_on_failure(
@@ -3057,10 +3012,8 @@ def test_outputs_requested_replaces_stale_and_rolls_back_directory_destination_o
     assert miss_result.cache_hit is False
     assert observed_during_miss == [b"caller-uncommitted-bytes"]
 
-    if tracker_a.engine:
-        tracker_a.engine.dispose()
-    if tracker_b.engine:
-        tracker_b.engine.dispose()
+    tracker_a.close()
+    tracker_b.close()
 
 
 def test_cache_hit_abs_path_populated_for_skipped_existing_and_shapefile_bundles(
@@ -3174,10 +3127,8 @@ def test_cache_hit_abs_path_populated_for_skipped_existing_and_shapefile_bundles
     assert (expected_set_root / "part_a.csv").exists()
     assert hit_3.outputs["bundle_set"].abs_path == str(expected_set_root.resolve())
 
-    if tracker.engine:
-        tracker.engine.dispose()
-    if tracker_b.engine:
-        tracker_b.engine.dispose()
+    tracker.close()
+    tracker_b.close()
 
 
 def test_dynamic_logged_outputs_hydrated_on_cold_scratch_with_eager_validation(
@@ -3289,5 +3240,4 @@ def test_dynamic_logged_outputs_hydrated_on_cold_scratch_with_eager_validation(
     assert hydrated_events.read_bytes() == b"events-2"
     assert (hydrated_skims / "chunk" / "0.0").read_bytes() == b"skims-2"
 
-    if tracker.engine:
-        tracker.engine.dispose()
+    tracker.close()

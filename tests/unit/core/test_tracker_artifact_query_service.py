@@ -4,7 +4,7 @@ import uuid
 
 import pytest
 
-from consist.models.artifact import Artifact, get_tracker_ref
+from consist.models.artifact import Artifact
 from consist.models.run import Run
 
 
@@ -29,9 +29,10 @@ def test_artifact_query_service_prefers_current_run_artifacts_by_uri(
                 ),
             )
 
-        found = service.get_artifact_by_uri(artifact.container_uri)
+        found = service.get_artifact_by_uri(artifact.uri)
 
-    assert found is artifact
+    assert found == artifact
+    assert found.resolver is tracker
 
 
 def test_artifact_query_service_normalizes_run_filters_and_attaches_tracker(
@@ -48,7 +49,7 @@ def test_artifact_query_service_normalizes_run_filters_and_attaches_tracker(
     artifact = Artifact(
         id=uuid.uuid4(),
         key="result",
-        container_uri="outputs://result.csv",
+        uri="outputs://result.csv",
         driver="csv",
     )
     captured: dict[str, object] = {}
@@ -81,6 +82,4 @@ def test_artifact_query_service_normalizes_run_filters_and_attaches_tracker(
         "key": "result",
         "limit": 7,
     }
-    tracker_ref = get_tracker_ref(artifact)
-    assert tracker_ref is not None
-    assert tracker_ref() is tracker
+    assert results[0].resolver is tracker

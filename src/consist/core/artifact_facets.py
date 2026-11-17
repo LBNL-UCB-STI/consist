@@ -74,7 +74,7 @@ class ArtifactFacetManager:
             logging.info(
                 "[Consist] Skipping artifact facet persistence for artifact %s "
                 "(facet too large: %d bytes).",
-                getattr(artifact, "id", None),
+                artifact.id,
                 facet_bytes,
             )
             return None
@@ -108,7 +108,7 @@ class ArtifactFacetManager:
                 logging.info(
                     "[Consist] Skipping artifact facet KV indexing for artifact %s "
                     "(too many keys: %d).",
-                    getattr(artifact, "id", None),
+                    artifact.id,
                     len(kv_rows),
                 )
                 kv_rows = None
@@ -130,9 +130,9 @@ class ArtifactFacetManager:
         index_kv: bool,
         max_facet_bytes: int = 16_384,
         max_kv_rows: int = 500,
-    ) -> None:
+    ) -> Artifact:
         if not self._db:
-            return
+            return artifact
 
         bundle = self.prepare_facet_bundle(
             artifact=artifact,
@@ -145,9 +145,9 @@ class ArtifactFacetManager:
             max_kv_rows=max_kv_rows,
         )
         if bundle is None:
-            return
+            return artifact
 
-        self._db.persist_artifact_facet_bundle(
+        return self._db.persist_artifact_facet_bundle(
             artifact=artifact,
             facet=bundle.facet,
             meta_updates=bundle.meta_updates,

@@ -1,73 +1,31 @@
 """
-Database model for flattened artifact facet keys in the Consist main database.
-
-This table stores typed scalar facet leaves for fast artifact filtering.
+Value model for flattened artifact facet key-value rows in Consist.
 """
 
 from __future__ import annotations
 
-import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Optional
+import uuid
 
-from sqlalchemy import Column, DateTime, JSON, String
-from sqlmodel import Field, SQLModel
-
-from consist.models.artifact import UUIDType
+from pydantic import BaseModel, Field
 
 UTC = timezone.utc
 
 
-class ArtifactKV(SQLModel, table=True):
-    """
-    Query index table for artifact facets.
+class ArtifactKV(BaseModel):
+    """Typed key-value index entry extracted from an ``ArtifactFacet``."""
 
-    Each row represents a scalar leaf from an artifact facet payload.
-    """
-
-    __tablename__ = "artifact_kv"
-
-    artifact_id: uuid.UUID = Field(
-        primary_key=True,
-        sa_type=UUIDType,
-        sa_column_kwargs={"autoincrement": False},
-        index=True,
-    )
-
-    facet_id: str = Field(
-        primary_key=True,
-        sa_column_kwargs={"autoincrement": False},
-        index=True,
-    )
-
-    key_path: str = Field(
-        primary_key=True,
-        index=True,
-        description="Flattened dotted key path.",
-    )
-
+    artifact_id: uuid.UUID
+    facet_id: str
+    key_path: str = Field(description="Flattened dotted key path.")
     namespace: Optional[str] = Field(
         default=None,
-        index=True,
         description="Optional namespace for the indexed facet.",
     )
-
-    value_type: str = Field(
-        description="One of: str|int|float|bool|null",
-    )
-
-    value_str: Optional[str] = Field(
-        default=None, sa_column=Column(String, nullable=True)
-    )
-    value_num: Optional[float] = Field(default=None, nullable=True)
-    value_bool: Optional[bool] = Field(default=None, nullable=True)
-    value_json: Optional[Dict[str, Any]] = Field(
-        default=None,
-        sa_column=Column(JSON, nullable=True),
-        description="Reserved for future compatibility.",
-    )
-
-    created_at: datetime = Field(
-        default_factory=lambda: datetime.now(UTC),
-        sa_type=DateTime,
-    )
+    value_type: str = Field(description="One of: str|int|float|bool|null")
+    value_str: Optional[str] = None
+    value_num: Optional[float] = None
+    value_bool: Optional[bool] = None
+    value_json: Optional[Any] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

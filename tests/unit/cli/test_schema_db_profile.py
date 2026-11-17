@@ -3,10 +3,9 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
-from sqlmodel import Session
-
 from consist import Tracker
 from consist.cli import ConsistShell
+from consist.digest import Digest
 from consist.models.artifact import Artifact
 from consist.models.artifact_schema import (
     ArtifactSchema,
@@ -35,9 +34,9 @@ def test_schema_command_uses_db_profile_when_available(tmp_path: Path, capsys) -
     artifact = Artifact(
         id=artifact_id,
         key="test_artifact",
-        container_uri="inputs://data.csv",
+        uri="inputs://data.csv",
         driver="csv",
-        hash="abc",
+        digest=Digest("sha256:file", "ab" * 32),
         meta={"schema_id": schema_id},
     )
 
@@ -47,12 +46,9 @@ def test_schema_command_uses_db_profile_when_available(tmp_path: Path, capsys) -
         source="duckdb",
     )
 
-    with Session(tracker.engine) as session:
-        session.add(schema)
-        session.add(field)
-        session.add(artifact)
-        session.add(observation)
-        session.commit()
+    assert tracker.db is not None
+    tracker.db.sync_artifact(artifact)
+    tracker.db.persist_artifact_schema(schema, [field], observation=observation)
 
     shell = ConsistShell(tracker)
     shell.do_schema_profile("test_artifact")
@@ -61,3 +57,4 @@ def test_schema_command_uses_db_profile_when_available(tmp_path: Path, capsys) -
     assert "Schema: test_artifact" in captured
     assert "col" in captured
     assert "integer" in captured
+    tracker.close()

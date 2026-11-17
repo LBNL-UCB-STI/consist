@@ -14,8 +14,8 @@ from consist import (
 from consist.api import StringCapture as ApiStringCapture
 from consist.core.output_sets import (
     build_output_set_manifest,
+    compute_output_set_manifest_digest,
     discover_output_set_members,
-    _manifest_identity_hash,
     output_set_child_destinations,
     resolve_output_set_expected_members,
     validate_cached_output_sets,
@@ -156,12 +156,12 @@ def test_output_set_child_destinations_rejects_traversal_metadata() -> None:
     parent = Artifact(
         id=parent_id,
         key="annual",
-        container_uri="inputs://annual",
+        uri="inputs://annual",
         driver="artifact_set",
     )
     child = Artifact(
         key="annual__escape",
-        container_uri="inputs://annual/../escape.csv",
+        uri="inputs://annual/../escape.csv",
         driver="csv",
         parent_artifact_id=parent_id,
         meta={
@@ -183,12 +183,12 @@ def test_output_set_child_destinations_rejects_absolute_metadata() -> None:
     parent = Artifact(
         id=parent_id,
         key="annual",
-        container_uri="inputs://annual",
+        uri="inputs://annual",
         driver="artifact_set",
     )
     child = Artifact(
         key="annual__absolute",
-        container_uri="inputs://annual/escape.csv",
+        uri="inputs://annual/escape.csv",
         driver="csv",
         parent_artifact_id=parent_id,
         meta={
@@ -210,12 +210,12 @@ def test_validate_cached_output_sets_rejects_traversal_metadata() -> None:
     parent = Artifact(
         id=parent_id,
         key="annual",
-        container_uri="inputs://annual",
+        uri="inputs://annual",
         driver="artifact_set",
     )
     child = Artifact(
         key="annual__escape",
-        container_uri="inputs://annual/../escape.csv",
+        uri="inputs://annual/../escape.csv",
         driver="csv",
         parent_artifact_id=parent_id,
         meta={
@@ -332,7 +332,9 @@ def test_filename_pattern_manifest_identity_is_order_independent(
         logged_members=[],
     )
 
-    assert _manifest_identity_hash(manifest_a) == _manifest_identity_hash(manifest_b)
+    assert compute_output_set_manifest_digest(
+        manifest_a
+    ) == compute_output_set_manifest_digest(manifest_b)
 
 
 def test_filename_pattern_capture_extracts_typed_facets(tmp_path: Path) -> None:

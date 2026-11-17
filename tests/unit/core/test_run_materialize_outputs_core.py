@@ -49,6 +49,9 @@ def _run(run_id: str, *, run_dir: Path, mounts: dict[str, str] | None = None) ->
     )
 
 
+_STUB_RECOVERY_ROOTS: dict[uuid.UUID, list[str]] = {}
+
+
 def _artifact(
     key: str,
     uri: str,
@@ -57,15 +60,42 @@ def _artifact(
     driver: str = "csv",
     hash_value: str | None = None,
     meta: dict | None = None,
+    recovery_roots: list[str] | None = None,
 ) -> Artifact:
+    from consist.digest import Digest
+    import hashlib
+
+    meta_dict = dict(meta or {})
+    digest_obj = None
+    if hash_value is not None:
+        scheme = (
+            "dir_manifest_v1:sha256"
+            if (
+                meta_dict.get("directory_artifact")
+                or meta_dict.get("file_bundle_artifact")
+                or meta_dict.get("file_bundle") == "shapefile"
+                or driver in {"zarr", "shapefile", "directory"}
+            )
+            else "sha256:file"
+        )
+        hex_val = (
+            hash_value
+            if len(hash_value) == 64
+            and all(c in "0123456789abcdef" for c in hash_value)
+            else hashlib.sha256(hash_value.encode("utf-8")).hexdigest()
+        )
+        digest_obj = Digest(scheme, hex_val)
+    art_id = uuid.uuid4()
+    if recovery_roots is not None:
+        _STUB_RECOVERY_ROOTS[art_id] = list(recovery_roots)
     return Artifact(
-        id=uuid.uuid4(),
+        id=art_id,
         key=key,
-        container_uri=uri,
+        uri=uri,
         driver=driver,
-        hash=hash_value,
+        digest=digest_obj,
         run_id=run_id,
-        meta=dict(meta or {}),
+        meta=meta_dict,
     )
 
 
@@ -86,6 +116,9 @@ def _stub_tracker(
         engine=None,
         get_run=db.get_run,
         get_parent_artifact=lambda artifact: None,
+        artifact_recovery_roots=lambda artifact, resolve=True: list(
+            _STUB_RECOVERY_ROOTS.get(artifact.id, [])
+        ),
     )
 
 
@@ -103,7 +136,7 @@ def test_materialize_artifact_restores_file_from_recovery_root(tmp_path: Path) -
         "./outputs/a.csv",
         run_id="producer",
         hash_value=_sha256(source),
-        meta={"recovery_roots": [str(recovery_root)]},
+        recovery_roots=[str(recovery_root)],
     )
     tracker = _stub_tracker(
         run_dir=tmp_path / "workspace",
@@ -151,7 +184,7 @@ def test_materialize_artifact_prefers_source_root_over_other_roots(
         "table",
         "./outputs/a.csv",
         run_id="producer",
-        meta={"recovery_roots": [str(recovery_root)]},
+        recovery_roots=[str(recovery_root)],
     )
     tracker = _stub_tracker(
         run_dir=tmp_path / "workspace",
@@ -292,7 +325,7 @@ def test_materialize_artifact_reports_missing_source(tmp_path: Path) -> None:
     artifact = _artifact(
         "table",
         "./outputs/a.csv",
-        meta={"recovery_roots": [str(tmp_path / "archive")]},
+        recovery_roots=[str(tmp_path / "archive")],
     )
     tracker = _stub_tracker(
         run_dir=tmp_path / "workspace",
@@ -324,7 +357,7 @@ def test_materialize_artifact_reports_hash_mismatch(tmp_path: Path) -> None:
         "table",
         "./outputs/a.csv",
         hash_value="0" * 64,
-        meta={"recovery_roots": [str(recovery_root)]},
+        recovery_roots=[str(recovery_root)],
     )
     tracker = _stub_tracker(
         run_dir=tmp_path / "workspace",
@@ -385,7 +418,7 @@ def test_materialize_artifact_blocks_symlink_recovery_source(tmp_path: Path) -> 
     artifact = _artifact(
         "table",
         "./outputs/a.csv",
-        meta={"recovery_roots": [str(recovery_root)]},
+        recovery_roots=[str(recovery_root)],
     )
     tracker = _stub_tracker(
         run_dir=tmp_path / "workspace",
@@ -422,7 +455,7 @@ def test_materialize_artifact_blocks_symlink_parent_in_recovery_source(
     artifact = _artifact(
         "table",
         "./outputs/a.csv",
-        meta={"recovery_roots": [str(recovery_root)]},
+        recovery_roots=[str(recovery_root)],
     )
     tracker = _stub_tracker(
         run_dir=tmp_path / "workspace",
@@ -455,7 +488,7 @@ def test_materialize_artifact_supports_directory_sources(tmp_path: Path) -> None
     artifact = _artifact(
         "directory",
         "./outputs/dir",
-        meta={"recovery_roots": [str(recovery_root)]},
+        recovery_roots=[str(recovery_root)],
     )
     tracker = _stub_tracker(
         run_dir=tmp_path / "workspace",
@@ -511,8 +544,8 @@ def test_materialize_artifact_directory_manifest_skips_corrupted_historical_root
         meta={
             "directory_artifact": True,
             "directory_manifest": manifest,
-            "recovery_roots": [str(recovery_root)],
         },
+        recovery_roots=[str(recovery_root)],
     )
     tracker = _stub_tracker(
         run_dir=tmp_path / "workspace",
@@ -871,7 +904,7 @@ def test_build_plan_uses_recovery_roots_for_workspace_outputs(
         "table",
         "./outputs/a.csv",
         run_id="producer",
-        meta={"recovery_roots": [str(recovery_root)]},
+        recovery_roots=[str(recovery_root)],
     )
     tracker = _stub_tracker(
         run_dir=tmp_path / "workspace",
@@ -909,7 +942,7 @@ def test_build_plan_uses_recovery_roots_for_mount_outputs_without_snapshot(
         "summary",
         "outputs://reports/summary.csv",
         run_id="producer",
-        meta={"recovery_roots": [str(recovery_root)]},
+        recovery_roots=[str(recovery_root)],
     )
     tracker = _stub_tracker(
         run_dir=tmp_path / "workspace",
@@ -952,7 +985,7 @@ def test_build_plan_prefers_historical_source_over_recovery_roots(
         "table",
         "./outputs/table.csv",
         run_id="producer",
-        meta={"recovery_roots": [str(recovery_root)]},
+        recovery_roots=[str(recovery_root)],
     )
     tracker = _stub_tracker(
         run_dir=tmp_path / "workspace",
@@ -994,7 +1027,7 @@ def test_build_plan_prefers_source_root_over_recovery_roots(
         "table",
         "./outputs/table.csv",
         run_id="producer",
-        meta={"recovery_roots": [str(recovery_root)]},
+        recovery_roots=[str(recovery_root)],
     )
     tracker = _stub_tracker(
         run_dir=tmp_path / "workspace",
@@ -1032,7 +1065,8 @@ def test_build_plan_prefers_recovery_roots_over_db_export(
         "./outputs/table.csv",
         run_id="producer",
         driver="csv",
-        meta={"is_ingested": True, "recovery_roots": [str(recovery_root)]},
+        meta={"is_ingested": True},
+        recovery_roots=[str(recovery_root)],
     )
     tracker = _stub_tracker(
         run_dir=tmp_path / "workspace",
@@ -1337,13 +1371,12 @@ def test_materialize_run_outputs_db_fallback_handles_attached_catalog_with_same_
     output_path.unlink()
 
     attached_db = run_dir / "attached_other.duckdb"
-    with tracker.engine.begin() as conn:
-        conn.exec_driver_sql(f"ATTACH '{attached_db}' AS attached_other")
-        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS attached_other.global_tables")
-        conn.exec_driver_sql(
-            'CREATE TABLE attached_other.global_tables."table" '
-            "(consist_artifact_id VARCHAR, value BIGINT, extra_col VARCHAR)"
-        )
+    tracker.db.execute(f"ATTACH '{attached_db}' AS attached_other")
+    tracker.db.execute("CREATE SCHEMA IF NOT EXISTS attached_other.global_tables")
+    tracker.db.execute(
+        'CREATE TABLE attached_other.global_tables."table" '
+        "(consist_artifact_id VARCHAR, value BIGINT, extra_col VARCHAR)"
+    )
 
     try:
         result = tracker.materialize_run_outputs(
@@ -1352,8 +1385,7 @@ def test_materialize_run_outputs_db_fallback_handles_attached_catalog_with_same_
             db_fallback="if_ingested",
         )
     finally:
-        with tracker.engine.begin() as conn:
-            conn.exec_driver_sql("DETACH DATABASE IF EXISTS attached_other")
+        tracker.db.execute("DETACH DATABASE IF EXISTS attached_other")
 
     restored_path = run_dir / "restored_attached" / "outputs" / "table.csv"
     assert result.materialized_from_db == {"table": str(restored_path.resolve())}
@@ -1404,10 +1436,7 @@ def test_materialize_run_outputs_db_fallback_empty_export_is_missing_source(
     tracker.ingest(artifact)
     output_path.unlink()
 
-    monkeypatch.setattr(
-        "consist.core.materialize.pd.read_sql",
-        lambda *_args, **_kwargs: pd.DataFrame(),
-    )
+    tracker.db.execute('DELETE FROM "global_tables"."empty"')
 
     result = tracker.materialize_run_outputs(
         "producer_empty",
@@ -1486,8 +1515,8 @@ def test_hydrate_run_outputs_returns_detached_artifact_views(
     assert result.resolvable is True
     assert result.path == restored_path
     assert result.artifact is not historical_artifact
-    assert result.artifact.hash == historical_artifact.hash == logged.hash
-    assert result.artifact.container_uri == historical_artifact.container_uri
+    assert result.artifact.digest == historical_artifact.digest == logged.digest
+    assert result.artifact.uri == historical_artifact.uri
     assert result.artifact.path == restored_path
     assert result.artifact.as_path() == restored_path
     assert result.artifact.as_path(tracker=tracker) == output_path
@@ -1567,7 +1596,7 @@ def test_hydrate_run_outputs_preserves_unhashed_artifacts(tmp_path: Path) -> Non
     result = hydrated["table"]
     assert result.status == "materialized_from_filesystem"
     assert result.resolvable is True
-    assert result.artifact.hash is None
+    assert result.artifact.digest is None
 
 
 def test_hydrate_run_outputs_warn_mode_returns_mixed_keyed_statuses(
@@ -1829,7 +1858,7 @@ def test_hydrate_run_outputs_to_destinations_prefers_source_root(
         "table",
         "./outputs/table.csv",
         run_id="producer",
-        meta={"recovery_roots": [str(recovery_root)]},
+        recovery_roots=[str(recovery_root)],
     )
     tracker = _stub_tracker(
         run_dir=tmp_path / "workspace",

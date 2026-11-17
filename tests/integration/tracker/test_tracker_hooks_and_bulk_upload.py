@@ -63,6 +63,7 @@ def test_bulk_upload_and_description(tracker: Tracker, tmp_path: Path):
     # Test 4: Verify artifacts have hashes
     print("\\n=== Verifying Artifact Hashes ===")
     for art in arts.values():
-        print(f"  {art.key}: hash={art.hash[:16]}...")
+        assert art.digest is not None
+        print(f"  {art.key}: digest={str(art.digest)[:24]}...")
 
     print("\\n✅ All new features working correctly!")

@@ -31,6 +31,7 @@ from consist.api import (
 )
 from consist.api import set_artifact_recovery_roots as set_artifact_recovery_roots_api
 from consist.core.tracker import Tracker
+from consist.digest import compute_digest, compute_output_set_digest
 from consist.models.artifact import Artifact, ArchivedOutputs
 from consist.models.run import Run
 
@@ -99,7 +100,7 @@ def _hydrated_result(
             artifact=Artifact(
                 id=uuid.uuid4(),
                 key=key,
-                container_uri=f"./{key}.csv",
+                uri=f"./{key}.csv",
                 driver="csv",
                 meta={},
             ),
@@ -317,14 +318,15 @@ def test_set_artifact_recovery_roots_persists_and_invalidates_cache(
         [archive_a, archive_a],
         tracker=tracker,
     )
-    assert updated.meta["recovery_roots"] == [str(archive_a.resolve())]
+    assert "recovery_roots" not in updated.meta
+    assert updated.recovery_roots == [str(archive_a.resolve())]
 
     refreshed = tracker.get_run_outputs("producer_recovery_roots")["table"]
-    assert refreshed.meta["recovery_roots"] == [str(archive_a.resolve())]
+    assert refreshed.recovery_roots == [str(archive_a.resolve())]
 
     tracker.set_artifact_recovery_roots(refreshed, [archive_b], append=True)
     appended = tracker.get_run_outputs("producer_recovery_roots")["table"]
-    assert appended.meta["recovery_roots"] == [
+    assert appended.recovery_roots == [
         str(archive_a.resolve()),
         str(archive_b.resolve()),
     ]
@@ -332,6 +334,7 @@ def test_set_artifact_recovery_roots_persists_and_invalidates_cache(
     tracker.set_artifact_recovery_roots(appended, [], append=False)
     cleared = tracker.get_run_outputs("producer_recovery_roots")["table"]
     assert "recovery_roots" not in cleared.meta
+    assert cleared.recovery_roots == []
 
 
 def test_log_artifact_normalizes_recovery_roots_metadata(tracker: Tracker) -> None:
@@ -348,7 +351,7 @@ def test_log_artifact_normalizes_recovery_roots_metadata(tracker: Tracker) -> No
             recovery_roots=[archive, archive],
         )
 
-    assert artifact.meta["recovery_roots"] == [str(archive.resolve())]
+    assert "recovery_roots" not in artifact.meta
     assert artifact.recovery_roots == [str(archive.resolve())]
 
 
@@ -370,7 +373,7 @@ def test_archive_artifact_copies_bytes_and_records_recovery_root(
     assert archived_path.read_text(encoding="utf-8") == "value\n1\n"
     assert output_path.exists()
     refreshed = tracker.get_run_outputs("producer_archive_copy")["archived"]
-    assert refreshed.meta["recovery_roots"] == [str(archive_root.resolve())]
+    assert refreshed.recovery_roots == [str(archive_root.resolve())]
 
 
 def test_register_artifact_recovery_copy_verifies_existing_file_without_copying(
@@ -484,8 +487,7 @@ def test_register_artifact_recovery_copy_uses_full_hash_when_tracker_is_fast(
         refreshed = tracker.get_run_outputs("producer_adopt_fast")["fast_hash"]
         assert refreshed.recovery_roots == [str(recovery_root.resolve())]
     finally:
-        if tracker.engine:
-            tracker.engine.dispose()
+        tracker.close()
 
 
 def test_register_artifact_recovery_copy_fast_hash_requires_byte_hash(
@@ -521,8 +523,7 @@ def test_register_artifact_recovery_copy_fast_hash_requires_byte_hash(
         ]
         assert "recovery_roots" not in refreshed.meta
     finally:
-        if tracker.engine:
-            tracker.engine.dispose()
+        tracker.close()
 
 
 def test_register_artifact_recovery_copy_verify_false_adopts_existing_copy(
@@ -562,8 +563,7 @@ def test_register_artifact_recovery_copy_verify_false_adopts_existing_copy(
         ]
         assert refreshed.recovery_roots == [str(recovery_root.resolve())]
     finally:
-        if tracker.engine:
-            tracker.engine.dispose()
+        tracker.close()
 
 
 def test_register_artifact_recovery_copy_empty_content_hash_is_explicit(
@@ -640,8 +640,7 @@ def test_register_artifact_recovery_copy_rejects_same_metadata_wrong_bytes(
         ]
         assert "recovery_roots" not in refreshed.meta
     finally:
-        if tracker.engine:
-            tracker.engine.dispose()
+        tracker.close()
 
 
 def test_register_artifact_recovery_copy_unmappable_layout_blocks_clearly(
@@ -651,7 +650,7 @@ def test_register_artifact_recovery_copy_unmappable_layout_blocks_clearly(
     artifact = Artifact(
         id=uuid.uuid4(),
         key="absolute",
-        container_uri=str((tmp_path / "absolute.csv").resolve()),
+        uri=str((tmp_path / "absolute.csv").resolve()),
         driver="csv",
         meta={},
     )
@@ -698,7 +697,7 @@ def test_archive_artifact_unmappable_layout_has_actionable_error(
     artifact = Artifact(
         id=uuid.uuid4(),
         key="absolute",
-        container_uri=str((tmp_path / "absolute.csv").resolve()),
+        uri=str((tmp_path / "absolute.csv").resolve()),
         driver="csv",
         meta={},
     )
@@ -784,10 +783,8 @@ def test_archive_artifact_prefers_historical_source_over_current_workspace(
 
     assert archived_path.read_text(encoding="utf-8") == "historical\n"
 
-    if tracker_a.engine:
-        tracker_a.engine.dispose()
-    if tracker_b.engine:
-        tracker_b.engine.dispose()
+    tracker_a.close()
+    tracker_b.close()
 
 
 def test_archive_run_outputs_uses_current_configured_mount_for_run_owned_file(
@@ -826,7 +823,7 @@ def test_archive_run_outputs_uses_current_configured_mount_for_run_owned_file(
         assert archived["shared"] == (archive_root / "outputs" / "shared.csv").resolve()
         assert archived["shared"].read_text(encoding="utf-8") == "historical\n"
         refreshed = tracker_b.get_run_outputs(run_id)["shared"]
-        assert refreshed.container_uri == artifact.container_uri
+        assert refreshed.uri == artifact.uri
         assert refreshed.recovery_roots == [
             str(current_workspace.resolve()),
             str(archive_root.resolve()),
@@ -843,10 +840,8 @@ def test_archive_run_outputs_uses_current_configured_mount_for_run_owned_file(
         assert hydrated["shared"].path == restored_root / "outputs" / "shared.csv"
         assert hydrated["shared"].path.read_text(encoding="utf-8") == "historical\n"
     finally:
-        if tracker_a.engine:
-            tracker_a.engine.dispose()
-        if tracker_b.engine:
-            tracker_b.engine.dispose()
+        tracker_a.close()
+        tracker_b.close()
 
 
 def test_archive_run_outputs_rejects_stale_current_managed_mount_file(
@@ -887,10 +882,8 @@ def test_archive_run_outputs_rejects_stale_current_managed_mount_file(
         assert refreshed.recovery_roots == []
         assert not archive_root.exists()
     finally:
-        if tracker_a.engine:
-            tracker_a.engine.dispose()
-        if tracker_b.engine:
-            tracker_b.engine.dispose()
+        tracker_a.close()
+        tracker_b.close()
 
 
 def test_archive_artifact_move_rolls_back_on_metadata_failure(
@@ -909,7 +902,9 @@ def test_archive_artifact_move_rolls_back_on_metadata_failure(
     def _raise_update(*_args, **_kwargs):
         raise RuntimeError("db down")
 
-    monkeypatch.setattr(tracker.db, "update_artifact_meta", _raise_update)
+    monkeypatch.setattr(
+        tracker.db, "replace_artifact_recovery_locations_bulk", _raise_update
+    )
 
     with pytest.raises(RuntimeError, match="db down"):
         tracker.archive_artifact(artifact, archive_root, mode="move")
@@ -983,8 +978,9 @@ def test_archive_run_outputs_archives_selected_keys(
 
     assert archived == {"a": (archive_root / "outputs" / "a.csv").resolve()}
     outputs = tracker.get_run_outputs("producer_archive_bulk")
-    assert outputs["a"].meta["recovery_roots"] == [str(archive_root.resolve())]
+    assert outputs["a"].recovery_roots == [str(archive_root.resolve())]
     assert "recovery_roots" not in outputs["b"].meta
+    assert outputs["b"].recovery_roots == []
 
 
 def test_archive_run_outputs_archives_output_set_and_hydrates_from_recovery_root(
@@ -1028,7 +1024,7 @@ def test_archive_run_outputs_archives_output_set_and_hydrates_from_recovery_root
 
     assert set(archived) == {"summary", "annual"}
     parent = archived.outputs["annual"]
-    parent_relative = tracker.fs.get_remappable_relative_path(parent.container_uri)
+    parent_relative = tracker.fs.get_remappable_relative_path(parent.uri)
     assert parent_relative is not None
     assert archived["annual"] == archive_root / parent_relative
     assert (archived["annual"] / "annual_2030.csv").read_text(encoding="utf-8") == (
@@ -1041,7 +1037,7 @@ def test_archive_run_outputs_archives_output_set_and_hydrates_from_recovery_root
     members = tracker.get_child_artifacts(parent)
     manifest = tracker.get_artifact(parent.meta["manifest_artifact_id"])
     assert manifest is not None
-    manifest_relative = tracker.fs.get_remappable_relative_path(manifest.container_uri)
+    manifest_relative = tracker.fs.get_remappable_relative_path(manifest.uri)
     assert manifest_relative is not None
     assert (archive_root / manifest_relative).is_file()
     for artifact in [parent, *members, manifest]:
@@ -1104,7 +1100,9 @@ def test_archive_run_outputs_preserves_compound_driver_output_set_identity(
 
     assert member_drivers == {"0.skimsOD.csv.gz": "csv", "README": "unknown"}
     assert manifest_drivers == member_drivers
-    assert parent.hash == _canonical_output_set_identity_hash(manifest_contents)
+    assert parent.digest == compute_output_set_digest(
+        (member.key, member.digest) for member in members if member.digest is not None
+    )
 
     archived = tracker.archive_run_outputs(
         result.run.id, tmp_path / "archive_compound_driver_output_set"
@@ -1489,6 +1487,7 @@ def test_archive_run_outputs_moves_all_output_set_members_and_manifest(
     [member] = tracker.get_child_artifacts(parent)
     manifest = tracker.get_artifact(parent.meta["manifest_artifact_id"])
     assert manifest is not None
+    parent_source = Path(parent.path)
     member_source = Path(member.path)
     manifest_source = Path(manifest.path)
     archive_root = tmp_path / "move_archive_output_set"
@@ -1498,7 +1497,8 @@ def test_archive_run_outputs_moves_all_output_set_members_and_manifest(
     assert (archived["annual"] / "annual_2030.csv").is_file()
     assert not member_source.exists()
     assert not manifest_source.exists()
-    assert not Path(parent.path).exists()
+    assert not parent_source.exists()
+    assert Path(parent.path) == archived["annual"]
     refreshed_parent = archived.outputs["annual"]
     refreshed_members = tracker.get_child_artifacts(refreshed_parent)
     refreshed_manifest = tracker.get_artifact(
@@ -1582,7 +1582,7 @@ def test_archive_run_outputs_rejects_stale_output_set_manifest_before_registrati
         json.dumps(json.loads(manifest_path.read_text(encoding="utf-8"))) + "\n",
         encoding="utf-8",
     )
-    assert tracker.identity.compute_file_checksum(manifest_path) != manifest.hash
+    assert compute_digest(manifest_path, driver="json") != manifest.digest
     archive_root = tmp_path / "stale_manifest_archive_output_set"
 
     with pytest.raises(ValueError, match="manifest.*identity"):
@@ -1626,8 +1626,8 @@ def test_archive_run_outputs_cleans_output_set_bytes_when_metadata_update_fails(
     [member] = tracker.get_child_artifacts(parent)
     manifest = tracker.get_artifact(parent.meta["manifest_artifact_id"])
     assert manifest is not None
-    parent_relative = tracker.fs.get_remappable_relative_path(parent.container_uri)
-    manifest_relative = tracker.fs.get_remappable_relative_path(manifest.container_uri)
+    parent_relative = tracker.fs.get_remappable_relative_path(parent.uri)
+    manifest_relative = tracker.fs.get_remappable_relative_path(manifest.uri)
     assert parent_relative is not None
     assert manifest_relative is not None
     archive_root = tmp_path / "metadata_failure_archive_output_set"
@@ -1684,8 +1684,7 @@ def test_archive_run_outputs_supports_output_sets_with_fast_manifest_identity(
             str((tmp_path / "fast_archive_output_set").resolve())
         ]
     finally:
-        if fast_tracker.engine is not None:
-            fast_tracker.engine.dispose()
+        fast_tracker.close()
 
 
 def test_archive_run_output_files_copies_verifies_and_registers_selected_file(
@@ -1852,8 +1851,24 @@ def test_archive_run_output_files_rejects_symlink_recovery_root_before_resolutio
             output_path, key="root_linked", direction="output"
         )
 
+    from consist.location import ArtifactLocationRow
+
     output_path.unlink()
-    artifact.meta = {"recovery_roots": [str(linked_root)]}
+    assert tracker.db is not None
+    tracker.db.replace_artifact_recovery_locations_bulk(
+        {
+            artifact.id: [
+                ArtifactLocationRow.create(
+                    digest=str(artifact.digest) if artifact.digest else None,
+                    artifact_id=artifact.id,
+                    site="advisory",
+                    mount_name="abs",
+                    mount_instance_id="",
+                    uri=f"file://{linked_root}/outputs/root_linked.csv",
+                )
+            ]
+        }
+    )
     monkeypatch.setattr(
         tracker, "get_run_outputs", lambda _run_id: {"root_linked": artifact}
     )
@@ -1910,7 +1925,7 @@ def test_archive_run_output_files_rejects_output_set_roles_before_copy(
     artifact = Artifact(
         id=uuid.uuid4(),
         key="set",
-        container_uri="./outputs/set",
+        uri="./outputs/set",
         driver="artifact_set",
         meta={"artifact_set": True},
     )
@@ -1940,7 +1955,7 @@ def test_archive_run_output_files_rejects_output_set_manifest_and_member(
     artifact = Artifact(
         id=uuid.uuid4(),
         key=key,
-        container_uri=f"./outputs/{key}.json",
+        uri=f"./outputs/{key}.json",
         driver="json",
         meta=meta,
     )
@@ -2609,7 +2624,7 @@ def test_api_register_artifact_recovery_copy_delegates_with_default_tracker(
     artifact = Artifact(
         id=uuid.uuid4(),
         key="x",
-        container_uri="./x.csv",
+        uri="./x.csv",
         driver="csv",
         meta={},
     )
@@ -2764,8 +2779,7 @@ def test_tracker_hydrate_run_outputs_allows_external_target_root_when_configured
 
     assert calls["allowed_base"] is None
 
-    if tracker.engine:
-        tracker.engine.dispose()
+    tracker.close()
 
 
 def test_run_materialize_outputs_delegates_to_tracker() -> None:
@@ -3330,3 +3344,78 @@ def test_api_hydrate_run_outputs_to_destinations_delegates_and_is_exported(
             "db_fallback": "never",
         },
     }
+
+
+def test_register_run_output_recovery_copies_with_source_root_mixed_strategies(
+    tmp_path: Path,
+) -> None:
+    """source_root verifies fast-hashed outputs without re-hashing full sha256:file outputs."""
+    from consist.types import OutputArtifactSpec
+
+    source_run_dir = tmp_path / "scratch_run"
+    recovery_root = tmp_path / "nfs_recovery"
+    fast_src = source_run_dir / "outputs" / "fast_out.bin"
+    full_src = source_run_dir / "outputs" / "full_out.bin"
+    missing_src = source_run_dir / "outputs" / "missing_fast.bin"
+
+    def _produce() -> None:
+        fast_src.parent.mkdir(parents=True, exist_ok=True)
+        fast_src.write_bytes(b"fast-output-payload")
+        full_src.write_bytes(b"full-output-payload")
+        missing_src.write_bytes(b"missing-fast-payload")
+
+    with Tracker(
+        run_dir=source_run_dir,
+        db_path=str(tmp_path / "mixed.duckdb"),
+        hashing_strategy="fast",
+    ) as tracker:
+        res = tracker.run(
+            fn=_produce,
+            name="mixed_fast_full",
+            run_id="mixed_recovery_1",
+            outputs={
+                "fast_out": OutputArtifactSpec(path=fast_src),
+                "full_out": OutputArtifactSpec(path=full_src, hashing_strategy="full"),
+                "missing_fast": OutputArtifactSpec(path=missing_src),
+            },
+        )
+        assert res.outputs["fast_out"].digest is not None
+        assert res.outputs["fast_out"].digest.scheme == "stat_file_v1:sha256"
+        assert res.outputs["full_out"].digest is not None
+        assert res.outputs["full_out"].digest.scheme == "sha256:file"
+
+        # Copy all outputs to recovery_root, then delete full_src and missing_src from source_run_dir
+        for src in (fast_src, full_src, missing_src):
+            rel = src.relative_to(source_run_dir)
+            dest = recovery_root / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(src.read_bytes())
+
+        full_src.unlink()
+        missing_src.unlink()
+
+        reg = consist.register_run_output_recovery_copies(
+            "mixed_recovery_1",
+            recovery_root,
+            source_root=source_run_dir,
+            verify=True,
+            tracker=tracker,
+        )
+        assert reg["fast_out"].status == "registered"
+        assert reg["fast_out"].verification_succeeded is True
+        # full_out already has sha256:file so it must not touch or require source_root
+        assert reg["full_out"].status == "registered"
+        assert reg["full_out"].verification_succeeded is True
+        # missing_fast lacks sha256:file and is absent in source_root
+        assert reg["missing_fast"].status == "unverifiable_hash"
+
+        # Tampered destination bytes fail against source_root hash
+        (recovery_root / "outputs" / "fast_out.bin").write_bytes(b"tampered")
+        tampered = tracker.register_run_output_recovery_copies(
+            "mixed_recovery_1",
+            recovery_root,
+            keys=["fast_out"],
+            source_root=source_run_dir,
+            verify=True,
+        )
+        assert tampered["fast_out"].status == "hash_mismatch"

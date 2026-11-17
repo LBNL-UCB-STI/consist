@@ -12,7 +12,6 @@ from consist.core.directory_artifacts import (
     build_directory_manifest,
     build_shapefile_bundle_manifest,
 )
-from consist.core.noop import NoopScenarioContext
 from consist.core.tracker import Tracker
 from consist.core.workflow import RestoredCouplerSnapshotResult
 from consist.models.artifact import Artifact
@@ -28,56 +27,76 @@ def _create_persisted_artifact(
     abs_path: Optional[str] = None,
     meta: Optional[dict] = None,
 ) -> Artifact:
+    from consist.digest import Digest
+    import hashlib
+
+    meta_dict = dict(meta or {})
+    digest_obj: Optional[Digest] = None
+    if content_hash is not None:
+        if (
+            meta_dict.get("directory_artifact")
+            or meta_dict.get("artifact_kind") == "directory"
+            or meta_dict.get("file_bundle_artifact")
+            or meta_dict.get("file_bundle") == "shapefile"
+            or driver in {"zarr", "shapefile", "directory"}
+        ):
+            scheme = "dir_manifest_v1:sha256"
+        else:
+            scheme = "sha256:file"
+        hex_val = (
+            content_hash
+            if len(content_hash) == 64
+            and all(c in "0123456789abcdef" for c in content_hash)
+            else hashlib.sha256(content_hash.encode("utf-8")).hexdigest()
+        )
+        digest_obj = Digest(scheme, hex_val)
     art = Artifact(
         id=uuid.uuid4(),
         key=key,
-        container_uri=uri,
+        uri=uri,
         driver=driver,
-        hash=content_hash,
-        abs_path=abs_path,
-        meta=dict(meta or {}),
+        digest=digest_obj,
+        meta=meta_dict,
     )
+    if abs_path is not None:
+        art = art.with_abs_path(abs_path)
     if tracker.db is not None:
-        with tracker.db.session_scope() as session:
-            session.add(art)
-            session.commit()
-            session.refresh(art)
-            session.expunge(art)
+        tracker.db.sync_artifact(art)
     return art
 
 
 def test_default_backward_compatibility_and_noop_parity(tmp_path: Path) -> None:
-    """Verify default backward-compatibility and Noop parity with new kwargs."""
+    """Verify default backward-compatibility and ephemeral scenario parity with new kwargs."""
     db_path = tmp_path / "test.duckdb"
     tracker = Tracker(run_dir=tmp_path / "run", db_path=db_path)
 
-    # 1. NoopScenarioContext parity
-    noop_sc = NoopScenarioContext("noop_test")
-    noop_sc.coupler.set("prior_key", "prior_value")
+    # 1. Ephemeral Tracker scenario parity
+    ephem_tracker = Tracker()
+    with ephem_tracker.scenario("ephemeral_test") as ephem_sc:
+        ephem_sc.coupler.set("prior_key", "prior_value")
 
-    res_noop = noop_sc.restore_coupler_snapshot(
-        target_root=tmp_path / "target",
-        source_root=tmp_path / "source",
-        remappable_schemes={"beam_input": "beam/input"},
-        prune_unrecoverable=True,
-        validate_content_hash="never",
-    )
-    assert isinstance(res_noop, RestoredCouplerSnapshotResult)
-    assert isinstance(res_noop, Mapping)
-    assert res_noop == RestoredCouplerSnapshotResult()
-    assert res_noop != RestoredCouplerSnapshotResult(pruned_keys=("x",))
-    assert dict(res_noop) == {}
-    assert len(res_noop) == 0
-    assert not res_noop
-    # Coupler should retain prior key since clear_existing was False
-    assert "prior_key" in noop_sc.coupler
+        res_ephem = ephem_sc.restore_coupler_snapshot(
+            target_root=tmp_path / "target",
+            source_root=tmp_path / "source",
+            remappable_schemes={"beam_input": "beam/input"},
+            prune_unrecoverable=True,
+            validate_content_hash="never",
+        )
+        assert isinstance(res_ephem, RestoredCouplerSnapshotResult)
+        assert isinstance(res_ephem, Mapping)
+        assert res_ephem == RestoredCouplerSnapshotResult()
+        assert res_ephem != RestoredCouplerSnapshotResult(pruned_keys=("x",))
+        assert dict(res_ephem) == {}
+        assert len(res_ephem) == 0
+        assert not res_ephem
+        # Coupler should retain prior key since clear_existing was False
+        assert "prior_key" in ephem_sc.coupler
 
-    res_noop_clear = noop_sc.restore_coupler_snapshot(
-        clear_existing=True,
-        prune_unrecoverable=True,
-    )
-    assert res_noop_clear == RestoredCouplerSnapshotResult()
-    assert len(noop_sc.coupler) == 0
+        res_ephem_clear = ephem_sc.restore_coupler_snapshot(
+            clear_existing=True,
+            prune_unrecoverable=True,
+        )
+        assert res_ephem_clear == RestoredCouplerSnapshotResult()
 
     # 2. Standard ScenarioContext without target_root or prune_unrecoverable
     data_file = tmp_path / "run" / "data.csv"
@@ -256,7 +275,7 @@ def test_multi_node_restart_materialization_and_pruning(tmp_path: Path) -> None:
 
 
 def test_directory_and_shapefile_bundle_materialization(tmp_path: Path) -> None:
-    """Verify directory / Zarr and shapefile bundle artifacts end-to-end with PR 1."""
+    """Verify directory / Zarr and shapefile bundle artifacts end-to-end."""
     db_path = tmp_path / "test.duckdb"
     archive_dir = tmp_path / "archive"
     local_dir = tmp_path / "local"
@@ -381,7 +400,7 @@ def test_startup_performance_guard_no_full_sha256(tmp_path: Path) -> None:
 
     with tracker_local.scenario("perf_resumed") as sc_resume:
         with (
-            patch("consist.core.materialize.file_sha256") as mock_file_sha,
+            patch("consist.digest.file_sha256") as mock_file_sha,
             patch(
                 "consist.core.materialize.build_directory_manifest"
             ) as mock_dir_manifest,
@@ -405,18 +424,21 @@ def test_startup_performance_guard_no_full_sha256(tmp_path: Path) -> None:
     tracker_local2 = Tracker(run_dir=local_dir2, db_path=db_path)
 
     with tracker_local2.scenario("perf_resumed_always") as sc_resume2:
+        assert file_art.digest is not None
+        assert dir_art.digest is not None
         with (
             patch(
-                "consist.core.materialize.file_sha256",
-                return_value="recorded_file_sha256",
+                "consist.digest.file_sha256",
+                return_value=file_art.digest.hex,
             ) as mock_file_sha,
             patch(
                 "consist.core.materialize.build_directory_manifest"
             ) as mock_dir_manifest,
         ):
             mock_dir_manifest.return_value = {
-                "tree_hash": "recorded_dir_sha256",
-                "members": [],
+                "version": 1,
+                "tree_hash": dir_art.digest.hex,
+                "entries": [],
             }
             result2 = sc_resume2.restore_coupler_snapshot(
                 scenario_run_id="perf_scenario",

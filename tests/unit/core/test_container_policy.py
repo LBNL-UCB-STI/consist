@@ -17,7 +17,7 @@ def _artifact(
 ) -> Artifact:
     return Artifact(
         key=key,
-        container_uri=f"outputs://{key}",
+        uri=f"outputs://{key}",
         driver=driver,
         meta=meta or {},
         parent_artifact_id=parent_artifact_id,

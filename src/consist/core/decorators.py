@@ -7,13 +7,14 @@ from typing import (
     List,
     Mapping,
     Optional,
+    Sequence,
     TypeVar,
     Union,
     Dict,
 )
 
 from consist.core.step_context import StepContext
-from consist.types import IdentityInputs, InputBindingMode, OutputSet
+from consist.types import IdentityInputs, InputBindingMode, OutputPathRef, OutputSet
 
 if TYPE_CHECKING:
     from consist.core.config_canonicalization import ConfigAdapter
@@ -32,7 +33,9 @@ class StepDefinition:
     description: Optional[MetaValue[str]] = None
 
     # Outputs
-    outputs: Optional[MetaValue[List[str]]] = None
+    outputs: Optional[MetaValue[Union[Sequence[str], Mapping[str, OutputPathRef]]]] = (
+        None
+    )
     schema_outputs: Optional[MetaValue[List[str]]] = None
     output_paths: Optional[MetaValue[Mapping[str, Any]]] = None
     output_sets: Optional[MetaValue[Mapping[str, OutputSet]]] = None
@@ -72,7 +75,9 @@ def define_step(
     *,
     model: Optional[MetaValue[str]] = None,
     name_template: Optional[MetaValue[str]] = None,
-    outputs: Optional[MetaValue[List[str]]] = None,
+    outputs: Optional[MetaValue[Union[Sequence[str], Mapping[str, OutputPathRef]]]] = (
+        None
+    ),
     schema_outputs: Optional[MetaValue[List[str]]] = None,
     output_paths: Optional[MetaValue[Mapping[str, Any]]] = None,
     output_sets: Optional[MetaValue[Mapping[str, OutputSet]]] = None,

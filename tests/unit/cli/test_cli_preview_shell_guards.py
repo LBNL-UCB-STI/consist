@@ -449,7 +449,9 @@ def test_preview_reports_mount_diagnostics_on_missing_file() -> None:
         run_id=None,
         key="missing_artifact",
         driver="parquet",
-        container_uri="inputs://data/missing.parquet",
+        uri="inputs://data/missing.parquet",
+        member=None,
+        digest=None,
         meta={"mount_root": "/workspace/original"},
     )
     tracker.resolve_uri.return_value = "/workspace/current/data/missing.parquet"
@@ -486,7 +488,9 @@ def test_shell_preview_reports_mount_diagnostics_on_missing_file(capsys) -> None
         run_id=None,
         key="missing_artifact",
         driver="csv",
-        container_uri="inputs://data/missing.csv",
+        uri="inputs://data/missing.csv",
+        member=None,
+        digest=None,
         meta={"mount_root": "/workspace/original"},
     )
     tracker.resolve_uri.return_value = "/workspace/current/data/missing.csv"
@@ -581,7 +585,9 @@ def test_shell_preview_supports_hash_selector(capsys) -> None:
             key="resolved_by_hash",
             run_id="run-1",
             driver="csv",
-            container_uri="inputs://file.csv",
+            uri="inputs://file.csv",
+            member=None,
+            digest=None,
             meta={},
         )
     )
@@ -606,7 +612,9 @@ def test_shell_preview_supports_hash_equals_selector(capsys) -> None:
             key="resolved_by_hash",
             run_id="run-1",
             driver="csv",
-            container_uri="inputs://file.csv",
+            uri="inputs://file.csv",
+            member=None,
+            digest=None,
             meta={},
         )
     )
@@ -739,7 +747,9 @@ def test_shell_schema_profile_supports_hash_selector_with_db_profile(capsys) -> 
             run_id=None,
             key="trips",
             driver="parquet",
-            container_uri="inputs://data/trips.parquet",
+            uri="inputs://data/trips.parquet",
+            member=None,
+            digest=None,
             meta={},
         )
     )
@@ -834,7 +844,9 @@ def test_shell_schema_profile_unsupported_loaded_type_without_db_profile(
         run_id=None,
         key="artifact_key",
         driver="bin",
-        container_uri="inputs://data/object.bin",
+        uri="inputs://data/object.bin",
+        member=None,
+        digest=None,
         meta={},
     )
     shell = ConsistShell(tracker)
@@ -862,7 +874,9 @@ def test_shell_schema_profile_h5_container_hint_for_unsupported_type(
         run_id=None,
         key="h5_container",
         driver="h5",
-        container_uri="inputs://data/pipeline.h5",
+        uri="inputs://data/pipeline.h5",
+        member=None,
+        digest=None,
         meta={},
     )
     shell = ConsistShell(tracker)

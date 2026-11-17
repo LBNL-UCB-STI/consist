@@ -11,6 +11,7 @@ import pytest
 from consist.core.cache import ActiveRunCacheOptions, materialize_requested_inputs
 from consist.core.directory_artifacts import build_directory_manifest
 from consist.core.tracker_orchestration import RunTraceCoordinator, RunTraceHelpers
+from consist.digest import Digest
 from consist.models.artifact import Artifact
 from consist.models.run import ConsistRecord, Run
 from consist.types import BindingResult, ExecutionOptions
@@ -77,9 +78,9 @@ def test_materialize_requested_inputs_stages_requested_key(tmp_path: Path) -> No
 
     artifact = Artifact(
         key="raw",
-        container_uri=str(source),
+        uri=str(source),
         driver="csv",
-        hash=_sha256(source),
+        digest=Digest("sha256:file", _sha256(source)),
         meta={},
     )
     run = _make_run()
@@ -99,7 +100,7 @@ def test_materialize_requested_inputs_stages_requested_key(tmp_path: Path) -> No
 
     assert staged == {"raw": str(destination.resolve())}
     assert destination.read_text(encoding="utf-8") == "value\n1\n"
-    assert artifact.abs_path == str(destination.resolve())
+    assert tracker.current_consist.inputs[0].abs_path == str(destination.resolve())
 
 
 def test_materialize_requested_inputs_rejects_distinct_artifacts_for_one_key(
@@ -112,16 +113,16 @@ def test_materialize_requested_inputs_rejects_distinct_artifacts_for_one_key(
     destination = tmp_path / "staged" / "raw.csv"
     first = Artifact(
         key="raw",
-        container_uri=str(first_source),
+        uri=str(first_source),
         driver="csv",
-        hash=_sha256(first_source),
+        digest=Digest("sha256:file", _sha256(first_source)),
         meta={},
     )
     second = Artifact(
         key="raw",
-        container_uri=str(second_source),
+        uri=str(second_source),
         driver="csv",
-        hash=_sha256(second_source),
+        digest=Digest("sha256:file", _sha256(second_source)),
         meta={},
     )
     tracker = _FakeTracker(
@@ -150,9 +151,9 @@ def test_materialize_requested_inputs_stages_manifest_backed_directory(
 
     artifact = Artifact(
         key="skims",
-        container_uri=str(source),
+        uri=str(source),
         driver="zarr",
-        hash=manifest["tree_hash"],
+        digest=Digest("dir_manifest_v1:sha256", manifest["tree_hash"]),
         meta={"directory_artifact": True, "directory_manifest": manifest},
     )
     tracker = _FakeTracker(
@@ -170,7 +171,7 @@ def test_materialize_requested_inputs_stages_manifest_backed_directory(
     )
 
     assert staged == {"skims": str(destination.resolve())}
-    assert build_directory_manifest(destination)["tree_hash"] == artifact.hash
+    assert build_directory_manifest(destination)["tree_hash"] == artifact.digest.hex
 
 
 def test_materialize_requested_inputs_rejects_mutated_manifest_directory(
@@ -185,9 +186,9 @@ def test_materialize_requested_inputs_rejects_mutated_manifest_directory(
 
     artifact = Artifact(
         key="skims",
-        container_uri=str(destination),
+        uri=str(destination),
         driver="zarr",
-        hash=manifest["tree_hash"],
+        digest=Digest("dir_manifest_v1:sha256", manifest["tree_hash"]),
         meta={"directory_artifact": True, "directory_manifest": manifest},
     )
     tracker = _FakeTracker(
@@ -212,12 +213,14 @@ def test_materialize_requested_inputs_preserves_legacy_directory_checksum(
     destination = tmp_path / "staged" / "legacy.zarr"
     destination.mkdir(parents=True)
     (destination / "0.0").write_bytes(b"legacy")
+    from consist.digest import build_manifest_v1
 
+    legacy_manifest = build_manifest_v1(destination)
     artifact = Artifact(
         key="legacy",
-        container_uri=str(tmp_path / "missing.zarr"),
+        uri=str(tmp_path / "missing.zarr"),
         driver="zarr",
-        hash="legacy-directory-checksum",
+        digest=Digest("dir_manifest_v1:sha256", legacy_manifest["tree_hash"]),
         meta={},
     )
     tracker = _FakeTracker(
@@ -246,12 +249,11 @@ def test_execute_python_run_uses_staged_input_path(tmp_path: Path) -> None:
 
     artifact = Artifact(
         key="raw",
-        container_uri=str(source),
+        uri=str(source),
         driver="csv",
-        hash=_sha256(staged),
+        digest=Digest("sha256:file", _sha256(staged)),
         meta={},
-    )
-    artifact.abs_path = str(staged)
+    ).with_abs_path(staged)
 
     tracker = _FakeTracker(run_dir=tmp_path)
 

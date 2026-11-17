@@ -20,12 +20,13 @@ from typing import (
     Literal,
     Mapping,
     Iterator,
+    Sequence,
     Union,
     cast,
     Tuple,
 )
 
-from consist.models.artifact import Artifact, set_tracker_ref
+from consist.models.artifact import Artifact
 from consist.models.run import (
     ConsistRecord,
     RunResult,
@@ -49,15 +50,18 @@ from consist.core.orchestration import (
 from consist.core.error_messages import format_problem_cause_fix
 from consist.core.metadata_resolver import MetadataResolver, ResolvedStepIdentity
 from consist.core.resolved_binding import (
-    ArtifactIdentity,
     ResolvedBinding,
     TrackedArtifactLocator,
     _create_strict_binding_invocation_context,
     step_contract_identity,
+    trusted_digest_from_artifact,
 )
-from consist.core.run_invocation import resolve_run_invocation
+from consist.core.run_invocation import (
+    infer_parameter_binding_kinds,
+    resolve_run_invocation,
+)
 from consist.core.run_options import resolve_trace_output_policy
-from consist.digest import normalize_json
+from consist.digest import Digest, normalize_json
 from consist.types import (
     ArtifactRef,
     BindingResult,
@@ -772,6 +776,107 @@ class ScenarioContext:
         self._inputs[key] = artifact
         return artifact
 
+    def seed_artifact(
+        self,
+        key: str,
+        value: ArtifactRef,
+        *,
+        driver: Optional[str] = None,
+        content_hash: Optional[Union[str, Digest]] = None,
+        reuse_if_unchanged: bool = True,
+        register_input: bool = False,
+        **meta: Any,
+    ) -> Artifact:
+        """
+        Seed an artifact into the coupler before or between steps.
+
+        Parameters
+        ----------
+        key : str
+            Semantic key for the artifact.
+        value : ArtifactRef
+            Artifact instance, Path, or URI string.
+        driver : Optional[str]
+            Optional data driver hint (e.g. "parquet").
+        content_hash : Optional[Union[str, Digest]]
+            Pre-computed content hash.
+        reuse_if_unchanged : bool, default True
+            Whether to reuse an existing artifact if file is unchanged.
+        register_input : bool, default False
+            If True, also registers the artifact as a scenario header input.
+        **meta : Any
+            Additional metadata to attach to the artifact.
+
+        Returns
+        -------
+        Artifact
+            The seeded artifact.
+        """
+        self.coupler._validate_artifact_key(key)
+        if not self._header_record:
+            raise RuntimeError("Scenario not active. Use within 'with' block.")
+
+        if register_input:
+            artifact = self.add_input(
+                value,
+                key=key,
+                driver=driver,
+                content_hash=content_hash,
+                reuse_if_unchanged=reuse_if_unchanged,
+                **meta,
+            )
+            self.coupler.set(key, artifact)
+            return artifact
+
+        should_persist = True
+        if isinstance(value, Artifact):
+            if driver is None and content_hash is None and not meta:
+                artifact = value
+                if (
+                    self.tracker.db is not None
+                    and artifact.id is not None
+                    and artifact.id
+                    in self.tracker.db.get_existing_artifact_ids([artifact.id])
+                ):
+                    should_persist = False
+            else:
+                artifact = self.tracker.artifacts.create_artifact(
+                    value,
+                    run_id=None,
+                    key=key,
+                    direction="input",
+                    driver=driver,
+                    content_hash=content_hash,
+                    force_hash_override=content_hash is not None,
+                    reuse_if_unchanged=reuse_if_unchanged,
+                    **meta,
+                )
+                if artifact.id == value.id:
+                    artifact = replace(
+                        artifact,
+                        id=uuid.uuid4(),
+                        key=key,
+                        run_id=None,
+                        parent_artifact_id=value.id,
+                    )
+        else:
+            resolved_path = self.coupler._resolve_ref_path(value)
+            artifact, should_persist = self.coupler._create_verified_input_artifact(
+                key,
+                resolved_path,
+                driver=driver,
+                content_hash=content_hash,
+                reuse_if_unchanged=reuse_if_unchanged,
+                **meta,
+            )
+
+        if should_persist:
+            self.tracker.persistence.persist_standalone_artifact(
+                artifact, direction="input"
+            )
+        self.coupler.set(key, artifact)
+        return artifact
+
     @property
     def meta(self) -> Mapping[str, Any]:
         """
@@ -925,11 +1030,27 @@ class ScenarioContext:
         step_ordinal : Optional[int], default None
             Step ordinal within the scenario. Defaults to self._step_ordinal.
         """
-        if self.tracker.db is None:
+        if self.tracker.db is None or self.tracker.db.read_only:
             return
         target_run_id = run_id or self.run_id
         ordinal = self._step_ordinal if step_ordinal is None else step_ordinal
         artifacts = dict(self.coupler.items())
+        candidate_ids = [
+            art.id
+            for art in artifacts.values()
+            if isinstance(art, Artifact) and art.id is not None
+        ]
+        if candidate_ids:
+            existing_ids = self.tracker.db.get_existing_artifact_ids(candidate_ids)
+            for art in artifacts.values():
+                if (
+                    isinstance(art, Artifact)
+                    and art.id is not None
+                    and art.id not in existing_ids
+                ):
+                    self.tracker.persistence.persist_standalone_artifact(
+                        art, direction="input"
+                    )
         self.tracker.db.sync_run_coupler_snapshot(
             run_id=target_run_id,
             phase=phase,
@@ -957,8 +1078,8 @@ class ScenarioContext:
         artifact: Artifact,
         effective_remappable_schemes: Mapping[str, Path],
     ) -> Literal["workspace_managed", "external_mount"]:
-        """Classify artifact container URI as workspace-managed or external mount."""
-        uri = artifact.container_uri
+        """Classify artifact URI as workspace-managed or external mount."""
+        uri = artifact.uri
         if not uri:
             return "workspace_managed"
         if "://" not in uri:
@@ -970,19 +1091,6 @@ class ScenarioContext:
             return "workspace_managed"
         return "external_mount"
 
-    def _extract_recovery_roots(
-        self,
-        artifact: Artifact,
-        source_root: Optional[Union[str, Path]] = None,
-    ) -> List[str]:
-        """Extract and preserve recovery roots, appending source_root if provided."""
-        roots: List[str] = list(artifact.recovery_roots)
-        if source_root is not None:
-            source_root_str = str(Path(source_root).resolve())
-            if source_root_str not in roots:
-                roots.append(source_root_str)
-        return roots
-
     def _check_or_materialize_local_artifact(
         self,
         art: Artifact,
@@ -992,26 +1100,36 @@ class ScenarioContext:
         validate_content_hash: Literal["never", "if-present", "always"],
     ) -> MaterializedArtifact:
         """Check for local artifact presence or recover into tracker.run_dir."""
-        existing_path: Optional[Path] = None
-        try:
-            candidate = Path(self.tracker.resolve_uri(art.container_uri))
-            if candidate.exists():
-                existing_path = candidate
-        except (ValueError, RuntimeError, OSError, TypeError):
-            pass
+        from consist.core.tracker_recovery import resolve_verified_local_path
 
-        if existing_path is None and art.abs_path:
+        existing_path: Optional[Path] = None
+        if validate_content_hash != "never":
+            existing_path = resolve_verified_local_path(
+                self.tracker,
+                art,
+                allow_recovery_roots=False,
+                verify_digest=(validate_content_hash == "always"),
+            )
+        else:
             try:
-                candidate = Path(art.abs_path)
+                candidate = Path(self.tracker.resolve_uri(art.uri))
                 if candidate.exists():
                     existing_path = candidate
             except (ValueError, RuntimeError, OSError, TypeError):
                 pass
+            if existing_path is None and art.abs_path:
+                try:
+                    candidate = Path(art.abs_path)
+                    if candidate.exists():
+                        existing_path = candidate
+                except (ValueError, RuntimeError, OSError, TypeError):
+                    pass
 
         if existing_path is not None:
             resolved_existing = existing_path.resolve()
-            detached = art.model_copy(deep=True)
-            detached.abs_path = str(resolved_existing)
+            detached = art.with_abs_path(str(resolved_existing)).with_resolver(
+                self.tracker
+            )
             return MaterializedArtifact(
                 artifact=detached,
                 key=key,
@@ -1035,8 +1153,7 @@ class ScenarioContext:
                 scheme_prefixes=effective_remappable_schemes,
             )
 
-        detached_missing = art.model_copy(deep=True)
-        detached_missing.abs_path = None
+        detached_missing = art.with_abs_path(None).with_resolver(self.tracker)
         return MaterializedArtifact(
             artifact=detached_missing,
             key=key,
@@ -1191,8 +1308,9 @@ class ScenarioContext:
 
         if target_root is None and not prune_unrecoverable:
             if artifacts:
-                for art in artifacts.values():
-                    set_tracker_ref(art, self.tracker)
+                artifacts = {
+                    k: art.with_resolver(self.tracker) for k, art in artifacts.items()
+                }
                 self.coupler.update(artifacts)
             if restored_step_ordinal > 0:
                 if phase == "pre":
@@ -1261,15 +1379,15 @@ class ScenarioContext:
                 art, effective_remappable_schemes
             )
             if scheme_classification == "external_mount":
-                set_tracker_ref(art, self.tracker)
-                restored_artifacts[key] = art
-                self.coupler.set(key, art)
+                bound_art = art.with_resolver(self.tracker)
+                restored_artifacts[key] = bound_art
+                self.coupler.set(key, bound_art)
                 outcomes[key] = MaterializedArtifact(
-                    artifact=art,
+                    artifact=bound_art,
                     key=key,
-                    path=art.as_path(self.tracker),
+                    path=bound_art.as_path(self.tracker),
                     source_path=None,
-                    target_path=art.as_path(self.tracker),
+                    target_path=bound_art.as_path(self.tracker),
                     status="preserved_existing",
                     resolvable=True,
                 )
@@ -1301,10 +1419,10 @@ class ScenarioContext:
             if outcome.resolvable:
                 hydrated_art = outcome.artifact
                 if outcome.path is not None:
-                    hydrated_art.abs_path = str(outcome.path)
+                    hydrated_art = hydrated_art.with_abs_path(str(outcome.path))
                 meta = dict(hydrated_art.meta or {})
 
-                uri = hydrated_art.container_uri
+                uri = hydrated_art.uri
                 if (
                     not uri
                     or uri.startswith("workspace://")
@@ -1322,13 +1440,18 @@ class ScenarioContext:
                     else:
                         meta["mount_root"] = str(resolved_target_root)
 
-                recovery_roots = self._extract_recovery_roots(
-                    hydrated_art, source_root=source_root
+                hydrated_art = hydrated_art.with_meta(meta, merge=False).with_resolver(
+                    self.tracker
                 )
-                if recovery_roots or "recovery_roots" in meta:
-                    meta["recovery_roots"] = recovery_roots
-                hydrated_art.meta = meta
-                set_tracker_ref(hydrated_art, self.tracker)
+                if (
+                    source_root is not None
+                    and hydrated_art.id is not None
+                    and self.tracker.db is not None
+                    and not self.tracker.db.read_only
+                ):
+                    self.tracker.set_artifact_recovery_roots(
+                        hydrated_art, [str(Path(source_root).resolve())], append=True
+                    )
 
                 restored_artifacts[key] = hydrated_art
                 self.coupler.set(key, hydrated_art)
@@ -1338,8 +1461,7 @@ class ScenarioContext:
                         self.coupler.pop(key, None)
                     pruned_keys_list.append(key)
                 else:
-                    unresolvable_art = outcome.artifact
-                    set_tracker_ref(unresolvable_art, self.tracker)
+                    unresolvable_art = outcome.artifact.with_resolver(self.tracker)
                     restored_artifacts[key] = unresolvable_art
                     self.coupler.set(key, unresolvable_art)
 
@@ -1388,8 +1510,7 @@ class ScenarioContext:
         if result is None:
             return None
         matched_run_id, matched_ordinal, artifacts = result
-        for art in artifacts.values():
-            set_tracker_ref(art, self.tracker)
+        artifacts = {k: art.with_resolver(self.tracker) for k, art in artifacts.items()}
         return (matched_run_id, matched_ordinal, artifacts)
 
     def _coerce_keys(self, value: Optional[Iterable[str] | str]) -> List[str]:
@@ -1667,7 +1788,7 @@ class ScenarioContext:
         phase: Optional[str] = None,
         stage: Optional[str] = None,
         parent_run_id: Optional[str] = None,
-        outputs: Optional[List[str]] = None,
+        outputs: Optional[Union[Sequence[str], Mapping[str, OutputPathRef]]] = None,
         output_paths: Optional[Mapping[str, OutputPathRef]] = None,
         output_sets: Optional[Mapping[str, OutputSet]] = None,
         profile_file_schema: bool | Literal["if_changed"] | None = None,
@@ -1841,10 +1962,13 @@ class ScenarioContext:
                                 f"Resolved binding artifact is unavailable for {parameter!r}."
                             )
                         resolved_by_id[locator.artifact_id] = artifact
-                    if (
-                        ArtifactIdentity.from_artifact(artifact)
-                        != resolved_input.artifact.identity
-                    ):
+                    try:
+                        current_digest = trusted_digest_from_artifact(artifact)
+                    except ValueError as exc:
+                        raise ValueError(
+                            f"Resolved binding artifact identity changed for {parameter!r}."
+                        ) from exc
+                    if current_digest != resolved_input.artifact.identity:
                         raise ValueError(
                             f"Resolved binding artifact identity changed for {parameter!r}."
                         )
@@ -1869,10 +1993,26 @@ class ScenarioContext:
             and execution_options.load_inputs is True
         ):
             requested_input_binding = "loaded"
-        if requested_input_binding in {"loaded", "paths"}:
+        declared_out_keys: set[str] = set()
+        if isinstance(outputs, Mapping):
+            declared_out_keys.update(str(k) for k in outputs.keys())
+        if isinstance(output_paths, Mapping):
+            declared_out_keys.update(str(k) for k in output_paths.keys())
+        if requested_input_binding in {"loaded", "paths"} or (
+            fn is not None
+            and any(
+                kind in {"path", "loaded", "artifact"}
+                and param_name not in declared_out_keys
+                and (
+                    not isinstance(invocation_inputs, Mapping)
+                    or param_name in invocation_inputs
+                )
+                for param_name, kind in infer_parameter_binding_kinds(fn).items()
+            )
+        ):
             invocation_inputs = self._promote_inputs_for_binding(
                 invocation_inputs,
-                requested_input_binding,
+                requested_input_binding or "paths",
             )
 
         resolved_invocation = resolve_run_invocation(
@@ -1923,7 +2063,7 @@ class ScenarioContext:
         resolved_tags = resolved_invocation.tags
         resolved_facet = resolved_invocation.facet
         resolved_facet_index = resolved_invocation.facet_index
-        resolved_outputs = resolved_invocation.outputs
+        resolved_outputs = resolved_invocation.outputs_for_delegation
         resolved_output_paths = resolved_invocation.output_paths
         resolved_inputs = resolved_invocation.inputs
         resolved_input_keys = resolved_invocation.input_keys
@@ -2033,8 +2173,14 @@ class ScenarioContext:
         promoted_inputs = self._promote_inputs_for_binding(
             resolved_inputs, resolved_input_binding
         )
+        if binding is not None:
+            effective_input_keys = input_keys
+            effective_optional_input_keys = optional_input_keys
+        else:
+            effective_input_keys = resolved_input_keys
+            effective_optional_input_keys = resolved_optional_input_keys
         resolved_inputs = self._resolve_inputs(
-            promoted_inputs, resolved_input_keys, resolved_optional_input_keys
+            promoted_inputs, effective_input_keys, effective_optional_input_keys
         )
         resolved_output_paths = self._resolve_output_paths(resolved_output_paths)
 
@@ -2088,6 +2234,9 @@ class ScenarioContext:
                 validate_cached_outputs=resolved_validate_cached_outputs,
                 validate_materialized_inputs=(
                     resolved_invocation.validate_materialized_inputs
+                ),
+                materialize_cached_outputs_source_root=(
+                    resolved_invocation.materialize_cached_outputs_source_root
                 ),
                 code_identity=resolved_invocation.code_identity,
                 code_identity_extra_deps=resolved_invocation.code_identity_extra_deps,
@@ -2165,7 +2314,7 @@ class ScenarioContext:
         year: Optional[int] = None,
         iteration: Optional[int] = None,
         parent_run_id: Optional[str] = None,
-        outputs: Optional[List[str]] = None,
+        outputs: Optional[Union[Sequence[str], Mapping[str, OutputPathRef]]] = None,
         output_paths: Optional[Mapping[str, OutputPathRef]] = None,
         capture_dir: Optional[Path] = None,
         capture_pattern: str = "*",
@@ -2174,6 +2323,7 @@ class ScenarioContext:
         cache_version: Optional[int] = None,
         cache_epoch: Optional[int] = None,
         validate_cached_outputs: str = "lazy",
+        validate_materialized_inputs: Optional[bool] = None,
         code_identity: Optional[CodeIdentityMode] = None,
         code_identity_extra_deps: Optional[List[str]] = None,
         output_mismatch: str = "warn",
@@ -2232,7 +2382,7 @@ class ScenarioContext:
                 cache_version=cache_version,
                 cache_epoch=cache_epoch,
                 validate_cached_outputs=validate_cached_outputs,
-                validate_materialized_inputs=None,
+                validate_materialized_inputs=validate_materialized_inputs,
                 code_identity=code_identity,
                 code_identity_extra_deps=code_identity_extra_deps,
             ),
@@ -2257,7 +2407,7 @@ class ScenarioContext:
         resolved_identity_inputs = resolved_invocation.identity_inputs
         resolved_tags = self._merge_step_tags(resolved_invocation.tags)
         resolved_facet = self._merge_step_facet(resolved_invocation.facet)
-        resolved_outputs = resolved_invocation.outputs
+        resolved_outputs = resolved_invocation.outputs_for_delegation
         resolved_output_paths = self._resolve_output_paths(
             resolved_invocation.output_paths
         )
@@ -2709,7 +2859,14 @@ class ScenarioContext:
         )
         tracker_config_dict = child_tracker_config.model_dump()
 
-        with executor_cls(max_workers=max_workers) as executor:
+        from contextlib import nullcontext
+
+        suspend_ctx = (
+            self.tracker.db.suspend_for_subprocesses()
+            if self.tracker.db is not None
+            else nullcontext()
+        )
+        with suspend_ctx, executor_cls(max_workers=max_workers) as executor:
             futures = {
                 executor.submit(execute_worker_run, tracker_config_dict, spec): (
                     idx,

@@ -5,6 +5,70 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog], and this project adheres to
 [Semantic Versioning].
 
+## [0.5.0] - 2026-11-16
+
+### Added
+
+- Add `DatabaseManager` single-connection native DuckDB persistence and Schema v2
+  (`schema_v2.sql`), replacing SQLModel ORM queries and connection churn with direct
+  SQL execution and ART index scans by @zneedell
+  ([#319](https://github.com/LBNL-UCB-STI/consist/pull/319),
+  [#321](https://github.com/LBNL-UCB-STI/consist/pull/321)).
+- Add a verified `artifact_location` ledger, `FileStat` / `DirTreeStat` file
+  witnesses, scratch eviction safety, and `consist migrate` (v0.4 -> v0.5 schema
+  migration) with fast `--dry-run` metadata inspection and `rich` phase/artifact
+  progress reporting by @zneedell
+  ([#321](https://github.com/LBNL-UCB-STI/consist/pull/321),
+  [#327](https://github.com/LBNL-UCB-STI/consist/pull/327)).
+- Add typed step binding, ephemeral (Ghost) execution mode, lazy `Coupler` with
+  `MutableMapping` support, `ScenarioContext.seed_artifact(...)` for first-class
+  scenario seeding, and `HotDataStore` DDL/DML forwarding by @zneedell
+  ([#323](https://github.com/LBNL-UCB-STI/consist/pull/323),
+  [#324](https://github.com/LBNL-UCB-STI/consist/pull/324),
+  [#326](https://github.com/LBNL-UCB-STI/consist/pull/326)).
+- Add `Artifact.relative_path`, `Artifact.meta_dict`, per-output `hashing_strategy`
+  overrides, explicit admission metadata, and `source_root` recovery copy
+  registration by @zneedell
+  ([#324](https://github.com/LBNL-UCB-STI/consist/pull/324)).
+- Add `consist schemas` and `consist views suggest` CLI discovery helpers, plus
+  `consist views create --key` (key-isolated grouped hybrid views) and shell
+  autocompletion by @zneedell
+  ([#328](https://github.com/LBNL-UCB-STI/consist/pull/328)).
+- Add step-level `INFO` summary rollups grouped by artifact role (file counts and
+  total bytes) for directory staging and hydration by @zneedell
+  ([#328](https://github.com/LBNL-UCB-STI/consist/pull/328)).
+
+### Changed
+
+- Replace ORM provenance models with immutable value-model `Artifact` and `Run`
+  records and unified scheme digests, including `Artifact.meta` immutability and
+  HDF5 slab streaming optimizations by @zneedell
+  ([#320](https://github.com/LBNL-UCB-STI/consist/pull/320),
+  [#324](https://github.com/LBNL-UCB-STI/consist/pull/324)).
+- Switch CLI database auto-discovery (`find_project_root_and_db` / `find_db_path`)
+  to strictly bounded `O(1)` zero-glob `stat` checks (supporting
+  `.consist/snapshots/latest/provenance.duckdb` and `--run-dir` across CLI
+  subcommands) and make `consist validate` mount- and `artifact_location`-aware by
+  @zneedell ([#327](https://github.com/LBNL-UCB-STI/consist/pull/327)).
+- Bump package version in `pyproject.toml` to `0.5.0` and update v0.5
+  documentation by @zneedell
+  ([#323](https://github.com/LBNL-UCB-STI/consist/pull/323),
+  [#324](https://github.com/LBNL-UCB-STI/consist/pull/324),
+  [#328](https://github.com/LBNL-UCB-STI/consist/pull/328)).
+
+### Fixed
+
+- Deduplicate `artifact_location` upserts across sites (`advisory` -> `archive`),
+  resolve `archive` / `advisory` `artifact_location` rows via historical run mounts
+  in `ViewFactory` and recovery, and persist lazy-seeded `Coupler` artifacts during
+  `capture_coupler_snapshot` by @zneedell
+  ([#326](https://github.com/LBNL-UCB-STI/consist/pull/326)).
+- Harden outputs staleness guards, `OutputSet` missing-member checks,
+  `ParameterizedSQL.params` validation, optional `geopandas` lazy imports, and
+  DuckDB 2.0 compatibility by @zneedell
+  ([#323](https://github.com/LBNL-UCB-STI/consist/pull/323),
+  [#324](https://github.com/LBNL-UCB-STI/consist/pull/324)).
+
 ## [0.4.2] - 2026-11-09
 
 ### Added
@@ -938,7 +1002,9 @@ The format is based on [Keep a Changelog], and this project adheres to
 
 [Semantic Versioning]: https://semver.org/spec/v2.0.0.html
 
-[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/LBNL-UCB-STI/consist/compare/v0.5.0...HEAD
+
+[0.5.0]: https://github.com/LBNL-UCB-STI/consist/compare/v0.4.2...v0.5.0
 
 [0.4.2]: https://github.com/LBNL-UCB-STI/consist/compare/v0.4.1...v0.4.2
 

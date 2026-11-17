@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 
 import pytest
-from sqlmodel import Session, select
 
 from consist.integrations.activitysim import ActivitySimConfigAdapter, ConfigOverrides
 from consist.models.activitysim import ActivitySimConstantsCache
@@ -47,27 +46,26 @@ def test_activitysim_ingest_and_query_by_config_value(tracker, tmp_path: Path):
     _log_mock_output(tracker, "activitysim_run_b", tmp_path)
     tracker.end_run()
 
-    if tracker.engine is None:
-        raise AssertionError("Tracker engine missing; DB tests require DuckDB.")
-    with tracker.engine.begin() as connection:
-        run_rows = connection.exec_driver_sql(
-            "SELECT DISTINCT l.run_id "
-            "FROM global_tables.activitysim_constants_cache c "
-            "JOIN global_tables.activitysim_config_ingest_run_link l "
-            "ON l.content_hash = c.content_hash "
-            "WHERE l.table_name = 'activitysim_constants_cache' "
-            "AND c.key = 'sample_rate' AND c.value_num = 0.5"
-        ).fetchall()
-        run_ids = [row[0] for row in run_rows]
-        assert run_ids
+    if tracker.db is None:
+        raise AssertionError("Tracker db missing; DB tests require DuckDB.")
+    run_df = tracker.query_df(
+        "SELECT DISTINCT l.run_id "
+        "FROM global_tables.activitysim_constants_cache c "
+        "JOIN global_tables.activitysim_config_ingest_run_link l "
+        "ON l.content_hash = c.content_hash "
+        "WHERE l.table_name = 'activitysim_constants_cache' "
+        "AND c.key = 'sample_rate' AND c.value_num = 0.5"
+    )
+    run_ids = run_df["run_id"].tolist()
+    assert run_ids
 
-        output_rows = connection.exec_driver_sql(
-            "SELECT a.key FROM artifact a "
-            "JOIN run_artifact_link r ON a.id = r.artifact_id "
-            "WHERE r.direction = 'output' AND r.run_id IN (%s)"
-            % ", ".join([f"'{run_id}'" for run_id in run_ids])
-        ).fetchall()
-        output_keys = [row[0] for row in output_rows]
+    output_df = tracker.query_df(
+        "SELECT a.key FROM main.artifact a "
+        "JOIN main.run_artifact_link r ON a.id = r.artifact_id "
+        "WHERE r.direction = 'output' AND r.run_id IN (SELECT UNNEST(?))",
+        [run_ids],
+    )
+    output_keys = output_df["key"].tolist()
 
     assert set(output_keys) == {"outputs:activitysim_run_b"}
     assert run_a.id != run_b.id
@@ -86,14 +84,14 @@ def test_activitysim_sqlmodel_query(tracker, tmp_path: Path):
     tracker.canonicalize_config(adapter, [overlay_dir, base_dir], ingest=True)
     tracker.end_run()
 
-    if tracker.engine is None:
-        raise AssertionError("Tracker engine missing; DB tests require DuckDB.")
-    with Session(tracker.engine) as session:
-        rows = session.exec(
-            select(ActivitySimConstantsCache)
-            .where(ActivitySimConstantsCache.key == "sample_rate")
-            .where(ActivitySimConstantsCache.value_num == 0.5)
-        ).all()
+    if tracker.db is None:
+        raise AssertionError("Tracker db missing; DB tests require DuckDB.")
+    rows = tracker.query_rows(
+        "SELECT * FROM global_tables.activitysim_constants_cache "
+        "WHERE key = ? AND value_num = ?",
+        ["sample_rate", 0.5],
+        model=ActivitySimConstantsCache,
+    )
 
     assert rows
 
@@ -113,8 +111,8 @@ def test_activitysim_query_coefficients(tracker, tmp_path: Path):
     tracker.canonicalize_config(adapter, [overlay_dir, base_dir], ingest=True)
     tracker.end_run()
 
-    if tracker.engine is None:
-        raise AssertionError("Tracker engine missing; DB tests require DuckDB.")
+    if tracker.db is None:
+        raise AssertionError("Tracker db missing; DB tests require DuckDB.")
 
     rows = adapter.coefficients_rows(
         coefficient="time",
@@ -129,15 +127,14 @@ def test_activitysim_query_coefficients(tracker, tmp_path: Path):
     )
     assert {run_id for run_id, _ in rows} == {"activitysim_coeff_query"}
 
-    from sqlalchemy import Float, cast
-
-    with Session(tracker.engine) as session:
-        numeric_rows = session.exec(
-            select(ActivitySimCoefficientsCache)
-            .where(ActivitySimCoefficientsCache.value_num.is_not(None))
-            .where(cast(ActivitySimCoefficientsCache.value_num, Float) > 1.0)
-            .where(ActivitySimCoefficientsCache.coefficient_name == "time")
-        ).all()
+    numeric_rows = tracker.query_rows(
+        "SELECT * FROM global_tables.activitysim_coefficients_cache "
+        "WHERE value_num IS NOT NULL "
+        "AND CAST(value_num AS DOUBLE) > 1.0 "
+        "AND coefficient_name = ?",
+        ["time"],
+        model=ActivitySimCoefficientsCache,
+    )
 
     assert numeric_rows, "Expected numeric comparison on value_num to work."
 
@@ -171,15 +168,14 @@ def test_activitysim_config_plan_apply(tracker, tmp_path: Path):
     tracker.apply_config_plan(plan, ingest=True)
     tracker.end_run()
 
-    if tracker.engine is None:
-        raise AssertionError("Tracker engine missing; DB tests require DuckDB.")
+    if tracker.db is None:
+        raise AssertionError("Tracker db missing; DB tests require DuckDB.")
 
-    with Session(tracker.engine) as session:
-        rows = session.exec(
-            select(ActivitySimConstantsCache).where(
-                ActivitySimConstantsCache.key == "sample_rate"
-            )
-        ).all()
+    rows = tracker.query_rows(
+        "SELECT * FROM global_tables.activitysim_constants_cache WHERE key = ?",
+        ["sample_rate"],
+        model=ActivitySimConstantsCache,
+    )
 
     assert rows, "Expected constants to be ingested from config plan."
 
@@ -203,15 +199,14 @@ def test_activitysim_config_plan_run_applies_ingest(tracker, tmp_path: Path):
         cache_options=CacheOptions(cache_mode="overwrite"),
     )
 
-    if tracker.engine is None:
-        raise AssertionError("Tracker engine missing; DB tests require DuckDB.")
+    if tracker.db is None:
+        raise AssertionError("Tracker db missing; DB tests require DuckDB.")
 
-    with Session(tracker.engine) as session:
-        rows = session.exec(
-            select(ActivitySimConstantsCache).where(
-                ActivitySimConstantsCache.key == "sample_rate"
-            )
-        ).all()
+    rows = tracker.query_rows(
+        "SELECT * FROM global_tables.activitysim_constants_cache WHERE key = ?",
+        ["sample_rate"],
+        model=ActivitySimConstantsCache,
+    )
 
     assert rows, "Expected config plan ingest during Tracker.run."
 
@@ -230,16 +225,15 @@ def test_activitysim_template_refs_ingested(tracker, tmp_path: Path):
     tracker.canonicalize_config(adapter, [overlay_dir, base_dir], ingest=True)
     tracker.end_run()
 
-    if tracker.engine is None:
-        raise AssertionError("Tracker engine missing; DB tests require DuckDB.")
+    if tracker.db is None:
+        raise AssertionError("Tracker db missing; DB tests require DuckDB.")
 
-    with Session(tracker.engine) as session:
-        rows = session.exec(
-            select(ActivitySimCoefficientTemplateRefsCache).where(
-                ActivitySimCoefficientTemplateRefsCache.file_name
-                == "tour_mode_choice_coefficients_template.csv"
-            )
-        ).all()
+    rows = tracker.query_rows(
+        "SELECT * FROM global_tables.activitysim_coefficients_template_refs_cache "
+        "WHERE file_name = ?",
+        ["tour_mode_choice_coefficients_template.csv"],
+        model=ActivitySimCoefficientTemplateRefsCache,
+    )
 
     assert rows, "Expected template reference rows to be ingested."
 

@@ -2,7 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Union,
+)
 
 from consist.core.metadata_resolver import MetadataResolver
 from consist.core.run_options import merge_run_options
@@ -134,7 +144,7 @@ def resolve_step_contract(
     iteration: Optional[int] = None,
     phase: Optional[str] = None,
     stage: Optional[str] = None,
-    outputs: Optional[List[str]] = None,
+    outputs: Optional[Union[Sequence[str], Mapping[str, OutputPathRef]]] = None,
     output_paths: Optional[Mapping[str, OutputPathRef]] = None,
     output_sets: Optional[Mapping[str, OutputSet]] = None,
     cache_options: Optional[CacheOptions] = None,
@@ -358,8 +368,16 @@ def resolve_step_contract(
         inputs=resolved.inputs,
         input_keys=resolved.input_keys,
         optional_input_keys=resolved.optional_input_keys,
-        outputs=resolved.outputs,
-        output_paths=resolved.output_paths,
+        outputs=(
+            list(resolved.outputs.keys())
+            if isinstance(resolved.outputs, Mapping)
+            else resolved.outputs
+        ),
+        output_paths=(
+            resolved.outputs
+            if isinstance(resolved.outputs, Mapping)
+            else resolved.output_paths
+        ),
         output_sets=resolved.output_sets,
         cache_mode=resolved.cache_mode,
         cache_hydration=resolved.cache_hydration,

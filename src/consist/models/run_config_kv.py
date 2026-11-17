@@ -1,69 +1,27 @@
 """
-Database model for flattened config facet keys in the Consist main database.
-
-This table provides a fast, typed index for filtering runs by config values.
+Value model for flattened configuration facet key-value rows in Consist.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
-from sqlalchemy import Column, DateTime, JSON, String
-from sqlmodel import Field, SQLModel
+from pydantic import BaseModel, Field
 
 UTC = timezone.utc
 
 
-class RunConfigKV(SQLModel, table=True):
-    """
-    Query index table for config facets in the Consist database.
+class RunConfigKV(BaseModel):
+    """Typed key-value index entry extracted from a run's ``ConfigFacet``."""
 
-    Each row represents a single flattened key from a config facet, stored in a typed column
-    to support fast filtering. This table powers ``find_runs_by_facet_kv`` and related
-    search helpers.
-    """
-
-    __tablename__ = "run_config_kv"
-
-    run_id: str = Field(
-        primary_key=True,
-        sa_column_kwargs={"autoincrement": False},
-        index=True,
-    )
-
-    facet_id: str = Field(
-        primary_key=True,
-        sa_column_kwargs={"autoincrement": False},
-        index=True,
-    )
-
-    namespace: str = Field(
-        primary_key=True,
-        index=True,
-        description="Model namespace (defaults to model_name).",
-    )
-
-    key: str = Field(
-        primary_key=True,
-        index=True,
-        description="Flattened dotted key (e.g. 'household_sample_size').",
-    )
-
-    value_type: str = Field(
-        description="One of: str|int|float|bool|json|null",
-    )
-
-    value_str: Optional[str] = Field(
-        default=None, sa_column=Column(String, nullable=True)
-    )
-    value_num: Optional[float] = Field(default=None, nullable=True)
-    value_bool: Optional[bool] = Field(default=None, nullable=True)
-    value_json: Optional[Dict[str, Any]] = Field(
-        default=None, sa_column=Column(JSON, nullable=True)
-    )
-
-    created_at: datetime = Field(
-        default_factory=lambda: datetime.now(UTC),
-        sa_type=DateTime,
-    )
+    run_id: str
+    facet_id: str
+    namespace: str = Field(description="Model namespace (defaults to model_name).")
+    key: str = Field(description="Flattened dotted key (e.g. 'household_sample_size').")
+    value_type: str = Field(description="One of: str|int|float|bool|json|null")
+    value_str: Optional[str] = None
+    value_num: Optional[float] = None
+    value_bool: Optional[bool] = None
+    value_json: Optional[Any] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

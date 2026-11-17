@@ -10,6 +10,7 @@ from typing import (
     List,
     Mapping,
     Optional,
+    Sequence,
     Union,
     cast,
 )
@@ -33,7 +34,7 @@ class ResolvedStepMetadata:
     tags: Optional[List[str]]
     facet: Optional[Any]
     facet_index: Optional[bool]
-    outputs: Optional[List[str]]
+    outputs: Optional[Union[List[str], Mapping[str, Any]]]
     output_paths: Optional[Mapping[str, Any]]
     output_sets: Optional[Mapping[str, Any]]
     inputs: Optional[Union[Mapping[str, Any], Iterable[Any]]]
@@ -216,7 +217,7 @@ class MetadataResolver:
         consist_workspace: Optional[Path],
         consist_state: Optional[Any],
         runtime_kwargs: Optional[Dict[str, Any]],
-        outputs: Optional[List[str]],
+        outputs: Optional[Union[Sequence[str], Mapping[str, Any]]],
         output_paths: Optional[Mapping[str, Any]],
         output_sets: Optional[Mapping[str, Any]] = None,
         cache_mode: Optional[str],
@@ -278,7 +279,9 @@ class MetadataResolver:
         resolved_facet = _resolve_meta(facet, step_def.facet)
         resolved_facet_index = _resolve_meta(facet_index, step_def.facet_index)
         resolved_outputs = _resolve_meta(outputs, step_def.outputs)
-        if resolved_outputs is not None:
+        if isinstance(resolved_outputs, Mapping):
+            resolved_outputs = dict(resolved_outputs)
+        elif resolved_outputs is not None:
             resolved_outputs = list(resolved_outputs)
         resolved_output_paths = _resolve_meta(output_paths, step_def.output_paths)
         resolved_output_sets = _resolve_meta(output_sets, step_def.output_sets)
