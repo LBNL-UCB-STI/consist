@@ -4497,6 +4497,7 @@ class Tracker:
             mode=mode,
             if_exists=if_exists,
             missing_files=missing_files,
+            key=key,
             run_id=run_id,
             parent_run_id=parent_run_id,
             model=model,

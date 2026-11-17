@@ -738,26 +738,41 @@ def count_directory_files_and_bytes(
         entries = manifest["entries"]
         file_count = 0
         total_bytes = 0
-        for entry in entries:
-            if isinstance(entry, Mapping) and entry.get("kind") != "directory":
-                file_count += 1
-                total_bytes += int(entry.get("size") or 0)
-        return file_count, total_bytes
-    if not path.exists():
+        if isinstance(entries, Sequence):
+            for entry in entries:
+                if isinstance(entry, Mapping) and entry.get("kind") != "directory":
+                    file_count += 1
+                    total_bytes += int(entry.get("size") or 0)
+            return file_count, total_bytes
+    try:
+        if not path.exists():
+            return 0, 0
+        if not path.is_dir():
+            return 1, path.stat().st_size
+    except OSError:
         return 0, 0
-    if not path.is_dir():
-        return 1, path.stat().st_size
-    file_count = 0
-    total_bytes = 0
-    for root, _, files in os.walk(path):
-        for f in files:
-            p = Path(root) / f
-            try:
-                total_bytes += p.stat().st_size
-                file_count += 1
-            except OSError:
-                pass
-    return file_count, total_bytes
+
+    def _scan(p: Path | str) -> tuple[int, int]:
+        count = 0
+        nbytes = 0
+        try:
+            with os.scandir(p) as it:
+                for entry in it:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            sub_count, sub_bytes = _scan(entry.path)
+                            count += sub_count
+                            nbytes += sub_bytes
+                        elif entry.is_file(follow_symlinks=False):
+                            count += 1
+                            nbytes += entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        return count, nbytes
+
+    return _scan(path)
 
 
 def resolve_artifact_role(artifact: Artifact, fallback_key: str | None = None) -> str:
@@ -771,15 +786,64 @@ def resolve_artifact_role(artifact: Artifact, fallback_key: str | None = None) -
     return artifact.key or "unknown"
 
 
+def record_directory_rollup(
+    rollups: dict[str, tuple[int, int]],
+    artifact: Artifact,
+    path: Path,
+    *,
+    fallback_key: str | None = None,
+    allow_dir_stat_probe: bool = False,
+) -> None:
+    """Record directory artifact file count and byte size into role-keyed rollups."""
+    known_directory = (
+        artifact.driver in ("zarr", "directory")
+        or _is_directory_artifact(artifact)
+        or _is_file_bundle_artifact(artifact)
+    )
+    if not known_directory:
+        if allow_dir_stat_probe:
+            try:
+                if not path.is_dir():
+                    return
+            except OSError:
+                return
+        else:
+            return
+
+    manifest = None
+    if isinstance(artifact.meta, Mapping):
+        raw_manifest = artifact.meta.get("directory_manifest")
+        if isinstance(raw_manifest, Mapping):
+            manifest = raw_manifest
+
+    files, nbytes = count_directory_files_and_bytes(path, manifest=manifest)
+    role = resolve_artifact_role(artifact, fallback_key=fallback_key)
+    prev_files, prev_bytes = rollups.get(role, (0, 0))
+    rollups[role] = (prev_files + files, prev_bytes + nbytes)
+
+
+def resolve_step_id(tracker: Any) -> str | None:
+    """Safely extract run id from tracker without failing on mock objects."""
+    consist = getattr(tracker, "current_consist", None)
+    if consist is not None:
+        run = getattr(consist, "run", None)
+        if run is not None and getattr(run, "id", None) is not None:
+            return str(run.id)
+    return None
+
+
 def emit_directory_rollup_summary(
     action: str,
     rollups: Mapping[str, tuple[int, int]],
     *,
+    tracker: Any = None,
     step_id: str | None = None,
 ) -> None:
     """Emit a step-level INFO summary grouped by artifact role."""
     if not rollups:
         return
+    if step_id is None and tracker is not None:
+        step_id = resolve_step_id(tracker)
     parts = []
     for role in sorted(rollups.keys()):
         file_count, total_bytes = rollups[role]
@@ -2408,41 +2472,23 @@ def stage_artifacts_to_destinations(
             allow_external_paths=allow_external_paths,
         )
 
-    directory_rollups: dict[str, list[tuple[int, int]]] = {}
-    for key, staged_output in outputs.items():
-        if (
-            staged_output.status not in ("staged", "preserved_existing")
-            or staged_output.path is None
-        ):
-            continue
-        p = staged_output.path
-        art = staged_output.artifact
-        if (
-            p.is_dir()
-            or art.driver in ("zarr", "directory")
-            or _is_directory_artifact(art)
-        ):
-            manifest = (
-                _directory_artifact_manifest(art)
-                if _is_directory_artifact(art)
-                else None
+    if logging.getLogger().isEnabledFor(logging.INFO):
+        directory_rollups: dict[str, tuple[int, int]] = {}
+        for key, staged_output in outputs.items():
+            if (
+                staged_output.status not in ("staged", "preserved_existing")
+                or staged_output.path is None
+            ):
+                continue
+            record_directory_rollup(
+                directory_rollups,
+                staged_output.artifact,
+                staged_output.path,
+                fallback_key=key,
+                allow_dir_stat_probe=True,
             )
-            files, nbytes = count_directory_files_and_bytes(p, manifest=manifest)
-            role = resolve_artifact_role(art, fallback_key=key)
-            directory_rollups.setdefault(role, []).append((files, nbytes))
-    if directory_rollups:
-        aggregated = {
-            role: (sum(f for f, _ in pairs), sum(b for _, b in pairs))
-            for role, pairs in directory_rollups.items()
-        }
-        step_id: str | None = None
-        current_consist = getattr(tracker, "current_consist", None)
-        if current_consist is not None:
-            current_run = getattr(current_consist, "run", None)
-            if current_run is not None and getattr(current_run, "id", None) is not None:
-                step_id = str(current_run.id)
         emit_directory_rollup_summary(
-            "Staged directory inputs", aggregated, step_id=step_id
+            "Staged directory inputs", directory_rollups, tracker=tracker
         )
 
     return _ordered_staged_results(tuple(key_order), outputs)
@@ -2968,7 +3014,6 @@ def execute_planned_output_hydration(
 ) -> HydratedRunOutputsResult:
     """Execute a planned historical output hydration."""
     outputs: dict[str, HydratedRunOutput] = {}
-    directory_rollups: dict[str, list[tuple[int, int]]] = {}
 
     def _record_item(
         item: PlannedMaterialization,
@@ -2988,24 +3033,6 @@ def execute_planned_output_hydration(
                 message=message,
                 resolvable=resolvable,
             )
-        if resolvable and path.exists():
-            art = item.artifact
-            if (
-                _is_directory_artifact(art)
-                or _is_file_bundle_artifact(art)
-                or path.is_dir()
-                or art.driver in ("zarr", "directory")
-            ):
-                manifest = (
-                    _directory_artifact_manifest(art)
-                    if _is_directory_artifact(art)
-                    else None
-                )
-                files, nbytes = count_directory_files_and_bytes(path, manifest=manifest)
-                role = resolve_artifact_role(
-                    art, fallback_key=item.keys[0] if item.keys else None
-                )
-                directory_rollups.setdefault(role, []).append((files, nbytes))
 
     for item in plan:
         try:
@@ -3114,19 +3141,25 @@ def execute_planned_output_hydration(
                 item, "failed", item.destination, message=str(exc), resolvable=False
             )
 
-    if directory_rollups:
-        aggregated = {
-            role: (sum(f for f, _ in pairs), sum(b for _, b in pairs))
-            for role, pairs in directory_rollups.items()
-        }
-        step_id: str | None = None
-        current_consist = getattr(tracker, "current_consist", None)
-        if current_consist is not None:
-            current_run = getattr(current_consist, "run", None)
-            if current_run is not None and getattr(current_run, "id", None) is not None:
-                step_id = str(current_run.id)
+    if logging.getLogger().isEnabledFor(logging.INFO):
+        directory_rollups: dict[str, tuple[int, int]] = {}
+        for item in plan:
+            first_key = item.keys[0] if item.keys else None
+            out = outputs.get(first_key) if first_key else None
+            if (
+                out is not None
+                and out.resolvable
+                and out.status not in ("failed", "missing_source")
+            ):
+                record_directory_rollup(
+                    directory_rollups,
+                    item.artifact,
+                    item.destination,
+                    fallback_key=first_key,
+                    allow_dir_stat_probe=False,
+                )
         emit_directory_rollup_summary(
-            "Hydrated directory outputs", aggregated, step_id=step_id
+            "Hydrated directory outputs", directory_rollups, tracker=tracker
         )
 
     key_order = tuple(key for item in plan for key in item.keys)

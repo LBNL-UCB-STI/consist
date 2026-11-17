@@ -214,3 +214,20 @@ def test_cli_views_create_ambiguous_key(cli_runner, tracker, tmp_path: Path):
         in res_ambiguous.stdout
     )
     assert "disambiguate" in res_ambiguous.stdout
+
+    # Test that views suggest suggests --schema-id for ambiguous keys
+    res_suggest_ambiguous = cli_runner.invoke(
+        app,
+        [
+            "views",
+            "suggest",
+            "--db-path",
+            str(tracker.db_path),
+            "--key",
+            "ambiguous_key",
+        ],
+        env={"COLUMNS": "160"},
+    )
+    assert res_suggest_ambiguous.exit_code == 0
+    assert "--schema-id" in res_suggest_ambiguous.stdout
+    assert "--key" not in res_suggest_ambiguous.stdout

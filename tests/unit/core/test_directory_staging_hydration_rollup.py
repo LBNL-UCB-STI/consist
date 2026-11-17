@@ -315,3 +315,64 @@ def test_materialize_requested_inputs_directory_rollup(tmp_path: Path, caplog) -
     ]
     assert len(staged_logs) == 1
     assert "skims (2 files," in staged_logs[0]
+
+
+def test_create_grouped_view_isolates_identical_schemas_by_key(tracker, tmp_path: Path):
+    f1 = tmp_path / "k1.parquet"
+    pd.DataFrame({"id": [1, 2], "val": [10, 20]}).to_parquet(f1)
+    f2 = tmp_path / "k2.parquet"
+    pd.DataFrame({"id": [3, 4], "val": [30, 40]}).to_parquet(f2)
+
+    with tracker.start_run("r1", "model_1", cache_mode="overwrite"):
+        tracker.log_artifact(
+            str(f1), key="key_alpha", driver="parquet", profile_file_schema=True
+        )
+        tracker.log_artifact(
+            str(f2), key="key_beta", driver="parquet", profile_file_schema=True
+        )
+
+    tracker.create_grouped_view("v_alpha", key="key_alpha", mode="cold_only")
+    tracker.create_grouped_view("v_beta", key="key_beta", mode="cold_only")
+
+    df_a = tracker.query_df("SELECT * FROM v_alpha")
+    assert len(df_a) == 2
+    assert set(df_a["id"].tolist()) == {1, 2}
+
+    df_b = tracker.query_df("SELECT * FROM v_beta")
+    assert len(df_b) == 2
+    assert set(df_b["id"].tolist()) == {3, 4}
+
+
+def test_record_directory_rollup_tolerates_corrupted_or_missing_manifest(
+    tmp_path: Path,
+):
+    from consist.core.materialize import record_directory_rollup
+
+    d = tmp_path / "somedir"
+    d.mkdir()
+    (d / "file1.txt").write_bytes(b"12345")
+
+    # Corrupted manifest (not a mapping)
+    artifact = Artifact(
+        key="my_dir",
+        uri=str(d),
+        driver="directory",
+        meta={"directory_artifact": True, "directory_manifest": "not_a_mapping"},
+    )
+    rollups = {}
+    record_directory_rollup(rollups, artifact, d)
+    assert rollups == {"my_dir": (1, 5)}
+
+    # Valid manifest with entries
+    artifact2 = Artifact(
+        key="my_dir2",
+        uri=str(d),
+        driver="directory",
+        meta={
+            "directory_artifact": True,
+            "directory_manifest": {"entries": [{"kind": "file", "size": 42}]},
+        },
+    )
+    rollups2 = {}
+    record_directory_rollup(rollups2, artifact2, d)
+    assert rollups2 == {"my_dir2": (1, 42)}

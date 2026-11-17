@@ -4321,6 +4321,7 @@ class DatabaseManager:
         predicates: Optional[List[Dict[str, Any]]] = None,
         namespace: Optional[str] = None,
         drivers: Optional[List[str]] = None,
+        key: Optional[str] = None,
         run_id: Optional[str] = None,
         parent_run_id: Optional[str] = None,
         model: Optional[str] = None,
@@ -4364,11 +4365,20 @@ class DatabaseManager:
 
         ordered_sids = sorted(resolved_schema_ids)
         sid_ph = ", ".join("?" for _ in ordered_sids)
-        clauses: list[str] = [
-            f"EXISTS (SELECT 1 FROM artifact_schema_observation obs "
-            f"WHERE obs.artifact_id = a.id AND obs.schema_id IN ({sid_ph}))"
-        ]
-        params: list[Any] = list(ordered_sids)
+        if self.has_table("artifact_schema_observation"):
+            clauses: list[str] = [
+                f"(EXISTS (SELECT 1 FROM artifact_schema_observation obs "
+                f"WHERE obs.artifact_id = a.id AND obs.schema_id IN ({sid_ph})) "
+                f"OR json_extract_string(a.meta, '$.schema_id') IN ({sid_ph}))"
+            ]
+            params: list[Any] = list(ordered_sids) + list(ordered_sids)
+        else:
+            clauses = [f"json_extract_string(a.meta, '$.schema_id') IN ({sid_ph})"]
+            params = list(ordered_sids)
+
+        if key is not None:
+            clauses.append("a.key = ?")
+            params.append(key)
 
         if drivers:
             drv_list = list(dict.fromkeys(drivers))
@@ -4479,11 +4489,9 @@ class DatabaseManager:
         if key is not None:
             clauses.append("a.key = ?")
             params.append(key)
-        if driver is not None:
-            clauses.append("a.driver = ?")
-            params.append(driver)
-        elif drivers:
-            drv_list = list(dict.fromkeys(drivers))
+        effective_drivers = [driver] if driver is not None and not drivers else drivers
+        if effective_drivers:
+            drv_list = list(dict.fromkeys(effective_drivers))
             drv_ph = ", ".join("?" for _ in drv_list)
             clauses.append(f"a.driver IN ({drv_ph})")
             params.extend(drv_list)

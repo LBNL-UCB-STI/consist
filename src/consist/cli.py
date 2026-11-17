@@ -1954,6 +1954,10 @@ def _render_schemas_table(
     if suggest_view:
         table.add_column("Suggested Command", style="dim", overflow="fold")
 
+    key_schema_counts: dict[str, set[str]] = {}
+    for item in summaries:
+        key_schema_counts.setdefault(item["key"], set()).add(item["schema_id"])
+
     for item in summaries:
         sid = item["schema_id"]
         display_sid = sid[:16] + "..." if len(sid) > 19 else sid
@@ -1966,7 +1970,12 @@ def _render_schemas_table(
         ]
         if suggest_view:
             clean_name = f"v_{item['key'].replace('.', '_').replace('-', '_')}"
-            row_args.append(f"consist views create {clean_name} --key {item['key']}")
+            if len(key_schema_counts.get(item["key"], set())) > 1:
+                row_args.append(f"consist views create {clean_name} --schema-id {sid}")
+            else:
+                row_args.append(
+                    f"consist views create {clean_name} --key {item['key']}"
+                )
         table.add_row(*row_args)
 
     console.print(table)

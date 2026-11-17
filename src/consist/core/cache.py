@@ -1806,47 +1806,27 @@ def materialize_requested_inputs(
 
         _mark_staged(key, destination_path, artifact)
 
-    if staged:
-        from consist.core.directory_artifacts import (
-            require_directory_artifact_manifest as _directory_artifact_manifest,
-            is_directory_artifact as _is_dir_art,
-        )
+    if staged and logging.getLogger().isEnabledFor(logging.INFO):
         from consist.core.materialize import (
-            count_directory_files_and_bytes,
             emit_directory_rollup_summary,
-            resolve_artifact_role,
+            record_directory_rollup,
         )
 
-        directory_rollups: dict[str, list[tuple[int, int]]] = {}
+        directory_rollups: dict[str, tuple[int, int]] = {}
         for key, staged_path_str in staged.items():
-            p = Path(staged_path_str)
             matches = inputs_by_key.get(key, [])
             art = matches[0] if matches else None
-            is_dir = p.is_dir() or (
-                art is not None
-                and (art.driver in ("zarr", "directory") or _is_dir_art(art))
-            )
-            if is_dir:
-                manifest = (
-                    _directory_artifact_manifest(art)
-                    if art is not None and _is_dir_art(art)
-                    else None
+            if art is not None:
+                record_directory_rollup(
+                    directory_rollups,
+                    art,
+                    Path(staged_path_str),
+                    fallback_key=key,
+                    allow_dir_stat_probe=False,
                 )
-                files, nbytes = count_directory_files_and_bytes(p, manifest=manifest)
-                role = (
-                    resolve_artifact_role(art, fallback_key=key)
-                    if art is not None
-                    else key
-                )
-                directory_rollups.setdefault(role, []).append((files, nbytes))
 
-        if directory_rollups:
-            aggregated = {
-                role: (sum(f for f, _ in pairs), sum(b for _, b in pairs))
-                for role, pairs in directory_rollups.items()
-            }
-            emit_directory_rollup_summary(
-                "Staged directory inputs", aggregated, step_id=run.id
-            )
+        emit_directory_rollup_summary(
+            "Staged directory inputs", directory_rollups, step_id=run.id
+        )
 
     return staged
