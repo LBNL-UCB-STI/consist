@@ -285,7 +285,7 @@ def test_migrate_cli_non_json_progress_and_output(tmp_path: Path) -> None:
     res = runner.invoke(app, ["migrate", str(db_path), "--dry-run"])
     assert res.exit_code == 0, res.output
     assert "Dry run complete" in res.stdout
-    assert db_path.name in res.stdout
+    assert db_path.name in res.stdout.replace("\n", "")
 
 
 def test_validate_distinguishes_unmounted_schemes_from_missing_files(
