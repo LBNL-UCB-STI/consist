@@ -25,6 +25,11 @@ class GtfsSchema(SQLModel):
         index=True,
         description="Stable namespace for a feed within a GTFS bundle.",
     )
+    content_hash: Optional[str] = Field(
+        default=None,
+        index=True,
+        description="Deterministic hash of the selected GTFS table rows for ingest deduplication.",
+    )
 
     __consist_additive_schema__ = True
 

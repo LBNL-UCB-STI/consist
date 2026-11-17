@@ -653,6 +653,10 @@ class TrackerConfigPlanService(_TrackerServiceBase):
                         spec.table_name,
                         artifact.key,
                     )
+                logging.info(
+                    "[Consist] Ingesting config table %s...",
+                    spec.table_name,
+                )
                 rows = spec.materialize_rows(run.id)
                 self.ingest(
                     artifact,

@@ -619,6 +619,10 @@ def canonicalize_gtfs_bundle(
             continue
         frame_for_ingest = _ingest_frame(frame)
         rows = _frame_to_nullable_records(frame_for_ingest)
+        table_content_hash = selected_table_hashes.get(table_name)
+        if table_content_hash is not None:
+            for row in rows:
+                row["content_hash"] = table_content_hash
         ingestables.append(
             IngestSpec(
                 table_name=table_name,
@@ -626,7 +630,7 @@ def canonicalize_gtfs_bundle(
                 rows=rows,
                 source_path=snapshots[0].source_path if snapshots else None,
                 source=source_key,
-                content_hash=selected_table_hashes.get(table_name),
+                content_hash=table_content_hash,
                 dedupe_on_hash=True,
             )
         )

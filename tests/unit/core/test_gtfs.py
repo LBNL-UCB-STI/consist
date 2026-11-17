@@ -613,3 +613,44 @@ def test_gtfs_explicit_duplicate_feed_keys_raise(tmp_path: Path) -> None:
             identity=IdentityManager(),
             feed_keys=["feed", "feed"],
         )
+
+
+def test_gtfs_ingest_dedupes_on_content_hash(
+    gtfs_tracker, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    feed = _write_gtfs_feed(tmp_path / "feed")
+
+    with gtfs_tracker.start_run("gtfs_dedupe_run_1", "gtfs"):
+        first = gtfs_tracker.canonicalize_gtfs(
+            [feed],
+            service_date="2024-01-01",
+            feed_keys=["feed"],
+        )
+    trips_spec = next(spec for spec in first.ingestables if spec.table_name == "trips")
+    assert trips_spec.content_hash is not None
+    assert "content_hash" in trips_spec.schema.model_fields
+    assert list(trips_spec.materialize_rows("gtfs_dedupe_run_1"))[0][
+        "content_hash"
+    ] == (trips_spec.content_hash)
+    assert gtfs_tracker.hot_data_store.ingest_cache_hit(
+        "trips", trips_spec.content_hash
+    )
+
+    ingest_calls: list[str] = []
+    original_ingest = gtfs_tracker.ingest
+
+    def _spy_ingest(*args, **kwargs):
+        schema = kwargs.get("schema")
+        if schema is not None:
+            ingest_calls.append(schema.__name__)
+        return original_ingest(*args, **kwargs)
+
+    monkeypatch.setattr(gtfs_tracker, "ingest", _spy_ingest)
+    with gtfs_tracker.start_run("gtfs_dedupe_run_2", "gtfs", config={"attempt": 2}):
+        gtfs_tracker.canonicalize_gtfs(
+            [feed],
+            service_date="2024-01-01",
+            feed_keys=["feed"],
+        )
+
+    assert ingest_calls == []

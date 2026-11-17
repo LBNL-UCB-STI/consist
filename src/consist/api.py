@@ -275,7 +275,7 @@ def db_session(*args: Any, **kwargs: Any) -> Any:
     raise NotImplementedError(
         "consist.db_session() was removed in Consist v0.5.0. "
         "Use consist.query_df(...), consist.query_rows(...), "
-        "tracker.db_connection(), or consist.ibis_connection(tracker) instead."
+        "tracker.db.connection, tracker.db.transaction(), or consist.ibis_connection(tracker) instead."
     )
 
 
