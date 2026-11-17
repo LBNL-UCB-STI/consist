@@ -195,6 +195,7 @@ def test_shell_completions_include_aliases_flags_and_dynamic_values(tmp_path) ->
     assert shell.complete_db("i", "db i", 3, 4) == ["inspect"]
     assert shell.complete_schema("c", "schema c", 7, 8) == ["capture-file"]
     assert shell.complete_views("c", "views c", 6, 7) == ["create"]
+    assert shell.complete_views("s", "views s", 6, 7) == ["suggest"]
     assert shell.complete_cli("d", "cli d", 4, 5) == ["db"]
     assert shell.complete_consist("s", "consist s", 8, 9) == [
         "search",
@@ -203,6 +204,7 @@ def test_shell_completions_include_aliases_flags_and_dynamic_values(tmp_path) ->
         "summary",
         "show",
         "schema",
+        "schemas",
     ]
 
 

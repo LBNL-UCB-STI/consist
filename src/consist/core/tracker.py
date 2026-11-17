@@ -4317,12 +4317,28 @@ class Tracker:
         factory = ViewFactory(self)
         return factory.create_hybrid_view(view_name, concept_key)
 
+    def find_artifact_schema_summaries(
+        self,
+        *,
+        key: Optional[str] = None,
+        driver: Optional[str] = None,
+        drivers: Optional[Sequence[str]] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return summaries of distinct artifact keys, drivers, schema IDs, and run counts."""
+        if not self.db:
+            return []
+        return self.db.find_artifact_schema_summaries(
+            key=key, driver=driver, drivers=drivers, limit=limit
+        )
+
     def create_grouped_view(
         self,
         view_name: str,
         *,
         schema_id: Optional[str] = None,
         schema: Optional[Type[BaseModel]] = None,
+        key: Optional[str] = None,
         namespace: Optional[str] = None,
         params: Optional[Iterable[str]] = None,
         drivers: Optional[List[str]] = None,
@@ -4421,8 +4437,27 @@ class Tracker:
         """
         if not self.db:
             raise RuntimeError("Database required to create grouped views.")
-        if (schema_id is None) == (schema is None):
-            raise ValueError("Provide exactly one of schema_id or schema.")
+        provided_selectors = sum(x is not None for x in (schema_id, schema, key))
+        if provided_selectors != 1:
+            raise ValueError("Provide exactly one of schema_id or schema (or key).")
+
+        if key is not None:
+            summaries = self.find_artifact_schema_summaries(key=key, drivers=drivers)
+            distinct_sids = list(
+                dict.fromkeys(s["schema_id"] for s in summaries if s.get("schema_id"))
+            )
+            if not distinct_sids:
+                raise ValueError(
+                    f"No schemas found for artifact key '{key}'. "
+                    "Inspect available schemas with 'consist schemas'."
+                )
+            if len(distinct_sids) > 1:
+                sids_str = ", ".join(distinct_sids)
+                raise ValueError(
+                    f"Multiple schema IDs found for artifact key '{key}': {sids_str}. "
+                    "Specify schema_id to disambiguate (or inspect with 'consist schemas')."
+                )
+            schema_id = distinct_sids[0]
 
         resolved_schema_ids: Optional[List[str]] = None
         if schema is not None:

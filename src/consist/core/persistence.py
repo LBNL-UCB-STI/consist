@@ -4443,6 +4443,79 @@ class DatabaseManager:
             for row in rows
         ]
 
+    def find_artifact_schema_summaries(
+        self,
+        *,
+        key: Optional[str] = None,
+        driver: Optional[str] = None,
+        drivers: Optional[Sequence[str]] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return distinct artifact keys, drivers, schema IDs, and run counts."""
+        if not self.has_table("artifact"):
+            return []
+
+        has_obs = self.has_table("artifact_schema_observation")
+        clauses: list[str] = []
+        params: list[Any] = []
+
+        if has_obs:
+            schema_expr = (
+                "COALESCE(obs.schema_id, json_extract_string(a.meta, '$.schema_id'))"
+            )
+            from_clause = (
+                "FROM artifact a "
+                "LEFT JOIN artifact_schema_observation obs ON obs.artifact_id = a.id "
+                "LEFT JOIN run_artifact_link l ON l.artifact_id = a.id"
+            )
+        else:
+            schema_expr = "json_extract_string(a.meta, '$.schema_id')"
+            from_clause = (
+                "FROM artifact a LEFT JOIN run_artifact_link l ON l.artifact_id = a.id"
+            )
+
+        clauses.append(f"{schema_expr} IS NOT NULL AND {schema_expr} != ''")
+
+        if key is not None:
+            clauses.append("a.key = ?")
+            params.append(key)
+        if driver is not None:
+            clauses.append("a.driver = ?")
+            params.append(driver)
+        elif drivers:
+            drv_list = list(dict.fromkeys(drivers))
+            drv_ph = ", ".join("?" for _ in drv_list)
+            clauses.append(f"a.driver IN ({drv_ph})")
+            params.extend(drv_list)
+
+        where_sql = f"WHERE {' AND '.join(clauses)}"
+        limit_sql = ""
+        if limit is not None:
+            limit_sql = " LIMIT ?"
+            params.append(max(0, int(limit)))
+
+        query = (
+            f"SELECT a.key, a.driver, {schema_expr} AS schema_id, "
+            "COUNT(DISTINCT COALESCE(NULLIF(a.run_id, ''), l.run_id)) AS run_count, "
+            "COUNT(DISTINCT a.id) AS artifact_count "
+            f"{from_clause} "
+            f"{where_sql} "
+            f"GROUP BY a.key, a.driver, {schema_expr} "
+            "ORDER BY a.key ASC, a.driver ASC, schema_id ASC"
+            f"{limit_sql}"
+        )
+        rows = self.fetchall(query, params)
+        return [
+            {
+                "key": str(r[0]),
+                "driver": str(r[1]),
+                "schema_id": str(r[2]),
+                "run_count": int(r[3]),
+                "artifact_count": int(r[4]),
+            }
+            for r in rows
+        ]
+
     def find_linked_artifacts_exact(
         self,
         *,

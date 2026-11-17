@@ -1805,8 +1805,13 @@ def schema_apply_fks(
 @views_app.command("create")
 def views_create(
     view_name: str = typer.Argument(..., help="Name of the SQL view to create."),
-    schema_id: str = typer.Option(
-        ..., "--schema-id", help="Schema id used to select artifacts."
+    schema_id: Optional[str] = typer.Option(
+        None, "--schema-id", help="Schema id used to select artifacts."
+    ),
+    key: Optional[str] = typer.Option(
+        None,
+        "--key",
+        help="Artifact key used to select artifacts and resolve schema id.",
     ),
     namespace: Optional[str] = typer.Option(
         None, "--namespace", help="Default artifact facet namespace."
@@ -1878,11 +1883,21 @@ def views_create(
     ),
 ) -> None:
     """Create a selector-driven grouped hybrid view across many artifacts."""
+    if schema_id is not None and key is not None:
+        console.print("[red]Provide either --schema-id or --key, not both.[/red]")
+        raise typer.Exit(CLI_EXIT_USAGE_ERROR)
+    if schema_id is None and key is None:
+        console.print(
+            "[red]Provide either --schema-id or --key to select artifacts.[/red]"
+        )
+        raise typer.Exit(CLI_EXIT_USAGE_ERROR)
+
     tracker = get_tracker(db_path, run_dir=run_dir, read_only=False)
     try:
         tracker.create_grouped_view(
             view_name=view_name,
             schema_id=schema_id,
+            key=key,
             namespace=namespace,
             params=param or [],
             drivers=driver,
@@ -1904,6 +1919,90 @@ def views_create(
         raise typer.Exit(CLI_EXIT_RUNTIME_ERROR) from exc
 
     console.print(f"[green]Created grouped view '{view_name}'.[/green]")
+
+
+def _render_schemas_table(
+    *,
+    db_path: Optional[str] = None,
+    run_dir: Optional[str] = None,
+    key: Optional[str] = None,
+    driver: Optional[str] = None,
+    limit: int = 100,
+    json_output: bool = False,
+    suggest_view: bool = False,
+) -> None:
+    tracker = get_tracker(db_path, run_dir=run_dir)
+    summaries = tracker.find_artifact_schema_summaries(
+        key=key, driver=driver, limit=limit
+    )
+
+    if json_output:
+        output_json(summaries)
+        return
+
+    if not summaries:
+        console.print("[yellow]No artifact schemas found.[/yellow]")
+        return
+
+    title = "Suggested Grouped Views" if suggest_view else "Artifact Schemas"
+    table = Table(title=title)
+    table.add_column("Key", style="cyan", no_wrap=True)
+    table.add_column("Driver", style="green", no_wrap=True)
+    table.add_column("Schema ID", style="yellow", no_wrap=True)
+    table.add_column("Runs", style="magenta", justify="right", no_wrap=True)
+    table.add_column("Artifacts", style="blue", justify="right", no_wrap=True)
+    if suggest_view:
+        table.add_column("Suggested Command", style="dim", overflow="fold")
+
+    for item in summaries:
+        sid = item["schema_id"]
+        display_sid = sid[:16] + "..." if len(sid) > 19 else sid
+        row_args = [
+            item["key"],
+            item["driver"],
+            display_sid,
+            str(item["run_count"]),
+            str(item["artifact_count"]),
+        ]
+        if suggest_view:
+            clean_name = f"v_{item['key'].replace('.', '_').replace('-', '_')}"
+            row_args.append(f"consist views create {clean_name} --key {item['key']}")
+        table.add_row(*row_args)
+
+    console.print(table)
+
+
+@views_app.command("suggest")
+def views_suggest(
+    db_path: Optional[str] = typer.Option(
+        None, help="Path to the Consist DuckDB database."
+    ),
+    run_dir: Optional[str] = typer.Option(
+        None,
+        "--run-dir",
+        help=RUN_DIR_RESOLUTION_HELP,
+    ),
+    key: Optional[str] = typer.Option(None, "--key", help="Filter by artifact key."),
+    driver: Optional[str] = typer.Option(
+        None, "--driver", help="Filter by artifact driver."
+    ),
+    limit: int = typer.Option(
+        100, "--limit", help="Maximum number of schema summaries to display."
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Output schemas as JSON for scripting/testing."
+    ),
+) -> None:
+    """Suggest distinct artifact keys and schemas for creating grouped views."""
+    _render_schemas_table(
+        db_path=db_path,
+        run_dir=run_dir,
+        key=key,
+        driver=driver,
+        limit=limit,
+        json_output=json_output,
+        suggest_view=True,
+    )
 
 
 def _collect_scenario_run_ids(tracker: Tracker, scenario_id: str) -> List[str]:
@@ -2772,6 +2871,39 @@ def validate(
                 "[yellow]Note: Unmounted schemes were not marked missing on disk. "
                 "Configure the required mounts using --mount to validate them.[/yellow]"
             )
+
+
+@app.command("schemas")
+def schemas(
+    db_path: Optional[str] = typer.Option(
+        None, help="Path to the Consist DuckDB database."
+    ),
+    run_dir: Optional[str] = typer.Option(
+        None,
+        "--run-dir",
+        help=RUN_DIR_RESOLUTION_HELP,
+    ),
+    key: Optional[str] = typer.Option(None, "--key", help="Filter by artifact key."),
+    driver: Optional[str] = typer.Option(
+        None, "--driver", help="Filter by artifact driver."
+    ),
+    limit: int = typer.Option(
+        100, "--limit", help="Maximum number of schema summaries to display."
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Output schemas as JSON for scripting/testing."
+    ),
+) -> None:
+    """Summarize distinct artifact keys, drivers, schema IDs, and run counts."""
+    _render_schemas_table(
+        db_path=db_path,
+        run_dir=run_dir,
+        key=key,
+        driver=driver,
+        limit=limit,
+        json_output=json_output,
+        suggest_view=False,
+    )
 
 
 @app.command()
@@ -3996,7 +4128,7 @@ class ConsistShell(cmd.Cmd):
         "fix-status",
     )
     _SCHEMA_SUBCOMMANDS: Tuple[str, ...] = ("capture-file", "export", "apply-fks")
-    _VIEWS_SUBCOMMANDS: Tuple[str, ...] = ("create",)
+    _VIEWS_SUBCOMMANDS: Tuple[str, ...] = ("create", "suggest")
     _CLI_ROOT_COMMANDS: Tuple[str, ...] = (
         "init",
         "exec",
@@ -4011,6 +4143,7 @@ class ConsistShell(cmd.Cmd):
         "preview",
         "show",
         "schema",
+        "schemas",
         "views",
         "db",
     )
@@ -4022,6 +4155,7 @@ class ConsistShell(cmd.Cmd):
         "scenario",
         "lineage",
         "schema",
+        "schemas",
         "views",
         "db",
     )
@@ -4669,6 +4803,10 @@ class ConsistShell(cmd.Cmd):
     def do_views(self, arg: str) -> None:
         """Run view subcommands. Usage: views create ..."""
         self._invoke_cli_command("views", arg)
+
+    def do_schemas(self, arg: str) -> None:
+        """List and summarize artifact schemas. Usage: schemas [--key KEY] [--driver DRIVER] [--limit N] [--json]"""
+        self._invoke_cli_command("schemas", arg)
 
     def do_runs(self, arg: str) -> None:
         """List recent runs. Usage: runs [--limit N] [--model NAME] [--status STATUS] [--tag TAG] [--scenario ID] [--json]"""

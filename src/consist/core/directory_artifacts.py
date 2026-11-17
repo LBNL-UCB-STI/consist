@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import tempfile
@@ -557,6 +558,11 @@ def materialize_directory_tree_with_rollback_info(
                     _mkdir_with_tracking(target.parent, created_dirs)
                     shutil.copy2(source_path / entry["path"], target)
                     created_files.append(target)
+                    logging.debug(
+                        "[Consist] Staged directory entry %s (%d bytes)",
+                        entry["path"],
+                        entry.get("size", 0),
+                    )
             validate_directory_tree(
                 source_path,
                 normalized_manifest,
