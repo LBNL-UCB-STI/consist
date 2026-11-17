@@ -82,7 +82,16 @@ def test_tracker_run_requested_input_materialization_validates_fast_hash(
     assert result.cache_hit is False
     assert staged_path.exists()
     input_artifact = tracker.get_artifacts_for_run(result.run.id).inputs["data"]
-    assert tracker.identity.compute_file_checksum(staged_path) == input_artifact.hash
+    from consist.digest import compute_digest
+
+    assert (
+        compute_digest(
+            staged_path,
+            driver="csv",
+            options={"hashing_strategy": "fast"},
+        )
+        == input_artifact.digest
+    )
 
 
 def test_tracker_run_requested_input_materialization_skips_on_cache_hit_and_preserves_in_place_output(

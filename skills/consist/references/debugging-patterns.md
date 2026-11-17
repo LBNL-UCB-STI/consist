@@ -177,7 +177,7 @@ CONSIST_CACHE_TIMING=1 CONSIST_CACHE_DEBUG=1 /path/to/python script.py
 
 ## Path And Mount Resolution
 
-- Inspect `artifact.container_uri` before assuming the stored path is wrong.
+- Inspect `artifact.uri` before assuming the stored path is wrong.
 - Use `tracker.resolve_uri(uri)` to translate stored URIs into the current host
   filesystem.
 - If runs or outputs moved, prefer explicit CLI flags first:

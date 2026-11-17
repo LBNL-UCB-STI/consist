@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
-from sqlmodel import SQLModel
 
 from consist.models.run import Run
 from consist.types import BuiltinSchemaLiteral
@@ -27,9 +26,10 @@ class TrackerConfig(BaseModel):
     project_root: str = "."
     hashing_strategy: str = "full"
     cache_epoch: int = 1
-    schemas: Optional[list[type[SQLModel]]] = None
+    schemas: Optional[list[type[BaseModel]]] = None
     builtin_schemas: list[BuiltinSchemaLiteral] = Field(default_factory=list)
     access_mode: AccessMode = "standard"
+    read_only: bool = False
     run_subdir_fn: Optional[Callable[[Run], str]] = None
     allow_external_paths: Optional[bool] = None
     openlineage_enabled: bool = False
@@ -52,6 +52,7 @@ class TrackerConfig(BaseModel):
             "schemas": self.schemas,
             "builtin_schemas": self.builtin_schemas,
             "access_mode": self.access_mode,
+            "read_only": self.read_only,
             "run_subdir_fn": self.run_subdir_fn,
             "allow_external_paths": self.allow_external_paths,
             "openlineage_enabled": self.openlineage_enabled,

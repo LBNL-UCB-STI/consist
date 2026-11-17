@@ -19,7 +19,6 @@ from typing import (
     List,
     Mapping,
     Optional,
-    Protocol,
     Sequence,
     TYPE_CHECKING,
     Type,
@@ -31,11 +30,10 @@ from typing import (
 )
 import weakref
 
-import pandas as pd
 import duckdb
-from sqlalchemy import and_, case, func, select as sa_select, Subquery
-from sqlalchemy.sql import Executable
-from sqlmodel import SQLModel, Session, col, select
+import pandas as pd
+from pydantic import BaseModel
+from typing_extensions import Protocol, runtime_checkable
 
 # Internal imports
 from consist.core.context import (
@@ -45,6 +43,8 @@ from consist.core.context import (
     use_tracker as _use_tracker,
 )
 from consist.core.decorators import (
+    MetaValue,
+    OutputPathRef,
     define_step as define_step_decorator,
     require_runtime_kwargs as require_runtime_kwargs_decorator,
 )
@@ -58,17 +58,35 @@ from consist.core.drivers import (
     _normalize_columns,
 )
 from consist.core.gtfs import GTFS_BUNDLE_SOURCE_KEY, GtfsCanonicalizationResult
-from consist.core.noop import NoopRunContext, NoopScenarioContext
+from consist.errors import DeprecatedViewsError
+from consist.core.migrate import (
+    MigrationReport as MigrationReport,
+    migrate_database as migrate_database,
+    undo_migrate_database as undo_migrate_database,
+)
+from consist.core.persistence import (
+    close_tracked_relation_tokens,
+    extract_tracked_relation_tokens,
+    lookup_live_db_by_path,
+    register_tracked_relation_cursor,
+    tracked_relation_count,
+)
+from consist.core.queries import (
+    build_config_run_query,
+    build_pivot_facets,
+    execute_config_run_rows,
+)
 from consist.core.run_options import raise_legacy_policy_kwargs_error
-from consist.core.stores import get_hot_data_db_path
-from consist.core.views import _quote_ident, create_view_model
+from consist.core.stores import get_hot_data_db, get_hot_data_db_path
+from consist.core.views import _quote_ident
 from consist.core.workflow import OutputCapture, RunContext
+from consist.digest import Digest
 from consist.integrations.ibis import (
     ibis_grouped_view as _ibis_grouped_view,
     ibis_connection as _ibis_connection,
     ibis_view as _ibis_view,
 )
-from consist.models.artifact import Artifact, ArchivedOutputs, get_tracker_ref
+from consist.models.artifact import Artifact, ArchivedOutputs
 from consist.models.run import (
     ConsistRecord,
     CouplerSnapshotPhase,
@@ -91,6 +109,7 @@ from consist.types import (
     IdentityInputs,
     IntCapture as IntCapture,
     OutputPolicyOptions,
+    ParameterizedSQL,
     OutputSet,
     RunCompletionArchivePolicy,
     StringCapture as StringCapture,
@@ -109,7 +128,6 @@ if TYPE_CHECKING:
         StagedInput,
         StagedInputsResult,
     )
-    from consist.core.step_context import StepContext
     from consist.runset import RunSet
     from ibis.backends.duckdb import Backend as IbisDuckDBBackend
     from ibis.expr.types import Table as IbisTable
@@ -144,17 +162,7 @@ def _get_gpd() -> Optional[ModuleType]:
     return gpd
 
 
-T = TypeVar("T", bound=SQLModel)
-
-
-class OpenMatrixFileLike(Protocol):
-    """Minimal file-like surface for OpenMatrix/HDF5 access."""
-
-    def __contains__(self, key: object) -> bool: ...
-
-    def __getitem__(self, key: str) -> Any: ...
-
-    def close(self) -> None: ...
+T = TypeVar("T", bound=BaseModel)
 
 
 LoadResult = Union[
@@ -233,52 +241,57 @@ class SpatialArtifact(ArtifactLike, Protocol):
     ]: ...
 
 
-def view(model: Type[T], name: Optional[str] = None) -> Type[T]:
-    """
-    Create a SQLModel class backed by a Consist hybrid view.
+_QueryModelT = TypeVar("_QueryModelT")
+_ViewModelT = TypeVar("_ViewModelT")
 
-    This is a convenience wrapper around the view factory that lets you define
-    a SQLModel schema for a concept (e.g., a canonicalized config table, an
-    ingested dataset, or a computed artifact view) and then query it as a normal
-    SQLModel table. The returned class is a dynamic subclass with `table=True`
-    that points at a database view, so you can use it in `sqlmodel.Session`
-    queries without creating a physical table.
 
-    If you need explicit control over view naming or want to create multiple
-    named views for the same concept, use `Tracker.create_view(...)` or
-    `Tracker.view(...)` directly.
+def view(model: Type[_ViewModelT], name: Optional[str] = None) -> Type[_ViewModelT]:
+    """Deprecated stub for removed SQLModel ORM view creation."""
+    _ = (model, name)
+    msg = (
+        "consist.view(...) and SQLModel ORM hybrid views were removed in Consist v0.5.0. "
+        "Use tracker.create_view(view_name, concept_key) with consist.query_df(...) / "
+        "consist.query_rows(..., model=...), or consist.ibis_view(tracker, model=...) instead."
+    )
+    warnings.warn(msg, DeprecationWarning, stacklevel=2)
+    raise DeprecatedViewsError(msg)
 
-    Parameters
-    ----------
-    model : Type[T]
-        Base SQLModel describing the schema (columns and types).
-    name : Optional[str], optional
-        Optional override for the generated view name (defaults to the model's
-        table name).
 
-    Returns
-    -------
-    Type[T]
-        SQLModel subclass with ``table=True`` pointing at the hybrid view.
+def register_views(*models: Type[Any]) -> Dict[str, Type[Any]]:
+    """Deprecated stub for removed bulk SQLModel ORM view registration."""
+    _ = models
+    msg = (
+        "consist.register_views(...) was removed in Consist v0.5.0. "
+        "Use tracker.create_view(view_name, concept_key) with consist.query_df(...) / "
+        "consist.query_rows(..., model=...), or consist.ibis_view(tracker, model=...) instead."
+    )
+    warnings.warn(msg, DeprecationWarning, stacklevel=2)
+    raise DeprecatedViewsError(msg)
 
-    Examples
-    --------
-    ```python
-    from sqlmodel import Session, select
-    from consist import view
-    from consist.models.activitysim import ActivitySimConstantsCache
 
-    # Create a dynamic view class for querying constants
-    ConstantsView = view(ActivitySimConstantsCache)
+def db_session(*args: Any, **kwargs: Any) -> Any:
+    """Removed v0.4 SQLAlchemy session helper."""
+    _ = (args, kwargs)
+    raise NotImplementedError(
+        "consist.db_session() was removed in Consist v0.5.0. "
+        "Use consist.query_df(...), consist.query_rows(...), "
+        "tracker.db_connection(), or consist.ibis_connection(tracker) instead."
+    )
 
-    with Session(tracker.engine) as session:
-        rows = session.exec(
-            select(ConstantsView)
-            .where(ConstantsView.key == "sample_rate")
-        ).all()
-    ```
-    """
-    return create_view_model(model, name)
+
+def noop_scenario(*args: Any, **kwargs: Any) -> Any:
+    """Removed v0.4 no-op scenario context manager."""
+    _ = (args, kwargs)
+    raise NotImplementedError(
+        "consist.noop_scenario() was removed in Consist v0.5.0. "
+        "Use Tracker() (Ephemeral Mode) or Tracker(run_dir=..., db_path=None) "
+        "(JSON-Only Mode) with scenario(...) instead."
+    )
+
+
+@runtime_checkable
+class _DuckDBRelationLike(Protocol):
+    def df(self) -> pd.DataFrame: ...
 
 
 def ibis_connection(
@@ -293,7 +306,7 @@ def ibis_connection(
 def ibis_view(
     tracker: Optional["Tracker"] = None,
     *,
-    model: Type[SQLModel],
+    model: Type[BaseModel],
     key: Optional[str] = None,
 ) -> "IbisTable":
     """
@@ -410,34 +423,34 @@ def set_current_tracker(tracker: Optional["Tracker"]) -> Optional["Tracker"]:
 
 def define_step(
     *,
-    model: Optional[str] = None,
-    name_template: Optional[str] = None,
-    outputs: Optional[list[str]] = None,
-    schema_outputs: Optional[list[str]] = None,
-    output_paths: Optional[Mapping[str, Any]] = None,
-    output_sets: Optional[Mapping[str, OutputSet]] = None,
-    inputs: Optional[Union[Mapping[str, Any], Iterable[Any]]] = None,
-    input_keys: Optional[Union[Iterable[str], str]] = None,
-    optional_input_keys: Optional[Union[Iterable[str], str]] = None,
-    config: Optional[Dict[str, Any]] = None,
-    adapter: Optional[
-        Union["ConfigAdapter", Callable[["StepContext"], "ConfigAdapter"]]
-    ] = None,
-    identity_inputs: Optional[IdentityInputs] = None,
-    facet: Optional[Any] = None,
-    facet_index: Optional[bool] = None,
-    cache_mode: Optional[str] = None,
-    cache_hydration: Optional[str] = None,
-    cache_version: Optional[int] = None,
-    validate_cached_outputs: Optional[str] = None,
-    input_binding: Optional[InputBindingMode] = None,
-    load_inputs: Optional[bool] = None,
-    tags: Optional[list[str]] = None,
-    facet_from: Optional[list[str]] = None,
-    facet_schema_version: Optional[Union[str, int]] = None,
-    description: Optional[str] = None,
+    model: Optional[MetaValue[str]] = None,
+    name_template: Optional[MetaValue[str]] = None,
+    outputs: Optional[MetaValue[Union[Sequence[str], Mapping[str, OutputPathRef]]]] = (
+        None
+    ),
+    schema_outputs: Optional[MetaValue[List[str]]] = None,
+    output_paths: Optional[MetaValue[Mapping[str, Any]]] = None,
+    output_sets: Optional[MetaValue[Mapping[str, OutputSet]]] = None,
+    inputs: Optional[MetaValue[Union[Mapping[str, Any], Iterable[Any]]]] = None,
+    input_keys: Optional[MetaValue[Union[Iterable[str], str]]] = None,
+    optional_input_keys: Optional[MetaValue[Union[Iterable[str], str]]] = None,
+    config: Optional[MetaValue[Dict[str, Any]]] = None,
+    adapter: Optional[MetaValue["ConfigAdapter"]] = None,
+    identity_inputs: Optional[MetaValue[IdentityInputs]] = None,
+    facet: Optional[MetaValue[Any]] = None,
+    facet_index: Optional[MetaValue[bool]] = None,
+    cache_mode: Optional[MetaValue[str]] = None,
+    cache_hydration: Optional[MetaValue[str]] = None,
+    cache_version: Optional[MetaValue[int]] = None,
+    validate_cached_outputs: Optional[MetaValue[str]] = None,
+    input_binding: Optional[MetaValue[InputBindingMode]] = None,
+    load_inputs: Optional[MetaValue[bool]] = None,
+    tags: Optional[MetaValue[List[str]]] = None,
+    facet_from: Optional[MetaValue[List[str]]] = None,
+    facet_schema_version: Optional[MetaValue[Union[str, int]]] = None,
+    description: Optional[MetaValue[str]] = None,
     **extra: Any,
-):
+) -> Callable[[Callable], Callable]:
     """
     Attach metadata to a function without changing execution behavior.
 
@@ -490,7 +503,16 @@ def require_runtime_kwargs(*names: str) -> Callable[[Callable[..., Any]], Callab
     return require_runtime_kwargs_decorator(*names)
 
 
-@contextmanager
+def _require_enabled(enabled: bool, api_name: str) -> None:
+    if not enabled:
+        raise ValueError(
+            f"{api_name} with enabled=False is no longer supported; NoopTracker and "
+            "noop mode were removed in Consist v0.5. Use Tracker() (Ephemeral Mode) "
+            "or Tracker(run_dir=..., db_path=None) (JSON-Only Mode) for database-free "
+            "execution."
+        )
+
+
 def scenario(
     name: str,
     tracker: Optional["Tracker"] = None,
@@ -522,8 +544,9 @@ def scenario(
         The Tracker instance to use for persistence. Defaults to the active
         global tracker.
     enabled : bool, default True
-        If False, returns a no-op context that executes functions without
-        recording provenance, preserving the Scenario API ergonomics for debugging.
+        Must be ``True``. Passing ``False`` raises ``ValueError``; use
+        ``Tracker()`` (Ephemeral Mode) or ``Tracker(run_dir=..., db_path=None)``
+        (JSON-Only Mode) for database-free execution.
     step_tags : Optional[list[str]], optional
         Default tags applied to child ``scenario.run(...)`` and
         ``scenario.trace(...)`` calls. These defaults do not apply to the
@@ -546,43 +569,21 @@ def scenario(
     ScenarioContext
         An active scenario context with an internal Coupler for artifact chaining.
     """
-    if not enabled:
-        yield NoopScenarioContext(
+    _require_enabled(enabled, "consist.scenario")
+
+    @contextmanager
+    def _scenario_cm():
+        tr = _resolve_tracker(tracker)
+        with tr.scenario(
             name,
             step_tags=step_tags,
             step_facet=step_facet,
             step_run_completion_archive=step_run_completion_archive,
             **kwargs,
-        )
-        return
-    tr = _resolve_tracker(tracker)
-    with tr.scenario(
-        name,
-        step_tags=step_tags,
-        step_facet=step_facet,
-        step_run_completion_archive=step_run_completion_archive,
-        **kwargs,
-    ) as sc:
-        yield sc
+        ) as sc:
+            yield sc
 
-
-@contextmanager
-def noop_scenario(name: str, **kwargs: Any):
-    """
-    Creates a scenario context that executes without provenance tracking.
-
-    This is useful for debugging or running simulations where you want the
-    ergonomics of the Consist scenario API (like the Coupler and RunResult)
-    but do not want to record any metadata or artifacts to the database.
-
-    Parameters
-    ----------
-    name : str
-        Name of the scenario (for display/logging purposes).
-    **kwargs : Any
-        Additional arguments forwarded to the noop context.
-    """
-    yield NoopScenarioContext(name, **kwargs)
+    return _scenario_cm()
 
 
 @contextmanager
@@ -1498,7 +1499,7 @@ def hydrate_run_outputs(
     HydratedRunOutputsResult
         Keyed hydration outcome for the selected run outputs. Each detached
         returned artifact preserves the canonical fingerprint surface on
-        ``artifact.hash``.
+        ``artifact.digest``.
 
     Examples
     --------
@@ -1704,7 +1705,7 @@ def set_artifact_recovery_roots(
     These roots are probed after per-call overrides and historical run/mount
     locations when rematerializing historical outputs or hydrating cache-hit
     outputs. Use this when a workflow promotes bytes into a stable archive root
-    but you want to keep ``container_uri`` as the canonical logical location.
+    but you want to keep ``uri`` as the canonical logical location.
 
     Parameters
     ----------
@@ -1736,6 +1737,7 @@ def register_artifact_recovery_copy(
     *,
     verify: bool = True,
     content_hash: str | None = None,
+    source_root: str | Path | None = None,
     append: bool = True,
     tracker: Optional["Tracker"] = None,
 ) -> "ArtifactRecoveryCopyRegistration":
@@ -1750,7 +1752,11 @@ def register_artifact_recovery_copy(
     verify : bool, default True
         Whether to verify the copy's full-file SHA-256 digest.
     content_hash : str | None, optional
-        Expected SHA-256 digest, taking precedence over ``artifact.hash``.
+        Expected SHA-256 digest, taking precedence over ``artifact.digest``.
+    source_root : str | Path | None, optional
+        Optional root containing the unpromoted source file at its URI-relative
+        path, hashed only when ``verify=True``, ``content_hash is None``, and
+        ``artifact`` lacks a verifiable full digest.
     append : bool, default True
         Whether to append rather than replace recovery-root metadata.
     tracker : Tracker | None, optional
@@ -1766,11 +1772,20 @@ def register_artifact_recovery_copy(
     This function never copies bytes. Directory artifacts and HDF5 child tables
     are deliberately blocked until they have an independent recovery contract.
     """
+    if source_root is None:
+        return _resolve_tracker(tracker).register_artifact_recovery_copy(
+            artifact,
+            recovery_root,
+            verify=verify,
+            content_hash=content_hash,
+            append=append,
+        )
     return _resolve_tracker(tracker).register_artifact_recovery_copy(
         artifact,
         recovery_root,
         verify=verify,
         content_hash=content_hash,
+        source_root=source_root,
         append=append,
     )
 
@@ -1783,6 +1798,7 @@ def register_run_output_recovery_copies(
     verify: bool = True,
     append: bool = True,
     content_hashes: Mapping[str, str] | None = None,
+    source_root: str | Path | None = None,
     tracker: Optional["Tracker"] = None,
 ) -> "RunOutputRecoveryCopiesRegistration":
     """Verify and register existing recovery copies for run outputs.
@@ -1801,6 +1817,10 @@ def register_run_output_recovery_copies(
         Whether successful registrations append recovery-root metadata.
     content_hashes : mapping of str to str | None, optional
         Optional per-key SHA-256 proofs for artifacts without full hashes.
+    source_root : str | Path | None, optional
+        Optional root containing unpromoted source files at their URI-relative
+        paths, hashed only for outputs without ``content_hashes[key]`` or a
+        verifiable full digest when ``verify=True``.
     tracker : Tracker | None, optional
         Tracker used for validation and persistence.
 
@@ -1814,6 +1834,15 @@ def register_run_output_recovery_copies(
     KeyError
         If requested output or content-hash keys are unknown.
     """
+    if source_root is None:
+        return _resolve_tracker(tracker).register_run_output_recovery_copies(
+            run_id,
+            recovery_root,
+            keys=keys,
+            verify=verify,
+            append=append,
+            content_hashes=content_hashes,
+        )
     return _resolve_tracker(tracker).register_run_output_recovery_copies(
         run_id,
         recovery_root,
@@ -1821,6 +1850,7 @@ def register_run_output_recovery_copies(
         verify=verify,
         append=append,
         content_hashes=content_hashes,
+        source_root=source_root,
     )
 
 
@@ -1857,6 +1887,19 @@ def archive_artifact(
         archive_root,
         mode=mode,
         append=append,
+    )
+
+
+def evict_artifact(
+    artifact: Artifact,
+    *,
+    path: Optional[str | Path] = None,
+    scratch_path: Optional[str | Path] = None,
+    tracker: Optional["Tracker"] = None,
+) -> Path:
+    """Safely evict a verified local scratch copy when an archive or ingested table survives."""
+    return _resolve_tracker(tracker).evict_artifact(
+        artifact, path=path, scratch_path=scratch_path
     )
 
 
@@ -2052,10 +2095,12 @@ def log_artifact(
     path: ArtifactRef,
     key: Optional[str] = None,
     direction: str = "output",
-    schema: Optional[Type[SQLModel]] = None,
+    schema: Optional[Type[BaseModel]] = None,
     strict_schema: bool = False,
     driver: Optional[str] = None,
-    content_hash: Optional[str] = None,
+    member: Optional[str] = None,
+    content_hash: Optional[str | Digest] = None,
+    digest: Optional[Digest] = None,
     force_hash_override: bool = False,
     validate_content_hash: bool = False,
     reuse_if_unchanged: bool = False,
@@ -2085,8 +2130,8 @@ def log_artifact(
     direction : str, default "output"
         Specifies whether the artifact is an "input" or "output" for the
         current run. Defaults to "output".
-    schema : Optional[Type[SQLModel]], optional
-        An optional SQLModel class that names the artifact's logical schema.
+    schema : Optional[Type[BaseModel]], optional
+        An optional Pydantic/SQLModel class that names the artifact's logical schema.
         Its name will be stored in artifact metadata. This tags metadata; it
         does not validate file contents by default.
     strict_schema : bool, default False
@@ -2095,10 +2140,9 @@ def log_artifact(
     driver : Optional[str], optional
         Explicitly specify the driver (e.g., 'h5_table').
         If None, the driver is inferred from the file extension.
-    content_hash : Optional[str], optional
+    content_hash : Optional[str | Digest], optional
         Precomputed artifact fingerprint to use instead of hashing the path on
-        disk. When provided, Consist stores it on the canonical public
-        fingerprint field, ``artifact.hash``.
+        disk. When provided, Consist stores it on ``artifact.digest``.
     force_hash_override : bool, default False
         If True, overwrite an existing artifact hash when it differs from
         `content_hash`. By default, mismatched overrides are ignored with a warning.
@@ -2139,25 +2183,7 @@ def log_artifact(
     ValueError
         If `key` is not provided when `path` is a path-like (str/Path).
     """
-    if not enabled:
-        return NoopRunContext().log_artifact(
-            path=path,
-            key=key,
-            direction=direction,
-            schema=schema,
-            strict_schema=strict_schema,
-            driver=driver,
-            content_hash=content_hash,
-            force_hash_override=force_hash_override,
-            validate_content_hash=validate_content_hash,
-            reuse_if_unchanged=reuse_if_unchanged,
-            reuse_scope=reuse_scope,
-            parent_artifact_id=parent_artifact_id,
-            facet=facet,
-            facet_schema_version=facet_schema_version,
-            facet_index=facet_index,
-            **meta,
-        )
+    _require_enabled(enabled, "consist.log_artifact")
     return get_active_tracker().log_artifact(
         path=path,
         key=key,
@@ -2165,7 +2191,9 @@ def log_artifact(
         schema=schema,
         strict_schema=strict_schema,
         driver=driver,
+        member=member,
         content_hash=content_hash,
+        digest=digest,
         force_hash_override=force_hash_override,
         validate_content_hash=validate_content_hash,
         reuse_if_unchanged=reuse_if_unchanged,
@@ -2276,32 +2304,7 @@ def log_artifacts(
     #                  role="primary_unit", weight=1.0
     ```
     """
-    if not enabled:
-        ctx = NoopRunContext()
-        artifacts: Dict[str, ArtifactLike] = {}
-        per_key_meta = metadata_by_key or {}
-        for key, ref in outputs.items():
-            meta = dict(shared_meta)
-            meta.update(per_key_meta.get(key, {}))
-            facet = facets_by_key.get(key) if facets_by_key else None
-            facet_schema_version = (
-                facet_schema_versions_by_key.get(key)
-                if facet_schema_versions_by_key
-                else None
-            )
-            artifacts[str(key)] = ctx.log_artifact(
-                ref,
-                key=str(key),
-                direction=direction,
-                driver=driver,
-                facet=facet,
-                facet_schema_version=facet_schema_version,
-                facet_index=facet_index,
-                reuse_if_unchanged=reuse_if_unchanged,
-                reuse_scope=reuse_scope,
-                **meta,
-            )
-        return artifacts
+    _require_enabled(enabled, "consist.log_artifacts")
     return get_active_tracker().log_artifacts(
         outputs,
         direction=direction,
@@ -2320,9 +2323,11 @@ def log_input(
     path: ArtifactRef,
     key: Optional[str] = None,
     *,
-    schema: Optional[Type[SQLModel]] = None,
+    schema: Optional[Type[BaseModel]] = None,
     driver: Optional[str] = None,
-    content_hash: Optional[str] = None,
+    member: Optional[str] = None,
+    content_hash: Optional[str | Digest] = None,
+    digest: Optional[Digest] = None,
     force_hash_override: bool = False,
     validate_content_hash: bool = False,
     facet: Optional[Any] = None,
@@ -2345,14 +2350,13 @@ def log_input(
     key : Optional[str]
         Semantic name for the artifact (e.g. "raw_households"). Required if `path`
         is a file path.
-    schema : Optional[Type[SQLModel]]
-        Optional SQLModel class defining the data structure.
+    schema : Optional[Type[BaseModel]]
+        Optional Pydantic/SQLModel class defining the data structure.
     driver : Optional[str]
         Explicit format driver (e.g. "parquet"). Inferred from extension if None.
-    content_hash : Optional[str]
+    content_hash : Optional[str | Digest]
         Precomputed artifact fingerprint to avoid re-hashing large files. When
-        provided, Consist stores it on the canonical public fingerprint field,
-        ``artifact.hash``.
+        provided, Consist stores it on ``artifact.digest``.
     force_hash_override : bool, default False
         Overwrite existing hash in the database if different from `content_hash`.
     validate_content_hash : bool, default False
@@ -2379,7 +2383,9 @@ def log_input(
         direction="input",
         schema=schema,
         driver=driver,
+        member=member,
         content_hash=content_hash,
+        digest=digest,
         force_hash_override=force_hash_override,
         validate_content_hash=validate_content_hash,
         facet=facet,
@@ -2395,9 +2401,11 @@ def log_output(
     key: Optional[str] = None,
     *,
     artifact_kind: Literal["file", "directory"] = "file",
-    schema: Optional[Type[SQLModel]] = None,
+    schema: Optional[Type[BaseModel]] = None,
     driver: Optional[str] = None,
-    content_hash: Optional[str] = None,
+    member: Optional[str] = None,
+    content_hash: Optional[str | Digest] = None,
+    digest: Optional[Digest] = None,
     force_hash_override: bool = False,
     validate_content_hash: bool = False,
     reuse_if_unchanged: bool = False,
@@ -2422,14 +2430,13 @@ def log_output(
         Declare an immutable directory artifact with a complete persisted tree
         manifest. The artifact retains its content driver (for example,
         ``"zarr"``) for loading and type narrowing.
-    schema : Optional[Type[SQLModel]]
-        Optional SQLModel class defining the data structure.
+    schema : Optional[Type[BaseModel]]
+        Optional Pydantic/SQLModel class defining the data structure.
     driver : Optional[str]
         Explicit format driver (e.g. "parquet"). Inferred from extension if None.
-    content_hash : Optional[str]
+    content_hash : Optional[str | Digest]
         Precomputed artifact fingerprint to avoid re-hashing large files. When
-        provided, Consist stores it on the canonical public fingerprint field,
-        ``artifact.hash``.
+        provided, Consist stores it on ``artifact.digest``.
     force_hash_override : bool, default False
         Overwrite existing hash in the database if different from `content_hash`.
     validate_content_hash : bool, default False
@@ -2464,7 +2471,9 @@ def log_output(
             artifact_kind=artifact_kind,
             schema=schema,
             driver=driver,
+            member=member,
             content_hash=content_hash,
+            digest=digest,
             force_hash_override=force_hash_override,
             validate_content_hash=validate_content_hash,
             reuse_if_unchanged=reuse_if_unchanged,
@@ -2480,7 +2489,9 @@ def log_output(
         direction="output",
         schema=schema,
         driver=driver,
+        member=member,
         content_hash=content_hash,
+        digest=digest,
         force_hash_override=force_hash_override,
         validate_content_hash=validate_content_hash,
         reuse_if_unchanged=reuse_if_unchanged,
@@ -2496,7 +2507,7 @@ def log_output(
 def ingest(
     artifact: Artifact,
     data: Optional[Union[Iterable[Dict[str, Any]], Any]] = None,
-    schema: Optional[Type[SQLModel]] = None,
+    schema: Optional[Type[BaseModel]] = None,
     run: Optional[Run] = None,
 ) -> Any:
     """
@@ -2515,8 +2526,8 @@ def ingest(
         (str or Path), a Pandas DataFrame, or any other data type that `dlt`
         can handle. If `None`, Consist attempts to read the data directly
         from the artifact's resolved file path.
-    schema : Optional[Type[SQLModel]], optional
-        An optional SQLModel class that defines the expected schema for the ingested data.
+    schema : Optional[Type[BaseModel]], optional
+        An optional Pydantic/SQLModel class that defines the expected schema for the ingested data.
         If provided, `dlt` will use this for strict validation and schema inference.
     run : Optional[Run], optional
         The `Run` context for ingestion. If provided, the data will be tagged with
@@ -2574,7 +2585,7 @@ def canonicalize_gtfs(
 def log_dataframe(
     df: pd.DataFrame,
     key: str,
-    schema: Optional[Type[SQLModel]] = None,
+    schema: Optional[Type[BaseModel]] = None,
     direction: str = "output",
     tracker: Optional["Tracker"] = None,
     path: Optional[Union[str, Path]] = None,
@@ -2592,7 +2603,7 @@ def log_dataframe(
         Data to persist.
     key : str
         Logical artifact key.
-    schema : Optional[Type[SQLModel]], optional
+    schema : Optional[Type[BaseModel]], optional
         Schema used for ingestion, if provided.
     direction : str, default "output"
         Artifact direction relative to the run.
@@ -2655,23 +2666,6 @@ def log_dataframe(
     if schema is not None:
         tr.ingest(art, df, schema=schema)
     return art
-
-
-def register_views(*models: Type[SQLModel]) -> Dict[str, Type[SQLModel]]:
-    """
-    Register hybrid view models for the active tracker.
-
-    Parameters
-    ----------
-    *models : Type[SQLModel]
-        SQLModel classes describing the schema of hybrid views.
-
-    Returns
-    -------
-    Dict[str, Type[SQLModel]]
-        Mapping from model class name to the generated view model.
-    """
-    return {m.__name__: create_view_model(m) for m in models}
 
 
 def find_run(tracker: Optional["Tracker"] = None, **filters: Any) -> Optional[Run]:
@@ -2815,194 +2809,94 @@ def run_set(
     return tr.run_set(label=label, **filters)
 
 
-@contextmanager
-def db_session(tracker: Optional["Tracker"] = None) -> Iterator[Session]:
+def run_query(
+    query: str | ParameterizedSQL,
+    params: Optional[Sequence[Any] | Mapping[str, Any]] = None,
+    tracker: Optional["Tracker"] = None,
+) -> list[Any]:
     """
-    Provide a SQLModel ``Session`` connected to the tracker's database.
-
-    Parameters
-    ----------
-    tracker : Optional[Tracker], optional
-        Tracker instance supplying the engine; defaults to active tracker.
-
-    Yields
-    ------
-    Session
-        SQLModel session bound to the tracker engine.
+    Execute a validated read-only DuckDB SQL query via the tracker database.
     """
     tr = tracker or current_tracker()
-    with Session(tr.engine) as session:
-        yield session
+    return tr.run_query(query, params=params)
 
 
-def run_query(query: Executable, tracker: Optional["Tracker"] = None) -> list:
+def query_df(
+    sql: str | ParameterizedSQL,
+    params: Optional[Sequence[Any] | Mapping[str, Any]] = None,
+    *,
+    tracker: Optional["Tracker"] = None,
+) -> pd.DataFrame:
     """
-    Execute a SQLModel/SQLAlchemy query via the tracker engine.
-
-    Parameters
-    ----------
-    query : Executable
-        Query object (``select``, etc.).
-    tracker : Optional[Tracker], optional
-        Tracker instance supplying the engine; defaults to the active tracker.
-
-    Returns
-    -------
-    list
-        Results of the executed query.
+    Execute a validated read-only SQL query and return a DataFrame.
     """
     tr = tracker or current_tracker()
-    with Session(tr.engine) as session:
-        return session.exec(cast(Any, query)).all()
+    return tr.query_df(sql, params=params)
+
+
+def query_rows(
+    sql: str | ParameterizedSQL,
+    params: Optional[Sequence[Any] | Mapping[str, Any]] = None,
+    *,
+    model: Optional[Type[_QueryModelT]] = None,
+    tracker: Optional["Tracker"] = None,
+) -> list[Any]:
+    """
+    Execute a validated read-only SQL query and return rows or validated models.
+    """
+    tr = tracker or current_tracker()
+    return tr.query_rows(sql, params=params, model=model)
 
 
 def config_run_query(
-    table: Type[SQLModel],
+    table: Type[BaseModel] | str,
     *,
-    link_table: Type[SQLModel],
-    table_name: Optional[str] = None,
-    columns: Optional[Iterable[Any]] = None,
-    where: Optional[Union[Iterable[Any], Any]] = None,
-    join_on: Optional[Iterable[str]] = None,
-) -> Executable:
-    """
-    Build a query joining a config cache table to its run-link table.
-
-    This is a convenience helper for config adapter tables that are deduplicated
-    by content hash and linked to runs via a separate link table.
-
-    Parameters
-    ----------
-    table : Type[SQLModel]
-        Config cache table to query (e.g., ActivitySimCoefficientsCache).
-    link_table : Type[SQLModel]
-        Link table storing run_id/content_hash (e.g., ActivitySimConfigIngestRunLink).
-    table_name : Optional[str], optional
-        Optional filter for link_table.table_name. Defaults to table.__tablename__
-        if link_table has a table_name column.
-    columns : Optional[Iterable[Any]], optional
-        Columns to select. Defaults to (link_table.run_id, table).
-    where : Optional[Union[Iterable[Any], Any]], optional
-        Optional filter clauses to apply to the query.
-    join_on : Optional[Iterable[str]], optional
-        Column names to join on. Defaults to content_hash and file_name when available.
-
-    Returns
-    -------
-    Executable
-        SQL query joining the config table to runs.
-    """
-    if columns is None:
-        run_id_column = getattr(link_table, "run_id", None)
-        if run_id_column is None:
-            raise ValueError(
-                "config_run_query requires link_table to have a run_id column "
-                "when columns is not specified."
-            )
-        columns_list = [run_id_column, table]
-    else:
-        if isinstance(columns, (list, tuple, set)):
-            columns_list = list(columns)
-        else:
-            columns_list = [columns]
-        if not columns_list:
-            raise ValueError("config_run_query requires at least one column.")
-
-    if join_on is None:
-        join_on = ["content_hash"]
-        if (
-            getattr(table, "file_name", None) is not None
-            and getattr(link_table, "file_name", None) is not None
-        ):
-            join_on.append("file_name")
-    else:
-        join_on = list(join_on)
-        if not join_on:
-            raise ValueError("config_run_query join_on requires at least one column.")
-
-    join_clauses = []
-    for column in join_on:
-        table_column = getattr(table, column, None)
-        link_column = getattr(link_table, column, None)
-        if table_column is None or link_column is None:
-            raise ValueError(
-                f"config_run_query join_on column {column!r} must exist on table and link_table."
-            )
-        join_clauses.append(table_column == link_column)
-
-    stmt = (
-        sa_select(*cast(tuple[Any, ...], tuple(columns_list)))
-        .select_from(table)
-        .join(link_table, and_(*join_clauses))
-    )
-
-    resolved_table_name = table_name
-    if (
-        resolved_table_name is None
-        and getattr(link_table, "table_name", None) is not None
-    ):
-        resolved_table_name = (
-            getattr(table, "__tablename__", None) or table.__name__.lower()
-        )
-    if resolved_table_name is not None:
-        table_name_column = getattr(link_table, "table_name", None)
-        if table_name_column is None:
-            raise ValueError(
-                "config_run_query table_name provided but link_table has no table_name column."
-            )
-        stmt = stmt.where(table_name_column == resolved_table_name)
-
-    if where is not None:
-        if isinstance(where, (list, tuple, set)):
-            clauses = list(where)
-        else:
-            clauses = [where]
-        for clause in clauses:
-            stmt = stmt.where(cast(Any, clause))
-
-    return stmt
-
-
-def config_run_rows(
-    table: Type[SQLModel],
-    *,
-    link_table: Type[SQLModel],
+    link_table: Type[BaseModel] | str,
     table_name: Optional[str] = None,
     columns: Optional[Iterable[Any]] = None,
     where: Optional[Union[Iterable[Any], Any]] = None,
     join_on: Optional[Iterable[str]] = None,
     tracker: Optional["Tracker"] = None,
-) -> list:
+) -> ParameterizedSQL:
     """
-    Execute a config-to-run join query and return the results as a list of rows.
-
-    This is a high-level wrapper around `config_run_query` and `run_query`. It is
-    frequently used by integration adapters (like ActivitySim or BEAM) to retrieve
-    configuration parameters that were active during a specific run.
-
-    Parameters
-    ----------
-    table : Type[SQLModel]
-        The configuration cache table to query.
-    link_table : Type[SQLModel]
-        The table that links configuration entries to specific run IDs.
-    table_name : Optional[str]
-        Optional filter for the link table's `table_name` column.
-    columns : Optional[Iterable]
-        Specific columns to select. Defaults to the run ID and the config record.
-    where : Optional[Clause]
-        Additional SQLAlchemy filter clauses.
-    join_on : Optional[Iterable[str]]
-        Column names to join on (e.g. `["content_hash"]`).
-    tracker : Optional[Tracker]
-        The tracker to use for database access.
-
-    Returns
-    -------
-    list
-        The results of the query.
+    Build a parameterized DuckDB SQL query joining a config cache table to its run-link table.
     """
-    query = config_run_query(
+    if tracker is not None:
+        active_db = tracker.db
+    else:
+        try:
+            active_db = current_tracker().db
+        except RuntimeError:
+            active_db = None
+    return build_config_run_query(
+        table,
+        link_table=link_table,
+        table_name=table_name,
+        columns=columns,
+        where=where,
+        join_on=join_on,
+        db=active_db,
+    )
+
+
+def config_run_rows(
+    table: Type[BaseModel] | str,
+    *,
+    link_table: Type[BaseModel] | str,
+    table_name: Optional[str] = None,
+    columns: Optional[Iterable[Any]] = None,
+    where: Optional[Union[Iterable[Any], Any]] = None,
+    join_on: Optional[Iterable[str]] = None,
+    tracker: Optional["Tracker"] = None,
+) -> list[Any]:
+    """
+    Execute a config-to-run join query and return hydrated rows.
+    """
+    tr = tracker or current_tracker()
+    if tr.db is None:
+        raise RuntimeError("Database connection required.")
+    return execute_config_run_rows(
+        tr.db,
         table,
         link_table=link_table,
         table_name=table_name,
@@ -3010,87 +2904,32 @@ def config_run_rows(
         where=where,
         join_on=join_on,
     )
-    return run_query(query, tracker=tracker)
 
 
 def pivot_facets(
     *,
-    namespace: Optional[str],
+    namespace: Optional[str] = None,
     keys: Iterable[str],
     value_column: str = "value_num",
     value_columns: Optional[Mapping[str, str]] = None,
     label_prefix: str = "",
     label_map: Optional[Mapping[str, str]] = None,
     run_id_label: str = "run_id",
-    table: Type[RunConfigKV] = RunConfigKV,
-) -> Subquery:
+    table: Type[RunConfigKV] | str = RunConfigKV,
+) -> ParameterizedSQL:
     """
-    Build a pivoted facet subquery keyed by run_id.
-
-    This is a convenience helper for turning flattened config facets
-    (``run_config_kv``) into a wide table suitable for joins.
-
-    Parameters
-    ----------
-    namespace : Optional[str]
-        Facet namespace to filter by (typically the model name). If ``None``,
-        the namespace filter is skipped.
-    keys : Iterable[str]
-        Facet keys to pivot into columns.
-    value_column : str, default "value_num"
-        Default value column to read from. Must be one of:
-        ``value_num``, ``value_str``, ``value_bool``, ``value_json``.
-    value_columns : Optional[Mapping[str, str]], optional
-        Optional per-key override of ``value_column``.
-    label_prefix : str, default ""
-        Optional prefix for pivoted column labels.
-    label_map : Optional[Mapping[str, str]], optional
-        Optional per-key label overrides.
-    run_id_label : str, default "run_id"
-        Label to use for the run id column in the returned subquery.
-    table : Type[RunConfigKV], default RunConfigKV
-        Table/model providing the facet KV rows.
-
-    Returns
-    -------
-    Any
-        A SQLAlchemy subquery with columns: ``run_id`` and one column per key.
+    Build a parameterized DuckDB SQL query pivoting flattened config facets keyed by run_id.
     """
-    keys_list = list(dict.fromkeys(keys))
-    if not keys_list:
-        raise ValueError("pivot_facets requires at least one key")
-
-    valid_columns = {"value_num", "value_str", "value_bool", "value_json"}
-    if value_column not in valid_columns:
-        raise ValueError(
-            f"pivot_facets value_column must be one of {sorted(valid_columns)}"
-        )
-
-    value_columns = value_columns or {}
-    label_map = label_map or {}
-
-    select_columns = [col(table.run_id).label(run_id_label)]
-    for key in keys_list:
-        column_name = value_columns.get(key, value_column)
-        if column_name not in valid_columns:
-            raise ValueError(
-                f"pivot_facets value_columns[{key!r}] must be one of {sorted(valid_columns)}"
-            )
-        value_col = col(getattr(table, column_name))
-        label = label_map.get(key, f"{label_prefix}{key}")
-        select_columns.append(
-            func.max(case((col(table.key) == key, value_col), else_=None)).label(label)
-        )
-
-    stmt = (
-        select(*select_columns)
-        .where(col(table.key).in_(keys_list))
-        .group_by(col(table.run_id))
+    return build_pivot_facets(
+        namespace=namespace,
+        keys=keys,
+        value_column=value_column,
+        value_columns=value_columns,
+        label_prefix=label_prefix,
+        label_map=label_map,
+        run_id_label=run_id_label,
+        table=table,
     )
-    if namespace is not None:
-        stmt = stmt.where(table.namespace == namespace)
-
-    return stmt.subquery()
 
 
 @contextmanager
@@ -3319,6 +3158,7 @@ def load(
     tracker: Optional["Tracker"] = None,
     *,
     db_fallback: str = "inputs-only",
+    allow_recovery_roots: bool = True,
     **kwargs: Any,
 ) -> XarrayDatasetType: ...
 
@@ -3329,6 +3169,7 @@ def load(
     tracker: Optional["Tracker"] = None,
     *,
     db_fallback: str = "inputs-only",
+    allow_recovery_roots: bool = True,
     **kwargs: Any,
 ) -> XarrayDatasetType: ...
 
@@ -3339,6 +3180,7 @@ def load(
     tracker: Optional["Tracker"] = None,
     *,
     db_fallback: str = "inputs-only",
+    allow_recovery_roots: bool = True,
     **kwargs: Any,
 ) -> XarrayDatasetType: ...
 
@@ -3349,6 +3191,7 @@ def load(
     tracker: Optional["Tracker"] = None,
     *,
     db_fallback: str = "inputs-only",
+    allow_recovery_roots: bool = True,
     **kwargs: Any,
 ) -> GeoDataFrameType: ...
 
@@ -3359,6 +3202,7 @@ def load(
     tracker: Optional["Tracker"] = None,
     *,
     db_fallback: str = "inputs-only",
+    allow_recovery_roots: bool = True,
     **kwargs: Any,
 ) -> pd.HDFStore: ...
 
@@ -3370,6 +3214,7 @@ def load(
     *,
     db_fallback: str = "inputs-only",
     columns: Optional[Sequence[str]] = None,
+    allow_recovery_roots: bool = True,
     **kwargs: Any,
 ) -> duckdb.DuckDBPyRelation: ...
 
@@ -3381,6 +3226,7 @@ def load(
     *,
     db_fallback: str = "inputs-only",
     columns: Optional[Sequence[str]] = None,
+    allow_recovery_roots: bool = True,
     **kwargs: Any,
 ) -> duckdb.DuckDBPyRelation: ...
 
@@ -3392,6 +3238,7 @@ def load(
     *,
     db_fallback: str = "inputs-only",
     columns: Optional[Sequence[str]] = None,
+    allow_recovery_roots: bool = True,
     **kwargs: Any,
 ) -> duckdb.DuckDBPyRelation: ...
 
@@ -3403,6 +3250,7 @@ def load(
     *,
     db_fallback: str = "inputs-only",
     columns: Optional[Sequence[str]] = None,
+    allow_recovery_roots: bool = True,
     **kwargs: Any,
 ) -> LoadResult: ...
 
@@ -3414,6 +3262,7 @@ def load(
     *,
     db_fallback: str = "inputs-only",
     columns: Optional[Sequence[str]] = None,
+    allow_recovery_roots: bool = True,
     **kwargs: Any,
 ) -> LoadResult: ...
 
@@ -3424,6 +3273,7 @@ def load(
     *,
     db_fallback: str = "inputs-only",
     columns: Optional[Sequence[str]] = None,
+    allow_recovery_roots: bool = True,
     **kwargs: Any,
 ) -> LoadResult:
     """
@@ -3477,11 +3327,9 @@ def load(
     # 1. Resolve Tracker
     explicit_tracker = tracker is not None
     attached_tracker: Optional[Tracker] = None
-    tracker_ref = get_tracker_ref(artifact)
-    if tracker_ref:
-        ref_candidate = tracker_ref()
-        if isinstance(ref_candidate, Tracker):
-            attached_tracker = ref_candidate
+    resolver = artifact.resolver if isinstance(artifact, Artifact) else None
+    if isinstance(resolver, Tracker):
+        attached_tracker = resolver
 
     if tracker is None:
         try:
@@ -3494,7 +3342,11 @@ def load(
 
     if tracker is None:
         # If we have a resolved path available, allow direct disk loading without a tracker.
-        if artifact.path and Path(artifact.path).exists():
+        try:
+            candidate_path = artifact.path
+        except RuntimeError:
+            candidate_path = None
+        if candidate_path and Path(candidate_path).exists():
             pass
         else:
             raise RuntimeError(
@@ -3502,27 +3354,7 @@ def load(
                 "Pass it explicitly: consist.load(art, tracker=my_tracker)"
             )
 
-    # 2. Determine Physical Path
-    # If we have a tracker, use it to resolve unless a materialized runtime abs_path
-    # on the attached tracker is already present on disk.
-    if tracker:
-        if (
-            (not explicit_tracker or tracker is attached_tracker)
-            and artifact.abs_path
-            and Path(artifact.abs_path).exists()
-        ):
-            path = artifact.abs_path
-        else:
-            path = tracker.resolve_uri(artifact.container_uri)
-            if (
-                not Path(path).exists()
-                and artifact.abs_path
-                and Path(artifact.abs_path).exists()
-            ):
-                path = artifact.abs_path
-    else:
-        path = artifact.path
-
+    # 2. Prepare loader kwargs
     # Only pass caller-provided kwargs to the loader; artifact.meta can contain
     # flags (e.g., schema_name) not accepted by pandas/xarray readers.
     load_kwargs = dict(kwargs)
@@ -3534,20 +3366,75 @@ def load(
         artifact.driver in DriverType.table_path_drivers()
         and "table_path" not in load_kwargs
     ):
-        table_path = artifact.table_path
-        if table_path:
-            load_kwargs["table_path"] = table_path
+        if artifact.member:
+            load_kwargs["table_path"] = artifact.member
     if artifact.driver in DriverType.array_drivers():
         if "array_path" not in load_kwargs:
-            array_path = artifact.array_path
-            if array_path:
-                load_kwargs["array_path"] = array_path
+            if artifact.member:
+                load_kwargs["array_path"] = artifact.member
 
-    # 3. Try Disk Load (Priority 1)
-    if Path(path).exists():
-        return _load_from_disk(str(path), artifact.driver, **load_kwargs)
+    # 3. Try Verified Disk / Archive Load (Priority 1)
+    saw_digest_mismatch = False
+    resolved_disk_path: Optional[Path] = None
+    if isinstance(tracker, Tracker) and isinstance(artifact, Artifact):
+        from consist.core.tracker_recovery import (
+            resolve_verified_local_path_with_diagnostics,
+        )
+
+        resolved_disk_path, resolver_mismatch = (
+            resolve_verified_local_path_with_diagnostics(
+                tracker,
+                artifact,
+                allow_recovery_roots=allow_recovery_roots,
+                ignore_runtime_abs_path=(
+                    explicit_tracker and tracker is not attached_tracker
+                ),
+            )
+        )
+        if resolver_mismatch:
+            saw_digest_mismatch = True
+
+        try:
+            path: str | Path = (
+                resolved_disk_path
+                if resolved_disk_path is not None
+                else tracker.resolve_uri(artifact.uri)
+            )
+        except (OSError, RuntimeError, ValueError, TypeError):
+            path = artifact.abs_path or artifact.uri
+    else:
+        if tracker:
+            path = tracker.resolve_uri(artifact.uri)
+            if (
+                not Path(path).exists()
+                and artifact.abs_path
+                and Path(artifact.abs_path).exists()
+            ):
+                path = artifact.abs_path
+        else:
+            path = artifact.path
+        if Path(path).exists():
+            resolved_disk_path = Path(path)
+
+    if resolved_disk_path is not None:
+        return _load_from_disk(str(resolved_disk_path), artifact.driver, **load_kwargs)
 
     # 4. Try Database Load (Priority 2 - Ghost Mode)
+    if (
+        not artifact.meta.get("is_ingested", False)
+        and isinstance(tracker, Tracker)
+        and tracker.db is not None
+    ):
+        db_artifact = tracker.db.get_artifact(artifact.id)
+        if db_artifact is not None and db_artifact.meta.get("is_ingested", False):
+            artifact = db_artifact.with_resolver(tracker)
+
+    if saw_digest_mismatch and not artifact.meta.get("is_ingested", False):
+        raise ValueError(
+            f"Artifact '{artifact.key}' (ID: {artifact.id}) "
+            f"failed digest verification ({artifact.digest})."
+        )
+
     if artifact.meta.get("is_ingested", False):
         if db_fallback not in {"inputs-only", "always", "never"}:
             raise ValueError(
@@ -3573,32 +3460,76 @@ def load(
             )
 
         if db_fallback == "inputs-only":
-            if not tracker or not tracker.current_consist:
-                raise FileNotFoundError(
-                    f"Artifact '{artifact.key}' (ID: {artifact.id}) not found.\n"
-                    f" - Disk Path: {path} (Missing)\n"
-                    f" - Database: Ingested, but no active run context\n"
-                    f"Hint: call consist.load(...) within a tracker.start_run(..., inputs=[...]) context, "
-                    f"or pass db_fallback='always'."
+            evicted_to_db = False
+            if isinstance(tracker, Tracker) and tracker.db is not None:
+                m_name, m_inst, loc_uri = tracker.fs.location_coordinate_for_uri(
+                    artifact.uri
                 )
-            if tracker.is_cached:
-                raise FileNotFoundError(
-                    f"Artifact '{artifact.key}' (ID: {artifact.id}) not found.\n"
-                    f" - Disk Path: {path} (Missing)\n"
-                    f" - Database: Ingested, but current run is a cache hit\n"
-                    f"Hint: pass db_fallback='always' if you explicitly want DB recovery here."
+                loc_site = (
+                    "workspace" if m_name in ("workspace", "runs") else "external"
                 )
-            is_declared_input = any(
-                (a.id == artifact.id) or (a.container_uri == artifact.container_uri)
-                for a in tracker.current_consist.inputs
-            )
-            if not is_declared_input:
-                raise FileNotFoundError(
-                    f"Artifact '{artifact.key}' (ID: {artifact.id}) not found.\n"
-                    f" - Disk Path: {path} (Missing)\n"
-                    f" - Database: Ingested, but artifact is not a declared input to the active run\n"
-                    f"Hint: add it to inputs=[...] when starting the run, or pass db_fallback='always'."
+                extra_insts: list[str] = []
+                if isinstance(artifact, Artifact) and artifact.run_id is not None:
+                    owning_run = tracker.get_run(str(artifact.run_id))
+                    run_meta = (
+                        owning_run.meta
+                        if owning_run is not None
+                        and isinstance(owning_run.meta, MappingABC)
+                        else {}
+                    )
+                    mounts_meta = run_meta.get("mounts")
+                    hist_root = (
+                        mounts_meta.get(m_name)
+                        if isinstance(mounts_meta, MappingABC)
+                        else None
+                    ) or (
+                        run_meta.get("_physical_run_dir")
+                        if m_name in ("workspace", "runs")
+                        else None
+                    )
+                    if isinstance(hist_root, str) and hist_root:
+                        from consist.location import workspace_mount_instance_id
+
+                        hist_inst = workspace_mount_instance_id(hist_root)
+                        if hist_inst != m_inst:
+                            extra_insts.append(hist_inst)
+                evicted_to_db = tracker.db.has_evicted_artifact_location(
+                    artifact_id=artifact.id,
+                    digest=artifact.digest,
+                    member=artifact.member,
+                    site=loc_site,
+                    mount_name=m_name,
+                    mount_instance_id=m_inst,
+                    extra_mount_instance_ids=extra_insts,
+                    uri=loc_uri,
                 )
+            if not evicted_to_db:
+                if not tracker or not tracker.current_consist:
+                    raise FileNotFoundError(
+                        f"Artifact '{artifact.key}' (ID: {artifact.id}) not found.\n"
+                        f" - Disk Path: {path} (Missing)\n"
+                        f" - Database: Ingested, but no active run context\n"
+                        f"Hint: call consist.load(...) within a tracker.start_run(..., inputs=[...]) context, "
+                        f"or pass db_fallback='always'."
+                    )
+                if tracker.is_cached:
+                    raise FileNotFoundError(
+                        f"Artifact '{artifact.key}' (ID: {artifact.id}) not found.\n"
+                        f" - Disk Path: {path} (Missing)\n"
+                        f" - Database: Ingested, but current run is a cache hit\n"
+                        f"Hint: pass db_fallback='always' if you explicitly want DB recovery here."
+                    )
+                is_declared_input = any(
+                    (a.id == artifact.id) or (a.uri == artifact.uri)
+                    for a in tracker.current_consist.inputs
+                )
+                if not is_declared_input:
+                    raise FileNotFoundError(
+                        f"Artifact '{artifact.key}' (ID: {artifact.id}) not found.\n"
+                        f" - Disk Path: {path} (Missing)\n"
+                        f" - Database: Ingested, but artifact is not a declared input to the active run\n"
+                        f"Hint: add it to inputs=[...] when starting the run, or pass db_fallback='always'."
+                    )
 
         if not tracker or get_hot_data_db_path(tracker) is None:
             raise RuntimeError(
@@ -3658,20 +3589,29 @@ def _load_from_disk(path: str, driver: str, **kwargs: Any) -> LoadResult:
             driver=driver,
             schema_id=None,
         )
-        relation = cast(
-            duckdb.DuckDBPyRelation,
-            TABLE_DRIVERS.get(driver).load(info, conn, **load_kwargs),
-        )
-        if nrows is not None:
-            relation = relation.limit(int(nrows))
-        # Keep the connection alive for downstream relation materialization.
-        _RELATION_CONNECTIONS[relation] = conn
+        try:
+            raw_relation = cast(
+                duckdb.DuckDBPyRelation,
+                TABLE_DRIVERS.get(driver).load(info, conn, **load_kwargs),
+            )
+            token = uuid.uuid4().hex[:16]
+            alias = f"__consist_rel_{token}"
+            raw_relation.create_view(alias, replace=True)
+            relation = conn.sql(f"SELECT * FROM {alias}")
+            if nrows is not None:
+                relation = relation.limit(int(nrows))
+        except Exception:
+            conn.close()
+            raise
+        register_tracked_relation_cursor(token, conn, None)
         if driver == DriverType.PARQUET.value:
-            _RELATION_PARQUET_FALLBACKS[relation] = (
+            fallback_spec = (
                 path,
                 _normalize_columns(load_kwargs.get("columns")),
                 int(nrows) if nrows is not None else None,
             )
+            _RELATION_PARQUET_FALLBACKS[relation] = fallback_spec
+            _RELATION_PARQUET_FALLBACKS_BY_TOKEN[token] = fallback_spec
         _maybe_warn_relation_leaks()
         return relation
     elif driver in DriverType.array_drivers():
@@ -3708,48 +3648,115 @@ def _load_from_db(
     """
     Recovers data for an artifact from the Consist DuckDB database as a Relation.
     """
+    hot_db = get_hot_data_db(tracker)
     hot_data_db_path = get_hot_data_db_path(tracker)
-    if not hot_data_db_path:
+    if hot_db is None and hot_data_db_path:
+        hot_db = lookup_live_db_by_path(hot_data_db_path)
+    if hot_db is None and not hot_data_db_path:
         raise RuntimeError("Tracker has no DuckDB path configured.")
+
     table_name = artifact.meta.get("dlt_table_name") or artifact.key
     if not isinstance(table_name, str) or not table_name:
         raise RuntimeError(f"Invalid table name for DuckDB load: {table_name!r}")
+
     artifact_id = str(artifact.id).replace("'", "''")
-    conn = duckdb.connect(hot_data_db_path, read_only=True)
+    artifact_run_id: Optional[str] = (
+        artifact.run_id if isinstance(artifact, Artifact) else None
+    )
     quoted_table = _quote_ident(table_name)
     columns = _normalize_columns(kwargs.get("columns"))
     select_sql = ", ".join(_quote_ident(col) for col in columns) if columns else "*"
-    relation = conn.sql(
-        f"SELECT {select_sql} FROM global_tables.{quoted_table} "
-        f"WHERE consist_artifact_id = '{artifact_id}'"
-    )
     nrows = kwargs.get("nrows")
-    if nrows is not None:
-        relation = relation.limit(int(nrows))
-    # Keep the connection alive for downstream relation materialization.
-    _RELATION_CONNECTIONS[relation] = conn
+
+    if hot_db is not None and not hot_db._closed:
+        has_art_col = hot_db.has_table_column(
+            table_schema="global_tables",
+            table_name=table_name,
+            column_name="consist_artifact_id",
+        )
+        has_run_col = hot_db.has_table_column(
+            table_schema="global_tables",
+            table_name=table_name,
+            column_name="consist_run_id",
+        )
+        if has_art_col and has_run_col and artifact_run_id is not None:
+            escaped_run = str(artifact_run_id).replace("'", "''")
+            where_sql = (
+                f"CAST(consist_artifact_id AS VARCHAR) = '{artifact_id}' "
+                f"OR (consist_artifact_id IS NULL AND CAST(consist_run_id AS VARCHAR) = '{escaped_run}')"
+            )
+        elif has_art_col or artifact_run_id is None:
+            where_sql = f"CAST(consist_artifact_id AS VARCHAR) = '{artifact_id}'"
+        else:
+            escaped_run = str(artifact_run_id).replace("'", "''")
+            where_sql = f"CAST(consist_run_id AS VARCHAR) = '{escaped_run}'"
+
+        sql = f"SELECT {select_sql} FROM global_tables.{quoted_table} WHERE {where_sql}"
+        relation = hot_db.relation_query(sql)
+        if nrows is not None:
+            relation = relation.limit(int(nrows))
+        _maybe_warn_relation_leaks()
+        return relation
+
+    assert hot_data_db_path is not None
+    conn = duckdb.connect(hot_data_db_path, read_only=True)
+    try:
+        if artifact_run_id is None:
+            where_sql = f"CAST(consist_artifact_id AS VARCHAR) = '{artifact_id}'"
+        else:
+            col_rows = conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = 'global_tables' AND table_name = ?",
+                [table_name],
+            ).fetchall()
+            col_names = {str(r[0]) for r in col_rows}
+            has_art_col = "consist_artifact_id" in col_names if col_names else True
+            has_run_col = "consist_run_id" in col_names
+            escaped_run = str(artifact_run_id).replace("'", "''")
+            if has_art_col and has_run_col:
+                where_sql = (
+                    f"CAST(consist_artifact_id AS VARCHAR) = '{artifact_id}' "
+                    f"OR (consist_artifact_id IS NULL AND CAST(consist_run_id AS VARCHAR) = '{escaped_run}')"
+                )
+            elif has_art_col:
+                where_sql = f"CAST(consist_artifact_id AS VARCHAR) = '{artifact_id}'"
+            else:
+                where_sql = f"CAST(consist_run_id AS VARCHAR) = '{escaped_run}'"
+
+        token = uuid.uuid4().hex[:16]
+        alias = f"__consist_rel_{token}"
+        relation = conn.sql(
+            f"SELECT * FROM ("
+            f"SELECT {select_sql} FROM global_tables.{quoted_table} WHERE {where_sql}"
+            f") AS {alias}"
+        )
+        if nrows is not None:
+            relation = relation.limit(int(nrows))
+    except Exception:
+        if isinstance(conn, duckdb.DuckDBPyConnection):
+            conn.close()
+        raise
+    register_tracked_relation_cursor(token, conn, None)
     _maybe_warn_relation_leaks()
     return relation
 
 
 def _close_relation_connection(relation: duckdb.DuckDBPyRelation) -> None:
+    tokens = extract_tracked_relation_tokens(relation)
+    for token in tokens:
+        _RELATION_PARQUET_FALLBACKS_BY_TOKEN.pop(token, None)
+    close_tracked_relation_tokens(tokens)
     _RELATION_PARQUET_FALLBACKS.pop(relation, None)
     conn = _RELATION_CONNECTIONS.pop(relation, None)
-    if conn is None:
-        conn = getattr(relation, "_consist_conn", None)
-        if conn is None:
-            return
-    try:
+    if conn is not None:
         conn.close()
-    finally:
-        try:
-            delattr(relation, "_consist_conn")
-        except Exception:
-            pass
 
 
 _RELATION_CONNECTIONS: "weakref.WeakKeyDictionary[duckdb.DuckDBPyRelation, duckdb.DuckDBPyConnection]" = weakref.WeakKeyDictionary()
 _RELATION_PARQUET_FALLBACKS: "weakref.WeakKeyDictionary[duckdb.DuckDBPyRelation, tuple[str, list[str], Optional[int]]]" = weakref.WeakKeyDictionary()
+_RELATION_PARQUET_FALLBACKS_BY_TOKEN: dict[
+    str, tuple[str, list[str], Optional[int]]
+] = {}
 
 
 class RelationConnectionLeakWarning(RuntimeWarning):
@@ -3758,7 +3765,7 @@ class RelationConnectionLeakWarning(RuntimeWarning):
 
 def active_relation_count() -> int:
     """Return the number of active DuckDB relations tracked by Consist."""
-    return len(_RELATION_CONNECTIONS)
+    return len(_RELATION_CONNECTIONS) + tracked_relation_count()
 
 
 def _relation_warn_threshold() -> int:
@@ -3799,9 +3806,14 @@ def to_df(relation: duckdb.DuckDBPyRelation, *, close: bool = True) -> pd.DataFr
         Whether to close the underlying DuckDB connection after materialization.
         Use `close=False` if you plan to continue using the relation.
     """
-    if not hasattr(relation, "df"):
+    if not isinstance(relation, (duckdb.DuckDBPyRelation, _DuckDBRelationLike)):
         raise TypeError("to_df expects a DuckDB Relation.")
     parquet_fallback = _RELATION_PARQUET_FALLBACKS.get(relation)
+    if parquet_fallback is None:
+        for token in extract_tracked_relation_tokens(relation):
+            parquet_fallback = _RELATION_PARQUET_FALLBACKS_BY_TOKEN.get(token)
+            if parquet_fallback is not None:
+                break
     try:
         return relation.df()
     except (OSError, duckdb.IOException) as exc:

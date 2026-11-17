@@ -24,7 +24,6 @@ import numpy as np
 import time
 import os
 import gc
-from sqlmodel import text
 
 import consist
 from consist.core.tracker import Tracker
@@ -283,18 +282,16 @@ def test_comparative_analysis_benchmark(tmp_path: Path):
         tracker.create_view("v_bench_cold", "results")
 
         # 2. Query
-        with tracker.engine.connect() as conn:
-            query = text(
-                """
-                SELECT
-                    consist_run_id,
-                    AVG(val),
-                    AVG(subsidy)
-                FROM v_bench_cold
-                GROUP BY 1
+        res_consist = tracker.run_query(
             """
-            )
-            res_consist = conn.execute(query).fetchall()
+            SELECT
+                consist_run_id,
+                AVG(val),
+                AVG(subsidy)
+            FROM v_bench_cold
+            GROUP BY 1
+            """
+        )
 
     # =========================================================================
     # VERIFICATION

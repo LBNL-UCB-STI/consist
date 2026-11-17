@@ -2,7 +2,6 @@ from pathlib import Path
 from unittest.mock import patch
 from typing import List, Dict, Optional, Union, Mapping, Literal
 
-from sqlmodel import Session, select
 import pandas as pd
 
 from consist.core.tracker import Tracker
@@ -158,15 +157,16 @@ def test_pipeline_chaining(tracker: Tracker):
 
         # Verify Identity
         assert input_artifact.key == "my_data"
-        assert input_artifact.container_uri == generated_artifact.container_uri
+        assert input_artifact.uri == generated_artifact.uri
 
     # --- Phase 3: Verification (Database) ---
-    with Session(tracker.engine) as session:
-        artifacts = session.exec(select(Artifact)).all()
-        assert len(artifacts) == 1
+    artifact_count = tracker.run_query("SELECT COUNT(*) FROM main.artifact")[0]
+    assert artifact_count == 1
 
-        links = session.exec(select(RunArtifactLink)).all()
-        assert len(links) == 2
+    links = tracker.query_rows(
+        "SELECT * FROM main.run_artifact_link", model=RunArtifactLink
+    )
+    assert len(links) == 2
 
 
 def test_implicit_file_chaining(tracker: Tracker):
@@ -208,10 +208,11 @@ def test_implicit_file_chaining(tracker: Tracker):
         assert inp.run_id == "run_A"
 
         # 3. Verify Database Links
-    with Session(tracker.engine) as session:
-        links = session.exec(select(RunArtifactLink)).all()
-        assert len(links) == 2
-        assert links[0].artifact_id == links[1].artifact_id
+    links = tracker.query_rows(
+        "SELECT * FROM main.run_artifact_link", model=RunArtifactLink
+    )
+    assert len(links) == 2
+    assert links[0].artifact_id == links[1].artifact_id
 
 
 # --- NEW TEST: Container Chaining & Caching ---
@@ -361,12 +362,11 @@ def test_cross_tracker_input_hash_ignores_container_uri(tmp_path: Path):
 
     moved_artifact = Artifact(
         key=produced.key,
-        container_uri=tracker_b.fs.virtualize_path(str(moved_path)),
+        uri=tracker_b.fs.virtualize_path(str(moved_path)),
         driver=produced.driver,
         run_id=produced.run_id,
-        hash=produced.hash,
-        table_path=produced.table_path,
-        array_path=produced.array_path,
+        digest=produced.digest,
+        member=produced.member,
     )
 
     # First consumer run: establish cache entry using original artifact

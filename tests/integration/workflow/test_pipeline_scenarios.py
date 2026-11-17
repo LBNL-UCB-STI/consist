@@ -175,7 +175,7 @@ def mock_model_step(
                 f"Step {step_name}: Cached run missing outputs!"
             )
             output_artifact = t.current_consist.outputs[0]
-            return t.resolve_uri(output_artifact.container_uri)
+            return t.resolve_uri(output_artifact.uri)
         else:
             ctx.log_execution(step_name)
             df = pd.DataFrame({"id": [1], "val": [step_name], "param": [str(config)]})
@@ -290,12 +290,8 @@ def test_cache_overwrite_mode(tracker_setup, ctx):
 
     # 3. Verify Database State
     # The 'overwrite' run should now be the 'latest' one found by default lookups.
-    with tracker.engine.connect() as conn:
-        # We should see 2 completed runs for model A
-        count = pd.read_sql(
-            "SELECT count(*) as c FROM run WHERE model_name='A'", conn
-        ).iloc[0]["c"]
-        assert count == 2
+    count = tracker.run_query("SELECT count(*) FROM main.run WHERE model_name = 'A'")[0]
+    assert count == 2
 
 
 def test_ghost_mode_ingested(tracker_setup, ctx):
@@ -335,23 +331,22 @@ def test_ghost_mode_ingested(tracker_setup, ctx):
     assert "A" not in ctx.execution_log
     assert out_a_ghost == out_a
 
-    with tracker.engine.connect() as conn:
-        tables = pd.read_sql(
-            "SELECT table_schema, table_name FROM information_schema.tables", conn
-        )
-        # Robust search for the table name (dlt normalization)
-        target_table = None
-        for name in tables[tables["table_schema"] == "global_tables"]["table_name"]:
-            if "test_data_a" in name or "a" == name:
-                target_table = name
-                break
+    tables = tracker.query_df(
+        "SELECT table_schema, table_name FROM information_schema.tables"
+    )
+    # Robust search for the table name (dlt normalization)
+    target_table = None
+    for name in tables[tables["table_schema"] == "global_tables"]["table_name"]:
+        if "test_data_a" in name or "a" == name:
+            target_table = name
+            break
 
-        if not target_table:
-            raise ValueError(f"Table not found in {tables}")
+    if not target_table:
+        raise ValueError(f"Table not found in {tables}")
 
-        df_db = pd.read_sql(f"SELECT * FROM global_tables.{target_table}", conn)
-        assert not df_db.empty
-        assert df_db.iloc[0]["val"] == "A"
+    df_db = tracker.query_df(f"SELECT * FROM global_tables.{target_table}")
+    assert not df_db.empty
+    assert df_db.iloc[0]["val"] == "A"
 
 
 def test_broken_cache_recovery(tracker_setup, ctx):

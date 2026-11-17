@@ -1,135 +1,96 @@
 from __future__ import annotations
 
-import logging
-from typing import List
+from datetime import datetime, timezone
 
-import pytest
-from sqlalchemy.exc import DatabaseError, OperationalError
-
-from consist.core.db_runtime import DatabaseRuntimeOps
 from consist.core.persistence import DatabaseManager
+from consist.models.run import Run
 from consist.models.run_config_kv import RunConfigKV
 
 
-def _build_retry_only_db() -> DatabaseManager:
-    db = DatabaseManager.__new__(DatabaseManager)
-    db._runtime_ops = DatabaseRuntimeOps(db)
-    return db
-
-
-def test_execute_with_retry_retries_on_lock(monkeypatch) -> None:
-    """
-    execute_with_retry should retry lock/IO errors and eventually return.
-    """
-    db = _build_retry_only_db()
-    calls: List[int] = []
-
-    def flaky():
-        calls.append(1)
-        if len(calls) < 3:
-            raise OperationalError("stmt", {}, Exception("database is locked"))
-        return "ok"
-
-    monkeypatch.setattr("consist.core.db_runtime.time.sleep", lambda _s: None)
-    assert db.execute_with_retry(flaky, retries=3) == "ok"
-    assert len(calls) == 3
-
-
-def test_execute_with_retry_raises_on_non_lock_errors() -> None:
-    """
-    execute_with_retry should not retry non-lock errors (e.g., constraint violations).
-    """
-    db = _build_retry_only_db()
-    calls: List[int] = []
-
-    def fail_fast():
-        calls.append(1)
-        raise DatabaseError("stmt", {}, Exception("constraint violation"))
-
-    with pytest.raises(DatabaseError):
-        db.execute_with_retry(fail_fast, retries=3)
-    assert len(calls) == 1
-
-
-def test_execute_with_retry_raises_on_constraint_operational_error() -> None:
-    """
-    Constraint-like OperationalError should not be retried.
-    """
-    db = _build_retry_only_db()
-    calls: List[int] = []
-
-    def fail_fast():
-        calls.append(1)
-        raise OperationalError("stmt", {}, Exception("constraint violation"))
-
-    with pytest.raises(OperationalError):
-        db.execute_with_retry(fail_fast, retries=3)
-    assert len(calls) == 1
-
-
-def test_execute_with_retry_retries_on_active_connection_lock(monkeypatch) -> None:
-    """
-    execute_with_retry should retry connection-lock errors from DuckDB.
-    """
-    db = _build_retry_only_db()
-    calls: List[int] = []
-
-    def flaky():
-        calls.append(1)
-        if len(calls) < 3:
-            raise OperationalError(
-                "stmt",
-                {},
-                Exception("IO Error: Could not set lock on file: conflicting lock"),
-            )
-        return "ok"
-
-    monkeypatch.setattr("consist.core.db_runtime.time.sleep", lambda _s: None)
-    assert db.execute_with_retry(flaky, retries=3) == "ok"
-    assert len(calls) == 3
-
-
-def test_insert_run_config_kv_bulk_warns_on_duplicate_keys(
-    tmp_path, caplog: pytest.LogCaptureFixture
+def test_insert_run_config_kv_bulk_upserts_duplicate_keys_idempotently(
+    tmp_path,
 ) -> None:
-    """
-    Duplicate RunConfigKV inserts should warn and not crash.
-    """
-    caplog.set_level(logging.WARNING)
-    db = DatabaseManager(str(tmp_path / "provenance.db"))
+    """Duplicate RunConfigKV inserts in a batch upsert cleanly without crashing."""
+    db = DatabaseManager(str(tmp_path / "provenance.duckdb"))
+    try:
+        row_a = RunConfigKV(
+            run_id="run_1",
+            facet_id="facet_a",
+            namespace="model",
+            key="param",
+            value_type="str",
+            value_str="alpha",
+        )
+        row_b = RunConfigKV(
+            run_id="run_1",
+            facet_id="facet_a",
+            namespace="model",
+            key="param",
+            value_type="str",
+            value_str="beta",
+        )
 
-    row_a = RunConfigKV(
-        run_id="run_1",
-        facet_id="facet_a",
-        namespace="model",
-        key="param",
-        value_type="str",
-        value_str="alpha",
-    )
-    row_b = RunConfigKV(
-        run_id="run_1",
-        facet_id="facet_a",
-        namespace="model",
-        key="param",
-        value_type="str",
-        value_str="beta",
-    )
+        db.insert_run_config_kv_bulk([row_a, row_b])
 
-    db.insert_run_config_kv_bulk([row_a, row_b])
-
-    assert any(
-        "Failed to insert run config kv rows" in record.message
-        for record in caplog.records
-    )
+        rows = db.query_rows(
+            "SELECT * FROM run_config_kv WHERE run_id = ?",
+            ["run_1"],
+            model=RunConfigKV,
+        )
+        assert len(rows) == 1
+        assert rows[0].key == "param"
+        assert rows[0].value_str == "beta"
+    finally:
+        db.close()
 
 
-def test_database_manager_uses_configured_retry_defaults(tmp_path) -> None:
-    db = DatabaseManager(
-        str(tmp_path / "provenance_retry_defaults.db"),
-        lock_retries=7,
-        lock_base_sleep_seconds=0.3,
-        lock_max_sleep_seconds=1.1,
-    )
-    assert db._lock_retries == 7
-    assert db._lock_base_sleep_seconds == 0.3
-    assert db._lock_max_sleep_seconds == 1.1
+def test_sync_run_with_facet_bundle_replaces_kv_rows_idempotently(tmp_path) -> None:
+    """Re-syncing Run config facets replaces KV rows cleanly without duplicates."""
+    db = DatabaseManager(str(tmp_path / "provenance_facet_sync.duckdb"))
+    try:
+        now = datetime.now(timezone.utc)
+        run = Run(
+            id="run_1",
+            model_name="model",
+            config_hash=None,
+            git_hash=None,
+            status="completed",
+            created_at=now,
+            started_at=now,
+            ended_at=now,
+        )
+        db.sync_run(run)
+        db.insert_run_config_kv_bulk(
+            [
+                RunConfigKV(
+                    run_id="run_1",
+                    facet_id="facet_a",
+                    namespace="model",
+                    key="param",
+                    value_type="str",
+                    value_str="alpha",
+                )
+            ]
+        )
+        db.insert_run_config_kv_bulk(
+            [
+                RunConfigKV(
+                    run_id="run_1",
+                    facet_id="facet_a",
+                    namespace="model",
+                    key="param",
+                    value_type="str",
+                    value_str="beta",
+                )
+            ]
+        )
+
+        rows = db.query_rows(
+            "SELECT * FROM run_config_kv WHERE run_id = ?",
+            ["run_1"],
+            model=RunConfigKV,
+        )
+        assert len(rows) == 1
+        assert rows[0].value_str == "beta"
+    finally:
+        db.close()

@@ -17,8 +17,8 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Iterator, Mapping as MappingABC
-from dataclasses import dataclass, field
 from contextlib import suppress
+from dataclasses import dataclass, field
 import hashlib
 import logging
 import os
@@ -36,10 +36,7 @@ from typing import (
     cast,
     get_args,
 )
-
-import pandas as pd
-from sqlalchemy import Column, MetaData, Table, select, text
-from sqlalchemy.exc import SQLAlchemyError
+from typing_extensions import Protocol, runtime_checkable
 
 from consist.core.container_policy import validate_recovery_registration_policy
 from consist.core.directory_artifacts import (
@@ -59,9 +56,17 @@ from consist.core.directory_artifacts import (
     validate_shapefile_bundle_destination,
     validate_shapefile_bundle_root,
 )
-from consist.core.stores import get_hot_data_engine
-from consist.digest import file_sha256
-from consist.models.artifact import Artifact, _private_state
+from consist.core.persistence import DatabaseManager
+from consist.core.stores import get_hot_data_db
+from consist.core.views import _quote_ident, _validate_identifier
+from consist.digest import (
+    DIGEST_DRIVERS,
+    Digest,
+    compute_digest,
+    file_sha256,
+    verify_digest,
+)
+from consist.models.artifact import Artifact
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
@@ -712,6 +717,142 @@ class StagedInputsResult(MappingABC[str, StagedInput]):
         )
 
 
+def format_byte_size(num_bytes: int) -> str:
+    """Format bytes into a human-readable string (e.g. '1.2 MB', '500 B')."""
+    if num_bytes < 1024:
+        return f"{num_bytes} B"
+    size = float(num_bytes)
+    for unit in ("KB", "MB", "GB", "TB"):
+        size /= 1024.0
+        if size < 1024.0 or unit == "TB":
+            return f"{size:.1f} {unit}"
+    return f"{size:.1f} PB"
+
+
+def count_directory_files_and_bytes(
+    path: Path,
+    manifest: Mapping[str, Any] | None = None,
+) -> tuple[int, int]:
+    """Return (file_count, total_bytes) for a directory path or manifest."""
+    if manifest and isinstance(manifest, Mapping) and "entries" in manifest:
+        entries = manifest["entries"]
+        file_count = 0
+        total_bytes = 0
+        if isinstance(entries, Sequence):
+            for entry in entries:
+                if isinstance(entry, Mapping) and entry.get("kind") != "directory":
+                    file_count += 1
+                    total_bytes += int(entry.get("size") or 0)
+            return file_count, total_bytes
+    try:
+        if not path.exists():
+            return 0, 0
+        if not path.is_dir():
+            return 1, path.stat().st_size
+    except OSError:
+        return 0, 0
+
+    def _scan(p: Path | str) -> tuple[int, int]:
+        count = 0
+        nbytes = 0
+        try:
+            with os.scandir(p) as it:
+                for entry in it:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            sub_count, sub_bytes = _scan(entry.path)
+                            count += sub_count
+                            nbytes += sub_bytes
+                        elif entry.is_file(follow_symlinks=False):
+                            count += 1
+                            nbytes += entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        return count, nbytes
+
+    return _scan(path)
+
+
+def resolve_artifact_role(artifact: Artifact, fallback_key: str | None = None) -> str:
+    """Resolve the semantic role for an artifact (config_role, role, or key)."""
+    meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
+    role = meta.get("config_role") or meta.get("role")
+    if role and isinstance(role, str) and role.strip():
+        return role.strip()
+    if fallback_key and isinstance(fallback_key, str) and fallback_key.strip():
+        return fallback_key.strip()
+    return artifact.key or "unknown"
+
+
+def record_directory_rollup(
+    rollups: dict[str, tuple[int, int]],
+    artifact: Artifact,
+    path: Path,
+    *,
+    fallback_key: str | None = None,
+    allow_dir_stat_probe: bool = False,
+) -> None:
+    """Record directory artifact file count and byte size into role-keyed rollups."""
+    known_directory = (
+        artifact.driver in ("zarr", "directory")
+        or _is_directory_artifact(artifact)
+        or _is_file_bundle_artifact(artifact)
+    )
+    if not known_directory:
+        if allow_dir_stat_probe:
+            try:
+                if not path.is_dir():
+                    return
+            except OSError:
+                return
+        else:
+            return
+
+    manifest = None
+    if isinstance(artifact.meta, Mapping):
+        raw_manifest = artifact.meta.get("directory_manifest")
+        if isinstance(raw_manifest, Mapping):
+            manifest = raw_manifest
+
+    files, nbytes = count_directory_files_and_bytes(path, manifest=manifest)
+    role = resolve_artifact_role(artifact, fallback_key=fallback_key)
+    prev_files, prev_bytes = rollups.get(role, (0, 0))
+    rollups[role] = (prev_files + files, prev_bytes + nbytes)
+
+
+def resolve_step_id(tracker: Any) -> str | None:
+    """Safely extract run id from tracker without failing on mock objects."""
+    consist = getattr(tracker, "current_consist", None)
+    if consist is not None:
+        run = getattr(consist, "run", None)
+        if run is not None and getattr(run, "id", None) is not None:
+            return str(run.id)
+    return None
+
+
+def emit_directory_rollup_summary(
+    action: str,
+    rollups: Mapping[str, tuple[int, int]],
+    *,
+    tracker: Any = None,
+    step_id: str | None = None,
+) -> None:
+    """Emit a step-level INFO summary grouped by artifact role."""
+    if not rollups:
+        return
+    if step_id is None and tracker is not None:
+        step_id = resolve_step_id(tracker)
+    parts = []
+    for role in sorted(rollups.keys()):
+        file_count, total_bytes = rollups[role]
+        parts.append(f"{role} ({file_count} files, {format_byte_size(total_bytes)})")
+    summary = ", ".join(parts)
+    step_suffix = f" for step '{step_id}'" if step_id else ""
+    logging.info("[Consist] %s%s: %s", action, step_suffix, summary)
+
+
 @dataclass(frozen=True, slots=True)
 class PlannedMaterialization:
     artifact: Artifact
@@ -722,13 +863,10 @@ class PlannedMaterialization:
     relative_path: Path
     artifacts_by_key: Mapping[str, Artifact] | None = None
 
-    def __post_init__(self) -> None:
-        if self.artifacts_by_key is None:
-            object.__setattr__(
-                self,
-                "artifacts_by_key",
-                {key: self.artifact for key in self.keys},
-            )
+    def artifact_for_key(self, key: str) -> Artifact:
+        if self.artifacts_by_key is not None and key in self.artifacts_by_key:
+            return self.artifacts_by_key[key]
+        return self.artifact
 
 
 @dataclass(frozen=True, slots=True)
@@ -743,14 +881,10 @@ def _detach_artifact_for_hydration(
     *,
     hydrated_path: Path | None,
 ) -> Artifact:
-    clone = artifact.model_copy(deep=True)
-    private_state = _private_state(clone)
-    if private_state is not None:
-        private_state["_tracker"] = None
-    with suppress(Exception):
-        object.__setattr__(clone, "_tracker", None)
-    clone.abs_path = str(hydrated_path.resolve()) if hydrated_path is not None else None
-    return clone
+    resolved_abs = str(hydrated_path.resolve()) if hydrated_path is not None else None
+    return (
+        artifact.model_copy(deep=True).with_resolver(None).with_abs_path(resolved_abs)
+    )
 
 
 def _make_hydrated_output(
@@ -955,47 +1089,6 @@ def _compute_path_checksum(path: Path) -> str:
     return file_sha256(path)
 
 
-def _copy_file_atomic(source: Path, destination: Path) -> bool:
-    fd, tmp_path = tempfile.mkstemp(dir=str(destination.parent))
-    os.close(fd)
-    tmp_path_obj = Path(tmp_path)
-    try:
-        shutil.copy2(source, tmp_path_obj)
-        return _link_file_atomic(tmp_path_obj, destination)
-    finally:
-        with suppress(FileNotFoundError):
-            tmp_path_obj.unlink()
-
-
-def _link_file_atomic(source: Path, destination: Path) -> bool:
-    try:
-        os.link(source, destination)
-    except FileExistsError:
-        return False
-    return True
-
-
-def _copy_dir_safe(source: Path, destination: Path) -> bool:
-    try:
-        destination.mkdir(parents=True, exist_ok=False)
-    except FileExistsError:
-        return False
-
-    try:
-        shutil.copytree(source, destination, dirs_exist_ok=True)
-    except Exception:
-        shutil.rmtree(destination, ignore_errors=True)
-        raise
-    return True
-
-
-def _copy_dir_to_temp(source: Path, parent: Path) -> Path:
-    temporary_root = Path(tempfile.mkdtemp(dir=str(parent), prefix=".consist-dir-"))
-    tmp_destination = temporary_root / "payload"
-    shutil.copytree(source, tmp_destination, dirs_exist_ok=False)
-    return tmp_destination
-
-
 def _cleanup_path(path: Path) -> None:
     if not path.exists():
         return
@@ -1006,39 +1099,13 @@ def _cleanup_path(path: Path) -> None:
         path.unlink()
 
 
-def _replace_path(source: Path, destination: Path) -> None:
-    backup_path: Path | None = None
-    backup_root: Path | None = None
-    if destination.exists():
-        backup_root = Path(
-            tempfile.mkdtemp(
-                dir=str(destination.parent),
-                prefix=f".consist-backup-{destination.name}-",
-            )
-        )
-        backup_path = backup_root / "payload"
-        destination.rename(backup_path)
-
-    try:
-        os.replace(source, destination)
-    except Exception:
-        if backup_path is not None and backup_path.exists():
-            os.replace(backup_path, destination)
-        raise
-    else:
-        if backup_root is not None:
-            _cleanup_path(backup_root)
-
-
 def _materialize_path(
     *,
     source: Path,
     destination: Path,
     preserve_existing: bool,
 ) -> tuple[bool, bool]:
-    """
-    Return ``(materialized, skipped_existing)`` for one filesystem operation.
-    """
+    """Return ``(materialized, skipped_existing)`` using atomic staging."""
     _ensure_destination_not_symlink(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1046,6 +1113,8 @@ def _materialize_path(
         return True, False
 
     if destination.exists():
+        if destination.is_symlink():
+            raise ValueError(f"Symlink detected in destination path: {destination}")
         if preserve_existing:
             if source.is_dir() != destination.is_dir():
                 raise ValueError(
@@ -1053,30 +1122,64 @@ def _materialize_path(
                 )
             return False, True
 
-        if destination.is_symlink():
-            raise ValueError(f"Symlink detected in destination path: {destination}")
-
-    if preserve_existing:
-        if source.is_dir():
-            copied = _copy_dir_safe(source, destination)
-        else:
-            copied = _copy_file_atomic(source, destination)
-        if copied or destination.exists():
-            return True, False
-        return False, True
-
     if source.is_dir():
-        tmp_copy = _copy_dir_to_temp(source, destination.parent)
-        _replace_path(tmp_copy, destination)
-        _cleanup_path(tmp_copy.parent)
+        if preserve_existing:
+            try:
+                destination.mkdir(parents=True, exist_ok=False)
+            except FileExistsError:
+                return False, True
+            try:
+                shutil.copytree(source, destination, dirs_exist_ok=True)
+            except Exception:
+                shutil.rmtree(destination, ignore_errors=True)
+                raise
+            return True, False
+        tmp_root = Path(
+            tempfile.mkdtemp(dir=str(destination.parent), prefix=".consist-dir-")
+        )
+        tmp_dest = tmp_root / "payload"
+        backup_root: Path | None = None
+        backup_path: Path | None = None
+        try:
+            shutil.copytree(source, tmp_dest, dirs_exist_ok=False)
+            if destination.exists():
+                backup_root = Path(
+                    tempfile.mkdtemp(
+                        dir=str(destination.parent),
+                        prefix=f".consist-backup-{destination.name}-",
+                    )
+                )
+                backup_path = backup_root / "payload"
+                destination.rename(backup_path)
+            os.replace(tmp_dest, destination)
+        except Exception:
+            if (
+                backup_path is not None
+                and backup_path.exists()
+                and not destination.exists()
+            ):
+                os.replace(backup_path, destination)
+            raise
+        finally:
+            _cleanup_path(tmp_root)
+            if backup_root is not None:
+                _cleanup_path(backup_root)
         return True, False
 
+    if preserve_existing and destination.exists():
+        return False, True
     fd, tmp_path = tempfile.mkstemp(dir=str(destination.parent))
     os.close(fd)
     tmp_path_obj = Path(tmp_path)
     try:
         shutil.copy2(source, tmp_path_obj)
-        _replace_path(tmp_path_obj, destination)
+        if preserve_existing:
+            try:
+                os.link(tmp_path_obj, destination)
+            except FileExistsError:
+                return False, True
+        else:
+            os.replace(tmp_path_obj, destination)
     finally:
         with suppress(FileNotFoundError):
             tmp_path_obj.unlink()
@@ -1182,7 +1285,7 @@ def _get_artifact_owning_run(
 
 def _output_set_hydration_kind(tracker: "Tracker", artifact: Artifact) -> str | None:
     """Return the persisted OutputSet role when Slice 1 must reject it."""
-    artifact_meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+    artifact_meta = artifact.meta if isinstance(artifact.meta, MappingABC) else {}
     if artifact.driver == "artifact_set" or artifact_meta.get("artifact_set") is True:
         return "parent"
     if artifact_meta.get("output_set_manifest") is True:
@@ -1194,7 +1297,9 @@ def _output_set_hydration_kind(tracker: "Tracker", artifact: Artifact) -> str | 
 
     parent = tracker.get_parent_artifact(artifact)
     parent_meta = (
-        parent.meta if parent is not None and isinstance(parent.meta, dict) else {}
+        parent.meta
+        if parent is not None and isinstance(parent.meta, MappingABC)
+        else {}
     )
     if parent is not None and (
         parent.driver == "artifact_set" or parent_meta.get("artifact_set") is True
@@ -1203,65 +1308,17 @@ def _output_set_hydration_kind(tracker: "Tracker", artifact: Artifact) -> str | 
     return None
 
 
-def _derive_historical_remap(
-    tracker: "Tracker",
-    *,
-    artifact: Artifact,
-    run,
-) -> tuple[Path, Path] | None:
-    """Derive a recoverable historical root and URI-relative artifact path.
-
-    Parameters
-    ----------
-    tracker : Tracker
-        Tracker that owns filesystem URI policy.
-    artifact : Artifact
-        Artifact whose canonical URI is being remapped.
-    run : Run
-        Historical producing run containing mount metadata.
-
-    Returns
-    -------
-    tuple[Path, Path] | None
-        Historical root and safe relative path, or ``None`` when unmappable.
-    """
-    meta = run.meta if (run is not None and isinstance(run.meta, dict)) else {}
-    artifact_meta = artifact.meta if isinstance(artifact.meta, dict) else {}
-
-    return tracker.fs.get_historical_remap(
-        artifact.container_uri,
-        original_run_dir=meta.get("_physical_run_dir"),
-        mounts_snapshot=meta.get("mounts"),
-        artifact_mount_root=artifact_meta.get("mount_root"),
-    )
-
-
 def _derive_remappable_relative_path(
     tracker: "Tracker",
     *,
     artifact: Artifact,
     scheme_prefixes: Mapping[str, str | Path] | None = None,
 ) -> Path | None:
-    """Derive the safe URI-relative layout for an artifact.
-
-    Parameters
-    ----------
-    tracker : Tracker
-        Tracker that owns filesystem URI policy.
-    artifact : Artifact
-        Artifact whose canonical URI is inspected.
-    scheme_prefixes : mapping, optional
-        Explicit mapping of URI scheme to relative path prefix.
-
-    Returns
-    -------
-    Path | None
-        Portable relative path, or ``None`` for an unmappable URI.
-    """
-    if not artifact.container_uri:
+    """Derive the safe URI-relative layout for an artifact."""
+    if not artifact.uri:
         return None
 
-    uri = artifact.container_uri
+    uri = artifact.uri
     scheme: str | None = None
     if "://" in uri:
         scheme = uri.split("://", 1)[0]
@@ -1283,11 +1340,11 @@ def _derive_remappable_relative_path(
                 pass
         if inferred is None:
             owning_run = _get_artifact_run(tracker, artifact=artifact)
-            if owning_run is not None and isinstance(owning_run.meta, dict):
+            if owning_run is not None and isinstance(owning_run.meta, MappingABC):
                 run_mounts = owning_run.meta.get("mounts")
                 phys_run_dir = owning_run.meta.get("_physical_run_dir")
                 if (
-                    isinstance(run_mounts, dict)
+                    isinstance(run_mounts, MappingABC)
                     and scheme in run_mounts
                     and phys_run_dir
                 ):
@@ -1320,34 +1377,22 @@ def _derive_historical_root(
     run,
     preserve_raw_paths: bool = False,
 ) -> Path | None:
-    """Derive the historical root that can supply artifact bytes.
-
-    Parameters
-    ----------
-    tracker : Tracker
-        Tracker that owns filesystem URI policy.
-    artifact : Artifact
-        Artifact whose canonical URI is inspected.
-    run : Run
-        Historical producing run containing mount metadata.
-    preserve_raw_paths : bool, default False
-        Whether to retain path components for later symlink validation.
-
-    Returns
-    -------
-    Path | None
-        Historical root, or ``None`` when no remappable root is recorded.
-    """
-    meta = run.meta if (run is not None and isinstance(run.meta, dict)) else {}
-    artifact_meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+    """Derive the historical root that can supply artifact bytes."""
+    meta = run.meta if (run is not None and isinstance(run.meta, MappingABC)) else {}
+    artifact_meta = artifact.meta if isinstance(artifact.meta, MappingABC) else {}
 
     return tracker.fs.get_historical_root(
-        artifact.container_uri,
+        artifact.uri,
         original_run_dir=meta.get("_physical_run_dir"),
         mounts_snapshot=meta.get("mounts"),
         artifact_mount_root=artifact_meta.get("mount_root"),
         resolve=not preserve_raw_paths,
     )
+
+
+@runtime_checkable
+class _HasArtifactRecoveryRoots(Protocol):
+    def artifact_recovery_roots(self, artifact: Any) -> Any: ...
 
 
 def _artifact_recovery_roots(
@@ -1356,27 +1401,18 @@ def _artifact_recovery_roots(
     artifact: Artifact,
     preserve_raw_paths: bool = False,
 ) -> tuple[Path, ...]:
-    """Return ordered recovery roots recorded for an artifact.
-
-    Parameters
-    ----------
-    tracker : Tracker
-        Tracker that normalizes recovery-root metadata.
-    artifact : Artifact
-        Artifact whose advisory roots are requested.
-    preserve_raw_paths : bool, default False
-        Whether to retain path components for later symlink validation.
-
-    Returns
-    -------
-    tuple[Path, ...]
-        Normalized recovery roots in metadata order.
-    """
-    artifact_meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+    """Return ordered recovery roots recorded for an artifact."""
+    raw_roots: Any = ()
+    if isinstance(tracker, _HasArtifactRecoveryRoots):
+        fn = tracker.artifact_recovery_roots
+        try:
+            raw_roots = fn(artifact, resolve=not preserve_raw_paths)  # type: ignore[call-arg]
+        except TypeError:
+            raw_roots = fn(artifact)
     return tuple(
         Path(root)
         for root in tracker.fs.normalize_recovery_roots(
-            artifact_meta.get("recovery_roots"), resolve=not preserve_raw_paths
+            raw_roots, resolve=not preserve_raw_paths
         )
     )
 
@@ -1388,24 +1424,7 @@ def _ordered_candidate_roots(
     recovery_roots: Sequence[Path],
     preserve_raw_paths: bool = False,
 ) -> tuple[Path, ...]:
-    """Order and deduplicate recovery source roots.
-
-    Parameters
-    ----------
-    source_root : Path | None
-        Caller-supplied root, with highest precedence.
-    historical_root : Path | None
-        Root recorded with the producing run.
-    recovery_roots : sequence of Path
-        Advisory per-artifact fallback roots.
-    preserve_raw_paths : bool, default False
-        Whether to avoid resolving symlinks during normalization.
-
-    Returns
-    -------
-    tuple[Path, ...]
-        Distinct roots in lookup order.
-    """
+    """Order and deduplicate recovery source roots."""
     ordered: list[Path] = []
     seen: set[str] = set()
     for root in (
@@ -1432,40 +1451,7 @@ def find_existing_recovery_source_path(
     fallback_validator: Callable[[Path], bool] | None = None,
     preserve_raw_paths: bool = False,
 ) -> tuple[Path | None, Path | None, bool]:
-    """Find the first valid filesystem source for historical recovery.
-
-    Parameters
-    ----------
-    tracker : Tracker
-        Tracker that owns filesystem URI and recovery-root policy.
-    artifact : Artifact
-        Historical artifact whose bytes are being located.
-    run : Run
-        Producing run used to derive historical roots.
-    source_root : Path | None
-        Optional caller-supplied root tried before recorded locations.
-    source_validator : callable, optional
-        Predicate applied to existing candidates. False candidates are skipped;
-        exceptions are propagated to the caller.
-    fallback_validator : callable, optional
-        Secondary predicate applied across candidates only when no candidate
-        satisfies ``source_validator``.
-    preserve_raw_paths : bool, default False
-        Whether the validator should receive unresolved candidate paths for
-        caller-owned symlink validation.
-
-    Returns
-    -------
-    tuple[Path | None, Path | None, bool]
-        URI-relative path, existing source path, and whether any source roots
-        were available to probe. The first two values are ``None`` for an
-        unmappable artifact.
-
-    Notes
-    -----
-    Candidates are probed in order: ``source_root``, historical run/mount root,
-    then the artifact's ordered ``recovery_roots``.
-    """
+    """Find the first valid filesystem source for historical recovery."""
     relative_path = _derive_remappable_relative_path(tracker, artifact=artifact)
     if relative_path is None:
         return None, None, False
@@ -1527,7 +1513,7 @@ def _direct_artifact_source_path(
     if not allow_tracker_uri:
         return None
 
-    uri = artifact.container_uri
+    uri = artifact.uri
     if uri.startswith("workspace://") or uri.startswith("./"):
         candidate = Path(tracker.run_dir) / relative_path
         if candidate.exists():
@@ -1544,7 +1530,7 @@ def _direct_artifact_source_path(
                     return candidate
 
     try:
-        candidate = Path(tracker.resolve_uri(artifact.container_uri)).resolve()
+        candidate = Path(tracker.resolve_uri(artifact.uri)).resolve()
     except (OSError, ValueError, AttributeError):
         return None
     if candidate.exists():
@@ -1552,19 +1538,49 @@ def _direct_artifact_source_path(
     return None
 
 
+def _verify_scalar_artifact_digest(
+    candidate_path: Path, artifact: Artifact, expected_digest: Digest
+) -> bool:
+    if expected_digest.scheme == "caller_supplied_v1:sha256":
+        return False
+    if expected_digest.scheme not in DIGEST_DRIVERS:
+        return False
+    meta = artifact.meta if isinstance(artifact.meta, MappingABC) else {}
+    options: dict[str, Any] = {}
+    member_paths = meta.get("output_set_member_paths")
+    if isinstance(member_paths, MappingABC):
+        options["member_paths"] = member_paths
+    if meta.get("file_bundle_artifact") is True:
+        options["shapefile_bundle"] = True
+    return verify_digest(
+        candidate_path,
+        expected_digest,
+        driver=artifact.driver,
+        member=artifact.member,
+        options=options or None,
+    )
+
+
 def _is_valid_scalar_recovery_candidate(
     tracker: "Tracker", candidate_path: Path, artifact: Artifact
 ) -> bool:
-    if not candidate_path.is_file() or not artifact.hash:
+    expected = _portable_artifact_digest(tracker, artifact)
+    if not candidate_path.is_file() or expected is None:
+        return True
+    if expected.scheme == "caller_supplied_v1:sha256":
         return True
     try:
-        return (
-            tracker.identity.compute_file_checksum(str(candidate_path)) == artifact.hash
-        )
+        return _verify_scalar_artifact_digest(candidate_path, artifact, expected)
     except AttributeError:
         return True
     except (FileNotFoundError, OSError, ValueError):
         return False
+
+
+@runtime_checkable
+class _HasDbAttr(Protocol):
+    @property
+    def db(self) -> Any: ...
 
 
 def _select_materialize_artifact_source(
@@ -1573,6 +1589,7 @@ def _select_materialize_artifact_source(
     artifact: Artifact,
     relative_path: Path,
     source_root: Path | None,
+    validate_content_hash: Literal["never", "if-present", "always"] = "if-present",
 ) -> tuple[
     Path | None,
     Literal[
@@ -1583,7 +1600,37 @@ def _select_materialize_artifact_source(
     ]
     | None,
     bool,
+    bool,
 ]:
+    if (
+        source_root is None
+        and validate_content_hash != "never"
+        and isinstance(tracker, _HasDbAttr)
+        and isinstance(tracker.db, DatabaseManager)
+    ):
+        from consist.core.tracker_recovery import resolve_verified_local_path_detailed
+
+        resolved, saw_mismatch, winning_row = resolve_verified_local_path_detailed(
+            tracker,
+            artifact,
+            allow_recovery_roots=True,
+            ignore_runtime_abs_path=bool(artifact.run_id),
+            verify_digest=(validate_content_hash == "always"),
+        )
+        if resolved is not None:
+            if winning_row is not None and winning_row.site in ("archive", "advisory"):
+                resolved_kind: Literal[
+                    "source_root", "historical_root", "recovery_root", "artifact_uri"
+                ] = "recovery_root"
+            elif artifact.run_id:
+                resolved_kind = "historical_root"
+            else:
+                resolved_kind = "artifact_uri"
+            return resolved, resolved_kind, True, False
+        if saw_mismatch:
+            return None, None, True, True
+        return None, None, True, False
+
     candidate_roots: list[
         tuple[
             Literal["source_root", "historical_root", "recovery_root"],
@@ -1609,16 +1656,18 @@ def _select_materialize_artifact_source(
     )
 
     unprefixed_rel = (
-        tracker.fs.normalize_remappable_relative_path(
-            artifact.container_uri.split("://", 1)[1]
-        )
-        if "://" in artifact.container_uri
+        tracker.fs.normalize_remappable_relative_path(artifact.uri.split("://", 1)[1])
+        if "://" in artifact.uri
         else None
     )
     is_dir_artifact = _is_directory_artifact(artifact)
     is_bundle_artifact = _is_file_bundle_artifact(artifact)
 
     def _is_valid_manifest_candidate(candidate_path: Path) -> bool:
+        if validate_content_hash == "never":
+            if is_dir_artifact:
+                return candidate_path.is_dir()
+            return candidate_path.exists()
         if is_dir_artifact:
             return (
                 is_valid_directory_artifact_tree(candidate_path, artifact) is not False
@@ -1629,20 +1678,7 @@ def _select_materialize_artifact_source(
             )
         return _is_valid_scalar_recovery_candidate(tracker, candidate_path, artifact)
 
-    fallback_existing: (
-        tuple[
-            Path,
-            Literal[
-                "source_root",
-                "historical_root",
-                "recovery_root",
-                "artifact_uri",
-            ],
-            bool,
-        ]
-        | None
-    ) = None
-
+    saw_mismatch = False
     seen_roots: set[str] = set()
     for source_kind, root in candidate_roots:
         resolved_root = Path(root).resolve()
@@ -1653,16 +1689,16 @@ def _select_materialize_artifact_source(
         candidate = resolved_root / relative_path
         if candidate.exists():
             if _is_valid_manifest_candidate(candidate):
-                return candidate, source_kind, True
-            if fallback_existing is None:
-                fallback_existing = (candidate, source_kind, True)
+                return candidate, source_kind, True, False
+            if validate_content_hash != "never":
+                saw_mismatch = True
         if unprefixed_rel is not None and unprefixed_rel != relative_path:
             fallback_candidate = resolved_root / unprefixed_rel
             if fallback_candidate.exists():
                 if _is_valid_manifest_candidate(fallback_candidate):
-                    return fallback_candidate, source_kind, True
-                if fallback_existing is None:
-                    fallback_existing = (fallback_candidate, source_kind, True)
+                    return fallback_candidate, source_kind, True, False
+                if validate_content_hash != "never":
+                    saw_mismatch = True
 
     direct_source = _direct_artifact_source_path(
         tracker,
@@ -1672,18 +1708,11 @@ def _select_materialize_artifact_source(
     )
     if direct_source is not None:
         if _is_valid_manifest_candidate(direct_source):
-            return direct_source, "artifact_uri", bool(candidate_roots)
-        if fallback_existing is None:
-            fallback_existing = (
-                direct_source,
-                "artifact_uri",
-                bool(candidate_roots),
-            )
+            return direct_source, "artifact_uri", bool(candidate_roots), False
+        if validate_content_hash != "never":
+            saw_mismatch = True
 
-    if fallback_existing is not None:
-        return fallback_existing
-
-    return None, None, bool(candidate_roots)
+    return None, None, bool(candidate_roots), saw_mismatch
 
 
 def _materialized_status_for_source(
@@ -1703,10 +1732,39 @@ def _materialized_status_for_source(
     return "materialized_from_artifact_uri"
 
 
-def _portable_artifact_hash(tracker: "Tracker", artifact: Artifact) -> str | None:
+def _portable_artifact_digest(tracker: "Tracker", artifact: Artifact) -> Digest | None:
     if tracker.identity.hashing_strategy != "full":
         return None
-    return artifact.hash
+    digest = artifact.digest
+    if digest is None:
+        return None
+    if digest.scheme in {
+        "stat_file_v1:sha256",
+        "stat_dir_v1:sha256",
+        "output_set_v1:sha256",
+    }:
+        return None
+    return digest
+
+
+def _reject_symlink_from_source_root(source_path: Path, relative_path: Path) -> None:
+    root = source_path
+    for _ in relative_path.parts:
+        parent = root.parent
+        if parent == root:
+            break
+        root = parent
+    current = root
+    if current.is_symlink():
+        raise ValueError(
+            f"directory artifact source contains a symlink component: {current}"
+        )
+    for part in relative_path.parts:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError(
+                f"directory artifact source contains a symlink component: {current}"
+            )
 
 
 def _path_has_symlink_component(path: Path) -> bool:
@@ -1731,72 +1789,58 @@ def materialize_artifact(
     validate_content_hash: Literal["never", "if-present", "always"],
     scheme_prefixes: Mapping[str, str | Path] | None = None,
 ) -> MaterializedArtifact:
-    """Materialize one artifact into a target root using recovery metadata.
-
-    Parameters
-    ----------
-    tracker : Tracker
-        Tracker used for source discovery and policy checks.
-    artifact : Artifact
-        Artifact to materialize.
-    target_root : Path
-        Root below which its URI-relative path is recreated.
-    source_root : Path | None
-        Optional source root tried before recorded recovery locations.
-    allowed_base : Path, sequence of Path, or None
-        Allowed destination root or roots; ``None`` disables that check.
-    preserve_existing : bool
-        Whether an existing compatible destination can be retained.
-    on_missing : {"warn", "raise"}
-        Policy for unavailable bytes and materialization failures.
-    validate_content_hash : {"never", "if-present", "always"}
-        Content-validation policy for source and destination bytes.
-    scheme_prefixes : mapping, optional
-        Explicit mapping of URI scheme to relative path prefix.
-
-    Returns
-    -------
-    MaterializedArtifact
-        Detached artifact, source/target paths, and a recovery outcome.
-    """
+    """Materialize one artifact into a target root using recovery metadata."""
     if validate_content_hash not in {"never", "if-present", "always"}:
         raise ValueError(
             "validate_content_hash must be one of 'never', 'if-present', or 'always'."
         )
 
-    if artifact.driver == "h5_table":
-        parent = tracker.get_parent_artifact(artifact)
-        policy_validation = validate_recovery_registration_policy(
-            artifact,
-            parent=parent,
-        )
-        if not policy_validation.allowed:
-            return _make_materialized_artifact(
-                artifact,
-                status="blocked_by_container_policy",
-                path=None,
-                source_path=None,
-                target_path=None,
-                message=policy_validation.message,
-                resolvable=False,
-            )
+    source_path: Path | None = None
+    destination: Path | None = None
 
-    relative_path = _derive_remappable_relative_path(
-        tracker,
-        artifact=artifact,
-        scheme_prefixes=scheme_prefixes,
-    )
-    if relative_path is None:
+    def _fail(
+        status: MaterializedArtifactStatus,
+        msg: str | None = None,
+        *,
+        tgt: Path | None = None,
+    ) -> MaterializedArtifact:
         return _make_materialized_artifact(
             artifact,
-            status="skipped_unmapped",
+            status=status,
             path=None,
-            source_path=None,
-            target_path=None,
-            message=(
-                f"Artifact {artifact.key!r} does not have a rematerializable URI layout."
-            ),
+            source_path=source_path,
+            target_path=destination if tgt is None else tgt,
+            message=msg,
             resolvable=False,
+        )
+
+    def _ok(status: MaterializedArtifactStatus) -> MaterializedArtifact:
+        return _make_materialized_artifact(
+            artifact,
+            status=status,
+            path=destination,
+            source_path=source_path,
+            target_path=destination,
+            resolvable=True,
+        )
+
+    if artifact.driver == "h5_table" or (
+        artifact.driver in {"h5", "hdf5"}
+        and (artifact.parent_artifact_id is not None or artifact.member is not None)
+    ):
+        policy_validation = validate_recovery_registration_policy(
+            artifact, parent=tracker.get_parent_artifact(artifact)
+        )
+        if not policy_validation.allowed:
+            return _fail("blocked_by_container_policy", policy_validation.message)
+
+    relative_path = _derive_remappable_relative_path(
+        tracker, artifact=artifact, scheme_prefixes=scheme_prefixes
+    )
+    if relative_path is None:
+        return _fail(
+            "skipped_unmapped",
+            f"Artifact {artifact.key!r} does not have a rematerializable URI layout.",
         )
 
     raw_destination = target_root / relative_path
@@ -1804,15 +1848,7 @@ def materialize_artifact(
         msg = f"Symlink detected in destination path: {raw_destination.resolve()}"
         if on_missing == "raise":
             raise ValueError(msg)
-        return _make_materialized_artifact(
-            artifact,
-            status="symlink_destination",
-            path=None,
-            source_path=None,
-            target_path=raw_destination,
-            message=msg,
-            resolvable=False,
-        )
+        return _fail("symlink_destination", msg, tgt=raw_destination)
 
     destination = raw_destination.resolve()
     try:
@@ -1820,140 +1856,78 @@ def materialize_artifact(
     except ValueError as exc:
         if on_missing == "raise":
             raise
-        return _make_materialized_artifact(
-            artifact,
-            status="failed",
-            path=None,
-            source_path=None,
-            target_path=destination,
-            message=str(exc),
-            resolvable=False,
-        )
+        return _fail("failed", str(exc))
 
-    source_path, source_kind, _has_candidate_roots = (
+    source_path, source_kind, _has_candidate_roots, saw_source_mismatch = (
         _select_materialize_artifact_source(
             tracker,
             artifact=artifact,
             relative_path=relative_path,
             source_root=source_root,
+            validate_content_hash=validate_content_hash,
         )
     )
 
-    expected_hash = _portable_artifact_hash(tracker, artifact)
-    if validate_content_hash == "always" and not expected_hash:
-        return _make_materialized_artifact(
-            artifact,
-            status="failed",
-            path=None,
-            source_path=source_path,
-            target_path=destination,
-            message=(
-                f"Cannot validate artifact {artifact.key!r}: no portable content hash "
-                "is available."
-            ),
-            resolvable=False,
+    expected_digest = _portable_artifact_digest(tracker, artifact)
+    expected_hash = expected_digest.hex if expected_digest is not None else None
+    if validate_content_hash == "always" and expected_digest is None:
+        return _fail(
+            "failed",
+            f"Cannot validate artifact {artifact.key!r}: no portable content hash is available.",
         )
 
-    should_validate = bool(expected_hash) and validate_content_hash != "never"
+    should_validate = expected_digest is not None and validate_content_hash != "never"
+    meta = artifact.meta if isinstance(artifact.meta, MappingABC) else {}
+
+    def _check_bundle(
+        bundle_root: Path, entry_name: str, fallback_file: Path, label: str
+    ) -> str | None:
+        manifest = meta.get("file_bundle_manifest") or meta.get("directory_manifest")
+        try:
+            if manifest is not None:
+                validate_shapefile_bundle_root(
+                    bundle_root, entry_name, manifest, require_clean_root=False
+                )
+            elif expected_hash:
+                entry_cand = (
+                    bundle_root / entry_name
+                    if (bundle_root / entry_name).is_file()
+                    else fallback_file
+                )
+                if (
+                    build_shapefile_bundle_manifest(entry_cand)["tree_hash"]
+                    != expected_hash
+                ):
+                    return f"{label} hash does not match artifact {artifact.key!r}."
+        except (ValueError, OSError) as exc:
+            return f"{label} hash does not match artifact {artifact.key!r}: {exc}"
+        return None
 
     if destination.exists() and preserve_existing:
         if _is_file_bundle_artifact(artifact):
             if destination.is_dir():
-                return _make_materialized_artifact(
-                    artifact,
-                    status="failed",
-                    path=None,
-                    source_path=source_path,
-                    target_path=destination,
-                    message=(
-                        f"Destination {destination} exists but is a directory; "
-                        "expected Shapefile entry."
-                    ),
-                    resolvable=False,
+                return _fail(
+                    "failed",
+                    f"Destination {destination} exists but is a directory; expected Shapefile entry.",
                 )
             if should_validate:
-                meta = artifact.meta if isinstance(artifact.meta, dict) else {}
                 entry = file_bundle_entry_name(artifact, fallback=destination.name)
                 assert entry is not None
-                manifest = meta.get("file_bundle_manifest") or meta.get(
-                    "directory_manifest"
+                err = _check_bundle(
+                    destination.parent, entry, destination, "Existing destination"
                 )
-                if manifest is not None:
-                    try:
-                        validate_shapefile_bundle_root(
-                            destination.parent,
-                            entry,
-                            manifest,
-                            require_clean_root=False,
-                        )
-                    except (ValueError, OSError) as exc:
-                        return _make_materialized_artifact(
-                            artifact,
-                            status="hash_mismatch",
-                            path=None,
-                            source_path=source_path,
-                            target_path=destination,
-                            message=(
-                                f"Existing destination hash does not match artifact "
-                                f"{artifact.key!r}: {exc}"
-                            ),
-                            resolvable=False,
-                        )
-                elif expected_hash:
-                    try:
-                        built = build_shapefile_bundle_manifest(destination)
-                        if built["tree_hash"] != expected_hash:
-                            return _make_materialized_artifact(
-                                artifact,
-                                status="hash_mismatch",
-                                path=None,
-                                source_path=source_path,
-                                target_path=destination,
-                                message=(
-                                    f"Existing destination hash does not match artifact "
-                                    f"{artifact.key!r}."
-                                ),
-                                resolvable=False,
-                            )
-                    except (ValueError, OSError) as exc:
-                        return _make_materialized_artifact(
-                            artifact,
-                            status="hash_mismatch",
-                            path=None,
-                            source_path=source_path,
-                            target_path=destination,
-                            message=(
-                                f"Existing destination validation failed for "
-                                f"{artifact.key!r}: {exc}"
-                            ),
-                            resolvable=False,
-                        )
-            return _make_materialized_artifact(
-                artifact,
-                status="already_present",
-                path=destination,
-                source_path=source_path,
-                target_path=destination,
-                resolvable=True,
-            )
+                if err is not None:
+                    return _fail("hash_mismatch", err)
+            return _ok("already_present")
 
-        elif _is_directory_artifact(artifact) or destination.is_dir():
+        if _is_directory_artifact(artifact) or destination.is_dir():
             if not destination.is_dir():
-                return _make_materialized_artifact(
-                    artifact,
-                    status="failed",
-                    path=None,
-                    source_path=source_path,
-                    target_path=destination,
-                    message=f"Destination {destination} exists but is not a directory.",
-                    resolvable=False,
+                return _fail(
+                    "failed",
+                    f"Destination {destination} exists but is not a directory.",
                 )
-            manifest = (
-                artifact.meta.get("directory_manifest")
-                if isinstance(artifact.meta, dict)
-                else None
-            )
-            needs_partial_completion = False
+            manifest = meta.get("directory_manifest")
+            needs_partial = False
             if should_validate:
                 if manifest is not None:
                     try:
@@ -1964,150 +1938,83 @@ def materialize_artifact(
                             allow_extra_files=directory_allows_extra_files(artifact),
                         )
                     except (ValueError, OSError) as exc:
-                        return _make_materialized_artifact(
-                            artifact,
-                            status="hash_mismatch",
-                            path=None,
-                            source_path=source_path,
-                            target_path=destination,
-                            message=(
-                                f"Existing destination hash does not match artifact "
-                                f"{artifact.key!r}: {exc}"
-                            ),
-                            resolvable=False,
+                        return _fail(
+                            "hash_mismatch",
+                            f"Existing destination hash does not match artifact {artifact.key!r}: {exc}",
                         )
                     if not already_complete:
                         if source_path is None:
-                            return _make_materialized_artifact(
-                                artifact,
-                                status="hash_mismatch",
-                                path=None,
-                                source_path=source_path,
-                                target_path=destination,
-                                message=(
-                                    f"Existing destination for artifact {artifact.key!r} "
-                                    "is incomplete and no recovery source is available."
-                                ),
-                                resolvable=False,
+                            return _fail(
+                                "hash_mismatch",
+                                f"Existing destination for artifact {artifact.key!r} is incomplete and no recovery source is available.",
                             )
-                        needs_partial_completion = True
+                        needs_partial = True
                 elif expected_hash:
                     try:
-                        dest_manifest = build_directory_manifest(destination)
-                        if dest_manifest.get("tree_hash") != expected_hash:
-                            return _make_materialized_artifact(
-                                artifact,
-                                status="hash_mismatch",
-                                path=None,
-                                source_path=source_path,
-                                target_path=destination,
-                                message=(
-                                    f"Existing destination hash does not match artifact "
-                                    f"{artifact.key!r}."
-                                ),
-                                resolvable=False,
+                        if (
+                            build_directory_manifest(destination).get("tree_hash")
+                            != expected_hash
+                        ):
+                            return _fail(
+                                "hash_mismatch",
+                                f"Existing destination hash does not match artifact {artifact.key!r}.",
                             )
                     except (ValueError, OSError) as exc:
-                        return _make_materialized_artifact(
-                            artifact,
-                            status="hash_mismatch",
-                            path=None,
-                            source_path=source_path,
-                            target_path=destination,
-                            message=(
-                                f"Existing destination validation failed for "
-                                f"{artifact.key!r}: {exc}"
-                            ),
-                            resolvable=False,
+                        return _fail(
+                            "hash_mismatch",
+                            f"Existing destination validation failed for {artifact.key!r}: {exc}",
                         )
             elif (
                 isinstance(manifest, Mapping)
                 and isinstance(manifest.get("entries"), list)
                 and source_path is not None
             ):
-                needs_partial_completion = any(
-                    isinstance(entry, Mapping)
-                    and isinstance(entry.get("path"), str)
-                    and not (destination / entry["path"]).exists()
-                    for entry in manifest["entries"]
+                needs_partial = any(
+                    isinstance(e, Mapping)
+                    and isinstance(e.get("path"), str)
+                    and not (destination / e["path"]).exists()
+                    for e in manifest["entries"]
                 )
-            if not needs_partial_completion:
-                return _make_materialized_artifact(
-                    artifact,
-                    status="already_present",
-                    path=destination,
-                    source_path=source_path,
-                    target_path=destination,
-                    resolvable=True,
-                )
-
+            if not needs_partial:
+                return _ok("already_present")
         else:
             if destination.is_dir():
-                return _make_materialized_artifact(
-                    artifact,
-                    status="failed",
-                    path=None,
-                    source_path=source_path,
-                    target_path=destination,
-                    message=f"Destination {destination} exists but is a directory.",
-                    resolvable=False,
+                return _fail(
+                    "failed", f"Destination {destination} exists but is a directory."
                 )
-            if should_validate and file_sha256(destination) != expected_hash:
-                return _make_materialized_artifact(
-                    artifact,
-                    status="hash_mismatch",
-                    path=None,
-                    source_path=source_path,
-                    target_path=destination,
-                    message=(
-                        f"Existing destination hash does not match artifact {artifact.key!r}."
-                    ),
-                    resolvable=False,
+            if should_validate and (
+                expected_digest is None
+                or not _verify_scalar_artifact_digest(
+                    destination, artifact, expected_digest
                 )
-            return _make_materialized_artifact(
-                artifact,
-                status="already_present",
-                path=destination,
-                source_path=source_path,
-                target_path=destination,
-                resolvable=True,
-            )
+            ):
+                return _fail(
+                    "hash_mismatch",
+                    f"Existing destination hash does not match artifact {artifact.key!r}.",
+                )
+            return _ok("already_present")
 
     if source_path is None or source_kind is None:
+        if saw_source_mismatch:
+            return _fail(
+                "hash_mismatch",
+                f"Source hash does not match artifact {artifact.key!r}.",
+            )
         msg = f"No source bytes found for artifact {artifact.key!r}."
         if on_missing == "raise":
             raise FileNotFoundError(msg)
-        return _make_materialized_artifact(
-            artifact,
-            status="missing_source",
-            path=None,
-            source_path=None,
-            target_path=destination,
-            message=msg,
-            resolvable=False,
-        )
+        return _fail("missing_source", msg)
 
     if _path_has_symlink_component(source_path):
         msg = f"Symlink detected in source path: {source_path}"
         if on_missing == "raise":
             raise ValueError(msg)
-        return _make_materialized_artifact(
-            artifact,
-            status="failed",
-            path=None,
-            source_path=source_path,
-            target_path=destination,
-            message=msg,
-            resolvable=False,
-        )
+        return _fail("failed", msg)
 
     if _is_file_bundle_artifact(artifact):
-        meta = artifact.meta if isinstance(artifact.meta, dict) else {}
         entry = file_bundle_entry_name(artifact, fallback=destination.name)
         assert entry is not None
-
         manifest = meta.get("file_bundle_manifest") or meta.get("directory_manifest")
-
         if source_path.is_dir():
             source_bundle_root = source_path
         elif source_path.is_file():
@@ -2118,73 +2025,15 @@ def materialize_artifact(
             )
             if on_missing == "raise":
                 raise RuntimeError(msg)
-            return _make_materialized_artifact(
-                artifact,
-                status="failed",
-                path=None,
-                source_path=source_path,
-                target_path=destination,
-                message=msg,
-                resolvable=False,
-            )
+            return _fail("failed", msg)
 
         if should_validate:
-            if manifest is not None:
-                try:
-                    validate_shapefile_bundle_root(
-                        source_bundle_root,
-                        entry,
-                        manifest,
-                        require_clean_root=False,
-                    )
-                except (ValueError, OSError) as exc:
-                    return _make_materialized_artifact(
-                        artifact,
-                        status="hash_mismatch",
-                        path=None,
-                        source_path=source_path,
-                        target_path=destination,
-                        message=(
-                            f"Source hash does not match artifact {artifact.key!r}: {exc}"
-                        ),
-                        resolvable=False,
-                    )
-            elif expected_hash:
-                try:
-                    source_entry_file = (
-                        source_bundle_root / entry
-                        if (source_bundle_root / entry).is_file()
-                        else source_path
-                    )
-                    built = build_shapefile_bundle_manifest(source_entry_file)
-                    if built["tree_hash"] != expected_hash:
-                        return _make_materialized_artifact(
-                            artifact,
-                            status="hash_mismatch",
-                            path=None,
-                            source_path=source_path,
-                            target_path=destination,
-                            message=f"Source hash does not match artifact {artifact.key!r}.",
-                            resolvable=False,
-                        )
-                except (ValueError, OSError) as exc:
-                    return _make_materialized_artifact(
-                        artifact,
-                        status="hash_mismatch",
-                        path=None,
-                        source_path=source_path,
-                        target_path=destination,
-                        message=f"Source validation failed for {artifact.key!r}: {exc}",
-                        resolvable=False,
-                    )
+            err = _check_bundle(source_bundle_root, entry, source_path, "Source")
+            if err is not None:
+                return _fail("hash_mismatch", err)
 
         destination.parent.mkdir(parents=True, exist_ok=True)
-        members_to_copy: list[str] = []
-        if (
-            manifest is not None
-            and isinstance(manifest, Mapping)
-            and "entries" in manifest
-        ):
+        if isinstance(manifest, Mapping) and isinstance(manifest.get("entries"), list):
             members_to_copy = [
                 e["path"]
                 for e in manifest["entries"]
@@ -2194,33 +2043,24 @@ def materialize_artifact(
             stem = Path(entry).stem
             try:
                 with os.scandir(source_bundle_root) as scan:
-                    for child in scan:
-                        if child.is_file() and (
-                            child.name == entry or child.name.startswith(f"{stem}.")
-                        ):
-                            members_to_copy.append(child.name)
+                    members_to_copy = [
+                        c.name
+                        for c in scan
+                        if c.is_file()
+                        and (c.name == entry or c.name.startswith(f"{stem}."))
+                    ]
             except OSError as exc:
                 if on_missing == "raise":
                     raise RuntimeError(
                         f"Failed scanning bundle source {source_bundle_root}: {exc}"
                     ) from exc
-                return _make_materialized_artifact(
-                    artifact,
-                    status="failed",
-                    path=None,
-                    source_path=source_path,
-                    target_path=destination,
-                    message=str(exc),
-                    resolvable=False,
-                )
+                return _fail("failed", str(exc))
 
         try:
             for member_name in members_to_copy:
-                src_member = source_bundle_root / member_name
-                dst_member = destination.parent / member_name
                 _materialize_path(
-                    source=src_member,
-                    destination=dst_member,
+                    source=source_bundle_root / member_name,
+                    destination=destination.parent / member_name,
                     preserve_existing=preserve_existing,
                 )
         except (OSError, shutil.Error, RuntimeError, ValueError) as exc:
@@ -2228,67 +2068,21 @@ def materialize_artifact(
                 raise RuntimeError(
                     f"Failed to materialize bundle {artifact.key!r}: {exc}"
                 ) from exc
-            return _make_materialized_artifact(
-                artifact,
-                status="failed",
-                path=None,
-                source_path=source_path,
-                target_path=destination,
-                message=str(exc),
-                resolvable=False,
-            )
+            return _fail("failed", str(exc))
 
         if should_validate and manifest is not None:
-            try:
-                validate_shapefile_bundle_root(
-                    destination.parent,
-                    entry,
-                    manifest,
-                    require_clean_root=False,
-                )
-            except (ValueError, OSError) as exc:
-                return _make_materialized_artifact(
-                    artifact,
-                    status="hash_mismatch",
-                    path=None,
-                    source_path=source_path,
-                    target_path=destination,
-                    message=(
-                        f"Destination validation failed for {artifact.key!r}: {exc}"
-                    ),
-                    resolvable=False,
-                )
-
-        return _make_materialized_artifact(
-            artifact,
-            status=_materialized_status_for_source(source_kind),
-            path=destination,
-            source_path=source_path,
-            target_path=destination,
-            resolvable=True,
-        )
+            err = _check_bundle(destination.parent, entry, destination, "Destination")
+            if err is not None:
+                return _fail("hash_mismatch", err)
+        return _ok(_materialized_status_for_source(source_kind))
 
     if _is_directory_artifact(artifact) or source_path.is_dir():
         if not source_path.is_dir():
             msg = f"Source path is not a directory: {source_path}"
             if on_missing == "raise":
                 raise RuntimeError(msg)
-            return _make_materialized_artifact(
-                artifact,
-                status="failed",
-                path=None,
-                source_path=source_path,
-                target_path=destination,
-                message=msg,
-                resolvable=False,
-            )
-
-        manifest = (
-            artifact.meta.get("directory_manifest")
-            if isinstance(artifact.meta, dict)
-            else None
-        )
-
+            return _fail("failed", msg)
+        manifest = meta.get("directory_manifest")
         if should_validate:
             if manifest:
                 try:
@@ -2300,57 +2094,29 @@ def materialize_artifact(
                         allow_extra_files=directory_allows_extra_files(artifact),
                     )
                 except (ValueError, OSError) as exc:
-                    return _make_materialized_artifact(
-                        artifact,
-                        status="hash_mismatch",
-                        path=None,
-                        source_path=source_path,
-                        target_path=destination,
-                        message=(
-                            f"Directory validation failed for artifact "
-                            f"{artifact.key!r}: {exc}"
-                        ),
-                        resolvable=False,
+                    return _fail(
+                        "hash_mismatch",
+                        f"Directory validation failed for artifact {artifact.key!r}: {exc}",
                     )
-                if not materialized:
-                    return _make_materialized_artifact(
-                        artifact,
-                        status="already_present",
-                        path=destination,
-                        source_path=source_path,
-                        target_path=destination,
-                        resolvable=True,
-                    )
-                return _make_materialized_artifact(
-                    artifact,
-                    status=_materialized_status_for_source(source_kind),
-                    path=destination,
-                    source_path=source_path,
-                    target_path=destination,
-                    resolvable=True,
+                return _ok(
+                    _materialized_status_for_source(source_kind)
+                    if materialized
+                    else "already_present"
                 )
-            elif expected_hash:
+            if expected_hash:
                 try:
-                    src_manifest = build_directory_manifest(source_path)
-                    if src_manifest.get("tree_hash") != expected_hash:
-                        return _make_materialized_artifact(
-                            artifact,
-                            status="hash_mismatch",
-                            path=None,
-                            source_path=source_path,
-                            target_path=destination,
-                            message=f"Source hash does not match artifact {artifact.key!r}.",
-                            resolvable=False,
+                    if (
+                        build_directory_manifest(source_path).get("tree_hash")
+                        != expected_hash
+                    ):
+                        return _fail(
+                            "hash_mismatch",
+                            f"Source hash does not match artifact {artifact.key!r}.",
                         )
                 except (ValueError, OSError) as exc:
-                    return _make_materialized_artifact(
-                        artifact,
-                        status="hash_mismatch",
-                        path=None,
-                        source_path=source_path,
-                        target_path=destination,
-                        message=f"Validation failed for {artifact.key!r}: {exc}",
-                        resolvable=False,
+                    return _fail(
+                        "hash_mismatch",
+                        f"Validation failed for {artifact.key!r}: {exc}",
                     )
 
         try:
@@ -2360,22 +2126,16 @@ def materialize_artifact(
                 and isinstance(manifest, Mapping)
                 and isinstance(manifest.get("entries"), list)
             ):
-                materialized_any = False
-                for entry in manifest["entries"]:
-                    if not isinstance(entry, Mapping) or not isinstance(
-                        entry.get("path"), str
-                    ):
-                        continue
-                    rel_member = entry["path"]
-                    member_mat, _ = _materialize_path(
-                        source=source_path / rel_member,
-                        destination=destination / rel_member,
+                materialized = any(
+                    _materialize_path(
+                        source=source_path / entry["path"],
+                        destination=destination / entry["path"],
                         preserve_existing=True,
-                    )
-                    if member_mat:
-                        materialized_any = True
-                materialized = materialized_any
-                skipped_existing = not materialized_any
+                    )[0]
+                    for entry in manifest["entries"]
+                    if isinstance(entry, Mapping) and isinstance(entry.get("path"), str)
+                )
+                skipped_existing = not materialized
             else:
                 materialized, skipped_existing = _materialize_path(
                     source=source_path,
@@ -2387,58 +2147,24 @@ def materialize_artifact(
                 raise RuntimeError(
                     f"Failed to materialize directory artifact {artifact.key!r}: {exc}"
                 ) from exc
-            return _make_materialized_artifact(
-                artifact,
-                status="failed",
-                path=None,
-                source_path=source_path,
-                target_path=destination,
-                message=str(exc),
-                resolvable=False,
-            )
-
+            return _fail("failed", str(exc))
         if skipped_existing:
-            return _make_materialized_artifact(
-                artifact,
-                status="already_present",
-                path=destination,
-                source_path=source_path,
-                target_path=destination,
-                resolvable=True,
-            )
+            return _ok("already_present")
         if materialized:
-            return _make_materialized_artifact(
-                artifact,
-                status=_materialized_status_for_source(source_kind),
-                path=destination,
-                source_path=source_path,
-                target_path=destination,
-                resolvable=True,
-            )
+            return _ok(_materialized_status_for_source(source_kind))
 
     if not source_path.is_file():
         msg = f"Source path is not a regular file: {source_path}"
         if on_missing == "raise":
             raise RuntimeError(msg)
-        return _make_materialized_artifact(
-            artifact,
-            status="failed",
-            path=None,
-            source_path=source_path,
-            target_path=destination,
-            message=msg,
-            resolvable=False,
-        )
+        return _fail("failed", msg)
 
-    if should_validate and file_sha256(source_path) != expected_hash:
-        return _make_materialized_artifact(
-            artifact,
-            status="hash_mismatch",
-            path=None,
-            source_path=source_path,
-            target_path=destination,
-            message=f"Source hash does not match artifact {artifact.key!r}.",
-            resolvable=False,
+    if should_validate and (
+        expected_digest is None
+        or not _verify_scalar_artifact_digest(source_path, artifact, expected_digest)
+    ):
+        return _fail(
+            "hash_mismatch", f"Source hash does not match artifact {artifact.key!r}."
         )
 
     try:
@@ -2452,47 +2178,17 @@ def materialize_artifact(
             raise RuntimeError(
                 f"Failed to materialize artifact {artifact.key!r}: {exc}"
             ) from exc
-        return _make_materialized_artifact(
-            artifact,
-            status="failed",
-            path=None,
-            source_path=source_path,
-            target_path=destination,
-            message=str(exc),
-            resolvable=False,
-        )
+        return _fail("failed", str(exc))
 
     if skipped_existing:
-        return _make_materialized_artifact(
-            artifact,
-            status="already_present",
-            path=destination,
-            source_path=source_path,
-            target_path=destination,
-            resolvable=True,
-        )
+        return _ok("already_present")
     if materialized:
-        return _make_materialized_artifact(
-            artifact,
-            status=_materialized_status_for_source(source_kind),
-            path=destination,
-            source_path=source_path,
-            target_path=destination,
-            resolvable=True,
-        )
+        return _ok(_materialized_status_for_source(source_kind))
 
     msg = f"Failed to materialize artifact {artifact.key!r} to {destination}."
     if on_missing == "raise":
         raise RuntimeError(msg)
-    return _make_materialized_artifact(
-        artifact,
-        status="failed",
-        path=None,
-        source_path=source_path,
-        target_path=destination,
-        message=msg,
-        resolvable=False,
-    )
+    return _fail("failed", msg)
 
 
 def _source_identity(item: PlannedMaterialization) -> tuple[str, str]:
@@ -2506,45 +2202,72 @@ def _resolve_staging_source_path(
     tracker: "Tracker",
     *,
     artifact: Artifact,
-) -> Path | None:
-    canonical_path: Path | None = None
-    try:
-        candidate = Path(tracker.resolve_uri(artifact.container_uri)).resolve()
-        if candidate.exists():
-            canonical_path = candidate
-    except (OSError, ValueError, AttributeError):
-        canonical_path = None
+    validate_content_hash: Literal["never", "if-present", "always"] = "if-present",
+) -> tuple[Path | None, bool]:
+    from consist.core.tracker_recovery import (
+        resolve_verified_local_path_with_diagnostics,
+        verify_candidate_against_artifact,
+    )
 
-    if canonical_path is not None:
-        return canonical_path
+    if validate_content_hash != "never":
+        verified, saw_mismatch = resolve_verified_local_path_with_diagnostics(
+            tracker,
+            artifact,
+            allow_recovery_roots=True,
+            verify_digest=(validate_content_hash == "always"),
+        )
+        if verified is not None:
+            return verified.resolve(), False
+        if isinstance(tracker, _HasDbAttr) and isinstance(tracker.db, DatabaseManager):
+            return None, saw_mismatch
 
-    runtime_abs_path = artifact.abs_path
-    if runtime_abs_path:
-        candidate = Path(runtime_abs_path).resolve()
-        if candidate.exists():
-            return candidate
+    saw_any_mismatch = False
+    for raw_cand in (
+        (tracker.resolve_uri(artifact.uri) if callable(tracker.resolve_uri) else None),
+        artifact.abs_path,
+    ):
+        if not raw_cand:
+            continue
+        try:
+            cand = Path(str(raw_cand)).resolve()
+            if cand.exists():
+                if (
+                    validate_content_hash == "never"
+                    or verify_candidate_against_artifact(cand, artifact)
+                ):
+                    return cand, False
+                saw_any_mismatch = True
+        except (OSError, ValueError, TypeError):
+            pass
 
-    relative_path = tracker.fs.get_remappable_relative_path(artifact.container_uri)
-    if relative_path is None:
-        return None
-
-    if artifact.run_id:
-        owning_run = tracker.get_run(str(artifact.run_id))
-        if owning_run is not None:
-            _, source, _ = find_existing_recovery_source_path(
-                tracker,
-                artifact=artifact,
-                run=owning_run,
-                source_root=None,
-            )
-            if source is not None:
-                return source
-
-    for root in _artifact_recovery_roots(tracker, artifact=artifact):
-        candidate = (root / relative_path).resolve()
-        if candidate.exists():
-            return candidate
-    return None
+    relative_path = tracker.fs.get_remappable_relative_path(artifact.uri)
+    if relative_path is not None:
+        if artifact.run_id:
+            owning_run = tracker.get_run(str(artifact.run_id))
+            if owning_run is not None:
+                _, source, _ = find_existing_recovery_source_path(
+                    tracker,
+                    artifact=artifact,
+                    run=owning_run,
+                    source_root=None,
+                )
+                if source is not None:
+                    if (
+                        validate_content_hash == "never"
+                        or verify_candidate_against_artifact(source, artifact)
+                    ):
+                        return source, False
+                    saw_any_mismatch = True
+        for root in _artifact_recovery_roots(tracker, artifact=artifact):
+            cand = (root / relative_path).resolve()
+            if cand.exists():
+                if (
+                    validate_content_hash == "never"
+                    or verify_candidate_against_artifact(cand, artifact)
+                ):
+                    return cand, False
+                saw_any_mismatch = True
+    return None, saw_any_mismatch
 
 
 def _stage_artifact_path(
@@ -2569,141 +2292,136 @@ def _stage_artifact_path(
 
     destination_path = Path(destination)
 
-    try:
-        _ensure_destination_not_symlink(destination_path)
-        destination_path = destination_path.resolve()
-        validate_allowed_materialization_destination(destination_path, allowed_base)
-
-        source_path = _resolve_staging_source_path(tracker, artifact=artifact)
-        if source_path is None or not source_path.exists():
-            msg = f"[Consist] Cannot stage artifact {artifact.key!r}: source path missing."
-            logging.warning(msg)
-            return _make_staged_output(
-                artifact,
-                status="missing_source",
-                path=destination_path,
-                message=msg,
-                resolvable=False,
-            )
-
-        if validate_content_hash not in {"never", "if-present", "always"}:
-            raise ValueError(
-                "validate_content_hash must be one of 'never', 'if-present', or 'always'."
-            )
-
-        if validate_content_hash == "always" and not artifact.hash:
-            msg = f"[Consist] Cannot validate artifact {artifact.key!r}: artifact.hash is missing."
-            logging.warning(msg)
-            return _make_staged_output(
-                artifact,
-                status="failed",
-                path=destination_path,
-                message=msg,
-                resolvable=False,
-            )
-
-        source_hash: str | None = None
-        if artifact.hash and validate_content_hash != "never":
-            source_hash = _compute_path_checksum(source_path)
-            if source_hash != artifact.hash:
-                msg = (
-                    f"[Consist] Content hash mismatch while staging {artifact.key!r}: "
-                    f"expected {artifact.hash}, found {source_hash}."
-                )
-                logging.warning(msg)
-                return _make_staged_output(
-                    artifact,
-                    status="failed",
-                    path=destination_path,
-                    message=msg,
-                    resolvable=False,
-                )
-
-        if source_path == destination_path:
-            return _make_staged_output(
-                artifact,
-                status="preserved_existing",
-                path=destination_path,
-                resolvable=True,
-            )
-
-        if destination_path.exists():
-            if destination_path.is_symlink():
-                msg = f"Symlink detected in destination path: {destination_path}"
-                logging.warning("[Consist] %s", msg)
-                return _make_staged_output(
-                    artifact,
-                    status="failed",
-                    path=destination_path,
-                    message=msg,
-                    resolvable=False,
-                )
-            if source_path.is_dir() != destination_path.is_dir():
-                msg = f"Destination type mismatch for {destination_path}; refusing to overwrite."
-                logging.warning("[Consist] %s", msg)
-                return _make_staged_output(
-                    artifact,
-                    status="failed",
-                    path=destination_path,
-                    message=msg,
-                    resolvable=False,
-                )
-
-            if not overwrite:
-                if source_hash is None:
-                    source_hash = _compute_path_checksum(source_path)
-                destination_hash = _compute_path_checksum(destination_path)
-                if source_hash == destination_hash:
-                    return _make_staged_output(
-                        artifact,
-                        status="preserved_existing",
-                        path=destination_path,
-                        resolvable=True,
-                    )
-
-                msg = f"Destination already exists and differs for {destination_path}; "
-                msg += "refusing to overwrite."
-                logging.warning("[Consist] %s", msg)
-                return _make_staged_output(
-                    artifact,
-                    status="failed",
-                    path=destination_path,
-                    message=msg,
-                    resolvable=False,
-                )
-
-        materialized, skipped_existing = _materialize_path(
-            source=source_path,
-            destination=destination_path,
-            preserve_existing=False,
-        )
-        if skipped_existing:
-            return _make_staged_output(
-                artifact,
-                status="preserved_existing",
-                path=destination_path,
-                resolvable=True,
-            )
-        if materialized:
-            return _make_staged_output(
-                artifact,
-                status="staged",
-                path=destination_path,
-                resolvable=True,
-            )
-
-        msg = f"Failed to stage artifact {artifact.key!r} to {destination_path}."
-        logging.warning("[Consist] %s", msg)
+    def _fail_stage(
+        status: StagingStatus, msg: str, *, warn_prefix: bool = False
+    ) -> StagedInput:
+        logging.warning("[Consist] %s", msg) if warn_prefix else logging.warning(msg)
         return _make_staged_output(
             artifact,
-            status="failed",
+            status=status,
             path=destination_path,
             message=msg,
             resolvable=False,
         )
+
+    def _ok_stage(status: StagingStatus) -> StagedInput:
+        return _make_staged_output(
+            artifact,
+            status=status,
+            path=destination_path,
+            resolvable=True,
+        )
+
+    try:
+        if validate_content_hash not in {"never", "if-present", "always"}:
+            raise ValueError(
+                "validate_content_hash must be one of 'never', 'if-present', or 'always'."
+            )
+        _ensure_destination_not_symlink(destination_path)
+        destination_path = destination_path.resolve()
+        validate_allowed_materialization_destination(destination_path, allowed_base)
+
+        if validate_content_hash == "always" and artifact.digest is None:
+            source_probe, _ = _resolve_staging_source_path(
+                tracker, artifact=artifact, validate_content_hash="never"
+            )
+            if source_probe is None or not source_probe.exists():
+                return _fail_stage(
+                    "missing_source",
+                    f"[Consist] Cannot stage artifact {artifact.key!r}: source path missing.",
+                )
+            return _fail_stage(
+                "failed",
+                f"[Consist] Cannot validate artifact {artifact.key!r}: artifact.digest is missing.",
+            )
+
+        source_path, saw_mismatch = _resolve_staging_source_path(
+            tracker, artifact=artifact, validate_content_hash=validate_content_hash
+        )
+        if source_path is None or not source_path.exists():
+            if saw_mismatch:
+                return _fail_stage(
+                    "failed",
+                    f"[Consist] Content hash mismatch while staging {artifact.key!r}.",
+                )
+            return _fail_stage(
+                "missing_source",
+                f"[Consist] Cannot stage artifact {artifact.key!r}: source path missing.",
+            )
+
+        if artifact.digest is not None and validate_content_hash != "never":
+            digest_matches = (
+                verify_digest(
+                    source_path,
+                    artifact.digest,
+                    driver=artifact.driver,
+                    member=artifact.member,
+                )
+                if artifact.digest.scheme in DIGEST_DRIVERS
+                else False
+            )
+            if not digest_matches:
+                actual_digest = (
+                    compute_digest(
+                        source_path,
+                        driver="directory" if source_path.is_dir() else artifact.driver,
+                        member=artifact.member,
+                    )
+                    if source_path.exists()
+                    else None
+                )
+                return _fail_stage(
+                    "failed",
+                    f"[Consist] Content hash mismatch while staging {artifact.key!r}: "
+                    f"expected {artifact.digest}, found {actual_digest}.",
+                )
+
+        if source_path == destination_path:
+            return _ok_stage("preserved_existing")
+
+        if destination_path.exists():
+            if destination_path.is_symlink():
+                return _fail_stage(
+                    "failed",
+                    f"Symlink detected in destination path: {destination_path}",
+                    warn_prefix=True,
+                )
+            if source_path.is_dir() != destination_path.is_dir():
+                return _fail_stage(
+                    "failed",
+                    f"Destination type mismatch for {destination_path}; refusing to overwrite.",
+                    warn_prefix=True,
+                )
+            if not overwrite:
+                if _compute_path_checksum(source_path) == _compute_path_checksum(
+                    destination_path
+                ):
+                    return _ok_stage("preserved_existing")
+                return _fail_stage(
+                    "failed",
+                    f"Destination already exists and differs for {destination_path}; refusing to overwrite.",
+                    warn_prefix=True,
+                )
+
+        materialized, skipped_existing = _materialize_path(
+            source=source_path, destination=destination_path, preserve_existing=False
+        )
+        if skipped_existing:
+            return _ok_stage("preserved_existing")
+        if materialized:
+            return _ok_stage("staged")
+        return _fail_stage(
+            "failed",
+            f"Failed to stage artifact {artifact.key!r} to {destination_path}.",
+            warn_prefix=True,
+        )
     except (OSError, shutil.Error, RuntimeError, ValueError) as exc:
-        msg = f"[Consist] Failed to stage artifact {artifact.key!r} to {destination_path}: {exc}"
-        logging.warning(msg)
+        logging.warning(
+            "[Consist] Failed to stage artifact %r to %s: %s",
+            artifact.key,
+            destination_path,
+            exc,
+        )
         return _make_staged_output(
             artifact,
             status="failed",
@@ -2722,28 +2440,7 @@ def stage_artifacts_to_destinations(
     validate_content_hash: Literal["never", "if-present", "always"] = "if-present",
     allow_external_paths: bool | None = None,
 ) -> StagedInputsResult:
-    """Stage explicit artifact/destination pairs into a keyed result.
-
-    Parameters
-    ----------
-    tracker : Tracker
-        Tracker used for source discovery and destination policy.
-    items : sequence of (str, Artifact, Path)
-        Requested key, resolved artifact, and exact staging destination.
-    mode : {"copy", "hardlink", "symlink"}, default "copy"
-        Requested operation; only ``"copy"`` is currently supported.
-    overwrite : bool, default False
-        Whether existing destinations may be replaced.
-    validate_content_hash : {"never", "if-present", "always"}, default "if-present"
-        Content-validation policy for staged bytes.
-    allow_external_paths : bool | None, optional
-        Override for the tracker's external-destination policy.
-
-    Returns
-    -------
-    StagedInputsResult
-        Per-key staging outcomes in item order.
-    """
+    """Stage explicit artifact/destination pairs into a keyed result."""
     if mode != "copy":
         raise ValueError(
             f"Unsupported staging mode {mode!r}; only 'copy' is supported."
@@ -2774,6 +2471,26 @@ def stage_artifacts_to_destinations(
             validate_content_hash=validate_content_hash,
             allow_external_paths=allow_external_paths,
         )
+
+    if logging.getLogger().isEnabledFor(logging.INFO):
+        directory_rollups: dict[str, tuple[int, int]] = {}
+        for key, staged_output in outputs.items():
+            if (
+                staged_output.status not in ("staged", "preserved_existing")
+                or staged_output.path is None
+            ):
+                continue
+            record_directory_rollup(
+                directory_rollups,
+                staged_output.artifact,
+                staged_output.path,
+                fallback_key=key,
+                allow_dir_stat_probe=True,
+            )
+        emit_directory_rollup_summary(
+            "Staged directory inputs", directory_rollups, tracker=tracker
+        )
+
     return _ordered_staged_results(tuple(key_order), outputs)
 
 
@@ -2788,54 +2505,7 @@ def plan_run_output_hydration(
     preserve_existing: bool,
     db_fallback: Literal["never", "if_ingested"],
 ) -> PlannedRunOutputHydration:
-    """Plan historical output hydration for a run without mutating the target.
-
-    The planner resolves which artifacts belong to the requested keys, derives
-    their historical relative paths, chooses a recovery source for each output,
-    and emits preflight results for outcomes that do not need execution.
-
-    Preflight outcomes include:
-
-    - unknown keys (raised immediately)
-    - ambiguous duplicate output keys on the run (raised immediately)
-    - unmapped historical outputs
-    - destination collisions
-    - ``preserve_existing=True`` short-circuits
-
-    Parameters
-    ----------
-    tracker : Tracker
-        Tracker providing DB access, filesystem remapping, and mount policy.
-    run
-        Historical run record whose outputs are being restored.
-    target_root : Path | None
-        Root directory under which historical relative layout is recreated.
-        Mutually exclusive with ``destinations_by_key``.
-    destinations_by_key : Mapping[str, Path] | None
-        Exact destination for each requested output key. Its keys define the
-        complete requested-output selection.
-    source_root : Path | None
-        Optional override root to probe before the original historical source.
-    keys : Sequence[str] | None
-        Specific output keys to restore. ``None`` means all run outputs.
-    preserve_existing : bool
-        Whether existing destinations should be treated as reusable.
-    db_fallback : {"never", "if_ingested"}
-        Whether ingested CSV/Parquet artifacts may be exported from DuckDB when
-        cold bytes are unavailable.
-
-    Returns
-    -------
-    PlannedRunOutputHydration
-        Executable hydration work and preflight per-key outcomes.
-
-    Raises
-    ------
-    ValueError
-        If destination selection is invalid or output keys are ambiguous.
-    KeyError
-        If a requested output key is unknown.
-    """
+    """Plan historical output hydration for a run without mutating the target."""
     if (target_root is None) == (destinations_by_key is None):
         raise ValueError(
             "Provide exactly one of target_root or destinations_by_key for run output hydration."
@@ -3042,11 +2712,10 @@ def plan_run_output_hydration(
                     resolvable=True,
                 )
                 continue
+        saw_hydration_mismatch = False
         if _is_directory_artifact(artifact) and db_fallback == "never":
             _directory_artifact_manifest(artifact)
-            relative_path = tracker.fs.get_remappable_relative_path(
-                artifact.container_uri
-            )
+            relative_path = tracker.fs.get_remappable_relative_path(artifact.uri)
             source_path = (
                 Path(source_root) / relative_path
                 if source_root is not None and relative_path is not None
@@ -3055,15 +2724,42 @@ def plan_run_output_hydration(
             has_candidate_roots = relative_path is not None
         elif _is_file_bundle_artifact(artifact) and db_fallback == "never":
             _shapefile_bundle_metadata(artifact)
-            relative_path = tracker.fs.get_remappable_relative_path(
-                artifact.container_uri
-            )
+            relative_path = tracker.fs.get_remappable_relative_path(artifact.uri)
             source_path = (
                 Path(source_root) / relative_path
                 if source_root is not None and relative_path is not None
                 else None
             )
             has_candidate_roots = relative_path is not None
+        elif (
+            source_root is None
+            and isinstance(tracker, _HasDbAttr)
+            and isinstance(tracker.db, DatabaseManager)
+        ):
+            from consist.core.tracker_recovery import (
+                resolve_verified_local_path_detailed,
+            )
+
+            is_bundle_artifact = _is_file_bundle_artifact(artifact)
+            relative_path = _derive_remappable_relative_path(tracker, artifact=artifact)
+            if relative_path is None:
+                source_path = None
+                has_candidate_roots = False
+            else:
+                resolved_loc, saw_hydration_mismatch, _ = (
+                    resolve_verified_local_path_detailed(
+                        tracker,
+                        artifact,
+                        allow_recovery_roots=True,
+                        ignore_runtime_abs_path=True,
+                    )
+                )
+                source_path = (
+                    (resolved_loc if resolved_loc.is_dir() else resolved_loc.parent)
+                    if (is_bundle_artifact and resolved_loc is not None)
+                    else resolved_loc
+                )
+                has_candidate_roots = True
         else:
             owning_run = _get_artifact_owning_run(
                 tracker, selected_run=run, artifact=artifact
@@ -3071,8 +2767,8 @@ def plan_run_output_hydration(
             is_dir_artifact = _is_directory_artifact(artifact)
             is_bundle_artifact = _is_file_bundle_artifact(artifact)
             has_manifest_validator = is_dir_artifact or is_bundle_artifact
-            has_scalar_hash_validator = not has_manifest_validator and bool(
-                artifact.hash
+            has_scalar_hash_validator = not has_manifest_validator and (
+                artifact.digest is not None
             )
             relative_path, source_path, has_candidate_roots = (
                 find_existing_recovery_source_path(
@@ -3106,9 +2802,7 @@ def plan_run_output_hydration(
                         else None
                     ),
                     fallback_validator=(
-                        (lambda _: True)
-                        if (has_manifest_validator or has_scalar_hash_validator)
-                        else None
+                        (lambda _: True) if has_manifest_validator else None
                     ),
                     preserve_raw_paths=has_manifest_validator,
                 )
@@ -3156,7 +2850,9 @@ def plan_run_output_hydration(
                     resolvable=False,
                 )
                 continue
-            artifact_meta = artifact.meta if isinstance(artifact.meta, dict) else {}
+            artifact_meta = (
+                artifact.meta if isinstance(artifact.meta, MappingABC) else {}
+            )
             if db_fallback == "if_ingested" and artifact_meta.get("is_ingested", False):
                 driver = str(artifact.driver or "").lower()
                 if driver not in {"csv", "parquet"}:
@@ -3176,8 +2872,13 @@ def plan_run_output_hydration(
             else:
                 outputs[artifact.key] = _make_hydrated_output(
                     artifact,
-                    status="missing_source",
+                    status="failed" if saw_hydration_mismatch else "missing_source",
                     path=destination,
+                    message=(
+                        f"Source hash mismatch for artifact {artifact.key!r}."
+                        if saw_hydration_mismatch
+                        else None
+                    ),
                     resolvable=False,
                 )
                 continue
@@ -3253,7 +2954,7 @@ def plan_run_output_hydration(
         ):
             if item.destination.is_symlink():
                 for key in item.keys:
-                    artifact = cast(Mapping[str, Artifact], item.artifacts_by_key)[key]
+                    artifact = item.artifact_for_key(key)
                     outputs[key] = _make_hydrated_output(
                         artifact,
                         status="failed",
@@ -3263,7 +2964,7 @@ def plan_run_output_hydration(
                     )
             else:
                 for key in item.keys:
-                    artifact = cast(Mapping[str, Artifact], item.artifacts_by_key)[key]
+                    artifact = item.artifact_for_key(key)
                     outputs[key] = _make_hydrated_output(
                         artifact,
                         status="preserved_existing",
@@ -3289,30 +2990,7 @@ def build_run_output_materialize_plan(
     preserve_existing: bool,
     db_fallback: Literal["never", "if_ingested"],
 ) -> tuple[list[PlannedMaterialization], MaterializationResult]:
-    """Build the legacy materialization plan and aggregate preflight result.
-
-    Parameters
-    ----------
-    tracker : Tracker
-        Tracker used for output discovery and source planning.
-    run : Run
-        Historical run whose outputs should be materialized.
-    target_root : Path
-        Root below which canonical output paths are recreated.
-    source_root : Path | None
-        Optional source root tried before recorded sources.
-    keys : sequence of str | None
-        Requested output keys; ``None`` selects all outputs.
-    preserve_existing : bool
-        Whether existing targets are retained during planning.
-    db_fallback : {"never", "if_ingested"}
-        Whether eligible ingested data may be exported from the DB.
-
-    Returns
-    -------
-    tuple[list[PlannedMaterialization], MaterializationResult]
-        Executable plan and compatibility aggregate for preflight results.
-    """
+    """Build the legacy materialization plan and aggregate preflight result."""
     planned = plan_run_output_hydration(
         tracker,
         run,
@@ -3334,61 +3012,64 @@ def execute_planned_output_hydration(
     on_missing: Literal["warn", "raise"] = "warn",
     preserve_existing: bool = True,
 ) -> HydratedRunOutputsResult:
-    """Execute a planned historical output hydration.
-
-    Parameters
-    ----------
-    plan : Sequence[PlannedMaterialization]
-        Planned filesystem copies or DuckDB exports to execute.
-    tracker : Tracker
-        Tracker used for DB exports and path policy.
-    allowed_base : Path | Sequence[Path] | None
-        Allowed destination roots. ``None`` disables destination-root checks.
-    on_missing : {"warn", "raise"}, default "warn"
-        Error policy for missing source bytes and execution failures.
-    preserve_existing : bool, default True
-        Whether existing destinations should be kept in place.
-
-    Returns
-    -------
-    HydratedRunOutputsResult
-        Per-key execution outcomes for the plan. Preflight-only results are not
-        included; callers merge them separately.
-    """
+    """Execute a planned historical output hydration."""
     outputs: dict[str, HydratedRunOutput] = {}
+
+    def _record_item(
+        item: PlannedMaterialization,
+        status: HydrationStatus,
+        path: Path,
+        *,
+        entry_path: Path | None = None,
+        message: str | None = None,
+        resolvable: bool = True,
+    ) -> None:
+        for k in item.keys:
+            outputs[k] = _make_hydrated_output(
+                item.artifact_for_key(k),
+                status=status,
+                path=path,
+                entry_path=entry_path,
+                message=message,
+                resolvable=resolvable,
+            )
 
     for item in plan:
         try:
             _validate_allowed_base(item.destination, allowed_base)
 
             if _is_directory_artifact(item.artifact):
-                if item.source_path is None or not item.source_path.exists():
+                if item.source_path is None:
                     raise FileNotFoundError(f"source path missing ({item.source_path})")
-                manifest = _directory_artifact_manifest(item.artifact)
+                _reject_symlink_from_source_root(item.source_path, item.relative_path)
+                if not item.source_path.exists():
+                    raise FileNotFoundError(f"source path missing ({item.source_path})")
                 materialized = materialize_directory_tree(
                     item.source_path,
                     item.destination,
-                    manifest,
+                    _directory_artifact_manifest(item.artifact),
                     preserve_existing=preserve_existing,
                     allow_extra_files=directory_allows_extra_files(item.artifact),
                 )
-                status: HydrationStatus = (
+                _record_item(
+                    item,
                     "materialized_directory_from_filesystem"
                     if materialized
-                    else "preserved_existing"
+                    else "preserved_existing",
+                    item.destination,
                 )
-                for key in item.keys:
-                    artifact = cast(Mapping[str, Artifact], item.artifacts_by_key)[key]
-                    outputs[key] = _make_hydrated_output(
-                        artifact,
-                        status=status,
-                        path=item.destination,
-                        resolvable=True,
-                    )
                 continue
 
             if _is_file_bundle_artifact(item.artifact):
-                if item.source_path is None or not item.source_path.exists():
+                if item.source_path is None:
+                    raise FileNotFoundError(f"source path missing ({item.source_path})")
+                bundle_rel = (
+                    item.relative_path
+                    if item.source_path.name == item.relative_path.name
+                    else item.relative_path.parent
+                )
+                _reject_symlink_from_source_root(item.source_path, bundle_rel)
+                if not item.source_path.exists():
                     raise FileNotFoundError(f"source path missing ({item.source_path})")
                 entry, manifest = _shapefile_bundle_metadata(item.artifact)
                 materialized = materialize_shapefile_bundle(
@@ -3398,20 +3079,14 @@ def execute_planned_output_hydration(
                     manifest,
                     preserve_existing=preserve_existing,
                 )
-                status: HydrationStatus = (
+                _record_item(
+                    item,
                     "materialized_file_bundle_from_filesystem"
                     if materialized
-                    else "preserved_existing"
+                    else "preserved_existing",
+                    item.destination,
+                    entry_path=item.destination / entry,
                 )
-                for key in item.keys:
-                    artifact = cast(Mapping[str, Artifact], item.artifacts_by_key)[key]
-                    outputs[key] = _make_hydrated_output(
-                        artifact,
-                        status=status,
-                        path=item.destination,
-                        entry_path=item.destination / entry,
-                        resolvable=True,
-                    )
                 continue
 
             if item.source_kind == "filesystem":
@@ -3423,28 +3098,9 @@ def execute_planned_output_hydration(
                     preserve_existing=preserve_existing,
                 )
                 if skipped_existing:
-                    for key in item.keys:
-                        artifact = cast(Mapping[str, Artifact], item.artifacts_by_key)[
-                            key
-                        ]
-                        outputs[key] = _make_hydrated_output(
-                            artifact,
-                            status="preserved_existing",
-                            path=item.destination,
-                            resolvable=True,
-                        )
-                    continue
-                if materialized:
-                    for key in item.keys:
-                        artifact = cast(Mapping[str, Artifact], item.artifacts_by_key)[
-                            key
-                        ]
-                        outputs[key] = _make_hydrated_output(
-                            artifact,
-                            status="materialized_from_filesystem",
-                            path=item.destination,
-                            resolvable=True,
-                        )
+                    _record_item(item, "preserved_existing", item.destination)
+                elif materialized:
+                    _record_item(item, "materialized_from_filesystem", item.destination)
                 continue
 
             destination_str = materialize_ingested_artifact_from_db(
@@ -3453,14 +3109,7 @@ def execute_planned_output_hydration(
                 destination=item.destination,
                 overwrite=not preserve_existing,
             )
-            for key in item.keys:
-                artifact = cast(Mapping[str, Artifact], item.artifacts_by_key)[key]
-                outputs[key] = _make_hydrated_output(
-                    artifact,
-                    status="materialized_from_db",
-                    path=Path(destination_str),
-                    resolvable=True,
-                )
+            _record_item(item, "materialized_from_db", Path(destination_str))
 
         except FileNotFoundError as exc:
             if on_missing == "raise":
@@ -3470,15 +3119,13 @@ def execute_planned_output_hydration(
                 ",".join(repr(key) for key in item.keys),
                 exc,
             )
-            for key in item.keys:
-                artifact = cast(Mapping[str, Artifact], item.artifacts_by_key)[key]
-                outputs[key] = _make_hydrated_output(
-                    artifact,
-                    status="missing_source",
-                    path=item.destination,
-                    message=str(exc),
-                    resolvable=False,
-                )
+            _record_item(
+                item,
+                "missing_source",
+                item.destination,
+                message=str(exc),
+                resolvable=False,
+            )
         except (OSError, shutil.Error, RuntimeError, ValueError) as exc:
             if on_missing == "raise":
                 raise RuntimeError(
@@ -3490,15 +3137,30 @@ def execute_planned_output_hydration(
                 item.destination,
                 exc,
             )
-            for key in item.keys:
-                artifact = cast(Mapping[str, Artifact], item.artifacts_by_key)[key]
-                outputs[key] = _make_hydrated_output(
-                    artifact,
-                    status="failed",
-                    path=item.destination,
-                    message=str(exc),
-                    resolvable=False,
+            _record_item(
+                item, "failed", item.destination, message=str(exc), resolvable=False
+            )
+
+    if logging.getLogger().isEnabledFor(logging.INFO):
+        directory_rollups: dict[str, tuple[int, int]] = {}
+        for item in plan:
+            first_key = item.keys[0] if item.keys else None
+            out = outputs.get(first_key) if first_key else None
+            if (
+                out is not None
+                and out.resolvable
+                and out.status not in ("failed", "missing_source")
+            ):
+                record_directory_rollup(
+                    directory_rollups,
+                    item.artifact,
+                    item.destination,
+                    fallback_key=first_key,
+                    allow_dir_stat_probe=False,
                 )
+        emit_directory_rollup_summary(
+            "Hydrated directory outputs", directory_rollups, tracker=tracker
+        )
 
     key_order = tuple(key for item in plan for key in item.keys)
     return _ordered_hydrated_results(key_order, outputs)
@@ -3512,26 +3174,7 @@ def materialize_planned_outputs(
     on_missing: Literal["warn", "raise"] = "warn",
     preserve_existing: bool = True,
 ) -> MaterializationResult:
-    """Execute a plan and fold outcomes into ``MaterializationResult``.
-
-    Parameters
-    ----------
-    plan : sequence of PlannedMaterialization
-        Filesystem copies or DB exports to execute.
-    tracker : Tracker
-        Tracker used for DB exports and path policy.
-    allowed_base : Path, sequence of Path, or None
-        Allowed destination roots; ``None`` disables that check.
-    on_missing : {"warn", "raise"}, default "warn"
-        Policy for unavailable source bytes and execution errors.
-    preserve_existing : bool, default True
-        Whether existing destinations should be retained.
-
-    Returns
-    -------
-    MaterializationResult
-        Compatibility aggregate grouped by materialization status.
-    """
+    """Execute a plan and fold outcomes into ``MaterializationResult``."""
     return fold_hydrated_run_outputs_result(
         execute_planned_output_hydration(
             plan,
@@ -3541,6 +3184,22 @@ def materialize_planned_outputs(
             preserve_existing=preserve_existing,
         )
     )
+
+
+def _raise_if_preflight_failed(
+    preflight_results: Mapping[str, HydratedRunOutput],
+) -> None:
+    for key, item in preflight_results.items():
+        if item.status == "missing_source":
+            raise FileNotFoundError(
+                f"Cannot materialize run output {key!r}: "
+                f"{item.message or f'source path missing ({item.path})'}"
+            )
+        if item.status == "failed":
+            raise RuntimeError(
+                f"Failed to materialize run outputs for keys ({key!r},): "
+                f"{item.message or 'materialization failed'}"
+            )
 
 
 def hydrate_run_outputs(
@@ -3555,35 +3214,7 @@ def hydrate_run_outputs(
     on_missing: Literal["warn", "raise"],
     db_fallback: Literal["never", "if_ingested"],
 ) -> HydratedRunOutputsResult:
-    """Hydrate selected historical outputs into a target workspace root.
-
-    Parameters
-    ----------
-    tracker : Tracker
-        Tracker used for planning, source discovery, and execution.
-    run : Run
-        Historical run whose outputs are being hydrated.
-    target_root : Path
-        Root below which canonical output paths are recreated.
-    source_root : Path | None
-        Optional source root tried before recorded recovery sources.
-    keys : sequence of str | None
-        Requested output keys; ``None`` selects all outputs.
-    allowed_base : Path, sequence of Path, or None
-        Allowed destination roots; ``None`` disables that check.
-    preserve_existing : bool
-        Whether existing destinations should be retained.
-    on_missing : {"warn", "raise"}
-        Policy for unavailable bytes and execution failures.
-    db_fallback : {"never", "if_ingested"}
-        Whether eligible ingested outputs may be rebuilt from the DB.
-
-    Returns
-    -------
-    HydratedRunOutputsResult
-        Per-key results with detached artifacts whose ``abs_path`` points to a
-        resolvable hydrated destination.
-    """
+    """Hydrate selected historical outputs into a target workspace root."""
     planned = plan_run_output_hydration(
         tracker,
         run,
@@ -3594,6 +3225,8 @@ def hydrate_run_outputs(
         preserve_existing=preserve_existing,
         db_fallback=db_fallback,
     )
+    if on_missing == "raise":
+        _raise_if_preflight_failed(planned.preflight_results)
     executed = execute_planned_output_hydration(
         planned.plan,
         tracker=tracker,
@@ -3621,32 +3254,7 @@ def hydrate_run_outputs_to_destinations(
     on_missing: Literal["warn", "raise"],
     db_fallback: Literal["never", "if_ingested"],
 ) -> HydratedRunOutputsResult:
-    """Hydrate selected outputs to exact caller-provided destinations.
-
-    Parameters
-    ----------
-    tracker : Tracker
-        Tracker used for planning, source discovery, and execution.
-    run : Run
-        Historical run whose outputs are being hydrated.
-    destinations_by_key : mapping of str to Path
-        Exact destination for each requested output key.
-    source_root : Path | None
-        Optional source root tried before recorded recovery sources.
-    allowed_base : Path, sequence of Path, or None
-        Allowed destination roots; ``None`` disables that check.
-    preserve_existing : bool
-        Whether existing destinations should be retained.
-    on_missing : {"warn", "raise"}
-        Policy for unavailable bytes and execution failures.
-    db_fallback : {"never", "if_ingested"}
-        Whether eligible ingested outputs may be rebuilt from the DB.
-
-    Returns
-    -------
-    HydratedRunOutputsResult
-        Per-key results using the supplied exact destinations.
-    """
+    """Hydrate selected outputs to exact caller-provided destinations."""
     normalized_destinations = {
         key: Path(destination).expanduser().absolute()
         for key, destination in destinations_by_key.items()
@@ -3664,6 +3272,8 @@ def hydrate_run_outputs_to_destinations(
         preserve_existing=preserve_existing,
         db_fallback=db_fallback,
     )
+    if on_missing == "raise":
+        _raise_if_preflight_failed(planned.preflight_results)
     executed = execute_planned_output_hydration(
         planned.plan,
         tracker=tracker,
@@ -3686,32 +3296,12 @@ def materialize_artifacts(
     *,
     on_missing: Literal["warn", "raise"] = "warn",
 ) -> dict[str, str]:
-    """
-    Synchronize cached artifact bytes to specific filesystem destinations.
+    """Synchronize cached artifact bytes to specific filesystem destinations."""
+    from consist.core.tracker_recovery import (
+        resolve_verified_local_path,
+        stage_verified_source,
+    )
 
-    This function performs physical materialization by copying the resolved source
-    data of cached artifacts to the requested locations. It ensures atomic
-    file writes and safe directory recursion. If the destination already contains
-    matching data, the operation is bypassed to prevent redundant I/O.
-
-    Parameters
-    ----------
-    tracker : Tracker
-        The active Tracker instance used to resolve virtualized artifact URIs
-        to physical host filesystem paths.
-    items : Sequence[tuple[Artifact, Path]]
-        A collection of (Artifact, Path) pairs defining the source artifacts
-        and their respective target destinations.
-    on_missing : {"warn", "raise"}, default "warn"
-        The error handling policy for cases where the resolved source path
-        is absent from the filesystem.
-
-    Returns
-    -------
-    dict[str, str]
-        A mapping of artifact keys to their successfully materialized
-        absolute filesystem paths.
-    """
     materialized: dict[str, str] = {}
 
     for artifact, destination in items:
@@ -3719,53 +3309,60 @@ def materialize_artifacts(
         destination_path = Path(destination).resolve()
         destination_path.parent.mkdir(parents=True, exist_ok=True)
 
-        try:
-            source_path = Path(tracker.resolve_uri(artifact.container_uri)).resolve()
-        except (OSError, ValueError) as e:
-            msg = f"[Consist] Failed to resolve URI for artifact {artifact.key!r}: {e}"
-            if on_missing == "raise":
-                raise RuntimeError(msg) from e
-            logging.warning(msg)
-            continue
-
-        if not source_path.exists():
+        source_path = resolve_verified_local_path(
+            tracker, artifact, allow_recovery_roots=True
+        )
+        if source_path is None or not source_path.exists():
+            try:
+                probe = Path(tracker.resolve_uri(artifact.uri)).resolve()
+            except (OSError, ValueError) as e:
+                msg = f"[Consist] Failed to resolve URI for artifact {artifact.key!r}: {e}"
+                if on_missing == "raise":
+                    raise RuntimeError(msg) from e
+                logging.warning(msg)
+                continue
             msg = (
                 f"[Consist] Cannot materialize cached output {artifact.key!r}: "
-                f"resolved source path missing ({source_path})."
+                f"resolved source path missing ({probe})."
             )
             if on_missing == "raise":
                 raise FileNotFoundError(msg)
             logging.warning(msg)
             continue
 
+        source_resolved = source_path.resolve()
         try:
             if destination_path.exists():
                 if destination_path.is_symlink():
                     raise ValueError(
                         f"Symlink detected in destination path: {destination_path}"
                     )
-                if source_path.is_dir() != destination_path.is_dir():
+                if source_resolved.is_dir() != destination_path.is_dir():
                     raise ValueError(
                         f"Destination type mismatch for {destination_path}; "
                         "refusing to overwrite."
                     )
                 materialized[artifact.key] = str(destination_path)
                 continue
-            if source_path == destination_path:
+            if source_resolved == destination_path:
                 materialized[artifact.key] = str(destination_path)
                 continue
-            if source_path.is_dir():
-                copied = _copy_dir_safe(source_path, destination_path)
-            else:
-                copied = _copy_file_atomic(source_path, destination_path)
-            if copied:
-                materialized[artifact.key] = str(destination_path)
-            elif destination_path.exists():
+            try:
+                stage_verified_source(
+                    artifact,
+                    source_resolved,
+                    destination_path,
+                    mutable=False,
+                    overwrite=False,
+                )
+            except FileExistsError:
+                pass
+            if destination_path.exists():
                 materialized[artifact.key] = str(destination_path)
         except (OSError, shutil.Error, ValueError) as e:
             msg = (
                 f"[Consist] Failed to materialize cached output {artifact.key!r} "
-                f"from {source_path} -> {destination_path}: {e}"
+                f"from {source_resolved} -> {destination_path}: {e}"
             )
             if on_missing == "raise":
                 raise RuntimeError(msg) from e
@@ -3781,34 +3378,7 @@ def materialize_artifacts_from_sources(
     on_missing: Literal["warn", "raise"] = "warn",
     overwrite_existing: bool = False,
 ) -> dict[str, str]:
-    """
-    Rehydrate artifacts from explicit source paths to specified destinations.
-
-    This specialized materialization utility is typically employed during
-    cross-run hydration (e.g., 'inputs-missing' mode) where the original
-    on-disk source is located in a historical run directory. It enforces
-    directory containment security via the `allowed_base` parameter.
-
-    Parameters
-    ----------
-    items : Sequence[tuple[Artifact, Path, Path]]
-        A collection of (Artifact, SourcePath, DestinationPath) triples
-        defining the explicit rehydration mapping.
-    allowed_base : Path | None
-        A security boundary for the materialization. If provided, all
-        destination paths must reside within this directory tree.
-    on_missing : {"warn", "raise"}, default "warn"
-        The error handling policy for cases where the explicit source path
-        is absent from the filesystem.
-    overwrite_existing : bool, default False
-        If True, replace existing destinations after safety checks pass.
-
-    Returns
-    -------
-    dict[str, str]
-        A mapping of artifact keys to their successfully materialized
-        absolute filesystem paths.
-    """
+    """Rehydrate artifacts from explicit source paths to specified destinations."""
     materialized: dict[str, str] = {}
     for artifact, source, destination in items:
         _ensure_destination_not_symlink(Path(destination))
@@ -3841,21 +3411,12 @@ def materialize_artifacts_from_sources(
             if source_path == destination_path:
                 materialized[artifact.key] = str(destination_path)
                 continue
-            if destination_path.exists():
-                if not overwrite_existing:
-                    materialized[artifact.key] = str(destination_path)
-                    continue
-                if destination_path.is_dir():
-                    shutil.rmtree(destination_path)
-                else:
-                    destination_path.unlink()
-            if source_path.is_dir():
-                copied = _copy_dir_safe(source_path, destination_path)
-            else:
-                copied = _copy_file_atomic(source_path, destination_path)
-            if copied:
-                materialized[artifact.key] = str(destination_path)
-            elif destination_path.exists():
+            materialized_flag, skipped = _materialize_path(
+                source=source_path,
+                destination=destination_path,
+                preserve_existing=not overwrite_existing,
+            )
+            if materialized_flag or skipped or destination_path.exists():
                 materialized[artifact.key] = str(destination_path)
         except (OSError, shutil.Error, ValueError) as e:
             msg = (
@@ -3874,26 +3435,7 @@ def build_materialize_items_for_keys(
     *,
     destinations_by_key: dict[str, Path],
 ) -> list[tuple[Artifact, Path]]:
-    """
-    Construct materialization mappings by correlating artifacts with target keys.
-
-    This helper facilitates the preparation of materialization payloads by
-    matching a collection of candidate artifacts against a set of desired
-    destination keys.
-
-    Parameters
-    ----------
-    outputs : Iterable[Artifact]
-        The collection of candidate artifacts available for materialization.
-    destinations_by_key : dict[str, Path]
-        A mapping of artifact keys to their intended target filesystem paths.
-
-    Returns
-    -------
-    list[tuple[Artifact, Path]]
-        A list of (Artifact, Path) pairs ready for the `materialize_artifacts`
-        utility.
-    """
+    """Construct materialization mappings by correlating artifacts with target keys."""
     outputs_by_key = {a.key: a for a in outputs}
     items: list[tuple[Artifact, Path]] = []
     for key, dest in destinations_by_key.items():
@@ -3913,32 +3455,7 @@ def stage_artifact(
     validate_content_hash: Literal["never", "if-present", "always"] = "if-present",
     allow_external_paths: bool | None = None,
 ) -> StagedInput:
-    """Stage one artifact to a requested filesystem destination.
-
-    Parameters
-    ----------
-    tracker : Tracker
-        Tracker used to resolve canonical paths, allowed roots, and recovery
-        fallbacks.
-    artifact : Artifact
-        Canonical input artifact to stage.
-    destination : Path
-        Explicit local destination where the staged copy should exist.
-    mode : {"copy", "hardlink", "symlink"}, default "copy"
-        Staging mode. In v1, only ``"copy"`` is supported.
-    overwrite : bool, default False
-        Whether to replace an existing non-identical destination.
-    validate_content_hash : {"never", "if-present", "always"}, default "if-present"
-        Whether to validate staged file bytes against ``artifact.hash`` when a
-        file hash is available.
-    allow_external_paths : bool | None, default None
-        Override for the tracker's external-path policy.
-
-    Returns
-    -------
-    StagedInput
-        Detached artifact view plus the per-key staging outcome.
-    """
+    """Stage one artifact to a requested filesystem destination."""
     return stage_artifacts_to_destinations(
         tracker,
         [(artifact.key, artifact, Path(destination))],
@@ -3959,33 +3476,7 @@ def stage_inputs(
     validate_content_hash: Literal["never", "if-present", "always"] = "if-present",
     allow_external_paths: bool | None = None,
 ) -> StagedInputsResult:
-    """Stage multiple keyed artifacts to their requested destinations.
-
-    Parameters
-    ----------
-    tracker : Tracker
-        Tracker used to resolve canonical paths, allowed roots, and recovery
-        fallbacks.
-    inputs_by_key : Mapping[str, Artifact]
-        Resolved input artifact mapping, typically the same key space later
-        used for ``inputs={...}`` on ``run(...)`` or ``ScenarioContext.run(...)``.
-    destinations_by_key : Mapping[str, Path]
-        Explicit staging destinations keyed by input name.
-    mode : {"copy", "hardlink", "symlink"}, default "copy"
-        Staging mode. In v1, only ``"copy"`` is supported.
-    overwrite : bool, default False
-        Whether to replace an existing non-identical destination.
-    validate_content_hash : {"never", "if-present", "always"}, default "if-present"
-        Whether to validate staged file bytes against ``artifact.hash`` when a
-        file hash is available.
-    allow_external_paths : bool | None, default None
-        Override for the tracker's external-path policy.
-
-    Returns
-    -------
-    StagedInputsResult
-        Key-indexed staging outcomes in the caller's requested key order.
-    """
+    """Stage multiple keyed artifacts to their requested destinations."""
     if mode != "copy":
         raise ValueError(
             f"Unsupported staging mode {mode!r}; only 'copy' is supported."
@@ -4008,23 +3499,19 @@ def stage_inputs(
     )
 
 
-def _load_global_table_metadata(table_name: str, hot_data_engine: Any) -> Table:
-    """Construct a SQLAlchemy Table for ``global_tables.<table_name>`` without dialect reflection."""
-    metadata = MetaData()
+def _load_global_table_columns(table_name: str, hot_db: Any) -> list[str]:
+    """Inspect ``global_tables.<table_name>`` column names from DuckDB."""
     try:
-        with hot_data_engine.connect() as conn:
-            rows = conn.execute(
-                text(
-                    "SELECT column_name "
-                    "FROM information_schema.columns "
-                    "WHERE table_catalog = current_database() "
-                    "AND table_schema = 'global_tables' "
-                    "AND table_name = :table_name "
-                    "ORDER BY ordinal_position"
-                ),
-                {"table_name": table_name},
-            ).fetchall()
-    except SQLAlchemyError as e:
+        rows = hot_db.fetchall(
+            "SELECT column_name "
+            "FROM information_schema.columns "
+            "WHERE table_catalog = current_database() "
+            "AND table_schema = 'global_tables' "
+            "AND table_name = ? "
+            "ORDER BY ordinal_position",
+            [table_name],
+        )
+    except Exception as e:
         raise RuntimeError(
             f"Failed to reflect table 'global_tables.{table_name}': {e}"
         ) from e
@@ -4035,19 +3522,7 @@ def _load_global_table_metadata(table_name: str, hot_data_engine: Any) -> Table:
             "table does not exist or has no columns."
         )
 
-    column_names = list(dict.fromkeys(str(row[0]) for row in rows))
-    columns = [Column(name) for name in column_names]
-    try:
-        return Table(
-            table_name,
-            metadata,
-            *columns,
-            schema="global_tables",
-        )
-    except SQLAlchemyError as e:
-        raise RuntimeError(
-            f"Failed to reflect table 'global_tables.{table_name}': {e}"
-        ) from e
+    return list(dict.fromkeys(str(row[0]) for row in rows))
 
 
 def materialize_ingested_artifact_from_db(
@@ -4057,40 +3532,9 @@ def materialize_ingested_artifact_from_db(
     destination: Path,
     overwrite: bool = False,
 ) -> str:
-    """
-    Reconstruct an ingested artifact from the analytical database.
-
-    This recovery mechanism is utilized when a cached artifact is required but
-    its physical materialization has been purged from the filesystem. If the
-    artifact was previously ingested, its data is exported from DuckDB to
-    the specified destination.
-
-    Parameters
-    ----------
-    artifact : Artifact
-        The metadata record of the artifact to be reconstructed.
-    tracker : Tracker
-        The active Tracker instance containing the analytical engine and
-        database connection.
-    destination : Path
-        The target filesystem path where the reconstructed data will be
-        materialized.
-
-    Returns
-    -------
-    str
-        The absolute filesystem path of the reconstructed artifact.
-
-    Raises
-    ------
-    RuntimeError
-        If the database engine is unavailable or the source table cannot be resolved.
-    ValueError
-        If the artifact is not marked as ingested or uses an unsupported
-        materialization driver.
-    """
-    hot_data_engine = get_hot_data_engine(tracker)
-    if not tracker or hot_data_engine is None:
+    """Reconstruct an ingested artifact from the analytical database."""
+    hot_db = get_hot_data_db(tracker) if tracker else None
+    if not tracker or hot_db is None:
         raise RuntimeError(
             "Cannot materialize ingested artifact: tracker has no DB engine."
         )
@@ -4110,16 +3554,35 @@ def materialize_ingested_artifact_from_db(
     table_name = artifact.meta.get("dlt_table_name") or artifact.key
     if not isinstance(table_name, str) or not table_name:
         raise ValueError("Artifact table name is missing; cannot reconstruct from DB.")
+    _validate_identifier(table_name, label="table name")
 
-    table = _load_global_table_metadata(table_name, hot_data_engine)
+    column_names = _load_global_table_columns(table_name, hot_db)
+    quoted_cols = ", ".join(_quote_ident(col) for col in column_names)
+    has_artifact_id = "consist_artifact_id" in column_names
+    has_run_id = "consist_run_id" in column_names
 
-    if "consist_artifact_id" not in table.c:
+    if has_artifact_id and has_run_id and artifact.run_id is not None:
+        where_sql = (
+            'WHERE (CAST("consist_artifact_id" AS VARCHAR) = ? '
+            'OR ("consist_artifact_id" IS NULL AND CAST("consist_run_id" AS VARCHAR) = ?))'
+        )
+        query_params: list[Any] = [str(artifact.id), str(artifact.run_id)]
+    elif has_artifact_id:
+        where_sql = 'WHERE CAST("consist_artifact_id" AS VARCHAR) = ?'
+        query_params = [str(artifact.id)]
+    elif has_run_id and artifact.run_id is not None:
+        where_sql = 'WHERE CAST("consist_run_id" AS VARCHAR) = ?'
+        query_params = [str(artifact.run_id)]
+    else:
         raise RuntimeError(
             f"Table 'global_tables.{table_name}' is missing consist_artifact_id."
         )
 
-    stmt = select(table).where(table.c.consist_artifact_id == str(artifact.id))
-    df = pd.read_sql(stmt, hot_data_engine)
+    sql = (
+        f'SELECT {quoted_cols} FROM "global_tables".{_quote_ident(table_name)} '
+        f"{where_sql}"
+    )
+    df = hot_db.fetchdf(sql, query_params)
     if df.empty:
         raise FileNotFoundError(
             f"No ingested rows found for artifact {artifact.key!r} ({artifact.id})."
@@ -4149,9 +3612,13 @@ def materialize_ingested_artifact_from_db(
             return str(destination_path)
 
         if overwrite:
-            _replace_path(tmp_path_obj, destination_path)
+            if destination_path.exists() and destination_path.is_dir():
+                shutil.rmtree(destination_path)
+            os.replace(tmp_path_obj, destination_path)
         else:
-            if not _link_file_atomic(tmp_path_obj, destination_path):
+            try:
+                os.link(tmp_path_obj, destination_path)
+            except FileExistsError:
                 return str(destination_path)
     finally:
         with suppress(FileNotFoundError):

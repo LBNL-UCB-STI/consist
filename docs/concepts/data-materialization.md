@@ -163,7 +163,7 @@ tracker = Tracker(
     schemas=[Person],
 )
 
-VPerson = tracker.views.Person
+tracker.create_view("v_person", "people")
 ```
 
 Once registered, you can query across all runs (both ingested and cold data):
@@ -180,8 +180,8 @@ summary = (
 rows = summary.to_pandas()
 ```
 
-Use `consist.run_query(...)` when you need explicit SQLAlchemy / SQLModel
-queries or database-native SQL over tracker tables and views. For lazy analysis
+Use `consist.query_df(...)`, `consist.query_rows(...)`, or `consist.run_query(...)`
+when you need explicit DuckDB SQL over tracker tables and views. For lazy analysis
 over typed tracker views, `consist.ibis_view(...)` is the recommended surface.
 For schema-driven cross-artifact analysis, create a grouped view and query it
 with `consist.ibis_grouped_view(...)`.
@@ -219,10 +219,10 @@ Use the narrowest surface that matches the task:
   optional `consist[ibis]` extra.
 - `consist.ibis_grouped_view(...)` when you want the same lazy Ibis surface but
   need to aggregate or compare many artifacts through a grouped DuckDB view.
-- `consist.run_query(...)` when you need explicit SQLAlchemy / SQLModel queries
-  or hand-written SQL against Consist tables or views.
-- Call Ibis after the current SQLAlchemy session or run has released its DuckDB
-  connection; the adapter opens a separate DuckDB handle for analysis.
+- `consist.query_df(...)`, `consist.query_rows(...)`, or `consist.run_query(...)`
+  when you need hand-written DuckDB SQL against Consist tables or views.
+- Call Ibis after the current run has released its DuckDB connection; the adapter
+  opens a separate DuckDB handle for analysis.
 
 Example:
 

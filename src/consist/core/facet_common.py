@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional
 
@@ -63,7 +64,7 @@ def canonical_facet_json_and_id(
 
 def flatten_facet_values(
     *,
-    facet_dict: Dict[str, Any],
+    facet_dict: Mapping[str, Any],
     include_json_leaves: bool,
 ) -> List[FlattenedFacetValue]:
     """
@@ -74,7 +75,7 @@ def flatten_facet_values(
     rows: List[FlattenedFacetValue] = []
 
     def walk(prefix: str, value: Any) -> None:
-        if isinstance(value, dict):
+        if isinstance(value, Mapping):
             for k, v in value.items():
                 key_part = str(k).replace(".", "\\.")
                 new_prefix = f"{prefix}.{key_part}" if prefix else key_part

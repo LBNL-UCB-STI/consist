@@ -13,7 +13,11 @@ from consist import (
     DriverType,
 )
 import consist.api as api
+import uuid
+from types import MappingProxyType
+
 from consist.models.artifact import Artifact
+from consist.protocols import ArtifactLike as NarrowArtifactLike
 from consist.api import (
     ArtifactLike,
 )
@@ -23,7 +27,7 @@ def _artifact(driver: str) -> Artifact:
     """Create a test artifact with the given driver."""
     return Artifact(
         key="test",
-        container_uri="workspace://test.txt",
+        uri="workspace://test.txt",
         driver=driver,
     )
 
@@ -174,9 +178,35 @@ class TestRuntimeCheckable:
     """Test runtime-checkable protocol support."""
 
     def test_artifact_isinstance_artifactlike(self) -> None:
-        """Verify Artifact instances pass isinstance checks for ArtifactLike."""
+        """Verify unbacked Artifact and custom @property .path objects never evaluate .path in isinstance."""
         art = _artifact("parquet")
         assert isinstance(art, ArtifactLike)
+        assert isinstance(art, NarrowArtifactLike)
+
+        class _RaisingPathArtifact:
+            id = uuid.uuid4()
+            key = "raising"
+            digest = None
+            member = None
+            meta = MappingProxyType({})
+            driver = "parquet"
+
+            @property
+            def path(self) -> object:
+                raise RuntimeError("should not be evaluated by isinstance")
+
+            @property
+            def abs_path(self) -> str | None:
+                raise RuntimeError("should not be evaluated by isinstance")
+
+            @property
+            def uri(self) -> str:
+                return "workspace://raising.parquet"
+
+        raising = _RaisingPathArtifact()
+        assert isinstance(raising, NarrowArtifactLike)
+        assert isinstance(raising, ArtifactLike)
+        assert is_dataframe_artifact(raising) is True
 
 
 def test_load_from_disk_uses_read_parquet_for_geoparquet(

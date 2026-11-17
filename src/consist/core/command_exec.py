@@ -10,6 +10,7 @@ exit status directly into DuckDB without refactoring code into Python callables.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import logging
 import os
@@ -18,6 +19,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import (
@@ -29,14 +31,15 @@ from typing import (
 )
 
 from pydantic import ConfigDict, Field as PydanticField
-from sqlmodel import select
 
-from consist.core.run_ordering import recent_run_order_by
+from consist.core.artifacts import _infer_driver_from_path
+from consist.digest import compute_digest
 from consist.models.artifact import Artifact
-from consist.models.run import Run, RunResult
+from consist.models.run import RunResult
 
 if TYPE_CHECKING:
     from consist.core.tracker import Tracker
+
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +93,7 @@ class CommandExecutionResult(RunResult):
         """Return the error message recorded on the run, if any."""
         if self.run and self.run.meta:
             cmd_meta = self.run.meta.get("command")
-            if isinstance(cmd_meta, dict) and cmd_meta.get("error"):
+            if isinstance(cmd_meta, Mapping) and cmd_meta.get("error"):
                 return str(cmd_meta["error"])
             if self.run.meta.get("error"):
                 return str(self.run.meta["error"])
@@ -203,35 +206,34 @@ def compare_with_baseline(
         return None
 
     try:
-        with tracker.db.session_scope() as session:
-            stmt = (
-                select(Run)
-                .where(Run.model_name == model_name)
-                .where(Run.status == "completed")
-                .where(Run.id != current_run_id)
-                .order_by(*recent_run_order_by())
-                .limit(1)
-            )
-            baseline_run = session.exec(stmt).first()
-            if not baseline_run:
-                return None
+        recent_runs = tracker.db.find_runs(
+            model=model_name,
+            status="completed",
+            limit=10,
+        )
+        baseline_run = next(
+            (candidate for candidate in recent_runs if candidate.id != current_run_id),
+            None,
+        )
+        if not baseline_run:
+            return None
 
-            baseline_id = baseline_run.id
-            baseline_meta = baseline_run.meta or {}
-            raw_cmd_meta = baseline_meta.get("command")
-            baseline_cmd_meta: dict[str, Any] = (
-                raw_cmd_meta if isinstance(raw_cmd_meta, dict) else {}
-            )
-            baseline_command = baseline_cmd_meta.get("argv", [])
-            baseline_duration = baseline_cmd_meta.get("duration")
-            if (
-                baseline_duration is None
-                and baseline_run.ended_at
-                and baseline_run.started_at
-            ):
-                baseline_duration = (
-                    baseline_run.ended_at - baseline_run.started_at
-                ).total_seconds()
+        baseline_id = baseline_run.id
+        baseline_meta = baseline_run.meta or {}
+        raw_cmd_meta = baseline_meta.get("command")
+        baseline_cmd_meta: Mapping[str, Any] = (
+            raw_cmd_meta if isinstance(raw_cmd_meta, Mapping) else {}
+        )
+        baseline_command = baseline_cmd_meta.get("argv", [])
+        baseline_duration = baseline_cmd_meta.get("duration")
+        if (
+            baseline_duration is None
+            and baseline_run.ended_at
+            and baseline_run.started_at
+        ):
+            baseline_duration = (
+                baseline_run.ended_at - baseline_run.started_at
+            ).total_seconds()
     except Exception as exc:
         logger.debug("Error querying baseline run: %s", exc)
         return None
@@ -251,7 +253,7 @@ def compare_with_baseline(
     modified_inputs: list[str] = []
     unchanged_inputs: list[str] = []
     for k in sorted(curr_inp_keys.intersection(base_inp_keys)):
-        if current_inputs[k].hash != baseline_artifacts.inputs[k].hash:
+        if current_inputs[k].digest != baseline_artifacts.inputs[k].digest:
             modified_inputs.append(k)
         else:
             unchanged_inputs.append(k)
@@ -263,7 +265,7 @@ def compare_with_baseline(
     modified_outputs: list[str] = []
     unchanged_outputs: list[str] = []
     for k in sorted(curr_out_keys.intersection(base_out_keys)):
-        if current_outputs[k].hash != baseline_artifacts.outputs[k].hash:
+        if current_outputs[k].digest != baseline_artifacts.outputs[k].digest:
             modified_outputs.append(k)
         else:
             unchanged_outputs.append(k)
@@ -301,7 +303,12 @@ def _safe_stream_write(stream: Any, chunk: bytes) -> None:
     if stream is None or not chunk:
         return
     try:
-        buf = getattr(stream, "buffer", None)
+        buf = stream.buffer if isinstance(stream, io.TextIOWrapper) else None
+        if buf is None and not isinstance(stream, io.TextIOBase):
+            try:
+                buf = stream.buffer
+            except AttributeError:
+                buf = None
         if buf is not None:
             buf.write(chunk)
             buf.flush()
@@ -533,12 +540,19 @@ def execute_command(
     # Log declared inputs
     logged_inputs: dict[str, Artifact] = {}
     for k, p in resolved_inputs.items():
-        computed_hash = tracker.identity.compute_file_checksum(p)
+        effective_driver = "directory" if p.is_dir() else _infer_driver_from_path(p)
+        if effective_driver in {"h5", "hdf5", "shapefile"}:
+            effective_driver = "file"
+        computed_digest = compute_digest(
+            p,
+            driver=effective_driver,
+            options={"hashing_strategy": tracker.identity.hashing_strategy},
+        )
         art = tracker.log_artifact(
             p,
             key=k,
             direction="input",
-            content_hash=computed_hash,
+            digest=computed_digest,
             force_hash_override=True,
         )
         logged_inputs[k] = art
@@ -645,47 +659,53 @@ def execute_command(
 
     proc = None
     try:
-        proc = subprocess.Popen(
-            cmd_to_spawn,
-            shell=shell,
-            cwd=str(resolved_cwd),
-            env=merged_env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+        suspend_ctx = (
+            tracker.db.suspend_for_subprocesses()
+            if tracker.db is not None
+            else nullcontext()
         )
+        with suspend_ctx:
+            proc = subprocess.Popen(
+                cmd_to_spawn,
+                shell=shell,
+                cwd=str(resolved_cwd),
+                env=merged_env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
 
-        out_target = sys.stdout if stream_output else None
-        err_target = sys.stderr if stream_output else None
+            out_target = sys.stdout if stream_output else None
+            err_target = sys.stderr if stream_output else None
 
-        out_thread = threading.Thread(
-            target=_stream_reader,
-            args=(
-                proc.stdout,
-                stdout_chunks,
-                out_file,
-                out_target,
-                max_memory_stream_bytes,
-            ),
-            daemon=True,
-        )
-        err_thread = threading.Thread(
-            target=_stream_reader,
-            args=(
-                proc.stderr,
-                stderr_chunks,
-                err_file,
-                err_target,
-                max_memory_stream_bytes,
-            ),
-            daemon=True,
-        )
+            out_thread = threading.Thread(
+                target=_stream_reader,
+                args=(
+                    proc.stdout,
+                    stdout_chunks,
+                    out_file,
+                    out_target,
+                    max_memory_stream_bytes,
+                ),
+                daemon=True,
+            )
+            err_thread = threading.Thread(
+                target=_stream_reader,
+                args=(
+                    proc.stderr,
+                    stderr_chunks,
+                    err_file,
+                    err_target,
+                    max_memory_stream_bytes,
+                ),
+                daemon=True,
+            )
 
-        out_thread.start()
-        err_thread.start()
+            out_thread.start()
+            err_thread.start()
 
-        proc.wait()
-        out_thread.join(timeout=3.0)
-        err_thread.join(timeout=3.0)
+            proc.wait()
+            out_thread.join(timeout=3.0)
+            err_thread.join(timeout=3.0)
 
     except FileNotFoundError as exc:
         return _abort_spawn(127, f"Command not found: {cmd_list[0]}", exc)

@@ -17,7 +17,6 @@ import pandas as pd
 import numpy as np
 import consist
 from consist.core.tracker import Tracker
-from sqlmodel import text
 
 
 @pytest.mark.heavy
@@ -100,27 +99,26 @@ def test_cold_vectorized_view(tmp_path):
     tracker.create_view("v_cold", "distributed_data")
 
     logging.info("[Verification] Querying...")
-    with tracker.engine.connect() as conn:
-        # 1. Count Total Rows
-        count = conn.execute(text("SELECT COUNT(*) FROM v_cold")).scalar()
-        logging.info(f"   -> Total Rows: {count}")
-        assert count == total_rows
+    # 1. Count Total Rows
+    count = tracker.run_query("SELECT COUNT(*) FROM v_cold")[0]
+    logging.info(f"   -> Total Rows: {count}")
+    assert count == total_rows
 
-        # 2. Check Schema Drift (extra_col should be NULL for runs 0-2, 1 for runs 3-4)
-        # Summing it verifies that DuckDB correctly aligned the schemas
-        extra_sum = conn.execute(text("SELECT SUM(extra_col) FROM v_cold")).scalar()
-        logging.info(f"   -> Extra Col Sum: {extra_sum}")
-        assert extra_sum == expected_extra_sum
+    # 2. Check Schema Drift (extra_col should be NULL for runs 0-2, 1 for runs 3-4)
+    # Summing it verifies that DuckDB correctly aligned the schemas
+    extra_sum = tracker.run_query("SELECT SUM(extra_col) FROM v_cold")[0]
+    logging.info(f"   -> Extra Col Sum: {extra_sum}")
+    assert extra_sum == expected_extra_sum
 
-        # 3. Check Metadata Injection (The CTE Join)
-        # We group by run_id to ensure the join against filenames worked
-        run_counts = conn.execute(
-            text("SELECT consist_run_id, COUNT(*) FROM v_cold GROUP BY 1 ORDER BY 1")
-        ).fetchall()
+    # 3. Check Metadata Injection (The CTE Join)
+    # We group by run_id to ensure the join against filenames worked
+    run_counts = tracker.run_query(
+        "SELECT consist_run_id, COUNT(*) FROM v_cold GROUP BY 1 ORDER BY 1"
+    )
 
-        logging.info("   -> Rows per Run:")
-        for r in run_counts:
-            logging.info(f"      {r[0]}: {r[1]}")
-            assert r[1] == 1000  # 10 files * 100 rows
+    logging.info("   -> Rows per Run:")
+    for r in run_counts:
+        logging.info(f"      {r[0]}: {r[1]}")
+        assert r[1] == 1000  # 10 files * 100 rows
 
     logging.info("Success! Vectorized Read Optimization works.")

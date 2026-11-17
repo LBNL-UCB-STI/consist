@@ -68,7 +68,7 @@ def test_openmatrix_metadata_ingestion(tracker: Tracker):
     4. No raw matrix data is ingested (metadata-only strategy)
     5. Run ID propagation works
     """
-    if not tracker.engine:
+    if not tracker.db:
         pytest.skip("Database not configured")
 
     # 1. Create an OpenMatrix file
@@ -98,13 +98,10 @@ def test_openmatrix_metadata_ingestion(tracker: Tracker):
         tracker.ingest(artifact)
 
         # 4. Query the openmatrix_catalog table
-        from sqlalchemy import text
-
         result = tracker.run_query(
-            text(
-                "SELECT matrix_name, n_rows, n_cols FROM global_tables.network_matrices "
-                "WHERE consist_run_id = :run_id"
-            ).bindparams(run_id=artifact.run_id)
+            "SELECT matrix_name, n_rows, n_cols FROM global_tables.network_matrices "
+            "WHERE consist_run_id = ?",
+            [artifact.run_id],
         )
 
         # 5. Verify metadata was ingested

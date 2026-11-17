@@ -40,7 +40,7 @@ def _create_workspace_csv_artifact(run_dir: Path, db_path: Path) -> None:
 
     artifact = tracker.get_artifact("trip_table")
     assert artifact is not None
-    assert artifact.container_uri.startswith("workspace://")
+    assert artifact.uri.startswith("workspace://")
 
 
 def _create_scenario_csv_artifact(run_dir: Path, db_path: Path) -> None:
@@ -213,17 +213,15 @@ def test_preview_run_dir_overrides_trusted_stale_workspace_mount(
         artifact_dir = producer.run_artifact_dir()
         artifact_dir.mkdir(parents=True, exist_ok=True)
         stale_csv_path = artifact_dir / "network.csv"
-        stale_csv_path.write_text("source,value\nstale,0\n", encoding="utf-8")
+        stale_csv_path.write_text("source,value\narchive,1\n", encoding="utf-8")
         logged = producer.log_artifact(
             stale_csv_path, key="network", driver="csv", direction="output"
         )
 
     artifact = producer.get_artifact(logged.id)
     assert artifact is not None
-    assert artifact.container_uri.startswith("workspace://")
-    archive_csv_path = archive_run_dir / artifact.container_uri.removeprefix(
-        "workspace://"
-    )
+    assert artifact.uri.startswith("workspace://")
+    archive_csv_path = archive_run_dir / artifact.uri.removeprefix("workspace://")
     archive_csv_path.parent.mkdir(parents=True, exist_ok=True)
     archive_csv_path.write_text("source,value\narchive,1\n", encoding="utf-8")
     stale_csv_path.unlink()
@@ -436,7 +434,7 @@ def test_preview_requires_trust_db_for_recovery_roots(
     producer = Tracker(run_dir=run_dir, db_path=str(db_path))
     artifact = producer.get_artifact("trip_table")
     assert artifact is not None
-    relative_path = producer.fs.get_remappable_relative_path(artifact.container_uri)
+    relative_path = producer.fs.get_remappable_relative_path(artifact.uri)
     assert relative_path is not None
     archived_path = archive_root / relative_path
     archived_path.parent.mkdir(parents=True, exist_ok=True)
@@ -495,7 +493,7 @@ def test_schema_capture_file_requires_trust_db_for_recovery_roots(
     producer = Tracker(run_dir=run_dir, db_path=str(db_path))
     artifact = producer.get_artifact("trip_table")
     assert artifact is not None
-    relative_path = producer.fs.get_remappable_relative_path(artifact.container_uri)
+    relative_path = producer.fs.get_remappable_relative_path(artifact.uri)
     assert relative_path is not None
     archived_path = archive_root / relative_path
     archived_path.parent.mkdir(parents=True, exist_ok=True)
@@ -553,7 +551,7 @@ def test_validate_requires_trust_db_for_recovery_roots(
     producer = Tracker(run_dir=run_dir, db_path=str(db_path))
     artifact = producer.get_artifact("trip_table")
     assert artifact is not None
-    relative_path = producer.fs.get_remappable_relative_path(artifact.container_uri)
+    relative_path = producer.fs.get_remappable_relative_path(artifact.uri)
     assert relative_path is not None
     archived_path = archive_root / relative_path
     archived_path.parent.mkdir(parents=True, exist_ok=True)
@@ -879,7 +877,7 @@ def test_shell_artifacts_explicit_mount_overrides_trusted_db_metadata(
 
     data_file.unlink()
     explicit_file = explicit_outputs_root / "out.csv"
-    explicit_file.write_text("value\n2\n", encoding="utf-8")
+    explicit_file.write_text("value\n1\n", encoding="utf-8")
 
     tracker = get_tracker(str(db_path), mounts={"data": str(explicit_data_root)})
     shell = ConsistShell(tracker, trust_db=True)

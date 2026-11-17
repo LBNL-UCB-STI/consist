@@ -8,6 +8,7 @@ from consist.core.openlineage import (
     _dataset_name_from_artifact,
 )
 from consist.core.tracker import Tracker
+from consist.digest import Digest
 from consist.models.artifact import Artifact
 from consist.models.run import Run
 
@@ -21,8 +22,12 @@ def test_openlineage_dataset_name_suffixes():
         meta={},
         tags=[],
     )
-    artifact = Artifact(key="trips", container_uri="inputs://trips.csv", driver="csv")
-    artifact.meta = {"year": 2026, "iteration": 1}
+    artifact = Artifact(
+        key="trips",
+        uri="inputs://trips.csv",
+        driver="csv",
+        meta={"year": 2026, "iteration": 1},
+    )
 
     assert _dataset_name_from_artifact(artifact, run) == "trips_2026_iteration_1"
 
@@ -37,8 +42,12 @@ def test_openlineage_jsonl_written(tmp_path: Path):
         tags=[],
         started_at=datetime.now(timezone.utc),
     )
-    artifact = Artifact(key="trips", container_uri="inputs://trips.csv", driver="csv")
-    artifact.meta = {"year": 2025}
+    artifact = Artifact(
+        key="trips",
+        uri="inputs://trips.csv",
+        driver="csv",
+        meta={"year": 2025},
+    )
 
     emitter = OpenLineageEmitter(
         OpenLineageOptions(
@@ -70,11 +79,14 @@ def test_openlineage_schema_facet_from_meta(tmp_path: Path):
         tags=[],
         started_at=datetime.now(timezone.utc),
     )
-    artifact = Artifact(key="trips", container_uri="inputs://trips.csv", driver="csv")
-    artifact.hash = "hash123"
-    artifact.meta = {
-        "schema_profile": {"fields": [{"name": "id", "logical_type": "bigint"}]}
-    }
+    expected_digest = Digest("sha256:file", "a1" * 32)
+    artifact = Artifact(
+        key="trips",
+        uri="inputs://trips.csv",
+        driver="csv",
+        digest=expected_digest,
+        meta={"schema_profile": {"fields": [{"name": "id", "logical_type": "bigint"}]}},
+    )
 
     emitter = OpenLineageEmitter(
         OpenLineageOptions(
@@ -87,7 +99,9 @@ def test_openlineage_schema_facet_from_meta(tmp_path: Path):
     schema = payload["outputs"][0]["facets"]["schema"]
     assert schema["fields"][0]["name"] == "id"
     assert schema["fields"][0]["type"] == "bigint"
-    assert payload["outputs"][0]["facets"]["version"]["datasetVersion"] == "hash123"
+    assert payload["outputs"][0]["facets"]["version"]["datasetVersion"] == str(
+        expected_digest
+    )
 
 
 def test_openlineage_parent_facet_for_scenario(tmp_path: Path):

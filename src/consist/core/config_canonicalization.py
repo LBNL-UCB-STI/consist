@@ -13,14 +13,13 @@ from typing import (
     Mapping,
     NamedTuple,
     Optional,
-    Protocol,
     Sequence,
     TYPE_CHECKING,
     Union,
-    runtime_checkable,
 )
+from typing_extensions import Protocol, runtime_checkable
 
-from sqlmodel import SQLModel
+from pydantic import BaseModel
 
 from consist.core.identity import IdentityManager
 from consist.digest import canonical_json_sha256
@@ -450,8 +449,8 @@ class IngestSpec:
     ----------
     table_name : str
         Destination table name.
-    schema : type[SQLModel]
-        SQLModel schema describing the table.
+    schema : type[BaseModel]
+        Pydantic/SQLModel schema describing the table.
     rows : Optional[RowSource]
         Iterable of row dicts to ingest, or a factory that accepts a run_id.
     source_path : Optional[Path]
@@ -465,7 +464,7 @@ class IngestSpec:
     """
 
     table_name: str
-    schema: type[SQLModel]
+    schema: type[BaseModel]
     rows: Optional[RowSource]
     source_path: Optional[Path] = None
     source: Optional[str] = None
@@ -894,7 +893,7 @@ class SupportsRunWithConfigOverrides(Protocol):
         name: str,
         model: Optional[str] = None,
         config: Optional[dict[str, Any]] = None,
-        outputs: Optional[list[str]] = None,
+        outputs: Optional[Union[Sequence[str], Mapping[str, Any]]] = None,
         execution_options: Any = None,
         strict: bool = True,
         identity_inputs: IdentityInputs = None,

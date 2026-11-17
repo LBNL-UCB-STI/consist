@@ -5,6 +5,7 @@ import shutil
 from typing import Any, cast
 from unittest.mock import ANY
 
+import pandas as pd
 import pytest
 
 import consist
@@ -227,7 +228,9 @@ def test_log_archive_and_strictly_hydrate_shapefile_bundle(
     assert logged.driver == "shapefile"
     assert logged.meta["file_bundle_artifact"] is True
     assert logged.meta["file_bundle_entry"] == "roads.shp"
-    assert logged.hash == logged.meta["file_bundle_manifest"]["tree_hash"]
+    assert logged.digest is not None
+    assert logged.digest.scheme == "dir_manifest_v1:sha256"
+    assert logged.digest.hex == logged.meta["file_bundle_manifest"]["tree_hash"]
 
     archive_root = tmp_path / "archive"
     archived = tracker.archive_run_outputs("spatial_completed", archive_root)
@@ -293,6 +296,7 @@ def test_hydrated_shapefile_bundle_loads_through_native_driver(
     item = hydrated["places"]
     assert consist.is_spatial_artifact(item.artifact)
     restored = consist.load(item.artifact, db_fallback="never")
+    assert isinstance(restored, pd.DataFrame)
     assert restored["name"].tolist() == ["one", "two"]
 
 
@@ -345,7 +349,7 @@ def test_shapefile_bundle_archive_rolls_back_on_metadata_failure(
 
     monkeypatch.setattr(
         tracker.db,
-        "update_artifact_meta",
+        "replace_artifact_recovery_locations_bulk",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("db down")),
     )
     archive_root = tmp_path / "archive"
@@ -471,9 +475,16 @@ def test_explicit_tracker_load_ignores_artifact_runtime_path(tmp_path: Path) -> 
     with tracker_a.start_run("producer", model="test"):
         artifact = tracker_a.log_output(source_a, key="out")
 
+    # Tampered bytes in workspace_b are rejected rather than silently loading source_a
+    with pytest.raises((FileNotFoundError, ValueError), match="verification"):
+        consist.load(artifact, tracker=tracker_b, db_fallback="never")
+
+    # Removing source_a and placing matching verified bytes in workspace_b loads from workspace_b
+    source_a.unlink()
+    source_b.write_text("value\n1\n")
     loaded = cast(Any, consist.load(artifact, tracker=tracker_b, db_fallback="never"))
 
-    assert loaded.fetchone() == (2,)
+    assert loaded.fetchall()[0] == (1,)
 
 
 def test_legacy_shapefile_artifact_cannot_be_archived_or_hydrated(
@@ -484,8 +495,11 @@ def test_legacy_shapefile_artifact_cannot_be_archived_or_hydrated(
     _write_shapefile_bundle(source)
     with tracker.start_run("spatial_legacy", model="spatial"):
         legacy = tracker.log_output(source, key="roads")
-        legacy.meta = {}
-        tracker._sync_artifact_to_db(legacy, "output")
+        legacy = legacy.with_meta({}, merge=False)
+        assert tracker.current_consist is not None
+        tracker.current_consist.replace_artifact(legacy, direction="output")
+        assert tracker.db is not None
+        tracker.db.execute("UPDATE artifact SET meta = '{}' WHERE id = ?", [legacy.id])
 
     with pytest.raises(ValueError, match="legacy Shapefile"):
         tracker.archive_artifact(legacy, tmp_path / "archive")
@@ -516,18 +530,29 @@ def test_directory_manifest_rejects_symlink(tmp_path: Path) -> None:
         build_directory_manifest(root)
 
 
-def test_directory_manifest_rejects_symlinked_ancestor(tmp_path: Path) -> None:
+def test_directory_manifest_allows_symlinked_ancestor_but_rejects_symlink_root(
+    tmp_path: Path,
+) -> None:
     real_parent = tmp_path / "real"
     root = real_parent / "raw_od_skims.zarr"
     root.mkdir(parents=True)
-    linked_parent = tmp_path / "linked"
+    (root / "0.0").write_bytes(b"skim")
+    linked_parent = tmp_path / "linked_mount"
+    linked_root = tmp_path / "linked_skims.zarr"
     try:
         linked_parent.symlink_to(real_parent, target_is_directory=True)
+        linked_root.symlink_to(root, target_is_directory=True)
     except OSError as exc:
         pytest.skip(f"symlinks are unavailable in this environment: {exc}")
 
+    # Symlinked mount/OS ancestor (like macOS /tmp -> private/tmp or HPC /scratch) succeeds
+    assert build_directory_manifest(
+        linked_parent / root.name
+    ) == build_directory_manifest(root)
+
+    # Symlinked artifact root itself is rejected
     with pytest.raises(ValueError, match="symlink"):
-        build_directory_manifest(linked_parent / root.name)
+        build_directory_manifest(linked_root)
 
 
 def test_directory_validation_rejects_extra_or_changed_members(tmp_path: Path) -> None:
@@ -625,7 +650,7 @@ def test_directory_archive_rolls_back_on_metadata_failure(
 
     monkeypatch.setattr(
         tracker.db,
-        "update_artifact_meta",
+        "replace_artifact_recovery_locations_bulk",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("db down")),
     )
     archive_root = tmp_path / "archive"
@@ -687,15 +712,12 @@ def test_direct_zarr_output_logging_is_an_immutable_directory_artifact(
 
     assert logged.driver == "zarr"
     assert logged.meta["directory_artifact"] is True
-    assert logged.hash == logged.meta["directory_manifest"]["tree_hash"]
-    assert logged.meta["content_identity"] == f"sha256:manifest-v1:{logged.hash}"
-    assert logged.content_id is not None
-    content = tracker.db.find_artifact_content(
-        content_hash=logged.meta["content_identity"],
-        driver="zarr",
-    )
-    assert content is not None
-    assert content.id == logged.content_id
+    assert logged.digest is not None
+    assert logged.digest.scheme == "dir_manifest_v1:sha256"
+    assert logged.digest.hex == logged.meta["directory_manifest"]["tree_hash"]
+    persisted = tracker.db.get_artifact(logged.id)
+    assert persisted is not None
+    assert persisted.digest == logged.digest
     assert consist.is_zarr_artifact(logged)
 
 
@@ -745,7 +767,7 @@ def test_legacy_zarr_artifact_without_manifest_cannot_be_archived(
             driver="zarr",
         )
 
-    legacy.meta = {}
+    legacy = legacy.with_meta({}, merge=False)
     with pytest.raises(ValueError, match="legacy Zarr"):
         tracker.archive_artifact(legacy, tmp_path / "archive")
 
@@ -764,8 +786,11 @@ def test_legacy_zarr_artifact_without_manifest_cannot_be_hydrated(
             direction="output",
             driver="zarr",
         )
-        legacy.meta = {}
-        tracker._sync_artifact_to_db(legacy, "output")
+        legacy = legacy.with_meta({}, merge=False)
+        assert tracker.current_consist is not None
+        tracker.current_consist.replace_artifact(legacy, direction="output")
+        assert tracker.db is not None
+        tracker.db.execute("UPDATE artifact SET meta = '{}' WHERE id = ?", [legacy.id])
 
     hydrated = tracker.hydrate_run_outputs_to_destinations(
         "beam_legacy_zarr_hydration",
@@ -1102,8 +1127,7 @@ def test_directory_hydration_reopens_snapshot_with_original_archive_only(
             db_fallback="never",
         )
     finally:
-        if reopened.engine is not None:
-            reopened.engine.dispose()
+        reopened.close()
 
     assert hydrated["skims"].status == "materialized_directory_from_filesystem"
     assert destination.is_dir()
@@ -1173,13 +1197,17 @@ def test_directory_archive_rechecks_source_before_publication(
 def test_get_validated_directory_manifest_and_is_valid_directory_artifact_tree(
     tmp_path: Path,
 ) -> None:
+    from consist.digest import Digest
+
+    dummy_digest = Digest("sha256:file", "a" * 64)
+    dummy_dir_digest = Digest("dir_manifest_v1:sha256", "a" * 64)
     regular_file = tmp_path / "regular.csv"
     regular_file.write_text("a,b\n1,2\n")
     file_artifact = Artifact(
         key="regular",
-        container_uri="./regular.csv",
+        uri="./regular.csv",
         driver="csv",
-        hash="abc123",
+        digest=dummy_digest,
         meta={},
     )
     assert get_validated_directory_manifest(file_artifact) is None
@@ -1189,9 +1217,9 @@ def test_get_validated_directory_manifest_and_is_valid_directory_artifact_tree(
     legacy_dir.mkdir()
     legacy_artifact = Artifact(
         key="legacy",
-        container_uri="./legacy_dir",
+        uri="./legacy_dir",
         driver="zarr",
-        hash="abc123",
+        digest=dummy_dir_digest,
         meta={},
     )
     assert get_validated_directory_manifest(legacy_artifact) is None
@@ -1199,9 +1227,9 @@ def test_get_validated_directory_manifest_and_is_valid_directory_artifact_tree(
 
     missing_manifest_artifact = Artifact(
         key="missing_manifest",
-        container_uri="./legacy_dir",
+        uri="./legacy_dir",
         driver="zarr",
-        hash="abc123",
+        digest=dummy_dir_digest,
         meta={"directory_artifact": True},
     )
     with pytest.raises(ValueError, match="missing a valid directory_manifest"):
@@ -1212,9 +1240,9 @@ def test_get_validated_directory_manifest_and_is_valid_directory_artifact_tree(
 
     none_manifest_artifact = Artifact(
         key="none_manifest",
-        container_uri="./legacy_dir",
+        uri="./legacy_dir",
         driver="zarr",
-        hash="abc123",
+        digest=dummy_dir_digest,
         meta={"directory_artifact": True, "directory_manifest": None},
     )
     with pytest.raises(ValueError, match="missing a valid directory_manifest"):
@@ -1228,9 +1256,9 @@ def test_get_validated_directory_manifest_and_is_valid_directory_artifact_tree(
     manifest = build_directory_manifest(valid_dir)
     dir_artifact = Artifact(
         key="skims",
-        container_uri="./skims.zarr",
+        uri="./skims.zarr",
         driver="zarr",
-        hash=manifest["tree_hash"],
+        digest=Digest("dir_manifest_v1:sha256", manifest["tree_hash"]),
         meta={"directory_artifact": True, "directory_manifest": manifest},
     )
 
@@ -1269,9 +1297,9 @@ def test_get_validated_directory_manifest_and_is_valid_directory_artifact_tree(
     # Artifact hash mismatch with manifest["tree_hash"] -> ValueError / False
     mismatched_artifact = Artifact(
         key="skims",
-        container_uri="./skims.zarr",
+        uri="./skims.zarr",
         driver="zarr",
-        hash="0" * 64,
+        digest=Digest("dir_manifest_v1:sha256", "0" * 64),
         meta={"directory_artifact": True, "directory_manifest": manifest},
     )
     with pytest.raises(ValueError, match="tree_hash"):
@@ -1394,11 +1422,13 @@ def test_directory_allow_extra_files_validation_and_materialization(
     (source / "sub" / "nested.csv").write_text("id\n2\n", encoding="utf-8")
     manifest = build_directory_manifest(source)
 
+    from consist.digest import Digest
+
     artifact = Artifact(
         key="shared_dir",
-        container_uri="./shared_workspace",
+        uri="./shared_workspace",
         driver="directory",
-        hash=manifest["tree_hash"],
+        digest=Digest("dir_manifest_v1:sha256", manifest["tree_hash"]),
         meta={
             "directory_artifact": True,
             "directory_allow_extra_files": True,
@@ -1529,7 +1559,7 @@ def test_artifact_layout_and_record_sync_helpers(tmp_path: Path) -> None:
 
     bundle_art = Artifact(
         key="parcels",
-        container_uri="inputs://bundle_dir/parcels.shp",
+        uri="inputs://bundle_dir/parcels.shp",
         driver="shapefile",
         meta={
             "file_bundle_artifact": True,
@@ -1564,11 +1594,11 @@ def test_artifact_layout_and_record_sync_helpers(tmp_path: Path) -> None:
         abs_path=str(entry_file.resolve()),
     )
     assert len(matched) == 1
-    assert bundle_art.meta["custom"] == "new"
-    assert bundle_art.abs_path == str(entry_file.resolve())
+    assert record.outputs[0].meta["custom"] == "new"
+    assert record.outputs[0].abs_path == str(entry_file.resolve())
     record.sync_output_artifact(
         artifact_id=bundle_art.id,
         abs_path=str(bundle_dir.resolve()),
         preserve_existing_abs_path=True,
     )
-    assert bundle_art.abs_path == str(entry_file.resolve())
+    assert record.outputs[0].abs_path == str(entry_file.resolve())

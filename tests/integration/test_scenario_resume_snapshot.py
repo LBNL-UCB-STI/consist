@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Tuple
+from typing import Iterator, Tuple
 import pytest
-from sqlmodel import col, delete, select
 
 import consist
 from consist.core.tracker import Tracker
@@ -11,12 +10,13 @@ from consist.models.run import RunCouplerSnapshot
 
 
 @pytest.fixture
-def tracker_setup(tmp_path: Path) -> Tuple[Tracker, Path, Path]:
+def tracker_setup(tmp_path: Path) -> Iterator[Tuple[Tracker, Path, Path]]:
     run_dir = tmp_path / "runs"
     run_dir.mkdir(parents=True, exist_ok=True)
     db_path = tmp_path / "provenance.duckdb"
     tracker = Tracker(run_dir=run_dir, db_path=str(db_path))
-    return tracker, run_dir, db_path
+    yield tracker, run_dir, db_path
+    tracker.close()
 
 
 def test_scenario_mid_workflow_resumption(tmp_path: Path) -> None:
@@ -58,12 +58,13 @@ def test_scenario_mid_workflow_resumption(tmp_path: Path) -> None:
         s1.run(step1_fn, name="step_1")
         res2 = s1.run(step2_fn, name="step_2")
         step2_run_id = res2.run.id
-        step2_hash = res2.outputs["model_results"].hash
+        step2_hash = res2.outputs["model_results"].digest
 
     assert step1_executed == 1
     assert step2_executed == 1
 
     # 3. Close tracker / simulate fresh process by creating a new Tracker(db_path=tmp_db)
+    tracker1.close()
     # Reset execution counters to ensure step1 and step2 are never executed during resumption
     step1_executed = 0
     step2_executed = 0
@@ -87,7 +88,7 @@ def test_scenario_mid_workflow_resumption(tmp_path: Path) -> None:
         # - Verify scenario.coupler.get("model_results") is immediately present and identical in hash.
         model_res = s1_resumed.coupler.get("model_results")
         assert model_res is not None
-        assert model_res.hash == step2_hash
+        assert model_res.digest == step2_hash
 
         # - Execute Step 3 consuming model_results and raw_data via scenario.run(...)
         assert "raw_data" in s1_resumed.coupler
@@ -98,6 +99,7 @@ def test_scenario_mid_workflow_resumption(tmp_path: Path) -> None:
     assert step1_executed == 0
     assert step2_executed == 0
     assert "summary_report" in res3.outputs
+    tracker2.close()
 
 
 def test_scenario_resume_from_run_id_post(
@@ -254,13 +256,10 @@ def test_scenario_resume_fallback_to_completed_outputs(
         legacy_scen_id = sc.run_id
 
     # Wipe run_coupler_snapshot rows for this scenario to simulate legacy runs
-    with db.session_scope() as session:
-        session.exec(
-            delete(RunCouplerSnapshot).where(
-                col(RunCouplerSnapshot.scenario_run_id) == legacy_scen_id
-            )
-        )
-        session.commit()
+    db.execute(
+        "DELETE FROM main.run_coupler_snapshot WHERE scenario_run_id = ?",
+        [legacy_scen_id],
+    )
 
     # Verify no snapshots exist
     assert (
@@ -286,16 +285,14 @@ def test_scenario_resume_fallback_to_completed_outputs(
     assert "role_1" in backfilled
     assert "role_2" in backfilled
 
-    with db.session_scope() as session:
-        rows = session.exec(
-            select(RunCouplerSnapshot).where(
-                col(RunCouplerSnapshot.run_id) == res2.run.id,
-                col(RunCouplerSnapshot.phase) == "post",
-            )
-        ).all()
-        assert len(rows) == 2
-        for r in rows:
-            assert r.scenario_run_id == legacy_scen_id
+    rows = db.query_rows(
+        "SELECT * FROM main.run_coupler_snapshot WHERE run_id = ? AND phase = ?",
+        [res2.run.id, "post"],
+        model=RunCouplerSnapshot,
+    )
+    assert len(rows) == 2
+    for r in rows:
+        assert r.scenario_run_id == legacy_scen_id
 
 
 def test_scenario_resume_fallback_pre_phase_excludes_step_outputs(
@@ -322,13 +319,10 @@ def test_scenario_resume_fallback_pre_phase_excludes_step_outputs(
         legacy_scen_id = sc.run_id
 
     # Wipe run_coupler_snapshot rows for this scenario
-    with db.session_scope() as session:
-        session.exec(
-            delete(RunCouplerSnapshot).where(
-                col(RunCouplerSnapshot.scenario_run_id) == legacy_scen_id
-            )
-        )
-        session.commit()
+    db.execute(
+        "DELETE FROM main.run_coupler_snapshot WHERE scenario_run_id = ?",
+        [legacy_scen_id],
+    )
 
     # Restore with phase="pre" on res2.run.id
     # It should include role_1 (from s1), but NOT role_2 (from s2 itself)
@@ -370,13 +364,10 @@ def test_scenario_resume_fallback_preserves_execution_order(
         scen_id = sc.run_id
 
     # Wipe snapshots
-    with db.session_scope() as session:
-        session.exec(
-            delete(RunCouplerSnapshot).where(
-                col(RunCouplerSnapshot.scenario_run_id) == scen_id
-            )
-        )
-        session.commit()
+    db.execute(
+        "DELETE FROM main.run_coupler_snapshot WHERE scenario_run_id = ?",
+        [scen_id],
+    )
 
     # Fallback restore for the scenario should respect execution order:
     # "a_second" was executed after "z_first", so its version of "shared_role" should win
@@ -386,7 +377,7 @@ def test_scenario_resume_fallback_preserves_execution_order(
             fallback_to_completed_outputs=True,
         )
         assert "shared_role" in restored
-        assert restored["shared_role"].hash == res_a.outputs["shared_role"].hash
+        assert restored["shared_role"].digest == res_a.outputs["shared_role"].digest
 
 
 def test_scenario_diff_snapshots_across_scenarios(
@@ -463,7 +454,7 @@ def test_scenario_resume_across_tracker_instances(tmp_path: Path) -> None:
         sc1.run(year1_step, name="year1_step")
         res_y2_s1 = sc1.run(year2_step1, name="year2_step1")
         y2_s1_id = res_y2_s1.run.id
-        y2_s1_hash = res_y2_s1.outputs["usim_datastore_h5"].hash
+        y2_s1_hash = res_y2_s1.outputs["usim_datastore_h5"].digest
 
     # Simulate process death / restart by initializing a new Tracker
     # Process 2: new tracker, new scenario resuming from year2_step1
@@ -485,7 +476,7 @@ def test_scenario_resume_across_tracker_instances(tmp_path: Path) -> None:
         # Verify usim_datastore_h5 is the year 2 version
         assert "usim_datastore_h5" in sc2.coupler
         restored_ds = sc2.coupler.require("usim_datastore_h5")
-        assert restored_ds.hash == y2_s1_hash
+        assert restored_ds.digest == y2_s1_hash
 
         res_final = sc2.run(year2_step2, name="year2_step2")
 

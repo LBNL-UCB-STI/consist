@@ -35,10 +35,10 @@ if TYPE_CHECKING:
         current_consist,
         current_run,
         current_tracker,
-        db_session,
         define_step,
         diff_coupler_snapshots,
         ensure_local_path,
+        evict_artifact,
         exec,
         find_latest_run,
         find_matching_run,
@@ -71,16 +71,17 @@ if TYPE_CHECKING:
         log_output,
         materialize_artifact,
         materialize_run_outputs,
-        noop_scenario,
+        migrate_database,
         output_dir,
         output_path,
         pivot_facets,
+        query_df,
+        query_rows,
         ref,
         refs,
         register_artifact_facet_parser,
         register_artifact_recovery_copy,
         register_run_output_recovery_copies,
-        register_views,
         require_runtime_kwargs,
         resolve_canonical_run_id,
         resolve_run_output_paths,
@@ -98,8 +99,11 @@ if TYPE_CHECKING:
         start_run,
         to_df,
         trace,
+        undo_migrate_database,
         use_tracker,
-        view,
+    )
+    from consist.core.migrate import (
+        MigrationReport,
     )
     from consist.core.command_exec import (
         CommandExecutionError,
@@ -112,6 +116,10 @@ if TYPE_CHECKING:
     )
     from consist.core.coupler import (
         Coupler,
+    )
+    from consist.core.error_messages import (
+        MissingOutputError,
+        StaleOutputError,
     )
     from consist.core.indexing import (
         FacetIndex,
@@ -131,13 +139,6 @@ if TYPE_CHECKING:
         StagedInput,
         StagedInputsResult,
     )
-    from consist.core.noop import (
-        NoopArtifact,
-        NoopCoupler,
-        NoopRunResult,
-        NoopScenarioContext,
-        NoopTracker,
-    )
     from consist.core.orchestration import (
         BatchResult,
         BatchRunSpec,
@@ -150,15 +151,17 @@ if TYPE_CHECKING:
         resolve_callable,
     )
     from consist.core.persistence import (
+        DatabaseMigrationRequired,
         IncompatibleSchemaError,
+        TransactionAbortedError,
     )
     from consist.core.resolved_binding import (
         AdmissionEvidence,
-        ArtifactIdentity,
         BoundArtifact,
         ResolvedBinding,
         ResolvedBindingBuilder,
         TrackedArtifactLocator,
+        trusted_digest_from_artifact,
     )
     from consist.core.step_contracts import (
         StepContract,
@@ -172,6 +175,10 @@ if TYPE_CHECKING:
         RestoredCouplerSnapshotResult,
         StepIdentity,
     )
+    from consist.digest import (
+        Digest,
+        digest_file,
+    )
     from consist.models.artifact import (
         ArchivedOutputs,
         Artifact,
@@ -184,7 +191,6 @@ if TYPE_CHECKING:
     )
     from consist.protocols import (
         ArtifactLike,
-        RunIdentifiedResultLike,
         RunResultLike,
         ScenarioLike,
         TrackerLike,
@@ -195,6 +201,10 @@ if TYPE_CHECKING:
     )
     from consist.runtime import (
         create_tracker,
+    )
+    from consist.errors import (
+        ConsistError,
+        DeprecatedViewsError,
     )
     from consist.types import (
         ArtifactSpec,
@@ -212,6 +222,7 @@ if TYPE_CHECKING:
         OutputPathRef,
         OutputPolicyOptions,
         OutputSet,
+        ParameterizedSQL,
         RunCompletionArchivePolicy,
         StringCapture,
     )
@@ -226,7 +237,6 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
         "ArchivedRunOutputFilesReport",
     ),
     "Artifact": ("consist.models.artifact", "Artifact"),
-    "ArtifactIdentity": ("consist.core.resolved_binding", "ArtifactIdentity"),
     "ArtifactLike": ("consist.protocols", "ArtifactLike"),
     "ArtifactRecoveryCopyRegistration": (
         "consist.core.materialize",
@@ -253,8 +263,15 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     ),
     "CommandExecutionError": ("consist.core.command_exec", "CommandExecutionError"),
     "CommandExecutionResult": ("consist.core.command_exec", "CommandExecutionResult"),
+    "ConsistError": ("consist.errors", "ConsistError"),
     "Coupler": ("consist.core.coupler", "Coupler"),
     "CouplerSnapshotPhase": ("consist.models.run", "CouplerSnapshotPhase"),
+    "DatabaseMigrationRequired": (
+        "consist.core.persistence",
+        "DatabaseMigrationRequired",
+    ),
+    "DeprecatedViewsError": ("consist.errors", "DeprecatedViewsError"),
+    "Digest": ("consist.digest", "Digest"),
     "DriverType": ("consist.types", "DriverType"),
     "EnumCapture": ("consist.types", "EnumCapture"),
     "ExecutionAttempt": ("consist.core.orchestration", "ExecutionAttempt"),
@@ -277,15 +294,13 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "IntCapture": ("consist.types", "IntCapture"),
     "MaterializationResult": ("consist.core.materialize", "MaterializationResult"),
     "MaterializedArtifact": ("consist.core.materialize", "MaterializedArtifact"),
-    "NoopArtifact": ("consist.core.noop", "NoopArtifact"),
-    "NoopCoupler": ("consist.core.noop", "NoopCoupler"),
-    "NoopRunResult": ("consist.core.noop", "NoopRunResult"),
-    "NoopScenarioContext": ("consist.core.noop", "NoopScenarioContext"),
-    "NoopTracker": ("consist.core.noop", "NoopTracker"),
+    "MigrationReport": ("consist.core.migrate", "MigrationReport"),
+    "MissingOutputError": ("consist.core.error_messages", "MissingOutputError"),
     "OutputArtifactSpec": ("consist.types", "OutputArtifactSpec"),
     "OutputPathRef": ("consist.types", "OutputPathRef"),
     "OutputPolicyOptions": ("consist.types", "OutputPolicyOptions"),
     "OutputSet": ("consist.types", "OutputSet"),
+    "ParameterizedSQL": ("consist.types", "ParameterizedSQL"),
     "PythonCallableTarget": ("consist.core.orchestration", "PythonCallableTarget"),
     "RelationConnectionLeakWarning": ("consist.api", "RelationConnectionLeakWarning"),
     "ResolvedBinding": ("consist.core.resolved_binding", "ResolvedBinding"),
@@ -305,7 +320,6 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "RunContext": ("consist.api", "RunContext"),
     "RunCouplerSnapshot": ("consist.models.run", "RunCouplerSnapshot"),
     "RunFieldIndex": ("consist.core.indexing", "RunFieldIndex"),
-    "RunIdentifiedResultLike": ("consist.protocols", "RunIdentifiedResultLike"),
     "RunOutputRecoveryCopiesRegistration": (
         "consist.core.materialize",
         "RunOutputRecoveryCopiesRegistration",
@@ -315,6 +329,7 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "RunSet": ("consist.runset", "RunSet"),
     "RunSpecResult": ("consist.core.orchestration", "RunSpecResult"),
     "ScenarioLike": ("consist.protocols", "ScenarioLike"),
+    "StaleOutputError": ("consist.core.error_messages", "StaleOutputError"),
     "StagedInput": ("consist.core.materialize", "StagedInput"),
     "StagedInputsResult": ("consist.core.materialize", "StagedInputsResult"),
     "StepContract": ("consist.core.step_contracts", "StepContract"),
@@ -326,6 +341,10 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     ),
     "Tracker": ("consist.core.tracker", "Tracker"),
     "TrackerLike": ("consist.protocols", "TrackerLike"),
+    "TransactionAbortedError": (
+        "consist.core.persistence",
+        "TransactionAbortedError",
+    ),
     "active_relation_count": ("consist.api", "active_relation_count"),
     "archive_artifact": ("consist.api", "archive_artifact"),
     "archive_current_run_outputs": ("consist.api", "archive_current_run_outputs"),
@@ -341,10 +360,11 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "current_consist": ("consist.api", "current_consist"),
     "current_run": ("consist.api", "current_run"),
     "current_tracker": ("consist.api", "current_tracker"),
-    "db_session": ("consist.api", "db_session"),
     "define_step": ("consist.api", "define_step"),
     "diff_coupler_snapshots": ("consist.api", "diff_coupler_snapshots"),
+    "digest_file": ("consist.digest", "digest_file"),
     "ensure_local_path": ("consist.api", "ensure_local_path"),
+    "evict_artifact": ("consist.api", "evict_artifact"),
     "exec": ("consist.api", "exec"),
     "execute_worker_run": ("consist.core.orchestration", "execute_worker_run"),
     "find_latest_run": ("consist.api", "find_latest_run"),
@@ -383,10 +403,12 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "log_output": ("consist.api", "log_output"),
     "materialize_artifact": ("consist.api", "materialize_artifact"),
     "materialize_run_outputs": ("consist.api", "materialize_run_outputs"),
-    "noop_scenario": ("consist.api", "noop_scenario"),
+    "migrate_database": ("consist.api", "migrate_database"),
     "output_dir": ("consist.api", "output_dir"),
     "output_path": ("consist.api", "output_path"),
     "pivot_facets": ("consist.api", "pivot_facets"),
+    "query_df": ("consist.api", "query_df"),
+    "query_rows": ("consist.api", "query_rows"),
     "ref": ("consist.api", "ref"),
     "refs": ("consist.api", "refs"),
     "register_artifact_facet_parser": ("consist.api", "register_artifact_facet_parser"),
@@ -398,7 +420,6 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
         "consist.api",
         "register_run_output_recovery_copies",
     ),
-    "register_views": ("consist.api", "register_views"),
     "require_runtime_kwargs": ("consist.api", "require_runtime_kwargs"),
     "resolve_callable": ("consist.core.orchestration", "resolve_callable"),
     "resolve_canonical_run_id": ("consist.api", "resolve_canonical_run_id"),
@@ -418,8 +439,12 @@ _CORE_EXPORTS: dict[str, tuple[str, str]] = {
     "start_run": ("consist.api", "start_run"),
     "to_df": ("consist.api", "to_df"),
     "trace": ("consist.api", "trace"),
+    "trusted_digest_from_artifact": (
+        "consist.core.resolved_binding",
+        "trusted_digest_from_artifact",
+    ),
+    "undo_migrate_database": ("consist.api", "undo_migrate_database"),
     "use_tracker": ("consist.api", "use_tracker"),
-    "view": ("consist.api", "view"),
 }
 
 _DEPRECATED_TOP_LEVEL_EXPORTS: dict[str, tuple[str, str]] = {
@@ -427,14 +452,11 @@ _DEPRECATED_TOP_LEVEL_EXPORTS: dict[str, tuple[str, str]] = {
         "consist.admission",
         "ARTIFACT_PROVENANCE_SCHEMA_VERSION",
     ),
-    "AdmissionIdentity": ("consist.admission", "AdmissionIdentity"),
     "AdmissionReference": ("consist.admission", "AdmissionReference"),
     "AdmissionReport": ("consist.admission", "AdmissionReport"),
     "ArrayCanonicalizationPolicy": ("consist.digest", "ArrayCanonicalizationPolicy"),
-    "ArtifactProvenanceSidecar": ("consist.admission", "ArtifactProvenanceSidecar"),
     "DeclaredDigestExpectation": ("consist.admission", "DeclaredDigestExpectation"),
     "FLOAT32_MATRICES_V1_POLICY": ("consist.digest", "FLOAT32_MATRICES_V1_POLICY"),
-    "FileIdentity": ("consist.admission", "FileIdentity"),
     "GTFS_SCHEMAS": ("consist.gtfs", "GTFS_SCHEMAS"),
     "GTFS_SCHEMA_BY_TABLE_NAME": ("consist.gtfs", "GTFS_SCHEMA_BY_TABLE_NAME"),
     "GTFS_TABLE_NAMES": ("consist.gtfs", "GTFS_TABLE_NAMES"),
@@ -454,18 +476,8 @@ _DEPRECATED_TOP_LEVEL_EXPORTS: dict[str, tuple[str, str]] = {
     "GtfsStops": ("consist.gtfs", "GtfsStops"),
     "GtfsTransfers": ("consist.gtfs", "GtfsTransfers"),
     "GtfsTrips": ("consist.gtfs", "GtfsTrips"),
-    "MatrixContainerSummary": ("consist.admission", "MatrixContainerSummary"),
     "PRESERVE_CANONICAL_POLICY": ("consist.digest", "PRESERVE_CANONICAL_POLICY"),
     "PriorRunExpectation": ("consist.admission", "PriorRunExpectation"),
-    "admission_directory_identity": (
-        "consist.admission",
-        "admission_directory_identity",
-    ),
-    "admission_file_identity": ("consist.admission", "admission_file_identity"),
-    "artifact_provenance_sidecar_path": (
-        "consist.admission",
-        "artifact_provenance_sidecar_path",
-    ),
     "canonicalize_float32_array": ("consist.digest", "canonicalize_float32_array"),
     "canonicalize_float64_array": ("consist.digest", "canonicalize_float64_array"),
     "canonicalize_float_array": ("consist.digest", "canonicalize_float_array"),
@@ -528,7 +540,6 @@ __all__ = [
     "ArchivedRunOutputFile",
     "ArchivedRunOutputFilesReport",
     "Artifact",
-    "ArtifactIdentity",
     "ArtifactLike",
     "ArtifactRecoveryCopyRegistration",
     "ArtifactSpec",
@@ -543,8 +554,12 @@ __all__ = [
     "CanonicalizationSnapshot",
     "CommandExecutionError",
     "CommandExecutionResult",
+    "ConsistError",
     "Coupler",
     "CouplerSnapshotPhase",
+    "DatabaseMigrationRequired",
+    "DeprecatedViewsError",
+    "Digest",
     "DriverType",
     "EnumCapture",
     "ExecutionAttempt",
@@ -561,15 +576,13 @@ __all__ = [
     "IntCapture",
     "MaterializationResult",
     "MaterializedArtifact",
-    "NoopArtifact",
-    "NoopCoupler",
-    "NoopRunResult",
-    "NoopScenarioContext",
-    "NoopTracker",
+    "MigrationReport",
+    "MissingOutputError",
     "OutputArtifactSpec",
     "OutputPathRef",
     "OutputPolicyOptions",
     "OutputSet",
+    "ParameterizedSQL",
     "PythonCallableTarget",
     "RelationConnectionLeakWarning",
     "ResolvedBinding",
@@ -580,13 +593,13 @@ __all__ = [
     "RunContext",
     "RunCouplerSnapshot",
     "RunFieldIndex",
-    "RunIdentifiedResultLike",
     "RunOutputRecoveryCopiesRegistration",
     "RunResult",
     "RunResultLike",
     "RunSet",
     "RunSpecResult",
     "ScenarioLike",
+    "StaleOutputError",
     "StagedInput",
     "StagedInputsResult",
     "StepContract",
@@ -595,6 +608,7 @@ __all__ = [
     "TrackedArtifactLocator",
     "Tracker",
     "TrackerLike",
+    "TransactionAbortedError",
     "active_relation_count",
     "archive_artifact",
     "archive_current_run_outputs",
@@ -610,10 +624,11 @@ __all__ = [
     "current_consist",
     "current_run",
     "current_tracker",
-    "db_session",
     "define_step",
     "diff_coupler_snapshots",
+    "digest_file",
     "ensure_local_path",
+    "evict_artifact",
     "exec",
     "execute_worker_run",
     "find_latest_run",
@@ -649,16 +664,17 @@ __all__ = [
     "log_output",
     "materialize_artifact",
     "materialize_run_outputs",
-    "noop_scenario",
+    "migrate_database",
     "output_dir",
     "output_path",
     "pivot_facets",
+    "query_df",
+    "query_rows",
     "ref",
     "refs",
     "register_artifact_facet_parser",
     "register_artifact_recovery_copy",
     "register_run_output_recovery_copies",
-    "register_views",
     "require_runtime_kwargs",
     "resolve_callable",
     "resolve_canonical_run_id",
@@ -678,9 +694,32 @@ __all__ = [
     "start_run",
     "to_df",
     "trace",
+    "trusted_digest_from_artifact",
+    "undo_migrate_database",
     "use_tracker",
-    "view",
 ]
+
+
+_REMOVED_V04_EXPORTS: dict[str, tuple[str, str]] = {
+    "NoopTracker": (
+        "consist.NoopTracker was removed in Consist v0.5.0. "
+        "Use Tracker() (Ephemeral Mode) or Tracker(run_dir=..., db_path=None) "
+        "(JSON-Only Mode) instead.",
+        "ImportError",
+    ),
+    "noop_scenario": (
+        "consist.noop_scenario() was removed in Consist v0.5.0. "
+        "Use Tracker() (Ephemeral Mode) or Tracker(run_dir=..., db_path=None) "
+        "(JSON-Only Mode) with scenario(...) instead.",
+        "ImportError",
+    ),
+    "db_session": (
+        "consist.db_session() was removed in Consist v0.5.0. "
+        "Use consist.query_df(...), consist.query_rows(...), "
+        "tracker.db_connection(), or consist.ibis_connection(tracker) instead.",
+        "ImportError",
+    ),
+}
 
 
 def __getattr__(name: str) -> Any:
@@ -692,9 +731,17 @@ def __getattr__(name: str) -> Any:
     if name in _CORE_EXPORTS:
         module_path, attr_name = _CORE_EXPORTS[name]
         module = importlib.import_module(module_path)
-        val = module.__dict__[attr_name]
+        val = vars(module)[attr_name]
         globals()[name] = val
         return val
+
+    if name in ("view", "register_views"):
+        module = importlib.import_module("consist.api")
+        return vars(module)[name]
+
+    if name in _REMOVED_V04_EXPORTS:
+        msg, _ = _REMOVED_V04_EXPORTS[name]
+        raise ImportError(msg)
 
     if name in _DEPRECATED_TOP_LEVEL_EXPORTS:
         target_mod, target_attr = _DEPRECATED_TOP_LEVEL_EXPORTS[name]
@@ -704,7 +751,7 @@ def __getattr__(name: str) -> Any:
             stacklevel=2,
         )
         module = importlib.import_module(target_mod)
-        return module.__dict__[target_attr]
+        return vars(module)[target_attr]
 
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 import pytest
-from sqlmodel import Field, SQLModel, Session, text
+from sqlmodel import Field, SQLModel
 
 from consist.models.artifact_schema import ArtifactSchema, ArtifactSchemaField
 
@@ -104,9 +104,8 @@ def test_grouped_view_schema_compatible_mode(tracker, tmp_path) -> None:
         mode="cold_only",
         schema_compatible=False,
     )
-    with tracker.engine.connect() as conn:
-        exact_count = conn.execute(text("SELECT COUNT(*) FROM v_compat_exact")).scalar()
-    assert exact_count == 1
+    exact_row = tracker.db.fetchone("SELECT COUNT(*) FROM v_compat_exact")
+    assert exact_row is not None and exact_row[0] == 1
 
     tracker.create_grouped_view(
         "v_compat_wide",
@@ -116,9 +115,8 @@ def test_grouped_view_schema_compatible_mode(tracker, tmp_path) -> None:
         mode="cold_only",
         schema_compatible=True,
     )
-    with tracker.engine.connect() as conn:
-        wide_count = conn.execute(text("SELECT COUNT(*) FROM v_compat_wide")).scalar()
-    assert wide_count == 2
+    wide_row = tracker.db.fetchone("SELECT COUNT(*) FROM v_compat_wide")
+    assert wide_row is not None and wide_row[0] == 2
 
 
 def test_grouped_view_accepts_schema_class_selector(tracker, tmp_path) -> None:
@@ -149,9 +147,8 @@ def test_grouped_view_accepts_schema_class_selector(tracker, tmp_path) -> None:
         params=["artifact_family=schema_class"],
         mode="cold_only",
     )
-    with tracker.engine.connect() as conn:
-        count = conn.execute(text("SELECT COUNT(*) FROM v_schema_class")).scalar()
-    assert count == 1
+    row = tracker.db.fetchone("SELECT COUNT(*) FROM v_schema_class")
+    assert row is not None and row[0] == 1
 
 
 def test_grouped_view_selector_validation(tracker, tmp_path) -> None:
@@ -179,101 +176,109 @@ def test_resolve_schema_compatible_ids_respects_table_name_and_subset_rules(
     wrong_table_schema_id = "schema_wrong_table"
     empty_schema_id = "schema_empty"
 
-    with Session(tracker.engine) as session:
-        session.add_all(
-            [
-                ArtifactSchema(
-                    id=base_schema_id,
-                    summary_json={"table_name": "events"},
-                    profile_version=1,
-                ),
-                ArtifactSchema(
-                    id=superset_schema_id,
-                    summary_json={"table_name": "events"},
-                    profile_version=1,
-                ),
-                ArtifactSchema(
-                    id=subset_schema_id,
-                    summary_json={"table_name": "events"},
-                    profile_version=1,
-                ),
-                ArtifactSchema(
-                    id=wrong_table_schema_id,
-                    summary_json={"table_name": "households"},
-                    profile_version=1,
-                ),
-                ArtifactSchema(
-                    id=empty_schema_id,
-                    summary_json={"table_name": "events"},
-                    profile_version=1,
-                ),
-            ]
-        )
-        session.add_all(
-            [
-                ArtifactSchemaField(
-                    schema_id=base_schema_id,
-                    ordinal_position=1,
-                    name="id",
-                    logical_type="integer",
-                    nullable=False,
-                ),
-                ArtifactSchemaField(
-                    schema_id=base_schema_id,
-                    ordinal_position=2,
-                    name="value",
-                    logical_type="double",
-                    nullable=True,
-                ),
-                ArtifactSchemaField(
-                    schema_id=superset_schema_id,
-                    ordinal_position=1,
-                    name="id",
-                    logical_type="integer",
-                    nullable=False,
-                ),
-                ArtifactSchemaField(
-                    schema_id=superset_schema_id,
-                    ordinal_position=2,
-                    name="value",
-                    logical_type="double",
-                    nullable=True,
-                ),
-                ArtifactSchemaField(
-                    schema_id=superset_schema_id,
-                    ordinal_position=3,
-                    name="mode",
-                    logical_type="varchar",
-                    nullable=True,
-                ),
-                ArtifactSchemaField(
-                    schema_id=subset_schema_id,
-                    ordinal_position=1,
-                    name="id",
-                    logical_type="integer",
-                    nullable=False,
-                ),
-                ArtifactSchemaField(
-                    schema_id=wrong_table_schema_id,
-                    ordinal_position=1,
-                    name="id",
-                    logical_type="integer",
-                    nullable=False,
-                ),
-                ArtifactSchemaField(
-                    schema_id=wrong_table_schema_id,
-                    ordinal_position=2,
-                    name="value",
-                    logical_type="double",
-                    nullable=True,
-                ),
-            ]
-        )
-        session.commit()
+    tracker.db.persist_artifact_schema(
+        ArtifactSchema(
+            id=base_schema_id,
+            summary_json={"table_name": "events"},
+            profile_version=1,
+        ),
+        [
+            ArtifactSchemaField(
+                schema_id=base_schema_id,
+                ordinal_position=1,
+                name="id",
+                logical_type="integer",
+                nullable=False,
+            ),
+            ArtifactSchemaField(
+                schema_id=base_schema_id,
+                ordinal_position=2,
+                name="value",
+                logical_type="double",
+                nullable=True,
+            ),
+        ],
+    )
+    tracker.db.persist_artifact_schema(
+        ArtifactSchema(
+            id=superset_schema_id,
+            summary_json={"table_name": "events"},
+            profile_version=1,
+        ),
+        [
+            ArtifactSchemaField(
+                schema_id=superset_schema_id,
+                ordinal_position=1,
+                name="id",
+                logical_type="integer",
+                nullable=False,
+            ),
+            ArtifactSchemaField(
+                schema_id=superset_schema_id,
+                ordinal_position=2,
+                name="value",
+                logical_type="double",
+                nullable=True,
+            ),
+            ArtifactSchemaField(
+                schema_id=superset_schema_id,
+                ordinal_position=3,
+                name="mode",
+                logical_type="varchar",
+                nullable=True,
+            ),
+        ],
+    )
+    tracker.db.persist_artifact_schema(
+        ArtifactSchema(
+            id=subset_schema_id,
+            summary_json={"table_name": "events"},
+            profile_version=1,
+        ),
+        [
+            ArtifactSchemaField(
+                schema_id=subset_schema_id,
+                ordinal_position=1,
+                name="id",
+                logical_type="integer",
+                nullable=False,
+            ),
+        ],
+    )
+    tracker.db.persist_artifact_schema(
+        ArtifactSchema(
+            id=wrong_table_schema_id,
+            summary_json={"table_name": "households"},
+            profile_version=1,
+        ),
+        [
+            ArtifactSchemaField(
+                schema_id=wrong_table_schema_id,
+                ordinal_position=1,
+                name="id",
+                logical_type="integer",
+                nullable=False,
+            ),
+            ArtifactSchemaField(
+                schema_id=wrong_table_schema_id,
+                ordinal_position=2,
+                name="value",
+                logical_type="double",
+                nullable=True,
+            ),
+        ],
+    )
+    tracker.db.persist_artifact_schema(
+        ArtifactSchema(
+            id=empty_schema_id,
+            summary_json={"table_name": "events"},
+            profile_version=1,
+        ),
+        [],
+    )
 
-        compatible_ids = tracker.db._resolve_schema_compatible_ids(
-            session=session,
-            schema_id=base_schema_id,
-        )
+    compatible_ids = tracker.db._resolve_schema_compatible_ids(
+        schema_id=base_schema_id,
+    )
 
     assert compatible_ids == {base_schema_id, superset_schema_id, subset_schema_id}

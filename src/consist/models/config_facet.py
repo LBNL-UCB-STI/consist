@@ -1,8 +1,5 @@
 """
-Database model for configuration facets in the Consist main database.
-
-Facets are compact, queryable config snapshots that are deduplicated by hash
-and used to power run discovery.
+Value model for deduplicated configuration facets in Consist.
 """
 
 from __future__ import annotations
@@ -10,50 +7,25 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Union
 
-from sqlalchemy import Column, DateTime, JSON, String
-from sqlmodel import Field, SQLModel
+from pydantic import BaseModel, Field
 
 UTC = timezone.utc
 
 
-class ConfigFacet(SQLModel, table=True):
-    """
-    A small, queryable snapshot of a run's configuration stored in the database.
+class ConfigFacet(BaseModel):
+    """Compact, deduplicated snapshot of a run's queryable configuration."""
 
-    Facets are intended to be minimal and stable: only include fields that are useful
-    for inspection and filtering. Facets are deduplicated by their canonical JSON hash
-    and referenced by runs (via facet IDs) and the flattened ``run_config_kv`` index.
-    """
-
-    __tablename__ = "config_facet"
-
-    id: str = Field(
-        primary_key=True,
-        sa_column_kwargs={"autoincrement": False},
-        description="SHA256 of canonical facet JSON.",
-    )
-
-    # Namespace is the model_name by default (e.g. 'activitysim', 'beam')
-    namespace: str = Field(index=True)
-
+    id: str = Field(description="SHA256 of canonical facet JSON.")
+    namespace: str
     schema_name: str = Field(
-        index=True,
-        description="Facet schema name (typically the Pydantic model name).",
+        description="Facet schema name (typically the Pydantic model name)."
     )
-
     schema_version: Optional[Union[str, int]] = Field(
         default=None,
-        sa_column=Column(String, nullable=True),
         description="Optional schema version for evolvability.",
     )
-
     facet_json: Dict[str, Any] = Field(
         default_factory=dict,
-        sa_column=Column("json", JSON),
         description="Compact facet JSON (intentionally small).",
     )
-
-    created_at: datetime = Field(
-        default_factory=lambda: datetime.now(UTC),
-        sa_type=DateTime,
-    )
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

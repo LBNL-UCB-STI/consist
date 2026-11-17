@@ -173,7 +173,16 @@ def validate_recovery_registration_policy(
     driver = artifact.driver
     meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
 
-    if driver in {"h5", "hdf5"}:
+    is_h5_child = driver == "h5_table" or (
+        driver in {"h5", "hdf5"}
+        and (
+            artifact.parent_artifact_id is not None
+            or parent is not None
+            or artifact.member is not None
+        )
+    )
+
+    if driver in {"h5", "hdf5"} and not is_h5_child:
         policy = normalize_container_policy(meta)
         if not policy.valid:
             return ContainerRecoveryValidation(
@@ -205,7 +214,7 @@ def validate_recovery_registration_policy(
             ),
         )
 
-    if driver == "h5_table":
+    if is_h5_child:
         if parent is None:
             return ContainerRecoveryValidation(
                 allowed=False,

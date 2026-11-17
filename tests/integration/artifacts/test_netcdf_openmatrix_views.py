@@ -14,7 +14,7 @@ class TestNetCdfMetadataView:
 
     def test_get_variables(self, tracker: Tracker, write_netcdf):
         """Test querying all variables in a NetCDF artifact."""
-        if not tracker.engine:
+        if not tracker.db:
             pytest.skip("Database not configured")
 
         # 1. Create and ingest NetCDF
@@ -54,7 +54,7 @@ class TestNetCdfMetadataView:
 
     def test_get_dimensions(self, tracker: Tracker, write_netcdf):
         """Test extracting dimensions from NetCDF metadata."""
-        if not tracker.engine:
+        if not tracker.db:
             pytest.skip("Database not configured")
 
         netcdf_path = tracker.run_dir / "test_dims.nc"
@@ -84,7 +84,7 @@ class TestNetCdfMetadataView:
 
     def test_get_data_variables(self, tracker: Tracker, write_netcdf):
         """Test filtering to only data variables (not coordinates)."""
-        if not tracker.engine:
+        if not tracker.db:
             pytest.skip("Database not configured")
 
         netcdf_path = tracker.run_dir / "test_vars.nc"
@@ -115,7 +115,7 @@ class TestNetCdfMetadataView:
 
     def test_summary(self, tracker: Tracker, write_netcdf):
         """Test human-readable summary of NetCDF structure."""
-        if not tracker.engine:
+        if not tracker.db:
             pytest.skip("Database not configured")
 
         netcdf_path = tracker.run_dir / "test_summary.nc"
@@ -147,7 +147,7 @@ class TestOpenMatrixMetadataView:
 
     def test_get_matrices(self, tracker: Tracker):
         """Test querying all matrices in an OpenMatrix artifact."""
-        if not tracker.engine:
+        if not tracker.db:
             pytest.skip("Database not configured")
 
         # 1. Create and ingest OMX
@@ -177,7 +177,7 @@ class TestOpenMatrixMetadataView:
 
     def test_get_zone_counts(self, tracker: Tracker):
         """Test querying zone counts across runs."""
-        if not tracker.engine:
+        if not tracker.db:
             pytest.skip("Database not configured")
 
         omx_path = tracker.run_dir / "zones.omx"
@@ -200,7 +200,7 @@ class TestOpenMatrixMetadataView:
 
     def test_get_matrix_names(self, tracker: Tracker):
         """Test listing unique matrix names."""
-        if not tracker.engine:
+        if not tracker.db:
             pytest.skip("Database not configured")
 
         omx_path = tracker.run_dir / "names.omx"
@@ -227,7 +227,7 @@ class TestOpenMatrixMetadataView:
 
     def test_compare_runs(self, tracker: Tracker):
         """Test comparing matrices across multiple runs."""
-        if not tracker.engine:
+        if not tracker.db:
             pytest.skip("Database not configured")
 
         # Create baseline OMX (5000 zones)
@@ -266,7 +266,7 @@ class TestOpenMatrixMetadataView:
 
     def test_summary(self, tracker: Tracker):
         """Test human-readable summary of OpenMatrix structure."""
-        if not tracker.engine:
+        if not tracker.db:
             pytest.skip("Database not configured")
 
         omx_path = tracker.run_dir / "test_summary.omx"

@@ -3,7 +3,7 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 from unittest.mock import patch
-from sqlmodel import SQLModel, Field, select, func
+from sqlmodel import SQLModel, Field
 
 from consist.core.tracker import Tracker
 from consist.models.run import Run
@@ -48,6 +48,7 @@ def run_simulation_scenario(
     base_trips_by_year=None,
     advance_delta_by_year=None,
     validate_cached_outputs: str = "lazy",
+    container_subdir: str | None = None,
 ):
     rng = np.random.default_rng(42)
     n_hh = 100
@@ -55,7 +56,11 @@ def run_simulation_scenario(
 
     base_trips_by_year = base_trips_by_year or {}
     advance_delta_by_year = advance_delta_by_year or {}
-    container_out_root = (tracker.run_dir / "container_out").resolve()
+    container_out_root = (
+        (tracker.run_dir / "container_out" / container_subdir).resolve()
+        if container_subdir
+        else (tracker.run_dir / "container_out").resolve()
+    )
     # Example "external config bundle" that should affect identity but not be stored in DB.
     external_cfg_dir = (
         tracker.run_dir / "external_configs" / "generate_trips"
@@ -245,35 +250,44 @@ def test_pilates_header_pattern(tmp_path: Path):
     tracker.identity.hashing_strategy = "fast"
 
     years = [2020, 2030]
-    run_simulation_scenario(tracker, "baseline", 10, years, "cold")
-    run_simulation_scenario(tracker, "high_gas", 5, years, "hot")
+    run_simulation_scenario(
+        tracker, "baseline", 10, years, "cold", container_subdir="baseline"
+    )
+    run_simulation_scenario(
+        tracker, "high_gas", 5, years, "hot", container_subdir="high_gas"
+    )
 
-    # Generate Dynamic View Models
-    VPerson = tracker.views.Person
-    VHousehold = tracker.views.Household
+    # Create Hybrid Views
+    tracker.create_view("v_persons", "persons")
+    tracker.create_view("v_households", "households")
 
     # Q1: Comparing Scenarios
     logging.info("\n--- Query 1: Scenario Comparison ---")
-    query = (
-        select(
-            VPerson.consist_scenario_id.label("scenario_id"),
-            VPerson.consist_year,
-            func.avg(VPerson.number_of_trips).label("avg_trips"),
-        )
-        .select_from(VPerson)
-        .where(VPerson.consist_scenario_id.in_(["baseline", "high_gas"]))
-        .where(VPerson.consist_year.is_not(None))
-        .group_by(VPerson.consist_scenario_id, VPerson.consist_year)
-        .order_by("scenario_id", "consist_year")
+    q1_df = tracker.query_df(
+        """
+        SELECT
+            consist_scenario_id AS scenario_id,
+            consist_year,
+            AVG(number_of_trips) AS avg_trips
+        FROM v_persons
+        WHERE consist_scenario_id IN ('baseline', 'high_gas')
+          AND consist_year IS NOT NULL
+        GROUP BY consist_scenario_id, consist_year
+        ORDER BY scenario_id, consist_year
+        """
     )
-    results = consist.run_query(query, tracker=tracker)
-    for r in results:
-        logging.info(f"{r.scenario_id:<20} {r.consist_year}: {r.avg_trips:.2f}")
+    for _, r in q1_df.iterrows():
+        logging.info(
+            f"{r['scenario_id']:<20} {int(r['consist_year'])}: {float(r['avg_trips']):.2f}"
+        )
 
-    assert len(results) == 4
+    assert len(q1_df) == 4
 
     # Validation Logic
-    res_map = {(r.scenario_id, r.consist_year): r.avg_trips for r in results}
+    res_map = {
+        (str(r["scenario_id"]), int(r["consist_year"])): float(r["avg_trips"])
+        for _, r in q1_df.iterrows()
+    }
     assert res_map[("high_gas", 2030)] < res_map[("baseline", 2030)]
 
     # Verify artifact metadata inherited step year/tags
@@ -285,23 +299,22 @@ def test_pilates_header_pattern(tmp_path: Path):
 
     # Q2: Complex Join
     logging.info("\n--- Query 2: Trips by Region ---")
-    query = (
-        select(
-            VPerson.consist_scenario_id.label("scenario"),
-            VHousehold.region,
-            VPerson.consist_year,
-            func.sum(VPerson.number_of_trips).label("total_trips"),
-        )
-        .select_from(VPerson)
-        .join(VHousehold, VPerson.household_id == VHousehold.household_id)
-        # Ensure we are joining data from same scenario context
-        .where(VPerson.consist_scenario_id == VHousehold.consist_scenario_id)
-        .group_by(VPerson.consist_scenario_id, VHousehold.region, VPerson.consist_year)
-        .order_by("scenario", VHousehold.region, VPerson.consist_year)
+    q2_df = tracker.query_df(
+        """
+        SELECT
+            p.consist_scenario_id AS scenario,
+            h.region,
+            p.consist_year,
+            SUM(p.number_of_trips) AS total_trips
+        FROM v_persons p
+        JOIN v_households h
+          ON p.household_id = h.household_id
+         AND p.consist_scenario_id = h.consist_scenario_id
+        GROUP BY p.consist_scenario_id, h.region, p.consist_year
+        ORDER BY scenario, h.region, p.consist_year
+        """
     )
-
-    results = consist.run_query(query, tracker=tracker)
-    assert len(results) > 0
+    assert len(q2_df) > 0
 
     # Q3: Helper Method Usage
     # We want the generate_trips run from 2030 specifically
@@ -422,8 +435,6 @@ def test_pilates_caching_scenarios(tmp_path):
     ):
         # A: baseline
         run_simulation_scenario(tracker, "A", 10, years, "cold")
-        # B: different inputs/base_trips -> no hits relative to A
-        run_simulation_scenario(tracker, "B", 15, years, "cold")
         # C: same as A but different name -> should reuse A’s work
         run_simulation_scenario(tracker, "C", 10, years, "cold")
         # D: same as A, but advance delta changes only in 2030
@@ -444,6 +455,10 @@ def test_pilates_caching_scenarios(tmp_path):
             "cold",
             base_trips_by_year={2030: 20},
         )
+        # B: different inputs/base_trips -> no hits relative to A.
+        # Run after C/D/E because scenarios share `container_out/{year}/persons.parquet`
+        # and verified locations detect when B overwrites A's 2020 file on disk.
+        run_simulation_scenario(tracker, "B", 15, years, "cold")
 
     # Helpers to inspect cache flags
     def cache_hit(parent, year, model):

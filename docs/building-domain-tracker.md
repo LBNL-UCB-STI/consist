@@ -83,14 +83,17 @@ class CalibrationTracker:
         }
 
     def query_top_k(self, *, metric: str, k: int = 5):
-        query = text("""
-            SELECT run_id, value_num
-            FROM global_tables.run_config_kv
-            WHERE key = :metric
-            ORDER BY value_num ASC
-            LIMIT :k
-        """)
-        return self._tracker.run_query(query.params(metric=metric, k=k))
+        query = consist.ParameterizedSQL(
+            sql="""
+                SELECT run_id, value_num
+                FROM global_tables.run_config_kv
+                WHERE key = ?
+                ORDER BY value_num ASC
+                LIMIT ?
+            """,
+            params=[metric, k],
+        )
+        return self._tracker.query_rows(query.sql, query.params)
 
     def query_top_k_ibis(self, *, metric: str, k: int = 5):
         kv = consist.ibis_view(self._tracker, model=RunConfigKV)
@@ -103,7 +106,7 @@ class CalibrationTracker:
 ```
 
 Prefer the Ibis helper for analysis-time reads over the typed view surface.
-Keep the SQLAlchemy / SQLModel version when you want to show the lower-level
+Keep the DuckDB SQL version when you want to show the lower-level
 tracker internals or the exact SQL text being issued.
 
 Usage:

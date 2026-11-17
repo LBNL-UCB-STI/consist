@@ -134,7 +134,9 @@ classes:
   ConsistArtifactIdentity:
     description: >-
       A trusted, typed immutable identity that Consist can attest for a strict
-      bound artifact. It is stronger and narrower than Artifact.hash.
+      bound artifact. Maps directly from Artifact.digest (Digest(scheme, hex)),
+      where scheme identifies the contract (e.g. file or manifest-v1) and hex
+      provides the SHA256Digest.
     attributes:
       algorithm:
         description: The attested immutable identity algorithm.
@@ -145,7 +147,7 @@ classes:
         range: ConsistArtifactIdentityKind
         required: true
       digest:
-        description: The immutable identity digest.
+        description: The immutable identity digest (Digest.hex).
         range: SHA256Digest
         required: true
 
@@ -169,16 +171,17 @@ classes:
         description: The human-readable Consist artifact key, when known.
       fingerprint:
         description: >-
-          The public Artifact.hash value. It is a portable fingerprint whose
-          interpretation follows the hashing strategy and may be content- or
-          metadata-based. Artifact.content_id is database-local and is never a
-          portable fingerprint.
+          The public Artifact.digest.hex value (or legacy fingerprint). It is a
+          portable fingerprint whose interpretation follows the hashing strategy
+          and may be content- or metadata-based. Artifact.content_id is
+          database-local and is never a portable fingerprint.
       fingerprint_strategy:
         description: The hashing strategy or interpretation for fingerprint, when known.
       immutable_identity:
         description: >-
-          A trusted typed immutable identity, when Consist can attest one. It
-          must not be inferred from a broader Artifact.hash alone.
+          A trusted typed immutable identity mapped from Artifact.digest
+          (Digest(scheme, hex)), when Consist can attest one. It must not be
+          inferred from unverified metadata alone.
         range: ConsistArtifactIdentity
         inlined: true
       parent_artifact:

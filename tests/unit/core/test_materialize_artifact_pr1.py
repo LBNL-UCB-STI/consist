@@ -11,7 +11,7 @@ from consist.core.directory_artifacts import (
 )
 from consist.core.fs import FileSystemManager
 from consist.core.materialize import materialize_artifact
-from consist.core.noop import NoopCoupler
+from consist.digest import Digest
 from consist.models.artifact import Artifact
 
 
@@ -19,8 +19,10 @@ def _create_stub_tracker(
     run_dir: Path,
     mounts: dict[str, str | Path] | None = None,
     runs: dict[str, Any] | None = None,
+    recovery_roots_by_id: dict[Any, list[str | Path]] | None = None,
 ):
     fs = FileSystemManager(run_dir=run_dir, mounts=mounts or {})
+    roots_map = dict(recovery_roots_by_id or {})
 
     class StubIdentity:
         hashing_strategy = "full"
@@ -73,6 +75,9 @@ def _create_stub_tracker(
         def resolve_uri(self, uri: str) -> str:
             return self.fs.resolve_uri(uri)
 
+        def artifact_recovery_roots(self, artifact, *, resolve: bool = True):
+            return list(roots_map.get(artifact.id, []))
+
         def materialize_artifact(
             self,
             artifact,
@@ -100,13 +105,13 @@ def _create_stub_tracker(
 
 
 # =========================================================================
-# 1. Coupler.pop, CouplerView.pop, NoopCoupler.pop
+# 1. Coupler.pop, CouplerView.pop
 # =========================================================================
 
 
 def test_coupler_and_view_pop_behavior() -> None:
     coupler = Coupler()
-    art_a = Artifact(key="a", container_uri="workspace://a.csv", driver="csv")
+    art_a = Artifact(key="a", uri="workspace://a.csv", driver="csv")
     coupler.set("a", art_a)
 
     # Pop existing returns artifact
@@ -116,7 +121,7 @@ def test_coupler_and_view_pop_behavior() -> None:
 
     # Pop missing returns default
     assert coupler.pop("a") is None
-    sentinel = Artifact(key="s", container_uri="workspace://s.csv", driver="csv")
+    sentinel = Artifact(key="s", uri="workspace://s.csv", driver="csv")
     assert coupler.pop("missing", sentinel) == sentinel
 
     # Key validation
@@ -125,7 +130,7 @@ def test_coupler_and_view_pop_behavior() -> None:
 
     # CouplerView pop
     view = coupler.view("sub")
-    art_b = Artifact(key="sub/b", container_uri="workspace://b.csv", driver="csv")
+    art_b = Artifact(key="sub/b", uri="workspace://b.csv", driver="csv")
     view.set("b", art_b)
     assert "sub/b" in coupler
 
@@ -139,11 +144,6 @@ def test_coupler_and_view_pop_behavior() -> None:
 
     with pytest.raises(ValueError):
         view.pop("")
-
-    # NoopCoupler pop
-    noop = NoopCoupler()
-    assert noop.pop("anything") is None
-    assert noop.pop("anything", sentinel) == sentinel
 
 
 # =========================================================================
@@ -162,9 +162,9 @@ def test_directory_artifact_materialization_with_manifest(tmp_path: Path) -> Non
     manifest = build_directory_manifest(dir_path)
     artifact = Artifact(
         key="zarr_output",
-        container_uri="workspace://models/zarr_data",
+        uri="workspace://models/zarr_data",
         driver="zarr",
-        hash=manifest["tree_hash"],
+        digest=Digest("dir_manifest_v1:sha256", manifest["tree_hash"]),
         meta={
             "directory_artifact": True,
             "directory_manifest": manifest,
@@ -221,9 +221,9 @@ def test_directory_artifact_materialization_never_skips_manifest_hashing(
 
     artifact = Artifact(
         key="large_dir",
-        container_uri="workspace://large_dir",
+        uri="workspace://large_dir",
         driver="directory",
-        hash="arbitrary_hash",
+        digest=Digest("caller_supplied_v1:sha256", "ab" * 32),
         meta={"directory_artifact": True},
     )
 
@@ -294,9 +294,9 @@ def test_directory_artifact_manifest_mismatch_returns_hash_mismatch(
 
     artifact = Artifact(
         key="dir_a",
-        container_uri="workspace://dir_a",
+        uri="workspace://dir_a",
         driver="directory",
-        hash=manifest["tree_hash"],
+        digest=Digest("dir_manifest_v1:sha256", manifest["tree_hash"]),
         meta={"directory_artifact": True, "directory_manifest": manifest},
     )
 
@@ -338,14 +338,13 @@ def test_shapefile_bundle_materialization_from_archive_dir(tmp_path: Path) -> No
     manifest = build_shapefile_bundle_manifest(shp_file)
     artifact = Artifact(
         key="roads",
-        container_uri="workspace://outputs/roads.shp",
+        uri="workspace://outputs/roads.shp",
         driver="shapefile",
-        hash=manifest["tree_hash"],
+        digest=Digest("dir_manifest_v1:sha256", manifest["tree_hash"]),
         meta={
             "file_bundle": "shapefile",
             "file_bundle_entry": "roads.shp",
             "file_bundle_manifest": manifest,
-            "recovery_roots": [str(archive_root)],
         },
     )
 
@@ -355,7 +354,10 @@ def test_shapefile_bundle_materialization_from_archive_dir(tmp_path: Path) -> No
     unrelated_file = dest_dir / "unrelated_sibling.csv"
     unrelated_file.write_text("a,b,c\n1,2,3\n", encoding="utf-8")
 
-    tracker = _create_stub_tracker(tmp_path / "workspace")
+    tracker = _create_stub_tracker(
+        tmp_path / "workspace",
+        recovery_roots_by_id={artifact.id: [str(archive_root)]},
+    )
 
     result = materialize_artifact(
         tracker,
@@ -401,9 +403,9 @@ def test_shapefile_bundle_materialization_from_workspace_file(tmp_path: Path) ->
     manifest = build_shapefile_bundle_manifest(source_shp)
     artifact = Artifact(
         key="roads",
-        container_uri="workspace://outputs/roads.shp",
+        uri="workspace://outputs/roads.shp",
         driver="shapefile",
-        hash=manifest["tree_hash"],
+        digest=Digest("dir_manifest_v1:sha256", manifest["tree_hash"]),
         meta={
             "file_bundle": "shapefile",
             "file_bundle_entry": "roads.shp",
@@ -469,9 +471,9 @@ def test_submount_relative_path_with_explicit_scheme_prefixes(tmp_path: Path) ->
 
     artifact = Artifact(
         key="transit_schedule",
-        container_uri="beam_input://transit/schedule.csv",
+        uri="beam_input://transit/schedule.csv",
         driver="csv",
-        hash=None,
+        digest=None,
     )
 
     tracker = _create_stub_tracker(tmp_path / "workspace")
@@ -510,9 +512,9 @@ def test_submount_relative_path_auto_derived_from_run_mount(tmp_path: Path) -> N
 
     artifact = Artifact(
         key="transit_schedule",
-        container_uri="beam_input://transit/schedule.csv",
+        uri="beam_input://transit/schedule.csv",
         driver="csv",
-        hash=None,
+        digest=None,
     )
 
     # Materialize without explicit scheme_prefixes -> should auto-derive prefix "beam/input"
@@ -557,9 +559,9 @@ def test_submount_relative_path_auto_derived_from_historical_run_mount(
     artifact = Artifact(
         key="transit_schedule",
         run_id="run-123",
-        container_uri="beam_input://transit/schedule.csv",
+        uri="beam_input://transit/schedule.csv",
         driver="csv",
-        hash=None,
+        digest=None,
     )
 
     result = tracker.materialize_artifact(
@@ -581,7 +583,7 @@ def test_submount_strict_filtering_when_scheme_prefixes_provided(
     target_root = tmp_path / "target"
     artifact = Artifact(
         key="external",
-        container_uri="unmapped://data.csv",
+        uri="unmapped://data.csv",
         driver="csv",
     )
     tracker = _create_stub_tracker(tmp_path / "workspace")

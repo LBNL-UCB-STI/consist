@@ -4,7 +4,6 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
-from sqlmodel import Session, select
 
 from consist.models.artifact import Artifact
 
@@ -22,7 +21,7 @@ class TestLogInputOutput:
             )
 
         assert artifact.key == "my_input"
-        assert artifact.container_uri.endswith("input_data.csv")
+        assert artifact.uri.endswith("input_data.csv")
         assert artifact.driver == "csv"
         assert artifact.meta.get("schema_version") == "1.0"
 
@@ -41,7 +40,7 @@ class TestLogInputOutput:
             )
 
         assert artifact.key == "my_output"
-        assert artifact.container_uri.endswith("output_data.parquet")
+        assert artifact.uri.endswith("output_data.parquet")
         assert artifact.driver == "parquet"
         assert artifact.meta.get("version") == "2.0"
 
@@ -133,19 +132,15 @@ class TestCreatedAtIso:
         parsed_dt = datetime.fromisoformat(iso_string)
         assert abs((parsed_dt - artifact.created_at).total_seconds()) < 0.001
 
-    def test_created_at_iso_from_database_roundtrip(
-        self, tracker, engine, run_dir: Path
-    ):
+    def test_created_at_iso_from_database_roundtrip(self, tracker, run_dir: Path):
         test_file = run_dir / "artifact_db.csv"
         test_file.write_text("test\n")
 
         with tracker.start_run("run_iso_db", "test_model"):
-            tracker.log_artifact(str(test_file), key="test_artifact_db")
+            logged = tracker.log_artifact(str(test_file), key="test_artifact_db")
 
-        with Session(engine) as session:
-            artifact = session.exec(
-                select(Artifact).where(Artifact.key == "test_artifact_db")
-            ).one()
+        artifact = tracker.get_artifact(logged.id)
+        assert artifact is not None
 
         iso_string = artifact.created_at_iso
         assert isinstance(iso_string, str)
@@ -161,27 +156,25 @@ class TestGetArtifactByUri:
 
         with tracker.start_run("run_find_001", "test_model"):
             artifact = tracker.log_artifact(str(test_file), key="find_me")
-            uri = artifact.container_uri
+            uri = artifact.uri
             found = tracker.get_artifact_by_uri(uri)
 
         assert found is not None
-        assert found.container_uri == uri
+        assert found.uri == uri
         assert found.key == "find_me"
 
-    def test_get_artifact_by_uri_finds_in_database(
-        self, tracker, engine, run_dir: Path
-    ):
+    def test_get_artifact_by_uri_finds_in_database(self, tracker, run_dir: Path):
         test_file = run_dir / "db_search.csv"
         test_file.write_text("data\n")
 
         with tracker.start_run("run_db_search", "test_model"):
             artifact = tracker.log_artifact(str(test_file), key="db_search")
-            uri = artifact.container_uri
+            uri = artifact.uri
 
         found = tracker.get_artifact_by_uri(uri)
 
         assert found is not None
-        assert found.container_uri == uri
+        assert found.uri == uri
         assert found.key == "db_search"
 
     def test_get_artifact_by_uri_returns_none_for_missing(self, tracker):
@@ -200,12 +193,12 @@ class TestGetArtifactByUri:
         with tracker.start_run("run_multi_artifact", "test_model"):
             for i, f in enumerate(files):
                 art = tracker.log_artifact(str(f), key=f"artifact_{i}")
-                uris.append(art.container_uri)
+                uris.append(art.uri)
 
         for i, uri in enumerate(uris):
             found = tracker.get_artifact_by_uri(uri)
             assert found is not None
-            assert found.container_uri == uri
+            assert found.uri == uri
             assert found.key == f"artifact_{i}"
 
 
@@ -253,7 +246,7 @@ class TestLogH5Container:
             )
 
         assert container.key == "my_data"
-        assert container.container_uri.endswith("test_data.h5")
+        assert container.uri.endswith("test_data.h5")
         assert container.driver == "h5"
         assert len(tables) == 0
         assert any(art.driver == "h5" for art in tracker.last_run.outputs)

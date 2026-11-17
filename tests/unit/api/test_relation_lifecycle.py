@@ -17,7 +17,7 @@ def _csv_artifact(tmp_path: Path) -> Artifact:
     df = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
     path = tmp_path / "data.csv"
     df.to_csv(path, index=False)
-    return Artifact(key="data", container_uri=str(path), driver="csv")
+    return Artifact(key="data", uri=str(path), driver="csv")
 
 
 def test_load_relation_closes_connection(tmp_path):

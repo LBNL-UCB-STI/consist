@@ -143,12 +143,14 @@ def test_read_only_tracker_opens_db_read_only_and_skips_view_ddl(
 
     view_called = False
 
-    def fail_if_view_called(self: Tracker, schema: object) -> object:
+    def fail_if_view_called(self: Tracker, *args: object, **kwargs: object) -> object:
         nonlocal view_called
         view_called = True
-        raise AssertionError("Tracker.view() should not be called in read_only mode")
+        raise AssertionError(
+            "Tracker.create_view() should not be called in read_only mode"
+        )
 
-    monkeypatch.setattr(Tracker, "view", fail_if_view_called)
+    monkeypatch.setattr(Tracker, "create_view", fail_if_view_called)
 
     class DummySchema:
         pass
@@ -451,7 +453,7 @@ def test_to_df_enodata_fallback_when_materialization_raises(
 ) -> None:
     pq_path = tmp_path / "lazy_enodata.parquet"
     pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]}).to_parquet(pq_path, index=False)
-    artifact = Artifact(key="lazy", container_uri=str(pq_path), driver="parquet")
+    artifact = Artifact(key="lazy", uri=str(pq_path), driver="parquet")
 
     rel = consist.load(artifact, columns=["b"], nrows=2)
     assert isinstance(rel, duckdb.DuckDBPyRelation)

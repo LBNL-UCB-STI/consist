@@ -70,7 +70,7 @@ def test_netcdf_metadata_ingestion(tracker: Tracker, write_netcdf):
     3. Variable metadata is queryable
     4. No raw data is ingested (metadata-only strategy)
     """
-    if not tracker.engine:
+    if not tracker.db:
         pytest.skip("Database not configured")
 
     # 1. Create a NetCDF file
@@ -102,20 +102,17 @@ def test_netcdf_metadata_ingestion(tracker: Tracker, write_netcdf):
         tracker.ingest(artifact)
 
         # 4. Query the netcdf_catalog table
-        from sqlalchemy import text
-
         result = tracker.run_query(
-            text(
-                "SELECT variable_name FROM global_tables.climate_metadata "
-                "WHERE consist_run_id = :run_id"
-            ).bindparams(run_id=artifact.run_id)
+            "SELECT variable_name FROM global_tables.climate_metadata "
+            "WHERE consist_run_id = ?",
+            [artifact.run_id],
         )
 
         # 5. Verify metadata was ingested
         assert len(result) > 0, "Metadata should be ingested"
 
         # Extract metadata rows
-        var_names = [row[0] for row in result]
+        var_names = list(result)
         assert "temperature" in var_names
         assert "pressure" in var_names
         assert "lat" in var_names

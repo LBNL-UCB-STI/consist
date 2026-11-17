@@ -18,33 +18,34 @@ def test_public_package_exports_resolved_binding_contract() -> None:
 
 
 def test_artifact_identity_parses_self_describing_file_identity() -> None:
-    from consist.core.resolved_binding import ArtifactIdentity
+    from consist.core.resolved_binding import parse_strict_artifact_digest
 
-    identity = ArtifactIdentity.parse(f"sha256:file:{'a' * 64}")
+    identity = parse_strict_artifact_digest(f"sha256:file:{'a' * 64}")
 
-    assert identity.kind == "file"
-    assert identity.algorithm == "sha256"
+    assert identity.scheme == "sha256:file"
+    assert identity.hex == "a" * 64
     assert str(identity) == f"sha256:file:{'a' * 64}"
 
 
 def test_artifact_identity_rejects_unknown_or_malformed_contracts() -> None:
-    from consist.core.resolved_binding import ArtifactIdentity
+    from consist.core.resolved_binding import parse_strict_artifact_digest
 
     with pytest.raises(ValueError, match="unsupported"):
-        ArtifactIdentity.parse(f"sha256:unknown:{'a' * 64}")
-    with pytest.raises(ValueError, match="invalid"):
-        ArtifactIdentity.parse("sha256:file:not-a-digest")
+        parse_strict_artifact_digest(f"sha256:unknown:{'a' * 64}")
+    with pytest.raises(ValueError, match="Malformed digest"):
+        parse_strict_artifact_digest("sha256:file:not-a-digest")
 
 
 def test_artifact_identity_from_artifact_requires_explicit_semantics() -> None:
-    from consist.core.resolved_binding import ArtifactIdentity
+    from consist.core.resolved_binding import trusted_digest_from_artifact
+    from consist.digest import Digest
     from consist.models.artifact import Artifact
 
     artifact = Artifact(
         key="raw",
-        container_uri="data://raw.csv",
+        uri="data://raw.csv",
         driver="csv",
-        hash="a" * 64,
+        digest=Digest("sha256:file", "a" * 64),
         meta={
             "hash_semantics": {
                 "version": 1,
@@ -56,11 +57,11 @@ def test_artifact_identity_from_artifact_requires_explicit_semantics() -> None:
         },
     )
 
-    assert str(ArtifactIdentity.from_artifact(artifact)) == f"sha256:file:{'a' * 64}"
+    assert str(trusted_digest_from_artifact(artifact)) == f"sha256:file:{'a' * 64}"
 
-    artifact.meta = {}
+    untrusted = artifact.with_digest(Digest("caller_supplied_v1:sha256", "a" * 64))
     with pytest.raises(ValueError, match="immutable identity"):
-        ArtifactIdentity.from_artifact(artifact)
+        trusted_digest_from_artifact(untrusted)
 
 
 def test_resolved_binding_input_hash_composes_strict_and_ordinary_identity() -> None:
@@ -68,35 +69,33 @@ def test_resolved_binding_input_hash_composes_strict_and_ordinary_identity() -> 
     from consist.models.artifact import Artifact
 
     identity = IdentityManager()
-    ordinary = Artifact(
-        key="ordinary", container_uri="data://ordinary", driver="txt", run_id="a"
-    )
-    same = identity.compute_resolved_binding_input_hash(
-        ordinary_inputs=[ordinary],
+    ordinary = Artifact(key="ordinary", uri="data://ordinary", driver="txt", run_id="a")
+    same = identity.compute_input_hash(
+        inputs=[ordinary],
         strict_binding_identity="binding-a",
         signature_lookup=lambda run_id: {"a": "signature-a", "b": "signature-b"}[
             run_id
         ],
     )
-    assert same == identity.compute_resolved_binding_input_hash(
-        ordinary_inputs=[ordinary],
+    assert same == identity.compute_input_hash(
+        inputs=[ordinary],
         strict_binding_identity="binding-a",
         signature_lookup=lambda run_id: {"a": "signature-a", "b": "signature-b"}[
             run_id
         ],
     )
-    assert same != identity.compute_resolved_binding_input_hash(
-        ordinary_inputs=[ordinary],
+    assert same != identity.compute_input_hash(
+        inputs=[ordinary],
         strict_binding_identity="binding-b",
         signature_lookup=lambda run_id: {"a": "signature-a", "b": "signature-b"}[
             run_id
         ],
     )
-    assert same != identity.compute_resolved_binding_input_hash(
-        ordinary_inputs=[
+    assert same != identity.compute_input_hash(
+        inputs=[
             Artifact(
                 key="ordinary",
-                container_uri="data://ordinary",
+                uri="data://ordinary",
                 driver="txt",
                 run_id="b",
             )
@@ -107,15 +106,15 @@ def test_resolved_binding_input_hash_composes_strict_and_ordinary_identity() -> 
         ],
     )
     with pytest.raises(ValueError, match="must not be empty"):
-        identity.compute_resolved_binding_input_hash(
-            ordinary_inputs=[],
+        identity.compute_input_hash(
+            inputs=[],
             strict_binding_identity=" ",
         )
 
 
 def test_resolved_binding_separates_cache_identity_from_durable_evidence() -> None:
     from consist.core.resolved_binding import (
-        ArtifactIdentity,
+        parse_strict_artifact_digest,
         BoundArtifact,
         ResolvedBindingBuilder,
         TrackedArtifactLocator,
@@ -133,7 +132,7 @@ def test_resolved_binding_separates_cache_identity_from_durable_evidence() -> No
             parameter="linkstats",
             artifact=BoundArtifact(
                 artifact_id=artifact_id,
-                identity=ArtifactIdentity.parse(f"sha256:file:{'a' * 64}"),
+                identity=parse_strict_artifact_digest(f"sha256:file:{'a' * 64}"),
                 locator=TrackedArtifactLocator(artifact_id=artifact_id),
             ),
             destination=Path("inputs/linkstats.csv.gz"),
@@ -192,7 +191,7 @@ def test_resolved_binding_diagnostics_do_not_change_cache_identity() -> None:
 def test_resolved_binding_admission_evidence_does_not_change_cache_identity() -> None:
     from consist.core.resolved_binding import (
         AdmissionEvidence,
-        ArtifactIdentity,
+        parse_strict_artifact_digest,
         BoundArtifact,
         ResolvedBinding,
         ResolvedInput,
@@ -200,7 +199,7 @@ def test_resolved_binding_admission_evidence_does_not_change_cache_identity() ->
     )
 
     artifact_id = uuid.uuid4()
-    identity = ArtifactIdentity.parse(f"sha256:file:{'a' * 64}")
+    identity = parse_strict_artifact_digest(f"sha256:file:{'a' * 64}")
     common = {
         "schema_version": 1,
         "step_name": "beam",
@@ -249,7 +248,7 @@ def test_resolved_binding_admission_evidence_does_not_change_cache_identity() ->
 
 def test_strict_binding_invocation_context_preserves_duplicate_artifact_ids() -> None:
     from consist.core.resolved_binding import (
-        ArtifactIdentity,
+        parse_strict_artifact_digest,
         BoundArtifact,
         ResolvedBindingBuilder,
         TrackedArtifactLocator,
@@ -259,7 +258,7 @@ def test_strict_binding_invocation_context_preserves_duplicate_artifact_ids() ->
     )
 
     artifact_id = uuid.uuid4()
-    identity = ArtifactIdentity.parse(f"sha256:file:{'a' * 64}")
+    identity = parse_strict_artifact_digest(f"sha256:file:{'a' * 64}")
     binding = (
         ResolvedBindingBuilder(
             step_name="consume",
@@ -334,7 +333,7 @@ def test_strict_binding_invocation_context_rejects_reversed_distinct_artifact_id
     None
 ):
     from consist.core.resolved_binding import (
-        ArtifactIdentity,
+        parse_strict_artifact_digest,
         BoundArtifact,
         ResolvedBindingBuilder,
         TrackedArtifactLocator,
@@ -352,7 +351,7 @@ def test_strict_binding_invocation_context_rejects_reversed_distinct_artifact_id
             parameter="first",
             artifact=BoundArtifact(
                 artifact_id=first_id,
-                identity=ArtifactIdentity.parse(f"sha256:file:{'a' * 64}"),
+                identity=parse_strict_artifact_digest(f"sha256:file:{'a' * 64}"),
                 locator=TrackedArtifactLocator(artifact_id=first_id),
             ),
             destination=Path("inputs/first.txt"),
@@ -362,7 +361,7 @@ def test_strict_binding_invocation_context_rejects_reversed_distinct_artifact_id
             parameter="second",
             artifact=BoundArtifact(
                 artifact_id=second_id,
-                identity=ArtifactIdentity.parse(f"sha256:file:{'c' * 64}"),
+                identity=parse_strict_artifact_digest(f"sha256:file:{'c' * 64}"),
                 locator=TrackedArtifactLocator(artifact_id=second_id),
             ),
             destination=Path("inputs/second.txt"),
@@ -382,13 +381,14 @@ def test_strict_binding_invocation_context_rejects_reversed_distinct_artifact_id
 
 def test_bind_tracked_artifact_derives_the_strict_artifact_contract() -> None:
     from consist.core.resolved_binding import ResolvedBindingBuilder
+    from consist.digest import Digest
     from consist.models.artifact import Artifact
 
     artifact = Artifact(
         key="warmstart",
-        container_uri="data://linkstats.parquet",
+        uri="data://linkstats.parquet",
         driver="parquet",
-        hash="a" * 64,
+        digest=Digest("sha256:file", "a" * 64),
         meta={
             "hash_semantics": {
                 "version": 1,
@@ -510,7 +510,7 @@ def test_strict_binding_rejects_a_preflight_identity_name_mismatch(
 
 def test_resolved_binding_rejects_locator_for_a_different_artifact() -> None:
     from consist.core.resolved_binding import (
-        ArtifactIdentity,
+        parse_strict_artifact_digest,
         BoundArtifact,
         ResolvedBindingBuilder,
         TrackedArtifactLocator,
@@ -525,7 +525,7 @@ def test_resolved_binding_rejects_locator_for_a_different_artifact() -> None:
             parameter="linkstats",
             artifact=BoundArtifact(
                 artifact_id=uuid.uuid4(),
-                identity=ArtifactIdentity.parse(f"sha256:file:{'a' * 64}"),
+                identity=parse_strict_artifact_digest(f"sha256:file:{'a' * 64}"),
                 locator=TrackedArtifactLocator(artifact_id=uuid.uuid4()),
             ),
             destination=Path("inputs/linkstats.csv.gz"),
@@ -537,7 +537,7 @@ def test_resolved_binding_allows_benign_parameter_aliasing_to_same_destination()
     None
 ):
     from consist.core.resolved_binding import (
-        ArtifactIdentity,
+        parse_strict_artifact_digest,
         BoundArtifact,
         ResolvedBindingBuilder,
         TrackedArtifactLocator,
@@ -546,7 +546,7 @@ def test_resolved_binding_allows_benign_parameter_aliasing_to_same_destination()
     artifact_id = uuid.uuid4()
     artifact = BoundArtifact(
         artifact_id=artifact_id,
-        identity=ArtifactIdentity.parse(f"sha256:file:{'a' * 64}"),
+        identity=parse_strict_artifact_digest(f"sha256:file:{'a' * 64}"),
         locator=TrackedArtifactLocator(artifact_id=artifact_id),
     )
     builder = ResolvedBindingBuilder(
@@ -593,7 +593,7 @@ def test_resolved_binding_allows_benign_parameter_aliasing_to_same_destination()
 
 def test_resolved_binding_rejects_duplicate_execution_destinations() -> None:
     from consist.core.resolved_binding import (
-        ArtifactIdentity,
+        parse_strict_artifact_digest,
         BoundArtifact,
         ResolvedBindingBuilder,
         TrackedArtifactLocator,
@@ -603,12 +603,12 @@ def test_resolved_binding_rejects_duplicate_execution_destinations() -> None:
     second_id = uuid.uuid4()
     first_artifact = BoundArtifact(
         artifact_id=first_id,
-        identity=ArtifactIdentity.parse(f"sha256:file:{'a' * 64}"),
+        identity=parse_strict_artifact_digest(f"sha256:file:{'a' * 64}"),
         locator=TrackedArtifactLocator(artifact_id=first_id),
     )
     second_artifact = BoundArtifact(
         artifact_id=second_id,
-        identity=ArtifactIdentity.parse(f"sha256:file:{'c' * 64}"),
+        identity=parse_strict_artifact_digest(f"sha256:file:{'c' * 64}"),
         locator=TrackedArtifactLocator(artifact_id=second_id),
     )
     builder = ResolvedBindingBuilder(
@@ -633,7 +633,7 @@ def test_resolved_binding_rejects_duplicate_execution_destinations() -> None:
 
 def test_direct_resolved_binding_rejects_input_key_mismatch() -> None:
     from consist.core.resolved_binding import (
-        ArtifactIdentity,
+        parse_strict_artifact_digest,
         BoundArtifact,
         ResolvedBinding,
         ResolvedInput,
@@ -651,7 +651,9 @@ def test_direct_resolved_binding_rejects_input_key_mismatch() -> None:
                     parameter="actual",
                     artifact=BoundArtifact(
                         artifact_id=artifact_id,
-                        identity=ArtifactIdentity.parse(f"sha256:file:{'a' * 64}"),
+                        identity=parse_strict_artifact_digest(
+                            f"sha256:file:{'a' * 64}"
+                        ),
                         locator=TrackedArtifactLocator(artifact_id=artifact_id),
                     ),
                     destination=Path("inputs/raw.csv"),
@@ -665,7 +667,7 @@ def test_direct_resolved_binding_rejects_input_key_mismatch() -> None:
 
 def test_direct_resolved_binding_rejects_empty_parameter() -> None:
     from consist.core.resolved_binding import (
-        ArtifactIdentity,
+        parse_strict_artifact_digest,
         BoundArtifact,
         ResolvedBinding,
         ResolvedInput,
@@ -683,7 +685,9 @@ def test_direct_resolved_binding_rejects_empty_parameter() -> None:
                     parameter="",
                     artifact=BoundArtifact(
                         artifact_id=artifact_id,
-                        identity=ArtifactIdentity.parse(f"sha256:file:{'a' * 64}"),
+                        identity=parse_strict_artifact_digest(
+                            f"sha256:file:{'a' * 64}"
+                        ),
                         locator=TrackedArtifactLocator(artifact_id=artifact_id),
                     ),
                     destination=Path("inputs/raw.csv"),
@@ -698,7 +702,7 @@ def test_direct_resolved_binding_rejects_empty_parameter() -> None:
 def test_direct_resolved_binding_freezes_directory_manifest(tmp_path: Path) -> None:
     from consist.core.directory_artifacts import build_directory_manifest
     from consist.core.resolved_binding import (
-        ArtifactIdentity,
+        parse_strict_artifact_digest,
         BoundArtifact,
         ResolvedBinding,
         ResolvedInput,
@@ -719,7 +723,7 @@ def test_direct_resolved_binding_freezes_directory_manifest(tmp_path: Path) -> N
                 parameter="directory",
                 artifact=BoundArtifact(
                     artifact_id=artifact_id,
-                    identity=ArtifactIdentity.parse(
+                    identity=parse_strict_artifact_digest(
                         f"sha256:manifest-v1:{manifest['tree_hash']}"
                     ),
                     locator=TrackedArtifactLocator(artifact_id=artifact_id),
@@ -744,14 +748,14 @@ def test_direct_resolved_binding_freezes_directory_manifest(tmp_path: Path) -> N
 def test_resolved_binding_rejects_mismatched_admission_identity() -> None:
     from consist.core.resolved_binding import (
         AdmissionEvidence,
-        ArtifactIdentity,
+        parse_strict_artifact_digest,
         BoundArtifact,
         ResolvedBindingBuilder,
         TrackedArtifactLocator,
     )
 
-    observed = ArtifactIdentity.parse(f"sha256:file:{'a' * 64}")
-    different = ArtifactIdentity.parse(f"sha256:file:{'b' * 64}")
+    observed = parse_strict_artifact_digest(f"sha256:file:{'a' * 64}")
+    different = parse_strict_artifact_digest(f"sha256:file:{'b' * 64}")
     artifact_id = uuid.uuid4()
     builder = ResolvedBindingBuilder(
         step_name="beam",
@@ -782,13 +786,13 @@ def test_execution_snapshot_preserves_verified_file_after_source_mutates(
     tmp_path: Path,
 ) -> None:
     from consist.core.resolved_binding import (
-        ArtifactIdentity,
+        parse_strict_artifact_digest,
         create_execution_snapshot,
     )
 
     source = tmp_path / "external.csv"
     source.write_bytes(b"accepted bytes")
-    identity = ArtifactIdentity.parse(
+    identity = parse_strict_artifact_digest(
         "sha256:file:af77f61c6d49263ab0a0e93e4f4245d7cc682159eb52579e04771271b322c7c7"
     )
     destination = tmp_path / "run-owned" / "external.csv"
@@ -801,13 +805,13 @@ def test_execution_snapshot_preserves_verified_file_after_source_mutates(
 
 def test_execution_snapshot_rejects_source_equals_destination(tmp_path: Path) -> None:
     from consist.core.resolved_binding import (
-        ArtifactIdentity,
+        parse_strict_artifact_digest,
         create_execution_snapshot,
     )
 
     source = tmp_path / "external.csv"
     source.write_bytes(b"accepted bytes")
-    identity = ArtifactIdentity.parse(
+    identity = parse_strict_artifact_digest(
         "sha256:file:af77f61c6d49263ab0a0e93e4f4245d7cc682159eb52579e04771271b322c7c7"
     )
 
@@ -818,7 +822,7 @@ def test_execution_snapshot_rejects_source_equals_destination(tmp_path: Path) ->
 def test_execution_snapshot_validates_manifest_backed_directory(tmp_path: Path) -> None:
     from consist.core.directory_artifacts import build_directory_manifest
     from consist.core.resolved_binding import (
-        ArtifactIdentity,
+        parse_strict_artifact_digest,
         create_execution_snapshot,
     )
 
@@ -826,7 +830,9 @@ def test_execution_snapshot_validates_manifest_backed_directory(tmp_path: Path) 
     source.mkdir()
     (source / "chunk").write_bytes(b"immutable chunk")
     manifest = build_directory_manifest(source)
-    identity = ArtifactIdentity.parse(f"sha256:manifest-v1:{manifest['tree_hash']}")
+    identity = parse_strict_artifact_digest(
+        f"sha256:manifest-v1:{manifest['tree_hash']}"
+    )
     destination = tmp_path / "run-owned" / "source.zarr"
 
     create_execution_snapshot(
@@ -845,7 +851,7 @@ def test_scenario_runs_resolved_binding_from_verified_snapshot(
 ) -> None:
     from consist import ExecutionOptions
     from consist.core.resolved_binding import (
-        ArtifactIdentity,
+        trusted_digest_from_artifact,
         BoundArtifact,
         ResolvedBindingBuilder,
         TrackedArtifactLocator,
@@ -872,7 +878,7 @@ def test_scenario_runs_resolved_binding_from_verified_snapshot(
             parameter="payload",
             artifact=BoundArtifact(
                 artifact_id=artifact.id,
-                identity=ArtifactIdentity.from_artifact(artifact),
+                identity=trusted_digest_from_artifact(artifact),
                 locator=TrackedArtifactLocator(artifact_id=artifact.id),
             ),
             destination=Path("inputs/raw.txt"),
@@ -897,7 +903,7 @@ def test_strict_scenario_uses_execution_snapshot_helper(
 ) -> None:
     from consist import ExecutionOptions
     from consist.core.resolved_binding import (
-        ArtifactIdentity,
+        trusted_digest_from_artifact,
         BoundArtifact,
         ResolvedBindingBuilder,
         TrackedArtifactLocator,
@@ -921,7 +927,7 @@ def test_strict_scenario_uses_execution_snapshot_helper(
             parameter="raw",
             artifact=BoundArtifact(
                 artifact_id=artifact.id,
-                identity=ArtifactIdentity.from_artifact(artifact),
+                identity=trusted_digest_from_artifact(artifact),
                 locator=TrackedArtifactLocator(artifact_id=artifact.id),
             ),
             destination=Path("inputs/raw.txt"),
@@ -1192,7 +1198,7 @@ def test_scenario_rejects_resolved_binding_for_wrong_callable(
 ) -> None:
     from consist import ExecutionOptions
     from consist.core.resolved_binding import (
-        ArtifactIdentity,
+        trusted_digest_from_artifact,
         BoundArtifact,
         ResolvedBindingBuilder,
         TrackedArtifactLocator,
@@ -1219,7 +1225,7 @@ def test_scenario_rejects_resolved_binding_for_wrong_callable(
             parameter="raw",
             artifact=BoundArtifact(
                 artifact_id=artifact.id,
-                identity=ArtifactIdentity.from_artifact(artifact),
+                identity=trusted_digest_from_artifact(artifact),
                 locator=TrackedArtifactLocator(artifact_id=artifact.id),
             ),
             destination=Path("inputs/raw.txt"),
@@ -1243,7 +1249,7 @@ def test_scenario_records_each_strict_binding_invocation(
 ) -> None:
     from consist import ExecutionOptions
     from consist.core.resolved_binding import (
-        ArtifactIdentity,
+        trusted_digest_from_artifact,
         BoundArtifact,
         ResolvedBindingBuilder,
         TrackedArtifactLocator,
@@ -1267,7 +1273,7 @@ def test_scenario_records_each_strict_binding_invocation(
             parameter="raw",
             artifact=BoundArtifact(
                 artifact_id=artifact.id,
-                identity=ArtifactIdentity.from_artifact(artifact),
+                identity=trusted_digest_from_artifact(artifact),
                 locator=TrackedArtifactLocator(artifact_id=artifact.id),
             ),
             destination=Path("inputs/raw.txt"),
@@ -1381,13 +1387,12 @@ def test_strict_binding_reuses_across_equivalent_selected_producers(
     ] == str(second_artifact.id)
     for result in (first, second, third):
         identity = result.run.identity_summary["input_identity"]
-        assert identity["mode"] == "action-v2"
-        assert identity["version"] == 2
-        assert identity["code"] == {
-            "version": 1,
+        assert identity["version"] == 1
+        assert result.run.identity_summary["code_identity"] == {
             "mode": "repo_git",
-            "digest": "static_test_hash",
+            "extra_deps": None,
         }
+        assert result.run.git_hash == "static_test_hash"
         assert identity["strict_input_count"] == 1
         assert identity["ordinary_input_count"] == 0
         assert identity["strict_binding_identity"] == second_binding.identity_digest()
@@ -1493,15 +1498,14 @@ def test_strict_binding_reuses_attested_ordinary_dependency_content(
         {
             "kind": "dependency",
             "role": 0,
-            "mode": "content-v1",
-            "value": f"sha256:file:{first_dependency.hash}",
+            "mode": "content",
+            "value": str(first_dependency.digest),
             "artifact_id": str(first_dependency.id),
             "selector": {
                 "driver": "txt",
-                "table_path": None,
-                "array_path": None,
+                "member": None,
             },
-            "evidence": {"identity_strength": "content-v1"},
+            "evidence": {"identity_strength": "content"},
         }
     ]
 
@@ -1573,7 +1577,7 @@ def test_strict_binding_contract_partitions_cache_reuse(
 ) -> None:
     from consist import ExecutionOptions
     from consist.core.resolved_binding import (
-        ArtifactIdentity,
+        trusted_digest_from_artifact,
         BoundArtifact,
         ResolvedBindingBuilder,
         TrackedArtifactLocator,
@@ -1598,7 +1602,7 @@ def test_strict_binding_contract_partitions_cache_reuse(
                 parameter="raw",
                 artifact=BoundArtifact(
                     artifact_id=artifact.id,
-                    identity=ArtifactIdentity.from_artifact(artifact),
+                    identity=trusted_digest_from_artifact(artifact),
                     locator=TrackedArtifactLocator(artifact_id=artifact.id),
                 ),
                 destination=destination,
@@ -1631,7 +1635,7 @@ def test_failed_strict_binding_invocation_persists_evidence(
 ) -> None:
     from consist import ExecutionOptions
     from consist.core.resolved_binding import (
-        ArtifactIdentity,
+        trusted_digest_from_artifact,
         BoundArtifact,
         ResolvedBindingBuilder,
         TrackedArtifactLocator,
@@ -1655,7 +1659,7 @@ def test_failed_strict_binding_invocation_persists_evidence(
             parameter="raw",
             artifact=BoundArtifact(
                 artifact_id=artifact.id,
-                identity=ArtifactIdentity.from_artifact(artifact),
+                identity=trusted_digest_from_artifact(artifact),
                 locator=TrackedArtifactLocator(artifact_id=artifact.id),
             ),
             destination=Path("inputs/raw.txt"),
@@ -1685,7 +1689,7 @@ def test_strict_binding_refuses_execution_when_evidence_persistence_fails(
 ) -> None:
     from consist import ExecutionOptions
     from consist.core.resolved_binding import (
-        ArtifactIdentity,
+        trusted_digest_from_artifact,
         BoundArtifact,
         ResolvedBindingBuilder,
         TrackedArtifactLocator,
@@ -1712,7 +1716,7 @@ def test_strict_binding_refuses_execution_when_evidence_persistence_fails(
             parameter="raw",
             artifact=BoundArtifact(
                 artifact_id=artifact.id,
-                identity=ArtifactIdentity.from_artifact(artifact),
+                identity=trusted_digest_from_artifact(artifact),
                 locator=TrackedArtifactLocator(artifact_id=artifact.id),
             ),
             destination=Path("inputs/raw.txt"),

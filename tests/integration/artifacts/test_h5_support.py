@@ -63,7 +63,7 @@ def test_h5_auto_discovery(tracker: Tracker):
             )
             assert child.parent_artifact_id == container.id
             assert child.meta["parent_id"] == str(container.id)
-            assert child.driver == "h5_table"
+            assert child.driver == "h5"
 
     # 3. Verify Persistence
     saved_children = tracker.get_artifacts_for_run(container.run_id).outputs

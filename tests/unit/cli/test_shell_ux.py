@@ -123,7 +123,9 @@ def test_shell_preview_picker_selects_artifact_in_tty_mode(tmp_path) -> None:
         key="artifact-one",
         driver="csv",
         run_id=None,
-        container_uri="inputs://data/file.csv",
+        uri="inputs://data/file.csv",
+        member=None,
+        digest=None,
         meta={},
     )
 
@@ -193,6 +195,7 @@ def test_shell_completions_include_aliases_flags_and_dynamic_values(tmp_path) ->
     assert shell.complete_db("i", "db i", 3, 4) == ["inspect"]
     assert shell.complete_schema("c", "schema c", 7, 8) == ["capture-file"]
     assert shell.complete_views("c", "views c", 6, 7) == ["create"]
+    assert shell.complete_views("s", "views s", 6, 7) == ["suggest"]
     assert shell.complete_cli("d", "cli d", 4, 5) == ["db"]
     assert shell.complete_consist("s", "consist s", 8, 9) == [
         "search",
@@ -201,6 +204,7 @@ def test_shell_completions_include_aliases_flags_and_dynamic_values(tmp_path) ->
         "summary",
         "show",
         "schema",
+        "schemas",
     ]
 
 
@@ -226,7 +230,7 @@ def test_shell_completion_falls_back_to_empty_on_query_failure(tmp_path) -> None
     ):
         shell = ConsistShell(tracker)
 
-    with patch("consist.cli._tracker_session", side_effect=RuntimeError("db down")):
+    with patch("consist.cli._require_db", side_effect=RuntimeError("db down")):
         assert shell.complete_show("", "show ", 5, 5) == []
         assert shell.complete_artifacts("", "artifacts ", 10, 10) == []
         assert shell.complete_preview("", "preview ", 8, 8) == []
@@ -277,11 +281,13 @@ def test_shell_hash_lookup_reports_run_scoped_miss(tmp_path, capsys) -> None:
     ):
         shell = ConsistShell(tracker)
 
-    with patch("consist.cli._tracker_session") as tracker_session:
-        session = tracker_session.return_value.__enter__.return_value
-        session.exec.return_value.all.return_value = []
+    with patch("consist.cli._require_db") as require_db:
+        require_db.return_value.find_artifacts_by_digest_prefix.return_value = []
         resolved = shell._lookup_artifact_by_hash_prefix(
             "deadbeef", command_name="preview", run_id="run-123"
+        )
+        require_db.return_value.find_artifacts_by_digest_prefix.assert_called_once_with(
+            "deadbeef", run_id="run-123", limit=6
         )
 
     out = capsys.readouterr().out
@@ -302,11 +308,13 @@ def test_shell_hash_lookup_does_not_inherit_last_artifact_run_scope(
         shell = ConsistShell(tracker)
     shell._last_artifact_run_id = "run-123"
 
-    with patch("consist.cli._tracker_session") as tracker_session:
-        session = tracker_session.return_value.__enter__.return_value
-        session.exec.return_value.all.return_value = []
+    with patch("consist.cli._require_db") as require_db:
+        require_db.return_value.find_artifacts_by_digest_prefix.return_value = []
         resolved = shell._lookup_artifact_by_hash_prefix(
             "deadbeef", command_name="preview"
+        )
+        require_db.return_value.find_artifacts_by_digest_prefix.assert_called_once_with(
+            "deadbeef", run_id=None, limit=6
         )
 
     out = capsys.readouterr().out
@@ -327,22 +335,21 @@ def test_shell_hash_lookup_reports_ambiguity_with_candidates(tmp_path, capsys) -
 
     matches = [
         SimpleNamespace(
-            hash="deadbeef001",
+            digest="deadbeef001",
             key="trips_2018_it0",
             id="artifact-1",
             run_id="run-a",
         ),
         SimpleNamespace(
-            hash="deadbeef002",
+            digest="deadbeef002",
             key="trips_2018_it1",
             id="artifact-2",
             run_id="run-a",
         ),
     ]
 
-    with patch("consist.cli._tracker_session") as tracker_session:
-        session = tracker_session.return_value.__enter__.return_value
-        session.exec.return_value.all.return_value = matches
+    with patch("consist.cli._require_db") as require_db:
+        require_db.return_value.find_artifacts_by_digest_prefix.return_value = matches
         resolved = shell._lookup_artifact_by_hash_prefix(
             "deadbeef", command_name="schema_profile", run_id="run-a"
         )
@@ -628,11 +635,11 @@ def test_shell_runs_json_mode_uses_output_json(tmp_path) -> None:
     )
 
     with (
-        patch("consist.cli._tracker_session") as tracker_session,
+        patch("consist.cli._require_db") as require_db,
         patch("consist.cli.queries.get_runs", return_value=[fake_run]),
         patch("consist.cli.output_json") as output_json_mock,
     ):
-        tracker_session.return_value.__enter__.return_value = MagicMock()
+        require_db.return_value = MagicMock()
         shell.do_runs("--json")
 
     output_json_mock.assert_called_once()
@@ -664,7 +671,9 @@ def test_shell_preview_accepts_cached_artifact_ref(tmp_path) -> None:
         key="artifact-key",
         driver="csv",
         run_id=None,
-        container_uri="inputs://data/file.csv",
+        uri="inputs://data/file.csv",
+        member=None,
+        digest=None,
         meta={},
     )
     with (
@@ -690,7 +699,9 @@ def test_shell_preview_uses_cached_artifact_run_context(tmp_path) -> None:
         key="artifact-key",
         driver="csv",
         run_id="run-123",
-        container_uri="data://outputs/file.csv",
+        uri="data://outputs/file.csv",
+        member=None,
+        digest=None,
         meta={},
     )
     with (
@@ -727,7 +738,9 @@ def test_shell_schema_profile_uses_cached_artifact_run_context(tmp_path) -> None
         key="artifact-key",
         driver="csv",
         run_id="run-123",
-        container_uri="data://outputs/file.csv",
+        uri="data://outputs/file.csv",
+        member=None,
+        digest=None,
         meta={},
     )
     tracker.db = None
@@ -765,7 +778,9 @@ def test_shell_preview_renders_artifact_set_without_loading_parent(tmp_path) -> 
         key="annual",
         driver="artifact_set",
         run_id="run-1",
-        container_uri="./outputs/annual",
+        uri="./outputs/annual",
+        member=None,
+        digest=None,
         meta={"artifact_set": True},
     )
     tracker.get_artifact.return_value = parent
@@ -792,7 +807,9 @@ def test_shell_members_lists_artifact_set_children(tmp_path, capsys) -> None:
         key="annual",
         driver="artifact_set",
         run_id="run-1",
-        container_uri="./outputs/annual",
+        uri="./outputs/annual",
+        member=None,
+        digest=None,
         meta={"artifact_set": True},
     )
     tracker.get_artifact.return_value = parent
@@ -823,7 +840,9 @@ def test_shell_manifest_previews_artifact_set_manifest(tmp_path) -> None:
         key="annual",
         driver="artifact_set",
         run_id="run-1",
-        container_uri="./outputs/annual",
+        uri="./outputs/annual",
+        member=None,
+        digest=None,
         meta={"artifact_set": True, "manifest_artifact_id": "manifest-id"},
     )
     manifest = SimpleNamespace(
@@ -831,7 +850,9 @@ def test_shell_manifest_previews_artifact_set_manifest(tmp_path) -> None:
         key="annual_manifest",
         driver="json",
         run_id="run-1",
-        container_uri="./outputs/annual.output_set_manifest.json",
+        uri="./outputs/annual.output_set_manifest.json",
+        member=None,
+        digest=None,
         meta={"output_set_manifest": True},
     )
     tracker.get_artifact.side_effect = [parent, manifest]
