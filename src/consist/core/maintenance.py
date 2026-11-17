@@ -602,49 +602,48 @@ class DatabaseMaintenance:
         ]
 
         with self.db.transaction():
-            if self.db.has_table("run_coupler_snapshot"):
-                if selected_run_ids and selected_orphaned_artifact_ids:
-                    self.db.execute(
-                        """
-                        DELETE FROM run_coupler_snapshot
-                        WHERE run_id IN (SELECT UNNEST(?))
-                           OR scenario_run_id IN (SELECT UNNEST(?))
-                           OR CAST(artifact_id AS VARCHAR) IN (SELECT UNNEST(?))
-                        """,
-                        [
-                            selected_run_ids,
-                            selected_run_ids,
-                            selected_orphaned_artifact_ids,
-                        ],
-                    )
-                elif selected_run_ids:
-                    self.db.execute(
-                        """
-                        DELETE FROM run_coupler_snapshot
-                        WHERE run_id IN (SELECT UNNEST(?))
-                           OR scenario_run_id IN (SELECT UNNEST(?))
-                        """,
-                        [selected_run_ids, selected_run_ids],
-                    )
-                elif selected_orphaned_artifact_ids:
-                    self.db.execute(
-                        """
-                        DELETE FROM run_coupler_snapshot
-                        WHERE CAST(artifact_id AS VARCHAR) IN (SELECT UNNEST(?))
-                        """,
-                        [selected_orphaned_artifact_ids],
-                    )
-                if selected_run_ids:
-                    self.db.execute(
-                        """
-                        UPDATE run_coupler_snapshot
-                        SET producer_run_id = NULL
-                        WHERE producer_run_id IN (SELECT UNNEST(?))
-                        """,
-                        [selected_run_ids],
-                    )
+            if selected_run_ids and selected_orphaned_artifact_ids:
+                self.db.execute(
+                    """
+                    DELETE FROM run_coupler_snapshot
+                    WHERE run_id IN (SELECT UNNEST(?))
+                       OR scenario_run_id IN (SELECT UNNEST(?))
+                       OR CAST(artifact_id AS VARCHAR) IN (SELECT UNNEST(?))
+                    """,
+                    [
+                        selected_run_ids,
+                        selected_run_ids,
+                        selected_orphaned_artifact_ids,
+                    ],
+                )
+            elif selected_run_ids:
+                self.db.execute(
+                    """
+                    DELETE FROM run_coupler_snapshot
+                    WHERE run_id IN (SELECT UNNEST(?))
+                       OR scenario_run_id IN (SELECT UNNEST(?))
+                    """,
+                    [selected_run_ids, selected_run_ids],
+                )
+            elif selected_orphaned_artifact_ids:
+                self.db.execute(
+                    """
+                    DELETE FROM run_coupler_snapshot
+                    WHERE CAST(artifact_id AS VARCHAR) IN (SELECT UNNEST(?))
+                    """,
+                    [selected_orphaned_artifact_ids],
+                )
+            if selected_run_ids:
+                self.db.execute(
+                    """
+                    UPDATE run_coupler_snapshot
+                    SET producer_run_id = NULL
+                    WHERE producer_run_id IN (SELECT UNNEST(?))
+                    """,
+                    [selected_run_ids],
+                )
 
-            if selected_run_ids and self.db.has_table("run_binding_invocation"):
+            if selected_run_ids:
                 self.db.execute(
                     """
                     DELETE FROM run_binding_invocation
@@ -3002,16 +3001,15 @@ class DatabaseMaintenance:
         links = list(
             self.db.fetchall("SELECT artifact_id, run_id FROM run_artifact_link")
         )
-        if self.db.has_table("run_coupler_snapshot"):
-            links.extend(
-                self.db.fetchall(
-                    """
-                    SELECT artifact_id, run_id FROM run_coupler_snapshot
-                    UNION ALL
-                    SELECT artifact_id, scenario_run_id FROM run_coupler_snapshot
-                    """
-                )
+        links.extend(
+            self.db.fetchall(
+                """
+                SELECT artifact_id, run_id FROM run_coupler_snapshot
+                UNION ALL
+                SELECT artifact_id, scenario_run_id FROM run_coupler_snapshot
+                """
             )
+        )
 
         linked_runs_by_artifact: dict[uuid.UUID, set[str]] = {}
         for artifact_id, run_id in links:

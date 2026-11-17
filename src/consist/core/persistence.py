@@ -4365,16 +4365,12 @@ class DatabaseManager:
 
         ordered_sids = sorted(resolved_schema_ids)
         sid_ph = ", ".join("?" for _ in ordered_sids)
-        if self.has_table("artifact_schema_observation"):
-            clauses: list[str] = [
-                f"(EXISTS (SELECT 1 FROM artifact_schema_observation obs "
-                f"WHERE obs.artifact_id = a.id AND obs.schema_id IN ({sid_ph})) "
-                f"OR json_extract_string(a.meta, '$.schema_id') IN ({sid_ph}))"
-            ]
-            params: list[Any] = list(ordered_sids) + list(ordered_sids)
-        else:
-            clauses = [f"json_extract_string(a.meta, '$.schema_id') IN ({sid_ph})"]
-            params = list(ordered_sids)
+        clauses: list[str] = [
+            f"(EXISTS (SELECT 1 FROM artifact_schema_observation obs "
+            f"WHERE obs.artifact_id = a.id AND obs.schema_id IN ({sid_ph})) "
+            f"OR json_extract_string(a.meta, '$.schema_id') IN ({sid_ph}))"
+        ]
+        params: list[Any] = list(ordered_sids) + list(ordered_sids)
 
         if key is not None:
             clauses.append("a.key = ?")
@@ -4462,29 +4458,16 @@ class DatabaseManager:
         limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """Return distinct artifact keys, drivers, schema IDs, and run counts."""
-        if not self.has_table("artifact"):
-            return []
-
-        has_obs = self.has_table("artifact_schema_observation")
-        clauses: list[str] = []
+        schema_expr = (
+            "COALESCE(obs.schema_id, json_extract_string(a.meta, '$.schema_id'))"
+        )
+        from_clause = (
+            "FROM artifact a "
+            "LEFT JOIN artifact_schema_observation obs ON obs.artifact_id = a.id "
+            "LEFT JOIN run_artifact_link l ON l.artifact_id = a.id"
+        )
+        clauses: list[str] = [f"{schema_expr} IS NOT NULL AND {schema_expr} != ''"]
         params: list[Any] = []
-
-        if has_obs:
-            schema_expr = (
-                "COALESCE(obs.schema_id, json_extract_string(a.meta, '$.schema_id'))"
-            )
-            from_clause = (
-                "FROM artifact a "
-                "LEFT JOIN artifact_schema_observation obs ON obs.artifact_id = a.id "
-                "LEFT JOIN run_artifact_link l ON l.artifact_id = a.id"
-            )
-        else:
-            schema_expr = "json_extract_string(a.meta, '$.schema_id')"
-            from_clause = (
-                "FROM artifact a LEFT JOIN run_artifact_link l ON l.artifact_id = a.id"
-            )
-
-        clauses.append(f"{schema_expr} IS NOT NULL AND {schema_expr} != ''")
 
         if key is not None:
             clauses.append("a.key = ?")
