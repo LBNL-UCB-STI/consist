@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog], and this project adheres to
 [Semantic Versioning].
 
-## [0.5.0] - 2026-11-16
+## [0.5.0] - 2026-11-18
 
 ### Added
 
@@ -68,6 +68,13 @@ The format is based on [Keep a Changelog], and this project adheres to
   DuckDB 2.0 compatibility by @zneedell
   ([#323](https://github.com/LBNL-UCB-STI/consist/pull/323),
   [#324](https://github.com/LBNL-UCB-STI/consist/pull/324)).
+- Populate `content_hash` on `GtfsSchema` and `canonicalize_gtfs_bundle` rows so
+  `dedupe_on_hash=True` hits `_ingest_cache_hit` instead of re-ingesting
+  unchanged GTFS tables on `apply_config_plan` / `canonicalize_gtfs` runs, add
+  `INFO` progress logging before config table ingests, and update removed
+  `db_session()` error messages to reference `tracker.db.connection` /
+  `tracker.db.transaction()` by @zneedell
+  ([#329](https://github.com/LBNL-UCB-STI/consist/pull/329)).
 
 ## [0.4.2] - 2026-11-09
 
