@@ -384,7 +384,9 @@ inside the step body) over manual post-run archive loops. Both declarative
 run-completion archiving and `tracker.archive_run_outputs(...)` automatically
 skip virtual unbacked ingested tables when `keys=None` and sync updated
 `recovery_roots` and `abs_path` back onto live `RunResult.outputs` and scenario
-`coupler` artifacts.
+`coupler` artifacts. Keep `RunCompletionArchivePolicy.archive_root` step-scoped
+(for example `consist-recovery/<step_name>`): re-archiving into an existing
+root atomically replaces stale outputs in that root.
 
 Archive reporting is a bounded operational surface: use
 `archive_run_output_files(...)` only when a workflow needs a file-only copy,
