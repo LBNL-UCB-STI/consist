@@ -159,4 +159,4 @@ rules = { "invalid-assignment" = "ignore" }
 
 [[tool.ty.overrides]]
 include = ["tests/**"]
-rules = { "invalid-argument-type" = "ignore", "invalid-assignment" = "ignore", "not-subscriptable" = "ignore", "possibly-missing-attribute" = "ignore", "unresolved-attribute" = "ignore" }
+rules = { "invalid-argument-type" = "ignore", "invalid-assignment" = "ignore", "not-subscriptable" = "ignore", "missing-union-attribute" = "ignore", "missing-attribute" = "ignore" }

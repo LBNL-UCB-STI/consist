@@ -306,7 +306,7 @@ def _validate_select_only_sql(sql: str) -> None:
         stmts = duckdb.extract_statements(sql)
     except duckdb.Error as exc:
         raise ValueError(f"Invalid SQL query: {exc}") from exc
-    if not (len(stmts) == 1 and stmts[0].type == duckdb.StatementType.SELECT):  # ty: ignore[unresolved-attribute]
+    if not (len(stmts) == 1 and stmts[0].type == duckdb.StatementType.SELECT):  # ty: ignore[missing-attribute]
         raise ValueError(
             "query_df, query_rows, and run_query only permit a single read-only SELECT statement"
         )
