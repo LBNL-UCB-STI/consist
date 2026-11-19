@@ -2132,11 +2132,22 @@ class TrackerArchiveService(_TrackerServiceBase):
             raise ValueError(
                 f"Artifact {artifact.key!r} does not have a rematerializable URI layout."
             )
+
+        def _validate_directory_source(candidate: Path) -> bool:
+            # Checked coordinate translation no longer surfaces escaping-leaf
+            # symlink coordinates, so enforce the archive symlink policy here:
+            # a canonicalized twin must not bypass rejection of the lexical
+            # symlinked source.
+            if self._has_symlink_component(candidate):
+                raise ValueError(
+                    "directory artifact source contains a symlink component: "
+                    f"{candidate}"
+                )
+            return is_valid_directory_artifact_tree(candidate, artifact) is not False
+
         source_path = self._find_archive_source_candidate(
             artifact,
-            source_validator=lambda candidate: (
-                is_valid_directory_artifact_tree(candidate, artifact) is not False
-            ),
+            source_validator=_validate_directory_source,
             fallback_validator=lambda _: True,
         )
         if source_path is None or not source_path.exists():
@@ -2209,11 +2220,19 @@ class TrackerArchiveService(_TrackerServiceBase):
             raise ValueError(
                 f"Artifact {artifact.key!r} does not have a rematerializable URI layout."
             )
+
+        def _validate_shapefile_source(candidate: Path) -> bool:
+            # Mirror the directory-archive symlink policy: a canonicalized
+            # twin must not bypass rejection of the lexical symlinked source.
+            if self._has_symlink_component(candidate):
+                raise ValueError(
+                    f"shapefile bundle source contains a symlink component: {candidate}"
+                )
+            return is_valid_shapefile_bundle_source(candidate, artifact) is not False
+
         source_path = self._find_archive_source_candidate(
             artifact,
-            source_validator=lambda candidate: (
-                is_valid_shapefile_bundle_source(candidate, artifact) is not False
-            ),
+            source_validator=_validate_shapefile_source,
             fallback_validator=lambda _: True,
         )
         if source_path is None or not source_path.exists():

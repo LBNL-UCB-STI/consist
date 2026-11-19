@@ -1392,7 +1392,9 @@ def _derive_historical_root(
 
 @runtime_checkable
 class _HasArtifactRecoveryRoots(Protocol):
-    def artifact_recovery_roots(self, artifact: Any) -> Any: ...
+    def artifact_recovery_roots(
+        self, artifact: Artifact, *, resolve: bool = True
+    ) -> Sequence[str]: ...
 
 
 def _artifact_recovery_roots(
@@ -1401,12 +1403,19 @@ def _artifact_recovery_roots(
     artifact: Artifact,
     preserve_raw_paths: bool = False,
 ) -> tuple[Path, ...]:
-    """Return ordered recovery roots recorded for an artifact."""
-    raw_roots: Any = ()
+    """Return ordered recovery roots recorded for an artifact.
+
+    This is the filesystem-probe boundary: entries that cannot be used as
+    local paths (unresolved non-``file`` scheme URIs) are dropped here so a
+    URI never becomes a CWD-relative ``Path(...).absolute()`` pseudo-path in a
+    filesystem probe. URI-aware consumers read the roots from the tracker
+    directly instead.
+    """
+    raw_roots: Sequence[str] = ()
     if isinstance(tracker, _HasArtifactRecoveryRoots):
         fn = tracker.artifact_recovery_roots
         try:
-            raw_roots = fn(artifact, resolve=not preserve_raw_paths)  # type: ignore[call-arg]
+            raw_roots = fn(artifact, resolve=not preserve_raw_paths)
         except TypeError:
             raw_roots = fn(artifact)
     return tuple(
@@ -1414,6 +1423,7 @@ def _artifact_recovery_roots(
         for root in tracker.fs.normalize_recovery_roots(
             raw_roots, resolve=not preserve_raw_paths
         )
+        if "://" not in root or root.startswith("file://")
     )
 
 

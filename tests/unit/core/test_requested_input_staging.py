@@ -535,3 +535,112 @@ def test_requested_input_staging_skips_corrupted_first_recovery_root(
     assert result.cache_hit is False
     assert staged_events.read_bytes() == b"valid-events-payload"
     assert (staged_skims / "chunk" / "0.0").read_bytes() == b"valid-zarr-chunk"
+
+
+def test_requested_input_staging_recovers_step_scoped_outputs_from_historical_mount(
+    tmp_path: Path,
+) -> None:
+    """Incident regression (rev 7 §6.4).
+
+    A directory artifact and a scalar artifact survive only under a
+    step-scoped recovery copy on a scratch mount that is recorded in the
+    producing run but absent in the resuming session. ``resolve=False``
+    (raw-path) translation of the ledger row must still reconstruct the
+    step-scoped root so directory staging succeeds exactly like scalar
+    staging.
+    """
+    import shutil
+
+    from consist.core.tracker import Tracker
+
+    db_path = tmp_path / "prov.duckdb"
+    scratch = tmp_path / "shared_scratch"
+    scratch.mkdir()
+    producer_ws = tmp_path / "producer_ws"
+
+    producer = Tracker(
+        run_dir=producer_ws,
+        db_path=str(db_path),
+        mounts={"scratch": str(scratch)},
+    )
+    try:
+        skims_dir = producer_ws / "beam" / "beam_output" / "skims.zarr"
+        (skims_dir / "chunk").mkdir(parents=True)
+        (skims_dir / "chunk" / "0.0").write_bytes(b"zarr-chunk-bytes")
+        events_path = producer_ws / "beam" / "beam_output" / "0.events.parquet"
+        events_path.write_bytes(b"parquet-events-bytes")
+
+        with producer.start_run("pilates-run--x", model="beam"):
+            skims_artifact = producer.log_output(
+                skims_dir,
+                key="skims",
+                artifact_kind="directory",
+                driver="zarr",
+            )
+            events_artifact = producer.log_output(events_path, key="events")
+
+        # Step-scoped archive on the shared scratch mount.
+        step_root = scratch / "pilates-run--x" / "consist-recovery" / "step_sim"
+        producer.archive_artifact(skims_artifact, step_root, mode="copy")
+        producer.archive_artifact(events_artifact, step_root, mode="copy")
+
+        # The ledger records the step-scoped coordinate under the scratch scheme.
+        skims_rows = producer.db.get_artifact_recovery_locations(skims_artifact.id)
+        assert any(
+            row.uri.startswith("scratch://")
+            and row.uri.endswith("beam/beam_output/skims.zarr")
+            for row in skims_rows
+        )
+        events_rows = producer.db.get_artifact_recovery_locations(events_artifact.id)
+        assert any(
+            row.uri.startswith("scratch://")
+            and row.uri.endswith("beam/beam_output/0.events.parquet")
+            for row in events_rows
+        )
+    finally:
+        producer.close()
+
+    # The producer workspace is wiped; bytes survive only in the step-scoped
+    # recovery copy on the now-unmounted scratch scheme.
+    shutil.rmtree(producer_ws)
+
+    consumer = Tracker(run_dir=tmp_path / "consumer_ws", db_path=str(db_path))
+    try:
+        loaded_skims = consumer.get_artifact(skims_artifact.id)
+        loaded_events = consumer.get_artifact(events_artifact.id)
+        assert loaded_skims is not None
+        assert loaded_events is not None
+
+        staged_skims = consumer.run_dir / "staged" / "skims.zarr"
+        staged_events = consumer.run_dir / "staged" / "events.parquet"
+        received: list[tuple[Path, Path]] = []
+
+        def consume(skims: Path, events: Path) -> None:
+            received.append((skims, events))
+            assert (skims / "chunk" / "0.0").read_bytes() == b"zarr-chunk-bytes"
+            assert events.read_bytes() == b"parquet-events-bytes"
+
+        with consumer.scenario("resume_step_scoped") as scenario:
+            result = scenario.run(
+                fn=consume,
+                inputs={"skims": loaded_skims, "events": loaded_events},
+                execution_options=ExecutionOptions(
+                    input_binding="paths",
+                    input_materialization="requested",
+                    input_paths={
+                        "skims": staged_skims,
+                        "events": staged_events,
+                    },
+                ),
+            )
+
+        assert result.cache_hit is False
+        assert received == [(staged_skims.resolve(), staged_events.resolve())]
+        # The staged directory remains manifest-valid.
+        assert (
+            build_directory_manifest(staged_skims)["tree_hash"]
+            == loaded_skims.digest.hex
+        )
+        assert staged_events.read_bytes() == b"parquet-events-bytes"
+    finally:
+        consumer.close()

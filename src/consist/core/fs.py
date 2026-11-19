@@ -14,6 +14,17 @@ from consist.location import (
 )
 
 
+class LocationCoordinateRejected(Exception):
+    """Internal signal: a location coordinate is unsafe and must not be used.
+
+    Raised when a coordinate contains ``..`` traversal, resolves outside its
+    mount/workspace root, or when trustworthy containment cannot be
+    established (dangling symlinks, symlink loops, permission failures).
+    Distinct from an *unavailable* translation (unmounted scheme / foreign
+    workspace instance), which callers may retain as a URI.
+    """
+
+
 def capture_artifact_witness(
     path: str | Path,
     artifact: Any,
@@ -164,6 +175,56 @@ def resolve_historical_artifact_path(
             artifact_mount_root=artifact_mount_root,
         )
     )
+
+
+def _canonical_containment_target(candidate: Path) -> Optional[Path]:
+    """Best-effort canonical target of an absolute candidate path.
+
+    The candidate does not need to exist: a missing tail is joined lexically
+    onto the deepest strictly-resolved existing ancestor, so containment can
+    be established for not-yet-materialized candidates. Returns ``None`` when
+    a trustworthy canonical target cannot be established (dangling symlink,
+    symlink loop, unreadable component), which callers must treat as a
+    fail-closed rejection.
+    """
+    probe = Path(os.path.abspath(candidate))
+    tail: list[str] = []
+    while True:
+        try:
+            # lstat (not exists) succeeds on dangling symlinks so they fall
+            # through to strict resolve and fail closed.
+            os.lstat(probe)
+        except FileNotFoundError:
+            parent = probe.parent
+            if parent == probe:
+                base = probe
+                break
+            tail.append(probe.name)
+            probe = parent
+            continue
+        except OSError:
+            return None
+        try:
+            base = probe.resolve(strict=True)
+        except (OSError, RuntimeError):
+            return None
+        break
+    return base.joinpath(*reversed(tail))
+
+
+def _checked_uri_relative_parts(rel: str) -> tuple[str, ...]:
+    """Normalize a URI-relative path into joinable parts, rejecting traversal.
+
+    Raises :class:`LocationCoordinateRejected` when the value contains ``..``
+    components (including a terminal ``..``), before any join against a mount
+    or workspace root.
+    """
+    parts = PurePosixPath(rel).parts if rel else ()
+    if ".." in parts:
+        raise LocationCoordinateRejected(
+            f"location coordinate contains path traversal: {rel!r}"
+        )
+    return tuple(part for part in parts if part not in ("", "."))
 
 
 class FileSystemManager:
@@ -827,10 +888,53 @@ class FileSystemManager:
         *,
         historical_run_dir: str | Path | None = None,
     ) -> Optional[Path]:
-        """Resolve ``(mount_name, mount_instance_id, uri)`` to a host ``Path`` or ``None``."""
+        """Resolve ``(mount_name, mount_instance_id, uri)`` to a host ``Path`` or ``None``.
+
+        Coordinates that fail the checked translation (path traversal or
+        containment that cannot be established) return ``None``. Callers that
+        must distinguish a rejected unsafe coordinate from an unmounted one
+        should use :meth:`_translate_location_coordinate` directly.
+        """
+        try:
+            return self._translate_location_coordinate(
+                mount_name,
+                mount_instance_id,
+                uri,
+                historical_run_dir=historical_run_dir,
+                raw=False,
+            )
+        except LocationCoordinateRejected:
+            return None
+
+    def _translate_location_coordinate(
+        self,
+        mount_name: str,
+        mount_instance_id: str,
+        uri: str,
+        *,
+        historical_run_dir: str | Path | None = None,
+        raw: bool = False,
+    ) -> Optional[Path]:
+        """Checked translation of a location coordinate to a host path.
+
+        Returns the host path, or ``None`` when the coordinate has no
+        translation in this environment (unmounted scheme, foreign workspace
+        instance). Raises :class:`LocationCoordinateRejected` when the
+        coordinate is unsafe (``..`` traversal, or containment in the mount /
+        workspace root cannot be established, including escaping leaf
+        symlinks, dangling links, and symlink loops).
+
+        With ``raw=False`` (default) mounted coordinates keep the existing
+        parent-canonicalized, leaf-preserving return shape so contained leaf
+        symlinks stay visible to caller-side symlink policies. With
+        ``raw=True`` the absolute lexical path is returned without
+        dereferencing any component, so callers can inspect every component
+        (mount root, prefix, artifact-relative parents, and leaf). Translation
+        never requires the artifact to exist.
+        """
         if mount_name == "abs":
-            raw = uri[len("file://") :] if uri.startswith("file://") else uri
-            return Path(raw) if raw else None
+            stripped = uri[len("file://") :] if uri.startswith("file://") else uri
+            return Path(stripped) if stripped else None
 
         if mount_name in ("workspace", "runs"):
             if uri.startswith("workspace://"):
@@ -842,33 +946,32 @@ class FileSystemManager:
             else:
                 rel = uri
 
-            base_root: Optional[Path] = None
+            lexical_root: Optional[Path] = None
             if mount_name in self.mounts:
                 mount_path = Path(self.mounts[mount_name]).expanduser()
                 if mount_instance_id in ("", workspace_mount_instance_id(mount_path)):
-                    base_root = Path(os.path.realpath(mount_path))
+                    lexical_root = Path(os.path.abspath(mount_path))
                 elif historical_run_dir is not None:
                     hist_path = Path(historical_run_dir).expanduser()
                     if workspace_mount_instance_id(hist_path) == mount_instance_id:
-                        base_root = Path(os.path.realpath(hist_path))
+                        lexical_root = Path(os.path.abspath(hist_path))
             elif mount_instance_id in ("", self.workspace_instance_id):
-                base_root = Path(os.path.realpath(self.run_dir))
+                lexical_root = Path(os.path.abspath(self.run_dir))
             elif historical_run_dir is not None:
                 hist_path = Path(historical_run_dir).expanduser()
                 if workspace_mount_instance_id(hist_path) == mount_instance_id:
-                    base_root = Path(os.path.realpath(hist_path))
+                    lexical_root = Path(os.path.abspath(hist_path))
 
-            if base_root is None:
+            if lexical_root is None:
                 return None
-            candidate = base_root / rel
-            resolved_candidate = (
-                Path(os.path.realpath(candidate.parent)) / candidate.name
+            rel_parts = _checked_uri_relative_parts(rel)
+            canonical_root = Path(os.path.realpath(lexical_root))
+            return self._checked_location_candidate(
+                lexical_root,
+                canonical_root,
+                rel_parts,
+                raw=raw,
             )
-            try:
-                resolved_candidate.relative_to(base_root)
-            except ValueError:
-                return None
-            return resolved_candidate
 
         if mount_name in self.mounts or historical_run_dir is not None:
             raw_mount_root = (
@@ -876,23 +979,52 @@ class FileSystemManager:
                 if historical_run_dir is not None
                 else self.mounts[mount_name]
             )
-            mount_root = Path(os.path.realpath(Path(raw_mount_root).expanduser()))
+            lexical_root = Path(os.path.abspath(Path(raw_mount_root).expanduser()))
             rel = (
                 uri.split("://", 1)[1].lstrip("/") if "://" in uri else uri.lstrip("./")
             )
-            candidate = mount_root / rel if rel else mount_root
-            resolved = (
-                Path(os.path.realpath(candidate.parent)) / candidate.name
-                if rel
-                else mount_root
+            rel_parts = _checked_uri_relative_parts(rel)
+            canonical_root = Path(os.path.realpath(lexical_root))
+            return self._checked_location_candidate(
+                lexical_root,
+                canonical_root,
+                rel_parts,
+                raw=raw,
             )
-            try:
-                resolved.relative_to(mount_root)
-            except ValueError:
-                return None
-            return resolved
 
         return None
+
+    def _checked_location_candidate(
+        self,
+        lexical_root: Path,
+        canonical_root: Path,
+        rel_parts: tuple[str, ...],
+        *,
+        raw: bool,
+    ) -> Path:
+        """Containment-check a translated candidate and return it in the requested shape.
+
+        Raw mode returns the absolute lexical path built from ``lexical_root``
+        (symlinks remain visible). Default mode preserves the established
+        parent-canonicalized, leaf-preserving shape built from
+        ``canonical_root``. Both modes require the candidate's canonical
+        target — including the final component — to stay inside
+        ``canonical_root``.
+        """
+        if raw:
+            candidate = lexical_root.joinpath(*rel_parts) if rel_parts else lexical_root
+        else:
+            candidate = (
+                canonical_root.joinpath(*rel_parts) if rel_parts else canonical_root
+            )
+        target = _canonical_containment_target(candidate)
+        if target is None or not target.is_relative_to(canonical_root):
+            raise LocationCoordinateRejected(
+                f"location coordinate resolves outside its root: {candidate}"
+            )
+        if raw:
+            return candidate
+        return Path(os.path.realpath(candidate.parent)) / candidate.name
 
     def resolve_location_row_path(
         self,
@@ -914,32 +1046,58 @@ class FileSystemManager:
         row: ArtifactLocationRow,
         *,
         resolve: bool = True,
+        historical_run_dir: str | Path | None = None,
     ) -> Optional[str]:
-        """Reconstruct the normalized recovery root directory or URI from an archive/advisory row."""
+        """Reconstruct the normalized recovery root directory or URI from an archive/advisory row.
+
+        Extraction runs against the checked **lexical** coordinate layout, so a
+        symlink that changes an ancestor component's name cannot make the
+        artifact-relative suffix disappear (the ``lexical_root /
+        artifact_relative_path`` inversion reconstructs the translated lexical
+        coordinate). The extracted root is canonicalized only when
+        ``resolve=True``.
+
+        Returns ``None`` when the coordinate is rejected as unsafe or when the
+        artifact-relative suffix cannot be matched (unextractable rows must be
+        retained as-is by writeback callers, never rewritten as
+        ``old_coordinate / artifact_relative_path``). Unavailable translations
+        of eligible named-mount coordinates fall back to the unresolved scheme
+        URI prefix for URI-aware consumers. Pass ``historical_run_dir`` to
+        translate through a historical run's mount root.
+        """
         rel = self.get_remappable_relative_path(artifact_uri)
-        target = self.resolve_location_row_path(row)
+        try:
+            target = self._translate_location_coordinate(
+                row.mount_name,
+                row.mount_instance_id,
+                row.uri,
+                historical_run_dir=historical_run_dir,
+                raw=True,
+            )
+        except LocationCoordinateRejected:
+            return None
         if target is None:
             if "://" not in row.uri or row.mount_name in ("workspace", "runs", "abs"):
                 return None
             scheme, uri_rel = row.uri.split("://", 1)
             clean_rel = uri_rel.strip("/")
             uri_parts = PurePosixPath(clean_rel).parts if clean_rel else ()
+            if ".." in uri_parts:
+                return None
             rel_parts = rel.parts if rel is not None else ()
-            if (
+            if not (
                 rel_parts
                 and len(uri_parts) >= len(rel_parts)
                 and uri_parts[-len(rel_parts) :] == rel_parts
             ):
-                prefix = "/".join(uri_parts[: -len(rel_parts)])
-            else:
-                prefix = "/".join(uri_parts)
+                return None
+            prefix = "/".join(uri_parts[: -len(rel_parts)])
             return f"{scheme}://{prefix}"
-        resolved_target = (
-            Path(os.path.realpath(target)) if resolve else target.absolute()
-        )
         if rel is not None and len(rel.parts) > 0:
-            if len(resolved_target.parts) > len(rel.parts) and (
-                resolved_target.parts[-len(rel.parts) :] == rel.parts
+            if len(target.parts) > len(rel.parts) and (
+                target.parts[-len(rel.parts) :] == rel.parts
             ):
-                return str(resolved_target.parents[len(rel.parts) - 1])
-        return str(resolved_target)
+                root = target.parents[len(rel.parts) - 1]
+                return str(root.resolve() if resolve else root)
+            return None
+        return str(target.resolve() if resolve else target)
