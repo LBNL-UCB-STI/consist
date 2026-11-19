@@ -58,6 +58,13 @@ The format is based on [Keep a Changelog], and this project adheres to
 
 ### Fixed
 
+- Prevent machine-local BEAM reference presence from changing portable cache
+  identity by hashing declared reference policies and computed content digests
+  instead of runtime status, derived delegation keys, or digest-less directory
+  observations. Bump the BEAM identity schema to version 2, warn when
+  `directory_hash` / `fingerprint_manifest` policies provide no content
+  identity, and make optional `path_alias` / `scalar_value` presence changes
+  cache-stable while preserving strict validation and file content hashing.
 - Deduplicate `artifact_location` upserts across sites (`advisory` -> `archive`),
   resolve `archive` / `advisory` `artifact_location` rows via historical run mounts
   in `ViewFactory` and recovery, and persist lazy-seeded `Coupler` artifacts during

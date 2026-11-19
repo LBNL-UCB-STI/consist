@@ -26,6 +26,7 @@ from consist.integrations.beam import (
     BeamConfigOverrides,
     BeamLaunchBundleMember,
 )
+from consist.integrations.beam import config_adapter as beam_config_adapter
 from consist.integrations.beam.config_adapter import BeamReferencePolicy
 from consist.integrations.beam.config_adapter import (
     _build_beam_canonicalization_snapshot,
@@ -33,6 +34,7 @@ from consist.integrations.beam.config_adapter import (
 from consist.integrations.beam.config_adapter import _load_config_tree
 from consist.integrations.beam.config_adapter import _resolve_reference
 from consist.integrations.beam.config_adapter import _resolves_under_config_root
+from consist.digest import canonical_json_sha256
 from consist.models.artifact import Artifact
 from consist.types import CacheOptions, ExecutionOptions
 from tests.helpers.beam_fixtures import build_beam_test_configs
@@ -200,6 +202,42 @@ def _write_gtfs_directory_feed(
     ).to_csv(path / "stop_times.txt", index=False)
     (path / "license.txt").write_text("license text that should be ignored\n")
     return path
+
+
+def _write_identity_config(config_root: Path, values: dict[str, object]) -> Path:
+    config_root.mkdir(parents=True, exist_ok=True)
+    primary = config_root / "beam.conf"
+    primary.write_text(
+        "".join(
+            f"{key} = {json.dumps(str(value) if isinstance(value, Path) else value)}\n"
+            for key, value in values.items()
+        ),
+        encoding="utf-8",
+    )
+    return primary
+
+
+def _canonicalize_identity(adapter, canonical, tracker):
+    return adapter.canonicalize(
+        canonical,
+        tracker=tracker,
+        plan_only=True,
+    ).identity
+
+
+def _identity_hashes(identity):
+    return (
+        identity.scalar_hash,
+        identity.reference_hash,
+        identity.directory_hash,
+        identity.identity_hash,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _reset_noop_directory_policy_warnings(monkeypatch):
+    """Isolate tests from the process-global one-shot noop-policy warning set."""
+    monkeypatch.setattr(beam_config_adapter, "_NOOP_DIRECTORY_POLICY_WARNINGS", set())
 
 
 def test_beam_discover_includes_and_hash(tracker, tmp_path: Path):
@@ -684,6 +722,418 @@ def test_beam_canonicalize_normalizes_path_aliases(tracker, tmp_path: Path):
         options=ConfigAdapterOptions(path_aliases={"local_inputs": external_root}),
     )
     assert changed.identity.identity_hash != result.identity.identity_hash
+
+
+def test_beam_delegated_reference_presence_does_not_change_identity(
+    tracker, tmp_path: Path, caplog
+):
+    config_root = tmp_path / "config"
+    input_root = tmp_path / "input"
+    scenario = input_root / "urbansim" / "2018"
+    vehicle = scenario / "vehicles.csv.gz"
+    vehicle.parent.mkdir(parents=True)
+    vehicle.write_bytes(b"test")
+    primary = _write_identity_config(
+        config_root,
+        {
+            "beam.exchange.scenario.folder": scenario,
+            "beam.agentsim.agents.vehicles.vehiclesFilePath": vehicle,
+        },
+    )
+    policies = {
+        "beam.exchange.scenario.folder": BeamReferencePolicy(
+            identity_policy="delegated_to_artifacts",
+            required=True,
+            delegated_artifact_keys=(
+                "plans_beam_in",
+                "households_beam_in",
+                "persons_beam_in",
+                "vehicles_beam_in",
+            ),
+        ),
+        "beam.agentsim.agents.vehicles.vehiclesFilePath": BeamReferencePolicy(
+            identity_policy="delegated_to_artifacts",
+            required=True,
+            delegated_artifact_keys=("vehicles_beam_in",),
+        ),
+    }
+    adapter = BeamConfigAdapter(
+        primary_config=primary,
+        path_aliases={"beam_region_input": input_root},
+        reference_policies=policies,
+    )
+    canonical = adapter.discover([config_root], identity=tracker.identity)
+    with caplog.at_level(logging.WARNING):
+        present = _canonicalize_identity(adapter, canonical, tracker)
+        scenario.rename(tmp_path / "saved-scenario")
+        missing = _canonicalize_identity(adapter, canonical, tracker)
+
+    assert _identity_hashes(present) == _identity_hashes(missing)
+    assert len(present.directories) == 1
+    assert len(missing.directories) == 0
+    present_refs = {ref.config_key: ref for ref in present.references}
+    missing_refs = {ref.config_key: ref for ref in missing.references}
+    for key, before in present_refs.items():
+        after = missing_refs[key]
+        assert before.status == "resolved"
+        assert after.status == "missing_required"
+        assert before.canonical_value == after.canonical_value
+        assert before.delegated_artifact_keys == after.delegated_artifact_keys
+        assert key in caplog.text
+    assert "status=missing_required" in caplog.text
+    assert "policy=delegated_to_artifacts" in caplog.text
+
+
+def test_beam_implicit_delegated_artifact_keys_do_not_enter_identity(
+    tracker, tmp_path: Path
+):
+    config_root = tmp_path / "config"
+    scenario = tmp_path / "input" / "scenario"
+    scenario.mkdir(parents=True)
+    key = "beam.exchange.scenario.folder"
+    primary = _write_identity_config(config_root, {key: scenario})
+    adapter = BeamConfigAdapter(
+        primary_config=primary,
+        reference_policies={
+            key: BeamReferencePolicy(identity_policy="delegated_to_artifacts")
+        },
+    )
+    canonical = adapter.discover([config_root], identity=tracker.identity)
+    present = _canonicalize_identity(adapter, canonical, tracker)
+    scenario.rename(tmp_path / "saved-scenario")
+    missing = _canonicalize_identity(adapter, canonical, tracker)
+
+    assert present.references[0].delegated_artifact_keys
+    assert missing.references[0].delegated_artifact_keys == ()
+    assert _identity_hashes(present) == _identity_hashes(missing)
+
+
+def test_beam_multi_root_missing_relative_reference_identity_stable(
+    tracker, tmp_path: Path
+):
+    first_root = tmp_path / "config_a"
+    second_root = tmp_path / "config_b"
+    second_root.mkdir()
+    scenario = second_root / "inputs"
+    scenario.mkdir()
+    key = "beam.exchange.scenario.folder"
+    delegated_keys = ("scenario_input",)
+    primary = _write_identity_config(first_root, {key: "inputs"})
+    adapter = BeamConfigAdapter(
+        primary_config=primary,
+        reference_policies={
+            key: BeamReferencePolicy(
+                identity_policy="delegated_to_artifacts",
+                delegated_artifact_keys=delegated_keys,
+            )
+        },
+    )
+    canonical = adapter.discover([first_root, second_root], identity=tracker.identity)
+    present = _canonicalize_identity(adapter, canonical, tracker)
+    scenario.rename(tmp_path / "saved-inputs")
+    missing = _canonicalize_identity(adapter, canonical, tracker)
+
+    assert present.references[0].canonical_value == "config:config_b/inputs"
+    assert missing.references[0].canonical_value == "config:config_a/inputs"
+    assert present.directory_hash == missing.directory_hash
+    assert present.scalar_hash != missing.scalar_hash
+    expected_reference_hash = canonical_json_sha256(
+        {
+            "references": [
+                {
+                    "config_key": key,
+                    "canonical_value": "config:config_a/inputs",
+                    "hash": None,
+                    "policy": {
+                        "identity_policy": "delegated_to_artifacts",
+                        "required": True,
+                        "delegated_artifact_keys": list(delegated_keys),
+                    },
+                }
+            ]
+        }
+    )
+    assert missing.reference_hash == expected_reference_hash
+
+
+@pytest.mark.parametrize("identity_policy", ["path_alias", "scalar_value"])
+@pytest.mark.parametrize("required", [True, False])
+def test_beam_logical_reference_presence_does_not_change_identity(
+    tracker, tmp_path: Path, identity_policy: str, required: bool
+):
+    config_root = tmp_path / "config"
+    directory = tmp_path / "logical"
+    directory.mkdir()
+    key = "beam.test.logicalDirectory"
+    primary = _write_identity_config(config_root, {key: directory})
+    adapter = BeamConfigAdapter(
+        primary_config=primary,
+        reference_policies={
+            key: BeamReferencePolicy(
+                identity_policy=identity_policy,
+                required=required,
+            )
+        },
+    )
+    canonical = adapter.discover([config_root], identity=tracker.identity)
+    present = _canonicalize_identity(adapter, canonical, tracker)
+    directory.rename(tmp_path / "saved-logical")
+    missing = _canonicalize_identity(adapter, canonical, tracker)
+
+    assert present.references[0].status == "resolved"
+    assert missing.references[0].status == (
+        "missing_required" if required else "missing_optional"
+    )
+    assert _identity_hashes(present) == _identity_hashes(missing)
+
+
+def test_beam_ignored_output_directory_presence_does_not_change_identity(
+    tracker, tmp_path: Path
+):
+    config_root = tmp_path / "config"
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    key = "beam.test.outputDirectory"
+    primary = _write_identity_config(config_root, {key: output_dir})
+    adapter = BeamConfigAdapter(
+        primary_config=primary,
+        reference_policies={
+            key: BeamReferencePolicy(
+                identity_policy="output_or_runtime_ignored",
+                required=False,
+            )
+        },
+    )
+    canonical = adapter.discover([config_root], identity=tracker.identity)
+    present = _canonicalize_identity(adapter, canonical, tracker)
+    output_dir.rename(tmp_path / "saved-output")
+    missing = _canonicalize_identity(adapter, canonical, tracker)
+
+    assert present.references[0].status == "resolved"
+    assert missing.references[0].status == "missing_ignored"
+    assert _identity_hashes(present) == _identity_hashes(missing)
+
+
+def test_beam_content_hash_directory_presence_does_not_change_identity(
+    tracker, tmp_path: Path
+):
+    config_root = tmp_path / "config"
+    directory = tmp_path / "content-directory"
+    directory.mkdir()
+    key = "beam.test.contentDirectory"
+    primary = _write_identity_config(config_root, {key: directory})
+    adapter = BeamConfigAdapter(
+        primary_config=primary,
+        reference_policies={key: BeamReferencePolicy(identity_policy="content_hash")},
+    )
+    canonical = adapter.discover([config_root], identity=tracker.identity)
+    present = _canonicalize_identity(adapter, canonical, tracker)
+    directory.rename(tmp_path / "saved-content-directory")
+    missing = _canonicalize_identity(adapter, canonical, tracker)
+
+    present_ref = present.references[0]
+    missing_ref = missing.references[0]
+    assert present_ref.identity_policy == "delegated_to_artifacts"
+    assert present_ref.reason == "directory_content_delegated_to_artifact_inputs"
+    assert present_ref.delegated_artifact_keys
+    assert missing_ref.identity_policy == "content_hash"
+    assert missing_ref.reason is None
+    assert missing_ref.delegated_artifact_keys == ()
+    assert _identity_hashes(present) == _identity_hashes(missing)
+
+
+def test_beam_noop_directory_policies_warn_and_ignore_presence(
+    tracker, tmp_path: Path, caplog
+):
+    config_root = tmp_path / "config"
+    first = tmp_path / "noop-hash"
+    second = tmp_path / "noop-fingerprint"
+    first.mkdir()
+    second.mkdir()
+    hash_key = "beam.test.noopDirectoryHashPolicy"
+    fingerprint_key = "beam.test.noopFingerprintManifestPolicy"
+    primary = _write_identity_config(
+        config_root,
+        {hash_key: first, fingerprint_key: second},
+    )
+    adapter = BeamConfigAdapter(
+        primary_config=primary,
+        reference_policies={
+            hash_key: BeamReferencePolicy(identity_policy="directory_hash"),
+            fingerprint_key: BeamReferencePolicy(
+                identity_policy="fingerprint_manifest"
+            ),
+        },
+    )
+    canonical = adapter.discover([config_root], identity=tracker.identity)
+    with caplog.at_level(logging.WARNING):
+        present = _canonicalize_identity(adapter, canonical, tracker)
+        first.rename(tmp_path / "saved-noop-hash")
+        second.rename(tmp_path / "saved-noop-fingerprint")
+        missing = _canonicalize_identity(adapter, canonical, tracker)
+
+    warnings = [
+        record.message
+        for record in caplog.records
+        if "computes no directory digest" in record.message
+    ]
+    assert len(warnings) == 2
+    assert sum(hash_key in message for message in warnings) == 1
+    assert sum(fingerprint_key in message for message in warnings) == 1
+    assert all("delegated_to_artifacts" in message for message in warnings)
+    assert _identity_hashes(present) == _identity_hashes(missing)
+
+
+def test_beam_directory_hash_ignores_tracker_hashing_strategy(tracker, tmp_path: Path):
+    config_root = tmp_path / "config"
+    directory = tmp_path / "delegated-directory"
+    directory.mkdir()
+    key = "beam.test.delegatedDirectory"
+    primary = _write_identity_config(config_root, {key: directory})
+    adapter = BeamConfigAdapter(
+        primary_config=primary,
+        reference_policies={
+            key: BeamReferencePolicy(identity_policy="delegated_to_artifacts")
+        },
+    )
+    canonical = adapter.discover([config_root], identity=tracker.identity)
+    tracker.identity.hashing_strategy = "full"
+    full = _canonicalize_identity(adapter, canonical, tracker)
+    tracker.identity.hashing_strategy = "fast"
+    fast = _canonicalize_identity(adapter, canonical, tracker)
+
+    assert full.directories[0].hash_strategy == "full"
+    assert fast.directories[0].hash_strategy == "fast"
+    assert full.directory_hash == fast.directory_hash
+
+
+def test_beam_content_hash_file_presence_still_changes_identity(
+    tracker, tmp_path: Path
+):
+    config_root = tmp_path / "config"
+    source = tmp_path / "content.csv"
+    source.write_bytes(b"before")
+    key = "beam.test.contentFile"
+    primary = _write_identity_config(config_root, {key: source})
+    adapter = BeamConfigAdapter(
+        primary_config=primary,
+        reference_policies={key: BeamReferencePolicy(identity_policy="content_hash")},
+    )
+    canonical = adapter.discover([config_root], identity=tracker.identity)
+    present = _canonicalize_identity(adapter, canonical, tracker)
+    source.write_bytes(b"after")
+    changed = _canonicalize_identity(adapter, canonical, tracker)
+    source.rename(tmp_path / "saved-content.csv")
+    missing = _canonicalize_identity(adapter, canonical, tracker)
+
+    assert present.references[0].hash is not None
+    assert changed.references[0].hash is not None
+    assert present.references[0].hash != changed.references[0].hash
+    assert missing.references[0].hash is None
+    assert (
+        len(
+            {
+                present.identity_hash,
+                changed.identity_hash,
+                missing.identity_hash,
+            }
+        )
+        == 3
+    )
+
+
+def test_beam_missing_delegated_reference_strict_still_raises(tracker, tmp_path: Path):
+    config_root = tmp_path / "config"
+    key = "beam.exchange.scenario.folder"
+    primary = _write_identity_config(
+        config_root,
+        {key: tmp_path / "missing-scenario"},
+    )
+    adapter = BeamConfigAdapter(
+        primary_config=primary,
+        reference_policies={
+            key: BeamReferencePolicy(
+                identity_policy="delegated_to_artifacts",
+                required=True,
+            )
+        },
+    )
+    canonical = adapter.discover([config_root], identity=tracker.identity)
+
+    with pytest.raises(FileNotFoundError, match=key):
+        adapter.canonicalize(
+            canonical,
+            tracker=tracker,
+            strict=True,
+            plan_only=True,
+        )
+
+
+def test_beam_identity_schema_version_is_2(tracker, tmp_path: Path):
+    primary = _write_identity_config(
+        tmp_path / "config",
+        {"beam.agentsim.agentSampleSizeAsFractionOfPopulation": 1},
+    )
+    adapter = BeamConfigAdapter(primary_config=primary)
+    canonical = adapter.discover([tmp_path / "config"], identity=tracker.identity)
+    with patch(
+        "consist.integrations.beam.config_adapter._BEAM_IDENTITY_SCHEMA_VERSION",
+        1,
+    ):
+        version_1 = _canonicalize_identity(adapter, canonical, tracker)
+    version_2 = _canonicalize_identity(adapter, canonical, tracker)
+
+    assert version_1.identity_schema_version == 1
+    assert version_2.identity_schema_version == 2
+    assert version_2.to_meta_dict()["identity_schema_version"] == 2
+    assert version_1.identity_hash != version_2.identity_hash
+    assert version_1.scalar_hash == version_2.scalar_hash
+    assert version_1.reference_hash == version_2.reference_hash
+    assert version_1.directory_hash == version_2.directory_hash
+
+
+def test_beam_bare_implicit_path_discovery_requires_explicit_policy_for_portability(
+    tracker, tmp_path: Path
+):
+    config_root = tmp_path / "config"
+    inputs = config_root / "inputs"
+    inputs.mkdir(parents=True)
+    key = "beam.inputDirectory"
+    primary = _write_identity_config(config_root, {key: "inputs"})
+    implicit_adapter = BeamConfigAdapter(primary_config=primary)
+    implicit_canonical = implicit_adapter.discover(
+        [config_root], identity=tracker.identity
+    )
+    implicit_present = _canonicalize_identity(
+        implicit_adapter, implicit_canonical, tracker
+    )
+    inputs.rename(config_root / "saved-inputs")
+    implicit_missing = _canonicalize_identity(
+        implicit_adapter, implicit_canonical, tracker
+    )
+
+    assert implicit_present.references
+    assert not implicit_missing.references
+    assert implicit_present.identity_hash != implicit_missing.identity_hash
+
+    (config_root / "saved-inputs").rename(inputs)
+    explicit_adapter = BeamConfigAdapter(
+        primary_config=primary,
+        reference_policies={key: BeamReferencePolicy(identity_policy="path_alias")},
+    )
+    explicit_canonical = explicit_adapter.discover(
+        [config_root], identity=tracker.identity
+    )
+    explicit_present = _canonicalize_identity(
+        explicit_adapter, explicit_canonical, tracker
+    )
+    inputs.rename(config_root / "absent-inputs")
+    explicit_missing = _canonicalize_identity(
+        explicit_adapter, explicit_canonical, tracker
+    )
+
+    assert explicit_missing.references[0].status == "missing_required"
+    assert _identity_hashes(explicit_present) == _identity_hashes(explicit_missing)
 
 
 def test_beam_canonicalize_ignores_output_runtime_paths(tracker, tmp_path: Path):
