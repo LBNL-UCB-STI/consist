@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog], and this project adheres to
 [Semantic Versioning].
 
-## [0.5.0] - 2026-11-18
+## [0.5.0] - 2026-11-19
 
 ### Added
 
@@ -64,7 +64,8 @@ The format is based on [Keep a Changelog], and this project adheres to
   observations. Bump the BEAM identity schema to version 2, warn when
   `directory_hash` / `fingerprint_manifest` policies provide no content
   identity, and make optional `path_alias` / `scalar_value` presence changes
-  cache-stable while preserving strict validation and file content hashing.
+  cache-stable while preserving strict validation and file content hashing by
+  @zneedell ([#330](https://github.com/LBNL-UCB-STI/consist/pull/330)).
 - Deduplicate `artifact_location` upserts across sites (`advisory` -> `archive`),
   resolve `archive` / `advisory` `artifact_location` rows via historical run mounts
   in `ViewFactory` and recovery, and persist lazy-seeded `Coupler` artifacts during
