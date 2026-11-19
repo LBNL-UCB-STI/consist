@@ -33,6 +33,7 @@ from consist.models.run import (
     RunResult,
     CouplerSnapshotPhase,
 )
+from consist.core.location_resolver import MountPrecedenceResolver
 from consist.core.materialize import (
     MaterializedArtifact,
     materialize_artifact,
@@ -1123,6 +1124,7 @@ class ScenarioContext:
         source_root: Optional[Path],
         effective_remappable_schemes: Mapping[str, Path],
         validate_content_hash: Literal["never", "if-present", "always"],
+        resolver: Optional[MountPrecedenceResolver] = None,
     ) -> MaterializedArtifact:
         """Check for local artifact presence or recover into tracker.run_dir."""
         from consist.core.tracker_recovery import resolve_verified_local_path
@@ -1176,6 +1178,7 @@ class ScenarioContext:
                 on_missing="warn",
                 validate_content_hash=validate_content_hash,
                 scheme_prefixes=effective_remappable_schemes,
+                resolver=resolver,
             )
 
         detached_missing = art.with_abs_path(None).with_resolver(self.tracker)
@@ -1398,6 +1401,7 @@ class ScenarioContext:
         restored_artifacts: Dict[str, Artifact] = {}
         outcomes: Dict[str, MaterializedArtifact] = {}
         pruned_keys_list: List[str] = []
+        batch_resolver = MountPrecedenceResolver.from_tracker(self.tracker)
 
         for key, art in artifacts.items():
             scheme_classification = self._classify_coupler_artifact_scheme(
@@ -1429,6 +1433,7 @@ class ScenarioContext:
                     on_missing="warn",
                     validate_content_hash=normalize_validate_hash,
                     scheme_prefixes=effective_remappable_schemes,
+                    resolver=batch_resolver,
                 )
             else:
                 outcome = self._check_or_materialize_local_artifact(
@@ -1437,6 +1442,7 @@ class ScenarioContext:
                     source_root=resolved_source_root,
                     effective_remappable_schemes=effective_remappable_schemes,
                     validate_content_hash=normalize_validate_hash,
+                    resolver=batch_resolver,
                 )
 
             outcomes[key] = outcome
