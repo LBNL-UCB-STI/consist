@@ -32,8 +32,8 @@ from consist.core.directory_artifacts import (
 )
 from consist.core.fs import (
     build_verified_location_row,
-    resolve_historical_artifact_path,
 )
+from consist.core.location_resolver import iter_artifact_candidates
 from consist.core.materialize import (
     ArchivedRunOutputFile,
     ArchivedRunOutputFilesReport,
@@ -1119,7 +1119,6 @@ class TrackerArchiveService(_TrackerServiceBase):
         producing_run: Any | None = None,
         source_validator: Callable[[Path], bool] | None = None,
         fallback_validator: Callable[[Path], bool] | None = None,
-        preserve_raw_paths: bool = True,
         allow_run_owned_uri_fallback: bool = False,
         include_current_managed_uri: bool = True,
     ) -> Path | None:
@@ -1134,38 +1133,20 @@ class TrackerArchiveService(_TrackerServiceBase):
             )
         )
         allow_direct = allow_run_owned_uri_fallback or artifact.run_id is None
-        hist_raw = (
-            resolve_historical_artifact_path(
-                self.fs, artifact, run, fallback_to_current_uri=allow_direct
-            )
-            if run is not None
-            else None
-        )
-        if preserve_raw_paths:
-            raw_candidates: list[Path] = []
-            if artifact.abs_path:
-                raw_candidates.append(Path(artifact.abs_path))
-            if hist_raw is not None:
-                raw_candidates.append(hist_raw)
-            elif allow_direct:
-                try:
-                    raw_candidates.append(Path(self.resolve_uri(artifact.uri)))
-                except (OSError, RuntimeError, TypeError, ValueError):
-                    pass
-            if self.db is not None and artifact.id is not None:
-                for rec_row in self.db.get_artifact_recovery_locations(artifact.id):
-                    if rec_row.uri.startswith("file://"):
-                        raw_candidates.append(Path(rec_row.uri.removeprefix("file://")))
-                    else:
-                        rec_path = self.fs.resolve_location_row_path(rec_row)
-                        if rec_path is not None:
-                            raw_candidates.append(rec_path)
-            for raw_cand in raw_candidates:
-                if (
-                    raw_cand.exists() or raw_cand.is_symlink()
-                ) and self._has_symlink_component(raw_cand):
-                    if source_validator is not None:
-                        source_validator(raw_cand)
+
+        # Pre-scan for symlinks on candidates to preserve exception-raising reject_symlink
+        for cand in iter_artifact_candidates(
+            self.tracker,
+            artifact,
+            historical_run=run,
+            include_runtime_abs=True,
+        ):
+            probe_path = cand.mount_canonical_lexical_path
+            if (
+                probe_path.exists() or probe_path.is_symlink()
+            ) and self._has_symlink_component(probe_path):
+                if source_validator is not None:
+                    source_validator(probe_path)
 
         verified, _ = resolve_verified_local_path_with_diagnostics(
             self.tracker,
@@ -1174,7 +1155,7 @@ class TrackerArchiveService(_TrackerServiceBase):
             verify_digest=True,
         )
         if verified is not None:
-            cand = verified if preserve_raw_paths else verified.resolve()
+            cand = verified.resolve()
             if source_validator is None or source_validator(cand):
                 return cand
 
@@ -1187,7 +1168,7 @@ class TrackerArchiveService(_TrackerServiceBase):
             except (OSError, RuntimeError, TypeError, ValueError):
                 pass
             for raw_cand in direct_candidates:
-                cand = raw_cand if preserve_raw_paths else raw_cand.resolve()
+                cand = raw_cand.resolve()
                 if (
                     cand.exists()
                     and verify_candidate_against_artifact(cand, artifact)
@@ -1211,7 +1192,7 @@ class TrackerArchiveService(_TrackerServiceBase):
                                 f"Current configured mount source for artifact {artifact.key!r} "
                                 "does not match artifact hash."
                             )
-                    out_cand = cand if preserve_raw_paths else cand.resolve()
+                    out_cand = cand.resolve()
                     if source_validator is None or source_validator(out_cand):
                         return out_cand
 
@@ -1237,27 +1218,22 @@ class TrackerArchiveService(_TrackerServiceBase):
                 if backup_entry.exists() and verify_candidate_against_artifact(
                     backup_base, artifact
                 ):
-                    out_backup = (
-                        backup_entry if preserve_raw_paths else backup_entry.resolve()
-                    )
+                    out_backup = backup_entry.resolve()
                     if source_validator is None or source_validator(out_backup):
                         return out_backup
 
         if fallback_validator is not None:
-            fallback_candidates: list[Path] = []
-            if artifact.abs_path:
-                fallback_candidates.append(Path(artifact.abs_path))
-            if hist_raw is not None:
-                fallback_candidates.append(hist_raw)
-            if allow_direct:
-                try:
-                    fallback_candidates.append(Path(self.resolve_uri(artifact.uri)))
-                except (OSError, RuntimeError, TypeError, ValueError):
-                    pass
-            for raw_cand in fallback_candidates:
-                cand = raw_cand if preserve_raw_paths else raw_cand.resolve()
-                if (cand.exists() or cand.is_symlink()) and fallback_validator(cand):
-                    return cand
+            for cand in iter_artifact_candidates(
+                self.tracker,
+                artifact,
+                historical_run=run,
+                include_runtime_abs=True,
+            ):
+                probe_path = cand.mount_canonical_lexical_path
+                if (
+                    probe_path.exists() or probe_path.is_symlink()
+                ) and fallback_validator(probe_path):
+                    return cand.canonical_path
         return None
 
     def _find_output_set_archive_source(
@@ -1278,7 +1254,6 @@ class TrackerArchiveService(_TrackerServiceBase):
             producing_run=producing_run,
             source_validator=reject_symlink,
             fallback_validator=reject_symlink,
-            preserve_raw_paths=True,
             allow_run_owned_uri_fallback=True,
             include_current_managed_uri=False,
         )
@@ -1712,7 +1687,7 @@ class TrackerArchiveService(_TrackerServiceBase):
         source_path = (
             verified.resolve()
             if verified is not None
-            else self._find_archive_source_candidate(artifact, preserve_raw_paths=False)
+            else self._find_archive_source_candidate(artifact)
         )
         if source_path is None or not source_path.exists():
             for raw_cand_str in (artifact.abs_path,):
@@ -2839,7 +2814,6 @@ class TrackerArchiveService(_TrackerServiceBase):
                     producing_run=producing_run,
                     source_validator=validate_source,
                     fallback_validator=reject_symlink,
-                    preserve_raw_paths=True,
                     include_current_managed_uri=False,
                 )
             except ValueError as exc:
