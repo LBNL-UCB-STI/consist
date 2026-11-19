@@ -27,6 +27,37 @@ _NON_PORTABLE_DIGEST_PREFIXES: Final[tuple[str, ...]] = (
 
 LocationSite: TypeAlias = Literal["workspace", "archive", "advisory", "external"]
 LocationStatus: TypeAlias = Literal["active", "stale", "evicted"]
+CoordinateStatus: TypeAlias = Literal["resolved", "unmounted", "rejected"]
+
+
+@dataclass(frozen=True, slots=True)
+class TranslatedCoordinate:
+    """Result of translating a (mount_name, mount_instance_id, uri) coordinate."""
+
+    status: CoordinateStatus
+    mount_name: str
+    uri: str
+    lexical_path: Path | None = None  # lexical_root / rel_parts (all symlinks visible)
+    mount_canonical_lexical_path: Path | None = (
+        None  # canonical_root / rel_parts (mount root resolved; in-mount symlinks visible)
+    )
+    canonical_path: Path | None = (
+        None  # parent-canonicalized, leaf-preserving (existing resolve_location_coordinate shape)
+    )
+    unmounted_uri: str | None = None  # set when status == "unmounted"
+    rejection_reason: str | None = None  # set when status == "rejected"
+
+    @property
+    def is_resolved(self) -> bool:
+        return self.status == "resolved" and self.lexical_path is not None
+
+    @property
+    def is_rejected(self) -> bool:
+        return self.status == "rejected"
+
+    @property
+    def is_unmounted(self) -> bool:
+        return self.status == "unmounted"
 
 
 class WitnessFreshness(str, Enum):

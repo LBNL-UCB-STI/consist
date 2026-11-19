@@ -8,21 +8,11 @@ from consist.location import (
     ArtifactLocationRow,
     LocationSite,
     LocationStatus,
+    TranslatedCoordinate,
     Witness,
     capture_witness,
     workspace_mount_instance_id,
 )
-
-
-class LocationCoordinateRejected(Exception):
-    """Internal signal: a location coordinate is unsafe and must not be used.
-
-    Raised when a coordinate contains ``..`` traversal, resolves outside its
-    mount/workspace root, or when trustworthy containment cannot be
-    established (dangling symlinks, symlink loops, permission failures).
-    Distinct from an *unavailable* translation (unmounted scheme / foreign
-    workspace instance), which callers may retain as a URI.
-    """
 
 
 def capture_artifact_witness(
@@ -212,18 +202,15 @@ def _canonical_containment_target(candidate: Path) -> Optional[Path]:
     return base.joinpath(*reversed(tail))
 
 
-def _checked_uri_relative_parts(rel: str) -> tuple[str, ...]:
+def _checked_uri_relative_parts(rel: str) -> tuple[str, ...] | None:
     """Normalize a URI-relative path into joinable parts, rejecting traversal.
 
-    Raises :class:`LocationCoordinateRejected` when the value contains ``..``
-    components (including a terminal ``..``), before any join against a mount
-    or workspace root.
+    Returns ``None`` when the value contains ``..`` components (including a
+    terminal ``..``), before any join against a mount or workspace root.
     """
     parts = PurePosixPath(rel).parts if rel else ()
     if ".." in parts:
-        raise LocationCoordinateRejected(
-            f"location coordinate contains path traversal: {rel!r}"
-        )
+        return None
     return tuple(part for part in parts if part not in ("", "."))
 
 
@@ -880,61 +867,42 @@ class FileSystemManager:
 
         return "abs", "", f"file://{target_str}", target_path
 
-    def resolve_location_coordinate(
+    def translate_location_coordinate(
         self,
         mount_name: str,
         mount_instance_id: str,
         uri: str,
         *,
         historical_run_dir: str | Path | None = None,
-    ) -> Optional[Path]:
-        """Resolve ``(mount_name, mount_instance_id, uri)`` to a host ``Path`` or ``None``.
-
-        Coordinates that fail the checked translation (path traversal or
-        containment that cannot be established) return ``None``. Callers that
-        must distinguish a rejected unsafe coordinate from an unmounted one
-        should use :meth:`_translate_location_coordinate` directly.
-        """
-        try:
-            return self._translate_location_coordinate(
-                mount_name,
-                mount_instance_id,
-                uri,
-                historical_run_dir=historical_run_dir,
-                raw=False,
-            )
-        except LocationCoordinateRejected:
-            return None
-
-    def _translate_location_coordinate(
-        self,
-        mount_name: str,
-        mount_instance_id: str,
-        uri: str,
-        *,
-        historical_run_dir: str | Path | None = None,
-        raw: bool = False,
-    ) -> Optional[Path]:
+    ) -> TranslatedCoordinate:
         """Checked translation of a location coordinate to a host path.
 
-        Returns the host path, or ``None`` when the coordinate has no
-        translation in this environment (unmounted scheme, foreign workspace
-        instance). Raises :class:`LocationCoordinateRejected` when the
-        coordinate is unsafe (``..`` traversal, or containment in the mount /
-        workspace root cannot be established, including escaping leaf
-        symlinks, dangling links, and symlink loops).
-
-        With ``raw=False`` (default) mounted coordinates keep the existing
-        parent-canonicalized, leaf-preserving return shape so contained leaf
-        symlinks stay visible to caller-side symlink policies. With
-        ``raw=True`` the absolute lexical path is returned without
-        dereferencing any component, so callers can inspect every component
-        (mount root, prefix, artifact-relative parents, and leaf). Translation
-        never requires the artifact to exist.
+        Returns a :class:`TranslatedCoordinate` with:
+        - ``status="resolved"`` and ``lexical_path``, ``mount_canonical_lexical_path``,
+          and ``canonical_path`` populated when the coordinate is mounted and safe.
+        - ``status="unmounted"`` and ``unmounted_uri`` when the scheme is unmounted
+          or foreign.
+        - ``status="rejected"`` and ``rejection_reason`` when unsafe (``..`` traversal,
+          containment escape, dangling symlink, symlink loop, or permission failure).
         """
         if mount_name == "abs":
             stripped = uri[len("file://") :] if uri.startswith("file://") else uri
-            return Path(stripped) if stripped else None
+            if not stripped:
+                return TranslatedCoordinate(
+                    status="unmounted",
+                    mount_name=mount_name,
+                    uri=uri,
+                    unmounted_uri=uri,
+                )
+            p = Path(stripped)
+            return TranslatedCoordinate(
+                status="resolved",
+                mount_name=mount_name,
+                uri=uri,
+                lexical_path=p,
+                mount_canonical_lexical_path=p,
+                canonical_path=p,
+            )
 
         if mount_name in ("workspace", "runs"):
             if uri.startswith("workspace://"):
@@ -963,14 +931,27 @@ class FileSystemManager:
                     lexical_root = Path(os.path.abspath(hist_path))
 
             if lexical_root is None:
-                return None
+                return TranslatedCoordinate(
+                    status="unmounted",
+                    mount_name=mount_name,
+                    uri=uri,
+                    unmounted_uri=uri,
+                )
             rel_parts = _checked_uri_relative_parts(rel)
+            if rel_parts is None:
+                return TranslatedCoordinate(
+                    status="rejected",
+                    mount_name=mount_name,
+                    uri=uri,
+                    rejection_reason=f"location coordinate contains path traversal: {rel!r}",
+                )
             canonical_root = Path(os.path.realpath(lexical_root))
-            return self._checked_location_candidate(
+            return self._checked_translated_coordinate(
+                mount_name,
+                uri,
                 lexical_root,
                 canonical_root,
                 rel_parts,
-                raw=raw,
             )
 
         if mount_name in self.mounts or historical_run_dir is not None:
@@ -984,47 +965,80 @@ class FileSystemManager:
                 uri.split("://", 1)[1].lstrip("/") if "://" in uri else uri.lstrip("./")
             )
             rel_parts = _checked_uri_relative_parts(rel)
+            if rel_parts is None:
+                return TranslatedCoordinate(
+                    status="rejected",
+                    mount_name=mount_name,
+                    uri=uri,
+                    rejection_reason=f"location coordinate contains path traversal: {rel!r}",
+                )
             canonical_root = Path(os.path.realpath(lexical_root))
-            return self._checked_location_candidate(
+            return self._checked_translated_coordinate(
+                mount_name,
+                uri,
                 lexical_root,
                 canonical_root,
                 rel_parts,
-                raw=raw,
             )
 
-        return None
+        return TranslatedCoordinate(
+            status="unmounted",
+            mount_name=mount_name,
+            uri=uri,
+            unmounted_uri=uri,
+        )
 
-    def _checked_location_candidate(
+    def _checked_translated_coordinate(
         self,
+        mount_name: str,
+        uri: str,
         lexical_root: Path,
         canonical_root: Path,
         rel_parts: tuple[str, ...],
-        *,
-        raw: bool,
-    ) -> Path:
-        """Containment-check a translated candidate and return it in the requested shape.
-
-        Raw mode returns the absolute lexical path built from ``lexical_root``
-        (symlinks remain visible). Default mode preserves the established
-        parent-canonicalized, leaf-preserving shape built from
-        ``canonical_root``. Both modes require the candidate's canonical
-        target — including the final component — to stay inside
-        ``canonical_root``.
-        """
-        if raw:
-            candidate = lexical_root.joinpath(*rel_parts) if rel_parts else lexical_root
-        else:
-            candidate = (
-                canonical_root.joinpath(*rel_parts) if rel_parts else canonical_root
-            )
-        target = _canonical_containment_target(candidate)
+    ) -> TranslatedCoordinate:
+        lexical_path = lexical_root.joinpath(*rel_parts) if rel_parts else lexical_root
+        mount_canonical_lexical_path = (
+            canonical_root.joinpath(*rel_parts) if rel_parts else canonical_root
+        )
+        target = _canonical_containment_target(mount_canonical_lexical_path)
         if target is None or not target.is_relative_to(canonical_root):
-            raise LocationCoordinateRejected(
-                f"location coordinate resolves outside its root: {candidate}"
+            return TranslatedCoordinate(
+                status="rejected",
+                mount_name=mount_name,
+                uri=uri,
+                rejection_reason=f"location coordinate resolves outside its root: {lexical_path}",
             )
-        if raw:
-            return candidate
-        return Path(os.path.realpath(candidate.parent)) / candidate.name
+        canonical_path = (
+            Path(os.path.realpath(mount_canonical_lexical_path.parent))
+            / mount_canonical_lexical_path.name
+            if rel_parts
+            else canonical_root
+        )
+        return TranslatedCoordinate(
+            status="resolved",
+            mount_name=mount_name,
+            uri=uri,
+            lexical_path=lexical_path,
+            mount_canonical_lexical_path=mount_canonical_lexical_path,
+            canonical_path=canonical_path,
+        )
+
+    def resolve_location_coordinate(
+        self,
+        mount_name: str,
+        mount_instance_id: str,
+        uri: str,
+        *,
+        historical_run_dir: str | Path | None = None,
+    ) -> Optional[Path]:
+        """Resolve ``(mount_name, mount_instance_id, uri)`` to a host ``Path`` or ``None``."""
+        coord = self.translate_location_coordinate(
+            mount_name,
+            mount_instance_id,
+            uri,
+            historical_run_dir=historical_run_dir,
+        )
+        return coord.canonical_path if coord.is_resolved else None
 
     def resolve_location_row_path(
         self,
@@ -1066,17 +1080,15 @@ class FileSystemManager:
         translate through a historical run's mount root.
         """
         rel = self.get_remappable_relative_path(artifact_uri)
-        try:
-            target = self._translate_location_coordinate(
-                row.mount_name,
-                row.mount_instance_id,
-                row.uri,
-                historical_run_dir=historical_run_dir,
-                raw=True,
-            )
-        except LocationCoordinateRejected:
+        coord = self.translate_location_coordinate(
+            row.mount_name,
+            row.mount_instance_id,
+            row.uri,
+            historical_run_dir=historical_run_dir,
+        )
+        if coord.is_rejected:
             return None
-        if target is None:
+        if coord.is_unmounted:
             if "://" not in row.uri or row.mount_name in ("workspace", "runs", "abs"):
                 return None
             scheme, uri_rel = row.uri.split("://", 1)
@@ -1093,6 +1105,10 @@ class FileSystemManager:
                 return None
             prefix = "/".join(uri_parts[: -len(rel_parts)])
             return f"{scheme}://{prefix}"
+
+        target = coord.lexical_path
+        if target is None:
+            return None
         if rel is not None and len(rel.parts) > 0:
             if len(target.parts) > len(rel.parts) and (
                 target.parts[-len(rel.parts) :] == rel.parts

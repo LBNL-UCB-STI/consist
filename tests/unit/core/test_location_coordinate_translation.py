@@ -18,15 +18,13 @@ import uuid
 
 import pytest
 
-from consist.core.fs import (
-    FileSystemManager,
-    LocationCoordinateRejected,
-)
+from consist.core.fs import FileSystemManager
 from consist.core.materialize import _artifact_recovery_roots
 from consist.core.tracker import Tracker
 from consist.location import (
     ArtifactLocationRow,
     LocationSite,
+    TranslatedCoordinate,
     workspace_mount_instance_id,
 )
 from consist.models.artifact import Artifact
@@ -145,15 +143,22 @@ def test_default_mode_preserves_parent_canonicalized_leaf_shape(tmp_path: Path) 
     (mount / "sub" / "dir" / "leaf.parquet").write_bytes(b"x")
 
     fs = _make_fs(tmp_path, mounts={"scratch": str(mount)})
-    resolved = fs.resolve_location_coordinate(
+    coord = fs.translate_location_coordinate(
         "scratch", "", "scratch://sub/dir/leaf.parquet"
     )
-    assert resolved is not None
+    assert isinstance(coord, TranslatedCoordinate)
+    assert coord.status == "resolved"
+    assert coord.is_resolved
+    assert coord.canonical_path is not None
     # Parent canonicalized through the symlink, leaf preserved.
-    assert resolved.name == "leaf.parquet"
-    assert "renamed_dir" in resolved.parts
-    assert "sub" not in resolved.parts
-    assert resolved.exists()
+    assert coord.canonical_path.name == "leaf.parquet"
+    assert "renamed_dir" in coord.canonical_path.parts
+    assert "sub" not in coord.canonical_path.parts
+    assert coord.canonical_path.exists()
+    assert (
+        fs.resolve_location_coordinate("scratch", "", "scratch://sub/dir/leaf.parquet")
+        == coord.canonical_path
+    )
 
 
 def test_raw_mode_retains_entire_lexical_path(tmp_path: Path) -> None:
@@ -163,12 +168,13 @@ def test_raw_mode_retains_entire_lexical_path(tmp_path: Path) -> None:
     (mount / "sub" / "dir" / "leaf.parquet").write_bytes(b"x")
 
     fs = _make_fs(tmp_path, mounts={"scratch": str(mount)})
-    raw = fs._translate_location_coordinate(
-        "scratch", "", "scratch://sub/dir/leaf.parquet", raw=True
+    coord = fs.translate_location_coordinate(
+        "scratch", "", "scratch://sub/dir/leaf.parquet"
     )
-    assert raw is not None
+    assert coord.is_resolved
+    assert coord.lexical_path is not None
     # Every component stays visible: mount root, symlinked prefix, leaf.
-    assert raw == mount / "sub" / "dir" / "leaf.parquet"
+    assert coord.lexical_path == mount / "sub" / "dir" / "leaf.parquet"
     assert (mount / "sub").is_symlink()
 
 
@@ -179,13 +185,18 @@ def test_contained_leaf_symlink_visible_in_default_mode(tmp_path: Path) -> None:
     (mount / "sub" / "leaf.parquet").symlink_to(mount / "sub" / "target.parquet")
 
     fs = _make_fs(tmp_path, mounts={"scratch": str(mount)})
-    resolved = fs.resolve_location_coordinate(
+    coord = fs.translate_location_coordinate(
         "scratch", "", "scratch://sub/leaf.parquet"
     )
-    assert resolved is not None
+    assert coord.is_resolved
+    assert coord.canonical_path is not None
     # Contained leaf symlink stays visible for caller-side symlink policies.
-    assert resolved.name == "leaf.parquet"
-    assert resolved.is_symlink()
+    assert coord.canonical_path.name == "leaf.parquet"
+    assert coord.canonical_path.is_symlink()
+    assert (
+        fs.resolve_location_coordinate("scratch", "", "scratch://sub/leaf.parquet")
+        == coord.canonical_path
+    )
 
 
 def test_escaping_leaf_symlink_rejected_in_both_modes(tmp_path: Path) -> None:
@@ -197,18 +208,16 @@ def test_escaping_leaf_symlink_rejected_in_both_modes(tmp_path: Path) -> None:
     (mount / "sub" / "leaf.parquet").symlink_to(outside / "secret.parquet")
 
     fs = _make_fs(tmp_path, mounts={"scratch": str(mount)})
-    # Default mode: rejected (previously returned the escaping path).
     assert (
         fs.resolve_location_coordinate("scratch", "", "scratch://sub/leaf.parquet")
         is None
     )
-    with pytest.raises(LocationCoordinateRejected):
-        fs._translate_location_coordinate("scratch", "", "scratch://sub/leaf.parquet")
-    # Raw mode: rejected as well.
-    with pytest.raises(LocationCoordinateRejected):
-        fs._translate_location_coordinate(
-            "scratch", "", "scratch://sub/leaf.parquet", raw=True
-        )
+    coord = fs.translate_location_coordinate(
+        "scratch", "", "scratch://sub/leaf.parquet"
+    )
+    assert coord.status == "rejected"
+    assert coord.is_rejected
+    assert coord.rejection_reason is not None
 
 
 def test_escaping_ancestor_symlink_rejected_in_both_modes(tmp_path: Path) -> None:
@@ -224,10 +233,12 @@ def test_escaping_ancestor_symlink_rejected_in_both_modes(tmp_path: Path) -> Non
         fs.resolve_location_coordinate("scratch", "", "scratch://link/art.parquet")
         is None
     )
-    with pytest.raises(LocationCoordinateRejected):
-        fs._translate_location_coordinate(
-            "scratch", "", "scratch://link/art.parquet", raw=True
-        )
+    coord = fs.translate_location_coordinate(
+        "scratch", "", "scratch://link/art.parquet"
+    )
+    assert coord.status == "rejected"
+    assert coord.is_rejected
+    assert coord.rejection_reason is not None
 
 
 def test_intermediate_and_terminal_traversal_rejected(tmp_path: Path) -> None:
@@ -241,10 +252,10 @@ def test_intermediate_and_terminal_traversal_rejected(tmp_path: Path) -> None:
         fs.resolve_location_coordinate("scratch", "", "scratch://sub/../escape") is None
     )
     for uri in ("scratch://..", "scratch://sub/../escape"):
-        with pytest.raises(LocationCoordinateRejected):
-            fs._translate_location_coordinate("scratch", "", uri)
-        with pytest.raises(LocationCoordinateRejected):
-            fs._translate_location_coordinate("scratch", "", uri, raw=True)
+        coord = fs.translate_location_coordinate("scratch", "", uri)
+        assert coord.status == "rejected"
+        assert coord.is_rejected
+        assert coord.rejection_reason is not None
 
 
 def test_traversal_rejected_through_historical_mount(tmp_path: Path) -> None:
@@ -257,10 +268,11 @@ def test_traversal_rejected_through_historical_mount(tmp_path: Path) -> None:
         )
         is None
     )
-    with pytest.raises(LocationCoordinateRejected):
-        fs._translate_location_coordinate(
-            "scratch", "", "scratch://..", historical_run_dir=mount, raw=True
-        )
+    coord = fs.translate_location_coordinate(
+        "scratch", "", "scratch://..", historical_run_dir=mount
+    )
+    assert coord.status == "rejected"
+    assert coord.is_rejected
 
 
 def test_dangling_symlink_rejected(tmp_path: Path) -> None:
@@ -273,10 +285,11 @@ def test_dangling_symlink_rejected(tmp_path: Path) -> None:
         fs.resolve_location_coordinate("scratch", "", "scratch://sub/dangling.parquet")
         is None
     )
-    with pytest.raises(LocationCoordinateRejected):
-        fs._translate_location_coordinate(
-            "scratch", "", "scratch://sub/dangling.parquet", raw=True
-        )
+    coord = fs.translate_location_coordinate(
+        "scratch", "", "scratch://sub/dangling.parquet"
+    )
+    assert coord.status == "rejected"
+    assert coord.is_rejected
 
 
 def test_symlink_loop_rejected(tmp_path: Path) -> None:
@@ -286,8 +299,9 @@ def test_symlink_loop_rejected(tmp_path: Path) -> None:
 
     fs = _make_fs(tmp_path, mounts={"scratch": str(mount)})
     assert fs.resolve_location_coordinate("scratch", "", "scratch://loop/x") is None
-    with pytest.raises(LocationCoordinateRejected):
-        fs._translate_location_coordinate("scratch", "", "scratch://loop/x", raw=True)
+    coord = fs.translate_location_coordinate("scratch", "", "scratch://loop/x")
+    assert coord.status == "rejected"
+    assert coord.is_rejected
 
 
 def test_missing_candidate_is_translated_for_probing(tmp_path: Path) -> None:
@@ -296,16 +310,18 @@ def test_missing_candidate_is_translated_for_probing(tmp_path: Path) -> None:
 
     fs = _make_fs(tmp_path, mounts={"scratch": str(mount)})
     # The artifact bytes do not exist yet; translation must not require them.
-    resolved = fs.resolve_location_coordinate(
+    coord = fs.translate_location_coordinate(
         "scratch", "", "scratch://sub/missing.parquet"
     )
-    assert resolved == (mount / "sub" / "missing.parquet").resolve()
-    assert not resolved.exists()
-    raw = fs._translate_location_coordinate(
-        "scratch", "", "scratch://sub/missing.parquet", raw=True
+    assert coord.is_resolved
+    assert coord.canonical_path == (mount / "sub" / "missing.parquet").resolve()
+    assert not coord.canonical_path.exists()
+    assert coord.lexical_path == mount / "sub" / "missing.parquet"
+    assert not coord.lexical_path.exists()
+    assert (
+        fs.resolve_location_coordinate("scratch", "", "scratch://sub/missing.parquet")
+        == coord.canonical_path
     )
-    assert raw == mount / "sub" / "missing.parquet"
-    assert not raw.exists()
 
 
 def test_mount_root_symlink_canonical_containment_lexical_visibility(
@@ -318,16 +334,15 @@ def test_mount_root_symlink_canonical_containment_lexical_visibility(
     mount_link.symlink_to(real, target_is_directory=True)
 
     fs = _make_fs(tmp_path, mounts={"scratch": str(mount_link)})
-    default = fs.resolve_location_coordinate("scratch", "", "scratch://sub/art.parquet")
-    assert default is not None
-    assert default.exists()
+    coord = fs.translate_location_coordinate("scratch", "", "scratch://sub/art.parquet")
+    assert coord.is_resolved
+    assert coord.canonical_path is not None and coord.canonical_path.exists()
     # Default mode canonicalizes through the mount-root symlink.
-    assert "real_mount" in default.parts
-    raw = fs._translate_location_coordinate(
-        "scratch", "", "scratch://sub/art.parquet", raw=True
-    )
-    # Raw mode keeps the mount-root symlink visible.
-    assert raw == mount_link / "sub" / "art.parquet"
+    assert "real_mount" in coord.canonical_path.parts
+    # Lexical path keeps the mount-root symlink visible.
+    assert coord.lexical_path == mount_link / "sub" / "art.parquet"
+    # Mount canonical lexical path resolves mount root but keeps in-mount lexical.
+    assert coord.mount_canonical_lexical_path == real / "sub" / "art.parquet"
 
 
 def test_workspace_runs_and_abs_cases_preserved(tmp_path: Path) -> None:
@@ -338,38 +353,52 @@ def test_workspace_runs_and_abs_cases_preserved(tmp_path: Path) -> None:
     fs = _make_fs(tmp_path, run_dir=run_dir)
     inst = fs.workspace_instance_id
 
-    resolved = fs.resolve_location_coordinate(
+    coord = fs.translate_location_coordinate(
         "workspace", inst, "workspace://a/b.parquet"
     )
-    assert resolved == (run_dir / "a" / "b.parquet").resolve()
+    assert coord.is_resolved
+    assert coord.canonical_path == (run_dir / "a" / "b.parquet").resolve()
 
     # Foreign workspace instance without a historical dir: unavailable.
+    foreign_coord = fs.translate_location_coordinate(
+        "workspace", "other-instance", "workspace://a/b.parquet"
+    )
+    assert foreign_coord.status == "unmounted"
+    assert foreign_coord.is_unmounted
+    assert foreign_coord.unmounted_uri == "workspace://a/b.parquet"
     assert (
         fs.resolve_location_coordinate(
             "workspace", "other-instance", "workspace://a/b.parquet"
         )
         is None
     )
+
     # Matching historical run dir: translated.
     hist = tmp_path / "old_ws"
     (hist / "a").mkdir(parents=True)
     (hist / "a" / "b.parquet").write_bytes(b"x")
     hist_inst = workspace_mount_instance_id(hist)
-    resolved_hist = fs.resolve_location_coordinate(
+    coord_hist = fs.translate_location_coordinate(
         "workspace", hist_inst, "workspace://a/b.parquet", historical_run_dir=hist
     )
-    assert resolved_hist == (hist / "a" / "b.parquet").resolve()
+    assert coord_hist.is_resolved
+    assert coord_hist.canonical_path == (hist / "a" / "b.parquet").resolve()
 
     # abs case returns the supplied path unchanged.
-    assert fs.resolve_location_coordinate(
+    coord_abs = fs.translate_location_coordinate(
         "abs", "", f"file://{tmp_path}/abs/x.parquet"
-    ) == Path(f"{tmp_path}/abs/x.parquet")
+    )
+    assert coord_abs.is_resolved
+    assert coord_abs.lexical_path == Path(f"{tmp_path}/abs/x.parquet")
+    assert coord_abs.canonical_path == Path(f"{tmp_path}/abs/x.parquet")
+    assert coord_abs.mount_canonical_lexical_path == Path(f"{tmp_path}/abs/x.parquet")
 
     # Traversal is rejected in the workspace branch too.
-    assert (
-        fs.resolve_location_coordinate("workspace", inst, "workspace://../escape")
-        is None
+    coord_ws_traversal = fs.translate_location_coordinate(
+        "workspace", inst, "workspace://../escape"
     )
+    assert coord_ws_traversal.status == "rejected"
+    assert coord_ws_traversal.is_rejected
 
 
 # ---------------------------------------------------------------------------
