@@ -1450,6 +1450,14 @@ class _HasDbAttr(Protocol):
     def db(self) -> Any: ...
 
 
+_SOURCE_KIND_BY_SOURCE: dict[str, Literal["historical_root", "recovery_root"]] = {
+    "ledger_historical": "historical_root",
+    "historical_uri": "historical_root",
+    "explicit_root": "recovery_root",
+    "stub_recovery_root": "recovery_root",
+}
+
+
 def _select_materialize_artifact_source(
     tracker: "Tracker",
     *,
@@ -1546,19 +1554,17 @@ def _select_materialize_artifact_source(
             resolved_source_root
         ):
             source_kind = "source_root"
-        elif cand.source in ("ledger_historical", "historical_uri"):
-            source_kind = "historical_root"
-        elif cand.source in ("managed_mount", "runtime_abs"):
-            source_kind = "historical_root" if artifact.run_id else "artifact_uri"
-        elif cand.source == "ledger_primary":
-            if cand.row is not None and cand.row.site in ("archive", "advisory"):
+        elif cand.source in ("managed_mount", "runtime_abs", "ledger_primary"):
+            if (
+                cand.source == "ledger_primary"
+                and cand.row is not None
+                and cand.row.site in ("archive", "advisory")
+            ):
                 source_kind = "recovery_root"
-            elif artifact.run_id:
-                source_kind = "historical_root"
             else:
-                source_kind = "artifact_uri"
+                source_kind = "historical_root" if artifact.run_id else "artifact_uri"
         else:
-            source_kind = "recovery_root"
+            source_kind = _SOURCE_KIND_BY_SOURCE.get(cand.source, "recovery_root")
 
         if val_path.exists():
             if _is_valid_manifest_candidate(val_path):

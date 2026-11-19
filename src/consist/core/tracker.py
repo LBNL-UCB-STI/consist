@@ -259,64 +259,62 @@ class Tracker:
         overrides[artifact.id] = (artifact._abs_path, abs_path)
 
     def artifact_abs_path_override(
-        self, artifact: Any
+        self, artifact: Artifact
     ) -> Optional[Tuple[Optional[str], Optional[str]]]:
         overrides = self._compat_attr("_artifact_abs_path_overrides")
-        if not overrides or not isinstance(artifact, Artifact):
+        if not overrides:
             return None
         return overrides.get(artifact.id)
 
     def resolve_artifact_path(
         self,
-        artifact: Any,
+        artifact: Artifact,
         *,
         allow_recovery_roots: bool = True,
         ignore_runtime_abs_path: bool = False,
         now_ns: Optional[int] = None,
     ) -> Path:
-        if isinstance(artifact, Artifact):
-            from consist.core.tracker_recovery import (
-                resolve_verified_local_path_with_diagnostics,
-                verify_candidate_against_artifact,
+        from consist.core.tracker_recovery import (
+            resolve_verified_local_path_with_diagnostics,
+            verify_candidate_against_artifact,
+        )
+
+        resolved, saw_mismatch = resolve_verified_local_path_with_diagnostics(
+            self,
+            artifact,
+            allow_recovery_roots=allow_recovery_roots,
+            ignore_runtime_abs_path=ignore_runtime_abs_path,
+            now_ns=now_ns,
+        )
+        if resolved is not None:
+            return resolved
+
+        nominal: Optional[Path] = None
+        try:
+            nominal = Path(self.resolve_uri(artifact.uri))
+        except (ValueError, RuntimeError, OSError, TypeError):
+            nominal = Path(artifact._abs_path) if artifact._abs_path else None
+
+        if saw_mismatch or (
+            nominal is not None
+            and nominal.exists()
+            and artifact.digest is not None
+            and not verify_candidate_against_artifact(nominal, artifact)
+        ):
+            raise FileNotFoundError(
+                f"Artifact {artifact.key!r} failed witness/digest verification "
+                "and has no verified recovery location."
             )
 
-            resolved, saw_mismatch = resolve_verified_local_path_with_diagnostics(
-                self,
-                artifact,
-                allow_recovery_roots=allow_recovery_roots,
-                ignore_runtime_abs_path=ignore_runtime_abs_path,
-                now_ns=now_ns,
-            )
-            if resolved is not None:
-                return resolved
-
-            nominal: Optional[Path] = None
-            try:
-                nominal = Path(self.resolve_uri(artifact.uri))
-            except (ValueError, RuntimeError, OSError, TypeError):
-                nominal = Path(artifact._abs_path) if artifact._abs_path else None
-
-            if saw_mismatch or (
-                nominal is not None
-                and nominal.exists()
-                and artifact.digest is not None
-                and not verify_candidate_against_artifact(nominal, artifact)
-            ):
-                raise FileNotFoundError(
-                    f"Artifact {artifact.key!r} failed witness/digest verification "
-                    "and has no verified recovery location."
-                )
-
-            if not ignore_runtime_abs_path and artifact._abs_path:
-                return Path(artifact._abs_path)
-            if nominal is not None:
-                return nominal
-            return Path(artifact.uri)
-        return Path(self.resolve_uri(str(artifact)))
+        if not ignore_runtime_abs_path and artifact._abs_path:
+            return Path(artifact._abs_path)
+        if nominal is not None:
+            return nominal
+        return Path(artifact.uri)
 
     def ensure_local_artifact_path(
         self,
-        artifact: Any,
+        artifact: Artifact,
         *,
         target_root: Optional[Path | str] = None,
         source_root: Optional[Path | str] = None,
@@ -334,20 +332,18 @@ class Tracker:
             on_missing=on_missing,
         )
 
-    def load_artifact_df(self, artifact: Any, **kwargs: Any) -> Any:
+    def load_artifact_df(self, artifact: Artifact, **kwargs: Any) -> Any:
         from consist.api import load_df
 
         return load_df(artifact, tracker=self, **kwargs)
 
-    def artifact_accessibility(self, artifact: Any) -> str:
-        if isinstance(artifact, Artifact):
-            acc = artifact.accessibility(tracker=self)
-            return "accessible" if acc.accessible else "missing"
-        return "missing"
+    def artifact_accessibility(self, artifact: Artifact) -> str:
+        acc = artifact.accessibility(tracker=self)
+        return "accessible" if acc.accessible else "missing"
 
-    def inspect_artifact_locations(self, artifact: Any) -> list[tuple[str, Path, bool]]:
-        if not isinstance(artifact, Artifact):
-            return []
+    def inspect_artifact_locations(
+        self, artifact: Artifact
+    ) -> list[tuple[str, Path, bool]]:
         from consist.core.tracker_recovery import (
             resolve_verified_local_path,
             verify_candidate_against_artifact,
@@ -384,9 +380,9 @@ class Tracker:
         return locations
 
     def artifact_recovery_roots(
-        self, artifact: Any, *, resolve: bool = True
+        self, artifact: Artifact, *, resolve: bool = True
     ) -> list[str]:
-        if not isinstance(artifact, Artifact) or artifact.id is None:
+        if artifact.id is None:
             return []
         db = self._compat_attr("db")
         if db is None:

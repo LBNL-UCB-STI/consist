@@ -60,6 +60,35 @@ class TranslatedCoordinate:
         return self.status == "unmounted"
 
 
+def unmounted_coordinate(mount_name: str, uri: str) -> TranslatedCoordinate:
+    """Build the canonical ``unmounted`` coordinate for ``mount_name``/``uri``."""
+    return TranslatedCoordinate(
+        status="unmounted",
+        mount_name=mount_name,
+        uri=uri,
+        unmounted_uri=uri,
+    )
+
+
+def rejected_coordinate(
+    mount_name: str,
+    uri: str,
+    reason: str,
+    *,
+    lexical_path: Path | None = None,
+    mount_canonical_lexical_path: Path | None = None,
+) -> TranslatedCoordinate:
+    """Build the canonical ``rejected`` coordinate with a rejection reason."""
+    return TranslatedCoordinate(
+        status="rejected",
+        mount_name=mount_name,
+        uri=uri,
+        rejection_reason=reason,
+        lexical_path=lexical_path,
+        mount_canonical_lexical_path=mount_canonical_lexical_path,
+    )
+
+
 class WitnessFreshness(str, Enum):
     """Outcome of checking a cached filesystem witness against on-disk stat."""
 

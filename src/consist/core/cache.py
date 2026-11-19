@@ -186,6 +186,18 @@ def _settled_candidate_witness(
     return db.get_settled_witness(row.location_id)
 
 
+def _settled_witness_fresh(
+    cand: Optional["ResolvedCandidate"], db: Optional[CacheDb]
+) -> bool:
+    """True when a candidate row carries a settled witness that is still FRESH."""
+    if cand is None or cand.row is None:
+        return False
+    witness = _settled_candidate_witness(db, cand.row)
+    if witness is None:
+        return False
+    return witness.check(cand.canonical_path).freshness == WitnessFreshness.FRESH
+
+
 def _settle_candidate_witness_after_validation(
     db: Optional[CacheDb],
     cand: Optional["ResolvedCandidate"],
@@ -1040,6 +1052,23 @@ def hydrate_cache_hit_outputs(
                 batch_resolver = MountPrecedenceResolver.from_tracker(
                     cast("Tracker", tracker)
                 )
+
+                def _find_existing_source(
+                    art: Artifact, *, relative_path: Optional[Path] = None
+                ) -> Optional[Path]:
+                    """First iterated candidate whose canonical path exists."""
+                    for cand in iter_artifact_candidates(
+                        cast("Tracker", tracker),
+                        art,
+                        relative_path=relative_path,
+                        source_root=active_options.materialize_cached_outputs_source_root,
+                        historical_run=cached_run,
+                        resolver=batch_resolver,
+                    ):
+                        if cand.canonical_path.exists():
+                            return cand.canonical_path
+                    return None
+
                 items: list[tuple[Artifact, Path, Path]] = []
                 on_missing = "warn"
 
@@ -1057,17 +1086,7 @@ def hydrate_cache_hit_outputs(
                     )
                     unresolved_requested: list[tuple[str, str]] = []
                     for art, dest in requested_items:
-                        source: Path | None = None
-                        for cand in iter_artifact_candidates(
-                            cast("Tracker", tracker),
-                            art,
-                            source_root=active_options.materialize_cached_outputs_source_root,
-                            historical_run=cached_run,
-                            resolver=batch_resolver,
-                        ):
-                            if cand.canonical_path.exists():
-                                source = cand.canonical_path
-                                break
+                        source = _find_existing_source(art)
                         if source is not None:
                             items.append((art, source, Path(dest)))
                         else:
@@ -1098,17 +1117,7 @@ def hydrate_cache_hit_outputs(
                     ).resolve()
                     for art in record.outputs:
                         relative_path = tracker.fs.get_remappable_relative_path(art.uri)
-                        source = None
-                        for cand in iter_artifact_candidates(
-                            cast("Tracker", tracker),
-                            art,
-                            source_root=active_options.materialize_cached_outputs_source_root,
-                            historical_run=cached_run,
-                            resolver=batch_resolver,
-                        ):
-                            if cand.canonical_path.exists():
-                                source = cand.canonical_path
-                                break
+                        source = _find_existing_source(art, relative_path=relative_path)
                         if source is None or relative_path is None:
                             raise FileNotFoundError(
                                 "[Consist] Cannot materialize cached input "
@@ -1279,12 +1288,8 @@ def validate_cached_run_outputs(
     ) -> bool:
         if not candidate.exists():
             return False
-        if cand is not None and cand.row is not None:
-            witness = _settled_candidate_witness(tracker.db, cand.row)
-            if witness is not None:
-                w_res = witness.check(cand.canonical_path)
-                if w_res.freshness == WitnessFreshness.FRESH:
-                    return True
+        if _settled_witness_fresh(cand, tracker.db):
+            return True
         manifest_valid = is_valid_directory_artifact_tree(candidate, art)
         if manifest_valid is not None:
             if manifest_valid:
@@ -1413,12 +1418,8 @@ def materialize_missing_inputs(
     ) -> bool:
         if not active_options.validate_materialized_inputs:
             return True
-        if cand is not None and cand.row is not None:
-            witness = _settled_candidate_witness(tracker.db, cand.row)
-            if witness is not None:
-                w_res = witness.check(cand.canonical_path)
-                if w_res.freshness == WitnessFreshness.FRESH:
-                    return True
+        if _settled_witness_fresh(cand, tracker.db):
+            return True
         manifest_valid = is_valid_directory_artifact_tree(path, artifact)
         if manifest_valid is not None:
             if manifest_valid:
@@ -1597,12 +1598,8 @@ def materialize_requested_inputs(
             and not active_options.requested_input_strict_snapshot
         ):
             return True
-        if cand is not None and cand.row is not None:
-            witness = _settled_candidate_witness(tracker.db, cand.row)
-            if witness is not None:
-                w_res = witness.check(cand.canonical_path)
-                if w_res.freshness == WitnessFreshness.FRESH:
-                    return True
+        if _settled_witness_fresh(cand, tracker.db):
+            return True
         manifest_valid = is_valid_directory_artifact_tree(path, artifact)
         if manifest_valid is not None:
             if manifest_valid:

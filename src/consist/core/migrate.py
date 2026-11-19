@@ -42,6 +42,7 @@ from consist.digest import (
     normalize_logical_matrices_identity,
 )
 from consist.location import ArtifactLocationRow, LocationSite
+from consist.models.artifact import Artifact
 
 logger = logging.getLogger(__name__)
 
@@ -93,17 +94,6 @@ class MigrationReport:
     locations_created: int = 0
     global_tables_copied: int = 0
     views_copied: int = 0
-
-
-@dataclass(frozen=True, slots=True)
-class _MigratedArtifactInfo:
-    id: uuid.UUID
-    key: str
-    uri: str
-    driver: str
-    digest: Optional[Digest]
-    member: Optional[str]
-    meta: Mapping[str, Any]
 
 
 ProgressCallback = Callable[[str, int, int], None]
@@ -345,7 +335,7 @@ def _migrate_artifacts_and_locations(
 ) -> tuple[
     list[list[Any]],
     list[ArtifactLocationRow],
-    dict[uuid.UUID, _MigratedArtifactInfo],
+    dict[uuid.UUID, Artifact],
     tuple[int, int, int],
 ]:
     if "artifact" not in src_tables:
@@ -451,7 +441,7 @@ def _migrate_artifacts_and_locations(
 
     artifact_rows: list[list[Any]] = []
     location_rows: list[ArtifactLocationRow] = []
-    artifacts_by_id: dict[uuid.UUID, _MigratedArtifactInfo] = {}
+    artifacts_by_id: dict[uuid.UUID, Artifact] = {}
     hashed = trusted = cold = 0
     obs_base_ns = time.time_ns()
     total_artifacts = len(raw_artifacts)
@@ -555,8 +545,14 @@ def _migrate_artifacts_and_locations(
             if old_hash:
                 meta["legacy_v04_hash"] = old_hash
 
-        art_info = _MigratedArtifactInfo(
-            art_id, key, uri, driver, resolved_digest, member_val, meta
+        art_info = Artifact(
+            id=art_id,
+            key=key,
+            uri=uri,
+            driver=driver,
+            digest=resolved_digest,
+            member=member_val,
+            meta=meta,
         )
         artifacts_by_id[art_id] = art_info
         p_ok = primary_cand is not None and primary_cand.exists()
@@ -606,7 +602,7 @@ def _migrate_artifacts_and_locations(
 
 
 def _upgrade_strict_binding_evidence(
-    evidence_json: str, artifacts_by_id: Mapping[uuid.UUID, _MigratedArtifactInfo]
+    evidence_json: str, artifacts_by_id: Mapping[uuid.UUID, Artifact]
 ) -> Optional[tuple[str, str]]:
     try:
         evidence = json.loads(evidence_json)
@@ -645,7 +641,7 @@ def _upgrade_strict_binding_evidence(
 def _promote_run_identities_and_links(
     *,
     run_rows: Sequence[tuple[str, str, Optional[str], Optional[str], dict[str, Any]]],
-    artifacts_by_id: Mapping[uuid.UUID, _MigratedArtifactInfo],
+    artifacts_by_id: Mapping[uuid.UUID, Artifact],
     raw_links: Sequence[tuple[str, uuid.UUID, str, str, bool]],
     invocations_by_exec_run: Mapping[str, list[tuple[uuid.UUID, str]]],
 ) -> tuple[list[list[Any]], list[list[Any]], list[list[Any]]]:

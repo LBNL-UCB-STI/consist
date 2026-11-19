@@ -17,7 +17,6 @@ from typing import (
     Mapping,
     Optional,
     Sequence,
-    TypeAlias,
     Union,
 )
 from typing_extensions import Protocol, runtime_checkable
@@ -56,6 +55,7 @@ from consist.core.persistence import DatabaseManager
 from consist.digest import DIGEST_DRIVERS, is_shapefile_sidecar_filename, verify_digest
 from consist.location import (
     ArtifactLocationRow,
+    TranslatedCoordinate,
     WitnessFreshness,
 )
 from consist.models.artifact import Artifact
@@ -116,7 +116,7 @@ class _HasHistoryService(Protocol):
 @runtime_checkable
 class _HasAbsPathOverride(Protocol):
     def artifact_abs_path_override(
-        self, artifact: Any
+        self, artifact: Artifact
     ) -> Optional[tuple[Optional[str], Optional[str]]]: ...
 
 
@@ -314,28 +314,6 @@ class _CachedLocationEntry:
     primary: _CachedCandidate | None
     historical: tuple[_CachedCandidate, ...]
 
-    def __iter__(self):
-        primary_cand = self.primary.candidate if self.primary else None
-        hist_cand = self.historical[0].candidate if self.historical else None
-        primary_entry = self.primary.entry if self.primary else None
-        primary_real = self.primary.real if self.primary else ""
-        hist_entry = self.historical[0].entry if self.historical else None
-        hist_real = self.historical[0].real if self.historical else ""
-        return iter(
-            (
-                self.row,
-                primary_cand,
-                hist_cand,
-                primary_entry,
-                primary_real,
-                hist_entry,
-                hist_real,
-            )
-        )
-
-
-_CachedEntryTuple: TypeAlias = _CachedLocationEntry
-
 
 def _resolve_rows_for_cache(
     tracker: "Tracker",
@@ -348,41 +326,28 @@ def _resolve_rows_for_cache(
     res = resolver or MountPrecedenceResolver.from_tracker(tracker)
     for row in rows:
         primary_coord, hist_coords = res.resolve_row_coordinates(row, artifact)
-        primary_item: _CachedCandidate | None = None
-        if primary_coord.is_resolved:
-            p_cand = primary_coord.canonical_path
-            assert p_cand is not None
-            p_entry = Path(resolve_artifact_entry_path(artifact, p_cand))
-            p_real = _fast_realpath(str(p_entry))
-            assert primary_coord.lexical_path is not None
-            assert primary_coord.mount_canonical_lexical_path is not None
-            primary_item = _CachedCandidate(
-                candidate=p_cand,
-                entry=p_entry,
-                real=p_real,
-                lexical_path=primary_coord.lexical_path,
-                mount_canonical_lexical_path=primary_coord.mount_canonical_lexical_path,
+
+        def _from_coord(coord: TranslatedCoordinate) -> _CachedCandidate:
+            cand = coord.canonical_path
+            assert cand is not None
+            entry = Path(resolve_artifact_entry_path(artifact, cand))
+            real = _fast_realpath(str(entry))
+            assert coord.lexical_path is not None
+            assert coord.mount_canonical_lexical_path is not None
+            return _CachedCandidate(
+                candidate=cand,
+                entry=entry,
+                real=real,
+                lexical_path=coord.lexical_path,
+                mount_canonical_lexical_path=coord.mount_canonical_lexical_path,
             )
 
-        hist_items: list[_CachedCandidate] = []
-        for h_coord in hist_coords:
-            if not h_coord.is_resolved:
-                continue
-            h_cand = h_coord.canonical_path
-            assert h_cand is not None
-            h_entry = Path(resolve_artifact_entry_path(artifact, h_cand))
-            h_real = _fast_realpath(str(h_entry))
-            assert h_coord.lexical_path is not None
-            assert h_coord.mount_canonical_lexical_path is not None
-            hist_items.append(
-                _CachedCandidate(
-                    candidate=h_cand,
-                    entry=h_entry,
-                    real=h_real,
-                    lexical_path=h_coord.lexical_path,
-                    mount_canonical_lexical_path=h_coord.mount_canonical_lexical_path,
-                )
-            )
+        primary_item: _CachedCandidate | None = (
+            _from_coord(primary_coord) if primary_coord.is_resolved else None
+        )
+        hist_items: list[_CachedCandidate] = [
+            _from_coord(h_coord) for h_coord in hist_coords if h_coord.is_resolved
+        ]
 
         entry = _CachedLocationEntry(
             row=row,
@@ -482,7 +447,7 @@ def _find_sibling_outputs_for_prefetch(
 def _load_cached_active_locations(
     tracker: "Tracker",
     artifact: Artifact,
-) -> tuple[_CachedEntryTuple, ...]:
+) -> tuple[_CachedLocationEntry, ...]:
     db = tracker.db
     if db is None:
         return ()
@@ -1086,7 +1051,7 @@ def stage_verified_source(
 
 def ensure_local_artifact_path_core(
     tracker: "Tracker",
-    artifact: Any,
+    artifact: Artifact,
     *,
     target_root: Optional[Path | str] = None,
     source_root: Optional[Path | str] = None,

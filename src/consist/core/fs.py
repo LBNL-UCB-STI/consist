@@ -2,7 +2,7 @@ import os
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, Optional, Union, cast
+from typing import Dict, Optional, Union, cast
 
 from consist.location import (
     ArtifactLocationRow,
@@ -11,19 +11,23 @@ from consist.location import (
     TranslatedCoordinate,
     Witness,
     capture_witness,
+    rejected_coordinate,
+    unmounted_coordinate,
     workspace_mount_instance_id,
 )
+from consist.models.artifact import Artifact
+from consist.models.run import Run
 
 
 def capture_artifact_witness(
     path: str | Path,
-    artifact: Any,
+    artifact: Artifact,
     *,
     observed_at_ns: Optional[int] = None,
 ) -> Optional[Witness]:
     """Capture a ``FileStat`` or ``DirTreeStat`` witness matching ``artifact``'s layout."""
-    meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
-    driver = artifact.driver if isinstance(artifact.driver, str) else None
+    meta = artifact.meta
+    driver = artifact.driver
     path_obj = Path(path)
     is_dir = bool(
         meta.get("is_dir")
@@ -51,7 +55,7 @@ def capture_artifact_witness(
             entry_name = raw_entry
         elif path_obj.is_file():
             entry_name = path_obj.name
-        elif isinstance(artifact.uri, str) and artifact.uri.lower().endswith(".shp"):
+        elif artifact.uri.lower().endswith(".shp"):
             entry_name = Path(artifact.uri.split("://", 1)[-1]).name
     return capture_witness(
         path,
@@ -65,7 +69,7 @@ def capture_artifact_witness(
 
 def build_verified_location_row(
     fs: "FileSystemManager",
-    artifact: Any,
+    artifact: Artifact,
     *,
     local_path: str | Path | None = None,
     uri: str | None = None,
@@ -77,7 +81,7 @@ def build_verified_location_row(
 ) -> ArtifactLocationRow:
     """Construct a canonical ``ArtifactLocationRow`` (with optional stat witness)."""
     obs_ns = time.time_ns() if observed_at_ns is None else int(observed_at_ns)
-    target_uri = uri if uri is not None else str(artifact.uri)
+    target_uri = uri if uri is not None else artifact.uri
     if archive_root is not None:
         m_name, m_inst, canonical_uri, target_path = fs.archive_coordinate_for_root(
             target_uri, archive_root
@@ -116,54 +120,6 @@ def build_verified_location_row(
         status=status,
         witness=witness,
         observed_at_ns=obs_ns,
-    )
-
-
-def resolve_historical_artifact_path(
-    fs: Any,
-    artifact: Any,
-    run: Any,
-    *,
-    fallback_to_current_uri: bool = True,
-) -> Optional[Path]:
-    """Resolve an artifact's historical path using metadata from ``run`` and ``artifact``."""
-    run_meta = run.meta if run is not None and isinstance(run.meta, Mapping) else {}
-    original_run_dir_raw = run_meta.get("_physical_run_dir")
-    original_run_dir = (
-        original_run_dir_raw
-        if isinstance(original_run_dir_raw, str) and original_run_dir_raw
-        else None
-    )
-    raw_mounts = run_meta.get("mounts")
-    mounts_snapshot = (
-        {
-            str(k): str(v)
-            for k, v in raw_mounts.items()
-            if isinstance(k, str) and isinstance(v, str)
-        }
-        if isinstance(raw_mounts, Mapping)
-        else None
-    )
-    artifact_meta = (
-        artifact.meta
-        if artifact is not None and isinstance(artifact.meta, Mapping)
-        else {}
-    )
-    raw_mount_root = artifact_meta.get("mount_root")
-    artifact_mount_root = (
-        raw_mount_root if isinstance(raw_mount_root, str) and raw_mount_root else None
-    )
-    if not fallback_to_current_uri and not (
-        original_run_dir or mounts_snapshot or artifact_mount_root
-    ):
-        return None
-    return Path(
-        fs.resolve_historical_path(
-            artifact.uri,
-            original_run_dir,
-            mounts_snapshot=mounts_snapshot,
-            artifact_mount_root=artifact_mount_root,
-        )
     )
 
 
@@ -464,17 +420,46 @@ class FileSystemManager:
 
     def resolve_historical_artifact_path(
         self,
-        artifact: Any,
-        run: Any,
+        artifact: Artifact,
+        run: Run,
         *,
         fallback_to_current_uri: bool = True,
     ) -> Optional[Path]:
         """Resolve an artifact's historical path using metadata from ``run`` and ``artifact``."""
-        return resolve_historical_artifact_path(
-            self,
-            artifact,
-            run,
-            fallback_to_current_uri=fallback_to_current_uri,
+        run_meta = run.meta
+        original_run_dir_raw = run_meta.get("_physical_run_dir")
+        original_run_dir = (
+            original_run_dir_raw
+            if isinstance(original_run_dir_raw, str) and original_run_dir_raw
+            else None
+        )
+        raw_mounts = run_meta.get("mounts")
+        mounts_snapshot = (
+            {
+                str(k): str(v)
+                for k, v in raw_mounts.items()
+                if isinstance(k, str) and isinstance(v, str)
+            }
+            if isinstance(raw_mounts, Mapping)
+            else None
+        )
+        raw_mount_root = artifact.meta.get("mount_root")
+        artifact_mount_root = (
+            raw_mount_root
+            if isinstance(raw_mount_root, str) and raw_mount_root
+            else None
+        )
+        if not fallback_to_current_uri and not (
+            original_run_dir or mounts_snapshot or artifact_mount_root
+        ):
+            return None
+        return Path(
+            self.resolve_historical_path(
+                artifact.uri,
+                original_run_dir,
+                mounts_snapshot=mounts_snapshot,
+                artifact_mount_root=artifact_mount_root,
+            )
         )
 
     @staticmethod
@@ -707,58 +692,6 @@ class FileSystemManager:
 
         return None
 
-    def get_historical_remap(
-        self,
-        uri: str,
-        *,
-        original_run_dir: Optional[str],
-        mounts_snapshot: Optional[Dict[str, str]] = None,
-        artifact_mount_root: Optional[str] = None,
-        scheme_prefixes: Optional[Mapping[str, Union[str, Path]]] = None,
-    ) -> Optional[tuple[Path, Path]]:
-        """Derive a historical root plus portable relative URI layout.
-
-        Parameters
-        ----------
-        uri : str
-            Artifact container URI to remap.
-        original_run_dir : str | None
-            Historical workspace root for workspace-relative URIs.
-        mounts_snapshot : dict[str, str] | None, optional
-            Historical mount roots recorded by URI scheme.
-        artifact_mount_root : str | None, optional
-            Artifact-specific fallback mount root.
-        scheme_prefixes : mapping of str to str | Path, optional
-            Prefix overrides by scheme for relative path derivation.
-
-        Returns
-        -------
-        tuple[Path, Path] | None
-            Historical root and safe relative layout, or ``None`` when the URI
-            is not recovery-remappable.
-
-        Notes
-        -----
-        This is stricter than :meth:`resolve_historical_path` because it only
-        returns layouts safe for recovery-oriented materialization.
-        """
-        relative_path = self.get_remappable_relative_path(
-            uri, scheme_prefixes=scheme_prefixes
-        )
-        if relative_path is None:
-            return None
-
-        historical_root = self.get_historical_root(
-            uri,
-            original_run_dir=original_run_dir,
-            mounts_snapshot=mounts_snapshot,
-            artifact_mount_root=artifact_mount_root,
-        )
-        if historical_root is None:
-            return None
-
-        return historical_root, relative_path
-
     @property
     def workspace_instance_id(self) -> str:
         """Return deterministic 16-hex instance ID for ``self.run_dir``."""
@@ -889,12 +822,7 @@ class FileSystemManager:
         if mount_name == "abs":
             stripped = uri[len("file://") :] if uri.startswith("file://") else uri
             if not stripped:
-                return TranslatedCoordinate(
-                    status="unmounted",
-                    mount_name=mount_name,
-                    uri=uri,
-                    unmounted_uri=uri,
-                )
+                return unmounted_coordinate(mount_name, uri)
             p = Path(stripped)
             return TranslatedCoordinate(
                 status="resolved",
@@ -938,19 +866,13 @@ class FileSystemManager:
                 lexical_root = Path(os.path.abspath(self.run_dir))
 
             if lexical_root is None:
-                return TranslatedCoordinate(
-                    status="unmounted",
-                    mount_name=mount_name,
-                    uri=uri,
-                    unmounted_uri=uri,
-                )
+                return unmounted_coordinate(mount_name, uri)
             rel_parts = _checked_uri_relative_parts(rel)
             if rel_parts is None:
-                return TranslatedCoordinate(
-                    status="rejected",
-                    mount_name=mount_name,
-                    uri=uri,
-                    rejection_reason=f"location coordinate contains path traversal: {rel!r}",
+                return rejected_coordinate(
+                    mount_name,
+                    uri,
+                    f"location coordinate contains path traversal: {rel!r}",
                 )
             canonical_root = Path(os.path.realpath(lexical_root))
             return self._checked_translated_coordinate(
@@ -969,23 +891,17 @@ class FileSystemManager:
             )
             raw_root_str = str(raw_mount_root)
             if "://" in raw_root_str and not raw_root_str.startswith("file://"):
-                return TranslatedCoordinate(
-                    status="unmounted",
-                    mount_name=mount_name,
-                    uri=uri,
-                    unmounted_uri=uri,
-                )
+                return unmounted_coordinate(mount_name, uri)
             lexical_root = Path(os.path.abspath(Path(raw_mount_root).expanduser()))
             rel = (
                 uri.split("://", 1)[1].lstrip("/") if "://" in uri else uri.lstrip("./")
             )
             rel_parts = _checked_uri_relative_parts(rel)
             if rel_parts is None:
-                return TranslatedCoordinate(
-                    status="rejected",
-                    mount_name=mount_name,
-                    uri=uri,
-                    rejection_reason=f"location coordinate contains path traversal: {rel!r}",
+                return rejected_coordinate(
+                    mount_name,
+                    uri,
+                    f"location coordinate contains path traversal: {rel!r}",
                 )
             canonical_root = Path(os.path.realpath(lexical_root))
             return self._checked_translated_coordinate(
@@ -996,12 +912,7 @@ class FileSystemManager:
                 rel_parts,
             )
 
-        return TranslatedCoordinate(
-            status="unmounted",
-            mount_name=mount_name,
-            uri=uri,
-            unmounted_uri=uri,
-        )
+        return unmounted_coordinate(mount_name, uri)
 
     def _checked_translated_coordinate(
         self,
@@ -1017,11 +928,12 @@ class FileSystemManager:
         )
         target = _canonical_containment_target(mount_canonical_lexical_path)
         if target is None or not target.is_relative_to(canonical_root):
-            return TranslatedCoordinate(
-                status="rejected",
-                mount_name=mount_name,
-                uri=uri,
-                rejection_reason=f"location coordinate resolves outside its root: {lexical_path}",
+            return rejected_coordinate(
+                mount_name,
+                uri,
+                f"location coordinate resolves outside its root: {lexical_path}",
+                lexical_path=lexical_path,
+                mount_canonical_lexical_path=mount_canonical_lexical_path,
             )
         canonical_path = (
             Path(os.path.realpath(mount_canonical_lexical_path.parent))
@@ -1036,6 +948,28 @@ class FileSystemManager:
             lexical_path=lexical_path,
             mount_canonical_lexical_path=mount_canonical_lexical_path,
             canonical_path=canonical_path,
+        )
+
+    def translate_raw_root(self, root: Path | str, rel: Path) -> TranslatedCoordinate:
+        """Translate an arbitrary ``(root, rel)`` pair through the containment invariant.
+
+        Single home of the fail-closed containment rules (unsafe relative
+        parts, containment escape) shared by the location resolver's
+        root-based candidate construction.
+        """
+        lexical_root = Path(root).expanduser()
+        if not lexical_root.is_absolute():
+            lexical_root = lexical_root.resolve()
+        canonical_root = Path(os.path.realpath(lexical_root))
+        rel_parts = _checked_uri_relative_parts(rel.as_posix())
+        if rel_parts is None:
+            return rejected_coordinate(
+                "",
+                str(rel),
+                f"location coordinate contains path traversal: {rel.as_posix()!r}",
+            )
+        return self._checked_translated_coordinate(
+            "", str(lexical_root), lexical_root, canonical_root, rel_parts
         )
 
     def resolve_location_coordinate(

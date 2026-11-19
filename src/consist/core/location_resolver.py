@@ -17,11 +17,7 @@ from consist.core.directory_artifacts import (
     file_bundle_entry_name,
     is_file_bundle_artifact,
 )
-from consist.core.fs import (
-    FileSystemManager,
-    _canonical_containment_target,
-    _checked_uri_relative_parts,
-)
+from consist.core.fs import FileSystemManager
 from consist.location import ArtifactLocationRow, TranslatedCoordinate
 from consist.models.artifact import Artifact
 from consist.core.persistence import DatabaseManager
@@ -48,7 +44,6 @@ class ResolvedCandidate:
     lexical_path: Path
     mount_canonical_lexical_path: Path
     canonical_path: Path
-    entry_lexical_path: Path
     entry_canonical_path: Path
     row: ArtifactLocationRow | None = None
     rejected: bool = False
@@ -67,6 +62,20 @@ def _uri_relative_suffix(uri: str) -> Path | None:
     return Path(raw) if raw else None
 
 
+def _entry_canonical_path(artifact: Artifact, canonical_path: Path) -> Path:
+    """Resolve the bundle-member entry path for directory file bundles."""
+    if is_file_bundle_artifact(artifact) and canonical_path.is_dir():
+        entry_name = file_bundle_entry_name(artifact)
+        if entry_name is not None:
+            target_entry = canonical_path / entry_name
+            return (
+                target_entry.resolve()
+                if target_entry.exists()
+                else Path(os.path.realpath(canonical_path)) / entry_name
+            )
+    return canonical_path
+
+
 def _candidate_from_coordinate(
     coord: TranslatedCoordinate,
     source: CandidateSource,
@@ -80,30 +89,12 @@ def _candidate_from_coordinate(
     assert coord.mount_canonical_lexical_path is not None
     assert coord.canonical_path is not None
 
-    lexical_path = coord.lexical_path
-    mount_canonical = coord.mount_canonical_lexical_path
-    canonical_path = coord.canonical_path
-
-    entry_lexical = lexical_path
-    entry_canonical = canonical_path
-    if is_file_bundle_artifact(artifact) and canonical_path.is_dir():
-        entry_name = file_bundle_entry_name(artifact)
-        if entry_name is not None:
-            entry_lexical = lexical_path / entry_name
-            target_entry = canonical_path / entry_name
-            entry_canonical = (
-                target_entry.resolve()
-                if target_entry.exists()
-                else Path(os.path.realpath(canonical_path)) / entry_name
-            )
-
     return ResolvedCandidate(
         source=source,
-        lexical_path=lexical_path,
-        mount_canonical_lexical_path=mount_canonical,
-        canonical_path=canonical_path,
-        entry_lexical_path=entry_lexical,
-        entry_canonical_path=entry_canonical,
+        lexical_path=coord.lexical_path,
+        mount_canonical_lexical_path=coord.mount_canonical_lexical_path,
+        canonical_path=coord.canonical_path,
+        entry_canonical_path=_entry_canonical_path(artifact, coord.canonical_path),
         row=row,
     )
 
@@ -114,66 +105,35 @@ def _candidate_from_root(
     source: CandidateSource,
     artifact: Artifact,
     *,
+    fs: FileSystemManager,
     row: ArtifactLocationRow | None = None,
     keep_rejected: bool = False,
 ) -> ResolvedCandidate | None:
-    lexical_root = Path(root).expanduser()
-    if not lexical_root.is_absolute():
-        lexical_root = lexical_root.resolve()
-    canonical_root = Path(os.path.realpath(lexical_root))
-    rel_parts = _checked_uri_relative_parts(rel.as_posix())
-    if rel_parts is None:
-        return None
-    lexical_path = lexical_root.joinpath(*rel_parts) if rel_parts else lexical_root
-    mount_canonical = (
-        canonical_root.joinpath(*rel_parts) if rel_parts else canonical_root
-    )
-    target = _canonical_containment_target(mount_canonical)
-    if target is None or not target.is_relative_to(canonical_root):
-        if keep_rejected and (
-            lexical_path.is_symlink()
-            or lexical_path.exists()
-            or mount_canonical.is_symlink()
-            or mount_canonical.exists()
+    coord = fs.translate_raw_root(root, rel)
+    if coord is None or not coord.is_resolved:
+        if (
+            keep_rejected
+            and coord is not None
+            and coord.lexical_path is not None
+            and coord.mount_canonical_lexical_path is not None
+            and (
+                coord.lexical_path.is_symlink()
+                or coord.lexical_path.exists()
+                or coord.mount_canonical_lexical_path.is_symlink()
+                or coord.mount_canonical_lexical_path.exists()
+            )
         ):
             return ResolvedCandidate(
                 source=source,
-                lexical_path=lexical_path,
-                mount_canonical_lexical_path=mount_canonical,
-                canonical_path=mount_canonical,
-                entry_lexical_path=lexical_path,
-                entry_canonical_path=mount_canonical,
+                lexical_path=coord.lexical_path,
+                mount_canonical_lexical_path=coord.mount_canonical_lexical_path,
+                canonical_path=coord.mount_canonical_lexical_path,
+                entry_canonical_path=coord.mount_canonical_lexical_path,
                 row=row,
                 rejected=True,
             )
         return None
-    canonical_path = (
-        Path(os.path.realpath(mount_canonical.parent)) / mount_canonical.name
-        if rel_parts
-        else canonical_root
-    )
-    entry_lexical = lexical_path
-    entry_canonical = canonical_path
-    if is_file_bundle_artifact(artifact) and canonical_path.is_dir():
-        entry_name = file_bundle_entry_name(artifact)
-        if entry_name is not None:
-            entry_lexical = lexical_path / entry_name
-            target_entry = canonical_path / entry_name
-            entry_canonical = (
-                target_entry.resolve()
-                if target_entry.exists()
-                else Path(os.path.realpath(canonical_path)) / entry_name
-            )
-
-    return ResolvedCandidate(
-        source=source,
-        lexical_path=lexical_path,
-        mount_canonical_lexical_path=mount_canonical,
-        canonical_path=canonical_path,
-        entry_lexical_path=entry_lexical,
-        entry_canonical_path=entry_canonical,
-        row=row,
-    )
+    return _candidate_from_coordinate(coord, source, artifact, row=row)
 
 
 class MountPrecedenceResolver:
@@ -192,7 +152,6 @@ class MountPrecedenceResolver:
         )
         self.get_run = get_run
         self._run_obj_memo: dict[str, Run | None] = {}
-        self._run_meta_memo: dict[str, Mapping[str, Any]] = {}
         self._historical_roots_memo: dict[str, tuple[str, ...]] = {}
         self._has_hist_root_memo: dict[str, bool] = {}
 
@@ -208,9 +167,6 @@ class MountPrecedenceResolver:
     def seed_run_meta(self, run: Run) -> None:
         """Seed known run metadata for historical mount resolution."""
         self._run_obj_memo[str(run.id)] = run
-        self._run_meta_memo[str(run.id)] = (
-            run.meta if isinstance(run.meta, Mapping) else {}
-        )
 
     def _get_run(self, run_id: str) -> Run | None:
         if run_id not in self._run_obj_memo:
@@ -220,11 +176,8 @@ class MountPrecedenceResolver:
         return self._run_obj_memo[run_id]
 
     def _get_run_meta(self, run_id: str) -> Mapping[str, Any]:
-        if run_id not in self._run_meta_memo:
-            run = self._get_run(run_id)
-            meta = run.meta if run is not None and isinstance(run.meta, Mapping) else {}
-            self._run_meta_memo[run_id] = meta
-        return self._run_meta_memo[run_id]
+        run = self._get_run(run_id)
+        return run.meta if run is not None and isinstance(run.meta, Mapping) else {}
 
     def get_historical_mount_roots(self, mount_name: str) -> tuple[str, ...]:
         """Return memoized DB historical mount roots for ``mount_name``."""
@@ -457,6 +410,17 @@ def iter_artifact_candidates(
     res = resolver or MountPrecedenceResolver.from_tracker(tracker)
     if historical_run is not None:
         res.seed_run_meta(historical_run)
+
+    def _emit(cand: ResolvedCandidate | None) -> Iterator[ResolvedCandidate]:
+        """Yield a candidate, passing rejected candidates through and deduping the rest."""
+        if cand is None:
+            return
+        if cand.rejected:
+            yield cand
+        elif cand.canonical_path not in seen_canonical:
+            seen_canonical.add(cand.canonical_path)
+            yield cand
+
     rel = relative_path
     if rel is None:
         inferred_prefix: Path | None = None
@@ -491,28 +455,30 @@ def iter_artifact_candidates(
 
     # 1. Explicit source root
     if source_root is not None and rel is not None:
-        cand = _candidate_from_root(
-            source_root, rel, "explicit_root", artifact, keep_rejected=include_rejected
+        yield from _emit(
+            _candidate_from_root(
+                source_root,
+                rel,
+                "explicit_root",
+                artifact,
+                fs=tracker.fs,
+                keep_rejected=include_rejected,
+            )
         )
-        if cand is not None:
-            if cand.rejected:
-                yield cand
-            elif cand.canonical_path not in seen_canonical:
-                seen_canonical.add(cand.canonical_path)
-                yield cand
 
     # 2. Additional explicit roots
     if explicit_roots is not None and rel is not None:
         for exp_root in explicit_roots:
-            cand = _candidate_from_root(
-                exp_root, rel, "explicit_root", artifact, keep_rejected=include_rejected
+            yield from _emit(
+                _candidate_from_root(
+                    exp_root,
+                    rel,
+                    "explicit_root",
+                    artifact,
+                    fs=tracker.fs,
+                    keep_rejected=include_rejected,
+                )
             )
-            if cand is not None:
-                if cand.rejected:
-                    yield cand
-                elif cand.canonical_path not in seen_canonical:
-                    seen_canonical.add(cand.canonical_path)
-                    yield cand
 
     # 3. Runtime abs path (if requested)
     if include_runtime_abs and artifact.abs_path:
@@ -520,25 +486,12 @@ def iter_artifact_candidates(
         canonical = Path(os.path.realpath(p))
         if canonical not in seen_canonical:
             seen_canonical.add(canonical)
-            entry_lexical = p
-            entry_canonical = canonical
-            if is_file_bundle_artifact(artifact) and canonical.is_dir():
-                entry_name = file_bundle_entry_name(artifact)
-                if entry_name is not None:
-                    entry_lexical = p / entry_name
-                    target_entry = canonical / entry_name
-                    entry_canonical = (
-                        target_entry.resolve()
-                        if target_entry.exists()
-                        else Path(os.path.realpath(canonical)) / entry_name
-                    )
             yield ResolvedCandidate(
                 source="runtime_abs",
                 lexical_path=p,
                 mount_canonical_lexical_path=p,
                 canonical_path=canonical,
-                entry_lexical_path=entry_lexical,
-                entry_canonical_path=entry_canonical,
+                entry_canonical_path=_entry_canonical_path(artifact, canonical),
             )
 
     # 4. Ledger rows
@@ -558,19 +511,17 @@ def iter_artifact_candidates(
         for row in candidate_rows:
             primary_coord, hist_coords = res.resolve_row_coordinates(row, artifact)
             if primary_coord.is_resolved:
-                cand = _candidate_from_coordinate(
-                    primary_coord, "ledger_primary", artifact, row=row
+                yield from _emit(
+                    _candidate_from_coordinate(
+                        primary_coord, "ledger_primary", artifact, row=row
+                    )
                 )
-                if cand is not None and cand.canonical_path not in seen_canonical:
-                    seen_canonical.add(cand.canonical_path)
-                    yield cand
             for hist_coord in hist_coords:
-                cand = _candidate_from_coordinate(
-                    hist_coord, "ledger_historical", artifact, row=row
+                yield from _emit(
+                    _candidate_from_coordinate(
+                        hist_coord, "ledger_historical", artifact, row=row
+                    )
                 )
-                if cand is not None and cand.canonical_path not in seen_canonical:
-                    seen_canonical.add(cand.canonical_path)
-                    yield cand
 
     # 5. Direct translation and DB-less / stub-tracker fallback
     # 5a. Artifact mount_root candidate (always)
@@ -578,15 +529,16 @@ def iter_artifact_candidates(
     mr = art_meta.get("mount_root")
     suffix = _uri_relative_suffix(artifact.uri)
     if isinstance(mr, str) and mr and suffix is not None:
-        cand = _candidate_from_root(
-            mr, suffix, "historical_uri", artifact, keep_rejected=include_rejected
+        yield from _emit(
+            _candidate_from_root(
+                mr,
+                suffix,
+                "historical_uri",
+                artifact,
+                fs=tracker.fs,
+                keep_rejected=include_rejected,
+            )
         )
-        if cand is not None:
-            if cand.rejected:
-                yield cand
-            elif cand.canonical_path not in seen_canonical:
-                seen_canonical.add(cand.canonical_path)
-                yield cand
 
     # 5b. Owning-run historical root (always)
     owning_run = historical_run
@@ -608,15 +560,16 @@ def iter_artifact_candidates(
             hist_dir = hist_root
 
     if hist_dir is not None and rel is not None:
-        cand = _candidate_from_root(
-            hist_dir, rel, "historical_uri", artifact, keep_rejected=include_rejected
+        yield from _emit(
+            _candidate_from_root(
+                hist_dir,
+                rel,
+                "historical_uri",
+                artifact,
+                fs=tracker.fs,
+                keep_rejected=include_rejected,
+            )
         )
-        if cand is not None:
-            if cand.rejected:
-                yield cand
-            elif cand.canonical_path not in seen_canonical:
-                seen_canonical.add(cand.canonical_path)
-                yield cand
 
     # 5c/5d. Managed mount and DB-less / stub-tracker fallback
     if not candidate_rows:
@@ -630,36 +583,29 @@ def iter_artifact_candidates(
                 )
                 coord = tracker.fs.translate_location_coordinate(p_mount, p_inst, p_uri)
                 if coord.is_resolved:
-                    cand = _candidate_from_coordinate(coord, "managed_mount", artifact)
-                    if cand is not None and cand.canonical_path not in seen_canonical:
-                        seen_canonical.add(cand.canonical_path)
-                        yield cand
+                    yield from _emit(
+                        _candidate_from_coordinate(coord, "managed_mount", artifact)
+                    )
             except Exception:
                 pass
 
         if not is_real_db and rel is not None:
             rec_roots_fn = getattr(tracker, "artifact_recovery_roots", None)
             if callable(rec_roots_fn):
-                try:
-                    raw_roots = rec_roots_fn(artifact, resolve=False)
-                except TypeError:
-                    raw_roots = rec_roots_fn(artifact)
+                raw_roots = rec_roots_fn(artifact, resolve=False)
                 normalized = tracker.fs.normalize_recovery_roots(
                     raw_roots, resolve=False
                 )
                 for r in normalized:
                     if "://" in r and not r.startswith("file://"):
                         continue
-                    cand = _candidate_from_root(
-                        r,
-                        rel,
-                        "stub_recovery_root",
-                        artifact,
-                        keep_rejected=include_rejected,
+                    yield from _emit(
+                        _candidate_from_root(
+                            r,
+                            rel,
+                            "stub_recovery_root",
+                            artifact,
+                            fs=tracker.fs,
+                            keep_rejected=include_rejected,
+                        )
                     )
-                    if cand is not None:
-                        if cand.rejected:
-                            yield cand
-                        elif cand.canonical_path not in seen_canonical:
-                            seen_canonical.add(cand.canonical_path)
-                            yield cand
