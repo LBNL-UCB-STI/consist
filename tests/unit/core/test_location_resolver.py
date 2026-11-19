@@ -32,7 +32,9 @@ import uuid
 import pandas as pd
 import pytest
 
-from consist.core.fs import FileSystemManager
+from typing import cast
+
+from consist.core.fs import FileSystemManager, build_verified_location_row
 from consist.core.location_resolver import (
     MountPrecedenceResolver,
     iter_artifact_candidates,
@@ -44,7 +46,11 @@ from consist.core.tracker_recovery import (
     resolve_verified_local_path_detailed,
     warm_artifact_locations_cache,
 )
-from consist.location import ArtifactLocationRow, DirTreeStat
+from consist.location import (
+    ArtifactLocationRow,
+    DirTreeStat,
+    TranslatedCoordinate,
+)
 from consist.models.artifact import Artifact
 from consist.models.run import Run
 
@@ -719,7 +725,12 @@ def test_pilates_launcher_mount_configuration_resolves_step_scoped_scratch(
 def test_dirtreestat_witness_fast_path_skips_full_tree_chunk_hashing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A fresh DirTreeStat witness must skip recursive manifest/chunk hashing on Lustre."""
+    """A settled DirTreeStat witness skips recursive manifest/chunk hashing on Lustre.
+
+    Only settled (content-verified) witnesses certify bytes without
+    re-validation; the witness is therefore settled on the validating
+    tracker's own DB instance before the consumer run.
+    """
     db_path = tmp_path / "prov.duckdb"
     tracker = Tracker(run_dir=tmp_path / "ws", db_path=str(db_path))
 
@@ -736,9 +747,9 @@ def test_dirtreestat_witness_fast_path_skips_full_tree_chunk_hashing(
     future_time = time.time_ns() + 10_000_000_000
     witness = DirTreeStat.capture_dir(zarr_dir, observed_at_ns=future_time).settled()
     row = tracker.db.get_active_artifact_locations(artifact_id=art.id)[0]
-    tracker.db.settle_artifact_location_witness(row.location_id, witness)
 
-    # Spy on is_valid_directory_artifact_tree to ensure it is NOT called when witness is fresh
+    # Spy on is_valid_directory_artifact_tree to ensure it is NOT called when
+    # the witness is settled (digest-verified)
     import consist.core.cache as consist_cache
 
     manifest_validation_called = False
@@ -754,6 +765,8 @@ def test_dirtreestat_witness_fast_path_skips_full_tree_chunk_hashing(
     monkeypatch.setattr(time, "time_ns", lambda: future_time)
 
     consumer = Tracker(run_dir=tmp_path / "consumer_ws", db_path=str(db_path))
+    # Settle on the validating instance: settlement registry is per-DB-instance.
+    consumer.db.settle_artifact_location_witness(row.location_id, witness)
     with consumer.start_run(
         "zarr_consumer",
         model="m",
@@ -765,7 +778,7 @@ def test_dirtreestat_witness_fast_path_skips_full_tree_chunk_hashing(
         pass
 
     assert not manifest_validation_called, (
-        "Fresh DirTreeStat witness must skip recursive directory tree validation"
+        "Settled FRESH witness must skip recursive directory tree validation"
     )
     consumer.close()
     tracker.close()
@@ -1802,3 +1815,149 @@ def test_resolver_missing_run_meta_negative_lookup_memoized(tmp_path: Path) -> N
     assert get_run_calls == ["ghost"]
 
     consumer.close()
+
+
+# ---------------------------------------------------------------------------
+# 15. Witness settlement soundness (fresh witnesses are not digest certificates)
+# ---------------------------------------------------------------------------
+
+
+def test_unverified_fresh_witness_does_not_bless_tampered_recovery_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A witness captured without content verification must not certify tampered bytes.
+
+    Regression for the FRESH-witness fast path: input rows register with
+    lstat-only witnesses, so a tampered file can carry a FRESH witness that
+    never matched the artifact digest. Full digest validation must run and
+    reject the tampered source.
+    """
+    db_path = tmp_path / "prov.duckdb"
+    tracker = Tracker(run_dir=tmp_path / "ws", db_path=str(db_path))
+
+    f = tracker.run_dir / "io" / "input.csv"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("value\n1\n")
+
+    with tracker.start_run("producer", model="m"):
+        art = tracker.log_output(f, key="inp")
+
+    # Tamper, then capture an unverified stat witness matching the tampered
+    # bytes (simulating the unverified input-row capture path).
+    f.write_text("value\n999\n")
+    tampered_row = build_verified_location_row(tracker.fs, art, local_path=f)
+    tracker.db.upsert_artifact_locations([tampered_row])
+
+    # The tampered row must actually surface as a candidate.
+    cands = list(iter_artifact_candidates(tracker, art))
+    assert any(
+        c.row is not None and c.row.location_id == tampered_row.location_id
+        for c in cands
+    )
+
+    import consist.core.materialize as materialize_mod
+
+    staged_items: list[object] = []
+
+    def _spy_bulk(*args: object, **kwargs: object) -> dict[str, str]:
+        staged_items.append(args)
+        return {}
+
+    monkeypatch.setattr(
+        materialize_mod, "materialize_artifacts_from_sources", _spy_bulk
+    )
+
+    import consist.core.materialize as materialize_mod
+
+    staged_items: list = []
+    real_bulk = materialize_mod.materialize_artifacts_from_sources
+
+    def _spy_bulk(items: object, **kwargs: object) -> object:
+        staged_items.extend(items)  # type: ignore[attr-defined]
+        return real_bulk(items, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        materialize_mod, "materialize_artifacts_from_sources", _spy_bulk
+    )
+
+    with tracker.start_run(
+        "consumer",
+        model="m",
+        inputs=[art],
+        cache_mode="reuse",
+        cache_hydration="inputs-missing",
+        validate_materialized_inputs=True,
+    ):
+        pass
+
+    assert staged_items == [], (
+        "Unverified FRESH witness must not bless a tampered recovery source"
+    )
+    tracker.close()
+
+
+def test_rejected_primary_preserves_resolved_historical_coordinates(
+    tmp_path: Path,
+) -> None:
+    """A rejected workspace primary must not discard resolved historical coords.
+
+    Regression: relocated run dirs whose workspace primary is rejected used to
+    lose their owning-run physical-dir recovery path.
+    """
+    tracker = Tracker(run_dir=tmp_path / "ws", db_path=str(tmp_path / "prov.duckdb"))
+    resolver = MountPrecedenceResolver.from_tracker(tracker)
+
+    phys_dir = tmp_path / "old_phys_run"
+    phys_dir.mkdir(parents=True)
+
+    def _fake_translate(
+        mount_name: str,
+        mount_instance_id: str,
+        uri: str,
+        historical_run_dir: str | None = None,
+    ) -> TranslatedCoordinate:
+        if historical_run_dir is None:
+            return TranslatedCoordinate(
+                status="rejected",
+                mount_name=mount_name,
+                uri=uri,
+                rejection_reason="primary rejected",
+            )
+        hist_path = Path(historical_run_dir) / "outputs" / "a.csv"
+        return TranslatedCoordinate(
+            status="resolved",
+            mount_name=mount_name,
+            uri=uri,
+            lexical_path=hist_path,
+            mount_canonical_lexical_path=hist_path,
+            canonical_path=hist_path,
+        )
+
+    resolver.fs = cast(
+        FileSystemManager,
+        SimpleNamespace(translate_location_coordinate=_fake_translate),
+    )
+    resolver._get_run_meta = lambda run_id: {"_physical_run_dir": str(phys_dir)}
+
+    row = ArtifactLocationRow.create(
+        digest=None,
+        artifact_id=None,
+        site="workspace",
+        mount_name="workspace",
+        mount_instance_id="",
+        uri="workspace://outputs/a.csv",
+    )
+    artifact = Artifact(
+        key="a",
+        uri="workspace://outputs/a.csv",
+        driver="csv",
+        digest=None,
+        run_id="r1",
+    )
+
+    primary, hist = resolver.resolve_row_coordinates(row, artifact)
+    assert primary.status == "rejected"
+    assert len(hist) == 1
+    assert hist[0].is_resolved
+    assert hist[0].canonical_path == (phys_dir / "outputs" / "a.csv")
+    tracker.close()

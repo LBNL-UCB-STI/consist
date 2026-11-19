@@ -918,6 +918,11 @@ class FileSystemManager:
             lexical_root: Optional[Path] = None
             if historical_run_dir is not None:
                 hist_root = Path(historical_run_dir).expanduser()
+                # Legacy rows may carry an empty mount_instance_id (pre-instance
+                # ledger entries); they deliberately translate through any
+                # historical root of the same scheme. Test-pinned by
+                # test_historical_workspace_instance_verification; existence-only
+                # cache hydrate sites rely on these same-scheme DB-indexed roots.
                 if (
                     not verify_workspace_instance
                     or mount_instance_id == ""

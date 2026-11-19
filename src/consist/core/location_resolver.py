@@ -304,8 +304,11 @@ class MountPrecedenceResolver:
                     )
                     if hist_coord.is_resolved:
                         hist_coords.append(hist_coord)
-            if primary_coord.status == "rejected":
-                return (primary_coord, ())
+            # A rejected primary must not discard already-resolved historical
+            # coordinates: each historical coordinate is containment-checked at
+            # translation, and downstream candidate validation still applies.
+            # Discarding them would break recovery for relocated run dirs
+            # whose workspace primary was rejected.
             return (primary_coord, tuple(hist_coords))
 
         # Named mounts: compute deduplicated historical fallback(s).
@@ -444,7 +447,12 @@ def iter_artifact_candidates(
     resolver: MountPrecedenceResolver | None = None,
     include_rejected: bool = False,
 ) -> Iterator[ResolvedCandidate]:
-    """Enumerate ordered, deduplicated, containment-checked candidate locations for an artifact."""
+    """Enumerate ordered, deduplicated, containment-checked candidate locations for an artifact.
+
+    ``explicit_roots`` is a test/diagnostic surface for injecting additional
+    candidate roots (``explicit_root`` source); production callers rely on
+    ledger- and mount-derived candidates only.
+    """
     seen_canonical: set[Path] = set()
     res = resolver or MountPrecedenceResolver.from_tracker(tracker)
     if historical_run is not None:

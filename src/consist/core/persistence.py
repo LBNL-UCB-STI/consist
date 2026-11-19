@@ -5409,6 +5409,10 @@ class DatabaseManager:
 
         return list(by_id.values())
 
+    def get_settled_witness(self, location_id: uuid.UUID) -> Optional[Witness]:
+        """Return the settled (content-verified) witness for a location, if any."""
+        return self._settled_witnesses.get(location_id)
+
     def settle_artifact_location_witness(
         self,
         location_id: uuid.UUID,

@@ -195,6 +195,43 @@ def test_cache_validation_eager_rejects_corrupted_directory_output_when_dir_exis
         assert not t.is_cached
 
 
+def test_cache_validation_eager_rejects_tampered_dir_with_unverified_fresh_witness(
+    tracker,
+) -> None:
+    """
+    An unverified FRESH witness (captured after tampering, never compared to
+    the digest) must not bless a corrupted directory output: eager validation
+    must re-run the manifest check and reject the cache hit.
+    """
+    from consist.core.fs import build_verified_location_row
+
+    dir_path = tracker.run_dir / "outputs" / "skims_unverified_witness.zarr"
+    (dir_path / "nested").mkdir(parents=True, exist_ok=True)
+    member = dir_path / "nested" / "0.0"
+    member.write_bytes(b"original-chunk")
+
+    with tracker.start_run(
+        "seed_unverified_witness",
+        model="model_unverified_witness",
+        cache_mode="overwrite",
+    ):
+        art = tracker.log_output(dir_path, key="skims", artifact_kind="directory")
+
+    # Tamper, then capture an unverified stat witness matching the tampered
+    # tree (simulating row writes that capture witnesses without verification).
+    member.write_bytes(b"mutated-chunk")
+    tampered_row = build_verified_location_row(tracker.fs, art, local_path=dir_path)
+    tracker.db.upsert_artifact_locations([tampered_row])
+
+    with tracker.start_run(
+        "check_unverified_witness",
+        model="model_unverified_witness",
+        cache_mode="reuse",
+        validate_cached_outputs="eager",
+    ) as t:
+        assert not t.is_cached
+
+
 def test_cache_validation_eager_recovers_corrupted_primary_directory_from_recovery_root(
     tracker,
     tmp_path: Path,

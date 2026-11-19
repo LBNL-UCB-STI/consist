@@ -28,17 +28,30 @@ from consist.core.resolved_binding import (
     trusted_digest_from_artifact,
 )
 from consist.digest import DIGEST_DRIVERS, compute_digest, verify_digest
-from consist.location import WitnessFreshness
+from consist.location import ArtifactLocationRow, Witness, WitnessFreshness
 from consist.models.artifact import Artifact
 from consist.models.run import ConsistRecord, Run, RunArtifacts
 
 if TYPE_CHECKING:
+    from consist.core.location_resolver import ResolvedCandidate
     from consist.core.tracker import Tracker
 
 
 @runtime_checkable
 class CacheDb(Protocol):
+    read_only: bool
+
     def get_run(self, run_id: str) -> Optional[Run]: ...
+
+    def get_settled_witness(self, location_id: uuid.UUID) -> Optional[Witness]: ...
+
+    def settle_artifact_location_witness(
+        self,
+        location_id: uuid.UUID,
+        witness: Witness,
+        *,
+        observed_at_ns: Optional[int] = None,
+    ) -> None: ...
 
     def link_artifacts_to_run_bulk(
         self,
@@ -155,6 +168,51 @@ class CacheMaterializationContext(Protocol):
     mounts: Dict[str, str]
 
     def resolve_uri(self, uri: str) -> str: ...
+
+
+def _settled_candidate_witness(
+    db: Optional[CacheDb], row: ArtifactLocationRow
+) -> Optional[Witness]:
+    """Return the digest-verified settled witness for a candidate row, if any.
+
+    Only witnesses recorded through ``settle_artifact_location_witness`` (i.e.
+    after content verification) may certify bytes without re-validation.
+    Witnesses captured at row-write time were never compared to the artifact
+    digest, so an unverified FRESH witness only proves the bytes are unchanged
+    since capture — not that they match the artifact digest.
+    """
+    if db is None:
+        return None
+    return db.get_settled_witness(row.location_id)
+
+
+def _settle_candidate_witness_after_validation(
+    db: Optional[CacheDb],
+    cand: Optional["ResolvedCandidate"],
+    validated_path: Path,
+) -> None:
+    """Record a candidate row's witness as digest-verified after validation passed.
+
+    Gives verify-once semantics: the first full validation of an unverified row
+    settles its witness so subsequent checks can use the FRESH fast path.
+    """
+    if db is None or db.read_only or cand is None:
+        return
+    row = cand.row
+    if row is None:
+        return
+    witness = row.witness
+    if witness is None:
+        return
+    if db.get_settled_witness(row.location_id) is not None:
+        return
+    try:
+        w_res = witness.check(validated_path)
+    except (OSError, ValueError):
+        return
+    if w_res.freshness != WitnessFreshness.FRESH:
+        return
+    db.settle_artifact_location_witness(row.location_id, witness)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1217,18 +1275,26 @@ def validate_cached_run_outputs(
     def _is_valid_cached_output_path(
         art: Artifact,
         candidate: Path,
-        cand: Any = None,
+        cand: Optional["ResolvedCandidate"] = None,
     ) -> bool:
         if not candidate.exists():
             return False
-        if cand is not None and getattr(cand, "row", None) is not None:
-            witness = cand.row.witness
+        if cand is not None and cand.row is not None:
+            witness = _settled_candidate_witness(tracker.db, cand.row)
             if witness is not None:
                 w_res = witness.check(cand.canonical_path)
                 if w_res.freshness == WitnessFreshness.FRESH:
                     return True
         manifest_valid = is_valid_directory_artifact_tree(candidate, art)
         if manifest_valid is not None:
+            if manifest_valid:
+                _settle_candidate_witness_after_validation(tracker.db, cand, candidate)
+            return manifest_valid
+        return True
+        manifest_valid = is_valid_directory_artifact_tree(candidate, art)
+        if manifest_valid is not None:
+            if manifest_valid:
+                _settle_candidate_witness_after_validation(tracker.db, cand, candidate)
             return manifest_valid
         return True
 
@@ -1343,18 +1409,20 @@ def materialize_missing_inputs(
             return True
 
     def _recovery_source_matches_artifact(
-        artifact: Artifact, path: Path, cand: Any = None
+        artifact: Artifact, path: Path, cand: Optional["ResolvedCandidate"] = None
     ) -> bool:
         if not active_options.validate_materialized_inputs:
             return True
-        if cand is not None and getattr(cand, "row", None) is not None:
-            witness = cand.row.witness
+        if cand is not None and cand.row is not None:
+            witness = _settled_candidate_witness(tracker.db, cand.row)
             if witness is not None:
                 w_res = witness.check(cand.canonical_path)
                 if w_res.freshness == WitnessFreshness.FRESH:
                     return True
         manifest_valid = is_valid_directory_artifact_tree(path, artifact)
         if manifest_valid is not None:
+            if manifest_valid:
+                _settle_candidate_witness_after_validation(tracker.db, cand, path)
             return manifest_valid
         if not _has_verifiable_digest(artifact):
             return True
@@ -1366,7 +1434,7 @@ def materialize_missing_inputs(
         if tracker.identity.hashing_strategy != "full":
             return True
         try:
-            return _verify_artifact_path_digest(artifact, path)
+            digest_ok = _verify_artifact_path_digest(artifact, path)
         except (FileNotFoundError, OSError, ValueError) as exc:
             logging.debug(
                 "[Consist] Skipping recovery source for input %s at %s: %s",
@@ -1375,6 +1443,9 @@ def materialize_missing_inputs(
                 exc,
             )
             return False
+        if digest_ok:
+            _settle_candidate_witness_after_validation(tracker.db, cand, path)
+        return digest_ok
 
     items: list[tuple[Artifact, Path, Path]] = []
     db_items: list[tuple[Artifact, Path, bool]] = []
@@ -1519,21 +1590,23 @@ def materialize_requested_inputs(
             path.unlink()
 
     def _recovery_source_matches_artifact(
-        artifact: Artifact, path: Path, cand: Any = None
+        artifact: Artifact, path: Path, cand: Optional["ResolvedCandidate"] = None
     ) -> bool:
         if (
             active_options.requested_input_validate_content_hash == "never"
             and not active_options.requested_input_strict_snapshot
         ):
             return True
-        if cand is not None and getattr(cand, "row", None) is not None:
-            witness = cand.row.witness
+        if cand is not None and cand.row is not None:
+            witness = _settled_candidate_witness(tracker.db, cand.row)
             if witness is not None:
                 w_res = witness.check(cand.canonical_path)
                 if w_res.freshness == WitnessFreshness.FRESH:
                     return True
         manifest_valid = is_valid_directory_artifact_tree(path, artifact)
         if manifest_valid is not None:
+            if manifest_valid:
+                _settle_candidate_witness_after_validation(tracker.db, cand, path)
             return manifest_valid
         if (
             not _has_verifiable_digest(artifact)
@@ -1546,9 +1619,12 @@ def materialize_requested_inputs(
         ):
             return False
         try:
-            return _verify_artifact_path_digest(artifact, path)
+            digest_ok = _verify_artifact_path_digest(artifact, path)
         except (FileNotFoundError, OSError, ValueError):
             return False
+        if digest_ok:
+            _settle_candidate_witness_after_validation(tracker.db, cand, path)
+        return digest_ok
 
     def _resolve_source(artifact: Artifact) -> Optional[Path]:
         fallback_source: Optional[Path] = None
