@@ -915,20 +915,16 @@ class FileSystemManager:
                 rel = uri
 
             lexical_root: Optional[Path] = None
-            if mount_name in self.mounts:
+            if historical_run_dir is not None:
+                lexical_root = Path(
+                    os.path.abspath(Path(historical_run_dir).expanduser())
+                )
+            elif mount_name in self.mounts:
                 mount_path = Path(self.mounts[mount_name]).expanduser()
                 if mount_instance_id in ("", workspace_mount_instance_id(mount_path)):
                     lexical_root = Path(os.path.abspath(mount_path))
-                elif historical_run_dir is not None:
-                    hist_path = Path(historical_run_dir).expanduser()
-                    if workspace_mount_instance_id(hist_path) == mount_instance_id:
-                        lexical_root = Path(os.path.abspath(hist_path))
             elif mount_instance_id in ("", self.workspace_instance_id):
                 lexical_root = Path(os.path.abspath(self.run_dir))
-            elif historical_run_dir is not None:
-                hist_path = Path(historical_run_dir).expanduser()
-                if workspace_mount_instance_id(hist_path) == mount_instance_id:
-                    lexical_root = Path(os.path.abspath(hist_path))
 
             if lexical_root is None:
                 return TranslatedCoordinate(
@@ -960,6 +956,14 @@ class FileSystemManager:
                 if historical_run_dir is not None
                 else self.mounts[mount_name]
             )
+            raw_root_str = str(raw_mount_root)
+            if "://" in raw_root_str and not raw_root_str.startswith("file://"):
+                return TranslatedCoordinate(
+                    status="unmounted",
+                    mount_name=mount_name,
+                    uri=uri,
+                    unmounted_uri=uri,
+                )
             lexical_root = Path(os.path.abspath(Path(raw_mount_root).expanduser()))
             rel = (
                 uri.split("://", 1)[1].lstrip("/") if "://" in uri else uri.lstrip("./")

@@ -28,6 +28,7 @@ from consist.core.resolved_binding import (
     trusted_digest_from_artifact,
 )
 from consist.digest import DIGEST_DRIVERS, compute_digest, verify_digest
+from consist.location import WitnessFreshness
 from consist.models.artifact import Artifact
 from consist.models.run import ConsistRecord, Run, RunArtifacts
 
@@ -1199,9 +1200,19 @@ def validate_cached_run_outputs(
 
     run_artifacts = tracker.get_artifacts_for_run(run.id)
 
-    def _is_valid_cached_output_path(art: Artifact, candidate: Path) -> bool:
+    def _is_valid_cached_output_path(
+        art: Artifact,
+        candidate: Path,
+        cand: Any = None,
+    ) -> bool:
         if not candidate.exists():
             return False
+        if cand is not None and getattr(cand, "row", None) is not None:
+            witness = cand.row.witness
+            if witness is not None:
+                w_res = witness.check(cand.canonical_path)
+                if w_res.freshness == WitnessFreshness.FRESH:
+                    return True
         manifest_valid = is_valid_directory_artifact_tree(candidate, art)
         if manifest_valid is not None:
             return manifest_valid
@@ -1220,7 +1231,9 @@ def validate_cached_run_outputs(
 
             found_recovery = False
             for cand in iter_artifact_candidates(cast("Tracker", tracker), art):
-                if _is_valid_cached_output_path(art, cand.mount_canonical_lexical_path):
+                if _is_valid_cached_output_path(
+                    art, cand.mount_canonical_lexical_path, cand=cand
+                ):
                     found_recovery = True
                     break
             if found_recovery:
@@ -1313,9 +1326,17 @@ def materialize_missing_inputs(
             )
             return True
 
-    def _recovery_source_matches_artifact(artifact: Artifact, path: Path) -> bool:
+    def _recovery_source_matches_artifact(
+        artifact: Artifact, path: Path, cand: Any = None
+    ) -> bool:
         if not active_options.validate_materialized_inputs:
             return True
+        if cand is not None and getattr(cand, "row", None) is not None:
+            witness = cand.row.witness
+            if witness is not None:
+                w_res = witness.check(cand.canonical_path)
+                if w_res.freshness == WitnessFreshness.FRESH:
+                    return True
         manifest_valid = is_valid_directory_artifact_tree(path, artifact)
         if manifest_valid is not None:
             return manifest_valid
@@ -1359,7 +1380,7 @@ def materialize_missing_inputs(
         for cand in iter_artifact_candidates(cast("Tracker", tracker), artifact):
             val_path = cand.mount_canonical_lexical_path
             if val_path.exists() and _recovery_source_matches_artifact(
-                artifact, val_path
+                artifact, val_path, cand=cand
             ):
                 source = cand.canonical_path
                 break
@@ -1471,12 +1492,20 @@ def materialize_requested_inputs(
         else:
             path.unlink()
 
-    def _recovery_source_matches_artifact(artifact: Artifact, path: Path) -> bool:
+    def _recovery_source_matches_artifact(
+        artifact: Artifact, path: Path, cand: Any = None
+    ) -> bool:
         if (
             active_options.requested_input_validate_content_hash == "never"
             and not active_options.requested_input_strict_snapshot
         ):
             return True
+        if cand is not None and getattr(cand, "row", None) is not None:
+            witness = cand.row.witness
+            if witness is not None:
+                w_res = witness.check(cand.canonical_path)
+                if w_res.freshness == WitnessFreshness.FRESH:
+                    return True
         manifest_valid = is_valid_directory_artifact_tree(path, artifact)
         if manifest_valid is not None:
             return manifest_valid
@@ -1518,7 +1547,7 @@ def materialize_requested_inputs(
         for cand in iter_artifact_candidates(cast("Tracker", tracker), artifact):
             val_path = cand.mount_canonical_lexical_path
             if val_path.exists():
-                if _recovery_source_matches_artifact(artifact, val_path):
+                if _recovery_source_matches_artifact(artifact, val_path, cand=cand):
                     return cand.canonical_path
                 if fallback_source is None:
                     fallback_source = cand.canonical_path

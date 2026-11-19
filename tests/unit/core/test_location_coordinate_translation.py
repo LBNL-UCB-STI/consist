@@ -734,7 +734,12 @@ def test_recovery_roots_keep_untranslatable_uri_for_uri_aware_consumers(
         # URI-aware consumers.
         assert tracker.artifact_recovery_roots(loaded) == ["cold://bucket/prefix"]
         # But the filesystem-probe boundary drops it.
-        assert list(iter_artifact_candidates(tracker, loaded)) == []
+        rec_rows = tracker.db.get_artifact_recovery_locations(loaded.id)
+        assert list(iter_artifact_candidates(tracker, loaded, rows=rec_rows)) == []
+        assert not any(
+            "cold:" in str(c.canonical_path) or "bucket" in str(c.canonical_path)
+            for c in iter_artifact_candidates(tracker, loaded)
+        )
     finally:
         tracker.close()
 
@@ -771,7 +776,15 @@ def test_artifact_recovery_roots_never_probe_cwd_relative_pseudo_paths(
         (pseudo / "0.0").write_bytes(b"z")
         monkeypatch.chdir(tmp_path)
 
-        assert list(iter_artifact_candidates(tracker, artifact=loaded)) == []
+        rec_rows = tracker.db.get_artifact_recovery_locations(loaded.id)
+        assert (
+            list(iter_artifact_candidates(tracker, artifact=loaded, rows=rec_rows))
+            == []
+        )
+        assert not any(
+            c.canonical_path == pseudo
+            for c in iter_artifact_candidates(tracker, artifact=loaded)
+        )
     finally:
         tracker.close()
 

@@ -115,12 +115,16 @@ def _candidate_from_root(
     )
     target = _canonical_containment_target(mount_canonical)
     if target is None or not target.is_relative_to(canonical_root):
-        return None
-    canonical_path = (
-        Path(os.path.realpath(mount_canonical.parent)) / mount_canonical.name
-        if rel_parts
-        else canonical_root
-    )
+        if mount_canonical.is_symlink() or mount_canonical.exists():
+            canonical_path = mount_canonical
+        else:
+            return None
+    else:
+        canonical_path = (
+            Path(os.path.realpath(mount_canonical.parent)) / mount_canonical.name
+            if rel_parts
+            else canonical_root
+        )
     entry_lexical = lexical_path
     entry_canonical = canonical_path
     if is_file_bundle_artifact(artifact) and canonical_path.is_dir():
@@ -264,11 +268,7 @@ class MountPrecedenceResolver:
             return (primary_coord, ())
 
         if row.mount_name in ("workspace", "runs"):
-            if primary_coord.status == "resolved":
-                return (primary_coord, ())
-            if primary_coord.status == "rejected":
-                return (primary_coord, ())
-            # Unmounted workspace/runs: try owning run physical directory.
+            hist_coords: list[TranslatedCoordinate] = []
             if artifact is not None and artifact.run_id is not None:
                 phys_dir = self._lookup_owning_run_mount(
                     str(artifact.run_id), row.mount_name, row.site
@@ -281,8 +281,10 @@ class MountPrecedenceResolver:
                         historical_run_dir=phys_dir,
                     )
                     if hist_coord.is_resolved:
-                        return (hist_coord, ())
-            return (primary_coord, ())
+                        hist_coords.append(hist_coord)
+            if primary_coord.status == "rejected":
+                return (primary_coord, ())
+            return (primary_coord, tuple(hist_coords))
 
         # Named mounts: compute deduplicated historical fallback(s).
         hist_roots: list[str] = []
@@ -531,31 +533,52 @@ def iter_artifact_candidates(
 
     # 5. Direct translation and DB-less / stub-tracker fallback
     if not candidate_rows:
-        hist_dir = historical_run_dir
+        owning_run = historical_run
         if (
-            hist_dir is None
-            and historical_run is not None
-            and isinstance(historical_run.meta, Mapping)
+            owning_run is None
+            and artifact.run_id is not None
+            and res.get_run is not None
         ):
-            hist_dir = historical_run.meta.get("_physical_run_dir")
+            owning_run = res.get_run(str(artifact.run_id))
+
+        hist_dir = historical_run_dir
+        if hist_dir is None and owning_run is not None:
+            run_meta = owning_run.meta if isinstance(owning_run.meta, Mapping) else {}
+            art_meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
+            hist_root = tracker.fs.get_historical_root(
+                artifact.uri,
+                original_run_dir=run_meta.get("_physical_run_dir")
+                or getattr(owning_run, "run_dir", None),
+                mounts_snapshot=run_meta.get("mounts")
+                or run_meta.get("archive_mounts"),
+                artifact_mount_root=art_meta.get("mount_root"),
+                resolve=True,
+            )
+            if hist_root is not None:
+                hist_dir = hist_root
+
         if hist_dir is not None and rel is not None:
             cand = _candidate_from_root(hist_dir, rel, "historical_uri", artifact)
             if cand is not None and cand.canonical_path not in seen_canonical:
                 seen_canonical.add(cand.canonical_path)
                 yield cand
 
-        try:
-            p_mount, p_inst, p_uri, _ = tracker.fs.location_coordinate_for_uri(
-                artifact.uri
-            )
-            coord = tracker.fs.translate_location_coordinate(p_mount, p_inst, p_uri)
-            if coord.is_resolved:
-                cand = _candidate_from_coordinate(coord, "managed_mount", artifact)
-                if cand is not None and cand.canonical_path not in seen_canonical:
-                    seen_canonical.add(cand.canonical_path)
-                    yield cand
-        except Exception:
-            pass
+        is_current_run = artifact.run_id is None or str(artifact.run_id) == str(
+            getattr(tracker, "run_id", None)
+        )
+        if is_current_run:
+            try:
+                p_mount, p_inst, p_uri = tracker.fs.location_coordinate_for_uri(
+                    artifact.uri
+                )
+                coord = tracker.fs.translate_location_coordinate(p_mount, p_inst, p_uri)
+                if coord.is_resolved:
+                    cand = _candidate_from_coordinate(coord, "managed_mount", artifact)
+                    if cand is not None and cand.canonical_path not in seen_canonical:
+                        seen_canonical.add(cand.canonical_path)
+                        yield cand
+            except Exception:
+                pass
 
         if not is_real_db and rel is not None:
             rec_roots_fn = getattr(tracker, "artifact_recovery_roots", None)

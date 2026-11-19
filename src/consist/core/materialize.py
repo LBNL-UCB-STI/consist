@@ -1531,13 +1531,24 @@ def _select_materialize_artifact_source(
         candidate = cand.canonical_path
         val_path = cand.mount_canonical_lexical_path
 
-        source_kind: Literal["source_root", "historical_root", "recovery_root"]
+        source_kind: Literal[
+            "source_root", "historical_root", "recovery_root", "artifact_uri"
+        ]
         if resolved_source_root is not None and candidate.is_relative_to(
             resolved_source_root
         ):
             source_kind = "source_root"
         elif cand.source in ("ledger_historical", "historical_uri"):
             source_kind = "historical_root"
+        elif cand.source in ("managed_mount", "runtime_abs"):
+            source_kind = "historical_root" if artifact.run_id else "artifact_uri"
+        elif cand.source == "ledger_primary":
+            if cand.row is not None and cand.row.site in ("archive", "advisory"):
+                source_kind = "recovery_root"
+            elif artifact.run_id:
+                source_kind = "historical_root"
+            else:
+                source_kind = "artifact_uri"
         else:
             source_kind = "recovery_root"
 

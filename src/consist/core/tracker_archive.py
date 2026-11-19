@@ -1141,12 +1141,30 @@ class TrackerArchiveService(_TrackerServiceBase):
             historical_run=run,
             include_runtime_abs=True,
         ):
-            probe_path = cand.mount_canonical_lexical_path
+            for probe_path in (cand.lexical_path, cand.mount_canonical_lexical_path):
+                if (
+                    probe_path.exists() or probe_path.is_symlink()
+                ) and self._has_symlink_component(probe_path):
+                    if source_validator is not None:
+                        source_validator(probe_path)
+                    elif fallback_validator is not None:
+                        fallback_validator(probe_path)
+
+        raw_uri_path: Path | None = None
+        if "://" in artifact.uri:
+            scheme, rel_raw = artifact.uri.split("://", 1)
+            if scheme in self.fs.mounts:
+                raw_uri_path = Path(self.fs.mounts[scheme]) / rel_raw.lstrip("/")
+        elif artifact.uri.startswith("./"):
+            raw_uri_path = Path(self.fs.run_dir) / artifact.uri[2:]
+        if raw_uri_path is not None:
             if (
-                probe_path.exists() or probe_path.is_symlink()
-            ) and self._has_symlink_component(probe_path):
+                raw_uri_path.exists() or raw_uri_path.is_symlink()
+            ) and self._has_symlink_component(raw_uri_path):
                 if source_validator is not None:
-                    source_validator(probe_path)
+                    source_validator(raw_uri_path)
+                elif fallback_validator is not None:
+                    fallback_validator(raw_uri_path)
 
         verified, _ = resolve_verified_local_path_with_diagnostics(
             self.tracker,
