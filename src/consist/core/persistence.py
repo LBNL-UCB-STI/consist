@@ -706,18 +706,7 @@ class DatabaseManager:
         ] = {}
         self._location_resolution_cache: dict[
             tuple[Any, ...],
-            tuple[
-                tuple[
-                    ArtifactLocationRow,
-                    Optional[Path],
-                    Optional[Path],
-                    Optional[Path],
-                    str,
-                    Optional[Path],
-                    str,
-                ],
-                ...,
-            ],
+            tuple[Any, ...],
         ] = {}
         self._settled_witnesses: dict[uuid.UUID, Witness] = {}
         self._ephemeral_stale_locations: dict[uuid.UUID, LocationStatus] = {}

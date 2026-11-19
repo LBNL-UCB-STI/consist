@@ -57,6 +57,7 @@ from consist.core.resolved_binding import (
     _StrictBindingInvocationContext,
     _validate_strict_binding_invocation_context,
 )
+from consist.core.location_resolver import MountPrecedenceResolver
 from consist.core.tracker_artifact_logging import ArtifactLoggingCoordinator
 from consist.core.tracker_artifact_queries import TrackerArtifactQueryService
 from consist.core.tracker_lifecycle import RunLifecycleCoordinator
@@ -161,7 +162,6 @@ if TYPE_CHECKING:
         StagedInputsResult,
     )
     from consist.core.step_context import StepContext
-    from consist.location import ArtifactLocationRow
     from consist.runset import RunSet
     from ibis.backends.duckdb import Backend as IbisDuckDBBackend
     from ibis.expr.types import Table as IbisTable
@@ -393,6 +393,7 @@ class Tracker:
             return []
         rows = db.get_artifact_recovery_locations(artifact.id)
         roots: list[str] = []
+        resolver = MountPrecedenceResolver.from_tracker(self)
         for row in rows:
             extracted = self.fs.extract_recovery_root_from_location_row(
                 artifact.uri, row, resolve=resolve
@@ -403,44 +404,14 @@ class Tracker:
                 and not extracted.startswith("file://")
                 and row.mount_name not in self.fs.mounts
             ):
-                # Unmounted locally: try historical mount roots regardless of
-                # ``resolve``. When historical roots exist and all reject the
-                # coordinate as unsafe, drop it instead of keeping the URI.
-                hist_roots = db.lookup_historical_mount_roots(row.mount_name)
+                hist_roots = resolver.get_historical_mount_roots(row.mount_name)
                 if hist_roots:
-                    extracted = self._historical_mount_recovery_root(
-                        artifact.uri, row, hist_roots, resolve=resolve
+                    extracted = resolver.resolve_historical_recovery_root(
+                        artifact.uri, row, resolve=resolve
                     )
             if extracted is not None and extracted not in roots:
                 roots.append(extracted)
         return roots
-
-    def _historical_mount_recovery_root(
-        self,
-        artifact_uri: str,
-        row: "ArtifactLocationRow",
-        hist_roots: Sequence[str],
-        *,
-        resolve: bool,
-    ) -> Optional[str]:
-        """Translate a row through historical mounts, preserving first-existing-prefix order.
-
-        Rejected (unsafe) translations are skipped so a later eligible
-        historical root is still considered. With ``resolve=False`` the
-        checked lexical root is returned without dereferencing its components.
-        """
-        first_translated: Optional[str] = None
-        for historical_root in hist_roots:
-            candidate = self.fs.extract_recovery_root_from_location_row(
-                artifact_uri, row, resolve=resolve, historical_run_dir=historical_root
-            )
-            if candidate is None or "://" in candidate:
-                continue
-            if first_translated is None:
-                first_translated = candidate
-            if Path(candidate).exists():
-                return candidate
-        return first_translated
 
     def _replace_live_coupler_artifact(self, updated: Artifact) -> None:
         """Replace matching in-memory ``Artifact`` handles across active/tracked ``Coupler``s."""

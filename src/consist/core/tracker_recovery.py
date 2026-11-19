@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+from dataclasses import dataclass
 import fcntl
 import logging
 import os
@@ -9,7 +10,16 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Literal, Mapping, Optional, Sequence, TYPE_CHECKING, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    TypeAlias,
+    Union,
+)
 from typing_extensions import Protocol, runtime_checkable
 
 from consist.core._tracker_service_base import _TrackerServiceBase
@@ -23,6 +33,10 @@ from consist.core.directory_artifacts import (
     resolve_file_bundle_root,
 )
 from consist.core.fs import build_verified_location_row, capture_artifact_witness
+from consist.core.location_resolver import (
+    MountPrecedenceResolver,
+    iter_artifact_candidates,
+)
 from consist.core.materialize import (
     build_allowed_materialization_roots,
     fold_hydrated_run_outputs_result,
@@ -285,15 +299,42 @@ def verify_candidate_against_artifact(path: Path, artifact: Artifact) -> bool:
         return False
 
 
-_CachedEntryTuple = tuple[
-    ArtifactLocationRow,
-    Optional[Path],
-    Optional[Path],
-    Optional[Path],
-    str,
-    Optional[Path],
-    str,
-]
+@dataclass(frozen=True, slots=True)
+class _CachedCandidate:
+    candidate: Path
+    entry: Path | None
+    real: str
+    lexical_path: Path
+    mount_canonical_lexical_path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class _CachedLocationEntry:
+    row: ArtifactLocationRow
+    primary: _CachedCandidate | None
+    historical: tuple[_CachedCandidate, ...]
+
+    def __iter__(self):
+        primary_cand = self.primary.candidate if self.primary else None
+        hist_cand = self.historical[0].candidate if self.historical else None
+        primary_entry = self.primary.entry if self.primary else None
+        primary_real = self.primary.real if self.primary else ""
+        hist_entry = self.historical[0].entry if self.historical else None
+        hist_real = self.historical[0].real if self.historical else ""
+        return iter(
+            (
+                self.row,
+                primary_cand,
+                hist_cand,
+                primary_entry,
+                primary_real,
+                hist_entry,
+                hist_real,
+            )
+        )
+
+
+_CachedEntryTuple: TypeAlias = _CachedLocationEntry
 
 
 def _resolve_rows_for_cache(
@@ -301,127 +342,57 @@ def _resolve_rows_for_cache(
     artifact: Artifact,
     rows: Sequence[ArtifactLocationRow],
     historical_run_dir_memo: dict[str, Optional[str]],
-) -> tuple[_CachedEntryTuple, ...]:
-    primary_entries: list[_CachedEntryTuple] = []
-    historical_entries: list[_CachedEntryTuple] = []
+) -> tuple[_CachedLocationEntry, ...]:
+    primary_entries: list[_CachedLocationEntry] = []
+    historical_entries: list[_CachedLocationEntry] = []
+    resolver = MountPrecedenceResolver.from_tracker(tracker)
     for row in rows:
-        primary_cand = tracker.fs.resolve_location_row_path(row)
-        primary_entry = (
-            Path(resolve_artifact_entry_path(artifact, primary_cand))
-            if primary_cand is not None
-            else None
-        )
-        primary_real = (
-            _fast_realpath(str(primary_entry)) if primary_entry is not None else ""
-        )
-        hist_cand: Optional[Path] = None
-        if row.mount_name != "abs":
-            hist_dir: Optional[str] = None
-            if artifact.run_id is not None and (
-                primary_cand is None or row.mount_name not in ("workspace", "runs")
-            ):
-                rid_str = str(artifact.run_id)
-                memo_key = f"{rid_str}:{row.mount_name}"
-                if memo_key not in historical_run_dir_memo:
-                    owning_run = tracker.get_run(rid_str)
-                    run_meta = (
-                        owning_run.meta
-                        if owning_run is not None
-                        and isinstance(owning_run.meta, Mapping)
-                        else {}
-                    )
-                    mounts_meta = run_meta.get("mounts")
-                    arch_meta = run_meta.get("archive_mounts")
-                    m_over = (
-                        mounts_meta.get(row.mount_name)
-                        if isinstance(mounts_meta, Mapping)
-                        else None
-                    ) or (
-                        arch_meta.get(row.mount_name)
-                        if isinstance(arch_meta, Mapping)
-                        else None
-                    )
-                    phys = (
-                        m_over
-                        if isinstance(m_over, str) and m_over
-                        else (
-                            run_meta.get("_physical_run_dir")
-                            if row.mount_name in ("workspace", "runs")
-                            and row.site in ("workspace", "external")
-                            else None
-                        )
-                    )
-                    historical_run_dir_memo[memo_key] = (
-                        phys if isinstance(phys, str) and phys else None
-                    )
-                hist_dir = historical_run_dir_memo[memo_key]
+        primary_coord, hist_coords = resolver.resolve_row_coordinates(row, artifact)
+        primary_item: _CachedCandidate | None = None
+        if primary_coord.is_resolved:
+            p_cand = primary_coord.canonical_path
+            assert p_cand is not None
+            p_entry = Path(resolve_artifact_entry_path(artifact, p_cand))
+            p_real = _fast_realpath(str(p_entry))
+            assert primary_coord.lexical_path is not None
+            assert primary_coord.mount_canonical_lexical_path is not None
+            primary_item = _CachedCandidate(
+                candidate=p_cand,
+                entry=p_entry,
+                real=p_real,
+                lexical_path=primary_coord.lexical_path,
+                mount_canonical_lexical_path=primary_coord.mount_canonical_lexical_path,
+            )
 
-            if (
-                hist_dir is None
-                and row.mount_name not in ("workspace", "runs")
-                and isinstance(artifact.meta, Mapping)
-            ):
-                art_mount_scheme = artifact.meta.get("mount_scheme")
-                if art_mount_scheme == row.mount_name or (
-                    row.site == "external" and art_mount_scheme is None
-                ):
-                    art_mount_root = artifact.meta.get("mount_root")
-                    if isinstance(art_mount_root, str) and art_mount_root:
-                        hist_dir = art_mount_root
-
-            if (
-                hist_dir is None
-                and primary_cand is None
-                and row.mount_name not in ("workspace", "runs", "abs")
-                and tracker.db is not None
-            ):
-                candidate_roots = tracker.db.lookup_historical_mount_roots(
-                    row.mount_name
+        hist_items: list[_CachedCandidate] = []
+        for h_coord in hist_coords:
+            if not h_coord.is_resolved:
+                continue
+            h_cand = h_coord.canonical_path
+            assert h_cand is not None
+            h_entry = Path(resolve_artifact_entry_path(artifact, h_cand))
+            h_real = _fast_realpath(str(h_entry))
+            assert h_coord.lexical_path is not None
+            assert h_coord.mount_canonical_lexical_path is not None
+            hist_items.append(
+                _CachedCandidate(
+                    candidate=h_cand,
+                    entry=h_entry,
+                    real=h_real,
+                    lexical_path=h_coord.lexical_path,
+                    mount_canonical_lexical_path=h_coord.mount_canonical_lexical_path,
                 )
-                if candidate_roots:
-                    chosen_root: Optional[str] = None
-                    first_existing_root: Optional[str] = None
-                    for cand_r in candidate_roots:
-                        if first_existing_root is None and Path(cand_r).exists():
-                            first_existing_root = cand_r
-                        cand_probe = tracker.fs.resolve_location_row_path(
-                            row, historical_run_dir=cand_r
-                        )
-                        if (
-                            cand_probe is not None
-                            and Path(
-                                resolve_artifact_entry_path(artifact, cand_probe)
-                            ).exists()
-                        ):
-                            chosen_root = cand_r
-                            break
-                    hist_dir = chosen_root or first_existing_root or candidate_roots[0]
+            )
 
-            if hist_dir is not None:
-                cand_from_hist = tracker.fs.resolve_location_row_path(
-                    row, historical_run_dir=hist_dir
-                )
-                if cand_from_hist is not None and cand_from_hist != primary_cand:
-                    hist_cand = cand_from_hist
-        hist_entry = (
-            Path(resolve_artifact_entry_path(artifact, hist_cand))
-            if hist_cand is not None
-            else None
+        entry = _CachedLocationEntry(
+            row=row,
+            primary=primary_item,
+            historical=tuple(hist_items),
         )
-        hist_real = _fast_realpath(str(hist_entry)) if hist_entry is not None else ""
-        entry_tuple: _CachedEntryTuple = (
-            row,
-            primary_cand,
-            hist_cand,
-            primary_entry,
-            primary_real,
-            hist_entry,
-            hist_real,
-        )
-        if primary_cand is not None or row.site in ("archive", "advisory"):
-            primary_entries.append(entry_tuple)
+        if primary_item is not None or row.site in ("archive", "advisory"):
+            primary_entries.append(entry)
         else:
-            historical_entries.append(entry_tuple)
+            historical_entries.append(entry)
     return (*primary_entries, *historical_entries)
 
 
@@ -603,28 +574,23 @@ def resolve_verified_local_path_detailed(
             tuple[ArtifactLocationRow, list[tuple[Path, Optional[Path], str]]]
         ] = []
 
-        for (
-            row,
-            primary_cand,
-            hist_cand,
-            primary_entry,
-            _primary_real,
-            hist_entry,
-            _hist_real,
-        ) in cached_entries:
+        for entry in cached_entries:
+            row = entry.row
             cand_options: list[tuple[Path, Optional[Path], str]] = []
-            if primary_cand is not None:
+            if entry.primary is not None:
                 cand_options.append(
                     (
-                        primary_cand,
-                        primary_entry,
-                        _primary_real or _fast_realpath(str(primary_cand)),
+                        entry.primary.candidate,
+                        entry.primary.entry,
+                        entry.primary.real
+                        or _fast_realpath(str(entry.primary.candidate)),
                     )
                 )
-            if allow_recovery_roots and hist_cand is not None:
-                hr = _hist_real or _fast_realpath(str(hist_cand))
-                if not cand_options or cand_options[0][2] != hr:
-                    cand_options.append((hist_cand, hist_entry, hr))
+            if allow_recovery_roots and entry.historical:
+                for hist in entry.historical:
+                    hr = hist.real or _fast_realpath(str(hist.candidate))
+                    if not cand_options or cand_options[0][2] != hr:
+                        cand_options.append((hist.candidate, hist.entry, hr))
 
             matched_idx: Optional[int] = None
             if rt_str is not None:
@@ -645,17 +611,23 @@ def resolve_verified_local_path_detailed(
                 if (
                     matched_idx is None
                     and not allow_recovery_roots
-                    and hist_entry is not None
+                    and entry.historical
                 ):
-                    # Still detect a match on a disallowed recovery entry so
-                    # uncached rt_cand cannot bypass allow_recovery_roots=False.
-                    is_hist_match = str(hist_entry) == rt_str or _hist_real == rt_str
-                    if not is_hist_match:
-                        if rt_real is None:
-                            rt_real = _fast_realpath(rt_str)
-                        is_hist_match = _hist_real == rt_real
-                    if is_hist_match:
-                        matches_cached_coord = True
+                    for hist in entry.historical:
+                        hist_entry = hist.entry
+                        _hist_real = hist.real
+                        if hist_entry is None:
+                            continue
+                        is_hist_match = (
+                            str(hist_entry) == rt_str or _hist_real == rt_str
+                        )
+                        if not is_hist_match:
+                            if rt_real is None:
+                                rt_real = _fast_realpath(rt_str)
+                            is_hist_match = _hist_real == rt_real
+                        if is_hist_match:
+                            matches_cached_coord = True
+                            break
 
             if row.location_id in db._ephemeral_stale_locations:
                 continue
@@ -799,21 +771,14 @@ def resolve_verified_local_path_detailed(
             parent = db.get_artifact(artifact.parent_artifact_id)
             rel_path = tracker.fs.get_remappable_relative_path(artifact.uri)
             if parent is not None and rel_path is not None:
-                for root_str in tracker.artifact_recovery_roots(parent):
-                    if "://" in root_str and not root_str.startswith("file://"):
-                        _, _, _, cand_target = tracker.fs.archive_coordinate_for_root(
-                            artifact.uri, root_str
-                        )
-                        cand = cand_target
-                    else:
-                        cand = (Path(root_str) / rel_path).resolve()
-                    if str(cand).startswith("/__unmounted__/") or not cand.exists():
+                for cand in iter_artifact_candidates(tracker, parent):
+                    if not cand.canonical_path.exists():
                         continue
-                    if verify_candidate_against_artifact(cand, artifact):
+                    if verify_candidate_against_artifact(cand.canonical_path, artifact):
                         return (
-                            Path(resolve_artifact_entry_path(artifact, cand)),
+                            cand.entry_canonical_path,
                             saw_mismatch,
-                            None,
+                            cand.row,
                         )
                     saw_mismatch = True
 
