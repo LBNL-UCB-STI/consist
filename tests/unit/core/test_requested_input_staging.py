@@ -393,7 +393,7 @@ def test_requested_input_staging_recovers_cold_scratch_from_recovery_roots(
     tracker, tmp_path: Path
 ) -> None:
     import shutil
-    from consist.core.materialize import find_existing_recovery_source_path
+    from consist.core.location_resolver import iter_artifact_candidates
 
     archive_dir = tmp_path / "archive"
     events_path = tracker.run_dir / "beam" / "output" / "0.events.parquet"
@@ -425,13 +425,13 @@ def test_requested_input_staging_recovers_cold_scratch_from_recovery_roots(
     events_path.unlink()
     shutil.rmtree(skims_dir)
 
-    # Verify find_existing_recovery_source_path also works when run=None
-    _, recovered_null_run, _ = find_existing_recovery_source_path(
-        tracker,
-        artifact=events_artifact,
-        run=None,
-        source_root=None,
-    )
+    # Verify candidate resolution finds an existing recovery candidate
+    cands = [
+        c
+        for c in iter_artifact_candidates(tracker, artifact=events_artifact)
+        if c.canonical_path.exists()
+    ]
+    recovered_null_run = cands[0].canonical_path if cands else None
     assert recovered_null_run is not None
     assert recovered_null_run.read_bytes() == b"parquet-events-bytes"
 

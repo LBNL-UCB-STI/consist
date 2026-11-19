@@ -32,13 +32,13 @@ from typing import (
     Mapping,
     Sequence,
     TYPE_CHECKING,
-    Callable,
     cast,
     get_args,
 )
 from typing_extensions import Protocol, runtime_checkable
 
 from consist.core.container_policy import validate_recovery_registration_policy
+from consist.core.location_resolver import iter_artifact_candidates
 from consist.core.directory_artifacts import (
     build_directory_manifest,
     build_shapefile_bundle_manifest,
@@ -1267,22 +1267,6 @@ def _get_output_artifacts_for_run(tracker: "Tracker", run_id: str) -> list[Artif
     return list(db.get_output_artifacts_for_run(run_id))
 
 
-def _get_artifact_owning_run(
-    tracker: "Tracker",
-    *,
-    selected_run,
-    artifact: Artifact,
-):
-    artifact_run_id = artifact.run_id
-    if not artifact_run_id or artifact_run_id == selected_run.id:
-        return selected_run
-    db = tracker.db
-    if db is None:
-        return selected_run
-    producing_run = db.get_run(str(artifact_run_id))
-    return producing_run or selected_run
-
-
 def _output_set_hydration_kind(tracker: "Tracker", artifact: Artifact) -> str | None:
     """Return the persisted OutputSet role when Slice 1 must reject it."""
     artifact_meta = artifact.meta if isinstance(artifact.meta, MappingABC) else {}
@@ -1368,136 +1352,6 @@ def _derive_remappable_relative_path(
     if prefixes_arg is None:
         return tracker.fs.get_remappable_relative_path(uri)
     return tracker.fs.get_remappable_relative_path(uri, scheme_prefixes=prefixes_arg)
-
-
-def _derive_historical_root(
-    tracker: "Tracker",
-    *,
-    artifact: Artifact,
-    run,
-    preserve_raw_paths: bool = False,
-) -> Path | None:
-    """Derive the historical root that can supply artifact bytes."""
-    meta = run.meta if (run is not None and isinstance(run.meta, MappingABC)) else {}
-    artifact_meta = artifact.meta if isinstance(artifact.meta, MappingABC) else {}
-
-    return tracker.fs.get_historical_root(
-        artifact.uri,
-        original_run_dir=meta.get("_physical_run_dir"),
-        mounts_snapshot=meta.get("mounts"),
-        artifact_mount_root=artifact_meta.get("mount_root"),
-        resolve=not preserve_raw_paths,
-    )
-
-
-@runtime_checkable
-class _HasArtifactRecoveryRoots(Protocol):
-    def artifact_recovery_roots(
-        self, artifact: Artifact, *, resolve: bool = True
-    ) -> Sequence[str]: ...
-
-
-def _artifact_recovery_roots(
-    tracker: "Tracker",
-    *,
-    artifact: Artifact,
-    preserve_raw_paths: bool = False,
-) -> tuple[Path, ...]:
-    """Return ordered recovery roots recorded for an artifact.
-
-    This is the filesystem-probe boundary: entries that cannot be used as
-    local paths (unresolved non-``file`` scheme URIs) are dropped here so a
-    URI never becomes a CWD-relative ``Path(...).absolute()`` pseudo-path in a
-    filesystem probe. URI-aware consumers read the roots from the tracker
-    directly instead.
-    """
-    raw_roots: Sequence[str] = ()
-    if isinstance(tracker, _HasArtifactRecoveryRoots):
-        fn = tracker.artifact_recovery_roots
-        try:
-            raw_roots = fn(artifact, resolve=not preserve_raw_paths)
-        except TypeError:
-            raw_roots = fn(artifact)
-    return tuple(
-        Path(root)
-        for root in tracker.fs.normalize_recovery_roots(
-            raw_roots, resolve=not preserve_raw_paths
-        )
-        if "://" not in root or root.startswith("file://")
-    )
-
-
-def _ordered_candidate_roots(
-    *,
-    source_root: Path | None,
-    historical_root: Path | None,
-    recovery_roots: Sequence[Path],
-    preserve_raw_paths: bool = False,
-) -> tuple[Path, ...]:
-    """Order and deduplicate recovery source roots."""
-    ordered: list[Path] = []
-    seen: set[str] = set()
-    for root in (
-        ([source_root] if source_root is not None else [])
-        + ([historical_root] if historical_root is not None else [])
-        + list(recovery_roots)
-    ):
-        candidate = root.absolute() if preserve_raw_paths else root.resolve()
-        identity = str(candidate)
-        if identity in seen:
-            continue
-        seen.add(identity)
-        ordered.append(candidate)
-    return tuple(ordered)
-
-
-def find_existing_recovery_source_path(
-    tracker: "Tracker",
-    *,
-    artifact: Artifact,
-    run,
-    source_root: Path | None,
-    source_validator: Callable[[Path], bool] | None = None,
-    fallback_validator: Callable[[Path], bool] | None = None,
-    preserve_raw_paths: bool = False,
-) -> tuple[Path | None, Path | None, bool]:
-    """Find the first valid filesystem source for historical recovery."""
-    relative_path = _derive_remappable_relative_path(tracker, artifact=artifact)
-    if relative_path is None:
-        return None, None, False
-
-    historical_root = _derive_historical_root(
-        tracker,
-        artifact=artifact,
-        run=run,
-        preserve_raw_paths=preserve_raw_paths,
-    )
-    recovery_roots = _artifact_recovery_roots(
-        tracker, artifact=artifact, preserve_raw_paths=preserve_raw_paths
-    )
-    candidate_roots = _ordered_candidate_roots(
-        source_root=source_root,
-        historical_root=historical_root,
-        recovery_roots=recovery_roots,
-        preserve_raw_paths=preserve_raw_paths,
-    )
-    validators = (
-        (source_validator, fallback_validator)
-        if fallback_validator is not None
-        else (source_validator,)
-    )
-    for validator in validators:
-        for root in candidate_roots:
-            candidate = root / relative_path
-            validator_path = candidate if preserve_raw_paths else candidate.resolve()
-            if candidate.exists() and (validator is None or validator(validator_path)):
-                return (
-                    relative_path,
-                    candidate if preserve_raw_paths else candidate.resolve(),
-                    True,
-                )
-
-    return relative_path, None, bool(candidate_roots)
 
 
 def _get_artifact_run(tracker: "Tracker", *, artifact: Artifact):
@@ -1641,30 +1495,6 @@ def _select_materialize_artifact_source(
             return None, None, True, True
         return None, None, True, False
 
-    candidate_roots: list[
-        tuple[
-            Literal["source_root", "historical_root", "recovery_root"],
-            Path,
-        ]
-    ] = []
-    if source_root is not None:
-        candidate_roots.append(("source_root", source_root))
-
-    owning_run = _get_artifact_run(tracker, artifact=artifact)
-    if owning_run is not None:
-        historical_root = _derive_historical_root(
-            tracker,
-            artifact=artifact,
-            run=owning_run,
-        )
-        if historical_root is not None:
-            candidate_roots.append(("historical_root", historical_root))
-
-    candidate_roots.extend(
-        ("recovery_root", root)
-        for root in _artifact_recovery_roots(tracker, artifact=artifact)
-    )
-
     unprefixed_rel = (
         tracker.fs.normalize_remappable_relative_path(artifact.uri.split("://", 1)[1])
         if "://" in artifact.uri
@@ -1689,26 +1519,47 @@ def _select_materialize_artifact_source(
         return _is_valid_scalar_recovery_candidate(tracker, candidate_path, artifact)
 
     saw_mismatch = False
-    seen_roots: set[str] = set()
-    for source_kind, root in candidate_roots:
-        resolved_root = Path(root).resolve()
-        root_key = str(resolved_root)
-        if root_key in seen_roots:
-            continue
-        seen_roots.add(root_key)
-        candidate = resolved_root / relative_path
-        if candidate.exists():
-            if _is_valid_manifest_candidate(candidate):
+    has_candidate_roots = False
+    resolved_source_root = (
+        Path(source_root).resolve() if source_root is not None else None
+    )
+
+    for cand in iter_artifact_candidates(
+        tracker, artifact, relative_path=relative_path, source_root=source_root
+    ):
+        has_candidate_roots = True
+        candidate = cand.canonical_path
+        val_path = cand.mount_canonical_lexical_path
+
+        source_kind: Literal["source_root", "historical_root", "recovery_root"]
+        if resolved_source_root is not None and candidate.is_relative_to(
+            resolved_source_root
+        ):
+            source_kind = "source_root"
+        elif cand.source in ("ledger_historical", "historical_uri"):
+            source_kind = "historical_root"
+        else:
+            source_kind = "recovery_root"
+
+        if val_path.exists():
+            if _is_valid_manifest_candidate(val_path):
                 return candidate, source_kind, True, False
             if validate_content_hash != "never":
                 saw_mismatch = True
+
         if unprefixed_rel is not None and unprefixed_rel != relative_path:
-            fallback_candidate = resolved_root / unprefixed_rel
-            if fallback_candidate.exists():
-                if _is_valid_manifest_candidate(fallback_candidate):
-                    return fallback_candidate, source_kind, True, False
-                if validate_content_hash != "never":
-                    saw_mismatch = True
+            try:
+                rel_len = len(relative_path.parts)
+                if len(candidate.parts) > rel_len:
+                    root = candidate.parents[rel_len - 1]
+                    fallback_candidate = root / unprefixed_rel
+                    if fallback_candidate.exists():
+                        if _is_valid_manifest_candidate(fallback_candidate):
+                            return fallback_candidate, source_kind, True, False
+                        if validate_content_hash != "never":
+                            saw_mismatch = True
+            except (OSError, ValueError, IndexError):
+                pass
 
     direct_source = _direct_artifact_source_path(
         tracker,
@@ -1718,11 +1569,11 @@ def _select_materialize_artifact_source(
     )
     if direct_source is not None:
         if _is_valid_manifest_candidate(direct_source):
-            return direct_source, "artifact_uri", bool(candidate_roots), False
+            return direct_source, "artifact_uri", has_candidate_roots, False
         if validate_content_hash != "never":
             saw_mismatch = True
 
-    return None, None, bool(candidate_roots), saw_mismatch
+    return None, None, has_candidate_roots, saw_mismatch
 
 
 def _materialized_status_for_source(
@@ -2252,30 +2103,14 @@ def _resolve_staging_source_path(
 
     relative_path = tracker.fs.get_remappable_relative_path(artifact.uri)
     if relative_path is not None:
-        if artifact.run_id:
-            owning_run = tracker.get_run(str(artifact.run_id))
-            if owning_run is not None:
-                _, source, _ = find_existing_recovery_source_path(
-                    tracker,
-                    artifact=artifact,
-                    run=owning_run,
-                    source_root=None,
-                )
-                if source is not None:
-                    if (
-                        validate_content_hash == "never"
-                        or verify_candidate_against_artifact(source, artifact)
-                    ):
-                        return source, False
-                    saw_any_mismatch = True
-        for root in _artifact_recovery_roots(tracker, artifact=artifact):
-            cand = (root / relative_path).resolve()
-            if cand.exists():
+        for cand in iter_artifact_candidates(tracker, artifact):
+            source = cand.canonical_path
+            if source.exists():
                 if (
                     validate_content_hash == "never"
-                    or verify_candidate_against_artifact(cand, artifact)
+                    or verify_candidate_against_artifact(source, artifact)
                 ):
-                    return cand, False
+                    return source, False
                 saw_any_mismatch = True
     return None, saw_any_mismatch
 
@@ -2771,52 +2606,53 @@ def plan_run_output_hydration(
                 )
                 has_candidate_roots = True
         else:
-            owning_run = _get_artifact_owning_run(
-                tracker, selected_run=run, artifact=artifact
-            )
             is_dir_artifact = _is_directory_artifact(artifact)
             is_bundle_artifact = _is_file_bundle_artifact(artifact)
             has_manifest_validator = is_dir_artifact or is_bundle_artifact
             has_scalar_hash_validator = not has_manifest_validator and (
                 artifact.digest is not None
             )
-            relative_path, source_path, has_candidate_roots = (
-                find_existing_recovery_source_path(
+            relative_path = _derive_remappable_relative_path(tracker, artifact=artifact)
+            has_candidate_roots = False
+            source_path = None
+            if relative_path is not None:
+
+                def _candidate_validator(cand_path: Path) -> bool:
+                    if is_dir_artifact:
+                        return (
+                            is_valid_directory_artifact_tree(cand_path, artifact)
+                            is not False
+                        )
+                    if is_bundle_artifact:
+                        return (
+                            is_valid_shapefile_bundle_source(cand_path, artifact)
+                            is not False
+                        )
+                    if has_scalar_hash_validator:
+                        return _is_valid_scalar_recovery_candidate(
+                            tracker, cand_path, artifact
+                        )
+                    return True
+
+                first_existing_fallback: Path | None = None
+                for cand in iter_artifact_candidates(
                     tracker,
-                    artifact=artifact,
-                    run=owning_run,
+                    artifact,
+                    relative_path=relative_path,
                     source_root=source_root,
-                    source_validator=(
-                        (
-                            lambda candidate, artifact=artifact: (
-                                is_valid_directory_artifact_tree(candidate, artifact)
-                                is not False
-                            )
-                        )
-                        if is_dir_artifact
-                        else (
-                            lambda candidate, artifact=artifact: (
-                                is_valid_shapefile_bundle_source(candidate, artifact)
-                                is not False
-                            )
-                        )
-                        if is_bundle_artifact
-                        else (
-                            lambda candidate, artifact=artifact: (
-                                _is_valid_scalar_recovery_candidate(
-                                    tracker, candidate, artifact
-                                )
-                            )
-                        )
-                        if has_scalar_hash_validator
-                        else None
-                    ),
-                    fallback_validator=(
-                        (lambda _: True) if has_manifest_validator else None
-                    ),
-                    preserve_raw_paths=has_manifest_validator,
-                )
-            )
+                ):
+                    has_candidate_roots = True
+                    val_path = cand.mount_canonical_lexical_path
+                    if val_path.exists():
+                        if _candidate_validator(val_path):
+                            source_path = cand.canonical_path
+                            break
+                        if has_manifest_validator and first_existing_fallback is None:
+                            first_existing_fallback = cand.canonical_path
+
+                if source_path is None and first_existing_fallback is not None:
+                    source_path = first_existing_fallback
+
             if is_bundle_artifact and source_path is not None:
                 source_path = (
                     source_path if source_path.is_dir() else source_path.parent

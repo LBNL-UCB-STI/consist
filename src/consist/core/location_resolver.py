@@ -168,7 +168,29 @@ class MountPrecedenceResolver:
         fs: FileSystemManager = getattr(tracker, "fs")
         raw_db = getattr(tracker, "db", None)
         get_run = getattr(tracker, "get_run", None)
+        if get_run is None and raw_db is not None:
+            get_run = getattr(raw_db, "get_run", None)
         return cls(fs, db=raw_db, get_run=get_run)
+
+    def seed_run_meta(self, run: Run) -> None:
+        """Seed known run metadata for historical mount resolution."""
+        run_meta = run.meta if isinstance(run.meta, Mapping) else {}
+        mounts_meta = run_meta.get("mounts")
+        arch_meta = run_meta.get("archive_mounts")
+        phys = run_meta.get("_physical_run_dir")
+        rid = str(run.id)
+        if isinstance(mounts_meta, Mapping):
+            for m, r in mounts_meta.items():
+                if isinstance(r, str):
+                    self._run_mount_memo[(rid, m)] = r
+        if isinstance(arch_meta, Mapping):
+            for m, r in arch_meta.items():
+                if isinstance(r, str) and (rid, m) not in self._run_mount_memo:
+                    self._run_mount_memo[(rid, m)] = r
+        if isinstance(phys, str):
+            for m in ("workspace", "runs"):
+                if (rid, m) not in self._run_mount_memo:
+                    self._run_mount_memo[(rid, m)] = phys
 
     def get_historical_mount_roots(self, mount_name: str) -> tuple[str, ...]:
         """Return memoized DB historical mount roots for ``mount_name``."""
@@ -388,15 +410,51 @@ def iter_artifact_candidates(
     tracker: Any,
     artifact: Artifact,
     *,
+    relative_path: Path | None = None,
     rows: Sequence[ArtifactLocationRow] | None = None,
     source_root: str | Path | None = None,
     explicit_roots: Sequence[str | Path] | None = None,
+    historical_run: Run | None = None,
+    historical_run_dir: str | Path | None = None,
     include_runtime_abs: bool = False,
     resolver: MountPrecedenceResolver | None = None,
 ) -> Iterator[ResolvedCandidate]:
     """Enumerate ordered, deduplicated, containment-checked candidate locations for an artifact."""
     seen_canonical: set[Path] = set()
-    rel = tracker.fs.get_remappable_relative_path(artifact.uri)
+    res = resolver or MountPrecedenceResolver.from_tracker(tracker)
+    if historical_run is not None:
+        res.seed_run_meta(historical_run)
+    rel = relative_path
+    if rel is None:
+        inferred_prefix: Path | None = None
+        if artifact.run_id is not None and "://" in artifact.uri:
+            scheme = artifact.uri.split("://", 1)[0]
+            run_mount = res._lookup_owning_run_mount(
+                str(artifact.run_id), scheme, "workspace"
+            )
+            phys_dir = res._lookup_owning_run_mount(
+                str(artifact.run_id), "workspace", "workspace"
+            )
+            if run_mount is not None and phys_dir is not None:
+                try:
+                    p_mount = Path(run_mount).resolve()
+                    p_phys = Path(phys_dir).resolve()
+                    sub_rel = p_mount.relative_to(p_phys)
+                    if sub_rel != Path("."):
+                        inferred_prefix = sub_rel
+                except (ValueError, RuntimeError):
+                    pass
+        prefixes_map = (
+            {artifact.uri.split("://", 1)[0]: str(inferred_prefix)}
+            if inferred_prefix is not None
+            else None
+        )
+        try:
+            rel = tracker.fs.get_remappable_relative_path(
+                artifact.uri, scheme_prefixes=prefixes_map
+            )
+        except Exception:
+            rel = tracker.fs.get_remappable_relative_path(artifact.uri)
 
     # 1. Explicit source root
     if source_root is not None and rel is not None:
@@ -441,13 +499,17 @@ def iter_artifact_candidates(
             )
 
     # 4. Ledger rows
-    res = resolver or MountPrecedenceResolver.from_tracker(tracker)
     candidate_rows = rows
     db = getattr(tracker, "db", None)
     is_real_db = isinstance(db, DatabaseManager)
 
-    if candidate_rows is None and is_real_db and artifact.id is not None:
-        candidate_rows = db.get_artifact_recovery_locations(artifact.id)
+    if candidate_rows is None and is_real_db:
+        if artifact.id is not None or artifact.digest is not None:
+            candidate_rows = db.get_active_artifact_locations(
+                artifact_id=artifact.id,
+                digest=artifact.digest,
+                member=artifact.member,
+            )
 
     if candidate_rows:
         for row in candidate_rows:
@@ -467,19 +529,48 @@ def iter_artifact_candidates(
                     seen_canonical.add(cand.canonical_path)
                     yield cand
 
-    # 5. DB-less / stub-tracker fallback
-    elif not is_real_db and rel is not None:
-        rec_roots_fn = getattr(tracker, "artifact_recovery_roots", None)
-        if callable(rec_roots_fn):
-            try:
-                raw_roots = rec_roots_fn(artifact, resolve=False)
-            except TypeError:
-                raw_roots = rec_roots_fn(artifact)
-            normalized = tracker.fs.normalize_recovery_roots(raw_roots, resolve=False)
-            for r in normalized:
-                if "://" in r and not r.startswith("file://"):
-                    continue
-                cand = _candidate_from_root(r, rel, "stub_recovery_root", artifact)
+    # 5. Direct translation and DB-less / stub-tracker fallback
+    if not candidate_rows:
+        hist_dir = historical_run_dir
+        if (
+            hist_dir is None
+            and historical_run is not None
+            and isinstance(historical_run.meta, Mapping)
+        ):
+            hist_dir = historical_run.meta.get("_physical_run_dir")
+        if hist_dir is not None and rel is not None:
+            cand = _candidate_from_root(hist_dir, rel, "historical_uri", artifact)
+            if cand is not None and cand.canonical_path not in seen_canonical:
+                seen_canonical.add(cand.canonical_path)
+                yield cand
+
+        try:
+            p_mount, p_inst, p_uri, _ = tracker.fs.location_coordinate_for_uri(
+                artifact.uri
+            )
+            coord = tracker.fs.translate_location_coordinate(p_mount, p_inst, p_uri)
+            if coord.is_resolved:
+                cand = _candidate_from_coordinate(coord, "managed_mount", artifact)
                 if cand is not None and cand.canonical_path not in seen_canonical:
                     seen_canonical.add(cand.canonical_path)
                     yield cand
+        except Exception:
+            pass
+
+        if not is_real_db and rel is not None:
+            rec_roots_fn = getattr(tracker, "artifact_recovery_roots", None)
+            if callable(rec_roots_fn):
+                try:
+                    raw_roots = rec_roots_fn(artifact, resolve=False)
+                except TypeError:
+                    raw_roots = rec_roots_fn(artifact)
+                normalized = tracker.fs.normalize_recovery_roots(
+                    raw_roots, resolve=False
+                )
+                for r in normalized:
+                    if "://" in r and not r.startswith("file://"):
+                        continue
+                    cand = _candidate_from_root(r, rel, "stub_recovery_root", artifact)
+                    if cand is not None and cand.canonical_path not in seen_canonical:
+                        seen_canonical.add(cand.canonical_path)
+                        yield cand

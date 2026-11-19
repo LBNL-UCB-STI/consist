@@ -19,7 +19,7 @@ import uuid
 import pytest
 
 from consist.core.fs import FileSystemManager
-from consist.core.materialize import _artifact_recovery_roots
+from consist.core.location_resolver import iter_artifact_candidates
 from consist.core.tracker import Tracker
 from consist.location import (
     ArtifactLocationRow,
@@ -734,10 +734,7 @@ def test_recovery_roots_keep_untranslatable_uri_for_uri_aware_consumers(
         # URI-aware consumers.
         assert tracker.artifact_recovery_roots(loaded) == ["cold://bucket/prefix"]
         # But the filesystem-probe boundary drops it.
-        assert (
-            _artifact_recovery_roots(tracker, artifact=loaded, preserve_raw_paths=True)
-            == ()
-        )
+        assert list(iter_artifact_candidates(tracker, loaded)) == []
     finally:
         tracker.close()
 
@@ -774,10 +771,7 @@ def test_artifact_recovery_roots_never_probe_cwd_relative_pseudo_paths(
         (pseudo / "0.0").write_bytes(b"z")
         monkeypatch.chdir(tmp_path)
 
-        assert (
-            _artifact_recovery_roots(tracker, artifact=loaded, preserve_raw_paths=True)
-            == ()
-        )
+        assert list(iter_artifact_candidates(tracker, artifact=loaded)) == []
     finally:
         tracker.close()
 
@@ -949,7 +943,7 @@ def test_translation_and_discovery_do_not_mutate_ledger(tmp_path: Path) -> None:
         tracker.fs.extract_recovery_root_from_location_row(
             loaded.uri, row, historical_run_dir=scratch
         )
-        _artifact_recovery_roots(tracker, artifact=loaded, preserve_raw_paths=True)
+        list(iter_artifact_candidates(tracker, artifact=loaded))
 
         after = {
             r.location_id: (r.status, r.witness, r.observed_at_ns)

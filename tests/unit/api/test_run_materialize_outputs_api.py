@@ -1804,7 +1804,7 @@ def test_archive_run_output_files_rejects_symlink_source_ancestor(
     assert report["source_linked"].metadata_committed is False
 
 
-def test_find_existing_recovery_source_path_default_validator_receives_resolved_path(
+def test_iter_artifact_candidates_canonical_path_is_resolved(
     tracker: Tracker,
 ) -> None:
     output_path = tracker.run_dir / "outputs" / "validator.csv"
@@ -1814,20 +1814,11 @@ def test_find_existing_recovery_source_path_default_validator_receives_resolved_
         artifact = tracker.log_artifact(
             output_path, key="validator", direction="output"
         )
-    run = tracker.get_run("producer_validator_path")
-    assert run is not None
-    seen: list[Path] = []
+    from consist.core.location_resolver import iter_artifact_candidates
 
-    _, source, _ = consist_materialize.find_existing_recovery_source_path(
-        tracker,
-        artifact=artifact,
-        run=run,
-        source_root=None,
-        source_validator=lambda candidate: seen.append(candidate) or True,
-    )
-
-    assert seen == [output_path.resolve()]
-    assert source == output_path.resolve()
+    cands = list(iter_artifact_candidates(tracker, artifact))
+    assert len(cands) >= 1
+    assert cands[0].canonical_path == output_path.resolve()
 
 
 def test_archive_run_output_files_rejects_symlink_recovery_root_before_resolution(

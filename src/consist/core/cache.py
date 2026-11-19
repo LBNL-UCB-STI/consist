@@ -967,16 +967,14 @@ def hydrate_cache_hit_outputs(
                 )
 
             if should_use_legacy:
+                from consist.core.location_resolver import iter_artifact_candidates
                 from consist.core.materialize import (
                     build_materialize_items_for_keys,
-                    find_existing_recovery_source_path,
                     materialize_artifacts_from_sources,
                 )
 
                 items: list[tuple[Artifact, Path, Path]] = []
                 on_missing = "warn"
-                db = tracker.db
-                run_cache: dict[str, Optional[Run]] = {}
 
                 if active_options.cache_hydration == "outputs-requested":
                     destinations = _requested_output_destinations(
@@ -992,20 +990,16 @@ def hydrate_cache_hit_outputs(
                     )
                     unresolved_requested: list[tuple[str, str]] = []
                     for art, dest in requested_items:
-                        historical_run = cached_run
-                        if db and art.run_id:
-                            run_id = str(art.run_id)
-                            if run_id not in run_cache:
-                                run_cache[run_id] = db.get_run(run_id)
-                            cached_run_record: Run | None = run_cache.get(run_id)
-                            if cached_run_record is not None:
-                                historical_run = cached_run_record
-                        _, source, _ = find_existing_recovery_source_path(
+                        source: Path | None = None
+                        for cand in iter_artifact_candidates(
                             cast("Tracker", tracker),
-                            artifact=art,
-                            run=historical_run,
+                            art,
                             source_root=active_options.materialize_cached_outputs_source_root,
-                        )
+                            historical_run=cached_run,
+                        ):
+                            if cand.canonical_path.exists():
+                                source = cand.canonical_path
+                                break
                         if source is not None:
                             items.append((art, source, Path(dest)))
                         else:
@@ -1035,20 +1029,17 @@ def hydrate_cache_hit_outputs(
                         active_options.materialize_cached_outputs_dir
                     ).resolve()
                     for art in record.outputs:
-                        historical_run = cached_run
-                        if db and art.run_id:
-                            run_id = str(art.run_id)
-                            if run_id not in run_cache:
-                                run_cache[run_id] = db.get_run(run_id)
-                            cached_run_record: Run | None = run_cache.get(run_id)
-                            if cached_run_record is not None:
-                                historical_run = cached_run_record
-                        relative_path, source, _ = find_existing_recovery_source_path(
+                        relative_path = tracker.fs.get_remappable_relative_path(art.uri)
+                        source = None
+                        for cand in iter_artifact_candidates(
                             cast("Tracker", tracker),
-                            artifact=art,
-                            run=historical_run,
+                            art,
                             source_root=active_options.materialize_cached_outputs_source_root,
-                        )
+                            historical_run=cached_run,
+                        ):
+                            if cand.canonical_path.exists():
+                                source = cand.canonical_path
+                                break
                         if source is None or relative_path is None:
                             raise FileNotFoundError(
                                 "[Consist] Cannot materialize cached input "
@@ -1207,7 +1198,6 @@ def validate_cached_run_outputs(
         return True
 
     run_artifacts = tracker.get_artifacts_for_run(run.id)
-    db = tracker.db
 
     def _is_valid_cached_output_path(art: Artifact, candidate: Path) -> bool:
         if not candidate.exists():
@@ -1222,35 +1212,18 @@ def validate_cached_run_outputs(
         if not _is_valid_cached_output_path(
             art, Path(resolved_path)
         ) and not art.meta.get("is_ingested", False):
-            from consist.core.materialize import find_existing_recovery_source_path
+            from consist.core.location_resolver import iter_artifact_candidates
             from consist.tools.mount_diagnostics import (
                 build_mount_resolution_hint,
                 format_missing_artifact_mount_help,
             )
 
-            owning_run = run
-            if db is not None and art.run_id and str(art.run_id) != run.id:
-                producing_run = db.get_run(str(art.run_id))
-                if producing_run is not None:
-                    owning_run = producing_run
-
-            _, recovery_source, _ = find_existing_recovery_source_path(
-                cast("Tracker", tracker),
-                artifact=art,
-                run=owning_run,
-                source_root=None,
-                source_validator=lambda candidate, art=art: (
-                    _is_valid_cached_output_path(art, candidate)
-                ),
-                preserve_raw_paths=bool(
-                    isinstance(art.meta, Mapping)
-                    and (
-                        art.meta.get("directory_artifact") is True
-                        or "directory_manifest" in art.meta
-                    )
-                ),
-            )
-            if recovery_source is not None:
+            found_recovery = False
+            for cand in iter_artifact_candidates(cast("Tracker", tracker), art):
+                if _is_valid_cached_output_path(art, cand.mount_canonical_lexical_path):
+                    found_recovery = True
+                    break
+            if found_recovery:
                 continue
 
             hint = build_mount_resolution_hint(
@@ -1380,28 +1353,16 @@ def materialize_missing_inputs(
             if _should_preserve_existing_input(artifact, destination):
                 continue
 
-        run_id = str(artifact.run_id)
-        run = db.get_run(run_id)
-        source: Path | None = None
-        if run is not None:
-            from consist.core.materialize import find_existing_recovery_source_path
+        from consist.core.location_resolver import iter_artifact_candidates
 
-            _, source, _ = find_existing_recovery_source_path(
-                cast("Tracker", tracker),
-                artifact=artifact,
-                run=run,
-                source_root=None,
-                source_validator=lambda path, artifact=artifact: (
-                    _recovery_source_matches_artifact(artifact, path)
-                ),
-                preserve_raw_paths=bool(
-                    isinstance(artifact.meta, Mapping)
-                    and (
-                        artifact.meta.get("directory_artifact") is True
-                        or "directory_manifest" in artifact.meta
-                    )
-                ),
-            )
+        source: Path | None = None
+        for cand in iter_artifact_candidates(cast("Tracker", tracker), artifact):
+            val_path = cand.mount_canonical_lexical_path
+            if val_path.exists() and _recovery_source_matches_artifact(
+                artifact, val_path
+            ):
+                source = cand.canonical_path
+                break
         if source is not None:
             items.append((artifact, source, destination))
             continue
@@ -1484,7 +1445,6 @@ def materialize_requested_inputs(
 
     allowed_base = _allowed_materialization_roots(tracker, target_run=run)
     staged: dict[str, str] = {}
-    run_cache: dict[str, Any] = {}
 
     def _content_signature(path: Path) -> Optional[str]:
         if path.is_dir():
@@ -1553,43 +1513,15 @@ def materialize_requested_inputs(
                 if fallback_source is None:
                     fallback_source = abs_path
 
-        prior_run: Optional[Run] = None
-        if tracker.db is not None and artifact.run_id:
-            from consist.core.fs import resolve_historical_artifact_path
+        from consist.core.location_resolver import iter_artifact_candidates
 
-            run_id = str(artifact.run_id)
-            if run_id not in run_cache:
-                run_cache[run_id] = tracker.db.get_run(run_id)
-            prior_run = run_cache.get(run_id)
-            historical = resolve_historical_artifact_path(
-                tracker.fs, artifact, prior_run, fallback_to_current_uri=False
-            )
-            if historical is not None and historical.exists():
-                if _recovery_source_matches_artifact(artifact, historical):
-                    return historical
+        for cand in iter_artifact_candidates(cast("Tracker", tracker), artifact):
+            val_path = cand.mount_canonical_lexical_path
+            if val_path.exists():
+                if _recovery_source_matches_artifact(artifact, val_path):
+                    return cand.canonical_path
                 if fallback_source is None:
-                    fallback_source = historical
-
-        from consist.core.materialize import find_existing_recovery_source_path
-
-        _, recovered, _ = find_existing_recovery_source_path(
-            cast("Tracker", tracker),
-            artifact=artifact,
-            run=prior_run,
-            source_root=None,
-            preserve_raw_paths=bool(
-                isinstance(artifact.meta, Mapping)
-                and (
-                    artifact.meta.get("directory_artifact") is True
-                    or "directory_manifest" in artifact.meta
-                )
-            ),
-            source_validator=lambda path, artifact=artifact: (
-                _recovery_source_matches_artifact(artifact, path)
-            ),
-        )
-        if recovered is not None:
-            return recovered
+                    fallback_source = cand.canonical_path
 
         if (
             isinstance(artifact.meta, Mapping)
