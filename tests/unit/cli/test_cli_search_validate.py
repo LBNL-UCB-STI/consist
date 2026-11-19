@@ -298,3 +298,51 @@ def test_validate_rejects_mutually_exclusive_scopes(cli_runner) -> None:
         "Options --scenario, --run, and --latest are mutually exclusive."
         in result_two.stdout
     )
+
+
+def test_validate_trust_db_mount_root_probe_bounded_and_reason_updates(
+    cli_runner, tracker, tmp_path, monkeypatch
+) -> None:
+    """`validate --trust-db` probes each known historical mount root once per invocation."""
+    cold_root = tmp_path / "cold_storage"
+    assert tracker.db is not None
+    tracker.db.upsert_run(
+        Run(
+            id="cold_archivist",
+            model_name="m",
+            meta={"mounts": {"cold": str(cold_root)}},
+        )
+    )
+    for i in range(30):
+        artifact = Artifact(
+            id=uuid.uuid4(),
+            key=f"cold_art_{i}",
+            uri=f"cold://data/file_{i}.csv",
+            driver="csv",
+            digest=Digest("sha256:file", f"{i:064x}"),
+        )
+        tracker.db.sync_artifact(artifact)
+
+    root_probe_calls = {"count": 0}
+    original_exists = Path.exists
+
+    def _counting_exists(self: Path, *args: Any, **kwargs: Any) -> bool:
+        if str(self) == str(cold_root):
+            root_probe_calls["count"] += 1
+        return original_exists(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "exists", _counting_exists)
+
+    unmounted_result = cli_runner.invoke(app, ["validate", "--trust-db"])
+    assert unmounted_result.exit_code == 0
+    assert "unmounted scheme 'cold'" in unmounted_result.stdout
+    assert root_probe_calls["count"] <= 1
+
+    cold_root.mkdir(parents=True)
+    root_probe_calls["count"] = 0
+
+    missing_result = cli_runner.invoke(app, ["validate", "--trust-db"])
+    assert missing_result.exit_code == 0
+    assert "missing on disk" in missing_result.stdout
+    assert "unmounted scheme 'cold'" not in missing_result.stdout
+    assert root_probe_calls["count"] <= 1

@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import inspect
+import logging
 import os
 import uuid
 import functools
@@ -96,6 +97,30 @@ def _raise_unexpected_kwargs(kwargs: Mapping[str, Any]) -> None:
         raise TypeError(f"unexpected keyword argument '{names[0]}'")
     joined = "', '".join(names)
     raise TypeError(f"unexpected keyword arguments '{joined}'")
+
+
+logger = logging.getLogger(__name__)
+
+
+def _restore_target_recovery_root(
+    fs: Any,
+    uri: str,
+    restored_path: Path | None,
+    target_root: Path,
+) -> str | None:
+    """Return R such that R / get_remappable_relative_path(uri) == restored_path."""
+    if restored_path is None:
+        return None
+    restored = Path(restored_path).resolve()
+    if not restored.is_relative_to(Path(target_root).resolve()):
+        return None  # not copied into T; nothing to register
+    rel = fs.get_remappable_relative_path(uri)  # no scheme_prefixes, on purpose
+    if rel is None or not rel.parts:
+        return None
+    if restored.parts[-len(rel.parts) :] != rel.parts:
+        logger.debug("restore target layout does not end with %s: %s", rel, restored)
+        return None
+    return str(restored.parents[len(rel.parts) - 1])
 
 
 def _scenario_header_code_identity() -> None:
@@ -1444,14 +1469,25 @@ class ScenarioContext:
                     self.tracker
                 )
                 if (
-                    source_root is not None
-                    and hydrated_art.id is not None
+                    hydrated_art.id is not None
                     and self.tracker.db is not None
                     and not self.tracker.db.read_only
                 ):
-                    self.tracker.set_artifact_recovery_roots(
-                        hydrated_art, [str(Path(source_root).resolve())], append=True
+                    new_roots: list[str] = []
+                    target_root_rec = _restore_target_recovery_root(
+                        self.tracker.fs,
+                        hydrated_art.uri,
+                        outcome.path,
+                        resolved_target_root,
                     )
+                    if target_root_rec is not None:
+                        new_roots.append(target_root_rec)
+                    if source_root is not None:
+                        new_roots.append(str(Path(source_root).resolve()))
+                    if new_roots:
+                        self.tracker.set_artifact_recovery_roots(
+                            hydrated_art, new_roots, append=True
+                        )
 
                 restored_artifacts[key] = hydrated_art
                 self.coupler.set(key, hydrated_art)

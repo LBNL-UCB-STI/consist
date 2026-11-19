@@ -461,6 +461,7 @@ def _strict_requested_output_hydration(
         dir=str(staging_parent),
     ) as tmp_dir:
         staged_root = Path(tmp_dir)
+        from consist.core.location_resolver import MountPrecedenceResolver
         from consist.core.materialize import plan_run_output_hydration
 
         try:
@@ -472,6 +473,7 @@ def _strict_requested_output_hydration(
                 keys=requested_keys,
                 preserve_existing=False,
                 db_fallback="if_ingested",
+                resolver=MountPrecedenceResolver.from_tracker(cast("Tracker", tracker)),
             )
         except Exception as exc:
             logging.debug(
@@ -968,12 +970,18 @@ def hydrate_cache_hit_outputs(
                 )
 
             if should_use_legacy:
-                from consist.core.location_resolver import iter_artifact_candidates
+                from consist.core.location_resolver import (
+                    MountPrecedenceResolver,
+                    iter_artifact_candidates,
+                )
                 from consist.core.materialize import (
                     build_materialize_items_for_keys,
                     materialize_artifacts_from_sources,
                 )
 
+                batch_resolver = MountPrecedenceResolver.from_tracker(
+                    cast("Tracker", tracker)
+                )
                 items: list[tuple[Artifact, Path, Path]] = []
                 on_missing = "warn"
 
@@ -997,6 +1005,7 @@ def hydrate_cache_hit_outputs(
                             art,
                             source_root=active_options.materialize_cached_outputs_source_root,
                             historical_run=cached_run,
+                            resolver=batch_resolver,
                         ):
                             if cand.canonical_path.exists():
                                 source = cand.canonical_path
@@ -1037,6 +1046,7 @@ def hydrate_cache_hit_outputs(
                             art,
                             source_root=active_options.materialize_cached_outputs_source_root,
                             historical_run=cached_run,
+                            resolver=batch_resolver,
                         ):
                             if cand.canonical_path.exists():
                                 source = cand.canonical_path
@@ -1200,6 +1210,10 @@ def validate_cached_run_outputs(
 
     run_artifacts = tracker.get_artifacts_for_run(run.id)
 
+    from consist.core.location_resolver import MountPrecedenceResolver
+
+    batch_resolver = MountPrecedenceResolver.from_tracker(cast("Tracker", tracker))
+
     def _is_valid_cached_output_path(
         art: Artifact,
         candidate: Path,
@@ -1230,7 +1244,9 @@ def validate_cached_run_outputs(
             )
 
             found_recovery = False
-            for cand in iter_artifact_candidates(cast("Tracker", tracker), art):
+            for cand in iter_artifact_candidates(
+                cast("Tracker", tracker), art, resolver=batch_resolver
+            ):
                 if _is_valid_cached_output_path(
                     art, cand.mount_canonical_lexical_path, cand=cand
                 ):
@@ -1363,6 +1379,10 @@ def materialize_missing_inputs(
     items: list[tuple[Artifact, Path, Path]] = []
     db_items: list[tuple[Artifact, Path, bool]] = []
 
+    from consist.core.location_resolver import MountPrecedenceResolver
+
+    batch_resolver = MountPrecedenceResolver.from_tracker(cast("Tracker", tracker))
+
     for artifact in tracker.current_consist.inputs:
         if not artifact.run_id:
             continue
@@ -1377,7 +1397,9 @@ def materialize_missing_inputs(
         from consist.core.location_resolver import iter_artifact_candidates
 
         source: Path | None = None
-        for cand in iter_artifact_candidates(cast("Tracker", tracker), artifact):
+        for cand in iter_artifact_candidates(
+            cast("Tracker", tracker), artifact, resolver=batch_resolver
+        ):
             val_path = cand.mount_canonical_lexical_path
             if val_path.exists() and _recovery_source_matches_artifact(
                 artifact, val_path, cand=cand
@@ -1467,6 +1489,10 @@ def materialize_requested_inputs(
     allowed_base = _allowed_materialization_roots(tracker, target_run=run)
     staged: dict[str, str] = {}
 
+    from consist.core.location_resolver import MountPrecedenceResolver
+
+    batch_resolver = MountPrecedenceResolver.from_tracker(cast("Tracker", tracker))
+
     def _content_signature(path: Path) -> Optional[str]:
         if path.is_dir():
             return str(compute_digest(path, driver="directory"))
@@ -1544,7 +1570,9 @@ def materialize_requested_inputs(
 
         from consist.core.location_resolver import iter_artifact_candidates
 
-        for cand in iter_artifact_candidates(cast("Tracker", tracker), artifact):
+        for cand in iter_artifact_candidates(
+            cast("Tracker", tracker), artifact, resolver=batch_resolver
+        ):
             val_path = cand.mount_canonical_lexical_path
             if val_path.exists():
                 if _recovery_source_matches_artifact(artifact, val_path, cand=cand):

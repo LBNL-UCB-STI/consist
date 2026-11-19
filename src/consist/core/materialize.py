@@ -38,7 +38,10 @@ from typing import (
 from typing_extensions import Protocol, runtime_checkable
 
 from consist.core.container_policy import validate_recovery_registration_policy
-from consist.core.location_resolver import iter_artifact_candidates
+from consist.core.location_resolver import (
+    MountPrecedenceResolver,
+    iter_artifact_candidates,
+)
 from consist.core.directory_artifacts import (
     build_directory_manifest,
     build_shapefile_bundle_manifest,
@@ -1454,6 +1457,7 @@ def _select_materialize_artifact_source(
     relative_path: Path,
     source_root: Path | None,
     validate_content_hash: Literal["never", "if-present", "always"] = "if-present",
+    resolver: "MountPrecedenceResolver | None" = None,
 ) -> tuple[
     Path | None,
     Literal[
@@ -1525,7 +1529,11 @@ def _select_materialize_artifact_source(
     )
 
     for cand in iter_artifact_candidates(
-        tracker, artifact, relative_path=relative_path, source_root=source_root
+        tracker,
+        artifact,
+        relative_path=relative_path,
+        source_root=source_root,
+        resolver=resolver,
     ):
         has_candidate_roots = True
         candidate = cand.canonical_path
@@ -1660,6 +1668,7 @@ def materialize_artifact(
     on_missing: Literal["warn", "raise"],
     validate_content_hash: Literal["never", "if-present", "always"],
     scheme_prefixes: Mapping[str, str | Path] | None = None,
+    resolver: "MountPrecedenceResolver | None" = None,
 ) -> MaterializedArtifact:
     """Materialize one artifact into a target root using recovery metadata."""
     if validate_content_hash not in {"never", "if-present", "always"}:
@@ -1737,6 +1746,7 @@ def materialize_artifact(
             relative_path=relative_path,
             source_root=source_root,
             validate_content_hash=validate_content_hash,
+            resolver=resolver,
         )
     )
 
@@ -2075,6 +2085,7 @@ def _resolve_staging_source_path(
     *,
     artifact: Artifact,
     validate_content_hash: Literal["never", "if-present", "always"] = "if-present",
+    resolver: "MountPrecedenceResolver | None" = None,
 ) -> tuple[Path | None, bool]:
     from consist.core.tracker_recovery import (
         resolve_verified_local_path_with_diagnostics,
@@ -2114,7 +2125,7 @@ def _resolve_staging_source_path(
 
     relative_path = tracker.fs.get_remappable_relative_path(artifact.uri)
     if relative_path is not None:
-        for cand in iter_artifact_candidates(tracker, artifact):
+        for cand in iter_artifact_candidates(tracker, artifact, resolver=resolver):
             source = cand.canonical_path
             if source.exists():
                 if (
@@ -2134,6 +2145,7 @@ def _stage_artifact_path(
     overwrite: bool,
     validate_content_hash: Literal["never", "if-present", "always"],
     allow_external_paths: bool | None,
+    resolver: "MountPrecedenceResolver | None" = None,
 ) -> StagedInput:
     allow_external = (
         tracker.allow_external_paths
@@ -2179,7 +2191,10 @@ def _stage_artifact_path(
 
         if validate_content_hash == "always" and artifact.digest is None:
             source_probe, _ = _resolve_staging_source_path(
-                tracker, artifact=artifact, validate_content_hash="never"
+                tracker,
+                artifact=artifact,
+                validate_content_hash="never",
+                resolver=resolver,
             )
             if source_probe is None or not source_probe.exists():
                 return _fail_stage(
@@ -2192,7 +2207,10 @@ def _stage_artifact_path(
             )
 
         source_path, saw_mismatch = _resolve_staging_source_path(
-            tracker, artifact=artifact, validate_content_hash=validate_content_hash
+            tracker,
+            artifact=artifact,
+            validate_content_hash=validate_content_hash,
+            resolver=resolver,
         )
         if source_path is None or not source_path.exists():
             if saw_mismatch:
@@ -2295,12 +2313,15 @@ def stage_artifacts_to_destinations(
     overwrite: bool = False,
     validate_content_hash: Literal["never", "if-present", "always"] = "if-present",
     allow_external_paths: bool | None = None,
+    resolver: "MountPrecedenceResolver | None" = None,
 ) -> StagedInputsResult:
     """Stage explicit artifact/destination pairs into a keyed result."""
     if mode != "copy":
         raise ValueError(
             f"Unsupported staging mode {mode!r}; only 'copy' is supported."
         )
+    if resolver is None:
+        resolver = MountPrecedenceResolver.from_tracker(tracker)
 
     outputs: dict[str, StagedInput] = {}
     key_order: list[str] = []
@@ -2326,6 +2347,7 @@ def stage_artifacts_to_destinations(
             overwrite=overwrite,
             validate_content_hash=validate_content_hash,
             allow_external_paths=allow_external_paths,
+            resolver=resolver,
         )
 
     if logging.getLogger().isEnabledFor(logging.INFO):
@@ -2360,12 +2382,15 @@ def plan_run_output_hydration(
     keys: Sequence[str] | None,
     preserve_existing: bool,
     db_fallback: Literal["never", "if_ingested"],
+    resolver: "MountPrecedenceResolver | None" = None,
 ) -> PlannedRunOutputHydration:
     """Plan historical output hydration for a run without mutating the target."""
     if (target_root is None) == (destinations_by_key is None):
         raise ValueError(
             "Provide exactly one of target_root or destinations_by_key for run output hydration."
         )
+    if resolver is None:
+        resolver = MountPrecedenceResolver.from_tracker(tracker)
 
     outputs: dict[str, HydratedRunOutput] = {}
     raw_outputs = _get_output_artifacts_for_run(tracker, run.id)
@@ -2651,6 +2676,7 @@ def plan_run_output_hydration(
                     artifact,
                     relative_path=relative_path,
                     source_root=source_root,
+                    resolver=resolver,
                 ):
                     has_candidate_roots = True
                     val_path = cand.mount_canonical_lexical_path
@@ -2857,6 +2883,7 @@ def build_run_output_materialize_plan(
         keys=keys,
         preserve_existing=preserve_existing,
         db_fallback=db_fallback,
+        resolver=MountPrecedenceResolver.from_tracker(tracker),
     )
     return planned.plan, fold_hydrated_run_outputs_result(planned.preflight_results)
 
@@ -3081,6 +3108,7 @@ def hydrate_run_outputs(
         keys=keys,
         preserve_existing=preserve_existing,
         db_fallback=db_fallback,
+        resolver=MountPrecedenceResolver.from_tracker(tracker),
     )
     if on_missing == "raise":
         _raise_if_preflight_failed(planned.preflight_results)
@@ -3128,6 +3156,7 @@ def hydrate_run_outputs_to_destinations(
         keys=None,
         preserve_existing=preserve_existing,
         db_fallback=db_fallback,
+        resolver=MountPrecedenceResolver.from_tracker(tracker),
     )
     if on_missing == "raise":
         _raise_if_preflight_failed(planned.preflight_results)
@@ -3353,6 +3382,7 @@ def stage_inputs(
         overwrite=overwrite,
         validate_content_hash=validate_content_hash,
         allow_external_paths=allow_external_paths,
+        resolver=MountPrecedenceResolver.from_tracker(tracker),
     )
 
 

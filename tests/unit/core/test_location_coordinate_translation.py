@@ -401,6 +401,75 @@ def test_workspace_runs_and_abs_cases_preserved(tmp_path: Path) -> None:
     assert coord_ws_traversal.is_rejected
 
 
+@pytest.mark.parametrize("mount_name", ["workspace", "runs"])
+def test_historical_workspace_instance_verification(
+    tmp_path: Path, mount_name: str
+) -> None:
+    ws_a = tmp_path / "wsA"
+    ws_b = tmp_path / "wsB"
+    ws_a.mkdir()
+    ws_b.mkdir()
+    (ws_b / "outputs").mkdir()
+    (ws_b / "outputs" / "x.csv").write_bytes(b"b")
+    uri = f"{mount_name}://outputs/x.csv"
+
+    fs = _make_fs(tmp_path)
+
+    # Matching instance id: resolved, lexical path under wsB.
+    coord = fs.translate_location_coordinate(
+        mount_name,
+        workspace_mount_instance_id(ws_b),
+        uri,
+        historical_run_dir=ws_b,
+    )
+    assert coord.is_resolved
+    assert coord.lexical_path is not None
+    assert coord.lexical_path.is_relative_to(ws_b)
+
+    # Mismatched instance id (A != B): fail closed to "unmounted".
+    coord = fs.translate_location_coordinate(
+        mount_name,
+        workspace_mount_instance_id(ws_a),
+        uri,
+        historical_run_dir=ws_b,
+    )
+    assert coord.status == "unmounted"
+    assert coord.is_unmounted
+
+    # Empty instance id keeps permissive semantics.
+    coord = fs.translate_location_coordinate(
+        mount_name, "", uri, historical_run_dir=ws_b
+    )
+    assert coord.is_resolved
+    assert coord.lexical_path is not None
+    assert coord.lexical_path.is_relative_to(ws_b)
+
+    # Symlink alias to wsB with wsB's instance id resolves (realpath identity).
+    alias = tmp_path / "alias"
+    alias.symlink_to(ws_b, target_is_directory=True)
+    coord = fs.translate_location_coordinate(
+        mount_name,
+        workspace_mount_instance_id(ws_b),
+        uri,
+        historical_run_dir=alias,
+    )
+    assert coord.is_resolved
+    assert coord.lexical_path is not None
+    assert coord.lexical_path.is_relative_to(alias)
+
+    # Mismatched id with verification disabled: resolved (opt-out).
+    coord = fs.translate_location_coordinate(
+        mount_name,
+        workspace_mount_instance_id(ws_a),
+        uri,
+        historical_run_dir=ws_b,
+        verify_workspace_instance=False,
+    )
+    assert coord.is_resolved
+    assert coord.lexical_path is not None
+    assert coord.lexical_path.is_relative_to(ws_b)
+
+
 # ---------------------------------------------------------------------------
 # Recovery-root extraction from location rows
 # ---------------------------------------------------------------------------
@@ -733,9 +802,18 @@ def test_recovery_roots_keep_untranslatable_uri_for_uri_aware_consumers(
         # No cold mount and no historical roots: the URI stays available to
         # URI-aware consumers.
         assert tracker.artifact_recovery_roots(loaded) == ["cold://bucket/prefix"]
-        # But the filesystem-probe boundary drops it.
+        # The filesystem-probe boundary drops the untranslatable row, but the
+        # owning-run historical root is still consulted (C3): the intact
+        # producer workspace yields a row-less historical_uri candidate.
         rec_rows = tracker.db.get_artifact_recovery_locations(loaded.id)
-        assert list(iter_artifact_candidates(tracker, loaded, rows=rec_rows)) == []
+        cands = list(iter_artifact_candidates(tracker, loaded, rows=rec_rows))
+        assert all(c.row is None for c in cands)
+        assert any(
+            c.source == "historical_uri"
+            and c.canonical_path
+            == (tmp_path / "producer_ws" / "out" / "skims.zarr").resolve()
+            for c in cands
+        )
         assert not any(
             "cold:" in str(c.canonical_path) or "bucket" in str(c.canonical_path)
             for c in iter_artifact_candidates(tracker, loaded)
@@ -777,9 +855,16 @@ def test_artifact_recovery_roots_never_probe_cwd_relative_pseudo_paths(
         monkeypatch.chdir(tmp_path)
 
         rec_rows = tracker.db.get_artifact_recovery_locations(loaded.id)
-        assert (
-            list(iter_artifact_candidates(tracker, artifact=loaded, rows=rec_rows))
-            == []
+        cands = list(iter_artifact_candidates(tracker, artifact=loaded, rows=rec_rows))
+        # The unresolvable scratch:// row must not become a CWD-relative probe;
+        # only the row-less owning-run historical fallback is consulted (C3).
+        assert all(c.row is None for c in cands)
+        assert not any(c.canonical_path == pseudo for c in cands)
+        assert any(
+            c.source == "historical_uri"
+            and c.canonical_path
+            == (tmp_path / "producer_ws" / "out" / "skims.zarr").resolve()
+            for c in cands
         )
         assert not any(
             c.canonical_path == pseudo

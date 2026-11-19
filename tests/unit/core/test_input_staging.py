@@ -195,6 +195,36 @@ def test_stage_artifact_uses_recovery_roots_when_source_is_not_resolved(
     assert destination.read_text(encoding="utf-8") == "value\n1\n"
 
 
+def test_stage_artifact_rejects_escaping_symlink_recovery_source(
+    tmp_path: Path,
+) -> None:
+    """A recovery source escaping its root through a symlink is never followed (C1)."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_file = outside / "source.csv"
+    outside_file.write_text("value\noutside\n", encoding="utf-8")
+    archive_root = tmp_path / "archive"
+    (archive_root / "inputs").mkdir(parents=True)
+    (archive_root / "inputs").rmdir()
+    (archive_root / "inputs").symlink_to(outside, target_is_directory=True)
+    destination = tmp_path / "runs" / "staged" / "source.csv"
+    artifact = _artifact("source", "./inputs/source.csv")
+    tracker = _tracker(
+        tmp_path / "runs",
+        resolve_uri=lambda _uri: str(tmp_path / "missing" / "source.csv"),
+        recovery_roots_by_id={artifact.id: [archive_root]},
+    )
+
+    result = stage_artifact(
+        tracker, artifact, destination, validate_content_hash="never"
+    )
+
+    assert result.status == "missing_source"
+    assert result.resolvable is False
+    assert not destination.exists()
+    assert outside_file.read_text(encoding="utf-8") == "value\noutside\n"
+
+
 def test_stage_artifact_reports_missing_source(tmp_path: Path) -> None:
     source = tmp_path / "missing.csv"
     destination = tmp_path / "runs" / "staged" / "missing.csv"

@@ -3633,7 +3633,9 @@ class DatabaseMaintenance:
                                 seen_paths.add(pkey)
                                 protected_paths.append(extra_cand)
                 loc_cand = base_fs.resolve_location_row_path(
-                    loc, historical_run_dir=hist_rd
+                    loc,
+                    historical_run_dir=hist_rd,
+                    verify_workspace_instance=False,
                 )
                 if loc_cand is not None:
                     pkey = str(loc_cand)

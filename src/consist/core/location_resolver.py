@@ -51,6 +51,20 @@ class ResolvedCandidate:
     entry_lexical_path: Path
     entry_canonical_path: Path
     row: ArtifactLocationRow | None = None
+    rejected: bool = False
+
+
+def _uri_relative_suffix(uri: str) -> Path | None:
+    if uri.startswith("./"):
+        raw = uri[2:]
+    elif "://" in uri:
+        scheme, raw = uri.split("://", 1)
+        if scheme == "file":
+            return None
+        raw = raw.lstrip("/")
+    else:
+        return None
+    return Path(raw) if raw else None
 
 
 def _candidate_from_coordinate(
@@ -101,6 +115,7 @@ def _candidate_from_root(
     artifact: Artifact,
     *,
     row: ArtifactLocationRow | None = None,
+    keep_rejected: bool = False,
 ) -> ResolvedCandidate | None:
     lexical_root = Path(root).expanduser()
     if not lexical_root.is_absolute():
@@ -115,16 +130,28 @@ def _candidate_from_root(
     )
     target = _canonical_containment_target(mount_canonical)
     if target is None or not target.is_relative_to(canonical_root):
-        if mount_canonical.is_symlink() or mount_canonical.exists():
-            canonical_path = mount_canonical
-        else:
-            return None
-    else:
-        canonical_path = (
-            Path(os.path.realpath(mount_canonical.parent)) / mount_canonical.name
-            if rel_parts
-            else canonical_root
-        )
+        if keep_rejected and (
+            lexical_path.is_symlink()
+            or lexical_path.exists()
+            or mount_canonical.is_symlink()
+            or mount_canonical.exists()
+        ):
+            return ResolvedCandidate(
+                source=source,
+                lexical_path=lexical_path,
+                mount_canonical_lexical_path=mount_canonical,
+                canonical_path=mount_canonical,
+                entry_lexical_path=lexical_path,
+                entry_canonical_path=mount_canonical,
+                row=row,
+                rejected=True,
+            )
+        return None
+    canonical_path = (
+        Path(os.path.realpath(mount_canonical.parent)) / mount_canonical.name
+        if rel_parts
+        else canonical_root
+    )
     entry_lexical = lexical_path
     entry_canonical = canonical_path
     if is_file_bundle_artifact(artifact) and canonical_path.is_dir():
@@ -164,8 +191,10 @@ class MountPrecedenceResolver:
             db if isinstance(db, DatabaseManager) else None
         )
         self.get_run = get_run
-        self._run_mount_memo: dict[tuple[str, str], str | None] = {}
+        self._run_obj_memo: dict[str, Run | None] = {}
+        self._run_meta_memo: dict[str, Mapping[str, Any]] = {}
         self._historical_roots_memo: dict[str, tuple[str, ...]] = {}
+        self._has_hist_root_memo: dict[str, bool] = {}
 
     @classmethod
     def from_tracker(cls, tracker: Any) -> "MountPrecedenceResolver":
@@ -178,23 +207,24 @@ class MountPrecedenceResolver:
 
     def seed_run_meta(self, run: Run) -> None:
         """Seed known run metadata for historical mount resolution."""
-        run_meta = run.meta if isinstance(run.meta, Mapping) else {}
-        mounts_meta = run_meta.get("mounts")
-        arch_meta = run_meta.get("archive_mounts")
-        phys = run_meta.get("_physical_run_dir")
-        rid = str(run.id)
-        if isinstance(mounts_meta, Mapping):
-            for m, r in mounts_meta.items():
-                if isinstance(r, str):
-                    self._run_mount_memo[(rid, m)] = r
-        if isinstance(arch_meta, Mapping):
-            for m, r in arch_meta.items():
-                if isinstance(r, str) and (rid, m) not in self._run_mount_memo:
-                    self._run_mount_memo[(rid, m)] = r
-        if isinstance(phys, str):
-            for m in ("workspace", "runs"):
-                if (rid, m) not in self._run_mount_memo:
-                    self._run_mount_memo[(rid, m)] = phys
+        self._run_obj_memo[str(run.id)] = run
+        self._run_meta_memo[str(run.id)] = (
+            run.meta if isinstance(run.meta, Mapping) else {}
+        )
+
+    def _get_run(self, run_id: str) -> Run | None:
+        if run_id not in self._run_obj_memo:
+            self._run_obj_memo[run_id] = (
+                self.get_run(run_id) if self.get_run is not None else None
+            )
+        return self._run_obj_memo[run_id]
+
+    def _get_run_meta(self, run_id: str) -> Mapping[str, Any]:
+        if run_id not in self._run_meta_memo:
+            run = self._get_run(run_id)
+            meta = run.meta if run is not None and isinstance(run.meta, Mapping) else {}
+            self._run_meta_memo[run_id] = meta
+        return self._run_meta_memo[run_id]
 
     def get_historical_mount_roots(self, mount_name: str) -> tuple[str, ...]:
         """Return memoized DB historical mount roots for ``mount_name``."""
@@ -209,46 +239,38 @@ class MountPrecedenceResolver:
 
     def has_historical_root(self, mount_name: str) -> bool:
         """Return whether at least one existing historical root directory is known for ``mount_name``."""
+        if mount_name in self._has_hist_root_memo:
+            return self._has_hist_root_memo[mount_name]
+        result = False
         for cand_root in self.get_historical_mount_roots(mount_name):
             try:
                 if Path(cand_root).exists():
-                    return True
+                    result = True
+                    break
             except OSError:
                 continue
-        return False
+        self._has_hist_root_memo[mount_name] = result
+        return result
 
     def _lookup_owning_run_mount(
         self, run_id: str, mount_name: str, site: str
     ) -> str | None:
-        memo_key = (run_id, mount_name)
-        if memo_key in self._run_mount_memo:
-            return self._run_mount_memo[memo_key]
-        result: str | None = None
-        if self.get_run is not None:
-            owning_run = self.get_run(run_id)
-            run_meta = (
-                owning_run.meta
-                if owning_run is not None and isinstance(owning_run.meta, Mapping)
-                else {}
-            )
-            mounts_meta = run_meta.get("mounts")
-            arch_meta = run_meta.get("archive_mounts")
-            m_over = (
-                mounts_meta.get(mount_name)
-                if isinstance(mounts_meta, Mapping)
-                else None
-            ) or (arch_meta.get(mount_name) if isinstance(arch_meta, Mapping) else None)
-            if isinstance(m_over, str) and m_over:
-                result = m_over
-            elif mount_name in ("workspace", "runs") and site in (
-                "workspace",
-                "external",
-            ):
-                phys = run_meta.get("_physical_run_dir")
-                if isinstance(phys, str) and phys:
-                    result = phys
-        self._run_mount_memo[memo_key] = result
-        return result
+        run_meta = self._get_run_meta(run_id)
+        mounts_meta = run_meta.get("mounts")
+        arch_meta = run_meta.get("archive_mounts")
+        m_over = (
+            mounts_meta.get(mount_name) if isinstance(mounts_meta, Mapping) else None
+        ) or (arch_meta.get(mount_name) if isinstance(arch_meta, Mapping) else None)
+        if isinstance(m_over, str) and m_over:
+            return m_over
+        if mount_name in ("workspace", "runs") and site in (
+            "workspace",
+            "external",
+        ):
+            phys = run_meta.get("_physical_run_dir")
+            if isinstance(phys, str) and phys:
+                return phys
+        return None
 
     def resolve_row_coordinates(
         self,
@@ -420,6 +442,7 @@ def iter_artifact_candidates(
     historical_run_dir: str | Path | None = None,
     include_runtime_abs: bool = False,
     resolver: MountPrecedenceResolver | None = None,
+    include_rejected: bool = False,
 ) -> Iterator[ResolvedCandidate]:
     """Enumerate ordered, deduplicated, containment-checked candidate locations for an artifact."""
     seen_canonical: set[Path] = set()
@@ -460,18 +483,28 @@ def iter_artifact_candidates(
 
     # 1. Explicit source root
     if source_root is not None and rel is not None:
-        cand = _candidate_from_root(source_root, rel, "explicit_root", artifact)
-        if cand is not None and cand.canonical_path not in seen_canonical:
-            seen_canonical.add(cand.canonical_path)
-            yield cand
+        cand = _candidate_from_root(
+            source_root, rel, "explicit_root", artifact, keep_rejected=include_rejected
+        )
+        if cand is not None:
+            if cand.rejected:
+                yield cand
+            elif cand.canonical_path not in seen_canonical:
+                seen_canonical.add(cand.canonical_path)
+                yield cand
 
     # 2. Additional explicit roots
     if explicit_roots is not None and rel is not None:
         for exp_root in explicit_roots:
-            cand = _candidate_from_root(exp_root, rel, "explicit_root", artifact)
-            if cand is not None and cand.canonical_path not in seen_canonical:
-                seen_canonical.add(cand.canonical_path)
-                yield cand
+            cand = _candidate_from_root(
+                exp_root, rel, "explicit_root", artifact, keep_rejected=include_rejected
+            )
+            if cand is not None:
+                if cand.rejected:
+                    yield cand
+                elif cand.canonical_path not in seen_canonical:
+                    seen_canonical.add(cand.canonical_path)
+                    yield cand
 
     # 3. Runtime abs path (if requested)
     if include_runtime_abs and artifact.abs_path:
@@ -532,37 +565,53 @@ def iter_artifact_candidates(
                     yield cand
 
     # 5. Direct translation and DB-less / stub-tracker fallback
-    if not candidate_rows:
-        owning_run = historical_run
-        if (
-            owning_run is None
-            and artifact.run_id is not None
-            and res.get_run is not None
-        ):
-            owning_run = res.get_run(str(artifact.run_id))
-
-        hist_dir = historical_run_dir
-        if hist_dir is None and owning_run is not None:
-            run_meta = owning_run.meta if isinstance(owning_run.meta, Mapping) else {}
-            art_meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
-            hist_root = tracker.fs.get_historical_root(
-                artifact.uri,
-                original_run_dir=run_meta.get("_physical_run_dir")
-                or getattr(owning_run, "run_dir", None),
-                mounts_snapshot=run_meta.get("mounts")
-                or run_meta.get("archive_mounts"),
-                artifact_mount_root=art_meta.get("mount_root"),
-                resolve=True,
-            )
-            if hist_root is not None:
-                hist_dir = hist_root
-
-        if hist_dir is not None and rel is not None:
-            cand = _candidate_from_root(hist_dir, rel, "historical_uri", artifact)
-            if cand is not None and cand.canonical_path not in seen_canonical:
+    # 5a. Artifact mount_root candidate (always)
+    art_meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
+    mr = art_meta.get("mount_root")
+    suffix = _uri_relative_suffix(artifact.uri)
+    if isinstance(mr, str) and mr and suffix is not None:
+        cand = _candidate_from_root(
+            mr, suffix, "historical_uri", artifact, keep_rejected=include_rejected
+        )
+        if cand is not None:
+            if cand.rejected:
+                yield cand
+            elif cand.canonical_path not in seen_canonical:
                 seen_canonical.add(cand.canonical_path)
                 yield cand
 
+    # 5b. Owning-run historical root (always)
+    owning_run = historical_run
+    if owning_run is None and artifact.run_id is not None and res.get_run is not None:
+        owning_run = res._get_run(str(artifact.run_id))
+
+    hist_dir = historical_run_dir
+    if hist_dir is None and owning_run is not None:
+        run_meta = owning_run.meta if isinstance(owning_run.meta, Mapping) else {}
+        hist_root = tracker.fs.get_historical_root(
+            artifact.uri,
+            original_run_dir=run_meta.get("_physical_run_dir")
+            or getattr(owning_run, "run_dir", None),
+            mounts_snapshot=run_meta.get("mounts") or run_meta.get("archive_mounts"),
+            artifact_mount_root=art_meta.get("mount_root"),
+            resolve=True,
+        )
+        if hist_root is not None:
+            hist_dir = hist_root
+
+    if hist_dir is not None and rel is not None:
+        cand = _candidate_from_root(
+            hist_dir, rel, "historical_uri", artifact, keep_rejected=include_rejected
+        )
+        if cand is not None:
+            if cand.rejected:
+                yield cand
+            elif cand.canonical_path not in seen_canonical:
+                seen_canonical.add(cand.canonical_path)
+                yield cand
+
+    # 5c/5d. Managed mount and DB-less / stub-tracker fallback
+    if not candidate_rows:
         is_current_run = artifact.run_id is None or str(artifact.run_id) == str(
             getattr(tracker, "run_id", None)
         )
@@ -593,7 +642,16 @@ def iter_artifact_candidates(
                 for r in normalized:
                     if "://" in r and not r.startswith("file://"):
                         continue
-                    cand = _candidate_from_root(r, rel, "stub_recovery_root", artifact)
-                    if cand is not None and cand.canonical_path not in seen_canonical:
-                        seen_canonical.add(cand.canonical_path)
-                        yield cand
+                    cand = _candidate_from_root(
+                        r,
+                        rel,
+                        "stub_recovery_root",
+                        artifact,
+                        keep_rejected=include_rejected,
+                    )
+                    if cand is not None:
+                        if cand.rejected:
+                            yield cand
+                        elif cand.canonical_path not in seen_canonical:
+                            seen_canonical.add(cand.canonical_path)
+                            yield cand

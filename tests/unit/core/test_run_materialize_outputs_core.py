@@ -437,8 +437,10 @@ def test_materialize_artifact_blocks_symlink_recovery_source(tmp_path: Path) -> 
         validate_content_hash="never",
     )
 
-    assert result.status == "failed"
-    assert "Symlink detected in source path" in (result.message or "")
+    # Fail-closed containment (C1): the escaping symlink source is rejected by
+    # the candidate iterator, so staging reports a missing source instead of a
+    # late symlink failure.
+    assert result.status == "missing_source"
     assert not result.resolvable
     assert not (tmp_path / "restore" / "outputs" / "a.csv").exists()
 
@@ -474,8 +476,9 @@ def test_materialize_artifact_blocks_symlink_parent_in_recovery_source(
         validate_content_hash="never",
     )
 
-    assert result.status == "failed"
-    assert "Symlink detected in source path" in (result.message or "")
+    # Fail-closed containment (C1): the ancestor symlink escapes the recovery
+    # root, so the candidate is rejected and staging reports a missing source.
+    assert result.status == "missing_source"
     assert not result.resolvable
     assert not (tmp_path / "restore" / "outputs" / "a.csv").exists()
 

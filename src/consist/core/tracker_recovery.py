@@ -341,13 +341,13 @@ def _resolve_rows_for_cache(
     tracker: "Tracker",
     artifact: Artifact,
     rows: Sequence[ArtifactLocationRow],
-    historical_run_dir_memo: dict[str, Optional[str]],
+    resolver: MountPrecedenceResolver | None = None,
 ) -> tuple[_CachedLocationEntry, ...]:
     primary_entries: list[_CachedLocationEntry] = []
     historical_entries: list[_CachedLocationEntry] = []
-    resolver = MountPrecedenceResolver.from_tracker(tracker)
+    res = resolver or MountPrecedenceResolver.from_tracker(tracker)
     for row in rows:
-        primary_coord, hist_coords = resolver.resolve_row_coordinates(row, artifact)
+        primary_coord, hist_coords = res.resolve_row_coordinates(row, artifact)
         primary_item: _CachedCandidate | None = None
         if primary_coord.is_resolved:
             p_cand = primary_coord.canonical_path
@@ -442,7 +442,7 @@ def warm_artifact_locations_cache(
     if not missing:
         return
     rows_by_aid = db.get_active_artifact_locations_bulk(missing)
-    hist_memo: dict[str, Optional[str]] = {}
+    batch_resolver = MountPrecedenceResolver.from_tracker(tracker)
     for art in missing:
         if art.id is None:
             continue
@@ -451,7 +451,7 @@ def warm_artifact_locations_cache(
         if len(db._location_resolution_cache) >= 4096:
             db._location_resolution_cache.clear()
         db._location_resolution_cache[ck] = _resolve_rows_for_cache(
-            tracker, art, rows, hist_memo
+            tracker, art, rows, resolver=batch_resolver
         )
 
 
@@ -504,7 +504,7 @@ def _load_cached_active_locations(
         digest=artifact.digest,
         member=artifact.member,
     )
-    resolved_tuple = _resolve_rows_for_cache(tracker, artifact, rows, {})
+    resolved_tuple = _resolve_rows_for_cache(tracker, artifact, rows, resolver=None)
     if len(db._location_resolution_cache) >= 4096:
         db._location_resolution_cache.clear()
     db._location_resolution_cache[cache_key] = resolved_tuple

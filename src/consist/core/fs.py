@@ -874,6 +874,7 @@ class FileSystemManager:
         uri: str,
         *,
         historical_run_dir: str | Path | None = None,
+        verify_workspace_instance: bool = True,
     ) -> TranslatedCoordinate:
         """Checked translation of a location coordinate to a host path.
 
@@ -916,9 +917,14 @@ class FileSystemManager:
 
             lexical_root: Optional[Path] = None
             if historical_run_dir is not None:
-                lexical_root = Path(
-                    os.path.abspath(Path(historical_run_dir).expanduser())
-                )
+                hist_root = Path(historical_run_dir).expanduser()
+                if (
+                    not verify_workspace_instance
+                    or mount_instance_id == ""
+                    or mount_instance_id == workspace_mount_instance_id(hist_root)
+                ):
+                    lexical_root = Path(os.path.abspath(hist_root))
+                # else: leave lexical_root = None -> falls through to "unmounted".
             elif mount_name in self.mounts:
                 mount_path = Path(self.mounts[mount_name]).expanduser()
                 if mount_instance_id in ("", workspace_mount_instance_id(mount_path)):
@@ -1034,6 +1040,7 @@ class FileSystemManager:
         uri: str,
         *,
         historical_run_dir: str | Path | None = None,
+        verify_workspace_instance: bool = True,
     ) -> Optional[Path]:
         """Resolve ``(mount_name, mount_instance_id, uri)`` to a host ``Path`` or ``None``."""
         coord = self.translate_location_coordinate(
@@ -1041,6 +1048,7 @@ class FileSystemManager:
             mount_instance_id,
             uri,
             historical_run_dir=historical_run_dir,
+            verify_workspace_instance=verify_workspace_instance,
         )
         return coord.canonical_path if coord.is_resolved else None
 
@@ -1049,6 +1057,7 @@ class FileSystemManager:
         row: ArtifactLocationRow,
         *,
         historical_run_dir: str | Path | None = None,
+        verify_workspace_instance: bool = True,
     ) -> Optional[Path]:
         """Resolve an ``ArtifactLocationRow`` to a host ``Path`` or ``None`` if unmounted/foreign."""
         return self.resolve_location_coordinate(
@@ -1056,6 +1065,7 @@ class FileSystemManager:
             row.mount_instance_id,
             row.uri,
             historical_run_dir=historical_run_dir,
+            verify_workspace_instance=verify_workspace_instance,
         )
 
     def extract_recovery_root_from_location_row(

@@ -33,7 +33,10 @@ from consist.core.directory_artifacts import (
 from consist.core.fs import (
     build_verified_location_row,
 )
-from consist.core.location_resolver import iter_artifact_candidates
+from consist.core.location_resolver import (
+    MountPrecedenceResolver,
+    iter_artifact_candidates,
+)
 from consist.core.materialize import (
     ArchivedRunOutputFile,
     ArchivedRunOutputFilesReport,
@@ -1121,6 +1124,7 @@ class TrackerArchiveService(_TrackerServiceBase):
         fallback_validator: Callable[[Path], bool] | None = None,
         allow_run_owned_uri_fallback: bool = False,
         include_current_managed_uri: bool = True,
+        resolver: MountPrecedenceResolver | None = None,
     ) -> Path | None:
         """Locate a verified archive source candidate across recovery, runtime, and mount roots."""
         run = (
@@ -1140,6 +1144,8 @@ class TrackerArchiveService(_TrackerServiceBase):
             artifact,
             historical_run=run,
             include_runtime_abs=True,
+            include_rejected=True,
+            resolver=resolver,
         ):
             for probe_path in (cand.lexical_path, cand.mount_canonical_lexical_path):
                 if (
@@ -1150,21 +1156,22 @@ class TrackerArchiveService(_TrackerServiceBase):
                     elif fallback_validator is not None:
                         fallback_validator(probe_path)
 
-        raw_uri_path: Path | None = None
-        if "://" in artifact.uri:
-            scheme, rel_raw = artifact.uri.split("://", 1)
-            if scheme in self.fs.mounts:
-                raw_uri_path = Path(self.fs.mounts[scheme]) / rel_raw.lstrip("/")
-        elif artifact.uri.startswith("./"):
-            raw_uri_path = Path(self.fs.run_dir) / artifact.uri[2:]
-        if raw_uri_path is not None:
-            if (
-                raw_uri_path.exists() or raw_uri_path.is_symlink()
-            ) and self._has_symlink_component(raw_uri_path):
-                if source_validator is not None:
-                    source_validator(raw_uri_path)
-                elif fallback_validator is not None:
-                    fallback_validator(raw_uri_path)
+        if allow_direct or include_current_managed_uri:
+            raw_uri_path: Path | None = None
+            if "://" in artifact.uri:
+                scheme, rel_raw = artifact.uri.split("://", 1)
+                if scheme in self.fs.mounts:
+                    raw_uri_path = Path(self.fs.mounts[scheme]) / rel_raw.lstrip("/")
+            elif artifact.uri.startswith("./"):
+                raw_uri_path = Path(self.fs.run_dir) / artifact.uri[2:]
+            if raw_uri_path is not None:
+                if (
+                    raw_uri_path.exists() or raw_uri_path.is_symlink()
+                ) and self._has_symlink_component(raw_uri_path):
+                    if source_validator is not None:
+                        source_validator(raw_uri_path)
+                    elif fallback_validator is not None:
+                        fallback_validator(raw_uri_path)
 
         verified, _ = resolve_verified_local_path_with_diagnostics(
             self.tracker,
@@ -1173,9 +1180,8 @@ class TrackerArchiveService(_TrackerServiceBase):
             verify_digest=True,
         )
         if verified is not None:
-            cand = verified.resolve()
-            if source_validator is None or source_validator(cand):
-                return cand
+            if source_validator is None or source_validator(verified):
+                return verified.resolve()
 
         if allow_direct:
             direct_candidates: list[Path] = []
@@ -1186,13 +1192,12 @@ class TrackerArchiveService(_TrackerServiceBase):
             except (OSError, RuntimeError, TypeError, ValueError):
                 pass
             for raw_cand in direct_candidates:
-                cand = raw_cand.resolve()
                 if (
-                    cand.exists()
-                    and verify_candidate_against_artifact(cand, artifact)
-                    and (source_validator is None or source_validator(cand))
+                    raw_cand.exists()
+                    and verify_candidate_against_artifact(raw_cand, artifact)
+                    and (source_validator is None or source_validator(raw_cand))
                 ):
-                    return cand
+                    return raw_cand.resolve()
 
         if include_current_managed_uri and "://" in artifact.uri:
             scheme, _ = artifact.uri.split("://", 1)
@@ -1210,9 +1215,8 @@ class TrackerArchiveService(_TrackerServiceBase):
                                 f"Current configured mount source for artifact {artifact.key!r} "
                                 "does not match artifact hash."
                             )
-                    out_cand = cand.resolve()
-                    if source_validator is None or source_validator(out_cand):
-                        return out_cand
+                    if source_validator is None or source_validator(cand):
+                        return cand.resolve()
 
         if self._active_archive_replace_backup is not None:
             archive_root, backup_root = self._active_archive_replace_backup
@@ -1236,9 +1240,12 @@ class TrackerArchiveService(_TrackerServiceBase):
                 if backup_entry.exists() and verify_candidate_against_artifact(
                     backup_base, artifact
                 ):
-                    out_backup = backup_entry.resolve()
-                    if source_validator is None or source_validator(out_backup):
-                        return out_backup
+                    # C4: resolve_artifact_entry_path pre-resolves, so the raw
+                    # lexical backup path is validated alongside the entry.
+                    if source_validator is None or (
+                        source_validator(backup_base) and source_validator(backup_entry)
+                    ):
+                        return backup_entry.resolve()
 
         if fallback_validator is not None:
             for cand in iter_artifact_candidates(
@@ -1246,12 +1253,24 @@ class TrackerArchiveService(_TrackerServiceBase):
                 artifact,
                 historical_run=run,
                 include_runtime_abs=True,
+                resolver=resolver,
             ):
                 probe_path = cand.mount_canonical_lexical_path
                 if (
                     probe_path.exists() or probe_path.is_symlink()
                 ) and fallback_validator(probe_path):
                     return cand.canonical_path
+            if allow_direct:
+                try:
+                    raw = Path(self.resolve_uri(artifact.uri))
+                except (OSError, RuntimeError, TypeError, ValueError):
+                    raw = None
+                if (
+                    raw is not None
+                    and (raw.exists() or raw.is_symlink())
+                    and fallback_validator(raw)
+                ):
+                    return raw.resolve()
         return None
 
     def _find_output_set_archive_source(
@@ -1259,6 +1278,7 @@ class TrackerArchiveService(_TrackerServiceBase):
         artifact: Artifact,
         *,
         producing_run: Any | None = None,
+        resolver: MountPrecedenceResolver | None = None,
     ) -> Path:
         """Locate an OutputSet source without resolving through symlinks."""
 
@@ -1274,6 +1294,7 @@ class TrackerArchiveService(_TrackerServiceBase):
             fallback_validator=reject_symlink,
             allow_run_owned_uri_fallback=True,
             include_current_managed_uri=False,
+            resolver=resolver,
         )
         if source_path is None:
             raise FileNotFoundError(
@@ -1326,6 +1347,8 @@ class TrackerArchiveService(_TrackerServiceBase):
         self,
         artifact: Artifact,
         archive_root: str | os.PathLike[str],
+        *,
+        resolver: MountPrecedenceResolver | None = None,
     ) -> _OutputSetArchivePlan:
         """Validate a persisted OutputSet graph before changing archive bytes."""
         metadata = artifact.meta if isinstance(artifact.meta, Mapping) else {}
@@ -1386,14 +1409,14 @@ class TrackerArchiveService(_TrackerServiceBase):
             self.get_run(str(artifact.run_id)) if artifact.run_id is not None else None
         )
         parent_source = self._find_output_set_archive_source(
-            artifact, producing_run=producing_run
+            artifact, producing_run=producing_run, resolver=resolver
         )
         if not parent_source.is_dir():
             raise ValueError(
                 f"OutputSet parent {artifact.key!r} source is not a directory."
             )
         manifest_source = self._find_output_set_archive_source(
-            manifest, producing_run=producing_run
+            manifest, producing_run=producing_run, resolver=resolver
         )
         if not manifest_source.is_file():
             raise ValueError(
@@ -1605,8 +1628,11 @@ class TrackerArchiveService(_TrackerServiceBase):
         dict[str, _NestedOutputSetDirectory],
     ]:
         """Validate selected OutputSets and their nested-output overlap contract."""
+        batch_resolver = MountPrecedenceResolver.from_tracker(self.tracker)
         output_set_plans = {
-            key: self._build_output_set_archive_plan(artifact, archive_root)
+            key: self._build_output_set_archive_plan(
+                artifact, archive_root, resolver=batch_resolver
+            )
             for key, artifact in selected.items()
             if self._is_output_set_parent(artifact)
         }
@@ -1669,7 +1695,9 @@ class TrackerArchiveService(_TrackerServiceBase):
                     f"member {member.artifact.key!r} of OutputSet "
                     f"{output_set_key!r}."
                 )
-            source = self._find_output_set_archive_source(artifact)
+            source = self._find_output_set_archive_source(
+                artifact, resolver=batch_resolver
+            )
             if (
                 source != member.source_path
                 or not source.is_file()
@@ -2810,6 +2838,7 @@ class TrackerArchiveService(_TrackerServiceBase):
         candidate: _ArchiveFileCandidate,
         *,
         producing_run: Any,
+        resolver: MountPrecedenceResolver | None = None,
     ) -> tuple[_ArchiveFileCandidate | None, ArchivedRunOutputFile | None]:
         """Locate and validate a regular source file for archival."""
         source_path: Path | None = None
@@ -2833,6 +2862,7 @@ class TrackerArchiveService(_TrackerServiceBase):
                     source_validator=validate_source,
                     fallback_validator=reject_symlink,
                     include_current_managed_uri=False,
+                    resolver=resolver,
                 )
             except ValueError as exc:
                 return None, self._archive_result(
@@ -2996,6 +3026,7 @@ class TrackerArchiveService(_TrackerServiceBase):
         recovery_root_path = Path(recovery_root).absolute()
         report: dict[str, ArchivedRunOutputFile] = {}
         producing_run = self.get_run(run_id)
+        batch_resolver = MountPrecedenceResolver.from_tracker(self.tracker)
 
         for key, artifact in selected.items():
             output_set_kind = _output_set_hydration_kind(self.tracker, artifact)
@@ -3055,7 +3086,7 @@ class TrackerArchiveService(_TrackerServiceBase):
                 continue
 
             resolved, source_failure = self._resolve_archive_source(
-                candidate, producing_run=producing_run
+                candidate, producing_run=producing_run, resolver=batch_resolver
             )
             if source_failure is not None:
                 report[key] = source_failure

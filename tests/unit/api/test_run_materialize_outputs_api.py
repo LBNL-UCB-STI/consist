@@ -1891,6 +1891,30 @@ def test_archive_run_output_files_rejects_symlinked_historical_root_before_resol
         artifact = tracker.log_artifact(
             output_path, key="historical_linked", direction="output"
         )
+    # The producer row pins the producer workspace instance, so workspace-instance
+    # verification now (correctly) drops the foreign symlinked historical root as
+    # unmounted before symlink detection can fire. Add an instance-permissive row
+    # so the archive source scan still sees the symlinked historical coordinate
+    # and this test keeps exercising symlink rejection before resolution.
+    from consist.location import ArtifactLocationRow
+
+    existing_rows = tracker.db.get_active_artifact_locations(
+        artifact_id=artifact.id, digest=artifact.digest, member=artifact.member
+    )
+    tracker.db.upsert_artifact_locations(
+        [
+            ArtifactLocationRow.create(
+                digest=r.digest,
+                artifact_id=artifact.id,
+                site=r.site,
+                mount_name=r.mount_name,
+                mount_instance_id="",
+                uri=r.uri,
+                member=r.member,
+            )
+            for r in existing_rows
+        ]
+    )
     historical_run = tracker.get_run("producer_archive_historical_linked")
     assert historical_run is not None
     historical_run.meta = {"_physical_run_dir": str(linked_root)}
