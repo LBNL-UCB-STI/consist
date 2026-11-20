@@ -163,17 +163,20 @@ writes do not thrash `_historical_mount_cache`. For read-only connections
 `effective_mount_epoch` also include `_file_stat_stamp(self._resolved_db_path)`
 — `(db_m, db_s, wal_m, wal_s)` — so sibling `Tracker` handles pointing at the
 same DuckDB file immediately observe writes and new mounts from other handles or
-processes. `LocationResolver.sync_epoch()` compares `(db.effective_location_epoch,
-db.effective_mount_epoch, fs.workspace_instance_id, fs.sorted_mounts_key)` and
-clears its memos whenever the tuple changes.
+processes. `LocationResolver.sync_epoch()` tracks `_location_epoch_key`
+(`(db.effective_location_epoch, fs.workspace_instance_id)`) and `_mount_epoch_key`
+(`(db.effective_mount_epoch, fs.sorted_mounts_key)`) separately, clearing
+`_rows_by_key_memo`/`_run_obj_memo` on location-epoch changes and
+`_historical_roots_memo`/`_live_hist_roots_memo` on mount-epoch changes.
 
-## 5. Persisted `digest_verified` Witnesses & Racy Settlement
+## 5. Persisted `digest_verified` Witnesses
 
 `FileStat` and `DirTreeStat` in `src/consist/location.py` carry
 `digest_verified: bool = False`, serialized inside the `witness_json` JSON
 column of `artifact_location`. Storing `digest_verified` inside the witness JSON
 avoids requiring a DuckDB schema migration while keeping verification state
-co-located with the stat tuple.
+co-located with the stat tuple (without persisted `racy` state, avoiding 2x
+Lustre reads and read-time DB writes on first-consumer jobs).
 
 `verify_and_settle_candidate` in `src/consist/core/tracker_recovery.py` enforces
 three invariants:
@@ -185,18 +188,17 @@ three invariants:
    `effective_witness.digest_verified` is `True`. Otherwise it runs
    `verify_candidate_against_artifact(path, artifact)` and settles with
    `with_digest_verified(True)`.
-2. **`RACY_NEEDS_VERIFY` settlement**: when a file's `mtime_ns` is within
-   `_RACY_WINDOW_NS` (`2_000_000_000` ns / 2 seconds), `check()` returns
-   `WitnessFreshness.RACY_NEEDS_VERIFY`. `verify_and_settle_candidate` verifies
-   the content digest and calls `db.settle_artifact_location_witness(...)` only
-   if `check_res.can_settle_racy` is `True` (`now_ns - mtime_ns >= _RACY_WINDOW_NS`)
-   and `pre_w.settled() == post_w.settled()`.
+2. **Race-safe stat-mismatch & witnessless verification**: when
+   `WitnessFreshness.STAT_MISMATCH` (with portable content identity) or
+   `effective_witness is None` is encountered, `verify_and_settle_candidate`
+   captures `pre_w`, verifies the content digest, captures `post_w`, and calls
+   `db.settle_artifact_location_witness(...)` only if `pre_w == post_w`.
 3. **Carry-forward & no-op `UPDATE` suppression**:
    - During `_upsert_artifact_locations_locked` in `persistence.py`, if an
      incoming row has `loc.witness.digest_verified == False` while the existing
      row has `prev.witness.digest_verified == True`, `prev.digest == loc.digest`,
-     and `_witness_physical_stat_matches(prev.witness, loc.witness)`, the
-     existing `digest_verified=True` flag is carried forward onto `loc`.
+     and `prev.witness.with_digest_verified(False) == loc.witness.with_digest_verified(False)`,
+     the existing `digest_verified=True` flag is carried forward onto `loc`.
    - `DatabaseManager.settle_artifact_location_witness` checks both its
      in-memory `_settled_witnesses` cache and the persisted `witness_json` row;
      if `existing_witness == verified_witness`, it returns without issuing a

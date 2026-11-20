@@ -136,15 +136,14 @@ class LocationResolver:
         self.db: DatabaseManager | None = db
         self.get_run = get_run
         self.get_active_run_id = get_active_run_id
-        self._seeded_run_ids: set[str] = set()
         self._run_obj_memo: dict[str, Run | None] = {}
         self._rows_by_key_memo: dict[
             tuple[uuid.UUID | None, str | None, str], tuple[ArtifactLocationRow, ...]
         ] = {}
         self._historical_roots_memo: dict[str, tuple[str, ...]] = {}
         self._live_hist_roots_memo: dict[str, tuple[str, ...]] = {}
-        self._has_hist_root_memo: dict[str, bool] = {}
-        self._epoch_key: tuple[Any, ...] | None = None
+        self._location_epoch_key: tuple[Any, ...] | None = None
+        self._mount_epoch_key: tuple[Any, ...] | None = None
 
     @classmethod
     def from_tracker(cls, tracker: Tracker) -> LocationResolver:
@@ -154,37 +153,38 @@ class LocationResolver:
     def invalidate_live_probes(self) -> None:
         """Clear cached filesystem existence probes so fresh invocations re-stat roots."""
         self._live_hist_roots_memo.clear()
-        self._has_hist_root_memo.clear()
 
     def sync_epoch(self) -> None:
         """Synchronize memoized DB and mount state with the current epoch."""
         db = self.db
-        epoch = (
+        location_epoch = (
             db.effective_location_epoch if db is not None else None,
-            db.effective_mount_epoch if db is not None else None,
             self.fs.workspace_instance_id,
+        )
+        if location_epoch != self._location_epoch_key:
+            self._location_epoch_key = location_epoch
+            self._rows_by_key_memo.clear()
+            self._run_obj_memo.clear()
+
+        mount_epoch = (
+            db.effective_mount_epoch if db is not None else None,
             self.fs.sorted_mounts_key,
         )
-        if epoch != self._epoch_key:
-            self._epoch_key = epoch
-            self._rows_by_key_memo.clear()
+        if mount_epoch != self._mount_epoch_key:
+            self._mount_epoch_key = mount_epoch
             self._historical_roots_memo.clear()
             self._live_hist_roots_memo.clear()
-            self._has_hist_root_memo.clear()
-            if self._seeded_run_ids:
-                self._run_obj_memo = {
-                    rid: self._run_obj_memo[rid]
-                    for rid in self._seeded_run_ids
-                    if rid in self._run_obj_memo
-                }
-            else:
-                self._run_obj_memo.clear()
 
     def seed_run_meta(self, run: Run) -> None:
         """Seed known run metadata for historical mount resolution."""
-        rid = str(run.id)
-        self._seeded_run_ids.add(rid)
-        self._run_obj_memo[rid] = run
+        self._run_obj_memo[str(run.id)] = run
+
+    def get_cached_rows(
+        self, artifact: Artifact
+    ) -> tuple[ArtifactLocationRow, ...] | None:
+        """Return prefetched active location rows for ``artifact`` if cached."""
+        self.sync_epoch()
+        return self._rows_by_key_memo.get(_artifact_rows_key(artifact))
 
     def prefetch(
         self,
@@ -267,11 +267,7 @@ class LocationResolver:
 
     def has_historical_root(self, mount_name: str) -> bool:
         """Return whether at least one existing historical root directory is known for ``mount_name``."""
-        if mount_name in self._has_hist_root_memo:
-            return self._has_hist_root_memo[mount_name]
-        result = bool(self.get_live_historical_mount_roots(mount_name))
-        self._has_hist_root_memo[mount_name] = result
-        return result
+        return bool(self.get_live_historical_mount_roots(mount_name))
 
     def _lookup_owning_run_mount(
         self, run_id: str, mount_name: str, site: str
@@ -300,16 +296,12 @@ class LocationResolver:
         scheme_prefixes: Mapping[str, str | Path] | None = None,
     ) -> Path | None:
         """Derive a portable relative path for ``artifact``, inferring nested mount prefixes."""
-        prefixes_map: dict[str, str | Path] | None = (
-            dict(scheme_prefixes) if scheme_prefixes is not None else None
+        merged_prefixes: dict[str, str | Path] = (
+            dict(scheme_prefixes) if scheme_prefixes is not None else {}
         )
-        if (
-            prefixes_map is None
-            and artifact.run_id is not None
-            and "://" in artifact.uri
-        ):
+        if artifact.run_id is not None and "://" in artifact.uri:
             scheme = artifact.uri.split("://", 1)[0]
-            if scheme != "file":
+            if scheme != "file" and scheme not in merged_prefixes:
                 run_mount = self._lookup_owning_run_mount(
                     str(artifact.run_id), scheme, "workspace"
                 )
@@ -319,14 +311,21 @@ class LocationResolver:
                 if run_mount is not None and phys_dir is not None:
                     sub_rel = self.fs.nested_mount_prefix(run_mount, phys_dir)
                     if sub_rel is not None:
-                        prefixes_map = {scheme: str(sub_rel)}
+                        merged_prefixes[scheme] = str(sub_rel)
 
+        prefixes_arg: dict[str, str | Path] | None = (
+            merged_prefixes
+            if (scheme_prefixes is not None or merged_prefixes)
+            else None
+        )
         rel = self.fs.get_remappable_relative_path(
-            artifact.uri, scheme_prefixes=prefixes_map
+            artifact.uri, scheme_prefixes=prefixes_arg
         )
         if rel is not None:
             return rel
-        if prefixes_map is not None:
+        if scheme_prefixes is not None:
+            return None
+        if prefixes_arg is not None:
             rel = self.fs.get_remappable_relative_path(artifact.uri)
             if rel is not None:
                 return rel
@@ -361,6 +360,7 @@ class LocationResolver:
         artifact: Artifact | None = None,
         *,
         exclude_canonical: Path | None = None,
+        on_rejected: Callable[[TranslatedCoordinate], None] | None = None,
     ) -> Iterator[TranslatedCoordinate]:
         """Lazily resolve and rank historical coordinates for ``row``."""
         if row.mount_name == "abs":
@@ -378,7 +378,10 @@ class LocationResolver:
                         row.uri,
                         historical_run_dir=phys_dir,
                     )
-                    if hist_coord.is_resolved and (
+                    if hist_coord.is_rejected:
+                        if on_rejected is not None:
+                            on_rejected(hist_coord)
+                    elif hist_coord.is_resolved and (
                         exclude_canonical is None
                         or hist_coord.canonical_path != exclude_canonical
                     ):
@@ -444,6 +447,10 @@ class LocationResolver:
                 row.uri,
                 historical_run_dir=hist_root,
             )
+            if coord.is_rejected:
+                if on_rejected is not None:
+                    on_rejected(coord)
+                continue
             if not coord.is_resolved:
                 continue
             assert coord.canonical_path is not None
@@ -495,41 +502,6 @@ class LocationResolver:
             ),
         )
 
-    def resolve_historical_recovery_root(
-        self,
-        artifact_uri: str,
-        row: ArtifactLocationRow,
-        *,
-        resolve: bool = True,
-    ) -> str | None:
-        """Single-root projection for ``Tracker.artifact_recovery_roots``.
-
-        Selects the best historical root under the priority:
-        target exists -> prefix exists -> first non-rejected translation.
-        """
-        hist_roots = self.get_historical_mount_roots(row.mount_name)
-        if not hist_roots:
-            return None
-
-        first_translated: str | None = None
-        for historical_root in hist_roots:
-            candidate = self.fs.extract_recovery_root_from_location_row(
-                artifact_uri,
-                row,
-                resolve=resolve,
-                historical_run_dir=historical_root,
-            )
-            if candidate is None or "://" in candidate:
-                continue
-            if first_translated is None:
-                first_translated = candidate
-            try:
-                if Path(candidate).exists():
-                    return candidate
-            except OSError:
-                continue
-        return first_translated
-
     def extract_recovery_root(
         self,
         artifact_uri: str,
@@ -548,11 +520,27 @@ class LocationResolver:
             and not extracted.startswith("file://")
             and row.mount_name not in self.fs.mounts
         ):
-            if self.get_historical_mount_roots(row.mount_name):
-                return self.resolve_historical_recovery_root(
-                    artifact_uri, row, resolve=resolve
+            hist_roots = self.get_historical_mount_roots(row.mount_name)
+            if not hist_roots:
+                return extracted
+            first_translated: str | None = None
+            for historical_root in hist_roots:
+                candidate = self.fs.extract_recovery_root_from_location_row(
+                    artifact_uri,
+                    row,
+                    resolve=resolve,
+                    historical_run_dir=historical_root,
                 )
-            return extracted
+                if candidate is None or "://" in candidate:
+                    continue
+                if first_translated is None:
+                    first_translated = candidate
+                try:
+                    if Path(candidate).exists():
+                        return candidate
+                except OSError:
+                    continue
+            return first_translated
         return extracted
 
     def iter_candidates(
@@ -661,7 +649,10 @@ class LocationResolver:
 
             for row, exclude_canonical in zip(candidate_rows, primary_canonicals):
                 for hist_coord in self.iter_historical_coordinates(
-                    row, artifact, exclude_canonical=exclude_canonical
+                    row,
+                    artifact,
+                    exclude_canonical=exclude_canonical,
+                    on_rejected=on_rejected,
                 ):
                     yield from _emit(
                         _candidate_from_coordinate(
@@ -770,12 +761,10 @@ def iter_artifact_candidates(
     historical_run_dir: str | Path | None = None,
     include_runtime_abs: bool = False,
     resolver: LocationResolver | None = None,
-    include_rejected: bool = False,
     include_current_uri: bool = False,
     on_rejected: Callable[[TranslatedCoordinate], None] | None = None,
 ) -> Iterator[ResolvedCandidate]:
     """Enumerate ordered, deduplicated, containment-checked candidate locations for an artifact."""
-    _ = include_rejected
     active_resolver = resolver or tracker.location_resolver
     return active_resolver.iter_candidates(
         artifact,

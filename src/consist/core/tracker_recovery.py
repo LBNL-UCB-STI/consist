@@ -180,8 +180,12 @@ def _artifact_has_portable_content_identity(artifact: Artifact) -> bool:
             and artifact.digest.scheme in DIGEST_DRIVERS
             and artifact.digest.scheme not in _NON_PORTABLE_DIGEST_SCHEMES
         )
-    if is_directory_artifact(artifact) or artifact.driver in {"zarr", "directory"}:
-        if isinstance(meta.get("dir_manifest"), Mapping):
+    if (
+        is_directory_artifact(artifact)
+        or meta.get("directory_artifact") is True
+        or artifact.driver in {"zarr", "directory"}
+    ):
+        if isinstance(meta.get("directory_manifest"), Mapping):
             return True
     return (
         artifact.digest is not None
@@ -297,11 +301,7 @@ def verify_and_settle_candidate(
         else (row.witness if row is not None else None)
     )
 
-    def _verify_and_settle(
-        *,
-        can_settle: bool = True,
-        settled_override: Optional[Any] = None,
-    ) -> bool:
+    def _verify_and_settle() -> bool:
         verify_started_ns = time.time_ns() if now_ns is None else int(now_ns)
         pre_w = capture_artifact_witness(
             path, artifact, observed_at_ns=verify_started_ns
@@ -314,14 +314,13 @@ def verify_and_settle_candidate(
         if (
             db is not None
             and row is not None
-            and can_settle
             and pre_w is not None
             and post_w is not None
-            and pre_w.settled() == post_w.settled()
+            and pre_w == post_w
         ):
             db.settle_artifact_location_witness(
                 row.location_id,
-                settled_override if settled_override is not None else post_w,
+                post_w.with_digest_verified(True),
                 observed_at_ns=verify_started_ns,
             )
         return True
@@ -334,20 +333,11 @@ def verify_and_settle_candidate(
                 or effective_witness.digest_verified
             ):
                 return True, False
-            if _verify_and_settle(
-                settled_override=effective_witness.settled().with_digest_verified(True)
-            ):
+            if _verify_and_settle():
                 return True, True
             return False, True
         if check_res.freshness == WitnessFreshness.MISSING:
             return False, False
-        if check_res.freshness == WitnessFreshness.RACY_NEEDS_VERIFY:
-            if _verify_and_settle(
-                can_settle=check_res.can_settle_racy,
-                settled_override=effective_witness.settled().with_digest_verified(True),
-            ):
-                return True, True
-            return False, True
         if _artifact_has_portable_content_identity(artifact) and _verify_and_settle():
             return True, True
         return False, True
@@ -500,6 +490,15 @@ def _load_cached_active_locations(
     cached = db._location_resolution_cache.get(cache_key)
     if cached is not None:
         return cached
+    cached_rows = tracker.location_resolver.get_cached_rows(artifact)
+    if cached_rows is not None:
+        resolved_tuple = _resolve_rows_for_cache(
+            tracker, artifact, cached_rows, resolver=tracker.location_resolver
+        )
+        if len(db._location_resolution_cache) >= 4096:
+            db._location_resolution_cache.clear()
+        db._location_resolution_cache[cache_key] = resolved_tuple
+        return resolved_tuple
     siblings = _find_sibling_outputs_for_prefetch(tracker, artifact)
     if siblings is not None:
         warm_artifact_locations_cache(tracker, siblings)
@@ -616,92 +615,128 @@ def resolve_verified_local_path_detailed(
         ordered_rows = (*matched_rows, *normal_rows)
         checked_reals: set[str] = set()
         failed_reals: set[str] = set()
-        stale_candidates: dict[uuid.UUID, bool] = {}
+        stale_candidates: dict[uuid.UUID, ArtifactLocationRow] = {}
+        confirmed_stale_ids: list[uuid.UUID] = []
+        ws_instance_id = tracker.fs.workspace_instance_id
 
-        # Tier 4a: Primary coordinates across active rows.
-        for row, primary in ordered_rows:
-            if primary is None:
-                continue
-            cand_real = primary.real or _fast_realpath(str(primary.candidate))
-            if cand_real in failed_reals:
-                if row.site != "advisory":
-                    if allow_recovery_roots:
-                        stale_candidates[row.location_id] = True
-                    else:
-                        db.mark_artifact_location_status(row.location_id, "stale")
-                continue
-            checked_reals.add(cand_real)
-
-            is_valid, did_check_or_mismatch = verify_and_settle_candidate(
-                db,
-                primary.candidate,
-                artifact,
-                row=row,
-                verify_digest=verify_digest,
-                now_ns=now_ns,
-            )
-            if is_valid:
-                for stale_lid in stale_candidates:
-                    db.mark_artifact_location_status(stale_lid, "stale")
-                resolved_entry = (
-                    primary.entry
-                    if primary.entry is not None
-                    else Path(resolve_artifact_entry_path(artifact, primary.candidate))
+        def _cannot_have_distinct_historical_mounts(row: ArtifactLocationRow) -> bool:
+            if row.mount_name == "abs" or (
+                row.mount_name in ("workspace", "runs")
+                and row.mount_instance_id == ws_instance_id
+            ):
+                return True
+            if row.mount_name in tracker.fs.mounts:
+                current_root = (
+                    Path(tracker.fs.mounts[row.mount_name]).expanduser().resolve()
                 )
-                return resolved_entry, saw_mismatch, row
-
-            if did_check_or_mismatch:
-                saw_mismatch = True
-            failed_reals.add(cand_real)
-            if row.site != "advisory" or row.witness is not None:
-                if allow_recovery_roots:
-                    stale_candidates[row.location_id] = True
-                else:
-                    db.mark_artifact_location_status(row.location_id, "stale")
-
-        # Tier 4b: Lazy historical coordinates across active rows.
-        if allow_recovery_roots:
-            for row, primary in ordered_rows:
-                row_should_mark_stale = stale_candidates.get(row.location_id, False)
-                exclude_cand = primary.candidate if primary is not None else None
-                for hist_coord in tracker.location_resolver.iter_historical_coordinates(
-                    row, artifact, exclude_canonical=exclude_cand
-                ):
-                    if not hist_coord.is_resolved or hist_coord.canonical_path is None:
-                        continue
-                    cand = hist_coord.canonical_path
-                    cand_entry = Path(resolve_artifact_entry_path(artifact, cand))
-                    cand_real = _fast_realpath(str(cand_entry))
-                    if cand_real in failed_reals:
-                        if row.site != "advisory":
-                            row_should_mark_stale = True
-                        continue
-                    checked_reals.add(cand_real)
-
-                    is_valid, did_check_or_mismatch = verify_and_settle_candidate(
-                        db,
-                        cand,
-                        artifact,
-                        row=row,
-                        verify_digest=verify_digest,
-                        now_ns=now_ns,
+                return not any(
+                    Path(r).expanduser().resolve() != current_root
+                    for r in tracker.location_resolver.get_historical_mount_roots(
+                        row.mount_name
                     )
-                    if is_valid:
+                )
+            return False
+
+        def _flush_stale() -> None:
+            stale_ids = [
+                *confirmed_stale_ids,
+                *(
+                    lid
+                    for lid, cand_row in stale_candidates.items()
+                    if _cannot_have_distinct_historical_mounts(cand_row)
+                ),
+            ]
+            if stale_ids:
+                db.mark_artifact_locations_status_bulk(stale_ids, "stale")
+
+        try:
+            # Tier 4a: Primary coordinates across active rows.
+            for row, primary in ordered_rows:
+                if primary is None:
+                    continue
+                cand_real = primary.real or _fast_realpath(str(primary.candidate))
+                if cand_real in failed_reals:
+                    if row.site != "advisory":
+                        stale_candidates[row.location_id] = row
+                    continue
+                checked_reals.add(cand_real)
+
+                is_valid, did_check_or_mismatch = verify_and_settle_candidate(
+                    db,
+                    primary.candidate,
+                    artifact,
+                    row=row,
+                    verify_digest=verify_digest,
+                    now_ns=now_ns,
+                )
+                if is_valid:
+                    resolved_entry = (
+                        primary.entry
+                        if primary.entry is not None
+                        else Path(
+                            resolve_artifact_entry_path(artifact, primary.candidate)
+                        )
+                    )
+                    return resolved_entry, saw_mismatch, row
+
+                if did_check_or_mismatch:
+                    saw_mismatch = True
+                failed_reals.add(cand_real)
+                if row.site != "advisory" or row.witness is not None:
+                    stale_candidates[row.location_id] = row
+
+            # Tier 4b: Lazy historical coordinates across active rows.
+            if allow_recovery_roots:
+                for row, primary in ordered_rows:
+                    row_should_mark_stale = row.location_id in stale_candidates
+                    row_won = False
+                    exclude_cand = primary.candidate if primary is not None else None
+                    for (
+                        hist_coord
+                    ) in tracker.location_resolver.iter_historical_coordinates(
+                        row, artifact, exclude_canonical=exclude_cand
+                    ):
+                        if (
+                            not hist_coord.is_resolved
+                            or hist_coord.canonical_path is None
+                        ):
+                            continue
+                        cand = hist_coord.canonical_path
+                        cand_entry = Path(resolve_artifact_entry_path(artifact, cand))
+                        cand_real = _fast_realpath(str(cand_entry))
+                        if cand_real in failed_reals:
+                            if row.site != "advisory":
+                                row_should_mark_stale = True
+                            continue
+                        checked_reals.add(cand_real)
+
+                        is_valid, did_check_or_mismatch = verify_and_settle_candidate(
+                            db,
+                            cand,
+                            artifact,
+                            row=row,
+                            verify_digest=verify_digest,
+                            now_ns=now_ns,
+                        )
+                        if is_valid:
+                            stale_candidates.pop(row.location_id, None)
+                            row_won = True
+                            return cand_entry, saw_mismatch, row
+
+                        if did_check_or_mismatch:
+                            saw_mismatch = True
+                        failed_reals.add(cand_real)
+                        if row.site != "advisory" or row.witness is not None:
+                            row_should_mark_stale = True
+
+                    if not row_won:
+                        stale_candidates.pop(row.location_id, None)
                         if row_should_mark_stale:
-                            db.mark_artifact_location_status(row.location_id, "stale")
-                        for stale_lid in stale_candidates:
-                            db.mark_artifact_location_status(stale_lid, "stale")
-                        return cand_entry, saw_mismatch, row
+                            confirmed_stale_ids.append(row.location_id)
+        finally:
+            _flush_stale()
 
-                    if did_check_or_mismatch:
-                        saw_mismatch = True
-                    failed_reals.add(cand_real)
-                    if row.site != "advisory" or row.witness is not None:
-                        row_should_mark_stale = True
-
-                if row_should_mark_stale:
-                    db.mark_artifact_location_status(row.location_id, "stale")
-
+        if allow_recovery_roots:
             # Step 5a/5b: Row-less historical mount_root and owning-run candidates.
             for cand in tracker.location_resolver.iter_candidates(artifact, rows=()):
                 if cand.source != "historical_uri":
@@ -909,10 +944,11 @@ def stage_verified_source(
     *,
     mutable: bool = False,
     overwrite: bool = False,
+    already_verified: bool = False,
 ) -> Path:
     """Atomically stage verified ``source`` to ``destination`` via CoW clone or byte copy."""
     src = Path(os.path.realpath(source))
-    if not verify_candidate_against_artifact(src, artifact):
+    if not already_verified and not verify_candidate_against_artifact(src, artifact):
         raise ValueError(
             f"Source {src} failed digest/manifest verification for artifact {artifact.key!r}."
         )
@@ -1109,7 +1145,12 @@ def ensure_local_artifact_path_core(
 
             def _stage_to_primary(dest_path: Path, *, is_mutable: bool) -> Path:
                 staged = stage_verified_source(
-                    artifact, verified, dest_path, mutable=is_mutable, overwrite=False
+                    artifact,
+                    verified,
+                    dest_path,
+                    mutable=is_mutable,
+                    overwrite=False,
+                    already_verified=True,
                 )
                 if db is not None and not db.read_only and artifact.id is not None:
                     db.upsert_artifact_locations(
@@ -1180,6 +1221,7 @@ def ensure_local_artifact_path_core(
                             dest,
                             mutable=mutable,
                             overwrite=False,
+                            already_verified=True,
                         )
                         tracker._record_artifact_abs_path_override(
                             artifact, str(staged)

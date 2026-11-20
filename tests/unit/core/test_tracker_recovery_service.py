@@ -1686,3 +1686,109 @@ def test_output_set_unhydrated_cache_hit_with_preexisting_set_root_and_completio
         / "households_output.RData"
     ).exists()
     assert any(archive2.rglob("households_output.RData"))
+
+
+def test_run_completion_archive_eviction_does_not_evict_repointed_historical_mount(
+    tmp_path: Path,
+) -> None:
+    """Important #6: evicting sc_v2 step archive does not evict sc_v1 rows for re-pointed mount."""
+    run_dir = tmp_path / "runs"
+    workspace = tmp_path / "workspace"
+    sc_v1 = tmp_path / "sc_v1"
+    sc_v2 = tmp_path / "sc_v2"
+    for path in (run_dir, workspace, sc_v1, sc_v2):
+        path.mkdir()
+
+    db_path = tmp_path / "provenance.duckdb"
+    file_a = workspace / "asim" / "a.csv"
+    file_b = workspace / "asim" / "b.csv"
+
+    # Run 1: scratch points to sc_v1, archive goes to sc_v1/consist-recovery/asim_v1.
+    archive_v1 = sc_v1 / "consist-recovery" / "asim_v1"
+    tracker_1 = Tracker(
+        run_dir=run_dir,
+        db_path=str(db_path),
+        mounts={"workspace": str(workspace), "scratch": str(sc_v1)},
+    )
+
+    def step_ab_1(ctx) -> None:
+        file_a.parent.mkdir(parents=True, exist_ok=True)
+        file_a.write_bytes(b"col\n1\n")
+        file_b.write_bytes(b"col\n2\n")
+        tracker_1.log_output(file_a, key="a")
+        tracker_1.log_output(file_b, key="b")
+
+    res_1 = tracker_1.run(
+        fn=step_ab_1,
+        name="step_asim",
+        run_id="run_v1",
+        config={"v": 1},
+        outputs=["a", "b"],
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        output_policy=OutputPolicyOptions(
+            run_completion_archive=RunCompletionArchivePolicy(
+                archive_root=archive_v1,
+                mode="copy",
+            )
+        ),
+    )
+    v1_b_locs = tracker_1.db.get_artifact_recovery_locations(res_1.outputs["b"].id)
+    assert len(v1_b_locs) == 1
+    assert v1_b_locs[0].mount_name == "scratch"
+    tracker_1.close()
+
+    # Run 2 & 3: scratch is re-pointed to sc_v2, archive goes to sc_v2/consist-recovery/asim_v2.
+    archive_v2 = sc_v2 / "consist-recovery" / "asim_v2"
+    tracker_2 = Tracker(
+        run_dir=run_dir,
+        db_path=str(db_path),
+        mounts={"workspace": str(workspace), "scratch": str(sc_v2)},
+    )
+
+    def step_ab_2(ctx) -> None:
+        file_a.write_bytes(b"col\n1\n")
+        file_b.write_bytes(b"col\n2\n")
+        tracker_2.log_output(file_a, key="a")
+        tracker_2.log_output(file_b, key="b")
+
+    res_2 = tracker_2.run(
+        fn=step_ab_2,
+        name="step_asim",
+        run_id="run_v2",
+        config={"v": 2},
+        outputs=["a", "b"],
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        output_policy=OutputPolicyOptions(
+            run_completion_archive=RunCompletionArchivePolicy(
+                archive_root=archive_v2,
+                mode="copy",
+            )
+        ),
+    )
+    assert tracker_2.db.get_artifact_recovery_locations(res_2.outputs["b"].id)
+
+    def step_only_a_3(ctx) -> None:
+        file_a.write_bytes(b"col\n1\n")
+        tracker_2.log_output(file_a, key="a")
+
+    tracker_2.run(
+        fn=step_only_a_3,
+        name="step_asim",
+        run_id="run_v3",
+        config={"v": 3},
+        outputs=["a"],
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        output_policy=OutputPolicyOptions(
+            run_completion_archive=RunCompletionArchivePolicy(
+                archive_root=archive_v2,
+                mode="copy",
+            )
+        ),
+    )
+
+    # sc_v2 row for run_v2's b must be evicted, while sc_v1 row for run_v1's b must remain active.
+    assert not tracker_2.db.get_artifact_recovery_locations(res_2.outputs["b"].id)
+    v1_b_after = tracker_2.db.get_artifact_recovery_locations(res_1.outputs["b"].id)
+    assert len(v1_b_after) == 1
+    assert v1_b_after[0].status == "active"
+    tracker_2.close()

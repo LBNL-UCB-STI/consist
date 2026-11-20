@@ -538,14 +538,13 @@ def test_submount_strict_filtering_when_scheme_prefixes_provided(
         allow_external_paths=True,
     )
 
-    # When scheme_prefixes is provided and does not contain "unmapped", it does not
-    # apply the unrelated prefix; with no source available, it reports missing_source
-    # at the unprefixed relative target path.
+    # When scheme_prefixes is provided and does not contain "unmapped", strict
+    # filtering skips the unmapped URI instead of applying an unrelated prefix.
     result = tracker.materialize_artifact(
         artifact,
         target_root=target_root,
         scheme_prefixes={"other": "prefix"},
     )
-    assert result.status == "missing_source"
+    assert result.status == "skipped_unmapped"
     assert not result.resolvable
-    assert result.target_path == (target_root / "data.csv").resolve()
+    assert result.target_path is None

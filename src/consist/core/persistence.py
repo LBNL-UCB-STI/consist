@@ -1790,6 +1790,7 @@ class DatabaseManager:
         )
         if meta_dict.get("mounts") or meta_dict.get("archive_mounts"):
             self.bump_mount_epoch()
+        self.bump_location_epoch()
         self._recorded_run_archive_mounts.clear()
         self._location_resolution_cache.clear()
 
@@ -4665,30 +4666,12 @@ class DatabaseManager:
             return True
         if existing is None:
             return False
-        if existing == incoming:
-            return True
-        return not existing.racy and existing.settled() == incoming.settled()
-
-    @staticmethod
-    def _witness_physical_stat_matches(
-        w_a: Optional[Witness], w_b: Optional[Witness]
-    ) -> bool:
-        if isinstance(w_a, FileStat) and isinstance(w_b, FileStat):
-            return w_a._stat_tuple() == w_b._stat_tuple()
-        if isinstance(w_a, DirTreeStat) and isinstance(w_b, DirTreeStat):
-            return (
-                w_a.file_count == w_b.file_count
-                and w_a.total_bytes == w_b.total_bytes
-                and w_a.max_mtime_ns == w_b.max_mtime_ns
-                and w_a.subdirs == w_b.subdirs
-                and w_a.bundle_entry == w_b.bundle_entry
-                and len(w_a.entries) == len(w_b.entries)
-                and all(
-                    rel_a == rel_b and fs_a._stat_tuple() == fs_b._stat_tuple()
-                    for (rel_a, fs_a), (rel_b, fs_b) in zip(w_a.entries, w_b.entries)
-                )
-            )
-        return False
+        inc = (
+            incoming.with_digest_verified(True)
+            if existing.digest_verified and not incoming.digest_verified
+            else incoming
+        )
+        return existing == inc
 
     @staticmethod
     def _same_stat_footprint(w_a: Optional[Witness], w_b: Optional[Witness]) -> bool:
@@ -5193,7 +5176,8 @@ class DatabaseManager:
                 and prev.witness is not None
                 and prev.witness.digest_verified
                 and prev.digest == loc.digest
-                and self._witness_physical_stat_matches(prev.witness, loc.witness)
+                and prev.witness.with_digest_verified(False)
+                == loc.witness.with_digest_verified(False)
             ):
                 loc = replace(loc, witness=loc.witness.with_digest_verified(True))
                 coord = (
@@ -5501,14 +5485,6 @@ class DatabaseManager:
             return row_witness
         return None
 
-    def is_witness_digest_verified(
-        self,
-        location_id: uuid.UUID,
-        witness: Optional[Witness] = None,
-    ) -> bool:
-        """Return ``True`` when the location's witness is settled/digest-verified."""
-        return self.get_settled_witness(location_id, row_witness=witness) is not None
-
     def settle_artifact_location_witness(
         self,
         location_id: uuid.UUID,
@@ -5517,7 +5493,7 @@ class DatabaseManager:
         observed_at_ns: Optional[int] = None,
     ) -> None:
         lid = _coerce_uuid(location_id)
-        verified_witness = witness.settled().with_digest_verified(True)
+        verified_witness = witness.with_digest_verified(True)
         prev_cached = self._settled_witnesses.get(lid)
         self._settled_witnesses[lid] = verified_witness
         if self.read_only:
@@ -5999,30 +5975,16 @@ class DatabaseManager:
     def evict_recovery_root_locations(
         self,
         *,
-        mount_name: Optional[str] = None,
-        mount_instance_id: Optional[str] = None,
-        root_uri: Optional[str] = None,
-        root_coordinates: Optional[Sequence[tuple[str, str, str]]] = None,
+        root_coordinates: Sequence[tuple[str, str, str]],
         retained_ids: Set[uuid.UUID],
     ) -> bool:
-        """Mark ``archive``/``advisory`` locations beneath ``root_uri`` evicted for non-retained artifacts."""
-        coords: list[tuple[str, str, str]] = []
-        if root_coordinates is not None:
-            coords.extend(
+        """Mark ``archive``/``advisory`` locations beneath ``root_coordinates`` evicted for non-retained artifacts."""
+        coords = list(
+            dict.fromkeys(
                 (str(m_name), str(m_inst), str(r_uri))
                 for m_name, m_inst, r_uri in root_coordinates
             )
-        if (
-            mount_name is not None
-            or mount_instance_id is not None
-            or root_uri is not None
-        ):
-            if mount_name is None or mount_instance_id is None or root_uri is None:
-                raise ValueError(
-                    "mount_name, mount_instance_id, and root_uri must all be provided together"
-                )
-            coords.append((str(mount_name), str(mount_instance_id), str(root_uri)))
-        coords = list(dict.fromkeys(coords))
+        )
         if not coords:
             return False
 

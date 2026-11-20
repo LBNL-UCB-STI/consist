@@ -714,7 +714,7 @@ def test_dirtreestat_witness_fast_path_skips_full_tree_chunk_hashing(
     import time
 
     future_time = time.time_ns() + 10_000_000_000
-    witness = DirTreeStat.capture_dir(zarr_dir, observed_at_ns=future_time).settled()
+    witness = DirTreeStat.capture_dir(zarr_dir, observed_at_ns=future_time)
     row = tracker.db.get_active_artifact_locations(artifact_id=art.id)[0]
 
     # Spy on is_valid_directory_artifact_tree to ensure it is NOT called when
@@ -2132,7 +2132,7 @@ def test_select_materialize_artifact_source_scheme_prefixes_does_not_escape_abov
     )
     assert rel == Path("sub/data.csv")
 
-    selected, _, _, _ = _select_materialize_artifact_source(
+    selected, _, _, _, _ = _select_materialize_artifact_source(
         tracker,
         artifact=art,
         relative_path=rel,
@@ -2148,7 +2148,6 @@ def test_racy_witness_settles_and_fresh_tracker_skips_hashing_and_db_writes(
 ) -> None:
     """Important #4 & Perf #3: racy->settled witness skips hashing and DB writes on new Tracker."""
     import consist.core.tracker_recovery as recovery_mod
-    import consist.location as location_mod
 
     db_path = tmp_path / "prov.duckdb"
     ws = tmp_path / "ws"
@@ -2164,11 +2163,26 @@ def test_racy_witness_settles_and_fresh_tracker_skips_hashing_and_db_writes(
     rows_initial = t1.db.get_active_artifact_locations(artifact_id=art.id)
     assert rows_initial
     assert rows_initial[0].witness is not None
-    assert rows_initial[0].witness.racy is True
+    assert rows_initial[0].witness.digest_verified is True
 
-    # Advance clock >2s past mtime so the consumer run settles racy=False, digest_verified=True.
-    base_ns = int(f.stat().st_mtime_ns) + 5_000_000_000
-    monkeypatch.setattr(location_mod.time, "time_ns", lambda: base_ns)
+    # Reset to unverified witness (digest_verified=False) to exercise verify-once settlement.
+    t1.db.upsert_artifact_locations(
+        [
+            ArtifactLocationRow(
+                location_id=rows_initial[0].location_id,
+                digest=rows_initial[0].digest,
+                artifact_id=rows_initial[0].artifact_id,
+                site=rows_initial[0].site,
+                mount_name=rows_initial[0].mount_name,
+                mount_instance_id=rows_initial[0].mount_instance_id,
+                uri=rows_initial[0].uri,
+                member=rows_initial[0].member,
+                status=rows_initial[0].status,
+                witness=rows_initial[0].witness.with_digest_verified(False),
+                observed_at_ns=rows_initial[0].observed_at_ns,
+            )
+        ]
+    )
 
     with t1.start_run(
         "cons1",
@@ -2178,12 +2192,15 @@ def test_racy_witness_settles_and_fresh_tracker_skips_hashing_and_db_writes(
         cache_hydration="inputs-missing",
         validate_materialized_inputs=True,
     ):
-        pass
+        resolved_1, saw_mismatch_1, _ = resolve_verified_local_path_detailed(
+            t1, art, verify_digest=False
+        )
+        assert resolved_1 == f.resolve()
+        assert not saw_mismatch_1
 
     rows_settled = t1.db.get_active_artifact_locations(artifact_id=art.id)
     assert rows_settled
     assert rows_settled[0].witness is not None
-    assert rows_settled[0].witness.racy is False
     assert rows_settled[0].witness.digest_verified is True
     t1.close()
 
@@ -2372,3 +2389,316 @@ def test_restore_coupler_snapshot_bulk_write_and_iter_candidates_zero_historical
     assert first_cand.canonical_path.exists()
     assert hist_calls == []
     tracker.close()
+
+
+def test_remounted_named_mount_tier4b_keeps_winning_row_active(
+    tmp_path: Path,
+) -> None:
+    """Critical #1: Tier 4b historical mount win must keep the row active for subsequent calls."""
+    db_path = tmp_path / "prov.duckdb"
+    old_scratch = tmp_path / "old_scratch"
+    new_scratch = tmp_path / "new_scratch"
+    old_scratch.mkdir(parents=True)
+    new_scratch.mkdir(parents=True)
+
+    f = old_scratch / "data.csv"
+    f.write_text("col\n1\n", encoding="utf-8")
+
+    producer = Tracker(
+        run_dir=tmp_path / "prod_ws",
+        db_path=str(db_path),
+        mounts={"scratch": str(old_scratch)},
+    )
+    with producer.start_run("prod", model="m"):
+        art = producer.log_output(f, key="data")
+    producer.close()
+
+    consumer = Tracker(
+        run_dir=tmp_path / "cons_ws",
+        db_path=str(db_path),
+        mounts={"scratch": str(new_scratch)},
+        allow_external_paths=True,
+    )
+    # Tier 4a misses on new_scratch, Tier 4b succeeds on old_scratch.
+    resolved_1 = resolve_verified_local_path(consumer, art)
+    assert resolved_1 == f.resolve()
+
+    # Winning row must remain active in DuckDB (not marked stale).
+    active_rows = consumer.db.get_active_artifact_locations(artifact_id=art.id)
+    assert len(active_rows) == 1
+    assert active_rows[0].status == "active"
+
+    # A second call (including on a fresh consumer Tracker) must still succeed.
+    resolved_2 = resolve_verified_local_path(consumer, art)
+    assert resolved_2 == f.resolve()
+    consumer.close()
+
+    consumer_2 = Tracker(
+        run_dir=tmp_path / "cons_ws_2",
+        db_path=str(db_path),
+        mounts={"scratch": str(new_scratch)},
+        allow_external_paths=True,
+    )
+    resolved_3 = resolve_verified_local_path(consumer_2, art)
+    assert resolved_3 == f.resolve()
+    consumer_2.close()
+
+
+def test_racy_witness_not_laundered_on_upsert_and_in_window_validation_stays_racy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Critical #2: Path A avoids racy->settled laundering; Path B preserves racy=True in 2s window."""
+    import consist.location as location_mod
+    from consist.core.fs import capture_artifact_witness
+    from consist.core.tracker_recovery import verify_and_settle_candidate
+    from consist.location import FileStat, compute_location_id
+
+    db_path = tmp_path / "prov.duckdb"
+    ws = tmp_path / "ws"
+    ws.mkdir(parents=True)
+    f = ws / "io" / "data.csv"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("aaaa\n", encoding="utf-8")
+
+    # Path A: log_output -> digest_verified=True; stat mismatch resets digest_verified=False.
+    t1 = Tracker(run_dir=ws, db_path=str(db_path))
+    with t1.start_run("prod", model="m"):
+        art = t1.log_output(f, key="data")
+
+    rows_initial = t1.db.get_active_artifact_locations(artifact_id=art.id)
+    assert len(rows_initial) == 1
+    row_0 = rows_initial[0]
+    assert row_0.witness is not None
+    assert row_0.witness.digest_verified is True
+
+    # Mutate file with different content/size and upsert an unverified witness -> resets digest_verified=False.
+    f.write_text("bbbb_tampered\n", encoding="utf-8")
+    settled_now_ns = int(f.stat().st_mtime_ns) + 5_000_000_000
+    monkeypatch.setattr(location_mod.time, "time_ns", lambda: settled_now_ns)
+
+    incoming_w = capture_artifact_witness(f, art, observed_at_ns=settled_now_ns)
+    assert isinstance(incoming_w, FileStat)
+    assert incoming_w.digest_verified is False
+
+    digest_str = str(art.digest) if art.digest is not None else None
+    incoming_row = ArtifactLocationRow(
+        location_id=compute_location_id(
+            digest=digest_str,
+            artifact_id=art.id,
+            site=row_0.site,
+            mount_name=row_0.mount_name,
+            mount_instance_id=row_0.mount_instance_id,
+            uri=row_0.uri,
+            member=row_0.member,
+        ),
+        digest=digest_str,
+        artifact_id=art.id,
+        site=row_0.site,
+        mount_name=row_0.mount_name,
+        mount_instance_id=row_0.mount_instance_id,
+        uri=row_0.uri,
+        member=row_0.member,
+        status="active",
+        witness=incoming_w,
+        observed_at_ns=settled_now_ns,
+    )
+    t1.db.upsert_artifact_locations([incoming_row])
+
+    rows_after = t1.db.get_active_artifact_locations(artifact_id=art.id)
+    assert len(rows_after) == 1
+    assert rows_after[0].witness is not None
+    assert rows_after[0].witness.digest_verified is False
+
+    # Because digest_verified was reset on stat mismatch, resolution re-verifies and detects tampering.
+    resolved, saw_mismatch, _ = resolve_verified_local_path_detailed(
+        t1, art, verify_digest=False
+    )
+    assert resolved is None
+    assert saw_mismatch is True
+
+    # Path B: witnessless advisory row validated once settles digest_verified=True.
+    f_b = ws / "io" / "advisory.csv"
+    f_b.write_text("col\n1\n", encoding="utf-8")
+    with t1.start_run("prod_b", model="m2"):
+        art_b = t1.log_output(f_b, key="adv")
+
+    row_b_0 = t1.db.get_active_artifact_locations(artifact_id=art_b.id)[0]
+    adv_digest_str = str(art_b.digest) if art_b.digest is not None else None
+    adv_row = ArtifactLocationRow(
+        location_id=compute_location_id(
+            digest=adv_digest_str,
+            artifact_id=art_b.id,
+            site="advisory",
+            mount_name="workspace",
+            mount_instance_id=row_b_0.mount_instance_id,
+            uri="workspace://io/advisory.csv",
+            member="",
+        ),
+        digest=adv_digest_str,
+        artifact_id=art_b.id,
+        site="advisory",
+        mount_name="workspace",
+        mount_instance_id=row_b_0.mount_instance_id,
+        uri="workspace://io/advisory.csv",
+        member="",
+        status="active",
+        witness=None,
+        observed_at_ns=int(f_b.stat().st_mtime_ns),
+    )
+    t1.db.upsert_artifact_locations([adv_row])
+
+    in_window_ns = int(f_b.stat().st_mtime_ns) + 100_000_000
+    is_valid, did_check = verify_and_settle_candidate(
+        t1.db, f_b, art_b, row=adv_row, now_ns=in_window_ns
+    )
+    assert is_valid is True
+    assert did_check is True
+
+    settled_cached = t1.db.get_settled_witness(adv_row.location_id)
+    assert settled_cached is not None
+    assert settled_cached.digest_verified is True
+
+    adv_rows_db = [
+        r
+        for r in t1.db.get_active_artifact_locations(artifact_id=art_b.id)
+        if r.location_id == adv_row.location_id
+    ]
+    assert len(adv_rows_db) == 1
+    assert adv_rows_db[0].witness is not None
+    assert adv_rows_db[0].witness.digest_verified is True
+    t1.close()
+
+
+def test_directory_manifest_portable_identity_and_no_double_hash_on_cache_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Important #5: directory_manifest has portable identity and skips double-hashing."""
+    from collections.abc import Mapping
+    import consist.core.directory_artifacts as dir_mod
+    from consist.core.cache import _candidate_matches_cache_policy
+    from consist.core.tracker_recovery import _artifact_has_portable_content_identity
+
+    db_path = tmp_path / "prov.duckdb"
+    ws = tmp_path / "ws"
+    zarr_dir = ws / "bundle.zarr"
+    zarr_dir.mkdir(parents=True)
+    (zarr_dir / ".zgroup").write_text('{"zarr_format":2}\n', encoding="utf-8")
+    (zarr_dir / "chunk.bin").write_bytes(b"0123456789")
+
+    tracker = Tracker(run_dir=ws, db_path=str(db_path))
+    with tracker.start_run("prod", model="m"):
+        art = tracker.log_output(
+            zarr_dir, key="bundle", artifact_kind="directory", driver="zarr"
+        )
+
+    assert isinstance(art.meta.get("directory_manifest"), Mapping)
+    assert _artifact_has_portable_content_identity(art) is True
+
+    rows = tracker.db.get_active_artifact_locations(artifact_id=art.id)
+    assert len(rows) == 1
+    assert rows[0].witness is not None
+    assert rows[0].witness.digest_verified is True
+
+    # Spy on build_directory_manifest: _candidate_matches_cache_policy with
+    # hashing_strategy != "full" and a settled/unverified row must NOT double-hash.
+    build_calls: list[Path] = []
+    orig_build = dir_mod.build_directory_manifest
+
+    def _spy_build(path: Path, *args: object, **kwargs: object):
+        build_calls.append(Path(path))
+        return orig_build(path, *args, **kwargs)
+
+    monkeypatch.setattr(dir_mod, "build_directory_manifest", _spy_build)
+
+    unverified_row = ArtifactLocationRow(
+        location_id=rows[0].location_id,
+        digest=rows[0].digest,
+        artifact_id=rows[0].artifact_id,
+        site=rows[0].site,
+        mount_name=rows[0].mount_name,
+        mount_instance_id=rows[0].mount_instance_id,
+        uri=rows[0].uri,
+        member=rows[0].member,
+        status="active",
+        witness=None,
+        observed_at_ns=rows[0].observed_at_ns,
+    )
+    cand = SimpleNamespace(row=unverified_row)
+    tracker.db._settled_witnesses.pop(rows[0].location_id, None)
+
+    ok = _candidate_matches_cache_policy(
+        tracker.db,
+        art,
+        zarr_dir,
+        cand=cast(object, cand),  # type: ignore[arg-type]
+        validate_content=True,
+        hashing_strategy="fast",
+    )
+    assert ok is True
+    assert len(build_calls) <= 1
+    tracker.close()
+
+
+def test_materialize_skips_post_verify_and_prefetch_avoids_per_artifact_queries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Perf #1 & #2: skip post-selection verify_digest and issue 0 per-artifact location queries."""
+    import consist.core.materialize as mat_mod
+
+    db_path = tmp_path / "prov.duckdb"
+    ws = tmp_path / "ws"
+    ws.mkdir(parents=True)
+
+    t1 = Tracker(run_dir=ws, db_path=str(db_path), allow_external_paths=True)
+    arts: list[Artifact] = []
+    with t1.start_run("prod", model="m"):
+        for idx in range(3):
+            p = ws / "outputs" / f"item_{idx}.csv"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(f"v\n{idx}\n", encoding="utf-8")
+            arts.append(t1.log_output(p, key=f"item_{idx}"))
+    t1.close()
+
+    t2 = Tracker(
+        run_dir=tmp_path / "cons_ws", db_path=str(db_path), allow_external_paths=True
+    )
+    # Perf #2: prefetch() populates resolver cache; resolve_verified_local_path issues 0 per-artifact queries.
+    per_art_calls: list[object] = []
+    orig_get = t2.db.get_active_artifact_locations
+
+    def _spy_get(*args: object, **kwargs: object):
+        per_art_calls.append((args, kwargs))
+        return orig_get(*args, **kwargs)
+
+    monkeypatch.setattr(t2.db, "get_active_artifact_locations", _spy_get)
+    t2.location_resolver.prefetch(arts)
+    for art in arts:
+        resolved = resolve_verified_local_path(t2, art)
+        assert resolved is not None and resolved.exists()
+    assert per_art_calls == []
+
+    # Perf #1: materialize_artifact skips post-selection verify_digest when source_already_verified=True.
+    post_verify_calls: list[Path] = []
+
+    def _spy_scalar_verify(*args: object, **kwargs: object) -> bool:
+        post_verify_calls.append(Path(args[0]))  # type: ignore[arg-type]
+        return True
+
+    monkeypatch.setattr(mat_mod, "_verify_scalar_artifact_digest", _spy_scalar_verify)
+    target_root = tmp_path / "cons_ws" / "staged"
+    res = mat_mod.materialize_artifact(
+        t2,
+        arts[0],
+        target_root=target_root,
+        source_root=None,
+        allowed_base=tmp_path / "cons_ws",
+        preserve_existing=False,
+        on_missing="raise",
+        validate_content_hash="always",
+    )
+    assert res.status == "materialized_from_historical_root"
+    assert (target_root / "outputs" / "item_0.csv").read_text(
+        encoding="utf-8"
+    ) == "v\n0\n"
+    assert post_verify_calls == []
+    t2.close()

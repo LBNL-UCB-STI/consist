@@ -16,6 +16,7 @@ import inspect
 import logging
 from pathlib import Path
 import sys
+import time
 from typing import (
     Any,
     Callable,
@@ -279,6 +280,10 @@ def _verify_outputs_not_stale(
                 raise StaleOutputError(role=role, path=target_path)
         elif kind == "hdf5_member":
             post_stat = FileStat.capture(target_path)
+            is_racy = (
+                abs(time.time_ns() - max(post_stat.mtime_ns, post_stat.ctime_ns))
+                < 2_000_000_000
+            )
             art_spec = declared_output_specs[role].artifact_spec
             if art_spec is not None and art_spec.member is not None:
                 if pre_digest is not None:
@@ -287,11 +292,15 @@ def _verify_outputs_not_stale(
                 elif (
                     isinstance(pre_stat, FileStat)
                     and post_stat._stat_tuple() == pre_stat._stat_tuple()
-                    and not post_stat.racy
+                    and not is_racy
                 ):
                     raise StaleOutputError(role=role, path=target_path)
         else:
             post_stat = FileStat.capture(target_path)
+            is_racy = (
+                abs(time.time_ns() - max(post_stat.mtime_ns, post_stat.ctime_ns))
+                < 2_000_000_000
+            )
             if (
                 isinstance(pre_stat, FileStat)
                 and post_stat._stat_tuple() == pre_stat._stat_tuple()
@@ -299,7 +308,7 @@ def _verify_outputs_not_stale(
                 if pre_digest is not None:
                     if _sha256_file(target_path) == pre_digest:
                         raise StaleOutputError(role=role, path=target_path)
-                elif not post_stat.racy:
+                elif not is_racy:
                     raise StaleOutputError(role=role, path=target_path)
 
 

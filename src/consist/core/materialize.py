@@ -821,16 +821,6 @@ def record_directory_rollup(
     rollups[role] = (prev_files + files, prev_bytes + nbytes)
 
 
-def resolve_step_id(tracker: Any) -> str | None:
-    """Safely extract run id from tracker without failing on mock objects."""
-    consist = getattr(tracker, "current_consist", None)
-    if consist is not None:
-        run = getattr(consist, "run", None)
-        if run is not None and getattr(run, "id", None) is not None:
-            return str(run.id)
-    return None
-
-
 def emit_directory_rollup_summary(
     action: str,
     rollups: Mapping[str, tuple[int, int]],
@@ -842,7 +832,13 @@ def emit_directory_rollup_summary(
     if not rollups:
         return
     if step_id is None and tracker is not None:
-        step_id = resolve_step_id(tracker)
+        consist = tracker.current_consist
+        if (
+            consist is not None
+            and consist.run is not None
+            and consist.run.id is not None
+        ):
+            step_id = str(consist.run.id)
     parts = []
     for role in sorted(rollups.keys()):
         file_count, total_bytes = rollups[role]
@@ -1375,7 +1371,6 @@ _SOURCE_KIND_BY_SOURCE: dict[str, Literal["historical_root", "recovery_root"]] =
     "ledger_historical": "historical_root",
     "historical_uri": "historical_root",
     "explicit_root": "recovery_root",
-    "stub_recovery_root": "recovery_root",
 }
 
 
@@ -1396,6 +1391,7 @@ def _select_materialize_artifact_source(
         "artifact_uri",
     ]
     | None,
+    bool,
     bool,
     bool,
 ]:
@@ -1422,10 +1418,10 @@ def _select_materialize_artifact_source(
                 resolved_kind = "historical_root"
             else:
                 resolved_kind = "artifact_uri"
-            return resolved, resolved_kind, True, False
+            return resolved, resolved_kind, True, False, True
         if saw_mismatch:
-            return None, None, True, True
-        return None, None, True, False
+            return None, None, True, True, False
+        return None, None, True, False, False
 
     unprefixed_rel = tracker.fs.unprefixed_uri_relative_path(artifact.uri)
     is_dir_artifact = _is_directory_artifact(artifact)
@@ -1483,7 +1479,7 @@ def _select_materialize_artifact_source(
 
         if val_path.exists():
             if _is_valid_manifest_candidate(val_path):
-                return candidate, source_kind, True, False
+                return candidate, source_kind, True, False, False
             if validate_content_hash != "never":
                 saw_mismatch = True
 
@@ -1505,7 +1501,13 @@ def _select_materialize_artifact_source(
                 and fallback_coord.canonical_path.exists()
             ):
                 if _is_valid_manifest_candidate(fallback_coord.canonical_path):
-                    return fallback_coord.canonical_path, source_kind, True, False
+                    return (
+                        fallback_coord.canonical_path,
+                        source_kind,
+                        True,
+                        False,
+                        False,
+                    )
                 if validate_content_hash != "never":
                     saw_mismatch = True
 
@@ -1517,11 +1519,11 @@ def _select_materialize_artifact_source(
     )
     if direct_source is not None:
         if _is_valid_manifest_candidate(direct_source):
-            return direct_source, "artifact_uri", has_candidate_roots, False
+            return direct_source, "artifact_uri", has_candidate_roots, False, False
         if validate_content_hash != "never":
             saw_mismatch = True
 
-    return None, None, has_candidate_roots, saw_mismatch
+    return None, None, has_candidate_roots, saw_mismatch, False
 
 
 def _materialized_status_for_source(
@@ -1669,15 +1671,19 @@ def materialize_artifact(
             raise
         return _fail("failed", str(exc))
 
-    source_path, source_kind, _has_candidate_roots, saw_source_mismatch = (
-        _select_materialize_artifact_source(
-            tracker,
-            artifact=artifact,
-            relative_path=relative_path,
-            source_root=source_root,
-            validate_content_hash=validate_content_hash,
-            resolver=active_resolver,
-        )
+    (
+        source_path,
+        source_kind,
+        _has_candidate_roots,
+        saw_source_mismatch,
+        source_already_verified,
+    ) = _select_materialize_artifact_source(
+        tracker,
+        artifact=artifact,
+        relative_path=relative_path,
+        source_root=source_root,
+        validate_content_hash=validate_content_hash,
+        resolver=active_resolver,
     )
 
     expected_digest = _portable_artifact_digest(tracker, artifact)
@@ -1839,7 +1845,7 @@ def materialize_artifact(
                 raise RuntimeError(msg)
             return _fail("failed", msg)
 
-        if should_validate:
+        if should_validate and not source_already_verified:
             err = _check_bundle(source_bundle_root, entry, source_path, "Source")
             if err is not None:
                 return _fail("hash_mismatch", err)
@@ -1915,7 +1921,7 @@ def materialize_artifact(
                     if materialized
                     else "already_present"
                 )
-            if expected_hash:
+            if expected_hash and not source_already_verified:
                 try:
                     if (
                         build_directory_manifest(source_path).get("tree_hash")
@@ -1971,9 +1977,15 @@ def materialize_artifact(
             raise RuntimeError(msg)
         return _fail("failed", msg)
 
-    if should_validate and (
-        expected_digest is None
-        or not _verify_scalar_artifact_digest(source_path, artifact, expected_digest)
+    if (
+        should_validate
+        and not source_already_verified
+        and (
+            expected_digest is None
+            or not _verify_scalar_artifact_digest(
+                source_path, artifact, expected_digest
+            )
+        )
     ):
         return _fail(
             "hash_mismatch", f"Source hash does not match artifact {artifact.key!r}."
@@ -2016,7 +2028,7 @@ def _resolve_staging_source_path(
     artifact: Artifact,
     validate_content_hash: Literal["never", "if-present", "always"] = "if-present",
     resolver: LocationResolver | None = None,
-) -> tuple[Path | None, bool]:
+) -> tuple[Path | None, bool, bool]:
     from consist.core.tracker_recovery import (
         resolve_verified_local_path_with_diagnostics,
         verify_candidate_against_artifact,
@@ -2030,9 +2042,9 @@ def _resolve_staging_source_path(
             verify_digest=(validate_content_hash == "always"),
         )
         if verified is not None:
-            return verified.resolve(), False
+            return verified.resolve(), False, True
         if saw_mismatch:
-            return None, True
+            return None, True, False
 
     active_resolver = resolver or tracker.location_resolver
     saw_any_mismatch = False
@@ -2046,9 +2058,9 @@ def _resolve_staging_source_path(
             if validate_content_hash == "never" or verify_candidate_against_artifact(
                 source, artifact
             ):
-                return source, False
+                return source, False, False
             saw_any_mismatch = True
-    return None, saw_any_mismatch
+    return None, saw_any_mismatch, False
 
 
 def _stage_artifact_path(
@@ -2104,7 +2116,7 @@ def _stage_artifact_path(
         validate_allowed_materialization_destination(destination_path, allowed_base)
 
         if validate_content_hash == "always" and artifact.digest is None:
-            source_probe, _ = _resolve_staging_source_path(
+            source_probe, _, _ = _resolve_staging_source_path(
                 tracker,
                 artifact=artifact,
                 validate_content_hash="never",
@@ -2120,11 +2132,13 @@ def _stage_artifact_path(
                 f"[Consist] Cannot validate artifact {artifact.key!r}: artifact.digest is missing.",
             )
 
-        source_path, saw_mismatch = _resolve_staging_source_path(
-            tracker,
-            artifact=artifact,
-            validate_content_hash=validate_content_hash,
-            resolver=resolver,
+        source_path, saw_mismatch, source_already_verified = (
+            _resolve_staging_source_path(
+                tracker,
+                artifact=artifact,
+                validate_content_hash=validate_content_hash,
+                resolver=resolver,
+            )
         )
         if source_path is None or not source_path.exists():
             if saw_mismatch:
@@ -2137,7 +2151,11 @@ def _stage_artifact_path(
                 f"[Consist] Cannot stage artifact {artifact.key!r}: source path missing.",
             )
 
-        if artifact.digest is not None and validate_content_hash != "never":
+        if (
+            not source_already_verified
+            and artifact.digest is not None
+            and validate_content_hash != "never"
+        ):
             digest_matches = (
                 verify_digest(
                     source_path,
@@ -3154,6 +3172,7 @@ def materialize_artifacts(
                     destination_path,
                     mutable=False,
                     overwrite=False,
+                    already_verified=True,
                 )
             except FileExistsError:
                 pass

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 import hashlib
 import json
@@ -15,7 +15,6 @@ import uuid
 
 from consist.digest import Digest, is_shapefile_sidecar_filename
 
-_RACY_WINDOW_NS: Final[int] = 2_000_000_000
 _LOCATION_ID_NAMESPACE: Final[uuid.UUID] = uuid.UUID(
     "c0b51570-0005-4000-8000-000000000003"
 )
@@ -93,7 +92,6 @@ class WitnessFreshness(str, Enum):
     """Outcome of checking a cached filesystem witness against on-disk stat."""
 
     FRESH = "fresh"
-    RACY_NEEDS_VERIFY = "racy_needs_verify"
     STAT_MISMATCH = "stat_mismatch"
     MISSING = "missing"
 
@@ -103,7 +101,6 @@ class WitnessCheckResult:
     """Detailed result from checking a ``FileStat`` or ``DirTreeStat`` witness."""
 
     freshness: WitnessFreshness
-    can_settle_racy: bool = False
     current_stat: Union["FileStat", "DirTreeStat", None] = None
 
 
@@ -125,7 +122,6 @@ class FileStat:
     mtime_ns: int
     ctime_ns: int
     ino: int
-    racy: bool = False
     digest_verified: bool = False
 
     def _stat_tuple(self) -> tuple[int, int, int, int]:
@@ -135,13 +131,12 @@ class FileStat:
     def from_os_stat(
         cls, st: os.stat_result, *, observed_at_ns: int | None = None
     ) -> "FileStat":
-        now_ns = time.time_ns() if observed_at_ns is None else int(observed_at_ns)
+        del observed_at_ns
         return cls(
             size=int(st.st_size),
             mtime_ns=int(st.st_mtime_ns),
             ctime_ns=int(st.st_ctime_ns),
             ino=int(st.st_ino),
-            racy=abs(now_ns - int(st.st_mtime_ns)) < _RACY_WINDOW_NS,
         )
 
     @classmethod
@@ -153,35 +148,15 @@ class FileStat:
             raise ValueError(f"Expected regular file for FileStat witness: {path}")
         return cls.from_os_stat(st, observed_at_ns=observed_at_ns)
 
-    def settled(self) -> "FileStat":
-        if not self.racy:
-            return self
-        return FileStat(
-            self.size,
-            self.mtime_ns,
-            self.ctime_ns,
-            self.ino,
-            racy=False,
-            digest_verified=self.digest_verified,
-        )
-
     def with_digest_verified(self, verified: bool = True) -> "FileStat":
         verified_flag = bool(verified)
         if self.digest_verified is verified_flag:
             return self
-        return FileStat(
-            self.size,
-            self.mtime_ns,
-            self.ctime_ns,
-            self.ino,
-            racy=self.racy,
-            digest_verified=verified_flag,
-        )
+        return replace(self, digest_verified=verified_flag)
 
     def check(
         self, path: str | Path, *, now_ns: int | None = None
     ) -> WitnessCheckResult:
-        effective_now_ns = time.time_ns() if now_ns is None else int(now_ns)
         try:
             st = _lstat_leaf(path)
         except FileNotFoundError:
@@ -190,17 +165,10 @@ class FileStat:
             return WitnessCheckResult(freshness=WitnessFreshness.STAT_MISMATCH)
         if not stat.S_ISREG(st.st_mode):
             return WitnessCheckResult(freshness=WitnessFreshness.STAT_MISMATCH)
-        cur = FileStat.from_os_stat(st, observed_at_ns=effective_now_ns)
+        cur = FileStat.from_os_stat(st, observed_at_ns=now_ns)
         if cur._stat_tuple() != self._stat_tuple():
             return WitnessCheckResult(WitnessFreshness.STAT_MISMATCH, current_stat=cur)
-        if not self.racy:
-            return WitnessCheckResult(WitnessFreshness.FRESH, current_stat=self)
-        can_settle = (effective_now_ns - int(st.st_mtime_ns)) >= _RACY_WINDOW_NS
-        return WitnessCheckResult(
-            WitnessFreshness.RACY_NEEDS_VERIFY,
-            can_settle_racy=can_settle,
-            current_stat=self.settled() if can_settle else self,
-        )
+        return WitnessCheckResult(WitnessFreshness.FRESH, current_stat=self)
 
     def to_json_dict(self) -> dict[str, Any]:
         return {
@@ -209,7 +177,6 @@ class FileStat:
             "mtime_ns": self.mtime_ns,
             "ctime_ns": self.ctime_ns,
             "ino": self.ino,
-            "racy": self.racy,
             "digest_verified": self.digest_verified,
         }
 
@@ -223,7 +190,6 @@ class FileStat:
             mtime_ns=int(data["mtime_ns"]),
             ctime_ns=int(data["ctime_ns"]),
             ino=int(data["ino"]),
-            racy=bool(data.get("racy", False)),
             digest_verified=bool(data.get("digest_verified", False)),
         )
 
@@ -238,7 +204,6 @@ class DirTreeStat:
     entries: tuple[tuple[str, FileStat], ...]
     subdirs: tuple[str, ...] = ()
     bundle_entry: str | None = None
-    racy: bool = False
     digest_verified: bool = False
 
     @classmethod
@@ -251,13 +216,10 @@ class DirTreeStat:
         root_mtime_ns: int = 0,
         observed_at_ns: int | None = None,
     ) -> "DirTreeStat":
-        now_ns = time.time_ns() if observed_at_ns is None else int(observed_at_ns)
+        del observed_at_ns
         sorted_entries = tuple(sorted(entries, key=lambda item: item[0]))
         max_mtime = max(
             (fs.mtime_ns for _, fs in sorted_entries), default=int(root_mtime_ns)
-        )
-        is_racy = any(fs.racy for _, fs in sorted_entries) or (
-            max_mtime > 0 and abs(now_ns - max_mtime) < _RACY_WINDOW_NS
         )
         return cls(
             file_count=len(sorted_entries),
@@ -266,7 +228,6 @@ class DirTreeStat:
             entries=sorted_entries,
             subdirs=tuple(sorted(set(subdirs))),
             bundle_entry=bundle_entry,
-            racy=is_racy,
         )
 
     @classmethod
@@ -385,51 +346,31 @@ class DirTreeStat:
             observed_at_ns=now_ns,
         )
 
-    def settled(self) -> "DirTreeStat":
-        if not self.racy and not any(fs.racy for _, fs in self.entries):
-            return self
-        return DirTreeStat(
-            file_count=self.file_count,
-            total_bytes=self.total_bytes,
-            max_mtime_ns=self.max_mtime_ns,
-            entries=tuple((rel, fs.settled()) for rel, fs in self.entries),
-            subdirs=self.subdirs,
-            bundle_entry=self.bundle_entry,
-            racy=False,
-            digest_verified=self.digest_verified,
-        )
-
     def with_digest_verified(self, verified: bool = True) -> "DirTreeStat":
         verified_flag = bool(verified)
         if self.digest_verified is verified_flag and all(
             fs.digest_verified is verified_flag for _, fs in self.entries
         ):
             return self
-        return DirTreeStat(
-            file_count=self.file_count,
-            total_bytes=self.total_bytes,
-            max_mtime_ns=self.max_mtime_ns,
+        return replace(
+            self,
             entries=tuple(
                 (rel, fs.with_digest_verified(verified_flag))
                 for rel, fs in self.entries
             ),
-            subdirs=self.subdirs,
-            bundle_entry=self.bundle_entry,
-            racy=self.racy,
             digest_verified=verified_flag,
         )
 
     def check(
         self, path: str | Path, *, now_ns: int | None = None
     ) -> WitnessCheckResult:
-        effective_now_ns = time.time_ns() if now_ns is None else int(now_ns)
         try:
             current = (
                 DirTreeStat.capture_shapefile_bundle(
-                    path, entry_name=self.bundle_entry, observed_at_ns=effective_now_ns
+                    path, entry_name=self.bundle_entry, observed_at_ns=now_ns
                 )
                 if self.bundle_entry is not None
-                else DirTreeStat.capture_dir(path, observed_at_ns=effective_now_ns)
+                else DirTreeStat.capture_dir(path, observed_at_ns=now_ns)
             )
         except FileNotFoundError:
             return WitnessCheckResult(freshness=WitnessFreshness.MISSING)
@@ -450,14 +391,7 @@ class DirTreeStat:
             return WitnessCheckResult(
                 WitnessFreshness.STAT_MISMATCH, current_stat=current
             )
-        if not self.racy:
-            return WitnessCheckResult(WitnessFreshness.FRESH, current_stat=self)
-        can_settle = (effective_now_ns - self.max_mtime_ns) >= _RACY_WINDOW_NS
-        return WitnessCheckResult(
-            WitnessFreshness.RACY_NEEDS_VERIFY,
-            can_settle_racy=can_settle,
-            current_stat=self.settled() if can_settle else self,
-        )
+        return WitnessCheckResult(WitnessFreshness.FRESH, current_stat=self)
 
     def to_json_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -467,7 +401,6 @@ class DirTreeStat:
             "max_mtime_ns": self.max_mtime_ns,
             "entries": [[rel, fs.to_json_dict()] for rel, fs in self.entries],
             "subdirs": list(self.subdirs),
-            "racy": self.racy,
             "digest_verified": self.digest_verified,
         }
         if self.bundle_entry is not None:
@@ -500,7 +433,6 @@ class DirTreeStat:
             bundle_entry=str(raw_bundle)
             if isinstance(raw_bundle, str) and raw_bundle
             else None,
-            racy=bool(data.get("racy", False)),
             digest_verified=bool(data.get("digest_verified", False)),
         )
 

@@ -405,7 +405,7 @@ class Coupler(MutableMapping[str, Artifact]):
         now_ns = time.time_ns()
         if resolved_path.is_dir():
             dstat = DirTreeStat.capture_dir(resolved_path, observed_at_ns=now_ns)
-            is_racy = dstat.racy or (now_ns - dstat.max_mtime_ns) < 2_000_000_000
+            is_racy = abs(now_ns - dstat.max_mtime_ns) < 2_000_000_000
             stat_key: tuple[Any, ...] = (
                 "dir",
                 key,
@@ -418,10 +418,7 @@ class Coupler(MutableMapping[str, Artifact]):
             )
         else:
             fstat = FileStat.capture(resolved_path, observed_at_ns=now_ns)
-            is_racy = (
-                fstat.racy
-                or (now_ns - max(fstat.mtime_ns, fstat.ctime_ns)) < 2_000_000_000
-            )
+            is_racy = abs(now_ns - max(fstat.mtime_ns, fstat.ctime_ns)) < 2_000_000_000
             stat_key = (
                 "file",
                 key,

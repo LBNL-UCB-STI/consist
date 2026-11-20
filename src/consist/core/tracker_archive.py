@@ -894,6 +894,26 @@ class TrackerArchiveService(_TrackerServiceBase):
                     seen_run_mounts.add((run_id_str, m_name))
                     self.db.record_archive_mount_on_run(run_id_str, m_name, m_path_str)
 
+    def _persist_recovery_locations_bulk(
+        self,
+        locations_by_aid: Mapping[uuid.UUID, list[ArtifactLocationRow]],
+        snapshot_roots: Mapping[uuid.UUID, tuple[Artifact, Sequence[str]]],
+    ) -> None:
+        """Persist replacement recovery locations, mount records, and snapshot sidecars."""
+        assert self.db is not None
+        self.db.replace_artifact_recovery_locations_bulk(
+            dict(locations_by_aid),
+            require_all=True,
+        )
+        self._record_recovery_mounts_for_artifacts(
+            [
+                (artifact, locations_by_aid.get(aid, ()))
+                for aid, (artifact, _) in snapshot_roots.items()
+            ]
+        )
+        self._persist_snapshot_recovery_roots_for_artifacts(dict(snapshot_roots))
+        self._run_artifacts_cache.clear()
+
     def set_artifact_recovery_roots(
         self,
         artifact: Artifact,
@@ -946,18 +966,13 @@ class TrackerArchiveService(_TrackerServiceBase):
             default_site=default_site,
             retain_unextracted_existing=append,
         )
-        self.db.replace_artifact_recovery_locations_bulk(
+        self._persist_recovery_locations_bulk(
             {artifact.id: new_rows},
-            require_all=True,
-        )
-        self._record_recovery_mounts_for_artifacts([(artifact, new_rows)])
-        self._persist_snapshot_recovery_roots_for_artifacts(
-            {artifact.id: (artifact, normalized)}
+            {artifact.id: (artifact, normalized)},
         )
         base_meta = dict(artifact.meta or {})
         base_meta.pop("recovery_roots", None)
         updated = artifact.with_meta(base_meta).with_resolver(self.tracker)
-        self._run_artifacts_cache.clear()
         return updated
 
     def archive_artifact(
@@ -1146,6 +1161,7 @@ class TrackerArchiveService(_TrackerServiceBase):
             )
         )
         allow_direct = allow_run_owned_uri_fallback or artifact.run_id is None
+        reject_symlinks = source_validator is not None or fallback_validator is not None
         active_resolver = resolver or self.tracker.location_resolver
         first_symlink_path: Path | None = None
 
@@ -1154,13 +1170,32 @@ class TrackerArchiveService(_TrackerServiceBase):
             if first_symlink_path is None:
                 first_symlink_path = path
 
-        def _on_rejected(coord: TranslatedCoordinate) -> None:
-            if (
-                coord.lexical_path is not None
-                and (coord.lexical_path.exists() or coord.lexical_path.is_symlink())
-                and self._has_symlink_component(coord.lexical_path)
+        def _is_symlink_tainted(path: Path) -> bool:
+            if (path.exists() or path.is_symlink()) and self._has_symlink_component(
+                path
             ):
-                _record_symlink(coord.lexical_path)
+                _record_symlink(path)
+                return True
+            return False
+
+        def _translate_clean_scheme_uri(uri: str) -> Path | None:
+            scheme, _ = uri.split("://", 1)
+            coord = self.fs.translate_location_coordinate(scheme, "", uri)
+            if coord.is_resolved and coord.mount_canonical_lexical_path is not None:
+                if (
+                    coord.lexical_path is not None
+                    and _is_symlink_tainted(coord.lexical_path)
+                    and reject_symlinks
+                ):
+                    return None
+                return coord.mount_canonical_lexical_path
+            if coord.lexical_path is not None:
+                _is_symlink_tainted(coord.lexical_path)
+            return None
+
+        def _on_rejected(coord: TranslatedCoordinate) -> None:
+            if coord.lexical_path is not None:
+                _is_symlink_tainted(coord.lexical_path)
 
         for cand in active_resolver.iter_candidates(
             artifact,
@@ -1169,15 +1204,11 @@ class TrackerArchiveService(_TrackerServiceBase):
             include_current_uri=False,
             on_rejected=_on_rejected,
         ):
-            has_symlink = False
-            for probe_path in (cand.lexical_path, cand.mount_canonical_lexical_path):
-                if (
-                    probe_path.exists() or probe_path.is_symlink()
-                ) and self._has_symlink_component(probe_path):
-                    _record_symlink(probe_path)
-                    has_symlink = True
-                    break
-            if has_symlink:
+            has_symlink = any(
+                _is_symlink_tainted(probe_path)
+                for probe_path in (cand.lexical_path, cand.mount_canonical_lexical_path)
+            )
+            if reject_symlinks and has_symlink:
                 continue
             if (
                 cand.source == "managed_mount"
@@ -1198,36 +1229,16 @@ class TrackerArchiveService(_TrackerServiceBase):
             if artifact.abs_path:
                 direct_candidates.append(Path(artifact.abs_path))
             if "://" in artifact.uri:
-                scheme, _ = artifact.uri.split("://", 1)
-                coord = self.fs.translate_location_coordinate(scheme, "", artifact.uri)
-                if coord.is_resolved and coord.mount_canonical_lexical_path is not None:
-                    if (
-                        coord.lexical_path is not None
-                        and (
-                            coord.lexical_path.exists()
-                            or coord.lexical_path.is_symlink()
-                        )
-                        and self._has_symlink_component(coord.lexical_path)
-                    ):
-                        _record_symlink(coord.lexical_path)
-                    else:
-                        direct_candidates.append(coord.mount_canonical_lexical_path)
-                elif (
-                    coord.lexical_path is not None
-                    and (coord.lexical_path.exists() or coord.lexical_path.is_symlink())
-                    and self._has_symlink_component(coord.lexical_path)
-                ):
-                    _record_symlink(coord.lexical_path)
+                translated = _translate_clean_scheme_uri(artifact.uri)
+                if translated is not None:
+                    direct_candidates.append(translated)
             else:
                 try:
                     direct_candidates.append(Path(self.resolve_uri(artifact.uri)))
                 except (OSError, RuntimeError, TypeError, ValueError):
                     pass
             for raw_cand in direct_candidates:
-                if (
-                    raw_cand.exists() or raw_cand.is_symlink()
-                ) and self._has_symlink_component(raw_cand):
-                    _record_symlink(raw_cand)
+                if _is_symlink_tainted(raw_cand) and reject_symlinks:
                     continue
                 if (
                     raw_cand.exists()
@@ -1239,31 +1250,13 @@ class TrackerArchiveService(_TrackerServiceBase):
         if include_current_managed_uri and "://" in artifact.uri:
             scheme, _ = artifact.uri.split("://", 1)
             if scheme in self.fs.mounts:
-                coord = self.fs.translate_location_coordinate(scheme, "", artifact.uri)
-                managed_cand: Path | None = None
-                if coord.is_resolved and coord.mount_canonical_lexical_path is not None:
-                    if (
-                        coord.lexical_path is not None
-                        and (
-                            coord.lexical_path.exists()
-                            or coord.lexical_path.is_symlink()
-                        )
-                        and self._has_symlink_component(coord.lexical_path)
-                    ):
-                        _record_symlink(coord.lexical_path)
-                    else:
-                        managed_cand = coord.mount_canonical_lexical_path
-                elif (
-                    coord.lexical_path is not None
-                    and (coord.lexical_path.exists() or coord.lexical_path.is_symlink())
-                    and self._has_symlink_component(coord.lexical_path)
+                managed_cand = _translate_clean_scheme_uri(artifact.uri)
+                if (
+                    managed_cand is not None
+                    and _is_symlink_tainted(managed_cand)
+                    and reject_symlinks
                 ):
-                    _record_symlink(coord.lexical_path)
-                if managed_cand is not None and (
-                    (managed_cand.exists() or managed_cand.is_symlink())
-                    and self._has_symlink_component(managed_cand)
-                ):
-                    _record_symlink(managed_cand)
+                    managed_cand = None
                 elif managed_cand is not None and managed_cand.exists():
                     if managed_cand.is_file() and not _is_file_bundle_artifact(
                         artifact
@@ -2718,19 +2711,7 @@ class TrackerArchiveService(_TrackerServiceBase):
                 clean_meta
             ).with_resolver(self.tracker)
 
-        self.db.replace_artifact_recovery_locations_bulk(
-            locations_by_aid,
-            require_all=True,
-        )
-        self._record_recovery_mounts_for_artifacts(
-            [
-                (artifact, locations_by_aid.get(artifact.id, ()))
-                for artifact in validated_artifacts
-                if artifact.id is not None
-            ]
-        )
-        self._persist_snapshot_recovery_roots_for_artifacts(snapshot_roots)
-        self._run_artifacts_cache.clear()
+        self._persist_recovery_locations_bulk(locations_by_aid, snapshot_roots)
         return refreshed_by_id
 
     def append_artifacts_recovery_roots_bulk(
@@ -2796,18 +2777,7 @@ class TrackerArchiveService(_TrackerServiceBase):
             )
             snapshot_roots[aid] = (artifact, normalized)
 
-        self.db.replace_artifact_recovery_locations_bulk(
-            locations_by_aid,
-            require_all=True,
-        )
-        self._record_recovery_mounts_for_artifacts(
-            [
-                (artifact, locations_by_aid.get(aid, ()))
-                for aid, (artifact, _) in by_aid.items()
-            ]
-        )
-        self._persist_snapshot_recovery_roots_for_artifacts(snapshot_roots)
-        self._run_artifacts_cache.clear()
+        self._persist_recovery_locations_bulk(locations_by_aid, snapshot_roots)
 
     def register_run_output_recovery_copies(
         self,
@@ -3470,14 +3440,9 @@ class TrackerArchiveService(_TrackerServiceBase):
         if not normalized_roots:
             return
         target_root = normalized_roots[0]
-        resolved_target = Path(target_root).expanduser().resolve()
-        lexical_target = Path(target_root).expanduser().absolute()
-
-        root_coordinates: list[tuple[str, str, str]] = [
-            self.fs.archive_coordinate_for_root("", target_root)[:3],
-            ("abs", "", f"file://{resolved_target}"),
-            ("abs", "", f"file://{lexical_target}"),
-        ]
+        target_coord = self.fs.archive_coordinate_for_root("", target_root)
+        resolved_target = target_coord[3]
+        lexical_roots = self.fs.normalize_recovery_roots([archive_root], resolve=False)
 
         mount_candidates: dict[str, list[str | Path]] = {}
         for scheme, m_root in self.fs.mounts.items():
@@ -3498,18 +3463,48 @@ class TrackerArchiveService(_TrackerServiceBase):
             for hist_root in self.db.lookup_historical_mount_roots(scheme):
                 mount_candidates[scheme].append(hist_root)
 
+        root_coordinates: list[tuple[str, str, str]] = []
+        ambiguous_schemes: list[str] = []
         for scheme, roots in mount_candidates.items():
+            resolved_mounts: list[Path] = []
             for m_root in roots:
                 try:
-                    resolved_mount = Path(m_root).expanduser().resolve()
+                    resolved_mounts.append(Path(m_root).expanduser().resolve())
                 except (OSError, RuntimeError, TypeError, ValueError):
                     continue
-                if resolved_target.is_relative_to(resolved_mount):
-                    if resolved_target == resolved_mount:
+            if not resolved_mounts:
+                continue
+            matching_mounts = [
+                rm for rm in resolved_mounts if resolved_target.is_relative_to(rm)
+            ]
+            if not matching_mounts:
+                continue
+            if len(matching_mounts) == len(resolved_mounts):
+                for rm in matching_mounts:
+                    if resolved_target == rm:
                         root_coordinates.append((scheme, "", f"{scheme}://"))
                     else:
-                        rel = resolved_target.relative_to(resolved_mount).as_posix()
+                        rel = resolved_target.relative_to(rm).as_posix()
                         root_coordinates.append((scheme, "", f"{scheme}://{rel}"))
+            else:
+                ambiguous_schemes.append(scheme)
+
+        if target_coord[0] not in ambiguous_schemes:
+            root_coordinates.append(target_coord[:3])
+        if not str(resolved_target).startswith("/__unmounted__/"):
+            root_coordinates.append(("abs", "", f"file://{resolved_target}"))
+        if lexical_roots:
+            lex_target = lexical_roots[0]
+            if "://" not in lex_target:
+                root_coordinates.append(("abs", "", f"file://{lex_target}"))
+            else:
+                lex_coord = self.fs.archive_coordinate_for_root(
+                    "", lex_target, resolve=False
+                )
+                if lex_coord[0] not in ambiguous_schemes:
+                    root_coordinates.append(lex_coord[:3])
+                if not str(lex_coord[3]).startswith("/__unmounted__/"):
+                    root_coordinates.append(("abs", "", f"file://{lex_coord[3]}"))
 
         deduped_coords = list(dict.fromkeys(root_coordinates))
         retained_ids = {
@@ -3521,6 +3516,34 @@ class TrackerArchiveService(_TrackerServiceBase):
             root_coordinates=deduped_coords,
             retained_ids=retained_ids,
         )
+        if ambiguous_schemes and self.db.has_artifact_location_table():
+            placeholders = ", ".join("?" for _ in ambiguous_schemes)
+            raw_rows = self.db.fetchall(
+                f"SELECT {self.db._LOCATION_SELECT_COLS} FROM artifact_location "
+                f"WHERE site IN ('archive', 'advisory') AND status = 'active' "
+                f"AND mount_name IN ({placeholders})",
+                ambiguous_schemes,
+            )
+            evict_location_ids: list[uuid.UUID] = []
+            for raw_row in raw_rows:
+                row = self.db._hydrate_location_row(raw_row)
+                if row.artifact_id is not None and row.artifact_id in retained_ids:
+                    continue
+                primary_coord, hist_coords = (
+                    self.tracker.location_resolver.resolve_row_coordinates(row)
+                )
+                if any(
+                    coord.is_resolved
+                    and coord.canonical_path is not None
+                    and coord.canonical_path.is_relative_to(resolved_target)
+                    for coord in (primary_coord, *hist_coords)
+                ):
+                    evict_location_ids.append(row.location_id)
+            if evict_location_ids:
+                self.db.mark_artifact_locations_status_bulk(
+                    evict_location_ids, "evicted"
+                )
+                updated_any = True
         if updated_any:
             self._run_artifacts_cache.clear()
 

@@ -572,14 +572,13 @@ class FileSystemManager:
             return target_path.parents[len(rel_parts) - 1]
         return None
 
-    @staticmethod
     def nested_mount_prefix(
-        mount_root: str | Path, workspace_root: str | Path
+        self, mount_root: str | Path, workspace_root: str | Path
     ) -> Optional[Path]:
         """Return the relative subpath when ``mount_root`` is strictly inside ``workspace_root``."""
         try:
-            mount_resolved = Path(mount_root).expanduser().resolve()
-            workspace_resolved = Path(workspace_root).expanduser().resolve()
+            _, mount_resolved, _ = self._resolve_root_info(mount_root)
+            _, workspace_resolved, _ = self._resolve_root_info(workspace_root)
             rel = mount_resolved.relative_to(workspace_resolved)
             if rel != Path("."):
                 return rel
