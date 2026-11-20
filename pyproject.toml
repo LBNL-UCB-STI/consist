@@ -110,7 +110,7 @@ dev = [
     "tables>=3.10.2",
     "xarray>=2024.9.0",
     "zarr>=2.18,<3",
-        "ty>=0.0.92",
+        "ty>=0.0.107",
     "pre-commit",
     "linkml>=1.11.1",
 ]
@@ -124,7 +124,7 @@ docs = [
 ]
 typecheck = [
     "pandas-stubs~=2.3.3",
-    "ty>=0.0.92",
+    "ty>=0.0.107",
 ]
 
 [tool.pytest.ini_options]

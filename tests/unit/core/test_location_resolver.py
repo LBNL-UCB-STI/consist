@@ -968,14 +968,23 @@ def test_root_containment_fail_closed_by_root_kind(
     cands = _candidates_for_root_kind(kind, tmp_path, root)
     # get_historical_root(resolve=True) canonicalizes a symlinked root and a
     # contained leaf symlink stays visible as the canonical leaf, so match on
-    # either the lexical leaf or its canonical resolution.
+    # either the lexical leaf or its canonical resolution. Python 3.11's
+    # Path.resolve() raises RuntimeError on symlink loops; the loop case never
+    # needs canonical matching, so fall back to None there.
+    try:
+        expected_leaf_canonical: Path | None = expected_leaf.resolve()
+    except (OSError, RuntimeError):
+        expected_leaf_canonical = None
     safe_matches = [
         c
         for c in cands
         if not c.rejected
         and (
             c.lexical_path == expected_leaf
-            or c.canonical_path == expected_leaf.resolve()
+            or (
+                expected_leaf_canonical is not None
+                and c.canonical_path == expected_leaf_canonical
+            )
         )
     ]
     if should_yield:
