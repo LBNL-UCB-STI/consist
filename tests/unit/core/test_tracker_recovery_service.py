@@ -1703,8 +1703,8 @@ def test_run_completion_archive_eviction_does_not_evict_repointed_historical_mou
     file_a = workspace / "asim" / "a.csv"
     file_b = workspace / "asim" / "b.csv"
 
-    # Run 1: scratch points to sc_v1, archive goes to sc_v1/consist-recovery/asim_v1.
-    archive_v1 = sc_v1 / "consist-recovery" / "asim_v1"
+    # Run 1: scratch points to sc_v1, archive goes to sc_v1/consist-recovery/step_asim.
+    archive_v1 = sc_v1 / "consist-recovery" / "step_asim"
     tracker_1 = Tracker(
         run_dir=run_dir,
         db_path=str(db_path),
@@ -1737,8 +1737,8 @@ def test_run_completion_archive_eviction_does_not_evict_repointed_historical_mou
     assert v1_b_locs[0].mount_name == "scratch"
     tracker_1.close()
 
-    # Run 2 & 3: scratch is re-pointed to sc_v2, archive goes to sc_v2/consist-recovery/asim_v2.
-    archive_v2 = sc_v2 / "consist-recovery" / "asim_v2"
+    # Run 2 & 3: scratch is re-pointed to sc_v2, archive goes to sc_v2/consist-recovery/step_asim.
+    archive_v2 = sc_v2 / "consist-recovery" / "step_asim"
     tracker_2 = Tracker(
         run_dir=run_dir,
         db_path=str(db_path),

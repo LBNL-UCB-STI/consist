@@ -138,7 +138,6 @@ def _candidate_matches_cache_policy(
     validate_content: bool = True,
     hashing_strategy: str = "full",
     reject_caller_supplied: bool = False,
-    verify_digest: bool = False,
 ) -> bool:
     """Return whether ``path`` satisfies the active cache validation policy."""
     if not validate_content:
@@ -153,16 +152,15 @@ def _candidate_matches_cache_policy(
         return not reject_caller_supplied
     db_mgr = db if isinstance(db, DatabaseManager) else None
     row = cand.row if cand is not None else None
-    if not verify_digest and (
-        hashing_strategy != "full" or not _has_verifiable_digest(artifact)
-    ):
-        has_dir_manifest = isinstance(artifact.meta, dict) and bool(
-            artifact.meta.get("directory_manifest")
-        )
-        if not has_dir_manifest:
+    if hashing_strategy != "full" or not _has_verifiable_digest(artifact):
+        meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
+        if (
+            meta.get("directory_artifact") is not True
+            and meta.get("directory_manifest") is None
+        ):
             return True
     is_valid, _ = verify_and_settle_candidate(
-        db_mgr, path, artifact, row=row, verify_digest=verify_digest
+        db_mgr, path, artifact, row=row, verify_digest=False
     )
     return is_valid
 
@@ -1210,60 +1208,52 @@ def validate_cached_run_outputs(
     resolver = tracker.location_resolver
     resolver.prefetch(outputs, runs=[run])
 
-    def _is_valid_cached_output_path(
-        art: Artifact,
-        candidate: Path,
-        cand: Optional["ResolvedCandidate"] = None,
-    ) -> bool:
-        if not candidate.exists():
-            return False
-        if cand is not None:
-            return _candidate_matches_cache_policy(
-                tracker.db,
-                art,
-                candidate,
-                cand=cand,
-                hashing_strategy="none",
-                verify_digest=True,
-            )
-        manifest_valid = is_valid_directory_artifact_tree(candidate, art)
-        return manifest_valid if manifest_valid is not None else True
-
     for art in outputs:
         resolved_path = tracker.resolve_uri(art.uri)
-        if not _is_valid_cached_output_path(
-            art, Path(resolved_path)
-        ) and not art.meta.get("is_ingested", False):
-            from consist.tools.mount_diagnostics import (
-                build_mount_resolution_hint,
-                format_missing_artifact_mount_help,
-            )
+        meta = art.meta if isinstance(art.meta, Mapping) else {}
+        is_dir_manifest = (
+            meta.get("directory_artifact") is True
+            or meta.get("directory_manifest") is not None
+        )
+        if not is_dir_manifest and Path(resolved_path).exists():
+            continue
+        if meta.get("is_ingested", False):
+            continue
 
-            found_recovery = False
-            for cand in resolver.iter_candidates(art):
-                if _is_valid_cached_output_path(
-                    art, cand.mount_canonical_lexical_path, cand=cand
-                ):
-                    found_recovery = True
-                    break
-            if found_recovery:
-                continue
+        found_recovery = False
+        for cand in resolver.iter_candidates(art, include_current_uri=True):
+            cand_path = cand.mount_canonical_lexical_path
+            if cand_path.exists() and _candidate_matches_cache_policy(
+                tracker.db,
+                art,
+                cand_path,
+                cand=cand,
+                hashing_strategy="none",
+            ):
+                found_recovery = True
+                break
+        if found_recovery:
+            continue
 
-            hint = build_mount_resolution_hint(
-                art.uri, artifact_meta=art.meta, mounts=tracker.mounts
-            )
-            help_text = (
-                "\n"
-                + format_missing_artifact_mount_help(hint, resolved_path=resolved_path)
-                if hint
-                else f"\nResolved path: {resolved_path}"
-            )
-            logging.warning(
-                "⚠️ Cache Validation Failed. Missing: %s%s",
-                art.uri,
-                help_text,
-            )
-            return False
+        from consist.tools.mount_diagnostics import (
+            build_mount_resolution_hint,
+            format_missing_artifact_mount_help,
+        )
+
+        hint = build_mount_resolution_hint(
+            art.uri, artifact_meta=art.meta, mounts=tracker.mounts
+        )
+        help_text = (
+            "\n" + format_missing_artifact_mount_help(hint, resolved_path=resolved_path)
+            if hint
+            else f"\nResolved path: {resolved_path}"
+        )
+        logging.warning(
+            "⚠️ Cache Validation Failed. Missing: %s%s",
+            art.uri,
+            help_text,
+        )
+        return False
     return True
 
 

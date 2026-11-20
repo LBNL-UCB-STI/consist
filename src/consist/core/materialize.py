@@ -1400,7 +1400,10 @@ def _select_materialize_artifact_source(
         and validate_content_hash != "never"
         and isinstance(tracker.db, DatabaseManager)
     ):
-        from consist.core.tracker_recovery import resolve_verified_local_path_detailed
+        from consist.core.tracker_recovery import (
+            _artifact_has_portable_content_identity,
+            resolve_verified_local_path_detailed,
+        )
 
         resolved, saw_mismatch, winning_row = resolve_verified_local_path_detailed(
             tracker,
@@ -1418,7 +1421,13 @@ def _select_materialize_artifact_source(
                 resolved_kind = "historical_root"
             else:
                 resolved_kind = "artifact_uri"
-            return resolved, resolved_kind, True, False, True
+            return (
+                resolved,
+                resolved_kind,
+                True,
+                False,
+                _artifact_has_portable_content_identity(artifact),
+            )
         if saw_mismatch:
             return None, None, True, True, False
         return None, None, True, False, False
@@ -2030,6 +2039,7 @@ def _resolve_staging_source_path(
     resolver: LocationResolver | None = None,
 ) -> tuple[Path | None, bool, bool]:
     from consist.core.tracker_recovery import (
+        _artifact_has_portable_content_identity,
         resolve_verified_local_path_with_diagnostics,
         verify_candidate_against_artifact,
     )
@@ -2042,7 +2052,11 @@ def _resolve_staging_source_path(
             verify_digest=(validate_content_hash == "always"),
         )
         if verified is not None:
-            return verified.resolve(), False, True
+            return (
+                verified.resolve(),
+                False,
+                _artifact_has_portable_content_identity(artifact),
+            )
         if saw_mismatch:
             return None, True, False
 
@@ -2603,7 +2617,7 @@ def plan_run_output_hydration(
                     has_candidate_roots = True
                     val_path = cand.mount_canonical_lexical_path
                     if val_path.exists():
-                        if has_manifest_validator:
+                        if has_manifest_validator and cand.row is None:
                             is_valid = _candidate_validator(val_path)
                         else:
                             is_valid, _ = verify_and_settle_candidate(

@@ -17,14 +17,14 @@ persistence** (DuckDB + epoch invalidation), and **candidate precedence**
 ```mermaid
 flowchart TD
     LOC["src/consist/location.py<br/>FileStat · DirTreeStat · ArtifactLocationRow · TranslatedCoordinate"]
-    FS["src/consist/core/fs.py<br/>FileSystemManager<br/>(_canonical_containment_target, _translate_under_root, _root_info_cache)"]
+    FS["src/consist/core/fs.py<br/>FileSystemManager<br/>(containment-checked translation, root realpath caching)"]
     DB["src/consist/core/persistence.py<br/>DatabaseManager<br/>(artifact_location ledger, epochs, witness settlement)"]
     RES["src/consist/core/location_resolver.py<br/>LocationResolver<br/>(sync_epoch, prefetch, iter_candidates)"]
 
     REC["tracker_recovery.py<br/>verify_and_settle_candidate<br/>resolve_verified_local_path_detailed"]
     CACHE["cache.py<br/>hydration & validation"]
     MAT["materialize.py<br/>rematerialization & staging"]
-    ARCH["tracker_archive.py<br/>_find_archive_source_candidate<br/>_evict_superseded_recovery_root"]
+    ARCH["tracker_archive.py<br/>archive source selection<br/>superseded recovery-root eviction"]
     WF["workflow.py<br/>coupler snapshot restore<br/>append_artifacts_recovery_roots_bulk"]
 
     LOC --> FS
@@ -56,10 +56,10 @@ Every coordinate translation via `FileSystemManager.translate_location_coordinat
 | `mount_canonical_lexical_path` | `canonical_root / rel_parts` | Mount root resolved (`realpath`); in-mount symlinks visible | Symlink rejection probes inside a symlinked mount root (e.g. `/var` → `/private/var`) |
 | `canonical_path` | Parent-canonicalized, leaf-preserving | Ancestor resolved; leaf name preserved if leaf itself is a symlink | Deduplication (`seen_canonical`), existence/digest checks |
 
-### Single-Pass Containment (`_canonical_containment_target`)
+### Single-Pass Containment
 
-`_canonical_containment_target(candidate)` in `src/consist/core/fs.py`
-establishes containment without requiring the target file to exist yet:
+`FileSystemManager`'s containment check in `src/consist/core/fs.py` establishes
+containment without requiring the target file to exist yet:
 
 1. Starts at `probe = Path(os.path.abspath(candidate))` and walks upward using
    `os.lstat(probe)` (not `exists()`, so dangling symlinks do not look like
@@ -76,9 +76,8 @@ establishes containment without requiring the target file to exist yet:
    containment is checked against the resolved target `base` while
    `canonical_path` preserves the leaf name.
 
-For mounted/rooted coordinates, `_translate_under_root` first calls
-`_checked_uri_relative_parts(rel)` to reject any `..` segment before joining,
-then `_checked_translated_coordinate` verifies
+For mounted/rooted coordinates, `FileSystemManager` first rejects any `..`
+segment in the relative path before joining, then verifies
 `target.is_relative_to(canonical_root)` and returns `rejected_coordinate(...)`
 if the resolved path escapes the root.
 
@@ -88,16 +87,16 @@ When `mount_name == "abs"`, `translate_location_coordinate`:
 
 1. Strips a leading `file://` prefix (returning `unmounted_coordinate` if empty).
 2. Rejects any `..` segment in `PurePosixPath(stripped).parts` immediately.
-3. Calls `_canonical_containment_target(Path(stripped))` and returns
-   `rejected_coordinate(...)` if it returns `None` (dangling symlink, loop, or
+3. Performs single-pass containment resolution on `Path(stripped)` and returns
+   `rejected_coordinate(...)` if containment fails (dangling symlink, loop, or
    unreadable component).
 
-### Root Realpath Caching (`_root_info_cache`)
+### Root Realpath Caching
 
-`FileSystemManager._resolve_root_info(raw_root)` caches
-`(lexical_root, canonical_root, inst_id)` in `self._root_info_cache`, keyed by
-`self._root_info_cache_key = (self.run_dir, self.sorted_mounts_key)`. Changing
-`run_dir` or `mounts` automatically invalidates the cache on the next lookup.
+`FileSystemManager` caches resolved root metadata
+`(lexical_root, canonical_root, inst_id)` keyed by
+`(self.run_dir, self.sorted_mounts_key)`. Changing `run_dir` or `mounts`
+automatically invalidates the cache on the next lookup.
 
 ## 3. Canonical Candidate Precedence & Lazy Tiering
 
@@ -136,8 +135,8 @@ probed.
 
 - `LocationResolver.prefetch(artifacts, runs=())` calls `sync_epoch()`,
   bulk-loads active location rows via `db.get_active_artifact_locations_bulk`
-  into `_rows_by_key_memo`, and bulk-loads owning runs via
-  `db.get_runs_by_ids_chronological` into `_run_obj_memo`.
+  into its per-epoch location-row cache, and bulk-loads owning runs via
+  `db.get_runs_by_ids_chronological` into its per-epoch run cache.
 - Callers can pass `on_rejected: Callable[[TranslatedCoordinate], None]` to
   `iter_candidates` to inspect rejected coordinates (for example, to record
   symlink rejections) without altering candidate enumeration.
@@ -145,29 +144,27 @@ probed.
 ## 4. Epoch Synchronization
 
 `DatabaseManager` maintains two independent process-local epoch maps in
-`src/consist/core/persistence.py`, keyed by `str(self._resolved_db_path)`:
+`src/consist/core/persistence.py`, keyed by the resolved database path:
 
-- `_DB_PATH_LOCATION_EPOCH` (via `effective_location_epoch`,
+- **Location epoch** (via `effective_location_epoch`,
   `sync_location_epoch_caches`, `bump_location_epoch`): incremented on
   `artifact_location` writes, witness updates, and evictions. Invalidates
-  `_location_resolution_cache`, `_ephemeral_stale_locations`,
-  `_settled_witnesses`, `_active_coord_witness`, and registered
-  `_epoch_invalidation_hooks`.
-- `_DB_PATH_MOUNT_EPOCH` (via `effective_mount_epoch`,
-  `sync_mount_epoch_caches`, `bump_mount_epoch`): incremented only when mount
-  history changes. Invalidates `_historical_mount_cache`.
+  location resolution caches, ephemeral stale location state, settled-witness
+  caches, active coordinate witnesses, and registered epoch invalidation hooks.
+- **Mount epoch** (via `effective_mount_epoch`, `sync_mount_epoch_caches`,
+  `bump_mount_epoch`): incremented only when mount history changes. Invalidates
+  historical mount caches.
 
 Keeping these two epochs separate ensures that ordinary `artifact_location`
-writes do not thrash `_historical_mount_cache`. For read-only connections
-(`self._con_read_only`), both `effective_location_epoch` and
-`effective_mount_epoch` also include `_file_stat_stamp(self._resolved_db_path)`
-— `(db_m, db_s, wal_m, wal_s)` — so sibling `Tracker` handles pointing at the
-same DuckDB file immediately observe writes and new mounts from other handles or
-processes. `LocationResolver.sync_epoch()` tracks `_location_epoch_key`
-(`(db.effective_location_epoch, fs.workspace_instance_id)`) and `_mount_epoch_key`
-(`(db.effective_mount_epoch, fs.sorted_mounts_key)`) separately, clearing
-`_rows_by_key_memo`/`_run_obj_memo` on location-epoch changes and
-`_historical_roots_memo`/`_live_hist_roots_memo` on mount-epoch changes.
+writes do not thrash historical mount caches. For read-only connections, both
+`effective_location_epoch` and `effective_mount_epoch` also include the DB and
+WAL file stat stamps (`(mtime, size)`) so sibling `Tracker` handles pointing at
+the same DuckDB file immediately observe writes and new mounts from other
+handles or processes. `LocationResolver.sync_epoch()` tracks the location epoch
+(`(db.effective_location_epoch, fs.workspace_instance_id)`) and mount epoch
+(`(db.effective_mount_epoch, fs.sorted_mounts_key)`) separately, clearing its
+location-row and run caches on location-epoch changes and its historical-mount
+caches on mount-epoch changes.
 
 ## 5. Persisted `digest_verified` Witnesses
 
@@ -184,8 +181,7 @@ three invariants:
 1. **Unverified `FRESH` witnesses cannot bless tampered bytes**: when
    `WitnessFreshness.FRESH` is returned, it fast-paths (`return True, False`)
    only if `not verify_digest` and either the artifact has no portable content
-   identity (`not _artifact_has_portable_content_identity(artifact)`) or
-   `effective_witness.digest_verified` is `True`. Otherwise it runs
+   identity or `effective_witness.digest_verified` is `True`. Otherwise it runs
    `verify_candidate_against_artifact(path, artifact)` and settles with
    `with_digest_verified(True)`.
 2. **Race-safe stat-mismatch & witnessless verification**: when
@@ -194,39 +190,40 @@ three invariants:
    captures `pre_w`, verifies the content digest, captures `post_w`, and calls
    `db.settle_artifact_location_witness(...)` only if `pre_w == post_w`.
 3. **Carry-forward & no-op `UPDATE` suppression**:
-   - During `_upsert_artifact_locations_locked` in `persistence.py`, if an
-     incoming row has `loc.witness.digest_verified == False` while the existing
-     row has `prev.witness.digest_verified == True`, `prev.digest == loc.digest`,
-     and `prev.witness.with_digest_verified(False) == loc.witness.with_digest_verified(False)`,
+   - During `artifact_location` upserts in `DatabaseManager`, if an incoming row
+     has `loc.witness.digest_verified == False` while the existing row has
+     `prev.witness.digest_verified == True`, `prev.digest == loc.digest`, and
+     `prev.witness.with_digest_verified(False) == loc.witness.with_digest_verified(False)`,
      the existing `digest_verified=True` flag is carried forward onto `loc`.
    - `DatabaseManager.settle_artifact_location_witness` checks both its
-     in-memory `_settled_witnesses` cache and the persisted `witness_json` row;
-     if `existing_witness == verified_witness`, it returns without issuing a
-     DuckDB `UPDATE`, avoiding unnecessary write transactions across fresh
-     SLURM jobs.
+     in-memory settled-witness cache and the persisted `witness_json` row; if
+     `existing_witness == verified_witness`, it returns without issuing a DuckDB
+     `UPDATE`, avoiding unnecessary write transactions across fresh SLURM jobs.
 
 ## 6. Non-Obvious Invariants & Design Decisions
 
-- **Excluding `workspace` / `runs` from `_source_mount_recovery_root`**: in
-  `tracker_archive.py`, `_source_mount_recovery_root` returns `None` for
+- **Excluding `workspace` / `runs` from archive recovery roots**: in
+  `tracker_archive.py`, source-mount recovery-root extraction returns `None` for
   `workspace://` and `runs://` URIs (and when the resolved mount root equals
   `self.fs.run_dir`) so workspace-local outputs are not redundantly registered as
   `site="archive"` recovery roots.
-- **Multi-coordinate archive eviction (`_evict_superseded_recovery_root`)**:
-  when an archive root is overwritten, `_evict_superseded_recovery_root` in
+- **Multi-coordinate archive eviction**: when an archive root is overwritten,
   `tracker_archive.py` constructs eviction coordinates for the normalized archive
   coordinate, `("abs", "", f"file://{resolved_target}")`,
   `("abs", "", f"file://{lexical_target}")`, and any active or historical
   named-mount alias where `resolved_target.is_relative_to(resolved_mount)`, then
-  passes them together to `db.evict_recovery_root_locations(...)`. This prevents
-  stale `abs` or named-mount aliases from surviving eviction.
-- **Lazy per-candidate symlink rejection (`_find_archive_source_candidate`)**:
-  `LocationResolver.iter_candidates` yields candidates lazily, and
-  `_find_archive_source_candidate` in `tracker_archive.py` checks
-  `_has_symlink_component` on `cand.lexical_path` and
-  `cand.mount_canonical_lexical_path` per candidate, recording
-  `first_symlink_path` and continuing rather than aborting. An unrelated
-  historical symlink therefore never poisons a clean primary candidate.
+  passes them together to `db.evict_recovery_root_locations(...)`. For schemes
+  with multiple historical mount roots where only a subset match the target,
+  eviction filters rows in SQL by relative archive subpath and checks each
+  row's owning run mount (falling back to coordinate resolution only when no
+  owning mount is recorded) so rows pointing outside the overwritten root stay
+  active.
+- **Lazy per-candidate symlink rejection**: `LocationResolver.iter_candidates`
+  yields candidates lazily, and archive source selection in
+  `tracker_archive.py` checks for symlink components on `cand.lexical_path` and
+  `cand.mount_canonical_lexical_path` per candidate, recording the first rejected
+  symlink path and continuing rather than aborting. An unrelated historical
+  symlink therefore never poisons a clean primary candidate.
 - **`unprefixed_rel` climb guard & parent-to-child recovery**:
   `FileSystemManager.invert_relative_layout(target_path, rel_path)` requires
   `len(target_parts) > len(rel_parts)` (strictly greater, preventing climbing

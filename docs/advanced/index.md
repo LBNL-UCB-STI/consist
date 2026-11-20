@@ -10,7 +10,6 @@ execution path.
 
 - [Which execution style should I use?](execution-style-decision-tree.md)
 - [Manual Lifecycle and Decorators](manual-lifecycle-and-decorators.md)
-- [Location Resolver Architecture](location-resolver-architecture.md)
 
 ## Related references
 

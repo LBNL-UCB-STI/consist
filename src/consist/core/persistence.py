@@ -351,6 +351,8 @@ _GLOBAL_LOCATION_EPOCH = itertools.count(1)
 _DB_PATH_LOCATION_EPOCH: dict[str, int] = {}
 _GLOBAL_MOUNT_EPOCH = itertools.count(1)
 _DB_PATH_MOUNT_EPOCH: dict[str, int] = {}
+_GLOBAL_RUN_EPOCH = itertools.count(1)
+_DB_PATH_RUN_EPOCH: dict[str, int] = {}
 _TRACKED_RELATION_LOCK = threading.Lock()
 _TRACKED_RELATIONS: dict[
     str,
@@ -700,9 +702,11 @@ class DatabaseManager:
         self._temp_view_epoch: int = 0
         self.location_epoch: int = next(_GLOBAL_LOCATION_EPOCH)
         self.mount_epoch: int = next(_GLOBAL_MOUNT_EPOCH)
+        self.run_epoch: int = next(_GLOBAL_RUN_EPOCH)
         self._has_artifact_location_table: Optional[bool] = None
         self._last_seen_location_epoch: Optional[tuple[Any, ...]] = None
         self._last_seen_mount_epoch: Optional[tuple[Any, ...]] = None
+        self._last_seen_run_epoch: Optional[tuple[Any, ...]] = None
         self._epoch_invalidation_hooks: list[Callable[[], None]] = []
         self._active_coord_witness: dict[
             tuple[str, str, str, str, str],
@@ -1788,11 +1792,20 @@ class DatabaseManager:
                 _ensure_non_null_utc_dt(run.updated_at),
             ],
         )
-        if meta_dict.get("mounts") or meta_dict.get("archive_mounts"):
+        mount_changed = False
+        for mount_key in ("mounts", "archive_mounts"):
+            mount_map = meta_dict.get(mount_key)
+            if isinstance(mount_map, Mapping):
+                for scheme, root in mount_map.items():
+                    if isinstance(scheme, str) and isinstance(root, str):
+                        if self._session_known_mounts.get(scheme) != root:
+                            self._session_known_mounts[scheme] = root
+                            self._historical_mount_cache.pop(scheme, None)
+                            mount_changed = True
+        if mount_changed:
             self.bump_mount_epoch()
-        self.bump_location_epoch()
+        self.bump_run_epoch()
         self._recorded_run_archive_mounts.clear()
-        self._location_resolution_cache.clear()
 
     def _insert_binding_invocation_locked(
         self,
@@ -4653,6 +4666,34 @@ class DatabaseManager:
         self._last_seen_mount_epoch = self.effective_mount_epoch
         return nxt
 
+    @property
+    def effective_run_epoch(self) -> tuple[int, int, int, int, int, int]:
+        path_epoch = (
+            _DB_PATH_RUN_EPOCH.get(str(self._resolved_db_path), 0)
+            if self._resolved_db_path is not None
+            else 0
+        )
+        db_m, db_s, wal_m, wal_s = (
+            self._file_stat_stamp(self._resolved_db_path)
+            if self._con_read_only
+            else (0, 0, 0, 0)
+        )
+        return (self.run_epoch, path_epoch, db_m, db_s, wal_m, wal_s)
+
+    def sync_run_epoch_caches(self) -> tuple[int, int, int, int, int, int]:
+        cur_epoch = self.effective_run_epoch
+        if self._last_seen_run_epoch != cur_epoch:
+            self._last_seen_run_epoch = cur_epoch
+        return cur_epoch
+
+    def bump_run_epoch(self) -> int:
+        nxt = next(_GLOBAL_RUN_EPOCH)
+        self.run_epoch = nxt
+        if self._resolved_db_path is not None:
+            _DB_PATH_RUN_EPOCH[str(self._resolved_db_path)] = nxt
+        self._last_seen_run_epoch = self.effective_run_epoch
+        return nxt
+
     def has_artifact_location_table(self) -> bool:
         if self._has_artifact_location_table is None:
             self._has_artifact_location_table = self.has_table("artifact_location")
@@ -5208,7 +5249,16 @@ class DatabaseManager:
         did_delete = bool(delete_superseded_lids)
         if not stale_lids and not rows_to_upsert:
             if did_delete:
+                prev_active_coord = dict(self._active_coord_witness)
+                for coord in list(prev_active_coord):
+                    if (
+                        coord[1:] in physical_writers
+                        or (coord[1], coord[2], coord[3])
+                        in superseded_container_winners
+                    ):
+                        prev_active_coord.pop(coord, None)
                 self.bump_location_epoch()
+                self._active_coord_witness = prev_active_coord
             for coord, win_loc in winning_by_coord.items():
                 prev_win = existing_by_lid.get(_coerce_uuid(win_loc.location_id))
                 eff_w = (
@@ -5280,9 +5330,21 @@ class DatabaseManager:
             self._ephemeral_stale_locations.pop(lid, None)
             if loc.witness is not None:
                 self._settled_witnesses.pop(lid, None)
+        prev_active_coord = dict(self._active_coord_witness)
+        for coord in list(prev_active_coord):
+            if (
+                coord[1:] in physical_writers
+                or (coord[1], coord[2], coord[3]) in superseded_container_winners
+            ):
+                prev_active_coord.pop(coord, None)
         self.bump_location_epoch()
-        for coord, win_loc in winning_by_coord.items():
-            self._active_coord_witness[coord] = (win_loc.digest, win_loc.witness)
+        self._active_coord_witness = {
+            **prev_active_coord,
+            **{
+                coord: (win_loc.digest, win_loc.witness)
+                for coord, win_loc in winning_by_coord.items()
+            },
+        }
 
     def upsert_artifact_locations(
         self, locations: Sequence[ArtifactLocationRow]
@@ -5766,7 +5828,7 @@ class DatabaseManager:
             return
         self._session_known_mounts[mount_name] = root_path
         self._historical_mount_cache.pop(mount_name, None)
-        self.bump_location_epoch()
+        self.bump_mount_epoch()
 
     def record_archive_mount_on_run(
         self, run_id: str, mount_name: str, root_path: str
@@ -5795,7 +5857,7 @@ class DatabaseManager:
                     [patch_json, run_id],
                 )
                 self.bump_mount_epoch()
-                self.bump_location_epoch()
+                self.bump_run_epoch()
         self._recorded_run_archive_mounts.add(cache_key)
 
     def lookup_historical_mount_roots(self, mount_name: str) -> tuple[str, ...]:

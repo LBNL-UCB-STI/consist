@@ -3465,6 +3465,7 @@ class TrackerArchiveService(_TrackerServiceBase):
 
         root_coordinates: list[tuple[str, str, str]] = []
         ambiguous_schemes: list[str] = []
+        ambiguous_uri_filters: list[tuple[str, str, str]] = []
         for scheme, roots in mount_candidates.items():
             resolved_mounts: list[Path] = []
             for m_root in roots:
@@ -3488,6 +3489,15 @@ class TrackerArchiveService(_TrackerServiceBase):
                         root_coordinates.append((scheme, "", f"{scheme}://{rel}"))
             else:
                 ambiguous_schemes.append(scheme)
+                for rm in matching_mounts:
+                    if resolved_target == rm:
+                        r_uri = f"{scheme}://"
+                        prefix = r_uri
+                    else:
+                        rel = resolved_target.relative_to(rm).as_posix()
+                        r_uri = f"{scheme}://{rel}"
+                        prefix = r_uri.rstrip("/") + "/"
+                    ambiguous_uri_filters.append((scheme, r_uri, prefix))
 
         if target_coord[0] not in ambiguous_schemes:
             root_coordinates.append(target_coord[:3])
@@ -3516,34 +3526,118 @@ class TrackerArchiveService(_TrackerServiceBase):
             root_coordinates=deduped_coords,
             retained_ids=retained_ids,
         )
-        if ambiguous_schemes and self.db.has_artifact_location_table():
-            placeholders = ", ".join("?" for _ in ambiguous_schemes)
+        if ambiguous_uri_filters and self.db.has_artifact_location_table():
+            deduped_filters = list(dict.fromkeys(ambiguous_uri_filters))
+            coord_clauses: list[str] = []
+            params: list[Any] = []
+            for scheme, r_uri, prefix in deduped_filters:
+                coord_clauses.append(
+                    "(mount_name = ? AND (uri = ? OR starts_with(uri, ?)))"
+                )
+                params.extend([scheme, r_uri, prefix])
+
+            clauses = [
+                "site IN ('archive', 'advisory')",
+                "status = 'active'",
+                f"({' OR '.join(coord_clauses)})",
+            ]
+            if retained_ids:
+                retained_sorted = sorted(retained_ids, key=str)
+                for chunk_start in range(0, len(retained_sorted), 500):
+                    ret_chunk = retained_sorted[chunk_start : chunk_start + 500]
+                    ph = ", ".join("?" for _ in ret_chunk)
+                    clauses.append(
+                        f"(artifact_id IS NULL OR artifact_id NOT IN ({ph}))"
+                    )
+                    params.extend(ret_chunk)
+
             raw_rows = self.db.fetchall(
                 f"SELECT {self.db._LOCATION_SELECT_COLS} FROM artifact_location "
-                f"WHERE site IN ('archive', 'advisory') AND status = 'active' "
-                f"AND mount_name IN ({placeholders})",
-                ambiguous_schemes,
+                f"WHERE {' AND '.join(clauses)}",
+                params,
             )
-            evict_location_ids: list[uuid.UUID] = []
-            for raw_row in raw_rows:
-                row = self.db._hydrate_location_row(raw_row)
-                if row.artifact_id is not None and row.artifact_id in retained_ids:
-                    continue
-                primary_coord, hist_coords = (
-                    self.tracker.location_resolver.resolve_row_coordinates(row)
+            if raw_rows:
+                rows = [self.db._hydrate_location_row(r) for r in raw_rows]
+                artifact_ids = list(
+                    dict.fromkeys(
+                        row.artifact_id for row in rows if row.artifact_id is not None
+                    )
                 )
-                if any(
-                    coord.is_resolved
-                    and coord.canonical_path is not None
-                    and coord.canonical_path.is_relative_to(resolved_target)
-                    for coord in (primary_coord, *hist_coords)
-                ):
-                    evict_location_ids.append(row.location_id)
-            if evict_location_ids:
-                self.db.mark_artifact_locations_status_bulk(
-                    evict_location_ids, "evicted"
-                )
-                updated_any = True
+                run_id_by_artifact_id: dict[uuid.UUID, str] = {}
+                if artifact_ids:
+                    for chunk_start in range(0, len(artifact_ids), 500):
+                        aid_chunk = artifact_ids[chunk_start : chunk_start + 500]
+                        aid_ph = ", ".join("?" for _ in aid_chunk)
+                        for raw_aid, raw_run_id in self.db.fetchall(
+                            f"SELECT id, run_id FROM artifact WHERE id IN ({aid_ph})",
+                            aid_chunk,
+                        ):
+                            if (
+                                raw_aid is not None
+                                and isinstance(raw_run_id, str)
+                                and raw_run_id
+                            ):
+                                aid_uuid = (
+                                    raw_aid
+                                    if isinstance(raw_aid, uuid.UUID)
+                                    else uuid.UUID(str(raw_aid))
+                                )
+                                run_id_by_artifact_id[aid_uuid] = raw_run_id
+
+                resolver = self.tracker.location_resolver
+                resolver.sync_epoch()
+                evict_location_ids: list[uuid.UUID] = []
+                for row in rows:
+                    run_id = (
+                        run_id_by_artifact_id.get(row.artifact_id)
+                        if row.artifact_id is not None
+                        else None
+                    )
+                    owning_mount = (
+                        resolver._lookup_owning_run_mount(
+                            run_id, row.mount_name, row.site
+                        )
+                        if run_id is not None
+                        else None
+                    )
+                    if owning_mount is not None:
+                        coord = self.fs.translate_location_coordinate(
+                            row.mount_name,
+                            "",
+                            row.uri,
+                            historical_run_dir=owning_mount,
+                        )
+                        if (
+                            coord.is_resolved
+                            and coord.canonical_path is not None
+                            and coord.canonical_path.is_relative_to(resolved_target)
+                        ):
+                            evict_location_ids.append(row.location_id)
+                    else:
+                        primary_coord, hist_coords = resolver.resolve_row_coordinates(
+                            row
+                        )
+                        all_coords = (primary_coord, *hist_coords)
+                        has_inside = any(
+                            c.is_resolved
+                            and c.canonical_path is not None
+                            and c.canonical_path.is_relative_to(resolved_target)
+                            for c in all_coords
+                        )
+                        has_outside_on_disk = any(
+                            c.is_resolved
+                            and c.canonical_path is not None
+                            and not c.canonical_path.is_relative_to(resolved_target)
+                            and c.canonical_path.exists()
+                            for c in all_coords
+                        )
+                        if has_inside and not has_outside_on_disk:
+                            evict_location_ids.append(row.location_id)
+                if evict_location_ids:
+                    self.db.mark_artifact_locations_status_bulk(
+                        evict_location_ids, "evicted"
+                    )
+                    updated_any = True
         if updated_any:
             self._run_artifacts_cache.clear()
 

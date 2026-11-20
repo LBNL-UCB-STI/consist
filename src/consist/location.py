@@ -214,9 +214,7 @@ class DirTreeStat:
         subdirs: Sequence[str] = (),
         bundle_entry: str | None = None,
         root_mtime_ns: int = 0,
-        observed_at_ns: int | None = None,
     ) -> "DirTreeStat":
-        del observed_at_ns
         sorted_entries = tuple(sorted(entries, key=lambda item: item[0]))
         max_mtime = max(
             (fs.mtime_ns for _, fs in sorted_entries), default=int(root_mtime_ns)
@@ -234,7 +232,7 @@ class DirTreeStat:
     def capture_dir(
         cls, root: str | Path, *, observed_at_ns: int | None = None
     ) -> "DirTreeStat":
-        now_ns = time.time_ns() if observed_at_ns is None else int(observed_at_ns)
+        del observed_at_ns
         raw_root = Path(root).expanduser()
         if raw_root.is_symlink():
             raise ValueError(f"Directory witness root cannot be a symlink: {raw_root}")
@@ -267,9 +265,7 @@ class DirTreeStat:
                     _visit(child.path)
                 elif child.is_file(follow_symlinks=False):
                     st = child.stat(follow_symlinks=False)
-                    entries.append(
-                        (rel, FileStat.from_os_stat(st, observed_at_ns=now_ns))
-                    )
+                    entries.append((rel, FileStat.from_os_stat(st)))
                 else:
                     raise ValueError(f"Non-regular directory entry: {child.path}")
 
@@ -278,7 +274,6 @@ class DirTreeStat:
             entries=entries,
             subdirs=subdirs,
             root_mtime_ns=int(root_st.st_mtime_ns),
-            observed_at_ns=now_ns,
         )
 
     @classmethod
@@ -289,7 +284,7 @@ class DirTreeStat:
         entry_name: str | None = None,
         observed_at_ns: int | None = None,
     ) -> "DirTreeStat":
-        now_ns = time.time_ns() if observed_at_ns is None else int(observed_at_ns)
+        del observed_at_ns
         raw = Path(path).expanduser()
         if raw.is_symlink():
             raise ValueError(f"Shapefile bundle path cannot be a symlink: {raw}")
@@ -332,9 +327,7 @@ class DirTreeStat:
             if cand.name.lower() == resolved_entry.lower():
                 has_shp = True
             st = cand.stat(follow_symlinks=False)
-            entries.append(
-                (cand.name, FileStat.from_os_stat(st, observed_at_ns=now_ns))
-            )
+            entries.append((cand.name, FileStat.from_os_stat(st)))
         if not has_shp:
             raise FileNotFoundError(
                 f"Shapefile bundle missing primary entry {resolved_entry!r} in {bundle_root}"
@@ -343,7 +336,6 @@ class DirTreeStat:
             entries=entries,
             bundle_entry=resolved_entry,
             root_mtime_ns=root_mtime_ns,
-            observed_at_ns=now_ns,
         )
 
     def with_digest_verified(self, verified: bool = True) -> "DirTreeStat":

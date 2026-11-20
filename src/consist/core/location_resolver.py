@@ -144,6 +144,7 @@ class LocationResolver:
         self._live_hist_roots_memo: dict[str, tuple[str, ...]] = {}
         self._location_epoch_key: tuple[Any, ...] | None = None
         self._mount_epoch_key: tuple[Any, ...] | None = None
+        self._run_epoch_key: tuple[Any, ...] | None = None
 
     @classmethod
     def from_tracker(cls, tracker: Tracker) -> LocationResolver:
@@ -164,7 +165,6 @@ class LocationResolver:
         if location_epoch != self._location_epoch_key:
             self._location_epoch_key = location_epoch
             self._rows_by_key_memo.clear()
-            self._run_obj_memo.clear()
 
         mount_epoch = (
             db.effective_mount_epoch if db is not None else None,
@@ -174,6 +174,15 @@ class LocationResolver:
             self._mount_epoch_key = mount_epoch
             self._historical_roots_memo.clear()
             self._live_hist_roots_memo.clear()
+
+        run_epoch = (
+            db.effective_run_epoch if db is not None else None,
+            db.effective_mount_epoch if db is not None else None,
+            self.fs.sorted_mounts_key,
+        )
+        if run_epoch != self._run_epoch_key:
+            self._run_epoch_key = run_epoch
+            self._run_obj_memo.clear()
 
     def seed_run_meta(self, run: Run) -> None:
         """Seed known run metadata for historical mount resolution."""

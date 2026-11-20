@@ -2702,3 +2702,53 @@ def test_materialize_skips_post_verify_and_prefetch_avoids_per_artifact_queries(
     ) == "v\n0\n"
     assert post_verify_calls == []
     t2.close()
+
+
+def test_active_coord_witness_skips_unchanged_shared_input_across_steps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Multi-step shared input achieves skip_unchanged=True with zero redundant location upserts."""
+    db_path = tmp_path / "prov.duckdb"
+    ws = tmp_path / "ws"
+    ws.mkdir(parents=True)
+
+    shared_file = ws / "shared" / "input.csv"
+    shared_file.parent.mkdir(parents=True, exist_ok=True)
+    shared_file.write_text("col\n1\n", encoding="utf-8")
+
+    out2_file = ws / "outputs" / "out2.csv"
+    out3_file = ws / "outputs" / "out3.csv"
+    out2_file.parent.mkdir(parents=True, exist_ok=True)
+    out2_file.write_text("col\n2\n", encoding="utf-8")
+    out3_file.write_text("col\n3\n", encoding="utf-8")
+
+    tracker = Tracker(run_dir=ws, db_path=str(db_path))
+
+    with tracker.start_run("step1", model="m"):
+        shared_in = tracker.log_output(shared_file, key="shared_in")
+
+    assert tracker.db._active_coord_witness
+
+    upserted_ids_by_step: dict[str, list[object]] = {"step2": [], "step3": []}
+    current_step = "step2"
+    orig_upsert = tracker.db._upsert_artifact_locations_locked
+
+    def _spy_upsert(cur: object, rows: list[ArtifactLocationRow]) -> None:
+        upserted_ids_by_step[current_step].extend(row.artifact_id for row in rows)
+        orig_upsert(cur, rows)
+
+    monkeypatch.setattr(tracker.db, "_upsert_artifact_locations_locked", _spy_upsert)
+
+    with tracker.start_run("step2", model="m2", inputs=[shared_in]):
+        out2 = tracker.log_output(out2_file, key="out2")
+
+    current_step = "step3"
+    with tracker.start_run("step3", model="m3", inputs=[shared_in]):
+        out3 = tracker.log_output(out3_file, key="out3")
+
+    assert shared_in.id not in upserted_ids_by_step["step2"]
+    assert out2.id in upserted_ids_by_step["step2"]
+    assert shared_in.id not in upserted_ids_by_step["step3"]
+    assert out3.id in upserted_ids_by_step["step3"]
+    assert tracker.db.get_active_artifact_locations(artifact_id=shared_in.id)
+    tracker.close()

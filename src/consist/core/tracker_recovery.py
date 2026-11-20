@@ -615,25 +615,30 @@ def resolve_verified_local_path_detailed(
         ordered_rows = (*matched_rows, *normal_rows)
         checked_reals: set[str] = set()
         failed_reals: set[str] = set()
-        stale_candidates: dict[uuid.UUID, ArtifactLocationRow] = {}
+        stale_candidates: dict[
+            uuid.UUID, tuple[ArtifactLocationRow, Optional[Path]]
+        ] = {}
         confirmed_stale_ids: list[uuid.UUID] = []
         ws_instance_id = tracker.fs.workspace_instance_id
 
-        def _cannot_have_distinct_historical_mounts(row: ArtifactLocationRow) -> bool:
+        def _cannot_have_distinct_historical_mounts(
+            row: ArtifactLocationRow,
+            primary_cand: Optional[Path] = None,
+        ) -> bool:
             if row.mount_name == "abs" or (
                 row.mount_name in ("workspace", "runs")
                 and row.mount_instance_id == ws_instance_id
             ):
                 return True
             if row.mount_name in tracker.fs.mounts:
-                current_root = (
-                    Path(tracker.fs.mounts[row.mount_name]).expanduser().resolve()
-                )
-                return not any(
-                    Path(r).expanduser().resolve() != current_root
-                    for r in tracker.location_resolver.get_historical_mount_roots(
-                        row.mount_name
+                return (
+                    next(
+                        tracker.location_resolver.iter_historical_coordinates(
+                            row, artifact, exclude_canonical=primary_cand
+                        ),
+                        None,
                     )
+                    is None
                 )
             return False
 
@@ -642,8 +647,8 @@ def resolve_verified_local_path_detailed(
                 *confirmed_stale_ids,
                 *(
                     lid
-                    for lid, cand_row in stale_candidates.items()
-                    if _cannot_have_distinct_historical_mounts(cand_row)
+                    for lid, (cand_row, primary_cand) in stale_candidates.items()
+                    if _cannot_have_distinct_historical_mounts(cand_row, primary_cand)
                 ),
             ]
             if stale_ids:
@@ -657,7 +662,7 @@ def resolve_verified_local_path_detailed(
                 cand_real = primary.real or _fast_realpath(str(primary.candidate))
                 if cand_real in failed_reals:
                     if row.site != "advisory":
-                        stale_candidates[row.location_id] = row
+                        stale_candidates[row.location_id] = (row, primary.candidate)
                     continue
                 checked_reals.add(cand_real)
 
@@ -683,7 +688,7 @@ def resolve_verified_local_path_detailed(
                     saw_mismatch = True
                 failed_reals.add(cand_real)
                 if row.site != "advisory" or row.witness is not None:
-                    stale_candidates[row.location_id] = row
+                    stale_candidates[row.location_id] = (row, primary.candidate)
 
             # Tier 4b: Lazy historical coordinates across active rows.
             if allow_recovery_roots:
