@@ -126,6 +126,7 @@ class FileStat:
     ctime_ns: int
     ino: int
     racy: bool = False
+    digest_verified: bool = False
 
     def _stat_tuple(self) -> tuple[int, int, int, int]:
         return (self.size, self.mtime_ns, self.ctime_ns, self.ino)
@@ -155,7 +156,27 @@ class FileStat:
     def settled(self) -> "FileStat":
         if not self.racy:
             return self
-        return FileStat(self.size, self.mtime_ns, self.ctime_ns, self.ino, racy=False)
+        return FileStat(
+            self.size,
+            self.mtime_ns,
+            self.ctime_ns,
+            self.ino,
+            racy=False,
+            digest_verified=self.digest_verified,
+        )
+
+    def with_digest_verified(self, verified: bool = True) -> "FileStat":
+        verified_flag = bool(verified)
+        if self.digest_verified is verified_flag:
+            return self
+        return FileStat(
+            self.size,
+            self.mtime_ns,
+            self.ctime_ns,
+            self.ino,
+            racy=self.racy,
+            digest_verified=verified_flag,
+        )
 
     def check(
         self, path: str | Path, *, now_ns: int | None = None
@@ -189,6 +210,7 @@ class FileStat:
             "ctime_ns": self.ctime_ns,
             "ino": self.ino,
             "racy": self.racy,
+            "digest_verified": self.digest_verified,
         }
 
     def to_json(self) -> str:
@@ -202,6 +224,7 @@ class FileStat:
             ctime_ns=int(data["ctime_ns"]),
             ino=int(data["ino"]),
             racy=bool(data.get("racy", False)),
+            digest_verified=bool(data.get("digest_verified", False)),
         )
 
 
@@ -216,6 +239,7 @@ class DirTreeStat:
     subdirs: tuple[str, ...] = ()
     bundle_entry: str | None = None
     racy: bool = False
+    digest_verified: bool = False
 
     @classmethod
     def _from_parts(
@@ -372,6 +396,27 @@ class DirTreeStat:
             subdirs=self.subdirs,
             bundle_entry=self.bundle_entry,
             racy=False,
+            digest_verified=self.digest_verified,
+        )
+
+    def with_digest_verified(self, verified: bool = True) -> "DirTreeStat":
+        verified_flag = bool(verified)
+        if self.digest_verified is verified_flag and all(
+            fs.digest_verified is verified_flag for _, fs in self.entries
+        ):
+            return self
+        return DirTreeStat(
+            file_count=self.file_count,
+            total_bytes=self.total_bytes,
+            max_mtime_ns=self.max_mtime_ns,
+            entries=tuple(
+                (rel, fs.with_digest_verified(verified_flag))
+                for rel, fs in self.entries
+            ),
+            subdirs=self.subdirs,
+            bundle_entry=self.bundle_entry,
+            racy=self.racy,
+            digest_verified=verified_flag,
         )
 
     def check(
@@ -423,6 +468,7 @@ class DirTreeStat:
             "entries": [[rel, fs.to_json_dict()] for rel, fs in self.entries],
             "subdirs": list(self.subdirs),
             "racy": self.racy,
+            "digest_verified": self.digest_verified,
         }
         if self.bundle_entry is not None:
             payload["bundle_entry"] = self.bundle_entry
@@ -455,6 +501,7 @@ class DirTreeStat:
             if isinstance(raw_bundle, str) and raw_bundle
             else None,
             racy=bool(data.get("racy", False)),
+            digest_verified=bool(data.get("digest_verified", False)),
         )
 
 

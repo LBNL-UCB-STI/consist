@@ -22,12 +22,14 @@ from consist.core.directory_artifacts import (
 )
 from consist.core.error_messages import format_problem_cause_fix
 from consist.core.output_sets import build_output_set_child_destinations
+from consist.core.persistence import DatabaseManager
 from consist.core.resolved_binding import (
     create_execution_snapshot,
     trusted_digest_from_artifact,
 )
+from consist.core.tracker_recovery import verify_and_settle_candidate
 from consist.digest import DIGEST_DRIVERS, compute_digest, verify_digest
-from consist.location import ArtifactLocationRow, Witness, WitnessFreshness
+from consist.location import Witness
 from consist.models.artifact import Artifact
 from consist.models.run import ConsistRecord, Run, RunArtifacts
 
@@ -144,61 +146,37 @@ class CacheMaterializationContext(Protocol):
     def resolve_uri(self, uri: str) -> str: ...
 
 
-def _settled_candidate_witness(
-    db: Optional[CacheDb], row: ArtifactLocationRow
-) -> Optional[Witness]:
-    """Return the digest-verified settled witness for a candidate row, if any.
-
-    Only witnesses recorded through ``settle_artifact_location_witness`` (i.e.
-    after content verification) may certify bytes without re-validation.
-    Witnesses captured at row-write time were never compared to the artifact
-    digest, so an unverified FRESH witness only proves the bytes are unchanged
-    since capture — not that they match the artifact digest.
-    """
-    if db is None:
-        return None
-    return db.get_settled_witness(row.location_id)
-
-
-def _settled_witness_fresh(
-    cand: Optional["ResolvedCandidate"], db: Optional[CacheDb]
-) -> bool:
-    """True when a candidate row carries a settled witness that is still FRESH."""
-    if cand is None or cand.row is None:
-        return False
-    witness = _settled_candidate_witness(db, cand.row)
-    if witness is None:
-        return False
-    return witness.check(cand.canonical_path).freshness == WitnessFreshness.FRESH
-
-
-def _settle_candidate_witness_after_validation(
+def _candidate_matches_cache_policy(
     db: Optional[CacheDb],
-    cand: Optional["ResolvedCandidate"],
-    validated_path: Path,
-) -> None:
-    """Record a candidate row's witness as digest-verified after validation passed.
-
-    Gives verify-once semantics: the first full validation of an unverified row
-    settles its witness so subsequent checks can use the FRESH fast path.
-    """
-    if db is None or db.read_only or cand is None:
-        return
-    row = cand.row
-    if row is None:
-        return
-    witness = row.witness
-    if witness is None:
-        return
-    if db.get_settled_witness(row.location_id) is not None:
-        return
-    try:
-        w_res = witness.check(validated_path)
-    except (OSError, ValueError):
-        return
-    if w_res.freshness != WitnessFreshness.FRESH:
-        return
-    db.settle_artifact_location_witness(row.location_id, witness)
+    artifact: Artifact,
+    path: Path,
+    *,
+    cand: Optional["ResolvedCandidate"] = None,
+    validate_content: bool = True,
+    hashing_strategy: str = "full",
+    reject_caller_supplied: bool = False,
+) -> bool:
+    """Return whether ``path`` satisfies the active cache validation policy."""
+    if not validate_content:
+        return True
+    if (
+        artifact.digest is not None
+        and artifact.digest.scheme == "caller_supplied_v1:sha256"
+    ):
+        manifest_valid = is_valid_directory_artifact_tree(path, artifact)
+        if manifest_valid is not None:
+            return manifest_valid
+        return not reject_caller_supplied
+    db_mgr = db if isinstance(db, DatabaseManager) else None
+    row = cand.row if cand is not None else None
+    if hashing_strategy != "full" or not _has_verifiable_digest(artifact):
+        manifest_valid = is_valid_directory_artifact_tree(path, artifact)
+        if manifest_valid is None:
+            return True
+        if not manifest_valid:
+            return False
+    is_valid, _ = verify_and_settle_candidate(db_mgr, path, artifact, row=row)
+    return is_valid
 
 
 @dataclass(frozen=True, slots=True)
@@ -505,7 +483,6 @@ def _strict_requested_output_hydration(
         dir=str(staging_parent),
     ) as tmp_dir:
         staged_root = Path(tmp_dir)
-        from consist.core.location_resolver import MountPrecedenceResolver
         from consist.core.materialize import plan_run_output_hydration
 
         try:
@@ -517,7 +494,7 @@ def _strict_requested_output_hydration(
                 keys=requested_keys,
                 preserve_existing=False,
                 db_fallback="if_ingested",
-                resolver=MountPrecedenceResolver.from_tracker(cast("Tracker", tracker)),
+                resolver=cast("Tracker", tracker).location_resolver,
             )
         except Exception as exc:
             logging.debug(
@@ -1014,30 +991,23 @@ def hydrate_cache_hit_outputs(
                 )
 
             if should_use_legacy:
-                from consist.core.location_resolver import (
-                    MountPrecedenceResolver,
-                    iter_artifact_candidates,
-                )
                 from consist.core.materialize import (
                     build_materialize_items_for_keys,
                     materialize_artifacts_from_sources,
                 )
 
-                batch_resolver = MountPrecedenceResolver.from_tracker(
-                    cast("Tracker", tracker)
-                )
+                resolver = cast("Tracker", tracker).location_resolver
+                resolver.prefetch(record.outputs, runs=[cached_run])
 
                 def _find_existing_source(
                     art: Artifact, *, relative_path: Optional[Path] = None
                 ) -> Optional[Path]:
                     """First iterated candidate whose canonical path exists."""
-                    for cand in iter_artifact_candidates(
-                        cast("Tracker", tracker),
+                    for cand in resolver.iter_candidates(
                         art,
                         relative_path=relative_path,
                         source_root=active_options.materialize_cached_outputs_source_root,
                         historical_run=cached_run,
-                        resolver=batch_resolver,
                     ):
                         if cand.canonical_path.exists():
                             return cand.canonical_path
@@ -1149,17 +1119,15 @@ def hydrate_cache_hit_outputs(
             and active_options.materialize_cached_outputs_dir is not None
             and strict_materialized is None
         ):
-            from consist.core.materialize import _derive_remappable_relative_path
-
+            resolver_for_all = cast("Tracker", tracker).location_resolver
             out_dir = Path(active_options.materialize_cached_outputs_dir).resolve()
 
             def _resolve_outputs_all_abs(output_artifact: Artifact) -> Optional[str]:
                 if output_artifact.abs_path is not None:
                     return None
                 try:
-                    rel_path = _derive_remappable_relative_path(
-                        cast("Tracker", tracker),
-                        artifact=output_artifact,
+                    rel_path = resolver_for_all.remappable_relative_path(
+                        output_artifact
                     )
                 except Exception:
                     rel_path = None
@@ -1250,10 +1218,9 @@ def validate_cached_run_outputs(
         return True
 
     run_artifacts = tracker.get_artifacts_for_run(run.id)
-
-    from consist.core.location_resolver import MountPrecedenceResolver
-
-    batch_resolver = MountPrecedenceResolver.from_tracker(cast("Tracker", tracker))
+    outputs = list(run_artifacts.outputs.values())
+    resolver = cast("Tracker", tracker).location_resolver
+    resolver.prefetch(outputs, runs=[run])
 
     def _is_valid_cached_output_path(
         art: Artifact,
@@ -1262,30 +1229,29 @@ def validate_cached_run_outputs(
     ) -> bool:
         if not candidate.exists():
             return False
-        if _settled_witness_fresh(cand, tracker.db):
-            return True
+        if cand is not None:
+            return _candidate_matches_cache_policy(
+                tracker.db,
+                art,
+                candidate,
+                cand=cand,
+                hashing_strategy="none",
+            )
         manifest_valid = is_valid_directory_artifact_tree(candidate, art)
-        if manifest_valid is not None:
-            if manifest_valid:
-                _settle_candidate_witness_after_validation(tracker.db, cand, candidate)
-            return manifest_valid
-        return True
+        return manifest_valid if manifest_valid is not None else True
 
-    for art in run_artifacts.outputs.values():
+    for art in outputs:
         resolved_path = tracker.resolve_uri(art.uri)
         if not _is_valid_cached_output_path(
             art, Path(resolved_path)
         ) and not art.meta.get("is_ingested", False):
-            from consist.core.location_resolver import iter_artifact_candidates
             from consist.tools.mount_diagnostics import (
                 build_mount_resolution_hint,
                 format_missing_artifact_mount_help,
             )
 
             found_recovery = False
-            for cand in iter_artifact_candidates(
-                cast("Tracker", tracker), art, resolver=batch_resolver
-            ):
+            for cand in resolver.iter_candidates(art):
                 if _is_valid_cached_output_path(
                     art, cand.mount_canonical_lexical_path, cand=cand
                 ):
@@ -1381,47 +1347,14 @@ def materialize_missing_inputs(
             )
             return True
 
-    def _recovery_source_matches_artifact(
-        artifact: Artifact, path: Path, cand: Optional["ResolvedCandidate"] = None
-    ) -> bool:
-        if not active_options.validate_materialized_inputs:
-            return True
-        if _settled_witness_fresh(cand, tracker.db):
-            return True
-        manifest_valid = is_valid_directory_artifact_tree(path, artifact)
-        if manifest_valid is not None:
-            if manifest_valid:
-                _settle_candidate_witness_after_validation(tracker.db, cand, path)
-            return manifest_valid
-        if not _has_verifiable_digest(artifact):
-            return True
-        if (
-            artifact.digest is not None
-            and artifact.digest.scheme == "caller_supplied_v1:sha256"
-        ):
-            return True
-        if tracker.identity.hashing_strategy != "full":
-            return True
-        try:
-            digest_ok = _verify_artifact_path_digest(artifact, path)
-        except (FileNotFoundError, OSError, ValueError) as exc:
-            logging.debug(
-                "[Consist] Skipping recovery source for input %s at %s: %s",
-                artifact.key,
-                path,
-                exc,
-            )
-            return False
-        if digest_ok:
-            _settle_candidate_witness_after_validation(tracker.db, cand, path)
-        return digest_ok
-
     items: list[tuple[Artifact, Path, Path]] = []
     db_items: list[tuple[Artifact, Path, bool]] = []
 
-    from consist.core.location_resolver import MountPrecedenceResolver
-
-    batch_resolver = MountPrecedenceResolver.from_tracker(cast("Tracker", tracker))
+    resolver = cast("Tracker", tracker).location_resolver
+    resolver.prefetch(
+        list(tracker.current_consist.inputs),
+        runs=[tracker.current_consist.run],
+    )
 
     for artifact in tracker.current_consist.inputs:
         if not artifact.run_id:
@@ -1434,15 +1367,17 @@ def materialize_missing_inputs(
             if _should_preserve_existing_input(artifact, destination):
                 continue
 
-        from consist.core.location_resolver import iter_artifact_candidates
-
         source: Path | None = None
-        for cand in iter_artifact_candidates(
-            cast("Tracker", tracker), artifact, resolver=batch_resolver
-        ):
+        for cand in resolver.iter_candidates(artifact):
             val_path = cand.mount_canonical_lexical_path
-            if val_path.exists() and _recovery_source_matches_artifact(
-                artifact, val_path, cand=cand
+            if val_path.exists() and _candidate_matches_cache_policy(
+                tracker.db,
+                artifact,
+                val_path,
+                cand=cand,
+                validate_content=active_options.validate_materialized_inputs,
+                hashing_strategy=tracker.identity.hashing_strategy,
+                reject_caller_supplied=False,
             ):
                 source = cand.canonical_path
                 break
@@ -1529,9 +1464,12 @@ def materialize_requested_inputs(
     allowed_base = _allowed_materialization_roots(tracker, target_run=run)
     staged: dict[str, str] = {}
 
-    from consist.core.location_resolver import MountPrecedenceResolver
-
-    batch_resolver = MountPrecedenceResolver.from_tracker(cast("Tracker", tracker))
+    resolver = cast("Tracker", tracker).location_resolver
+    resolver.prefetch(list(tracker.current_consist.inputs), runs=[run])
+    validate_requested_source = not (
+        active_options.requested_input_validate_content_hash == "never"
+        and not active_options.requested_input_strict_snapshot
+    )
 
     def _content_signature(path: Path) -> Optional[str]:
         if path.is_dir():
@@ -1558,65 +1496,50 @@ def materialize_requested_inputs(
         else:
             path.unlink()
 
-    def _recovery_source_matches_artifact(
-        artifact: Artifact, path: Path, cand: Optional["ResolvedCandidate"] = None
-    ) -> bool:
-        if (
-            active_options.requested_input_validate_content_hash == "never"
-            and not active_options.requested_input_strict_snapshot
-        ):
-            return True
-        if _settled_witness_fresh(cand, tracker.db):
-            return True
-        manifest_valid = is_valid_directory_artifact_tree(path, artifact)
-        if manifest_valid is not None:
-            if manifest_valid:
-                _settle_candidate_witness_after_validation(tracker.db, cand, path)
-            return manifest_valid
-        if (
-            not _has_verifiable_digest(artifact)
-            or tracker.identity.hashing_strategy != "full"
-        ):
-            return True
-        if (
-            artifact.digest is not None
-            and artifact.digest.scheme == "caller_supplied_v1:sha256"
-        ):
-            return False
-        try:
-            digest_ok = _verify_artifact_path_digest(artifact, path)
-        except (FileNotFoundError, OSError, ValueError):
-            return False
-        if digest_ok:
-            _settle_candidate_witness_after_validation(tracker.db, cand, path)
-        return digest_ok
-
     def _resolve_source(artifact: Artifact) -> Optional[Path]:
         fallback_source: Optional[Path] = None
         resolved_uri = tracker.resolve_uri(artifact.uri) if artifact.uri else ""
         if resolved_uri:
             resolved_path = Path(resolved_uri)
             if resolved_path.exists():
-                if _recovery_source_matches_artifact(artifact, resolved_path):
+                if _candidate_matches_cache_policy(
+                    tracker.db,
+                    artifact,
+                    resolved_path,
+                    validate_content=validate_requested_source,
+                    hashing_strategy=tracker.identity.hashing_strategy,
+                    reject_caller_supplied=True,
+                ):
                     return resolved_path
                 fallback_source = resolved_path
 
         if artifact.abs_path:
             abs_path = Path(artifact.abs_path)
             if abs_path.exists():
-                if _recovery_source_matches_artifact(artifact, abs_path):
+                if _candidate_matches_cache_policy(
+                    tracker.db,
+                    artifact,
+                    abs_path,
+                    validate_content=validate_requested_source,
+                    hashing_strategy=tracker.identity.hashing_strategy,
+                    reject_caller_supplied=True,
+                ):
                     return abs_path
                 if fallback_source is None:
                     fallback_source = abs_path
 
-        from consist.core.location_resolver import iter_artifact_candidates
-
-        for cand in iter_artifact_candidates(
-            cast("Tracker", tracker), artifact, resolver=batch_resolver
-        ):
+        for cand in resolver.iter_candidates(artifact):
             val_path = cand.mount_canonical_lexical_path
             if val_path.exists():
-                if _recovery_source_matches_artifact(artifact, val_path, cand=cand):
+                if _candidate_matches_cache_policy(
+                    tracker.db,
+                    artifact,
+                    val_path,
+                    cand=cand,
+                    validate_content=validate_requested_source,
+                    hashing_strategy=tracker.identity.hashing_strategy,
+                    reject_caller_supplied=True,
+                ):
                     return cand.canonical_path
                 if fallback_source is None:
                     fallback_source = cand.canonical_path

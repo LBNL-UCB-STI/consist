@@ -1,107 +1,18 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 import pytest
 
+from consist import Tracker
 from consist.core.coupler import Coupler
 from consist.core.directory_artifacts import (
     build_directory_manifest,
     build_shapefile_bundle_manifest,
 )
-from consist.core.fs import FileSystemManager
 from consist.core.materialize import materialize_artifact
 from consist.digest import Digest
 from consist.models.artifact import Artifact
-
-
-def _create_stub_tracker(
-    run_dir: Path,
-    mounts: dict[str, str | Path] | None = None,
-    runs: dict[str, Any] | None = None,
-    recovery_roots_by_id: dict[Any, list[str | Path]] | None = None,
-):
-    fs = FileSystemManager(run_dir=run_dir, mounts=mounts or {})
-    roots_map = dict(recovery_roots_by_id or {})
-
-    class StubIdentity:
-        hashing_strategy = "full"
-
-    class StubRecoveryService:
-        def __init__(self, tracker_inst):
-            self._tracker = tracker_inst
-            self.run_dir = run_dir
-            self.mounts = mounts or {}
-            self.allow_external_paths = True
-
-        def materialize_artifact(
-            self,
-            artifact,
-            *,
-            target_root,
-            source_root=None,
-            preserve_existing=True,
-            on_missing="warn",
-            validate_content_hash="if-present",
-            allow_external_paths=None,
-            scheme_prefixes=None,
-        ):
-            return materialize_artifact(
-                self._tracker,
-                artifact,
-                target_root=Path(target_root),
-                source_root=Path(source_root) if source_root else None,
-                allowed_base=None,
-                preserve_existing=preserve_existing,
-                on_missing=on_missing,
-                validate_content_hash=validate_content_hash,
-                scheme_prefixes=scheme_prefixes,
-            )
-
-    class StubTracker:
-        def __init__(self):
-            self.run_dir = run_dir
-            self.fs = fs
-            self.identity = StubIdentity()
-            self._runs = runs or {}
-            self._recovery_service = StubRecoveryService(self)
-
-        def get_parent_artifact(self, _artifact):
-            return None
-
-        def get_run(self, run_id: str):
-            return self._runs.get(run_id)
-
-        def resolve_uri(self, uri: str) -> str:
-            return self.fs.resolve_uri(uri)
-
-        def artifact_recovery_roots(self, artifact, *, resolve: bool = True):
-            return list(roots_map.get(artifact.id, []))
-
-        def materialize_artifact(
-            self,
-            artifact,
-            *,
-            target_root,
-            source_root=None,
-            preserve_existing=True,
-            on_missing="warn",
-            validate_content_hash="if-present",
-            allow_external_paths=None,
-            scheme_prefixes=None,
-        ):
-            return self._recovery_service.materialize_artifact(
-                artifact,
-                target_root=target_root,
-                source_root=source_root,
-                preserve_existing=preserve_existing,
-                on_missing=on_missing,
-                validate_content_hash=validate_content_hash,
-                allow_external_paths=allow_external_paths,
-                scheme_prefixes=scheme_prefixes,
-            )
-
-    return StubTracker()
+from consist.models.run import Run
 
 
 # =========================================================================
@@ -171,7 +82,11 @@ def test_directory_artifact_materialization_with_manifest(tmp_path: Path) -> Non
         },
     )
 
-    tracker = _create_stub_tracker(tmp_path / "workspace")
+    tracker = Tracker(
+        run_dir=tmp_path / "workspace",
+        db_path=None,
+        allow_external_paths=True,
+    )
 
     # Materialize with validation
     result = materialize_artifact(
@@ -227,7 +142,11 @@ def test_directory_artifact_materialization_never_skips_manifest_hashing(
         meta={"directory_artifact": True},
     )
 
-    tracker = _create_stub_tracker(tmp_path / "workspace")
+    tracker = Tracker(
+        run_dir=tmp_path / "workspace",
+        db_path=None,
+        allow_external_paths=True,
+    )
 
     # Spy on build_directory_manifest and file_sha256 to ensure they are NOT called
     called = []
@@ -300,7 +219,11 @@ def test_directory_artifact_manifest_mismatch_returns_hash_mismatch(
         meta={"directory_artifact": True, "directory_manifest": manifest},
     )
 
-    tracker = _create_stub_tracker(tmp_path / "workspace")
+    tracker = Tracker(
+        run_dir=tmp_path / "workspace",
+        db_path=None,
+        allow_external_paths=True,
+    )
 
     result = materialize_artifact(
         tracker,
@@ -354,21 +277,27 @@ def test_shapefile_bundle_materialization_from_archive_dir(tmp_path: Path) -> No
     unrelated_file = dest_dir / "unrelated_sibling.csv"
     unrelated_file.write_text("a,b,c\n1,2,3\n", encoding="utf-8")
 
-    tracker = _create_stub_tracker(
-        tmp_path / "workspace",
-        recovery_roots_by_id={artifact.id: [str(archive_root)]},
+    tracker = Tracker(
+        run_dir=tmp_path / "workspace",
+        db_path=tmp_path / "prov.duckdb",
+        allow_external_paths=True,
     )
+    try:
+        tracker.db.sync_artifact(artifact, run_id=None, direction="output")
+        tracker.set_artifact_recovery_roots(artifact, [archive_root])
 
-    result = materialize_artifact(
-        tracker,
-        artifact,
-        target_root=target_root,
-        source_root=None,
-        allowed_base=None,
-        preserve_existing=True,
-        on_missing="warn",
-        validate_content_hash="if-present",
-    )
+        result = materialize_artifact(
+            tracker,
+            artifact,
+            target_root=target_root,
+            source_root=None,
+            allowed_base=None,
+            preserve_existing=True,
+            on_missing="warn",
+            validate_content_hash="if-present",
+        )
+    finally:
+        tracker.close()
 
     assert result.status == "materialized_from_recovery_root"
     assert result.resolvable
@@ -417,7 +346,11 @@ def test_shapefile_bundle_materialization_from_workspace_file(tmp_path: Path) ->
     dest_dir.mkdir(parents=True)
     (dest_dir / "pre_existing.txt").write_text("hello", encoding="utf-8")
 
-    tracker = _create_stub_tracker(tmp_path / "workspace")
+    tracker = Tracker(
+        run_dir=tmp_path / "workspace",
+        db_path=None,
+        allow_external_paths=True,
+    )
 
     result = materialize_artifact(
         tracker,
@@ -476,7 +409,11 @@ def test_submount_relative_path_with_explicit_scheme_prefixes(tmp_path: Path) ->
         digest=None,
     )
 
-    tracker = _create_stub_tracker(tmp_path / "workspace")
+    tracker = Tracker(
+        run_dir=tmp_path / "workspace",
+        db_path=None,
+        allow_external_paths=True,
+    )
 
     # Materialize via tracker.materialize_artifact with scheme_prefixes
     result = tracker.materialize_artifact(
@@ -501,9 +438,11 @@ def test_submount_relative_path_auto_derived_from_run_mount(tmp_path: Path) -> N
 
     # Mount configured under run_dir: workspace / "beam" / "input"
     mount_dir = workspace / "beam" / "input"
-    tracker = _create_stub_tracker(
+    tracker = Tracker(
         run_dir=workspace,
-        mounts={"beam_input": mount_dir},
+        db_path=None,
+        mounts={"beam_input": str(mount_dir)},
+        allow_external_paths=True,
     )
 
     src_file = source_root / "beam" / "input" / "transit" / "schedule.csv"
@@ -540,35 +479,42 @@ def test_submount_relative_path_auto_derived_from_historical_run_mount(
     orig_run_dir = tmp_path / "historical_run"
     orig_mount = orig_run_dir / "beam" / "input"
 
-    class StubRun:
-        id = "run-123"
-        meta = {
-            "_physical_run_dir": str(orig_run_dir),
-            "mounts": {"beam_input": str(orig_mount)},
-        }
-
-    tracker = _create_stub_tracker(
+    tracker = Tracker(
         run_dir=tmp_path / "fresh_workspace",
-        runs={"run-123": StubRun()},
+        db_path=tmp_path / "prov.duckdb",
+        allow_external_paths=True,
     )
+    try:
+        tracker.db.upsert_run(
+            Run(
+                id="run-123",
+                model_name="model",
+                meta={
+                    "_physical_run_dir": str(orig_run_dir),
+                    "mounts": {"beam_input": str(orig_mount)},
+                },
+            )
+        )
 
-    src_file = source_root / "beam" / "input" / "transit" / "schedule.csv"
-    src_file.parent.mkdir(parents=True)
-    src_file.write_text("trip_id,arrival_time\n3,10:00\n", encoding="utf-8")
+        src_file = source_root / "beam" / "input" / "transit" / "schedule.csv"
+        src_file.parent.mkdir(parents=True)
+        src_file.write_text("trip_id,arrival_time\n3,10:00\n", encoding="utf-8")
 
-    artifact = Artifact(
-        key="transit_schedule",
-        run_id="run-123",
-        uri="beam_input://transit/schedule.csv",
-        driver="csv",
-        digest=None,
-    )
+        artifact = Artifact(
+            key="transit_schedule",
+            run_id="run-123",
+            uri="beam_input://transit/schedule.csv",
+            driver="csv",
+            digest=None,
+        )
 
-    result = tracker.materialize_artifact(
-        artifact,
-        target_root=target_root,
-        source_root=source_root,
-    )
+        result = tracker.materialize_artifact(
+            artifact,
+            target_root=target_root,
+            source_root=source_root,
+        )
+    finally:
+        tracker.close()
 
     assert result.status == "materialized_from_source_root"
     assert result.resolvable
@@ -586,13 +532,20 @@ def test_submount_strict_filtering_when_scheme_prefixes_provided(
         uri="unmapped://data.csv",
         driver="csv",
     )
-    tracker = _create_stub_tracker(tmp_path / "workspace")
+    tracker = Tracker(
+        run_dir=tmp_path / "workspace",
+        db_path=None,
+        allow_external_paths=True,
+    )
 
-    # When scheme_prefixes is provided and does not contain "unmapped", it should skip unmapped
+    # When scheme_prefixes is provided and does not contain "unmapped", it does not
+    # apply the unrelated prefix; with no source available, it reports missing_source
+    # at the unprefixed relative target path.
     result = tracker.materialize_artifact(
         artifact,
         target_root=target_root,
         scheme_prefixes={"other": "prefix"},
     )
-    assert result.status == "skipped_unmapped"
+    assert result.status == "missing_source"
     assert not result.resolvable
+    assert result.target_path == (target_root / "data.csv").resolve()

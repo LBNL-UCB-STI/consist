@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
+from consist import Tracker
 from consist.core.cache import ActiveRunCacheOptions, materialize_requested_inputs
 from consist.core.directory_artifacts import build_directory_manifest
 from consist.core.tracker_orchestration import RunTraceCoordinator, RunTraceHelpers
@@ -40,35 +39,14 @@ def _make_run(run_id: str = "run_001") -> Run:
     )
 
 
-class _FakeTracker:
-    def __init__(
-        self,
-        *,
-        run_dir: Path,
-        current_consist: ConsistRecord | None = None,
-        compute_file_checksum: Callable[[Path], str] = _sha256,
-    ):
-        self.current_consist = current_consist
-        self.db = None
-        self.fs = SimpleNamespace(
-            resolve_historical_path=lambda uri, original_run_dir, **kwargs: uri,
-            normalize_recovery_roots=lambda roots, **kwargs: [],
-            get_remappable_relative_path=lambda uri, **kwargs: None,
-            get_historical_root=lambda *args, **kwargs: None,
-        )
-        self.identity = SimpleNamespace(
-            compute_file_checksum=compute_file_checksum,
-            hashing_strategy="full",
-        )
-        self.run_dir = run_dir
-        self.mounts = {}
-        self.allow_external_paths = False
-
-    def resolve_uri(self, uri: str) -> str:
-        return uri
-
-    def run_artifact_dir(self) -> Path:
-        return self.run_dir
+def _db_less_tracker(
+    *,
+    run_dir: Path,
+    current_consist: ConsistRecord | None = None,
+) -> Tracker:
+    tracker = Tracker(run_dir=run_dir, db_path=None, allow_external_paths=False)
+    tracker.current_consist = current_consist
+    return tracker
 
 
 def test_materialize_requested_inputs_stages_requested_key(tmp_path: Path) -> None:
@@ -85,7 +63,7 @@ def test_materialize_requested_inputs_stages_requested_key(tmp_path: Path) -> No
     )
     run = _make_run()
 
-    tracker = _FakeTracker(
+    tracker = _db_less_tracker(
         run_dir=tmp_path,
         current_consist=ConsistRecord(run=run, inputs=[artifact]),
     )
@@ -125,7 +103,7 @@ def test_materialize_requested_inputs_rejects_distinct_artifacts_for_one_key(
         digest=Digest("sha256:file", _sha256(second_source)),
         meta={},
     )
-    tracker = _FakeTracker(
+    tracker = _db_less_tracker(
         run_dir=tmp_path,
         current_consist=ConsistRecord(run=_make_run(), inputs=[first, second]),
     )
@@ -156,10 +134,9 @@ def test_materialize_requested_inputs_stages_manifest_backed_directory(
         digest=Digest("dir_manifest_v1:sha256", manifest["tree_hash"]),
         meta={"directory_artifact": True, "directory_manifest": manifest},
     )
-    tracker = _FakeTracker(
+    tracker = _db_less_tracker(
         run_dir=tmp_path,
         current_consist=ConsistRecord(run=_make_run(), inputs=[artifact]),
-        compute_file_checksum=lambda _path: "legacy-directory-checksum",
     )
 
     staged = materialize_requested_inputs(
@@ -191,10 +168,9 @@ def test_materialize_requested_inputs_rejects_mutated_manifest_directory(
         digest=Digest("dir_manifest_v1:sha256", manifest["tree_hash"]),
         meta={"directory_artifact": True, "directory_manifest": manifest},
     )
-    tracker = _FakeTracker(
+    tracker = _db_less_tracker(
         run_dir=tmp_path,
         current_consist=ConsistRecord(run=_make_run(), inputs=[artifact]),
-        compute_file_checksum=lambda _path: "legacy-directory-checksum",
     )
 
     with pytest.raises(ValueError, match="Hash mismatch"):
@@ -223,10 +199,9 @@ def test_materialize_requested_inputs_preserves_legacy_directory_checksum(
         digest=Digest("dir_manifest_v1:sha256", legacy_manifest["tree_hash"]),
         meta={},
     )
-    tracker = _FakeTracker(
+    tracker = _db_less_tracker(
         run_dir=tmp_path,
         current_consist=ConsistRecord(run=_make_run(), inputs=[artifact]),
-        compute_file_checksum=lambda _path: "legacy-directory-checksum",
     )
 
     staged = materialize_requested_inputs(
@@ -255,7 +230,7 @@ def test_execute_python_run_uses_staged_input_path(tmp_path: Path) -> None:
         meta={},
     ).with_abs_path(staged)
 
-    tracker = _FakeTracker(run_dir=tmp_path)
+    tracker = _db_less_tracker(run_dir=tmp_path)
 
     coordinator = RunTraceCoordinator(
         tracker=tracker,

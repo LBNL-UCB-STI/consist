@@ -537,37 +537,6 @@ def test_materialize_run_outputs_db_fallback_never_strictly_isolated(
     consumer.close()
 
 
-def test_set_artifact_recovery_roots_retains_unextractable_row(tmp_path: Path) -> None:
-    db_path = tmp_path / "prov.duckdb"
-    tracker = Tracker(run_dir=tmp_path / "ws", db_path=str(db_path))
-
-    out_file = tracker.run_dir / "file.csv"
-    out_file.write_text("a,b\n1,2\n")
-    with tracker.start_run("p", model="m"):
-        art = tracker.log_output(out_file, key="f")
-
-    unextractable = ArtifactLocationRow.create(
-        digest=None,
-        artifact_id=art.id,
-        site="advisory",
-        mount_name="cold",
-        mount_instance_id="",
-        uri="cold://bucket/different/name.bin",
-    )
-    tracker.db.upsert_artifact_locations([unextractable])
-
-    archive_dir = tmp_path / "arch"
-    (archive_dir / "file.csv").parent.mkdir(parents=True, exist_ok=True)
-    (archive_dir / "file.csv").write_text("a,b\n1,2\n")
-    tracker.set_artifact_recovery_roots(art, [str(archive_dir)], append=True)
-
-    rows = tracker.db.get_artifact_recovery_locations(art.id)
-    uris = {r.uri for r in rows}
-    assert "cold://bucket/different/name.bin" in uris
-    assert any(str(archive_dir) in u for u in uris)
-    tracker.close()
-
-
 # ---------------------------------------------------------------------------
 # 7. Performance / hot-path regression check
 # ---------------------------------------------------------------------------
@@ -808,6 +777,27 @@ def test_materialize_requested_inputs_returns_hash_mismatch_not_missing_source(
     consumer = Tracker(
         run_dir=consumer_ws, db_path=str(db_path), allow_external_paths=True
     )
+    from consist.core.materialize import stage_artifact
+
+    staged_dest = consumer_ws / "staged_input.csv"
+    stage_res = stage_artifact(
+        consumer,
+        art,
+        staged_dest,
+        validate_content_hash="if-present",
+    )
+    assert stage_res.status == "failed"
+    assert not staged_dest.exists()
+
+    mat_res = consumer.materialize_run_outputs(
+        "p",
+        target_root=consumer_ws / "mat_target",
+    )
+    assert any(
+        k == "inp" and "hash mismatch" in msg.lower() for k, msg in mat_res.failed
+    )
+    assert "inp" not in mat_res.skipped_missing_source
+
     with consumer.start_run(
         "c",
         model="consumer",
@@ -824,25 +814,6 @@ def test_materialize_requested_inputs_returns_hash_mismatch_not_missing_source(
 # ---------------------------------------------------------------------------
 # 10. Fail-closed root containment (C1)
 # ---------------------------------------------------------------------------
-
-
-def _stub_tracker_with_recovery_roots(
-    run_dir: Path, roots_by_id: dict[uuid.UUID, list[str]]
-):
-    """DB-less stub tracker exposing recovery roots, mirroring materialize tests."""
-    return SimpleNamespace(
-        run_dir=run_dir,
-        fs=FileSystemManager(run_dir, {}),
-        allow_external_paths=True,
-        run_id=None,
-        identity=SimpleNamespace(hashing_strategy="full"),
-        engine=None,
-        get_run=None,
-        get_parent_artifact=lambda artifact: None,
-        artifact_recovery_roots=lambda artifact, resolve=True: list(
-            roots_by_id.get(artifact.id, [])
-        ),
-    )
 
 
 def _containment_case_setup(tmp_path: Path, case: str) -> tuple[Path, Path, bool]:
@@ -897,51 +868,74 @@ def _candidates_for_root_kind(
     tmp_path: Path,
     root: Path,
     *,
-    include_rejected: bool = False,
+    on_rejected=None,
 ):
-    """Invoke iter_artifact_candidates with the requested root-kind plumbing."""
+    """Invoke iter_artifact_candidates with real Tracker/DB root-kind plumbing."""
     artifact = Artifact(
         key="x",
         uri="./outputs/x.csv",
         driver="csv",
         digest=None,
     )
+    ws = tmp_path / "ws"
     if kind == "source_root":
-        tracker = _stub_tracker_with_recovery_roots(tmp_path / "ws", {})
+        tracker = Tracker(run_dir=ws, allow_external_paths=True)
         return list(
             iter_artifact_candidates(
-                tracker, artifact, source_root=root, include_rejected=include_rejected
+                tracker, artifact, source_root=root, on_rejected=on_rejected
             )
         )
+    db_path = str(tmp_path / "prov.duckdb")
     if kind == "historical_root":
-        run = Run(
-            id="producer",
-            model_name="m",
-            meta={"_physical_run_dir": str(root)},
-        )
-        artifact = Artifact(
-            key="x",
-            uri="./outputs/x.csv",
-            driver="csv",
-            digest=None,
-            run_id="producer",
-        )
-        tracker = _stub_tracker_with_recovery_roots(tmp_path / "ws", {})
-        tracker.get_run = lambda run_id: run if run_id == "producer" else None
-        return list(
-            iter_artifact_candidates(
-                tracker, artifact, include_rejected=include_rejected
+        tracker = Tracker(run_dir=ws, db_path=db_path, allow_external_paths=True)
+        try:
+            run = Run(
+                id="producer",
+                model_name="m",
+                meta={"_physical_run_dir": str(root)},
             )
-        )
-    if kind == "stub_recovery_root":
-        tracker = _stub_tracker_with_recovery_roots(
-            tmp_path / "ws", {artifact.id: [str(root)]}
-        )
-        return list(
-            iter_artifact_candidates(
-                tracker, artifact, include_rejected=include_rejected
+            tracker.db.upsert_run(run)
+            artifact = Artifact(
+                key="x",
+                uri="./outputs/x.csv",
+                driver="csv",
+                digest=None,
+                run_id="producer",
             )
+            return list(
+                iter_artifact_candidates(tracker, artifact, on_rejected=on_rejected)
+            )
+        finally:
+            tracker.close()
+    if kind == "abs_recovery_root":
+        tracker = Tracker(run_dir=ws, db_path=db_path, allow_external_paths=True)
+        try:
+            tracker.db.sync_artifact(artifact)
+            tracker.set_artifact_recovery_roots(artifact, [str(root)])
+            rows = tracker.db.get_artifact_recovery_locations(artifact.id)
+            assert rows and all(r.mount_name == "abs" for r in rows)
+            return list(
+                iter_artifact_candidates(tracker, artifact, on_rejected=on_rejected)
+            )
+        finally:
+            tracker.close()
+    if kind == "named_mount_recovery_root":
+        tracker = Tracker(
+            run_dir=ws,
+            db_path=db_path,
+            mounts={"arch": str(root)},
+            allow_external_paths=True,
         )
+        try:
+            tracker.db.sync_artifact(artifact)
+            tracker.set_artifact_recovery_roots(artifact, [str(root)])
+            rows = tracker.db.get_artifact_recovery_locations(artifact.id)
+            assert rows and all(r.mount_name == "arch" for r in rows)
+            return list(
+                iter_artifact_candidates(tracker, artifact, on_rejected=on_rejected)
+            )
+        finally:
+            tracker.close()
     raise AssertionError(f"unknown kind {kind}")
 
 
@@ -959,7 +953,13 @@ def _candidates_for_root_kind(
     ],
 )
 @pytest.mark.parametrize(
-    "kind", ["source_root", "historical_root", "stub_recovery_root"]
+    "kind",
+    [
+        "source_root",
+        "historical_root",
+        "abs_recovery_root",
+        "named_mount_recovery_root",
+    ],
 )
 def test_root_containment_fail_closed_by_root_kind(
     tmp_path: Path, kind: str, case: str
@@ -978,8 +978,7 @@ def test_root_containment_fail_closed_by_root_kind(
     safe_matches = [
         c
         for c in cands
-        if not c.rejected
-        and (
+        if (
             c.lexical_path == expected_leaf
             or (
                 expected_leaf_canonical is not None
@@ -1001,16 +1000,22 @@ def test_root_containment_fail_closed_by_root_kind(
     ["escaping_ancestor", "escaping_leaf", "dangling_leaf", "symlink_loop"],
 )
 @pytest.mark.parametrize(
-    "kind", ["source_root", "historical_root", "stub_recovery_root"]
+    "kind",
+    [
+        "source_root",
+        "historical_root",
+        "abs_recovery_root",
+        "named_mount_recovery_root",
+    ],
 )
 def test_include_rejected_yields_escaping_candidate_flagged(
     tmp_path: Path, kind: str, case: str
 ) -> None:
     root, expected_leaf, _ = _containment_case_setup(tmp_path, case)
-    cands = _candidates_for_root_kind(kind, tmp_path, root, include_rejected=True)
-    rejected = [c for c in cands if c.rejected and c.lexical_path == expected_leaf]
-    assert len(rejected) == 1
-    assert rejected[0].row is None
+    rejected: list[TranslatedCoordinate] = []
+    cands = _candidates_for_root_kind(kind, tmp_path, root, on_rejected=rejected.append)
+    assert not any(c.lexical_path == expected_leaf for c in cands)
+    assert any(coord.lexical_path == expected_leaf for coord in rejected)
 
 
 def test_unsafe_first_explicit_root_does_not_shadow_safe_second(tmp_path: Path) -> None:
@@ -1033,13 +1038,13 @@ def test_unsafe_first_explicit_root_does_not_shadow_safe_second(tmp_path: Path) 
         driver="csv",
         digest=None,
     )
-    tracker = _stub_tracker_with_recovery_roots(tmp_path / "ws", {})
+    tracker = Tracker(run_dir=tmp_path / "ws", allow_external_paths=True)
     cands = list(
         iter_artifact_candidates(
             tracker, artifact, source_root=[str(bad_root), str(good_root)]
         )
     )
-    safe = [c for c in cands if not c.rejected and c.lexical_path == good_leaf]
+    safe = [c for c in cands if c.lexical_path == good_leaf]
     assert len(safe) == 1
     assert safe[0].canonical_path == good_leaf.resolve()
 
@@ -1866,18 +1871,6 @@ def test_unverified_fresh_witness_does_not_bless_tampered_recovery_source(
 
     import consist.core.materialize as materialize_mod
 
-    staged_items: list[object] = []
-
-    def _spy_bulk(*args: object, **kwargs: object) -> dict[str, str]:
-        staged_items.append(args)
-        return {}
-
-    monkeypatch.setattr(
-        materialize_mod, "materialize_artifacts_from_sources", _spy_bulk
-    )
-
-    import consist.core.materialize as materialize_mod
-
     staged_items: list = []
     real_bulk = materialize_mod.materialize_artifacts_from_sources
 
@@ -1969,4 +1962,413 @@ def test_rejected_primary_preserves_resolved_historical_coordinates(
     assert len(hist) == 1
     assert hist[0].is_resolved
     assert hist[0].canonical_path == (phys_dir / "outputs" / "a.csv")
+    tracker.close()
+
+
+# ---------------------------------------------------------------------------
+# 16. Targeted regression tests (Critical #1-#3, Important #4-#6, Perf #1-#3)
+# ---------------------------------------------------------------------------
+
+
+def test_child_file_recovery_via_parent_artifact_id_hashed_and_unhashed(
+    tmp_path: Path,
+) -> None:
+    """Critical #1: hashed and digest=None children recover via parent_artifact_id."""
+    db_path = tmp_path / "prov.duckdb"
+    ws = tmp_path / "ws"
+    archive_root = tmp_path / "archive"
+    bundle_dir = ws / "outputs" / "bundle"
+    bundle_dir.mkdir(parents=True)
+    hashed_file = bundle_dir / "hashed.csv"
+    unhashed_file = bundle_dir / "unhashed.csv"
+    hashed_file.write_text("a\n1\n", encoding="utf-8")
+    unhashed_file.write_text("b\n2\n", encoding="utf-8")
+
+    tracker = Tracker(run_dir=ws, db_path=str(db_path))
+    with tracker.start_run("prod", model="m"):
+        parent_art = tracker.log_output(
+            bundle_dir, key="bundle", artifact_kind="directory"
+        )
+        hashed_child = tracker.log_output(
+            hashed_file, key="hashed", parent_artifact_id=parent_art.id
+        )
+        unhashed_child = Artifact(
+            key="unhashed",
+            uri="workspace://outputs/bundle/unhashed.csv",
+            driver="csv",
+            digest=None,
+            run_id="prod",
+            parent_artifact_id=parent_art.id,
+        )
+        tracker.db.sync_artifact(unhashed_child)
+
+    # Archive only the parent directory; children have no direct recovery rows.
+    tracker.archive_artifact(parent_art, archive_root, mode="copy")
+    assert not tracker.db.get_artifact_recovery_locations(hashed_child.id)
+    assert not tracker.db.get_artifact_recovery_locations(unhashed_child.id)
+
+    # Wipe the workspace copy so recovery must traverse parent_artifact_id.
+    shutil.rmtree(bundle_dir)
+
+    resolved_hashed = resolve_verified_local_path(
+        tracker, hashed_child, allow_recovery_roots=True
+    )
+    resolved_unhashed = resolve_verified_local_path(
+        tracker, unhashed_child, allow_recovery_roots=True
+    )
+    assert (
+        resolved_hashed
+        == (archive_root / "outputs" / "bundle" / "hashed.csv").resolve()
+    )
+    assert (
+        resolved_unhashed
+        == (archive_root / "outputs" / "bundle" / "unhashed.csv").resolve()
+    )
+    tracker.close()
+
+
+def test_real_db_abs_mount_escaping_symlink_and_dotdot_rejected_in_stage_and_coupler(
+    tmp_path: Path,
+) -> None:
+    """Critical #2: real-DB mount_name='abs' escaping symlink and '..' are rejected."""
+    from consist.core.materialize import stage_artifact
+
+    db_path = tmp_path / "prov.duckdb"
+    ws = tmp_path / "ws"
+    outside = tmp_path / "outside"
+    arch = tmp_path / "arch"
+    for p in (ws / "outputs", outside, arch / "outputs"):
+        p.mkdir(parents=True, exist_ok=True)
+
+    payload = "secret\n1\n"
+    (outside / "x.csv").write_text(payload, encoding="utf-8")
+    ws_file = ws / "outputs" / "x.csv"
+    ws_file.write_text(payload, encoding="utf-8")
+
+    tracker = Tracker(run_dir=ws, db_path=str(db_path), allow_external_paths=True)
+    with tracker.scenario("s") as sc:
+        sc.coupler.declare_outputs("x")
+        res = sc.run(
+            fn=lambda: None,
+            name="step",
+            run_id="r1",
+            outputs=["x"],
+            output_paths={"x": ws_file},
+        )
+        art = res.outputs["x"]
+
+    # Delete workspace original and point real-DB abs recovery row to escaping symlink.
+    ws_file.unlink()
+    (arch / "outputs" / "x.csv").symlink_to(outside / "x.csv")
+    tracker.set_artifact_recovery_roots(art, [str(arch)], append=False)
+    rows = tracker.db.get_artifact_recovery_locations(art.id)
+    assert rows and all(r.mount_name == "abs" for r in rows)
+
+    dest = tmp_path / "dest" / "x.csv"
+    stage_sym = stage_artifact(tracker, art, dest)
+    assert stage_sym.status != "staged"
+    assert not dest.exists()
+
+    # Also test '..' traversal in a real-DB mount_name='abs' row.
+    art_dotdot = Artifact(
+        key="x_dotdot",
+        uri="workspace://outputs/x.csv",
+        driver="csv",
+        digest=art.digest,
+    )
+    tracker.db.sync_artifact(art_dotdot)
+    dotdot_row = ArtifactLocationRow.create(
+        digest=str(art_dotdot.digest),
+        artifact_id=art_dotdot.id,
+        site="archive",
+        mount_name="abs",
+        mount_instance_id="",
+        uri=f"file://{arch}/outputs/../../outside/x.csv",
+    )
+    tracker.db.upsert_artifact_locations([dotdot_row])
+
+    stage_dotdot = stage_artifact(tracker, art_dotdot, dest)
+    assert stage_dotdot.status != "staged"
+    assert not dest.exists()
+
+    # restore_coupler_snapshot must also reject/prune the escaping abs location.
+    target_root = tmp_path / "restore_target"
+    with tracker.scenario("s_restore") as sc2:
+        restored = sc2.restore_coupler_snapshot(
+            scenario_run_id="s",
+            target_root=target_root,
+            prune_unrecoverable=True,
+        )
+        assert "x" in restored.pruned_keys
+        assert not (target_root / "outputs" / "x.csv").exists()
+    tracker.close()
+
+
+def test_select_materialize_artifact_source_scheme_prefixes_does_not_escape_above_mount(
+    tmp_path: Path,
+) -> None:
+    """Critical #3: _select_materialize_artifact_source with scheme_prefixes stays inside mount."""
+    from consist.core.materialize import _select_materialize_artifact_source
+
+    parent_dir = tmp_path / "parent"
+    mount_root = parent_dir / "scratch_mount"
+    mount_root.mkdir(parents=True)
+    # Same-named file exists ABOVE the mount root; primary mount file is missing.
+    (parent_dir / "data.csv").write_text("above\n1\n", encoding="utf-8")
+
+    tracker = Tracker(
+        run_dir=tmp_path / "ws",
+        db_path=str(tmp_path / "prov.duckdb"),
+        mounts={"scratch": str(mount_root)},
+    )
+    art = Artifact(
+        key="data",
+        uri="scratch://data.csv",
+        driver="csv",
+        digest=None,
+    )
+    rel = tracker.fs.get_remappable_relative_path(
+        art.uri, scheme_prefixes={"scratch": "sub"}
+    )
+    assert rel == Path("sub/data.csv")
+
+    selected, _, _, _ = _select_materialize_artifact_source(
+        tracker,
+        artifact=art,
+        relative_path=rel,
+        source_root=None,
+        validate_content_hash="never",
+    )
+    assert selected is None
+    tracker.close()
+
+
+def test_racy_witness_settles_and_fresh_tracker_skips_hashing_and_db_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Important #4 & Perf #3: racy->settled witness skips hashing and DB writes on new Tracker."""
+    import consist.core.tracker_recovery as recovery_mod
+    import consist.location as location_mod
+
+    db_path = tmp_path / "prov.duckdb"
+    ws = tmp_path / "ws"
+    ws.mkdir(parents=True)
+    f = ws / "io" / "data.csv"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("col\n1\n", encoding="utf-8")
+
+    t1 = Tracker(run_dir=ws, db_path=str(db_path))
+    with t1.start_run("prod", model="m"):
+        art = t1.log_output(f, key="data")
+
+    rows_initial = t1.db.get_active_artifact_locations(artifact_id=art.id)
+    assert rows_initial
+    assert rows_initial[0].witness is not None
+    assert rows_initial[0].witness.racy is True
+
+    # Advance clock >2s past mtime so the consumer run settles racy=False, digest_verified=True.
+    base_ns = int(f.stat().st_mtime_ns) + 5_000_000_000
+    monkeypatch.setattr(location_mod.time, "time_ns", lambda: base_ns)
+
+    with t1.start_run(
+        "cons1",
+        model="c",
+        inputs=[art],
+        cache_mode="reuse",
+        cache_hydration="inputs-missing",
+        validate_materialized_inputs=True,
+    ):
+        pass
+
+    rows_settled = t1.db.get_active_artifact_locations(artifact_id=art.id)
+    assert rows_settled
+    assert rows_settled[0].witness is not None
+    assert rows_settled[0].witness.racy is False
+    assert rows_settled[0].witness.digest_verified is True
+    t1.close()
+
+    # Fresh second Tracker on the same db_path: must skip hashing AND issue zero location updates.
+    t2 = Tracker(run_dir=ws, db_path=str(db_path))
+    hash_calls: list[Path] = []
+    upsert_calls: list[object] = []
+
+    def _spy_verify(path: Path, artifact: Artifact) -> bool:
+        hash_calls.append(path)
+        return True
+
+    def _spy_upsert(rows: object) -> None:
+        upsert_calls.append(rows)
+
+    monkeypatch.setattr(recovery_mod, "verify_candidate_against_artifact", _spy_verify)
+    monkeypatch.setattr(t2.db, "upsert_artifact_locations", _spy_upsert)
+
+    resolved, saw_mismatch, _ = resolve_verified_local_path_detailed(
+        t2, art, verify_digest=False
+    )
+    assert resolved == f.resolve()
+    assert not saw_mismatch
+    assert hash_calls == []
+    assert upsert_calls == []
+    t2.close()
+
+
+def test_stage_artifact_default_if_present_fails_over_tampered_primary_to_archive_and_historical(
+    tmp_path: Path,
+) -> None:
+    """Important #5 & #6: default validate_content_hash='if-present' fails over past tampered primary."""
+    from consist.core.materialize import stage_artifact
+
+    db_path = tmp_path / "prov.duckdb"
+    ws = tmp_path / "ws"
+    archive_root = tmp_path / "archive"
+    t1 = Tracker(run_dir=ws, db_path=str(db_path))
+
+    f = ws / "io" / "input.csv"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("value\n1\n", encoding="utf-8")
+
+    with t1.start_run("prod", model="m"):
+        art = t1.log_output(f, key="inp")
+
+    # Archive clean copy, then tamper primary and record an unverified witness on primary.
+    t1.archive_run_outputs("prod", archive_root, mode="copy")
+    f.write_text("value\n999\n", encoding="utf-8")
+    tampered_row = build_verified_location_row(t1.fs, art, local_path=f)
+    t1.db.upsert_artifact_locations([tampered_row])
+
+    dest_1 = ws / "stage_1" / "input.csv"
+    res_1 = stage_artifact(t1, art, dest_1)
+    assert res_1.status == "staged"
+    assert dest_1.read_text(encoding="utf-8") == "value\n1\n"
+
+    # Part 2: Step 5a/5b owning-run historical fallback when primary is missing/tampered
+    # and no archive row exists.
+    hist_ws = tmp_path / "hist_ws"
+    hist_file = hist_ws / "io" / "hist.csv"
+    hist_file.parent.mkdir(parents=True, exist_ok=True)
+    hist_file.write_text("value\nhist\n", encoding="utf-8")
+
+    t1.db.upsert_run(
+        Run(id="hist_prod", model_name="m", meta={"_physical_run_dir": str(hist_ws)})
+    )
+    hist_art = Artifact(
+        key="hist",
+        uri="workspace://io/hist.csv",
+        driver="csv",
+        digest=_sha256_file_digest("value\nhist\n"),
+        run_id="hist_prod",
+    )
+    t1.db.sync_artifact(hist_art)
+
+    consumer_ws = tmp_path / "consumer_ws"
+    t2 = Tracker(run_dir=consumer_ws, db_path=str(db_path), allow_external_paths=True)
+    dest_2 = tmp_path / "stage_2" / "hist.csv"
+    res_2 = stage_artifact(t2, hist_art, dest_2)
+    assert res_2.status == "staged"
+    assert dest_2.read_text(encoding="utf-8") == "value\nhist\n"
+    t1.close()
+    t2.close()
+
+
+def test_unrelated_historical_mount_symlink_does_not_poison_archive_run_output_files(
+    tmp_path: Path,
+) -> None:
+    """Important #6 (Archive): symlink in unrelated historical/current mount does not poison clean primary."""
+    db_path = tmp_path / "prov.duckdb"
+    clean_scratch = tmp_path / "clean_scratch"
+    poisoned_scratch = tmp_path / "poisoned_scratch"
+    outside = tmp_path / "outside"
+    for p in (clean_scratch, poisoned_scratch, outside):
+        p.mkdir()
+
+    payload = "clean-archive-payload\n"
+    clean_file = clean_scratch / "data.csv"
+    clean_file.write_text(payload, encoding="utf-8")
+    (outside / "data.csv").write_text(payload, encoding="utf-8")
+    (poisoned_scratch / "data.csv").symlink_to(outside / "data.csv")
+
+    t1 = Tracker(
+        run_dir=tmp_path / "ws1",
+        db_path=str(db_path),
+        mounts={"scratch": str(clean_scratch)},
+    )
+    with t1.start_run("prod", model="m"):
+        t1.log_output(clean_file, key="data")
+    t1.close()
+
+    # Second tracker has mounts['scratch'] pointing to poisoned_scratch (symlinked twin),
+    # while producer's ledger primary points to clean_scratch.
+    t2 = Tracker(
+        run_dir=tmp_path / "ws2",
+        db_path=str(db_path),
+        mounts={"scratch": str(poisoned_scratch)},
+    )
+    archive_root = tmp_path / "archive"
+    res = t2.archive_run_output_files("prod", archive_root)
+    assert "data" in res.outputs
+    assert (archive_root / "data.csv").read_text(encoding="utf-8") == payload
+    t2.close()
+
+
+def test_restore_coupler_snapshot_bulk_write_and_iter_candidates_zero_historical_probes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Perf #1 & #2: bulk recovery write (1 vs N) and zero historical probes on valid primary."""
+    db_path = tmp_path / "prov.duckdb"
+    ws = tmp_path / "ws"
+    ws.mkdir(parents=True)
+
+    tracker = Tracker(run_dir=ws, db_path=str(db_path), allow_external_paths=True)
+    keys = [f"out_{i}" for i in range(4)]
+    paths = {}
+    for k in keys:
+        p = ws / "outputs" / f"{k}.csv"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(f"k\n{k}\n", encoding="utf-8")
+        paths[k] = p
+
+    with tracker.scenario("s_perf") as sc:
+        sc.coupler.declare_outputs(*keys)
+        sc.run(
+            fn=lambda: None,
+            name="multi_out",
+            run_id="r_multi",
+            outputs=keys,
+            output_paths=paths,
+        )
+
+    # Perf #1: restore_coupler_snapshot executes 1 bulk recovery write (not N).
+    bulk_calls: list[int] = []
+    orig_bulk = tracker.db.replace_artifact_recovery_locations_bulk
+
+    def _spy_bulk(locations_by_aid, **kwargs):
+        bulk_calls.append(len(locations_by_aid))
+        return orig_bulk(locations_by_aid, **kwargs)
+
+    monkeypatch.setattr(
+        tracker.db, "replace_artifact_recovery_locations_bulk", _spy_bulk
+    )
+    target_root = tmp_path / "restore_target"
+    with tracker.scenario("s_restore_perf") as sc2:
+        sc2.restore_coupler_snapshot(
+            scenario_run_id="s_perf",
+            target_root=target_root,
+        )
+    assert len(bulk_calls) == 1
+    assert bulk_calls[0] == len(keys)
+
+    # Perf #2: when ledger_primary is valid, consuming the first candidate from
+    # iter_candidates executes zero lookup_historical_mount_roots calls.
+    hist_calls: list[object] = []
+
+    def _spy_hist(*args: object, **kwargs: object):
+        hist_calls.append(args)
+        return []
+
+    monkeypatch.setattr(tracker.db, "lookup_historical_mount_roots", _spy_hist)
+    loaded = tracker.get_run_outputs("r_multi")["out_0"]
+    first_cand = next(tracker.location_resolver.iter_candidates(loaded))
+    assert first_cand.source == "ledger_primary"
+    assert first_cand.canonical_path.exists()
+    assert hist_calls == []
     tracker.close()

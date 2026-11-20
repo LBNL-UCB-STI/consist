@@ -116,12 +116,13 @@ def _restore_target_recovery_root(
     if not restored.is_relative_to(Path(target_root).resolve()):
         return None  # not copied into T; nothing to register
     rel = fs.get_remappable_relative_path(uri)  # no scheme_prefixes, on purpose
-    if rel is None or not rel.parts:
+    if rel is None:
         return None
-    if restored.parts[-len(rel.parts) :] != rel.parts:
+    root = fs.invert_relative_layout(restored, rel)
+    if root is None:
         logger.debug("restore target layout does not end with %s: %s", rel, restored)
         return None
-    return str(restored.parents[len(rel.parts) - 1])
+    return str(root)
 
 
 def _scenario_header_code_identity() -> None:
@@ -1402,6 +1403,8 @@ class ScenarioContext:
         outcomes: Dict[str, MaterializedArtifact] = {}
         pruned_keys_list: List[str] = []
         batch_resolver = MountPrecedenceResolver.from_tracker(self.tracker)
+        self.tracker.location_resolver.prefetch(list(artifacts.values()))
+        pending_recovery_roots: list[tuple[Artifact, list[str]]] = []
 
         for key, art in artifacts.items():
             scheme_classification = self._classify_coupler_artifact_scheme(
@@ -1491,9 +1494,7 @@ class ScenarioContext:
                     if source_root is not None:
                         new_roots.append(str(Path(source_root).resolve()))
                     if new_roots:
-                        self.tracker.set_artifact_recovery_roots(
-                            hydrated_art, new_roots, append=True
-                        )
+                        pending_recovery_roots.append((hydrated_art, new_roots))
 
                 restored_artifacts[key] = hydrated_art
                 self.coupler.set(key, hydrated_art)
@@ -1506,6 +1507,11 @@ class ScenarioContext:
                     unresolvable_art = outcome.artifact.with_resolver(self.tracker)
                     restored_artifacts[key] = unresolvable_art
                     self.coupler.set(key, unresolvable_art)
+
+        if pending_recovery_roots:
+            self.tracker._archive_service.append_artifacts_recovery_roots_bulk(
+                pending_recovery_roots
+            )
 
         if restored_step_ordinal > 0:
             if phase == "pre":

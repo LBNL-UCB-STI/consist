@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from types import SimpleNamespace
+
+import pytest
 
 import consist.api as consist_api
-from consist.core.fs import FileSystemManager
+from consist import Tracker
 from consist.core.materialize import (
     StagedInput,
     StagedInputsResult,
@@ -20,24 +21,17 @@ def _checksum(path: Path) -> Digest:
     return compute_digest(path, driver="directory" if path.is_dir() else "file")
 
 
-def _tracker(
+def _db_less_tracker(
     run_dir: Path,
     *,
-    resolve_uri,
     allow_external_paths: bool = True,
     mounts: dict[str, str] | None = None,
-    recovery_roots_by_id: dict[object, list[str | Path]] | None = None,
-):
-    roots_map = dict(recovery_roots_by_id or {})
-    return SimpleNamespace(
+) -> Tracker:
+    return Tracker(
         run_dir=run_dir,
-        fs=FileSystemManager(run_dir, mounts),
+        db_path=None,
+        mounts=mounts,
         allow_external_paths=allow_external_paths,
-        resolve_uri=resolve_uri,
-        artifact_recovery_roots=lambda art, resolve=True: list(
-            roots_map.get(art.id, [])
-        ),
-        identity=SimpleNamespace(compute_file_checksum=lambda p: _checksum(p).hex),
     )
 
 
@@ -74,7 +68,7 @@ def test_stage_artifact_copies_file_and_detaches_artifact(tmp_path: Path) -> Non
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text("value\n1\n", encoding="utf-8")
     destination = tmp_path / "runs" / "staged" / "source.csv"
-    tracker = _tracker(tmp_path / "runs", resolve_uri=lambda _uri: str(source))
+    tracker = _db_less_tracker(tmp_path)
     artifact = _artifact("source", "./inputs/source.csv", hash_value=_checksum(source))
 
     result = stage_artifact(tracker, artifact, destination)
@@ -97,7 +91,7 @@ def test_stage_artifact_preserves_existing_identical_destination(
     destination.parent.mkdir(parents=True, exist_ok=True)
     source.write_text("value\n1\n", encoding="utf-8")
     destination.write_text("value\n1\n", encoding="utf-8")
-    tracker = _tracker(tmp_path / "runs", resolve_uri=lambda _uri: str(source))
+    tracker = _db_less_tracker(tmp_path)
     artifact = _artifact("source", "./inputs/source.csv", hash_value=_checksum(source))
 
     result = stage_artifact(tracker, artifact, destination)
@@ -113,7 +107,7 @@ def test_stage_artifact_stages_directories(tmp_path: Path) -> None:
     (source / "nested").mkdir(parents=True, exist_ok=True)
     (source / "nested" / "data.txt").write_text("payload", encoding="utf-8")
     destination = tmp_path / "runs" / "staged" / "bundle"
-    tracker = _tracker(tmp_path / "runs", resolve_uri=lambda _uri: str(source))
+    tracker = _db_less_tracker(tmp_path)
     artifact = _artifact(
         "bundle",
         "./inputs/bundle",
@@ -137,7 +131,7 @@ def test_stage_artifact_preserves_missing_hash_on_detached_artifact(
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text("value\n1\n", encoding="utf-8")
     destination = tmp_path / "runs" / "staged" / "source.csv"
-    tracker = _tracker(tmp_path / "runs", resolve_uri=lambda _uri: str(source))
+    tracker = _db_less_tracker(tmp_path)
     artifact = _artifact("source", "./inputs/source.csv")
 
     result = stage_artifact(tracker, artifact, destination)
@@ -153,10 +147,7 @@ def test_stage_artifact_uses_runtime_abs_path_when_canonical_resolution_missing(
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text("value\n1\n", encoding="utf-8")
     destination = tmp_path / "runs" / "staged" / "source.csv"
-    tracker = _tracker(
-        tmp_path / "runs",
-        resolve_uri=lambda _uri: str(tmp_path / "missing" / "source.csv"),
-    )
+    tracker = _db_less_tracker(tmp_path / "runs")
     artifact = _artifact(
         "source",
         "./inputs/source.csv",
@@ -183,13 +174,18 @@ def test_stage_artifact_uses_recovery_roots_when_source_is_not_resolved(
         "./inputs/source.csv",
         hash_value=_checksum(source),
     )
-    tracker = _tracker(
-        tmp_path / "runs",
-        resolve_uri=lambda _uri: str(tmp_path / "missing" / "source.csv"),
-        recovery_roots_by_id={artifact.id: [archive_root]},
+    tracker = Tracker(
+        run_dir=tmp_path / "runs",
+        db_path=tmp_path / "prov.duckdb",
+        allow_external_paths=True,
     )
+    try:
+        tracker.db.sync_artifact(artifact, run_id=None, direction="output")
+        tracker.set_artifact_recovery_roots(artifact, [archive_root])
 
-    result = stage_artifact(tracker, artifact, destination)
+        result = stage_artifact(tracker, artifact, destination)
+    finally:
+        tracker.close()
 
     assert result.status == "staged"
     assert destination.read_text(encoding="utf-8") == "value\n1\n"
@@ -209,15 +205,58 @@ def test_stage_artifact_rejects_escaping_symlink_recovery_source(
     (archive_root / "inputs").symlink_to(outside, target_is_directory=True)
     destination = tmp_path / "runs" / "staged" / "source.csv"
     artifact = _artifact("source", "./inputs/source.csv")
-    tracker = _tracker(
-        tmp_path / "runs",
-        resolve_uri=lambda _uri: str(tmp_path / "missing" / "source.csv"),
-        recovery_roots_by_id={artifact.id: [archive_root]},
+    tracker = Tracker(
+        run_dir=tmp_path / "runs",
+        db_path=tmp_path / "prov.duckdb",
+        mounts={"archive": str(archive_root)},
+        allow_external_paths=True,
     )
+    try:
+        tracker.db.sync_artifact(artifact, run_id=None, direction="output")
+        tracker.set_artifact_recovery_roots(artifact, [archive_root])
 
-    result = stage_artifact(
-        tracker, artifact, destination, validate_content_hash="never"
+        result = stage_artifact(
+            tracker, artifact, destination, validate_content_hash="never"
+        )
+    finally:
+        tracker.close()
+
+    assert result.status == "missing_source"
+    assert result.resolvable is False
+    assert not destination.exists()
+    assert outside_file.read_text(encoding="utf-8") == "value\noutside\n"
+
+
+def test_stage_artifact_rejects_escaping_symlink_recovery_source_abs_mount(
+    tmp_path: Path,
+) -> None:
+    """Real-DB recovery row with mount_name='abs' rejects escaping symlinks (C1)."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_file = outside / "source.csv"
+    outside_file.write_text("value\noutside\n", encoding="utf-8")
+    archive_root = tmp_path / "archive"
+    (archive_root / "inputs").mkdir(parents=True)
+    (archive_root / "inputs").rmdir()
+    (archive_root / "inputs").symlink_to(outside, target_is_directory=True)
+    destination = tmp_path / "runs" / "staged" / "source.csv"
+    artifact = _artifact("source", "./inputs/source.csv")
+    tracker = Tracker(
+        run_dir=tmp_path / "runs",
+        db_path=tmp_path / "prov.duckdb",
+        allow_external_paths=True,
     )
+    try:
+        tracker.db.sync_artifact(artifact, run_id=None, direction="output")
+        tracker.set_artifact_recovery_roots(artifact, [archive_root])
+        rows = tracker.db.get_artifact_recovery_locations(artifact.id)
+        assert rows and all(row.mount_name == "abs" for row in rows)
+
+        result = stage_artifact(
+            tracker, artifact, destination, validate_content_hash="never"
+        )
+    finally:
+        tracker.close()
 
     assert result.status == "missing_source"
     assert result.resolvable is False
@@ -226,9 +265,8 @@ def test_stage_artifact_rejects_escaping_symlink_recovery_source(
 
 
 def test_stage_artifact_reports_missing_source(tmp_path: Path) -> None:
-    source = tmp_path / "missing.csv"
     destination = tmp_path / "runs" / "staged" / "missing.csv"
-    tracker = _tracker(tmp_path / "runs", resolve_uri=lambda _uri: str(source))
+    tracker = _db_less_tracker(tmp_path)
     artifact = _artifact("missing", "./missing.csv")
 
     result = stage_artifact(tracker, artifact, destination)
@@ -245,7 +283,7 @@ def test_stage_artifact_reports_hash_mismatch_when_validation_applies(
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text("value\n1\n", encoding="utf-8")
     destination = tmp_path / "runs" / "staged" / "source.csv"
-    tracker = _tracker(tmp_path / "runs", resolve_uri=lambda _uri: str(source))
+    tracker = _db_less_tracker(tmp_path)
     artifact = _artifact("source", "./inputs/source.csv", hash_value="deadbeef")
 
     result = stage_artifact(tracker, artifact, destination)
@@ -264,7 +302,7 @@ def test_stage_artifact_rejects_symlink_destination(tmp_path: Path) -> None:
     real_destination.write_text("value\n2\n", encoding="utf-8")
     destination = tmp_path / "runs" / "linked.csv"
     destination.symlink_to(real_destination)
-    tracker = _tracker(tmp_path / "runs", resolve_uri=lambda _uri: str(source))
+    tracker = _db_less_tracker(tmp_path)
     artifact = _artifact("source", "./inputs/source.csv", hash_value=_checksum(source))
 
     result = stage_artifact(tracker, artifact, destination)
@@ -276,12 +314,11 @@ def test_stage_artifact_rejects_symlink_destination(tmp_path: Path) -> None:
 def test_stage_artifact_rejects_external_destination_when_disallowed(
     tmp_path: Path,
 ) -> None:
-    source = tmp_path / "inputs" / "source.csv"
+    source = tmp_path / "runs" / "inputs" / "source.csv"
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text("value\n1\n", encoding="utf-8")
-    tracker = _tracker(
+    tracker = _db_less_tracker(
         tmp_path / "runs",
-        resolve_uri=lambda _uri: str(source),
         allow_external_paths=False,
     )
     artifact = _artifact("source", "./inputs/source.csv", hash_value=_checksum(source))
@@ -303,10 +340,7 @@ def test_stage_inputs_returns_ordered_keyed_results(tmp_path: Path) -> None:
     dest_b = tmp_path / "runs" / "staged" / "b.csv"
     dest_b.parent.mkdir(parents=True, exist_ok=True)
     dest_b.write_text("value\n2\n", encoding="utf-8")
-    tracker = _tracker(
-        tmp_path / "runs",
-        resolve_uri=lambda uri: str(source_a if uri.endswith("a.csv") else source_b),
-    )
+    tracker = _db_less_tracker(tmp_path)
     inputs = {
         "b": _artifact("b", "./inputs/b.csv", hash_value=_checksum(source_b)),
         "a": _artifact("a", "./inputs/a.csv", hash_value=_checksum(source_a)),
@@ -323,7 +357,9 @@ def test_stage_inputs_returns_ordered_keyed_results(tmp_path: Path) -> None:
     assert result.paths["b"] == dest_b.resolve()
 
 
-def test_api_stage_artifact_delegates_to_tracker_method() -> None:
+def test_api_stage_artifact_delegates_to_tracker_method(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     sentinel = object()
     calls: dict[str, object] = {}
     artifact = _artifact("source", "./inputs/source.csv")
@@ -332,7 +368,8 @@ def test_api_stage_artifact_delegates_to_tracker_method() -> None:
         calls.update(art=art, kwargs=kwargs)
         return sentinel
 
-    tracker = SimpleNamespace(stage_artifact=_fake_stage)
+    tracker = _db_less_tracker(tmp_path / "runs")
+    monkeypatch.setattr(tracker, "stage_artifact", _fake_stage)
 
     result = consist_api.stage_artifact(
         artifact,
@@ -349,7 +386,9 @@ def test_api_stage_artifact_delegates_to_tracker_method() -> None:
     assert calls["kwargs"]["mode"] == "copy"
 
 
-def test_api_stage_inputs_delegates_to_tracker_method() -> None:
+def test_api_stage_inputs_delegates_to_tracker_method(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     sentinel = object()
     calls: dict[str, object] = {}
     artifact = _artifact("source", "./inputs/source.csv")
@@ -361,7 +400,8 @@ def test_api_stage_inputs_delegates_to_tracker_method() -> None:
         )
         return sentinel
 
-    tracker = SimpleNamespace(stage_inputs=_fake_stage)
+    tracker = _db_less_tracker(tmp_path / "runs")
+    monkeypatch.setattr(tracker, "stage_inputs", _fake_stage)
 
     result = consist_api.stage_inputs(
         {"source": artifact},

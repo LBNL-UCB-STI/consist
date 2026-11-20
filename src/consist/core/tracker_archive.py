@@ -35,7 +35,7 @@ from consist.core.fs import (
 )
 from consist.core.location_resolver import (
     MountPrecedenceResolver,
-    iter_artifact_candidates,
+    TranslatedCoordinate,
 )
 from consist.core.materialize import (
     ArchivedRunOutputFile,
@@ -53,6 +53,7 @@ from consist.core.output_sets import (
     compute_output_set_manifest_digest,
 )
 from consist.core.tracker_recovery import (
+    _artifact_has_portable_content_identity,
     is_unvalidated_caller_digest,
     resolve_verified_local_path_with_diagnostics,
     verify_candidate_against_artifact,
@@ -190,10 +191,15 @@ class TrackerArchiveService(_TrackerServiceBase):
         if "://" not in artifact.uri:
             return None
         scheme, _ = artifact.uri.split("://", 1)
+        if scheme in ("workspace", "runs"):
+            return None
         mount_root = self.fs.mounts.get(scheme)
         if not mount_root:
             return None
-        return Path(mount_root).expanduser().resolve()
+        resolved = Path(mount_root).expanduser().resolve()
+        if resolved == self.fs.run_dir:
+            return None
+        return resolved
 
     def _archive_recovery_roots_for_artifact(
         self,
@@ -434,6 +440,9 @@ class TrackerArchiveService(_TrackerServiceBase):
                 site=row_site,
                 status="active",
                 capture_local_witness=is_verified,
+                digest_verified=(
+                    is_verified and _artifact_has_portable_content_identity(artifact)
+                ),
                 observed_at_ns=now_base + len(built) + idx,
             )
             if not is_verified and prior is not None and prior.witness is not None:
@@ -1137,61 +1146,89 @@ class TrackerArchiveService(_TrackerServiceBase):
             )
         )
         allow_direct = allow_run_owned_uri_fallback or artifact.run_id is None
+        active_resolver = resolver or self.tracker.location_resolver
+        first_symlink_path: Path | None = None
 
-        # Pre-scan for symlinks on candidates to preserve exception-raising reject_symlink
-        for cand in iter_artifact_candidates(
-            self.tracker,
+        def _record_symlink(path: Path) -> None:
+            nonlocal first_symlink_path
+            if first_symlink_path is None:
+                first_symlink_path = path
+
+        def _on_rejected(coord: TranslatedCoordinate) -> None:
+            if (
+                coord.lexical_path is not None
+                and (coord.lexical_path.exists() or coord.lexical_path.is_symlink())
+                and self._has_symlink_component(coord.lexical_path)
+            ):
+                _record_symlink(coord.lexical_path)
+
+        for cand in active_resolver.iter_candidates(
             artifact,
             historical_run=run,
             include_runtime_abs=True,
-            include_rejected=True,
-            resolver=resolver,
+            include_current_uri=False,
+            on_rejected=_on_rejected,
         ):
+            has_symlink = False
             for probe_path in (cand.lexical_path, cand.mount_canonical_lexical_path):
                 if (
                     probe_path.exists() or probe_path.is_symlink()
                 ) and self._has_symlink_component(probe_path):
-                    if source_validator is not None:
-                        source_validator(probe_path)
-                    elif fallback_validator is not None:
-                        fallback_validator(probe_path)
-
-        if allow_direct or include_current_managed_uri:
-            raw_uri_path: Path | None = None
-            if "://" in artifact.uri:
-                scheme, rel_raw = artifact.uri.split("://", 1)
-                if scheme in self.fs.mounts:
-                    raw_uri_path = Path(self.fs.mounts[scheme]) / rel_raw.lstrip("/")
-            elif artifact.uri.startswith("./"):
-                raw_uri_path = Path(self.fs.run_dir) / artifact.uri[2:]
-            if raw_uri_path is not None:
-                if (
-                    raw_uri_path.exists() or raw_uri_path.is_symlink()
-                ) and self._has_symlink_component(raw_uri_path):
-                    if source_validator is not None:
-                        source_validator(raw_uri_path)
-                    elif fallback_validator is not None:
-                        fallback_validator(raw_uri_path)
-
-        verified, _ = resolve_verified_local_path_with_diagnostics(
-            self.tracker,
-            artifact,
-            allow_recovery_roots=True,
-            verify_digest=True,
-        )
-        if verified is not None:
-            if source_validator is None or source_validator(verified):
-                return verified.resolve()
+                    _record_symlink(probe_path)
+                    has_symlink = True
+                    break
+            if has_symlink:
+                continue
+            if (
+                cand.source == "managed_mount"
+                and include_current_managed_uri
+                and cand.canonical_path.is_file()
+                and not _is_file_bundle_artifact(artifact)
+                and artifact.digest is None
+            ):
+                continue
+            if cand.canonical_path.exists() and verify_candidate_against_artifact(
+                cand.canonical_path, artifact
+            ):
+                if source_validator is None or source_validator(cand.canonical_path):
+                    return cand.canonical_path
 
         if allow_direct:
             direct_candidates: list[Path] = []
             if artifact.abs_path:
                 direct_candidates.append(Path(artifact.abs_path))
-            try:
-                direct_candidates.append(Path(self.resolve_uri(artifact.uri)))
-            except (OSError, RuntimeError, TypeError, ValueError):
-                pass
+            if "://" in artifact.uri:
+                scheme, _ = artifact.uri.split("://", 1)
+                coord = self.fs.translate_location_coordinate(scheme, "", artifact.uri)
+                if coord.is_resolved and coord.mount_canonical_lexical_path is not None:
+                    if (
+                        coord.lexical_path is not None
+                        and (
+                            coord.lexical_path.exists()
+                            or coord.lexical_path.is_symlink()
+                        )
+                        and self._has_symlink_component(coord.lexical_path)
+                    ):
+                        _record_symlink(coord.lexical_path)
+                    else:
+                        direct_candidates.append(coord.mount_canonical_lexical_path)
+                elif (
+                    coord.lexical_path is not None
+                    and (coord.lexical_path.exists() or coord.lexical_path.is_symlink())
+                    and self._has_symlink_component(coord.lexical_path)
+                ):
+                    _record_symlink(coord.lexical_path)
+            else:
+                try:
+                    direct_candidates.append(Path(self.resolve_uri(artifact.uri)))
+                except (OSError, RuntimeError, TypeError, ValueError):
+                    pass
             for raw_cand in direct_candidates:
+                if (
+                    raw_cand.exists() or raw_cand.is_symlink()
+                ) and self._has_symlink_component(raw_cand):
+                    _record_symlink(raw_cand)
+                    continue
                 if (
                     raw_cand.exists()
                     and verify_candidate_against_artifact(raw_cand, artifact)
@@ -1202,21 +1239,49 @@ class TrackerArchiveService(_TrackerServiceBase):
         if include_current_managed_uri and "://" in artifact.uri:
             scheme, _ = artifact.uri.split("://", 1)
             if scheme in self.fs.mounts:
-                cand = Path(self.fs.resolve_uri(artifact.uri))
-                if cand.exists():
-                    if cand.is_file() and not _is_file_bundle_artifact(artifact):
+                coord = self.fs.translate_location_coordinate(scheme, "", artifact.uri)
+                managed_cand: Path | None = None
+                if coord.is_resolved and coord.mount_canonical_lexical_path is not None:
+                    if (
+                        coord.lexical_path is not None
+                        and (
+                            coord.lexical_path.exists()
+                            or coord.lexical_path.is_symlink()
+                        )
+                        and self._has_symlink_component(coord.lexical_path)
+                    ):
+                        _record_symlink(coord.lexical_path)
+                    else:
+                        managed_cand = coord.mount_canonical_lexical_path
+                elif (
+                    coord.lexical_path is not None
+                    and (coord.lexical_path.exists() or coord.lexical_path.is_symlink())
+                    and self._has_symlink_component(coord.lexical_path)
+                ):
+                    _record_symlink(coord.lexical_path)
+                if managed_cand is not None and (
+                    (managed_cand.exists() or managed_cand.is_symlink())
+                    and self._has_symlink_component(managed_cand)
+                ):
+                    _record_symlink(managed_cand)
+                elif managed_cand is not None and managed_cand.exists():
+                    if managed_cand.is_file() and not _is_file_bundle_artifact(
+                        artifact
+                    ):
                         if artifact.digest is None:
                             raise ValueError(
                                 f"Cannot archive artifact {artifact.key!r} from its current "
                                 "configured mount: artifact hash is unavailable."
                             )
-                        if not verify_candidate_against_artifact(cand, artifact):
+                        if not verify_candidate_against_artifact(
+                            managed_cand, artifact
+                        ):
                             raise ValueError(
                                 f"Current configured mount source for artifact {artifact.key!r} "
                                 "does not match artifact hash."
                             )
-                    if source_validator is None or source_validator(cand):
-                        return cand.resolve()
+                    if source_validator is None or source_validator(managed_cand):
+                        return managed_cand.resolve()
 
         if self._active_archive_replace_backup is not None:
             archive_root, backup_root = self._active_archive_replace_backup
@@ -1247,13 +1312,17 @@ class TrackerArchiveService(_TrackerServiceBase):
                     ):
                         return backup_entry.resolve()
 
+        if first_symlink_path is not None:
+            if source_validator is not None:
+                source_validator(first_symlink_path)
+            elif fallback_validator is not None:
+                fallback_validator(first_symlink_path)
+
         if fallback_validator is not None:
-            for cand in iter_artifact_candidates(
-                self.tracker,
+            for cand in active_resolver.iter_candidates(
                 artifact,
                 historical_run=run,
                 include_runtime_abs=True,
-                resolver=resolver,
             ):
                 probe_path = cand.mount_canonical_lexical_path
                 if (
@@ -2664,6 +2733,82 @@ class TrackerArchiveService(_TrackerServiceBase):
         self._run_artifacts_cache.clear()
         return refreshed_by_id
 
+    def append_artifacts_recovery_roots_bulk(
+        self,
+        items: Sequence[tuple[Artifact, Sequence[str]]],
+    ) -> None:
+        """Append per-artifact recovery roots in one database transaction and sidecar pass."""
+        if not items:
+            return
+        if self.db is None:
+            raise RuntimeError(
+                "Cannot update artifact recovery roots: tracker has no database configured."
+            )
+
+        by_aid: dict[uuid.UUID, tuple[Artifact, list[str]]] = {}
+        for artifact, roots in items:
+            if not isinstance(artifact, Artifact):
+                raise TypeError("artifact must be an Artifact instance.")
+            if artifact.id is None:
+                raise ValueError("artifact must have an id.")
+            incoming = self.fs.normalize_recovery_roots(roots)
+            if not incoming:
+                continue
+            if artifact.id in by_aid:
+                _, prev_roots = by_aid[artifact.id]
+                by_aid[artifact.id] = (
+                    artifact,
+                    self.fs.normalize_recovery_roots([*prev_roots, *incoming]),
+                )
+            else:
+                by_aid[artifact.id] = (artifact, incoming)
+
+        if not by_aid:
+            return
+
+        existing_by_id = self.db.get_artifacts_recovery_locations_bulk(
+            list(by_aid.keys())
+        )
+        base_ns = time.time_ns()
+        locations_by_aid: dict[uuid.UUID, list[ArtifactLocationRow]] = {}
+        snapshot_roots: dict[uuid.UUID, tuple[Artifact, Sequence[str]]] = {}
+        for aid, (artifact, incoming) in by_aid.items():
+            existing_rows = existing_by_id.get(aid, [])
+            existing_roots = [
+                extracted
+                for r in existing_rows
+                if (
+                    extracted := self.fs.extract_recovery_root_from_location_row(
+                        artifact.uri, r
+                    )
+                )
+                is not None
+            ]
+            normalized = self.fs.normalize_recovery_roots([*existing_roots, *incoming])
+            locations_by_aid[aid] = self._build_recovery_location_rows_for_artifact(
+                artifact,
+                normalized,
+                existing_rows=existing_rows,
+                verified_roots=(),
+                default_site="advisory",
+                retain_unextracted_existing=True,
+                base_ns=base_ns,
+            )
+            snapshot_roots[aid] = (artifact, normalized)
+
+        self.db.replace_artifact_recovery_locations_bulk(
+            locations_by_aid,
+            require_all=True,
+        )
+        self._record_recovery_mounts_for_artifacts(
+            [
+                (artifact, locations_by_aid.get(aid, ()))
+                for aid, (artifact, _) in by_aid.items()
+            ]
+        )
+        self._persist_snapshot_recovery_roots_for_artifacts(snapshot_roots)
+        self._run_artifacts_cache.clear()
+
     def register_run_output_recovery_copies(
         self,
         run_id: str,
@@ -3027,6 +3172,10 @@ class TrackerArchiveService(_TrackerServiceBase):
         report: dict[str, ArchivedRunOutputFile] = {}
         producing_run = self.get_run(run_id)
         batch_resolver = MountPrecedenceResolver.from_tracker(self.tracker)
+        self.tracker.location_resolver.prefetch(
+            list(selected.values()),
+            runs=[producing_run] if producing_run is not None else (),
+        )
 
         for key, artifact in selected.items():
             output_set_kind = _output_set_hydration_kind(self.tracker, artifact)
@@ -3149,6 +3298,11 @@ class TrackerArchiveService(_TrackerServiceBase):
                 key: self._with_archive_candidate_path(artifact)
                 for key, artifact in selected.items()
             }
+        producing_run = self.get_run(run_id)
+        self.tracker.location_resolver.prefetch(
+            list(selected.values()),
+            runs=[producing_run] if producing_run is not None else (),
+        )
         output_set_plans, nested_scalars, nested_directories = (
             self._build_selected_output_set_archive_plans(selected, archive_root)
         )
@@ -3316,18 +3470,55 @@ class TrackerArchiveService(_TrackerServiceBase):
         if not normalized_roots:
             return
         target_root = normalized_roots[0]
-        mount_name, mount_inst, root_uri, _ = self.fs.archive_coordinate_for_root(
-            "", target_root
-        )
+        resolved_target = Path(target_root).expanduser().resolve()
+        lexical_target = Path(target_root).expanduser().absolute()
+
+        root_coordinates: list[tuple[str, str, str]] = [
+            self.fs.archive_coordinate_for_root("", target_root)[:3],
+            ("abs", "", f"file://{resolved_target}"),
+            ("abs", "", f"file://{lexical_target}"),
+        ]
+
+        mount_candidates: dict[str, list[str | Path]] = {}
+        for scheme, m_root in self.fs.mounts.items():
+            mount_candidates.setdefault(scheme, []).append(m_root)
+        if self.db.has_artifact_location_table():
+            try:
+                rows = self.db.fetchall(
+                    "SELECT DISTINCT mount_name FROM artifact_location "
+                    "WHERE site IN ('archive', 'advisory') AND status = 'active' "
+                    "AND mount_name != 'abs'"
+                )
+                for (m_scheme,) in rows:
+                    if isinstance(m_scheme, str) and m_scheme:
+                        mount_candidates.setdefault(m_scheme, [])
+            except Exception:
+                pass
+        for scheme in list(mount_candidates.keys()):
+            for hist_root in self.db.lookup_historical_mount_roots(scheme):
+                mount_candidates[scheme].append(hist_root)
+
+        for scheme, roots in mount_candidates.items():
+            for m_root in roots:
+                try:
+                    resolved_mount = Path(m_root).expanduser().resolve()
+                except (OSError, RuntimeError, TypeError, ValueError):
+                    continue
+                if resolved_target.is_relative_to(resolved_mount):
+                    if resolved_target == resolved_mount:
+                        root_coordinates.append((scheme, "", f"{scheme}://"))
+                    else:
+                        rel = resolved_target.relative_to(resolved_mount).as_posix()
+                        root_coordinates.append((scheme, "", f"{scheme}://{rel}"))
+
+        deduped_coords = list(dict.fromkeys(root_coordinates))
         retained_ids = {
             art.id
             for art in self.get_run_outputs(active_run_id).values()
             if art.id is not None
         }
         updated_any = self.db.evict_recovery_root_locations(
-            mount_name=mount_name,
-            mount_instance_id=mount_inst,
-            root_uri=root_uri,
+            root_coordinates=deduped_coords,
             retained_ids=retained_ids,
         )
         if updated_any:

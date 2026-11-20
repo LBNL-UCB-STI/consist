@@ -57,7 +57,7 @@ from consist.core.resolved_binding import (
     _StrictBindingInvocationContext,
     _validate_strict_binding_invocation_context,
 )
-from consist.core.location_resolver import MountPrecedenceResolver
+from consist.core.location_resolver import LocationResolver
 from consist.core.tracker_artifact_logging import ArtifactLoggingCoordinator
 from consist.core.tracker_artifact_queries import TrackerArtifactQueryService
 from consist.core.tracker_lifecycle import RunLifecycleCoordinator
@@ -337,6 +337,27 @@ class Tracker:
 
         return load_df(artifact, tracker=self, **kwargs)
 
+    @property
+    def location_resolver(self) -> LocationResolver:
+        """Return the epoch-synchronized ``LocationResolver`` bound to this tracker."""
+        resolver = self._location_resolver
+        if resolver is None or resolver.fs is not self.fs or resolver.db is not self.db:
+            resolver = LocationResolver(
+                self.fs,
+                db=self.db,
+                get_run=self.get_run,
+                get_active_run_id=(
+                    lambda: (
+                        self.current_consist.run.id
+                        if self.current_consist is not None
+                        else None
+                    )
+                ),
+            )
+            self._location_resolver = resolver
+        resolver.sync_epoch()
+        return resolver
+
     def artifact_accessibility(self, artifact: Artifact) -> str:
         acc = artifact.accessibility(tracker=self)
         return "accessible" if acc.accessible else "missing"
@@ -372,7 +393,12 @@ class Tracker:
         for index, root in enumerate(roots, start=1):
             if "://" in root and not root.startswith("file://"):
                 continue
-            candidate = (Path(root) / rel).resolve()
+            coord = self.fs.translate_raw_root(root, rel)
+            if not coord.is_resolved or coord.canonical_path is None:
+                lexical = coord.lexical_path or (Path(root) / rel)
+                locations.append((f"recovery_root #{index}", lexical, False))
+                continue
+            candidate = coord.canonical_path
             is_valid = candidate.exists() and verify_candidate_against_artifact(
                 candidate, artifact
             )
@@ -384,27 +410,16 @@ class Tracker:
     ) -> list[str]:
         if artifact.id is None:
             return []
-        db = self._compat_attr("db")
+        db = self.db
         if db is None:
             return []
         rows = db.get_artifact_recovery_locations(artifact.id)
         roots: list[str] = []
-        resolver = MountPrecedenceResolver.from_tracker(self)
+        resolver = self.location_resolver
         for row in rows:
-            extracted = self.fs.extract_recovery_root_from_location_row(
+            extracted = resolver.extract_recovery_root(
                 artifact.uri, row, resolve=resolve
             )
-            if (
-                extracted is not None
-                and "://" in extracted
-                and not extracted.startswith("file://")
-                and row.mount_name not in self.fs.mounts
-            ):
-                hist_roots = resolver.get_historical_mount_roots(row.mount_name)
-                if hist_roots:
-                    extracted = resolver.resolve_historical_recovery_root(
-                        artifact.uri, row, resolve=resolve
-                    )
             if extracted is not None and extracted not in roots:
                 roots.append(extracted)
         return roots
@@ -742,6 +757,7 @@ class Tracker:
         self._run_artifacts_cache_max_entries: int = 1024
 
         self._runs_by_id: Dict[str, Run] = {}
+        self._location_resolver: LocationResolver | None = None
         self._artifact_facet_parsers: list[
             tuple[str, Callable[[str], Optional[FacetLike]]]
         ] = []

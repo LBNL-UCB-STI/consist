@@ -825,7 +825,6 @@ def test_archive_run_outputs_uses_current_configured_mount_for_run_owned_file(
         refreshed = tracker_b.get_run_outputs(run_id)["shared"]
         assert refreshed.uri == artifact.uri
         assert refreshed.recovery_roots == [
-            str(current_workspace.resolve()),
             str(archive_root.resolve()),
         ]
 
@@ -1891,6 +1890,7 @@ def test_archive_run_output_files_rejects_symlinked_historical_root_before_resol
         artifact = tracker.log_artifact(
             output_path, key="historical_linked", direction="output"
         )
+    output_path.unlink()
     # The producer row pins the producer workspace instance, so workspace-instance
     # verification now (correctly) drops the foreign symlinked historical root as
     # unmounted before symlink detection can fire. Add an instance-permissive row

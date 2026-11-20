@@ -235,8 +235,8 @@ def test_tracker_create_grouped_view_with_key(tracker, tmp_path: Path):
 
 def test_materialize_requested_inputs_directory_rollup(tmp_path: Path, caplog) -> None:
     from datetime import datetime, timezone
-    from types import SimpleNamespace
     from consist.core.cache import ActiveRunCacheOptions, materialize_requested_inputs
+    from consist.core.tracker import Tracker
     from consist.digest import Digest
     from consist.models.run import ConsistRecord, Run
 
@@ -270,37 +270,11 @@ def test_materialize_requested_inputs_directory_rollup(tmp_path: Path, caplog) -
         meta={},
     )
 
-    class _FakeTracker:
-        def __init__(self, run_dir: Path, current_consist: ConsistRecord):
-            self.current_consist = current_consist
-            self.db = None
-            self.fs = SimpleNamespace(
-                resolve_historical_path=lambda uri, original_run_dir, **kwargs: uri,
-                normalize_recovery_roots=lambda roots, **kwargs: [],
-                get_remappable_relative_path=lambda uri, **kwargs: None,
-                get_historical_root=lambda *args, **kwargs: None,
-            )
-            self.identity = SimpleNamespace(
-                compute_file_checksum=lambda _path: "checksum",
-                hashing_strategy="full",
-            )
-            self.run_dir = run_dir
-            self.mounts = {}
-            self.allow_external_paths = False
-
-        def resolve_uri(self, uri: str) -> str:
-            return uri
-
-        def run_artifact_dir(self) -> Path:
-            return self.run_dir
-
-    fake_tracker = _FakeTracker(
-        run_dir=tmp_path,
-        current_consist=ConsistRecord(run=run, inputs=[artifact]),
-    )
+    tracker = Tracker(run_dir=tmp_path, db_path=None, allow_external_paths=False)
+    tracker.current_consist = ConsistRecord(run=run, inputs=[artifact])
 
     materialize_requested_inputs(
-        tracker=fake_tracker,
+        tracker=tracker,
         options=ActiveRunCacheOptions(
             requested_input_paths={"skims": destination},
             requested_input_materialization="requested",

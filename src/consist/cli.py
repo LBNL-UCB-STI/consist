@@ -2727,13 +2727,13 @@ def validate(
         else:
             target_run_ids = [latest_run.id]
 
-    from consist.core.location_resolver import MountPrecedenceResolver
     from consist.core.tracker_recovery import resolve_verified_local_path
     from consist.tools.mount_diagnostics import parse_mount_uri
 
     missing: List[Tuple[str, str, Optional[str], str]] = []
     genuinely_missing_artifacts: List["Artifact"] = []
-    mount_resolver = MountPrecedenceResolver.from_tracker(tracker)
+    mount_resolver = tracker.location_resolver
+    mount_resolver.invalidate_live_probes()
     batch_size = 1000
     if env_batch_size := os.getenv("CONSIST_VALIDATE_BATCH_SIZE"):
         try:

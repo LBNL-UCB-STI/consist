@@ -279,8 +279,18 @@ class ProvenanceWriter:
             except OSError:
                 path_exists = False
             if path_exists:
+                from consist.core.tracker_recovery import (
+                    _artifact_has_portable_content_identity,
+                )
+
                 loc = build_verified_location_row(
-                    tracker.fs, artifact, local_path=local_path
+                    tracker.fs,
+                    artifact,
+                    local_path=local_path,
+                    digest_verified=(
+                        direction == "output"
+                        and _artifact_has_portable_content_identity(artifact)
+                    ),
                 )
                 skip_unchanged = False
                 if direction == "input" and db is not None:

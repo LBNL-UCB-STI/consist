@@ -716,7 +716,6 @@ def test_archive_run_outputs_filters_virtual_ingested_and_syncs_last_consist_and
         )
         assert set(archived.keys()) == {"metrics"}
         expected_roots = [
-            str(workspace.resolve()),
             str(archive_root.resolve()),
         ]
         assert archived.outputs["metrics"].recovery_roots == expected_roots
@@ -813,7 +812,6 @@ def test_archive_directory_and_shapefile_under_separate_workspace_mount(
         mode="copy",
     )
     expected_roots = [
-        str(workspace_root.resolve()),
         str(archive_root.resolve()),
     ]
     assert set(archived.keys()) == {"skims_zarr", "zones_shp"}
@@ -1330,6 +1328,149 @@ def test_run_completion_archive_policy_evicts_stale_files_when_output_set_shrink
     run_1_outputs = tracker.get_run_outputs("shrink_run_1")
     assert expected_root not in run_1_outputs["a"].recovery_roots
     assert expected_root not in run_1_outputs["b"].recovery_roots
+    assert not tracker.db.get_artifact_recovery_locations(res_1.outputs["b"].id)
+
+
+def test_run_completion_archive_policy_evicts_replaced_scalar_artifact_location(
+    tmp_path: Path,
+) -> None:
+    """Replacing changed scalar bytes must retire the overwritten historical location."""
+    run_dir = tmp_path / "runs"
+    workspace = tmp_path / "workspace"
+    scratch = tmp_path / "scratch"
+    for path in (run_dir, workspace, scratch):
+        path.mkdir()
+    tracker = Tracker(
+        run_dir=run_dir,
+        db_path=str(tmp_path / "provenance.duckdb"),
+        mounts={"workspace": str(workspace), "scratch": str(scratch)},
+    )
+    archive_root = scratch / "consist-recovery" / "beam_preprocess"
+    policy = OutputPolicyOptions(
+        run_completion_archive=RunCompletionArchivePolicy(
+            archive_root=archive_root,
+            mode="copy",
+        )
+    )
+    out_path = workspace / "beam" / "plans.parquet"
+
+    def step(ctx) -> None:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text("v1", encoding="utf-8")
+        tracker.log_output(out_path, key="plans")
+
+    def changed_step(ctx) -> None:
+        out_path.write_text("v2", encoding="utf-8")
+        tracker.log_output(out_path, key="plans")
+
+    res_1 = tracker.run(
+        fn=step,
+        name="beam_preprocess",
+        run_id="beam_preprocess_run_1",
+        config={"attempt": 1},
+        outputs=["plans"],
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        output_policy=policy,
+    )
+    old_id = res_1.outputs["plans"].id
+    archived_path = archive_root / "beam" / "plans.parquet"
+    assert archived_path.read_bytes() == b"v1"
+    assert tracker.db.get_active_artifact_locations(artifact_id=old_id)
+
+    res_2 = tracker.run(
+        fn=changed_step,
+        name="beam_preprocess",
+        run_id="beam_preprocess_run_2",
+        config={"attempt": 2},
+        outputs=["plans"],
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        output_policy=policy,
+    )
+
+    assert not res_2.cache_hit
+    assert res_2.outputs["plans"].id != old_id
+    assert archived_path.read_bytes() == b"v2"
+    assert tracker.artifact_recovery_roots(res_2.outputs["plans"])
+    assert not tracker.db.get_artifact_recovery_locations(old_id)
+
+
+def test_run_completion_archive_policy_evicts_superseded_cross_mount_archive_location(
+    tmp_path: Path,
+) -> None:
+    """Step-scoped archive eviction must retire Run 1's abs row when Run 2 uses a named mount."""
+    run_dir = tmp_path / "runs"
+    workspace = tmp_path / "workspace"
+    scratch = tmp_path / "scratch"
+    for path in (run_dir, workspace, scratch):
+        path.mkdir()
+
+    db_path = tmp_path / "provenance.duckdb"
+    archive_root = scratch / "consist-recovery" / "asim"
+    policy = OutputPolicyOptions(
+        run_completion_archive=RunCompletionArchivePolicy(
+            archive_root=archive_root,
+            mode="copy",
+        )
+    )
+    file_a = workspace / "asim" / "a.csv"
+    file_b = workspace / "asim" / "b.csv"
+
+    # Run 1: no mounts["scratch"] -> archive location is recorded with mount_name="abs".
+    tracker_1 = Tracker(
+        run_dir=run_dir,
+        db_path=str(db_path),
+        mounts={"workspace": str(workspace)},
+    )
+
+    def step_ab(ctx) -> None:
+        file_a.parent.mkdir(parents=True, exist_ok=True)
+        file_a.write_bytes(b"col\n1\n")
+        file_b.write_bytes(b"col\n2\n")
+        tracker_1.log_output(file_a, key="a")
+        tracker_1.log_output(file_b, key="b")
+
+    res_1 = tracker_1.run(
+        fn=step_ab,
+        name="shrink_step",
+        run_id="cross_mount_run_1",
+        config={"attempt": 1},
+        outputs=["a", "b"],
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        output_policy=policy,
+    )
+    run_1_b_locs = tracker_1.db.get_artifact_recovery_locations(res_1.outputs["b"].id)
+    assert run_1_b_locs
+    assert all(loc.mount_name == "abs" for loc in run_1_b_locs)
+    tracker_1.close()
+
+    # Run 2: restarts with mounts["scratch"] -> archive location uses mount_name="scratch".
+    tracker_2 = Tracker(
+        run_dir=run_dir,
+        db_path=str(db_path),
+        mounts={"workspace": str(workspace), "scratch": str(scratch)},
+    )
+
+    def step_only_a(ctx) -> None:
+        file_a.write_bytes(b"col\n1\n")
+        tracker_2.log_output(file_a, key="a")
+
+    res_2 = tracker_2.run(
+        fn=step_only_a,
+        name="shrink_step",
+        run_id="cross_mount_run_2",
+        config={"attempt": 2},
+        outputs=["a"],
+        execution_options=ExecutionOptions(inject_context="ctx"),
+        output_policy=policy,
+    )
+    assert (archive_root / "asim" / "a.csv").read_bytes() == b"col\n1\n"
+    assert not (archive_root / "asim" / "b.csv").exists()
+    assert not tracker_2.db.get_artifact_recovery_locations(res_1.outputs["a"].id)
+    assert not tracker_2.db.get_artifact_recovery_locations(res_1.outputs["b"].id)
+    run_2_a_locs = tracker_2.db.get_artifact_recovery_locations(res_2.outputs["a"].id)
+    assert run_2_a_locs
+    assert any(loc.mount_name == "scratch" for loc in run_2_a_locs)
+    tracker_2.close()
 
 
 def test_cache_hit_preserves_imperative_outputs_when_output_paths_passed_and_outputs_is_none(
