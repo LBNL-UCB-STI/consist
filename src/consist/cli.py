@@ -2732,7 +2732,8 @@ def validate(
 
     missing: List[Tuple[str, str, Optional[str], str]] = []
     genuinely_missing_artifacts: List["Artifact"] = []
-    hist_root_exists_cache: dict[str, bool] = {}
+    mount_resolver = tracker.location_resolver
+    mount_resolver.invalidate_live_probes()
     batch_size = 1000
     if env_batch_size := os.getenv("CONSIST_VALIDATE_BATCH_SIZE"):
         try:
@@ -2816,16 +2817,7 @@ def validate(
                 if scheme not in tracker.mounts:
                     has_hist_root = False
                     if trust_db and tracker.db is not None:
-                        cached_hist = hist_root_exists_cache.get(scheme)
-                        if cached_hist is None:
-                            cached_hist = any(
-                                Path(cand_root).exists()
-                                for cand_root in tracker.db.lookup_historical_mount_roots(
-                                    scheme
-                                )
-                            )
-                            hist_root_exists_cache[scheme] = cached_hist
-                        has_hist_root = cached_hist
+                        has_hist_root = mount_resolver.has_historical_root(scheme)
                     if not has_hist_root:
                         is_unmounted = True
                         reason = f"unmounted scheme '{scheme}'"

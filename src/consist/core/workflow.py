@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import inspect
+import logging
 import os
 import uuid
 import functools
@@ -32,6 +33,7 @@ from consist.models.run import (
     RunResult,
     CouplerSnapshotPhase,
 )
+from consist.core.location_resolver import MountPrecedenceResolver
 from consist.core.materialize import (
     MaterializedArtifact,
     materialize_artifact,
@@ -96,6 +98,31 @@ def _raise_unexpected_kwargs(kwargs: Mapping[str, Any]) -> None:
         raise TypeError(f"unexpected keyword argument '{names[0]}'")
     joined = "', '".join(names)
     raise TypeError(f"unexpected keyword arguments '{joined}'")
+
+
+logger = logging.getLogger(__name__)
+
+
+def _restore_target_recovery_root(
+    fs: Any,
+    uri: str,
+    restored_path: Path | None,
+    target_root: Path,
+) -> str | None:
+    """Return R such that R / get_remappable_relative_path(uri) == restored_path."""
+    if restored_path is None:
+        return None
+    restored = Path(restored_path).resolve()
+    if not restored.is_relative_to(Path(target_root).resolve()):
+        return None  # not copied into T; nothing to register
+    rel = fs.get_remappable_relative_path(uri)  # no scheme_prefixes, on purpose
+    if rel is None:
+        return None
+    root = fs.invert_relative_layout(restored, rel)
+    if root is None:
+        logger.debug("restore target layout does not end with %s: %s", rel, restored)
+        return None
+    return str(root)
 
 
 def _scenario_header_code_identity() -> None:
@@ -1098,6 +1125,7 @@ class ScenarioContext:
         source_root: Optional[Path],
         effective_remappable_schemes: Mapping[str, Path],
         validate_content_hash: Literal["never", "if-present", "always"],
+        resolver: Optional[MountPrecedenceResolver] = None,
     ) -> MaterializedArtifact:
         """Check for local artifact presence or recover into tracker.run_dir."""
         from consist.core.tracker_recovery import resolve_verified_local_path
@@ -1151,6 +1179,7 @@ class ScenarioContext:
                 on_missing="warn",
                 validate_content_hash=validate_content_hash,
                 scheme_prefixes=effective_remappable_schemes,
+                resolver=resolver,
             )
 
         detached_missing = art.with_abs_path(None).with_resolver(self.tracker)
@@ -1373,6 +1402,9 @@ class ScenarioContext:
         restored_artifacts: Dict[str, Artifact] = {}
         outcomes: Dict[str, MaterializedArtifact] = {}
         pruned_keys_list: List[str] = []
+        batch_resolver = MountPrecedenceResolver.from_tracker(self.tracker)
+        self.tracker.location_resolver.prefetch(list(artifacts.values()))
+        pending_recovery_roots: list[tuple[Artifact, list[str]]] = []
 
         for key, art in artifacts.items():
             scheme_classification = self._classify_coupler_artifact_scheme(
@@ -1404,6 +1436,7 @@ class ScenarioContext:
                     on_missing="warn",
                     validate_content_hash=normalize_validate_hash,
                     scheme_prefixes=effective_remappable_schemes,
+                    resolver=batch_resolver,
                 )
             else:
                 outcome = self._check_or_materialize_local_artifact(
@@ -1412,6 +1445,7 @@ class ScenarioContext:
                     source_root=resolved_source_root,
                     effective_remappable_schemes=effective_remappable_schemes,
                     validate_content_hash=normalize_validate_hash,
+                    resolver=batch_resolver,
                 )
 
             outcomes[key] = outcome
@@ -1444,14 +1478,23 @@ class ScenarioContext:
                     self.tracker
                 )
                 if (
-                    source_root is not None
-                    and hydrated_art.id is not None
+                    hydrated_art.id is not None
                     and self.tracker.db is not None
                     and not self.tracker.db.read_only
                 ):
-                    self.tracker.set_artifact_recovery_roots(
-                        hydrated_art, [str(Path(source_root).resolve())], append=True
+                    new_roots: list[str] = []
+                    target_root_rec = _restore_target_recovery_root(
+                        self.tracker.fs,
+                        hydrated_art.uri,
+                        outcome.path,
+                        resolved_target_root,
                     )
+                    if target_root_rec is not None:
+                        new_roots.append(target_root_rec)
+                    if source_root is not None:
+                        new_roots.append(str(Path(source_root).resolve()))
+                    if new_roots:
+                        pending_recovery_roots.append((hydrated_art, new_roots))
 
                 restored_artifacts[key] = hydrated_art
                 self.coupler.set(key, hydrated_art)
@@ -1464,6 +1507,11 @@ class ScenarioContext:
                     unresolvable_art = outcome.artifact.with_resolver(self.tracker)
                     restored_artifacts[key] = unresolvable_art
                     self.coupler.set(key, unresolvable_art)
+
+        if pending_recovery_roots:
+            self.tracker._archive_service.append_artifacts_recovery_roots_bulk(
+                pending_recovery_roots
+            )
 
         if restored_step_ordinal > 0:
             if phase == "pre":

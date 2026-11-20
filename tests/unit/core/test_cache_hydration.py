@@ -2838,8 +2838,9 @@ def test_inputs_missing_validation_preserves_valid_and_rehydrates_corrupted_dire
         "skims": str(destination.resolve())
     }
 
-    # 3) When validate_materialized_inputs is disabled (default), missing directory
-    #    inputs should not perform manifest tree validation during recovery discovery.
+    # 3) Under unified Tier 4a -> Tier 4b ordering, active archive_root (Tier 4a)
+    #    is selected before unmounted historical runs_a (Tier 4b) even when
+    #    validate_materialized_inputs is disabled.
     import shutil
 
     shutil.rmtree(destination)
@@ -2851,7 +2852,7 @@ def test_inputs_missing_validation_preserves_valid_and_rehydrates_corrupted_dire
         cache_hydration="inputs-missing",
         validate_materialized_inputs=False,
     ):
-        assert (destination / "nested" / "0.0").read_bytes() == b"corrupted-historical"
+        assert (destination / "nested" / "0.0").read_bytes() == b"expected-skim"
 
     tracker_a.close()
     tracker_b.close()

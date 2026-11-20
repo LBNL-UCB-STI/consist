@@ -1,28 +1,35 @@
+import hashlib
 import os
+import stat
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, Optional, Union, cast
+from typing import Dict, Optional, Union, cast
 
 from consist.location import (
     ArtifactLocationRow,
     LocationSite,
     LocationStatus,
+    TranslatedCoordinate,
     Witness,
     capture_witness,
+    rejected_coordinate,
+    unmounted_coordinate,
     workspace_mount_instance_id,
 )
+from consist.models.artifact import Artifact
+from consist.models.run import Run
 
 
 def capture_artifact_witness(
     path: str | Path,
-    artifact: Any,
+    artifact: Artifact,
     *,
     observed_at_ns: Optional[int] = None,
 ) -> Optional[Witness]:
     """Capture a ``FileStat`` or ``DirTreeStat`` witness matching ``artifact``'s layout."""
-    meta = artifact.meta if isinstance(artifact.meta, Mapping) else {}
-    driver = artifact.driver if isinstance(artifact.driver, str) else None
+    meta = artifact.meta
+    driver = artifact.driver
     path_obj = Path(path)
     is_dir = bool(
         meta.get("is_dir")
@@ -50,7 +57,7 @@ def capture_artifact_witness(
             entry_name = raw_entry
         elif path_obj.is_file():
             entry_name = path_obj.name
-        elif isinstance(artifact.uri, str) and artifact.uri.lower().endswith(".shp"):
+        elif artifact.uri.lower().endswith(".shp"):
             entry_name = Path(artifact.uri.split("://", 1)[-1]).name
     return capture_witness(
         path,
@@ -64,7 +71,7 @@ def capture_artifact_witness(
 
 def build_verified_location_row(
     fs: "FileSystemManager",
-    artifact: Any,
+    artifact: Artifact,
     *,
     local_path: str | Path | None = None,
     uri: str | None = None,
@@ -72,11 +79,12 @@ def build_verified_location_row(
     site: Optional[LocationSite] = None,
     status: LocationStatus = "active",
     capture_local_witness: bool = True,
+    digest_verified: bool = False,
     observed_at_ns: Optional[int] = None,
 ) -> ArtifactLocationRow:
     """Construct a canonical ``ArtifactLocationRow`` (with optional stat witness)."""
     obs_ns = time.time_ns() if observed_at_ns is None else int(observed_at_ns)
-    target_uri = uri if uri is not None else str(artifact.uri)
+    target_uri = uri if uri is not None else artifact.uri
     if archive_root is not None:
         m_name, m_inst, canonical_uri, target_path = fs.archive_coordinate_for_root(
             target_uri, archive_root
@@ -103,6 +111,8 @@ def build_verified_location_row(
         witness = capture_artifact_witness(
             resolved_local, artifact, observed_at_ns=obs_ns
         )
+        if witness is not None and digest_verified:
+            witness = witness.with_digest_verified(True)
 
     return ArtifactLocationRow.create(
         digest=str(artifact.digest) if artifact.digest is not None else None,
@@ -118,52 +128,64 @@ def build_verified_location_row(
     )
 
 
-def resolve_historical_artifact_path(
-    fs: Any,
-    artifact: Any,
-    run: Any,
-    *,
-    fallback_to_current_uri: bool = True,
-) -> Optional[Path]:
-    """Resolve an artifact's historical path using metadata from ``run`` and ``artifact``."""
-    run_meta = run.meta if run is not None and isinstance(run.meta, Mapping) else {}
-    original_run_dir_raw = run_meta.get("_physical_run_dir")
-    original_run_dir = (
-        original_run_dir_raw
-        if isinstance(original_run_dir_raw, str) and original_run_dir_raw
-        else None
-    )
-    raw_mounts = run_meta.get("mounts")
-    mounts_snapshot = (
-        {
-            str(k): str(v)
-            for k, v in raw_mounts.items()
-            if isinstance(k, str) and isinstance(v, str)
-        }
-        if isinstance(raw_mounts, Mapping)
-        else None
-    )
-    artifact_meta = (
-        artifact.meta
-        if artifact is not None and isinstance(artifact.meta, Mapping)
-        else {}
-    )
-    raw_mount_root = artifact_meta.get("mount_root")
-    artifact_mount_root = (
-        raw_mount_root if isinstance(raw_mount_root, str) and raw_mount_root else None
-    )
-    if not fallback_to_current_uri and not (
-        original_run_dir or mounts_snapshot or artifact_mount_root
-    ):
+def _canonical_containment_target(
+    candidate: Path,
+) -> Optional[tuple[Path, Path]]:
+    """Best-effort canonical target of an absolute candidate path.
+
+    The candidate does not need to exist: a missing tail is joined lexically
+    onto the deepest strictly-resolved existing ancestor, so containment can
+    be established for not-yet-materialized candidates. Returns
+    ``(containment_target, leaf_preserving_canonical_path)`` or ``None`` when
+    a trustworthy canonical target cannot be established (dangling symlink,
+    symlink loop, unreadable component), which callers must treat as a
+    fail-closed rejection.
+    """
+    probe = Path(os.path.abspath(candidate))
+    tail: list[str] = []
+    leaf_st: Optional[os.stat_result] = None
+    while True:
+        try:
+            # lstat (not exists) succeeds on dangling symlinks so they fall
+            # through to strict resolve and fail closed.
+            st = os.lstat(probe)
+        except FileNotFoundError:
+            parent = probe.parent
+            if parent == probe:
+                base = probe
+                break
+            tail.append(probe.name)
+            probe = parent
+            continue
+        except OSError:
+            return None
+        try:
+            base = probe.resolve(strict=True)
+        except (OSError, RuntimeError):
+            return None
+        leaf_st = st
+        break
+
+    if tail:
+        joined = base.joinpath(*reversed(tail))
+        return joined, joined
+
+    if leaf_st is not None and stat.S_ISLNK(leaf_st.st_mode):
+        leaf_canonical = Path(os.path.realpath(probe.parent)) / probe.name
+        return base, leaf_canonical
+    return base, base
+
+
+def _checked_uri_relative_parts(rel: str) -> tuple[str, ...] | None:
+    """Normalize a URI-relative path into joinable parts, rejecting traversal.
+
+    Returns ``None`` when the value contains ``..`` components (including a
+    terminal ``..``), before any join against a mount or workspace root.
+    """
+    parts = PurePosixPath(rel).parts if rel else ()
+    if ".." in parts:
         return None
-    return Path(
-        fs.resolve_historical_path(
-            artifact.uri,
-            original_run_dir,
-            mounts_snapshot=mounts_snapshot,
-            artifact_mount_root=artifact_mount_root,
-        )
-    )
+    return tuple(part for part in parts if part not in ("", "."))
 
 
 class FileSystemManager:
@@ -206,6 +228,10 @@ class FileSystemManager:
         self._ws_id_cache: Optional[tuple[Path, str]] = None
         self._mounts_key_cache: Optional[
             tuple[tuple[tuple[str, str], ...], tuple[tuple[str, str], ...]]
+        ] = None
+        self._root_info_cache: dict[str, tuple[Path, Path, str]] = {}
+        self._root_info_cache_key: Optional[
+            tuple[Path, tuple[tuple[str, str], ...]]
         ] = None
 
     def resolve_uri(self, uri: str) -> str:
@@ -416,17 +442,40 @@ class FileSystemManager:
 
     def resolve_historical_artifact_path(
         self,
-        artifact: Any,
-        run: Any,
-        *,
-        fallback_to_current_uri: bool = True,
-    ) -> Optional[Path]:
+        artifact: Artifact,
+        run: Run,
+    ) -> Path:
         """Resolve an artifact's historical path using metadata from ``run`` and ``artifact``."""
-        return resolve_historical_artifact_path(
-            self,
-            artifact,
-            run,
-            fallback_to_current_uri=fallback_to_current_uri,
+        run_meta = run.meta
+        original_run_dir_raw = run_meta.get("_physical_run_dir")
+        original_run_dir = (
+            original_run_dir_raw
+            if isinstance(original_run_dir_raw, str) and original_run_dir_raw
+            else None
+        )
+        raw_mounts = run_meta.get("mounts")
+        mounts_snapshot = (
+            {
+                str(k): str(v)
+                for k, v in raw_mounts.items()
+                if isinstance(k, str) and isinstance(v, str)
+            }
+            if isinstance(raw_mounts, Mapping)
+            else None
+        )
+        raw_mount_root = artifact.meta.get("mount_root")
+        artifact_mount_root = (
+            raw_mount_root
+            if isinstance(raw_mount_root, str) and raw_mount_root
+            else None
+        )
+        return Path(
+            self.resolve_historical_path(
+                artifact.uri,
+                original_run_dir,
+                mounts_snapshot=mounts_snapshot,
+                artifact_mount_root=artifact_mount_root,
+            )
         )
 
     @staticmethod
@@ -496,6 +545,48 @@ class FileSystemManager:
         return normalized
 
     @staticmethod
+    def unprefixed_uri_relative_path(uri: str) -> Optional[Path]:
+        """Extract a normalized relative path from an unprefixed or scheme URI."""
+        if uri.startswith("./"):
+            return FileSystemManager.normalize_remappable_relative_path(uri[2:])
+        if "://" not in uri:
+            return None
+        scheme, rel_path = uri.split("://", 1)
+        if scheme == "file":
+            return None
+        return FileSystemManager.normalize_remappable_relative_path(
+            rel_path.lstrip("/")
+        )
+
+    @staticmethod
+    def invert_relative_layout(target_path: Path, rel_path: Path) -> Optional[Path]:
+        """Recover the root prefix by stripping a matching ``rel_path`` suffix."""
+        rel_parts = rel_path.parts
+        if not rel_parts:
+            return None
+        target_parts = target_path.parts
+        if (
+            len(target_parts) > len(rel_parts)
+            and target_parts[-len(rel_parts) :] == rel_parts
+        ):
+            return target_path.parents[len(rel_parts) - 1]
+        return None
+
+    def nested_mount_prefix(
+        self, mount_root: str | Path, workspace_root: str | Path
+    ) -> Optional[Path]:
+        """Return the relative subpath when ``mount_root`` is strictly inside ``workspace_root``."""
+        try:
+            _, mount_resolved, _ = self._resolve_root_info(mount_root)
+            _, workspace_resolved, _ = self._resolve_root_info(workspace_root)
+            rel = mount_resolved.relative_to(workspace_resolved)
+            if rel != Path("."):
+                return rel
+        except (ValueError, RuntimeError, OSError):
+            return None
+        return None
+
+    @staticmethod
     def normalize_remappable_relative_path(rel_path: str) -> Optional[Path]:
         """
         Validate and normalize a remappable URI-relative path.
@@ -559,14 +650,9 @@ class FileSystemManager:
         if scheme_prefixes is not None and scheme in scheme_prefixes:
             prefix = scheme_prefixes[scheme]
         elif scheme in self.mounts and self.run_dir:
-            try:
-                mount_resolved = Path(self.mounts[scheme]).resolve()
-                run_resolved = Path(self.run_dir).resolve()
-                rel = mount_resolved.relative_to(run_resolved)
-                if rel != Path("."):
-                    prefix = rel
-            except (ValueError, RuntimeError):
-                pass
+            rel = self.nested_mount_prefix(self.mounts[scheme], self.run_dir)
+            if rel is not None:
+                prefix = rel
 
         if prefix is not None:
             clean_rel = rel_path.lstrip("/")
@@ -624,33 +710,21 @@ class FileSystemManager:
         if mounts_snapshot and isinstance(mounts_snapshot.get(scheme), str):
             mount_path = Path(mounts_snapshot[scheme])
             if original_run_dir and scheme != "workspace":
-                try:
+                if self.nested_mount_prefix(mount_path, original_run_dir) is not None:
                     orig_dir_path = Path(original_run_dir)
-                    rel = mount_path.resolve().relative_to(orig_dir_path.resolve())
-                    if rel != Path("."):
-                        return (
-                            orig_dir_path.resolve()
-                            if resolve
-                            else orig_dir_path.absolute()
-                        )
-                except (ValueError, RuntimeError):
-                    pass
+                    return (
+                        orig_dir_path.resolve() if resolve else orig_dir_path.absolute()
+                    )
             return mount_path.resolve() if resolve else mount_path.absolute()
 
         if artifact_mount_root:
             mount_path = Path(artifact_mount_root)
             if original_run_dir and scheme != "workspace":
-                try:
+                if self.nested_mount_prefix(mount_path, original_run_dir) is not None:
                     orig_dir_path = Path(original_run_dir)
-                    rel = mount_path.resolve().relative_to(orig_dir_path.resolve())
-                    if rel != Path("."):
-                        return (
-                            orig_dir_path.resolve()
-                            if resolve
-                            else orig_dir_path.absolute()
-                        )
-                except (ValueError, RuntimeError):
-                    pass
+                    return (
+                        orig_dir_path.resolve() if resolve else orig_dir_path.absolute()
+                    )
             return mount_path.resolve() if resolve else mount_path.absolute()
 
         if scheme == "workspace" and original_run_dir:
@@ -658,58 +732,6 @@ class FileSystemManager:
             return path.resolve() if resolve else path.absolute()
 
         return None
-
-    def get_historical_remap(
-        self,
-        uri: str,
-        *,
-        original_run_dir: Optional[str],
-        mounts_snapshot: Optional[Dict[str, str]] = None,
-        artifact_mount_root: Optional[str] = None,
-        scheme_prefixes: Optional[Mapping[str, Union[str, Path]]] = None,
-    ) -> Optional[tuple[Path, Path]]:
-        """Derive a historical root plus portable relative URI layout.
-
-        Parameters
-        ----------
-        uri : str
-            Artifact container URI to remap.
-        original_run_dir : str | None
-            Historical workspace root for workspace-relative URIs.
-        mounts_snapshot : dict[str, str] | None, optional
-            Historical mount roots recorded by URI scheme.
-        artifact_mount_root : str | None, optional
-            Artifact-specific fallback mount root.
-        scheme_prefixes : mapping of str to str | Path, optional
-            Prefix overrides by scheme for relative path derivation.
-
-        Returns
-        -------
-        tuple[Path, Path] | None
-            Historical root and safe relative layout, or ``None`` when the URI
-            is not recovery-remappable.
-
-        Notes
-        -----
-        This is stricter than :meth:`resolve_historical_path` because it only
-        returns layouts safe for recovery-oriented materialization.
-        """
-        relative_path = self.get_remappable_relative_path(
-            uri, scheme_prefixes=scheme_prefixes
-        )
-        if relative_path is None:
-            return None
-
-        historical_root = self.get_historical_root(
-            uri,
-            original_run_dir=original_run_dir,
-            mounts_snapshot=mounts_snapshot,
-            artifact_mount_root=artifact_mount_root,
-        )
-        if historical_root is None:
-            return None
-
-        return historical_root, relative_path
 
     @property
     def workspace_instance_id(self) -> str:
@@ -819,18 +841,73 @@ class FileSystemManager:
 
         return "abs", "", f"file://{target_str}", target_path
 
-    def resolve_location_coordinate(
+    def _resolve_root_info(
+        self, raw_root: str | os.PathLike[str]
+    ) -> tuple[Path, Path, str]:
+        cache_key = (self.run_dir, self.sorted_mounts_key)
+        if self._root_info_cache_key != cache_key:
+            self._root_info_cache.clear()
+            self._root_info_cache_key = cache_key
+        raw_str = os.fspath(raw_root)
+        cached = self._root_info_cache.get(raw_str)
+        if cached is not None:
+            return cached
+        expanded = Path(raw_root).expanduser()
+        lexical_root = Path(os.path.abspath(expanded))
+        canonical_root = Path(os.path.realpath(lexical_root))
+        inst_id = hashlib.sha256(str(canonical_root).encode("utf-8")).hexdigest()[:16]
+        info = (lexical_root, canonical_root, inst_id)
+        self._root_info_cache[raw_str] = info
+        return info
+
+    def translate_location_coordinate(
         self,
         mount_name: str,
         mount_instance_id: str,
         uri: str,
         *,
         historical_run_dir: str | Path | None = None,
-    ) -> Optional[Path]:
-        """Resolve ``(mount_name, mount_instance_id, uri)`` to a host ``Path`` or ``None``."""
+        verify_workspace_instance: bool = True,
+    ) -> TranslatedCoordinate:
+        """Checked translation of a location coordinate to a host path.
+
+        Returns a :class:`TranslatedCoordinate` with:
+        - ``status="resolved"`` and ``lexical_path``, ``mount_canonical_lexical_path``,
+          and ``canonical_path`` populated when the coordinate is mounted and safe.
+        - ``status="unmounted"`` and ``unmounted_uri`` when the scheme is unmounted
+          or foreign.
+        - ``status="rejected"`` and ``rejection_reason`` when unsafe (``..`` traversal,
+          containment escape, dangling symlink, symlink loop, or permission failure).
+        """
         if mount_name == "abs":
-            raw = uri[len("file://") :] if uri.startswith("file://") else uri
-            return Path(raw) if raw else None
+            stripped = uri[len("file://") :] if uri.startswith("file://") else uri
+            if not stripped:
+                return unmounted_coordinate(mount_name, uri)
+            if ".." in PurePosixPath(stripped).parts:
+                return rejected_coordinate(
+                    mount_name,
+                    uri,
+                    f"location coordinate contains path traversal: {stripped!r}",
+                )
+            p = Path(stripped)
+            containment = _canonical_containment_target(p)
+            if containment is None:
+                return rejected_coordinate(
+                    mount_name,
+                    uri,
+                    f"location coordinate cannot be resolved safely: {p}",
+                    lexical_path=p,
+                    mount_canonical_lexical_path=p,
+                )
+            _, leaf_canonical_path = containment
+            return TranslatedCoordinate(
+                status="resolved",
+                mount_name=mount_name,
+                uri=uri,
+                lexical_path=p,
+                mount_canonical_lexical_path=p,
+                canonical_path=leaf_canonical_path,
+            )
 
         if mount_name in ("workspace", "runs"):
             if uri.startswith("workspace://"):
@@ -842,33 +919,40 @@ class FileSystemManager:
             else:
                 rel = uri
 
-            base_root: Optional[Path] = None
-            if mount_name in self.mounts:
-                mount_path = Path(self.mounts[mount_name]).expanduser()
-                if mount_instance_id in ("", workspace_mount_instance_id(mount_path)):
-                    base_root = Path(os.path.realpath(mount_path))
-                elif historical_run_dir is not None:
-                    hist_path = Path(historical_run_dir).expanduser()
-                    if workspace_mount_instance_id(hist_path) == mount_instance_id:
-                        base_root = Path(os.path.realpath(hist_path))
-            elif mount_instance_id in ("", self.workspace_instance_id):
-                base_root = Path(os.path.realpath(self.run_dir))
-            elif historical_run_dir is not None:
-                hist_path = Path(historical_run_dir).expanduser()
-                if workspace_mount_instance_id(hist_path) == mount_instance_id:
-                    base_root = Path(os.path.realpath(hist_path))
+            root_info: Optional[tuple[Path, Path, str]] = None
+            if historical_run_dir is not None:
+                candidate_info = self._resolve_root_info(historical_run_dir)
+                # Legacy rows may carry an empty mount_instance_id (pre-instance
+                # ledger entries); they deliberately translate through any
+                # historical root of the same scheme. Test-pinned by
+                # test_historical_workspace_instance_verification; existence-only
+                # cache hydrate sites rely on these same-scheme DB-indexed roots.
+                if (
+                    not verify_workspace_instance
+                    or mount_instance_id == ""
+                    or mount_instance_id == candidate_info[2]
+                ):
+                    root_info = candidate_info
+                # else: leave root_info = None -> falls through to "unmounted".
+            elif mount_name in self.mounts:
+                candidate_info = self._resolve_root_info(self.mounts[mount_name])
+                if mount_instance_id in ("", candidate_info[2]):
+                    root_info = candidate_info
+            else:
+                candidate_info = self._resolve_root_info(self.run_dir)
+                if mount_instance_id in ("", candidate_info[2]):
+                    root_info = candidate_info
 
-            if base_root is None:
-                return None
-            candidate = base_root / rel
-            resolved_candidate = (
-                Path(os.path.realpath(candidate.parent)) / candidate.name
+            if root_info is None:
+                return unmounted_coordinate(mount_name, uri)
+            lexical_root, canonical_root, _ = root_info
+            return self._translate_under_root(
+                mount_name,
+                uri,
+                lexical_root,
+                canonical_root,
+                rel,
             )
-            try:
-                resolved_candidate.relative_to(base_root)
-            except ValueError:
-                return None
-            return resolved_candidate
 
         if mount_name in self.mounts or historical_run_dir is not None:
             raw_mount_root = (
@@ -876,23 +960,118 @@ class FileSystemManager:
                 if historical_run_dir is not None
                 else self.mounts[mount_name]
             )
-            mount_root = Path(os.path.realpath(Path(raw_mount_root).expanduser()))
+            raw_root_str = str(raw_mount_root)
+            if "://" in raw_root_str and not raw_root_str.startswith("file://"):
+                return unmounted_coordinate(mount_name, uri)
+            lexical_root, canonical_root, _ = self._resolve_root_info(raw_mount_root)
             rel = (
                 uri.split("://", 1)[1].lstrip("/") if "://" in uri else uri.lstrip("./")
             )
-            candidate = mount_root / rel if rel else mount_root
-            resolved = (
-                Path(os.path.realpath(candidate.parent)) / candidate.name
-                if rel
-                else mount_root
+            return self._translate_under_root(
+                mount_name,
+                uri,
+                lexical_root,
+                canonical_root,
+                rel,
             )
-            try:
-                resolved.relative_to(mount_root)
-            except ValueError:
-                return None
-            return resolved
 
-        return None
+        return unmounted_coordinate(mount_name, uri)
+
+    def _translate_under_root(
+        self,
+        mount_name: str,
+        uri: str,
+        lexical_root: Path,
+        canonical_root: Path,
+        rel: str,
+    ) -> TranslatedCoordinate:
+        rel_parts = _checked_uri_relative_parts(rel)
+        if rel_parts is None:
+            return rejected_coordinate(
+                mount_name,
+                uri,
+                f"location coordinate contains path traversal: {rel!r}",
+            )
+        return self._checked_translated_coordinate(
+            mount_name,
+            uri,
+            lexical_root,
+            canonical_root,
+            rel_parts,
+        )
+
+    def _checked_translated_coordinate(
+        self,
+        mount_name: str,
+        uri: str,
+        lexical_root: Path,
+        canonical_root: Path,
+        rel_parts: tuple[str, ...],
+    ) -> TranslatedCoordinate:
+        lexical_path = lexical_root.joinpath(*rel_parts) if rel_parts else lexical_root
+        mount_canonical_lexical_path = (
+            canonical_root.joinpath(*rel_parts) if rel_parts else canonical_root
+        )
+        containment = _canonical_containment_target(mount_canonical_lexical_path)
+        if containment is None:
+            return rejected_coordinate(
+                mount_name,
+                uri,
+                f"location coordinate resolves outside its root: {lexical_path}",
+                lexical_path=lexical_path,
+                mount_canonical_lexical_path=mount_canonical_lexical_path,
+            )
+        target, leaf_canonical_path = containment
+        if not target.is_relative_to(canonical_root):
+            return rejected_coordinate(
+                mount_name,
+                uri,
+                f"location coordinate resolves outside its root: {lexical_path}",
+                lexical_path=lexical_path,
+                mount_canonical_lexical_path=mount_canonical_lexical_path,
+            )
+        canonical_path = leaf_canonical_path if rel_parts else canonical_root
+        return TranslatedCoordinate(
+            status="resolved",
+            mount_name=mount_name,
+            uri=uri,
+            lexical_path=lexical_path,
+            mount_canonical_lexical_path=mount_canonical_lexical_path,
+            canonical_path=canonical_path,
+        )
+
+    def translate_raw_root(self, root: Path | str, rel: Path) -> TranslatedCoordinate:
+        """Translate an arbitrary ``(root, rel)`` pair through the containment invariant.
+
+        Single home of the fail-closed containment rules (unsafe relative
+        parts, containment escape) shared by the location resolver's
+        root-based candidate construction.
+        """
+        lexical_root, canonical_root, _ = self._resolve_root_info(root)
+        return self._translate_under_root(
+            "",
+            str(lexical_root),
+            lexical_root,
+            canonical_root,
+            rel.as_posix(),
+        )
+
+    def resolve_location_coordinate(
+        self,
+        mount_name: str,
+        mount_instance_id: str,
+        uri: str,
+        *,
+        historical_run_dir: str | Path | None = None,
+    ) -> Optional[Path]:
+        """Resolve ``(mount_name, mount_instance_id, uri)`` to a host ``Path`` or ``None``."""
+        coord = self.translate_location_coordinate(
+            mount_name,
+            mount_instance_id,
+            uri,
+            historical_run_dir=historical_run_dir,
+        )
+        return coord.canonical_path if coord.is_resolved else None
 
     def resolve_location_row_path(
         self,
@@ -914,32 +1093,58 @@ class FileSystemManager:
         row: ArtifactLocationRow,
         *,
         resolve: bool = True,
+        historical_run_dir: str | Path | None = None,
     ) -> Optional[str]:
-        """Reconstruct the normalized recovery root directory or URI from an archive/advisory row."""
+        """Reconstruct the normalized recovery root directory or URI from an archive/advisory row.
+
+        Extraction runs against the checked **lexical** coordinate layout, so a
+        symlink that changes an ancestor component's name cannot make the
+        artifact-relative suffix disappear (the ``lexical_root /
+        artifact_relative_path`` inversion reconstructs the translated lexical
+        coordinate). The extracted root is canonicalized only when
+        ``resolve=True``.
+
+        Returns ``None`` when the coordinate is rejected as unsafe or when the
+        artifact-relative suffix cannot be matched (unextractable rows must be
+        retained as-is by writeback callers, never rewritten as
+        ``old_coordinate / artifact_relative_path``). Unavailable translations
+        of eligible named-mount coordinates fall back to the unresolved scheme
+        URI prefix for URI-aware consumers. Pass ``historical_run_dir`` to
+        translate through a historical run's mount root.
+        """
         rel = self.get_remappable_relative_path(artifact_uri)
-        target = self.resolve_location_row_path(row)
-        if target is None:
+        coord = self.translate_location_coordinate(
+            row.mount_name,
+            row.mount_instance_id,
+            row.uri,
+            historical_run_dir=historical_run_dir,
+        )
+        if coord.is_rejected:
+            return None
+        if coord.is_unmounted:
             if "://" not in row.uri or row.mount_name in ("workspace", "runs", "abs"):
                 return None
             scheme, uri_rel = row.uri.split("://", 1)
             clean_rel = uri_rel.strip("/")
             uri_parts = PurePosixPath(clean_rel).parts if clean_rel else ()
+            if ".." in uri_parts:
+                return None
             rel_parts = rel.parts if rel is not None else ()
-            if (
+            if not (
                 rel_parts
                 and len(uri_parts) >= len(rel_parts)
                 and uri_parts[-len(rel_parts) :] == rel_parts
             ):
-                prefix = "/".join(uri_parts[: -len(rel_parts)])
-            else:
-                prefix = "/".join(uri_parts)
+                return None
+            prefix = "/".join(uri_parts[: -len(rel_parts)])
             return f"{scheme}://{prefix}"
-        resolved_target = (
-            Path(os.path.realpath(target)) if resolve else target.absolute()
-        )
+
+        target = coord.lexical_path
+        if target is None:
+            return None
         if rel is not None and len(rel.parts) > 0:
-            if len(resolved_target.parts) > len(rel.parts) and (
-                resolved_target.parts[-len(rel.parts) :] == rel.parts
-            ):
-                return str(resolved_target.parents[len(rel.parts) - 1])
-        return str(resolved_target)
+            root = self.invert_relative_layout(target, rel)
+            if root is not None:
+                return str(root.resolve() if resolve else root)
+            return None
+        return str(target.resolve() if resolve else target)

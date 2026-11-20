@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
+from consist import Tracker
 from consist.core.cache import ActiveRunCacheOptions, materialize_requested_inputs
 from consist.core.directory_artifacts import build_directory_manifest
 from consist.core.tracker_orchestration import RunTraceCoordinator, RunTraceHelpers
@@ -40,35 +39,14 @@ def _make_run(run_id: str = "run_001") -> Run:
     )
 
 
-class _FakeTracker:
-    def __init__(
-        self,
-        *,
-        run_dir: Path,
-        current_consist: ConsistRecord | None = None,
-        compute_file_checksum: Callable[[Path], str] = _sha256,
-    ):
-        self.current_consist = current_consist
-        self.db = None
-        self.fs = SimpleNamespace(
-            resolve_historical_path=lambda uri, original_run_dir, **kwargs: uri,
-            normalize_recovery_roots=lambda roots, **kwargs: [],
-            get_remappable_relative_path=lambda uri, **kwargs: None,
-            get_historical_root=lambda *args, **kwargs: None,
-        )
-        self.identity = SimpleNamespace(
-            compute_file_checksum=compute_file_checksum,
-            hashing_strategy="full",
-        )
-        self.run_dir = run_dir
-        self.mounts = {}
-        self.allow_external_paths = False
-
-    def resolve_uri(self, uri: str) -> str:
-        return uri
-
-    def run_artifact_dir(self) -> Path:
-        return self.run_dir
+def _db_less_tracker(
+    *,
+    run_dir: Path,
+    current_consist: ConsistRecord | None = None,
+) -> Tracker:
+    tracker = Tracker(run_dir=run_dir, db_path=None, allow_external_paths=False)
+    tracker.current_consist = current_consist
+    return tracker
 
 
 def test_materialize_requested_inputs_stages_requested_key(tmp_path: Path) -> None:
@@ -85,7 +63,7 @@ def test_materialize_requested_inputs_stages_requested_key(tmp_path: Path) -> No
     )
     run = _make_run()
 
-    tracker = _FakeTracker(
+    tracker = _db_less_tracker(
         run_dir=tmp_path,
         current_consist=ConsistRecord(run=run, inputs=[artifact]),
     )
@@ -125,7 +103,7 @@ def test_materialize_requested_inputs_rejects_distinct_artifacts_for_one_key(
         digest=Digest("sha256:file", _sha256(second_source)),
         meta={},
     )
-    tracker = _FakeTracker(
+    tracker = _db_less_tracker(
         run_dir=tmp_path,
         current_consist=ConsistRecord(run=_make_run(), inputs=[first, second]),
     )
@@ -156,10 +134,9 @@ def test_materialize_requested_inputs_stages_manifest_backed_directory(
         digest=Digest("dir_manifest_v1:sha256", manifest["tree_hash"]),
         meta={"directory_artifact": True, "directory_manifest": manifest},
     )
-    tracker = _FakeTracker(
+    tracker = _db_less_tracker(
         run_dir=tmp_path,
         current_consist=ConsistRecord(run=_make_run(), inputs=[artifact]),
-        compute_file_checksum=lambda _path: "legacy-directory-checksum",
     )
 
     staged = materialize_requested_inputs(
@@ -191,10 +168,9 @@ def test_materialize_requested_inputs_rejects_mutated_manifest_directory(
         digest=Digest("dir_manifest_v1:sha256", manifest["tree_hash"]),
         meta={"directory_artifact": True, "directory_manifest": manifest},
     )
-    tracker = _FakeTracker(
+    tracker = _db_less_tracker(
         run_dir=tmp_path,
         current_consist=ConsistRecord(run=_make_run(), inputs=[artifact]),
-        compute_file_checksum=lambda _path: "legacy-directory-checksum",
     )
 
     with pytest.raises(ValueError, match="Hash mismatch"):
@@ -223,10 +199,9 @@ def test_materialize_requested_inputs_preserves_legacy_directory_checksum(
         digest=Digest("dir_manifest_v1:sha256", legacy_manifest["tree_hash"]),
         meta={},
     )
-    tracker = _FakeTracker(
+    tracker = _db_less_tracker(
         run_dir=tmp_path,
         current_consist=ConsistRecord(run=_make_run(), inputs=[artifact]),
-        compute_file_checksum=lambda _path: "legacy-directory-checksum",
     )
 
     staged = materialize_requested_inputs(
@@ -255,7 +230,7 @@ def test_execute_python_run_uses_staged_input_path(tmp_path: Path) -> None:
         meta={},
     ).with_abs_path(staged)
 
-    tracker = _FakeTracker(run_dir=tmp_path)
+    tracker = _db_less_tracker(run_dir=tmp_path)
 
     coordinator = RunTraceCoordinator(
         tracker=tracker,
@@ -393,7 +368,7 @@ def test_requested_input_staging_recovers_cold_scratch_from_recovery_roots(
     tracker, tmp_path: Path
 ) -> None:
     import shutil
-    from consist.core.materialize import find_existing_recovery_source_path
+    from consist.core.location_resolver import iter_artifact_candidates
 
     archive_dir = tmp_path / "archive"
     events_path = tracker.run_dir / "beam" / "output" / "0.events.parquet"
@@ -425,13 +400,13 @@ def test_requested_input_staging_recovers_cold_scratch_from_recovery_roots(
     events_path.unlink()
     shutil.rmtree(skims_dir)
 
-    # Verify find_existing_recovery_source_path also works when run=None
-    _, recovered_null_run, _ = find_existing_recovery_source_path(
-        tracker,
-        artifact=events_artifact,
-        run=None,
-        source_root=None,
-    )
+    # Verify candidate resolution finds an existing recovery candidate
+    cands = [
+        c
+        for c in iter_artifact_candidates(tracker, artifact=events_artifact)
+        if c.canonical_path.exists()
+    ]
+    recovered_null_run = cands[0].canonical_path if cands else None
     assert recovered_null_run is not None
     assert recovered_null_run.read_bytes() == b"parquet-events-bytes"
 
@@ -535,3 +510,112 @@ def test_requested_input_staging_skips_corrupted_first_recovery_root(
     assert result.cache_hit is False
     assert staged_events.read_bytes() == b"valid-events-payload"
     assert (staged_skims / "chunk" / "0.0").read_bytes() == b"valid-zarr-chunk"
+
+
+def test_requested_input_staging_recovers_step_scoped_outputs_from_historical_mount(
+    tmp_path: Path,
+) -> None:
+    """Incident regression (rev 7 §6.4).
+
+    A directory artifact and a scalar artifact survive only under a
+    step-scoped recovery copy on a scratch mount that is recorded in the
+    producing run but absent in the resuming session. ``resolve=False``
+    (raw-path) translation of the ledger row must still reconstruct the
+    step-scoped root so directory staging succeeds exactly like scalar
+    staging.
+    """
+    import shutil
+
+    from consist.core.tracker import Tracker
+
+    db_path = tmp_path / "prov.duckdb"
+    scratch = tmp_path / "shared_scratch"
+    scratch.mkdir()
+    producer_ws = tmp_path / "producer_ws"
+
+    producer = Tracker(
+        run_dir=producer_ws,
+        db_path=str(db_path),
+        mounts={"scratch": str(scratch)},
+    )
+    try:
+        skims_dir = producer_ws / "beam" / "beam_output" / "skims.zarr"
+        (skims_dir / "chunk").mkdir(parents=True)
+        (skims_dir / "chunk" / "0.0").write_bytes(b"zarr-chunk-bytes")
+        events_path = producer_ws / "beam" / "beam_output" / "0.events.parquet"
+        events_path.write_bytes(b"parquet-events-bytes")
+
+        with producer.start_run("pilates-run--x", model="beam"):
+            skims_artifact = producer.log_output(
+                skims_dir,
+                key="skims",
+                artifact_kind="directory",
+                driver="zarr",
+            )
+            events_artifact = producer.log_output(events_path, key="events")
+
+        # Step-scoped archive on the shared scratch mount.
+        step_root = scratch / "pilates-run--x" / "consist-recovery" / "step_sim"
+        producer.archive_artifact(skims_artifact, step_root, mode="copy")
+        producer.archive_artifact(events_artifact, step_root, mode="copy")
+
+        # The ledger records the step-scoped coordinate under the scratch scheme.
+        skims_rows = producer.db.get_artifact_recovery_locations(skims_artifact.id)
+        assert any(
+            row.uri.startswith("scratch://")
+            and row.uri.endswith("beam/beam_output/skims.zarr")
+            for row in skims_rows
+        )
+        events_rows = producer.db.get_artifact_recovery_locations(events_artifact.id)
+        assert any(
+            row.uri.startswith("scratch://")
+            and row.uri.endswith("beam/beam_output/0.events.parquet")
+            for row in events_rows
+        )
+    finally:
+        producer.close()
+
+    # The producer workspace is wiped; bytes survive only in the step-scoped
+    # recovery copy on the now-unmounted scratch scheme.
+    shutil.rmtree(producer_ws)
+
+    consumer = Tracker(run_dir=tmp_path / "consumer_ws", db_path=str(db_path))
+    try:
+        loaded_skims = consumer.get_artifact(skims_artifact.id)
+        loaded_events = consumer.get_artifact(events_artifact.id)
+        assert loaded_skims is not None
+        assert loaded_events is not None
+
+        staged_skims = consumer.run_dir / "staged" / "skims.zarr"
+        staged_events = consumer.run_dir / "staged" / "events.parquet"
+        received: list[tuple[Path, Path]] = []
+
+        def consume(skims: Path, events: Path) -> None:
+            received.append((skims, events))
+            assert (skims / "chunk" / "0.0").read_bytes() == b"zarr-chunk-bytes"
+            assert events.read_bytes() == b"parquet-events-bytes"
+
+        with consumer.scenario("resume_step_scoped") as scenario:
+            result = scenario.run(
+                fn=consume,
+                inputs={"skims": loaded_skims, "events": loaded_events},
+                execution_options=ExecutionOptions(
+                    input_binding="paths",
+                    input_materialization="requested",
+                    input_paths={
+                        "skims": staged_skims,
+                        "events": staged_events,
+                    },
+                ),
+            )
+
+        assert result.cache_hit is False
+        assert received == [(staged_skims.resolve(), staged_events.resolve())]
+        # The staged directory remains manifest-valid.
+        assert (
+            build_directory_manifest(staged_skims)["tree_hash"]
+            == loaded_skims.digest.hex
+        )
+        assert staged_events.read_bytes() == b"parquet-events-bytes"
+    finally:
+        consumer.close()

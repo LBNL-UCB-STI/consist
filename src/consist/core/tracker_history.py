@@ -40,9 +40,7 @@ class TrackerHistoryService(_TrackerServiceBase):
         if not run:
             return Path(self.resolve_uri(artifact.uri))
 
-        resolved = self.fs.resolve_historical_artifact_path(
-            artifact, run, fallback_to_current_uri=True
-        )
+        resolved = self.fs.resolve_historical_artifact_path(artifact, run)
         assert resolved is not None
         return resolved
 

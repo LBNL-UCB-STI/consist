@@ -86,13 +86,15 @@ class ArtifactResolver(Protocol):
 
     def resolve_uri(self, uri: str) -> str: ...
 
-    def resolve_artifact_path(self, artifact: Any) -> Path: ...
+    def resolve_artifact_path(self, artifact: ArtifactLike) -> Path: ...
 
-    def resolve_artifact_relative_path(self, artifact: Any) -> Optional[Path]: ...
+    def resolve_artifact_relative_path(
+        self, artifact: ArtifactLike
+    ) -> Optional[Path]: ...
 
     def ensure_local_artifact_path(
         self,
-        artifact: Any,
+        artifact: ArtifactLike,
         *,
         target_root: Optional[Path | str] = None,
         source_root: Optional[Path | str] = None,
@@ -100,14 +102,16 @@ class ArtifactResolver(Protocol):
         on_missing: Literal["warn", "raise"] = "warn",
     ) -> Optional[Path]: ...
 
-    def load_artifact_df(self, artifact: Any, **kwargs: Any) -> Any: ...
+    def load_artifact_df(self, artifact: ArtifactLike, **kwargs: Any) -> Any: ...
 
-    def artifact_accessibility(self, artifact: Any) -> str: ...
+    def artifact_accessibility(self, artifact: ArtifactLike) -> str: ...
 
-    def artifact_recovery_roots(self, artifact: Any) -> list[str]: ...
+    def artifact_recovery_roots(
+        self, artifact: ArtifactLike, *, resolve: bool = True
+    ) -> list[str]: ...
 
     def artifact_abs_path_override(
-        self, artifact: Any
+        self, artifact: ArtifactLike
     ) -> Optional[tuple[Optional[str], Optional[str]]]: ...
 
 
@@ -116,7 +120,7 @@ class ArtifactLocationInspector(Protocol):
     """Optional resolver extension returning verified reachability per location."""
 
     def inspect_artifact_locations(
-        self, artifact: Any
+        self, artifact: ArtifactLike
     ) -> Sequence[tuple[str, Path, bool]]: ...
 
 

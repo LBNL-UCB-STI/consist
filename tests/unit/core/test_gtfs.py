@@ -654,3 +654,82 @@ def test_gtfs_ingest_dedupes_on_content_hash(
         )
 
     assert ingest_calls == []
+
+
+def test_gtfs_memoization_isolates_mutations_and_bounds_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+    import time
+    from consist.core import gtfs as gtfs_mod
+    from consist.digest import clear_digest_cache
+
+    clear_digest_cache()
+    feed = _write_gtfs_feed(tmp_path / "feed_iso")
+    settled_ns = time.time_ns() - 5_000_000_123
+    for p in [feed, *feed.rglob("*")]:
+        os.utime(p, ns=(settled_ns, settled_ns))
+    time.sleep(0.025)
+
+    # Active slice mutation isolation (selected_tables, snapshots, manifest).
+    res1 = canonicalize_gtfs_bundle(
+        [feed], service_date="2024-01-01", feed_keys=["feed"]
+    )
+    res1.selected_tables["trips"].loc[:, "route_id"] = "MUTATED"
+    res1.snapshots[0].tables["trips"].loc[:, "route_id"] = "MUTATED"
+    res1.manifest["included_tables"].append("corrupted")
+
+    res2 = canonicalize_gtfs_bundle(
+        [feed], service_date="2024-01-01", feed_keys=["feed"]
+    )
+    assert res2.selected_tables["trips"]["route_id"].tolist() == ["R1"]
+    assert res2.snapshots[0].tables["trips"]["route_id"].tolist() == ["R1", "R1"]
+    assert "corrupted" not in res2.manifest["included_tables"]
+    trips_spec = next(spec for spec in res2.ingestables if spec.table_name == "trips")
+    rows = list(trips_spec.materialize_rows("run_2"))
+    assert rows[0]["route_id"] == "R1"
+
+    # Inactive/empty slice mutation isolation where _ingest_frame returns df unchanged.
+    empty1 = canonicalize_gtfs_bundle(
+        [feed], service_date="2024-01-03", feed_keys=["feed"]
+    )
+    empty1.selected_tables["trips"].loc[0, "trip_id"] = "POISON"
+    empty2 = canonicalize_gtfs_bundle(
+        [feed], service_date="2024-01-03", feed_keys=["feed"]
+    )
+    assert empty2.selected_tables["trips"].empty
+    empty_spec = next(spec for spec in empty2.ingestables if spec.table_name == "trips")
+    assert list(empty_spec.materialize_rows("run_empty")) == []
+
+    # Bounded LRU cap (max_entries=4) + discover_gtfs_members streaming memoization.
+    zip_feed = tmp_path / "streamed.zip"
+    with zipfile.ZipFile(zip_feed, "w") as zf:
+        for txt in feed.glob("*.txt"):
+            zf.write(txt, arcname=txt.name)
+    for p in [zip_feed]:
+        os.utime(p, ns=(settled_ns, settled_ns))
+    time.sleep(0.025)
+
+    first_line_calls = 0
+    real_first_line = gtfs_mod._read_member_first_line
+
+    def _spy_first_line(*args, **kwargs):
+        nonlocal first_line_calls
+        first_line_calls += 1
+        return real_first_line(*args, **kwargs)
+
+    monkeypatch.setattr(gtfs_mod, "_read_member_first_line", _spy_first_line)
+    m1 = discover_gtfs_members(zip_feed)
+    assert first_line_calls > 0
+    calls_after_first = first_line_calls
+    m2 = discover_gtfs_members(zip_feed)
+    assert m1 == m2
+    assert first_line_calls == calls_after_first
+
+    for day in range(1, 7):
+        canonicalize_gtfs_bundle(
+            [zip_feed], service_date=f"2024-01-0{day}", feed_keys=["feed"]
+        )
+    assert len(gtfs_mod._GTFS_BUNDLE_CACHE.entries) <= 4
+    clear_digest_cache()
+    assert len(gtfs_mod._GTFS_BUNDLE_CACHE.entries) == 0

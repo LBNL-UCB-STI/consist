@@ -32,13 +32,12 @@ from typing import (
     Mapping,
     Sequence,
     TYPE_CHECKING,
-    Callable,
     cast,
     get_args,
 )
-from typing_extensions import Protocol, runtime_checkable
 
 from consist.core.container_policy import validate_recovery_registration_policy
+from consist.core.location_resolver import LocationResolver
 from consist.core.directory_artifacts import (
     build_directory_manifest,
     build_shapefile_bundle_manifest,
@@ -62,6 +61,7 @@ from consist.core.views import _quote_ident, _validate_identifier
 from consist.digest import (
     DIGEST_DRIVERS,
     Digest,
+    bypass_digest_cache,
     compute_digest,
     file_sha256,
     verify_digest,
@@ -822,16 +822,6 @@ def record_directory_rollup(
     rollups[role] = (prev_files + files, prev_bytes + nbytes)
 
 
-def resolve_step_id(tracker: Any) -> str | None:
-    """Safely extract run id from tracker without failing on mock objects."""
-    consist = getattr(tracker, "current_consist", None)
-    if consist is not None:
-        run = getattr(consist, "run", None)
-        if run is not None and getattr(run, "id", None) is not None:
-            return str(run.id)
-    return None
-
-
 def emit_directory_rollup_summary(
     action: str,
     rollups: Mapping[str, tuple[int, int]],
@@ -843,7 +833,13 @@ def emit_directory_rollup_summary(
     if not rollups:
         return
     if step_id is None and tracker is not None:
-        step_id = resolve_step_id(tracker)
+        consist = tracker.current_consist
+        if (
+            consist is not None
+            and consist.run is not None
+            and consist.run.id is not None
+        ):
+            step_id = str(consist.run.id)
     parts = []
     for role in sorted(rollups.keys()):
         file_count, total_bytes = rollups[role]
@@ -1267,22 +1263,6 @@ def _get_output_artifacts_for_run(tracker: "Tracker", run_id: str) -> list[Artif
     return list(db.get_output_artifacts_for_run(run_id))
 
 
-def _get_artifact_owning_run(
-    tracker: "Tracker",
-    *,
-    selected_run,
-    artifact: Artifact,
-):
-    artifact_run_id = artifact.run_id
-    if not artifact_run_id or artifact_run_id == selected_run.id:
-        return selected_run
-    db = tracker.db
-    if db is None:
-        return selected_run
-    producing_run = db.get_run(str(artifact_run_id))
-    return producing_run or selected_run
-
-
 def _output_set_hydration_kind(tracker: "Tracker", artifact: Artifact) -> str | None:
     """Return the persisted OutputSet role when Slice 1 must reject it."""
     artifact_meta = artifact.meta if isinstance(artifact.meta, MappingABC) else {}
@@ -1306,195 +1286,6 @@ def _output_set_hydration_kind(tracker: "Tracker", artifact: Artifact) -> str | 
     ):
         return "member"
     return None
-
-
-def _derive_remappable_relative_path(
-    tracker: "Tracker",
-    *,
-    artifact: Artifact,
-    scheme_prefixes: Mapping[str, str | Path] | None = None,
-) -> Path | None:
-    """Derive the safe URI-relative layout for an artifact."""
-    if not artifact.uri:
-        return None
-
-    uri = artifact.uri
-    scheme: str | None = None
-    if "://" in uri:
-        scheme = uri.split("://", 1)[0]
-
-    merged_prefixes: dict[str, str | Path] = (
-        dict(scheme_prefixes) if scheme_prefixes is not None else {}
-    )
-
-    if scheme and scheme not in ("file", "workspace") and scheme not in merged_prefixes:
-        inferred: Path | None = None
-        if scheme in tracker.fs.mounts and tracker.run_dir:
-            try:
-                mount_resolved = Path(tracker.fs.mounts[scheme]).resolve()
-                run_resolved = Path(tracker.run_dir).resolve()
-                rel = mount_resolved.relative_to(run_resolved)
-                if rel != Path("."):
-                    inferred = rel
-            except (ValueError, RuntimeError):
-                pass
-        if inferred is None:
-            owning_run = _get_artifact_run(tracker, artifact=artifact)
-            if owning_run is not None and isinstance(owning_run.meta, MappingABC):
-                run_mounts = owning_run.meta.get("mounts")
-                phys_run_dir = owning_run.meta.get("_physical_run_dir")
-                if (
-                    isinstance(run_mounts, MappingABC)
-                    and scheme in run_mounts
-                    and phys_run_dir
-                ):
-                    try:
-                        mount_resolved = Path(run_mounts[scheme]).resolve()
-                        run_resolved = Path(phys_run_dir).resolve()
-                        rel = mount_resolved.relative_to(run_resolved)
-                        if rel != Path("."):
-                            inferred = rel
-                    except (ValueError, RuntimeError):
-                        pass
-        if inferred is not None:
-            merged_prefixes[scheme] = inferred
-
-    prefixes_arg = (
-        merged_prefixes
-        if (scheme_prefixes is not None or bool(merged_prefixes))
-        else None
-    )
-
-    if prefixes_arg is None:
-        return tracker.fs.get_remappable_relative_path(uri)
-    return tracker.fs.get_remappable_relative_path(uri, scheme_prefixes=prefixes_arg)
-
-
-def _derive_historical_root(
-    tracker: "Tracker",
-    *,
-    artifact: Artifact,
-    run,
-    preserve_raw_paths: bool = False,
-) -> Path | None:
-    """Derive the historical root that can supply artifact bytes."""
-    meta = run.meta if (run is not None and isinstance(run.meta, MappingABC)) else {}
-    artifact_meta = artifact.meta if isinstance(artifact.meta, MappingABC) else {}
-
-    return tracker.fs.get_historical_root(
-        artifact.uri,
-        original_run_dir=meta.get("_physical_run_dir"),
-        mounts_snapshot=meta.get("mounts"),
-        artifact_mount_root=artifact_meta.get("mount_root"),
-        resolve=not preserve_raw_paths,
-    )
-
-
-@runtime_checkable
-class _HasArtifactRecoveryRoots(Protocol):
-    def artifact_recovery_roots(self, artifact: Any) -> Any: ...
-
-
-def _artifact_recovery_roots(
-    tracker: "Tracker",
-    *,
-    artifact: Artifact,
-    preserve_raw_paths: bool = False,
-) -> tuple[Path, ...]:
-    """Return ordered recovery roots recorded for an artifact."""
-    raw_roots: Any = ()
-    if isinstance(tracker, _HasArtifactRecoveryRoots):
-        fn = tracker.artifact_recovery_roots
-        try:
-            raw_roots = fn(artifact, resolve=not preserve_raw_paths)  # type: ignore[call-arg]
-        except TypeError:
-            raw_roots = fn(artifact)
-    return tuple(
-        Path(root)
-        for root in tracker.fs.normalize_recovery_roots(
-            raw_roots, resolve=not preserve_raw_paths
-        )
-    )
-
-
-def _ordered_candidate_roots(
-    *,
-    source_root: Path | None,
-    historical_root: Path | None,
-    recovery_roots: Sequence[Path],
-    preserve_raw_paths: bool = False,
-) -> tuple[Path, ...]:
-    """Order and deduplicate recovery source roots."""
-    ordered: list[Path] = []
-    seen: set[str] = set()
-    for root in (
-        ([source_root] if source_root is not None else [])
-        + ([historical_root] if historical_root is not None else [])
-        + list(recovery_roots)
-    ):
-        candidate = root.absolute() if preserve_raw_paths else root.resolve()
-        identity = str(candidate)
-        if identity in seen:
-            continue
-        seen.add(identity)
-        ordered.append(candidate)
-    return tuple(ordered)
-
-
-def find_existing_recovery_source_path(
-    tracker: "Tracker",
-    *,
-    artifact: Artifact,
-    run,
-    source_root: Path | None,
-    source_validator: Callable[[Path], bool] | None = None,
-    fallback_validator: Callable[[Path], bool] | None = None,
-    preserve_raw_paths: bool = False,
-) -> tuple[Path | None, Path | None, bool]:
-    """Find the first valid filesystem source for historical recovery."""
-    relative_path = _derive_remappable_relative_path(tracker, artifact=artifact)
-    if relative_path is None:
-        return None, None, False
-
-    historical_root = _derive_historical_root(
-        tracker,
-        artifact=artifact,
-        run=run,
-        preserve_raw_paths=preserve_raw_paths,
-    )
-    recovery_roots = _artifact_recovery_roots(
-        tracker, artifact=artifact, preserve_raw_paths=preserve_raw_paths
-    )
-    candidate_roots = _ordered_candidate_roots(
-        source_root=source_root,
-        historical_root=historical_root,
-        recovery_roots=recovery_roots,
-        preserve_raw_paths=preserve_raw_paths,
-    )
-    validators = (
-        (source_validator, fallback_validator)
-        if fallback_validator is not None
-        else (source_validator,)
-    )
-    for validator in validators:
-        for root in candidate_roots:
-            candidate = root / relative_path
-            validator_path = candidate if preserve_raw_paths else candidate.resolve()
-            if candidate.exists() and (validator is None or validator(validator_path)):
-                return (
-                    relative_path,
-                    candidate if preserve_raw_paths else candidate.resolve(),
-                    True,
-                )
-
-    return relative_path, None, bool(candidate_roots)
-
-
-def _get_artifact_run(tracker: "Tracker", *, artifact: Artifact):
-    if not artifact.run_id:
-        return None
-
-    return tracker.get_run(str(artifact.run_id))
 
 
 def _direct_artifact_source_path(
@@ -1577,10 +1368,11 @@ def _is_valid_scalar_recovery_candidate(
         return False
 
 
-@runtime_checkable
-class _HasDbAttr(Protocol):
-    @property
-    def db(self) -> Any: ...
+_SOURCE_KIND_BY_SOURCE: dict[str, Literal["historical_root", "recovery_root"]] = {
+    "ledger_historical": "historical_root",
+    "historical_uri": "historical_root",
+    "explicit_root": "recovery_root",
+}
 
 
 def _select_materialize_artifact_source(
@@ -1590,6 +1382,7 @@ def _select_materialize_artifact_source(
     relative_path: Path,
     source_root: Path | None,
     validate_content_hash: Literal["never", "if-present", "always"] = "if-present",
+    resolver: LocationResolver | None = None,
 ) -> tuple[
     Path | None,
     Literal[
@@ -1601,14 +1394,17 @@ def _select_materialize_artifact_source(
     | None,
     bool,
     bool,
+    bool,
 ]:
     if (
         source_root is None
         and validate_content_hash != "never"
-        and isinstance(tracker, _HasDbAttr)
         and isinstance(tracker.db, DatabaseManager)
     ):
-        from consist.core.tracker_recovery import resolve_verified_local_path_detailed
+        from consist.core.tracker_recovery import (
+            _artifact_has_portable_content_identity,
+            resolve_verified_local_path_detailed,
+        )
 
         resolved, saw_mismatch, winning_row = resolve_verified_local_path_detailed(
             tracker,
@@ -1626,40 +1422,18 @@ def _select_materialize_artifact_source(
                 resolved_kind = "historical_root"
             else:
                 resolved_kind = "artifact_uri"
-            return resolved, resolved_kind, True, False
+            return (
+                resolved,
+                resolved_kind,
+                True,
+                False,
+                _artifact_has_portable_content_identity(artifact),
+            )
         if saw_mismatch:
-            return None, None, True, True
-        return None, None, True, False
+            return None, None, True, True, False
+        return None, None, True, False, False
 
-    candidate_roots: list[
-        tuple[
-            Literal["source_root", "historical_root", "recovery_root"],
-            Path,
-        ]
-    ] = []
-    if source_root is not None:
-        candidate_roots.append(("source_root", source_root))
-
-    owning_run = _get_artifact_run(tracker, artifact=artifact)
-    if owning_run is not None:
-        historical_root = _derive_historical_root(
-            tracker,
-            artifact=artifact,
-            run=owning_run,
-        )
-        if historical_root is not None:
-            candidate_roots.append(("historical_root", historical_root))
-
-    candidate_roots.extend(
-        ("recovery_root", root)
-        for root in _artifact_recovery_roots(tracker, artifact=artifact)
-    )
-
-    unprefixed_rel = (
-        tracker.fs.normalize_remappable_relative_path(artifact.uri.split("://", 1)[1])
-        if "://" in artifact.uri
-        else None
-    )
+    unprefixed_rel = tracker.fs.unprefixed_uri_relative_path(artifact.uri)
     is_dir_artifact = _is_directory_artifact(artifact)
     is_bundle_artifact = _is_file_bundle_artifact(artifact)
 
@@ -1679,24 +1453,71 @@ def _select_materialize_artifact_source(
         return _is_valid_scalar_recovery_candidate(tracker, candidate_path, artifact)
 
     saw_mismatch = False
-    seen_roots: set[str] = set()
-    for source_kind, root in candidate_roots:
-        resolved_root = Path(root).resolve()
-        root_key = str(resolved_root)
-        if root_key in seen_roots:
-            continue
-        seen_roots.add(root_key)
-        candidate = resolved_root / relative_path
-        if candidate.exists():
-            if _is_valid_manifest_candidate(candidate):
-                return candidate, source_kind, True, False
+    has_candidate_roots = False
+    resolved_source_root = (
+        Path(source_root).resolve() if source_root is not None else None
+    )
+    active_resolver = resolver or tracker.location_resolver
+
+    for cand in active_resolver.iter_candidates(
+        artifact,
+        relative_path=relative_path,
+        source_root=source_root,
+    ):
+        has_candidate_roots = True
+        candidate = cand.canonical_path
+        val_path = cand.mount_canonical_lexical_path
+
+        source_kind: Literal[
+            "source_root", "historical_root", "recovery_root", "artifact_uri"
+        ]
+        if resolved_source_root is not None and candidate.is_relative_to(
+            resolved_source_root
+        ):
+            source_kind = "source_root"
+        elif cand.source in ("managed_mount", "runtime_abs", "ledger_primary"):
+            if (
+                cand.source == "ledger_primary"
+                and cand.row is not None
+                and cand.row.site in ("archive", "advisory")
+            ):
+                source_kind = "recovery_root"
+            else:
+                source_kind = "historical_root" if artifact.run_id else "artifact_uri"
+        else:
+            source_kind = _SOURCE_KIND_BY_SOURCE.get(cand.source, "recovery_root")
+
+        if val_path.exists():
+            if _is_valid_manifest_candidate(val_path):
+                return candidate, source_kind, True, False, False
             if validate_content_hash != "never":
                 saw_mismatch = True
-        if unprefixed_rel is not None and unprefixed_rel != relative_path:
-            fallback_candidate = resolved_root / unprefixed_rel
-            if fallback_candidate.exists():
-                if _is_valid_manifest_candidate(fallback_candidate):
-                    return fallback_candidate, source_kind, True, False
+
+        if (
+            unprefixed_rel is not None
+            and unprefixed_rel != relative_path
+            and cand.source in ("explicit_root", "historical_uri")
+            and (
+                root := tracker.fs.invert_relative_layout(
+                    cand.lexical_path, relative_path
+                )
+            )
+            is not None
+        ):
+            fallback_coord = tracker.fs.translate_raw_root(root, unprefixed_rel)
+            if (
+                fallback_coord.is_resolved
+                and fallback_coord.canonical_path is not None
+                and fallback_coord.canonical_path.exists()
+            ):
+                if _is_valid_manifest_candidate(fallback_coord.canonical_path):
+                    return (
+                        fallback_coord.canonical_path,
+                        source_kind,
+                        True,
+                        False,
+                        False,
+                    )
                 if validate_content_hash != "never":
                     saw_mismatch = True
 
@@ -1708,11 +1529,11 @@ def _select_materialize_artifact_source(
     )
     if direct_source is not None:
         if _is_valid_manifest_candidate(direct_source):
-            return direct_source, "artifact_uri", bool(candidate_roots), False
+            return direct_source, "artifact_uri", has_candidate_roots, False, False
         if validate_content_hash != "never":
             saw_mismatch = True
 
-    return None, None, bool(candidate_roots), saw_mismatch
+    return None, None, has_candidate_roots, saw_mismatch, False
 
 
 def _materialized_status_for_source(
@@ -1788,6 +1609,7 @@ def materialize_artifact(
     on_missing: Literal["warn", "raise"],
     validate_content_hash: Literal["never", "if-present", "always"],
     scheme_prefixes: Mapping[str, str | Path] | None = None,
+    resolver: LocationResolver | None = None,
 ) -> MaterializedArtifact:
     """Materialize one artifact into a target root using recovery metadata."""
     if validate_content_hash not in {"never", "if-present", "always"}:
@@ -1834,8 +1656,9 @@ def materialize_artifact(
         if not policy_validation.allowed:
             return _fail("blocked_by_container_policy", policy_validation.message)
 
-    relative_path = _derive_remappable_relative_path(
-        tracker, artifact=artifact, scheme_prefixes=scheme_prefixes
+    active_resolver = resolver or tracker.location_resolver
+    relative_path = active_resolver.remappable_relative_path(
+        artifact, scheme_prefixes=scheme_prefixes
     )
     if relative_path is None:
         return _fail(
@@ -1858,14 +1681,19 @@ def materialize_artifact(
             raise
         return _fail("failed", str(exc))
 
-    source_path, source_kind, _has_candidate_roots, saw_source_mismatch = (
-        _select_materialize_artifact_source(
-            tracker,
-            artifact=artifact,
-            relative_path=relative_path,
-            source_root=source_root,
-            validate_content_hash=validate_content_hash,
-        )
+    (
+        source_path,
+        source_kind,
+        _has_candidate_roots,
+        saw_source_mismatch,
+        source_already_verified,
+    ) = _select_materialize_artifact_source(
+        tracker,
+        artifact=artifact,
+        relative_path=relative_path,
+        source_root=source_root,
+        validate_content_hash=validate_content_hash,
+        resolver=active_resolver,
     )
 
     expected_digest = _portable_artifact_digest(tracker, artifact)
@@ -1894,10 +1722,11 @@ def materialize_artifact(
                     if (bundle_root / entry_name).is_file()
                     else fallback_file
                 )
-                if (
-                    build_shapefile_bundle_manifest(entry_cand)["tree_hash"]
-                    != expected_hash
-                ):
+                with bypass_digest_cache():
+                    actual_tree_hash = build_shapefile_bundle_manifest(entry_cand)[
+                        "tree_hash"
+                    ]
+                if actual_tree_hash != expected_hash:
                     return f"{label} hash does not match artifact {artifact.key!r}."
         except (ValueError, OSError) as exc:
             return f"{label} hash does not match artifact {artifact.key!r}: {exc}"
@@ -1951,10 +1780,11 @@ def materialize_artifact(
                         needs_partial = True
                 elif expected_hash:
                     try:
-                        if (
-                            build_directory_manifest(destination).get("tree_hash")
-                            != expected_hash
-                        ):
+                        with bypass_digest_cache():
+                            actual_tree_hash = build_directory_manifest(
+                                destination
+                            ).get("tree_hash")
+                        if actual_tree_hash != expected_hash:
                             return _fail(
                                 "hash_mismatch",
                                 f"Existing destination hash does not match artifact {artifact.key!r}.",
@@ -2027,7 +1857,7 @@ def materialize_artifact(
                 raise RuntimeError(msg)
             return _fail("failed", msg)
 
-        if should_validate:
+        if should_validate and not source_already_verified:
             err = _check_bundle(source_bundle_root, entry, source_path, "Source")
             if err is not None:
                 return _fail("hash_mismatch", err)
@@ -2103,12 +1933,13 @@ def materialize_artifact(
                     if materialized
                     else "already_present"
                 )
-            if expected_hash:
+            if expected_hash and not source_already_verified:
                 try:
-                    if (
-                        build_directory_manifest(source_path).get("tree_hash")
-                        != expected_hash
-                    ):
+                    with bypass_digest_cache():
+                        actual_tree_hash = build_directory_manifest(source_path).get(
+                            "tree_hash"
+                        )
+                    if actual_tree_hash != expected_hash:
                         return _fail(
                             "hash_mismatch",
                             f"Source hash does not match artifact {artifact.key!r}.",
@@ -2159,9 +1990,15 @@ def materialize_artifact(
             raise RuntimeError(msg)
         return _fail("failed", msg)
 
-    if should_validate and (
-        expected_digest is None
-        or not _verify_scalar_artifact_digest(source_path, artifact, expected_digest)
+    if (
+        should_validate
+        and not source_already_verified
+        and (
+            expected_digest is None
+            or not _verify_scalar_artifact_digest(
+                source_path, artifact, expected_digest
+            )
+        )
     ):
         return _fail(
             "hash_mismatch", f"Source hash does not match artifact {artifact.key!r}."
@@ -2203,8 +2040,10 @@ def _resolve_staging_source_path(
     *,
     artifact: Artifact,
     validate_content_hash: Literal["never", "if-present", "always"] = "if-present",
-) -> tuple[Path | None, bool]:
+    resolver: LocationResolver | None = None,
+) -> tuple[Path | None, bool, bool]:
     from consist.core.tracker_recovery import (
+        _artifact_has_portable_content_identity,
         resolve_verified_local_path_with_diagnostics,
         verify_candidate_against_artifact,
     )
@@ -2217,57 +2056,29 @@ def _resolve_staging_source_path(
             verify_digest=(validate_content_hash == "always"),
         )
         if verified is not None:
-            return verified.resolve(), False
-        if isinstance(tracker, _HasDbAttr) and isinstance(tracker.db, DatabaseManager):
-            return None, saw_mismatch
+            return (
+                verified.resolve(),
+                False,
+                _artifact_has_portable_content_identity(artifact),
+            )
+        if saw_mismatch:
+            return None, True, False
 
+    active_resolver = resolver or tracker.location_resolver
     saw_any_mismatch = False
-    for raw_cand in (
-        (tracker.resolve_uri(artifact.uri) if callable(tracker.resolve_uri) else None),
-        artifact.abs_path,
+    for cand in active_resolver.iter_candidates(
+        artifact,
+        include_runtime_abs=True,
+        include_current_uri=True,
     ):
-        if not raw_cand:
-            continue
-        try:
-            cand = Path(str(raw_cand)).resolve()
-            if cand.exists():
-                if (
-                    validate_content_hash == "never"
-                    or verify_candidate_against_artifact(cand, artifact)
-                ):
-                    return cand, False
-                saw_any_mismatch = True
-        except (OSError, ValueError, TypeError):
-            pass
-
-    relative_path = tracker.fs.get_remappable_relative_path(artifact.uri)
-    if relative_path is not None:
-        if artifact.run_id:
-            owning_run = tracker.get_run(str(artifact.run_id))
-            if owning_run is not None:
-                _, source, _ = find_existing_recovery_source_path(
-                    tracker,
-                    artifact=artifact,
-                    run=owning_run,
-                    source_root=None,
-                )
-                if source is not None:
-                    if (
-                        validate_content_hash == "never"
-                        or verify_candidate_against_artifact(source, artifact)
-                    ):
-                        return source, False
-                    saw_any_mismatch = True
-        for root in _artifact_recovery_roots(tracker, artifact=artifact):
-            cand = (root / relative_path).resolve()
-            if cand.exists():
-                if (
-                    validate_content_hash == "never"
-                    or verify_candidate_against_artifact(cand, artifact)
-                ):
-                    return cand, False
-                saw_any_mismatch = True
-    return None, saw_any_mismatch
+        source = cand.canonical_path
+        if source.exists():
+            if validate_content_hash == "never" or verify_candidate_against_artifact(
+                source, artifact
+            ):
+                return source, False, False
+            saw_any_mismatch = True
+    return None, saw_any_mismatch, False
 
 
 def _stage_artifact_path(
@@ -2278,6 +2089,7 @@ def _stage_artifact_path(
     overwrite: bool,
     validate_content_hash: Literal["never", "if-present", "always"],
     allow_external_paths: bool | None,
+    resolver: LocationResolver | None = None,
 ) -> StagedInput:
     allow_external = (
         tracker.allow_external_paths
@@ -2322,8 +2134,11 @@ def _stage_artifact_path(
         validate_allowed_materialization_destination(destination_path, allowed_base)
 
         if validate_content_hash == "always" and artifact.digest is None:
-            source_probe, _ = _resolve_staging_source_path(
-                tracker, artifact=artifact, validate_content_hash="never"
+            source_probe, _, _ = _resolve_staging_source_path(
+                tracker,
+                artifact=artifact,
+                validate_content_hash="never",
+                resolver=resolver,
             )
             if source_probe is None or not source_probe.exists():
                 return _fail_stage(
@@ -2335,8 +2150,13 @@ def _stage_artifact_path(
                 f"[Consist] Cannot validate artifact {artifact.key!r}: artifact.digest is missing.",
             )
 
-        source_path, saw_mismatch = _resolve_staging_source_path(
-            tracker, artifact=artifact, validate_content_hash=validate_content_hash
+        source_path, saw_mismatch, source_already_verified = (
+            _resolve_staging_source_path(
+                tracker,
+                artifact=artifact,
+                validate_content_hash=validate_content_hash,
+                resolver=resolver,
+            )
         )
         if source_path is None or not source_path.exists():
             if saw_mismatch:
@@ -2349,7 +2169,11 @@ def _stage_artifact_path(
                 f"[Consist] Cannot stage artifact {artifact.key!r}: source path missing.",
             )
 
-        if artifact.digest is not None and validate_content_hash != "never":
+        if (
+            not source_already_verified
+            and artifact.digest is not None
+            and validate_content_hash != "never"
+        ):
             digest_matches = (
                 verify_digest(
                     source_path,
@@ -2393,9 +2217,11 @@ def _stage_artifact_path(
                     warn_prefix=True,
                 )
             if not overwrite:
-                if _compute_path_checksum(source_path) == _compute_path_checksum(
-                    destination_path
-                ):
+                with bypass_digest_cache():
+                    matches_existing = _compute_path_checksum(
+                        source_path
+                    ) == _compute_path_checksum(destination_path)
+                if matches_existing:
                     return _ok_stage("preserved_existing")
                 return _fail_stage(
                     "failed",
@@ -2439,12 +2265,15 @@ def stage_artifacts_to_destinations(
     overwrite: bool = False,
     validate_content_hash: Literal["never", "if-present", "always"] = "if-present",
     allow_external_paths: bool | None = None,
+    resolver: LocationResolver | None = None,
 ) -> StagedInputsResult:
     """Stage explicit artifact/destination pairs into a keyed result."""
     if mode != "copy":
         raise ValueError(
             f"Unsupported staging mode {mode!r}; only 'copy' is supported."
         )
+    active_resolver = resolver or tracker.location_resolver
+    active_resolver.prefetch([artifact for _, artifact, _ in items])
 
     outputs: dict[str, StagedInput] = {}
     key_order: list[str] = []
@@ -2470,6 +2299,7 @@ def stage_artifacts_to_destinations(
             overwrite=overwrite,
             validate_content_hash=validate_content_hash,
             allow_external_paths=allow_external_paths,
+            resolver=active_resolver,
         )
 
     if logging.getLogger().isEnabledFor(logging.INFO):
@@ -2504,15 +2334,18 @@ def plan_run_output_hydration(
     keys: Sequence[str] | None,
     preserve_existing: bool,
     db_fallback: Literal["never", "if_ingested"],
+    resolver: LocationResolver | None = None,
 ) -> PlannedRunOutputHydration:
     """Plan historical output hydration for a run without mutating the target."""
     if (target_root is None) == (destinations_by_key is None):
         raise ValueError(
             "Provide exactly one of target_root or destinations_by_key for run output hydration."
         )
+    active_resolver = resolver or tracker.location_resolver
 
     outputs: dict[str, HydratedRunOutput] = {}
     raw_outputs = _get_output_artifacts_for_run(tracker, run.id)
+    active_resolver.prefetch(raw_outputs, runs=[run])
 
     key_counts: dict[str, int] = {}
     for artifact in raw_outputs:
@@ -2731,17 +2564,13 @@ def plan_run_output_hydration(
                 else None
             )
             has_candidate_roots = relative_path is not None
-        elif (
-            source_root is None
-            and isinstance(tracker, _HasDbAttr)
-            and isinstance(tracker.db, DatabaseManager)
-        ):
+        elif source_root is None and isinstance(tracker.db, DatabaseManager):
             from consist.core.tracker_recovery import (
                 resolve_verified_local_path_detailed,
             )
 
             is_bundle_artifact = _is_file_bundle_artifact(artifact)
-            relative_path = _derive_remappable_relative_path(tracker, artifact=artifact)
+            relative_path = active_resolver.remappable_relative_path(artifact)
             if relative_path is None:
                 source_path = None
                 has_candidate_roots = False
@@ -2761,52 +2590,58 @@ def plan_run_output_hydration(
                 )
                 has_candidate_roots = True
         else:
-            owning_run = _get_artifact_owning_run(
-                tracker, selected_run=run, artifact=artifact
-            )
+            from consist.core.tracker_recovery import verify_and_settle_candidate
+
             is_dir_artifact = _is_directory_artifact(artifact)
             is_bundle_artifact = _is_file_bundle_artifact(artifact)
             has_manifest_validator = is_dir_artifact or is_bundle_artifact
-            has_scalar_hash_validator = not has_manifest_validator and (
-                artifact.digest is not None
-            )
-            relative_path, source_path, has_candidate_roots = (
-                find_existing_recovery_source_path(
-                    tracker,
-                    artifact=artifact,
-                    run=owning_run,
+            relative_path = active_resolver.remappable_relative_path(artifact)
+            has_candidate_roots = False
+            source_path = None
+            if relative_path is not None:
+                db = tracker.db if isinstance(tracker.db, DatabaseManager) else None
+
+                def _candidate_validator(cand_path: Path) -> bool:
+                    if is_dir_artifact:
+                        return (
+                            is_valid_directory_artifact_tree(cand_path, artifact)
+                            is not False
+                        )
+                    if is_bundle_artifact:
+                        return (
+                            is_valid_shapefile_bundle_source(cand_path, artifact)
+                            is not False
+                        )
+                    return True
+
+                first_existing_fallback: Path | None = None
+                for cand in active_resolver.iter_candidates(
+                    artifact,
+                    relative_path=relative_path,
                     source_root=source_root,
-                    source_validator=(
-                        (
-                            lambda candidate, artifact=artifact: (
-                                is_valid_directory_artifact_tree(candidate, artifact)
-                                is not False
+                ):
+                    has_candidate_roots = True
+                    val_path = cand.mount_canonical_lexical_path
+                    if val_path.exists():
+                        if has_manifest_validator and cand.row is None:
+                            is_valid = _candidate_validator(val_path)
+                        else:
+                            is_valid, _ = verify_and_settle_candidate(
+                                db,
+                                val_path,
+                                artifact,
+                                row=cand.row,
+                                verify_digest=False,
                             )
-                        )
-                        if is_dir_artifact
-                        else (
-                            lambda candidate, artifact=artifact: (
-                                is_valid_shapefile_bundle_source(candidate, artifact)
-                                is not False
-                            )
-                        )
-                        if is_bundle_artifact
-                        else (
-                            lambda candidate, artifact=artifact: (
-                                _is_valid_scalar_recovery_candidate(
-                                    tracker, candidate, artifact
-                                )
-                            )
-                        )
-                        if has_scalar_hash_validator
-                        else None
-                    ),
-                    fallback_validator=(
-                        (lambda _: True) if has_manifest_validator else None
-                    ),
-                    preserve_raw_paths=has_manifest_validator,
-                )
-            )
+                        if is_valid:
+                            source_path = cand.canonical_path
+                            break
+                        if has_manifest_validator and first_existing_fallback is None:
+                            first_existing_fallback = cand.canonical_path
+
+                if source_path is None and first_existing_fallback is not None:
+                    source_path = first_existing_fallback
+
             if is_bundle_artifact and source_path is not None:
                 source_path = (
                     source_path if source_path.is_dir() else source_path.parent
@@ -3000,6 +2835,7 @@ def build_run_output_materialize_plan(
         keys=keys,
         preserve_existing=preserve_existing,
         db_fallback=db_fallback,
+        resolver=tracker.location_resolver,
     )
     return planned.plan, fold_hydrated_run_outputs_result(planned.preflight_results)
 
@@ -3224,6 +3060,7 @@ def hydrate_run_outputs(
         keys=keys,
         preserve_existing=preserve_existing,
         db_fallback=db_fallback,
+        resolver=tracker.location_resolver,
     )
     if on_missing == "raise":
         _raise_if_preflight_failed(planned.preflight_results)
@@ -3271,6 +3108,7 @@ def hydrate_run_outputs_to_destinations(
         keys=None,
         preserve_existing=preserve_existing,
         db_fallback=db_fallback,
+        resolver=tracker.location_resolver,
     )
     if on_missing == "raise":
         _raise_if_preflight_failed(planned.preflight_results)
@@ -3354,6 +3192,7 @@ def materialize_artifacts(
                     destination_path,
                     mutable=False,
                     overwrite=False,
+                    already_verified=True,
                 )
             except FileExistsError:
                 pass
@@ -3496,6 +3335,7 @@ def stage_inputs(
         overwrite=overwrite,
         validate_content_hash=validate_content_hash,
         allow_external_paths=allow_external_paths,
+        resolver=tracker.location_resolver,
     )
 
 

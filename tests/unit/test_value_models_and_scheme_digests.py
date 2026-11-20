@@ -1725,3 +1725,86 @@ class TestEdgeCaseHardeningAndIsolation:
             check=False,
         )
         assert proc.returncode == 0, proc.stderr
+
+    def test_container_and_tabular_drivers_memoize_and_verify_digest_bypasses(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import time
+        import h5py
+        import numpy as np
+        from consist import digest as digest_mod
+
+        digest_mod.clear_digest_cache()
+        csv_path = tmp_path / "tab.csv"
+        pd.DataFrame({"id": [1, 2], "val": [10.0, 20.0]}).to_csv(csv_path, index=False)
+
+        h5_path = tmp_path / "matrix.h5"
+        with h5py.File(h5_path, "w") as h5f:
+            grp = h5f.create_group("data")
+            grp.create_dataset("AUTO", data=np.array([[1.0, 2.0], [3.0, 4.0]]))
+            h5f.create_dataset("raw_vec", data=np.array([1, 2, 3], dtype=np.int64))
+
+        settled_ns = time.time_ns() - 5_000_000_123
+        for p in (csv_path, h5_path):
+            os.utime(p, ns=(settled_ns, settled_ns))
+        time.sleep(0.025)
+
+        ctd1_calls = 0
+        orig_digest_table = digest_mod.digest_table
+
+        def _spy_digest_table(*args, **kwargs):
+            nonlocal ctd1_calls
+            ctd1_calls += 1
+            return orig_digest_table(*args, **kwargs)
+
+        omx_calls = 0
+        orig_omx = digest_mod.compute_omx_logical_matrices_sha256
+
+        def _spy_omx(*args, **kwargs):
+            nonlocal omx_calls
+            omx_calls += 1
+            return orig_omx(*args, **kwargs)
+
+        h5_node_calls = 0
+        orig_hash_node = digest_mod._hash_h5_dataset_node
+
+        def _spy_hash_node(*args, **kwargs):
+            nonlocal h5_node_calls
+            h5_node_calls += 1
+            return orig_hash_node(*args, **kwargs)
+
+        monkeypatch.setattr(digest_mod, "digest_table", _spy_digest_table)
+        monkeypatch.setattr(digest_mod, "compute_omx_logical_matrices_sha256", _spy_omx)
+        monkeypatch.setattr(digest_mod, "_hash_h5_dataset_node", _spy_hash_node)
+
+        c1 = compute_ctd1_digest(csv_path)
+        assert ctd1_calls == 1
+        assert compute_ctd1_digest(csv_path) == c1
+        assert ctd1_calls == 1
+        assert verify_digest(csv_path, c1)
+        assert ctd1_calls == 2
+
+        l1 = compute_digest(h5_path, driver="logical_matrices_canonical")
+        assert omx_calls == 1
+        assert compute_digest(h5_path, driver="logical_matrices_canonical") == l1
+        assert omx_calls == 1
+        assert verify_digest(h5_path, l1, driver="logical_matrices_canonical")
+        assert omx_calls == 2
+
+        d_fixed = digest_mod.compute_h5_fixed_digest(h5_path, member="data")
+        d_ds = digest_mod.compute_h5_dataset_digest(h5_path, member="raw_vec")
+        nodes_after_cold = h5_node_calls
+        assert digest_mod.compute_h5_fixed_digest(h5_path, member="data") == d_fixed
+        assert digest_mod.compute_h5_dataset_digest(h5_path, member="raw_vec") == d_ds
+        assert h5_node_calls == nodes_after_cold
+        assert verify_digest(
+            h5_path, d_fixed, driver="h5_fixed_v1:sha256", member="data"
+        )
+        assert verify_digest(
+            h5_path, d_ds, driver="h5_dataset_v1:sha256", member="raw_vec"
+        )
+        assert h5_node_calls > nodes_after_cold
+
+        # Editing the CSV invalidates ctd1 memo immediately.
+        pd.DataFrame({"id": [1, 2], "val": [10.0, 99.0]}).to_csv(csv_path, index=False)
+        assert compute_ctd1_digest(csv_path) != c1

@@ -83,8 +83,8 @@ summary = (
 Filter on Consist system columns, such as `consist_run_id`, `consist_year`, and
 `consist_scenario_id`, when the question is about one run or scenario. Install
 the optional dependency with `consist[ibis]`, configure the tracker with
-`db_path=...`, and avoid opening Ibis while a Consist SQLAlchemy session is
-still active for the same DuckDB file.
+`db_path=...`, and avoid opening a separate DuckDB/Ibis connection while an
+active `tracker.db.transaction()` is open on the same DuckDB file.
 
 Use pandas loading when you need a concrete object from one known output rather
 than a query expression:

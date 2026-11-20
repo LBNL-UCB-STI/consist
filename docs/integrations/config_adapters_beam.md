@@ -243,6 +243,37 @@ with Session(tracker.engine) as session:
   - `output_or_runtime_ignored` for output/runtime locations that should not
     make equivalent runs miss cache.
 
+### Reference identity and portability
+
+BEAM identity schema version 2 hashes the declared reference policy, canonical
+value, and any digest actually computed. Runtime observations such as presence,
+status, effective directory policy, and derived delegation keys remain in the
+manifest for diagnostics but do not independently change cache identity.
+Missing required references still warn or raise under `strict=True`.
+
+- `delegated_artifact_keys` are reference metadata, not input declarations. The
+  caller must pass the corresponding artifacts as named, identity-bearing
+  inputs and ensure their bytes are staged at the paths BEAM reads. Only
+  explicitly declared delegation keys participate in config identity.
+- `path_alias` and `scalar_value` references do not hash local presence. An
+  optional reference that is missing in one run and present in another therefore
+  has the same identity. If presence or contents affect model behavior, declare
+  the content as an input, use `delegated_to_artifacts`, or use `content_hash`
+  for files whose bytes should be hashed.
+- `directory_hash` and `fingerprint_manifest` compute no directory digest in the
+  BEAM adapter and provide no content identity. Configuring either policy emits
+  one warning per policy and config key. Declare directory contents as inputs
+  and use `delegated_to_artifacts` instead.
+- Bare relative values are discovered as references only while their targets
+  exist. Use an explicit `BeamReferencePolicy` for portable identity of values
+  such as `beam.inputDirectory = "inputs"`; heuristic discovery is not broadened
+  because enum and control values can look like paths.
+- Canonical values can still depend on presence when multiple config roots or
+  symlinks change path resolution.
+- An explicitly delegated `beam.routing.r5.directory` still includes locally
+  discovered GTFS feed identity in `scalar_hash`; removing those feeds can
+  therefore change identity.
+
 ## GTFS Transit Bundles
 
 When `beam.routing.r5.directory` points at a real transit bundle, Consist

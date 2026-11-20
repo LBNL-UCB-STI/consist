@@ -5,10 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog], and this project adheres to
 [Semantic Versioning].
 
-## [0.5.0] - 2026-11-16
+## [0.5.0] - 2026-11-20
 
 ### Added
 
+- Add centralized stat-validated in-process digest and config memoization
+  (`memoize_with_stat_token`, `path_stat_token`, `register_stat_cache`,
+  `clear_digest_cache`, and `bypass_digest_cache` in `consist.digest`) across
+  `file_sha256`, `IdentityManager` directory/Zarr hashing, path-backed
+  `compute_digest` drivers (`ctd1:sha256`, `h5_fixed_v1:sha256`,
+  `h5_dataset_v1:sha256`, `logical_matrices_*`), `canonicalize_gtfs_bundle` /
+  `discover_gtfs_members` (with streaming zip-header reads and bounded LRU
+  retention), and BEAM / ActivitySim config parsing, while forcing raw disk
+  reads inside explicit verification paths by @zneedell
+  ([#333](https://github.com/LBNL-UCB-STI/consist/pull/333)).
 - Add `DatabaseManager` single-connection native DuckDB persistence and Schema v2
   (`schema_v2.sql`), replacing SQLModel ORM queries and connection churn with direct
   SQL execution and ART index scans by @zneedell
@@ -40,6 +50,15 @@ The format is based on [Keep a Changelog], and this project adheres to
 
 ### Changed
 
+- Unify artifact location resolution across cache validation, input staging and
+  recovery, output materialization, archival, coupler restoration, and CLI
+  diagnostics around a typed `TranslatedCoordinate` / `LocationResolver`
+  (`MountPrecedenceResolver`) engine: fail-closed single-pass containment and
+  three-view symlink checks in `FileSystemManager`, split `location_epoch` /
+  `mount_epoch` / `run_epoch` cache invalidation, bulk candidate prefetching,
+  and lazy tiered `LocationResolver.iter_candidates` enumeration replacing
+  per-site `recovery_roots` probes by @zneedell
+  ([#333](https://github.com/LBNL-UCB-STI/consist/pull/333)).
 - Replace ORM provenance models with immutable value-model `Artifact` and `Run`
   records and unified scheme digests, including `Artifact.meta` immutability and
   HDF5 slab streaming optimizations by @zneedell
@@ -58,6 +77,22 @@ The format is based on [Keep a Changelog], and this project adheres to
 
 ### Fixed
 
+- Gate the cache-hit fresh-witness fast path on persisted `digest_verified`
+  witnesses in `FileStat` / `DirTreeStat` (eliminating cross-process SLURM and
+  eager cache-validation re-hashes without persisting racy witnesses), scope
+  overwritten archive recovery-root eviction to matching mount/path coordinates,
+  preserve resolved historical recovery candidates when the workspace primary
+  location is rejected, and report symlinked recovery sources as
+  `missing_source` by @zneedell
+  ([#333](https://github.com/LBNL-UCB-STI/consist/pull/333)).
+- Prevent machine-local BEAM reference presence from changing portable cache
+  identity by hashing declared reference policies and computed content digests
+  instead of runtime status, derived delegation keys, or digest-less directory
+  observations. Bump the BEAM identity schema to version 2, warn when
+  `directory_hash` / `fingerprint_manifest` policies provide no content
+  identity, and make optional `path_alias` / `scalar_value` presence changes
+  cache-stable while preserving strict validation and file content hashing by
+  @zneedell ([#330](https://github.com/LBNL-UCB-STI/consist/pull/330)).
 - Deduplicate `artifact_location` upserts across sites (`advisory` -> `archive`),
   resolve `archive` / `advisory` `artifact_location` rows via historical run mounts
   in `ViewFactory` and recovery, and persist lazy-seeded `Coupler` artifacts during
@@ -68,6 +103,13 @@ The format is based on [Keep a Changelog], and this project adheres to
   DuckDB 2.0 compatibility by @zneedell
   ([#323](https://github.com/LBNL-UCB-STI/consist/pull/323),
   [#324](https://github.com/LBNL-UCB-STI/consist/pull/324)).
+- Populate `content_hash` on `GtfsSchema` and `canonicalize_gtfs_bundle` rows so
+  `dedupe_on_hash=True` hits `_ingest_cache_hit` instead of re-ingesting
+  unchanged GTFS tables on `apply_config_plan` / `canonicalize_gtfs` runs, add
+  `INFO` progress logging before config table ingests, and update removed
+  `db_session()` error messages to reference `tracker.db.connection` /
+  `tracker.db.transaction()` by @zneedell
+  ([#329](https://github.com/LBNL-UCB-STI/consist/pull/329)).
 
 ## [0.4.2] - 2026-11-09
 

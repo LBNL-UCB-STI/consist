@@ -9,11 +9,14 @@ This module is a strict Layer-1 leaf:
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from contextlib import closing
+from contextlib import closing, contextmanager
+from contextvars import ContextVar
 import dataclasses
 from dataclasses import dataclass
 from enum import Enum
+import fnmatch
 import hashlib
 import importlib
 import io
@@ -24,8 +27,11 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import stat as stat_mod
 import struct
 import sys
+import threading
+import time
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from typing_extensions import Buffer, Protocol, runtime_checkable
@@ -167,21 +173,260 @@ def _read_attrs_mapping(obj: Any) -> Any | None:
         return None
 
 
-# --- Descriptor-Pinned File Hashing ---
+# --- Centralized Stat-Validated Digest Cache & Descriptor-Pinned File Hashing ---
+
+_SUBSECOND_SETTLE_NS = 20_000_000
+_SECOND_SETTLE_NS = 1_000_000_000
+_STAT_DIGEST_CACHE_MAX = 16_384
+_STAT_DIGEST_LOCK = threading.Lock()
+_CACHE_MISS = object()
+_BYPASS_DIGEST_CACHE: ContextVar[bool] = ContextVar(
+    "_BYPASS_DIGEST_CACHE", default=False
+)
+
+
+@dataclass(slots=True)
+class _StatMemoCache:
+    """Bounded LRU container protected by ``_STAT_DIGEST_LOCK``."""
+
+    max_entries: int
+    entries: OrderedDict[tuple[Any, ...], Any] = dataclasses.field(
+        default_factory=OrderedDict
+    )
+
+
+_DEFAULT_STAT_CACHE = _StatMemoCache(max_entries=_STAT_DIGEST_CACHE_MAX)
+_REGISTERED_STAT_CACHES: list[_StatMemoCache] = [_DEFAULT_STAT_CACHE]
+
+
+def register_stat_cache(*, max_entries: int) -> _StatMemoCache:
+    """Register an isolated bounded LRU cache cleared by ``clear_digest_cache()``."""
+    if max_entries < 1:
+        raise ValueError("max_entries must be >= 1")
+    cache = _StatMemoCache(max_entries=max_entries)
+    with _STAT_DIGEST_LOCK:
+        _REGISTERED_STAT_CACHES.append(cache)
+    return cache
+
+
+def clear_digest_cache() -> None:
+    """Clear all registered process-wide stat-validated digest caches."""
+    with _STAT_DIGEST_LOCK:
+        for cache in _REGISTERED_STAT_CACHES:
+            cache.entries.clear()
+
+
+@contextmanager
+def bypass_digest_cache() -> Iterator[None]:
+    """Force raw uncached byte reads inside explicit verification blocks."""
+    token = _BYPASS_DIGEST_CACHE.set(True)
+    try:
+        yield
+    finally:
+        _BYPASS_DIGEST_CACHE.reset(token)
+
+
+def _is_stat_settled(mtime_ns: int, ctime_ns: int, *, now_ns: int) -> bool:
+    latest_ns = mtime_ns if mtime_ns >= ctime_ns else ctime_ns
+    if latest_ns <= 0:
+        return False
+    window_ns = (
+        _SECOND_SETTLE_NS
+        if (mtime_ns % 1_000_000_000 == 0 and ctime_ns % 1_000_000_000 == 0)
+        else _SUBSECOND_SETTLE_NS
+    )
+    return (now_ns - latest_ns) >= window_ns
+
+
+def _stat_cache_get(
+    key: tuple[Any, ...], *, cache: _StatMemoCache = _DEFAULT_STAT_CACHE
+) -> Any:
+    with _STAT_DIGEST_LOCK:
+        val = cache.entries.get(key, _CACHE_MISS)
+        if val is not _CACHE_MISS:
+            cache.entries.move_to_end(key)
+        return val
+
+
+def _stat_cache_put(
+    key: tuple[Any, ...], value: Any, *, cache: _StatMemoCache = _DEFAULT_STAT_CACHE
+) -> None:
+    with _STAT_DIGEST_LOCK:
+        cache.entries[key] = value
+        cache.entries.move_to_end(key)
+        while len(cache.entries) > cache.max_entries:
+            cache.entries.popitem(last=False)
+
+
+def path_stat_token(
+    path: Path | str,
+    *,
+    now_ns: int | None = None,
+    ignore_dotfiles: bool = False,
+    allowlist: Sequence[str] | None = None,
+) -> tuple[str, bool] | None:
+    """Return ``(stat_token, settled)`` for a file or directory tree, or ``None`` if unavailable."""
+    effective_now = time.time_ns() if now_ns is None else now_ns
+    target = path if isinstance(path, Path) else Path(path)
+    try:
+        st = os.stat(target)
+        lst = os.lstat(target)
+    except OSError:
+        return None
+    real = os.path.realpath(target)
+    settled = _is_stat_settled(
+        int(st.st_mtime_ns), int(st.st_ctime_ns), now_ns=effective_now
+    )
+    if stat_mod.S_ISLNK(lst.st_mode) and not _is_stat_settled(
+        int(lst.st_mtime_ns), int(lst.st_ctime_ns), now_ns=effective_now
+    ):
+        settled = False
+    if stat_mod.S_ISREG(st.st_mode):
+        return (
+            f"f:{real}:{st.st_dev}:{st.st_ino}:{st.st_size}:{st.st_mtime_ns}:{st.st_ctime_ns}",
+            settled,
+        )
+    if not stat_mod.S_ISDIR(st.st_mode):
+        return None
+
+    hasher = hashlib.sha256(f"d:{real}\n".encode("utf-8"))
+
+    def _walk_dir(current_dir: Path, rel_prefix: str) -> bool:
+        nonlocal settled
+        try:
+            with os.scandir(current_dir) as scan:
+                entries = sorted(scan, key=lambda item: item.name)
+        except OSError:
+            return False
+
+        for entry in entries:
+            if ignore_dotfiles and entry.name.startswith("."):
+                continue
+            rel = f"{rel_prefix}/{entry.name}" if rel_prefix else entry.name
+            try:
+                is_dir_no_follow = entry.is_dir(follow_symlinks=False)
+            except OSError:
+                return False
+            if is_dir_no_follow:
+                try:
+                    dir_st = entry.stat(follow_symlinks=False)
+                except OSError:
+                    return False
+                if settled and not _is_stat_settled(
+                    int(dir_st.st_mtime_ns),
+                    int(dir_st.st_ctime_ns),
+                    now_ns=effective_now,
+                ):
+                    settled = False
+                if not _walk_dir(Path(entry.path), rel):
+                    return False
+                continue
+
+            if allowlist is not None and not any(
+                fnmatch.fnmatch(rel, pat) for pat in allowlist
+            ):
+                continue
+
+            try:
+                if entry.is_symlink():
+                    lst_entry = entry.stat(follow_symlinks=False)
+                    if settled and not _is_stat_settled(
+                        int(lst_entry.st_mtime_ns),
+                        int(lst_entry.st_ctime_ns),
+                        now_ns=effective_now,
+                    ):
+                        settled = False
+                est = entry.stat(follow_symlinks=True)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                return False
+
+            if not stat_mod.S_ISREG(est.st_mode):
+                continue
+            if settled and not _is_stat_settled(
+                int(est.st_mtime_ns), int(est.st_ctime_ns), now_ns=effective_now
+            ):
+                settled = False
+            hasher.update(
+                f"{rel}\x00{est.st_dev}:{est.st_ino}:{est.st_size}:{est.st_mtime_ns}:{est.st_ctime_ns}\n".encode(
+                    "utf-8"
+                )
+            )
+        return True
+
+    if not _walk_dir(target, ""):
+        return None
+    return f"d:{hasher.hexdigest()}", settled
+
+
+def memoize_with_stat_token(
+    namespace: tuple[Any, ...],
+    paths: Sequence[Path | str],
+    compute_fn: Callable[[], _T],
+    *,
+    clone_fn: Callable[[_T], _T] | None = None,
+    ignore_dotfiles: bool = False,
+    allowlist: tuple[str, ...] | None = None,
+    cache: _StatMemoCache | None = None,
+) -> _T:
+    """Memoize ``compute_fn()`` in a stat cache keyed by ``namespace`` and ``paths`` stats."""
+    if _BYPASS_DIGEST_CACHE.get() or not paths:
+        return compute_fn()
+
+    active_cache = _DEFAULT_STAT_CACHE if cache is None else cache
+
+    def _settled_tokens() -> tuple[str, ...] | None:
+        now_ns = time.time_ns()
+        tokens: list[str] = []
+        for p in paths:
+            tok_res = path_stat_token(
+                p,
+                now_ns=now_ns,
+                ignore_dotfiles=ignore_dotfiles,
+                allowlist=allowlist,
+            )
+            if tok_res is None or not tok_res[1]:
+                return None
+            tokens.append(tok_res[0])
+        return tuple(tokens)
+
+    pre_tokens = _settled_tokens()
+    if pre_tokens is None:
+        return compute_fn()
+
+    cache_key = (*namespace, pre_tokens)
+    hit = _stat_cache_get(cache_key, cache=active_cache)
+    if hit is not _CACHE_MISS:
+        return clone_fn(hit) if clone_fn is not None else cast(_T, hit)
+
+    result = compute_fn()
+    if _settled_tokens() == pre_tokens:
+        _stat_cache_put(
+            cache_key,
+            clone_fn(result) if clone_fn is not None else result,
+            cache=active_cache,
+        )
+    return result
 
 
 def _stat_signature(st: os.stat_result) -> tuple[int, int, int, int]:
     return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
 
 
-def _run_fd_pinned(path: Path | str, fn: Callable[[int], _T]) -> _T:
-    """Execute ``fn(fd)`` on an open file descriptor and verify no mid-read race occurred."""
+def _run_fd_pinned_with_stat(
+    path: Path | str,
+    fn: Callable[[int], _T],
+    *,
+    stat_pre_open: os.stat_result | None = None,
+) -> tuple[_T, os.stat_result]:
+    """Execute ``fn(fd)`` on an open file descriptor and return ``(result, fstat_after)``."""
     file_path = Path(path)
-    stat_pre_open = os.stat(file_path)
+    pre_open = os.stat(file_path) if stat_pre_open is None else stat_pre_open
     fd = os.open(file_path, os.O_RDONLY)
     try:
         fstat_before = os.fstat(fd)
-        if _stat_signature(stat_pre_open) != _stat_signature(fstat_before):
+        if _stat_signature(pre_open) != _stat_signature(fstat_before):
             raise ConcurrentMutationError(
                 f"Concurrent file replacement detected while opening {file_path}"
             )
@@ -202,7 +447,12 @@ def _run_fd_pinned(path: Path | str, fn: Callable[[int], _T]) -> _T:
         raise ConcurrentMutationError(
             f"Concurrent mid-read mutation detected while hashing {file_path}"
         )
-    return result
+    return result, fstat_after
+
+
+def _run_fd_pinned(path: Path | str, fn: Callable[[int], _T]) -> _T:
+    """Execute ``fn(fd)`` on an open file descriptor and verify no mid-read race occurred."""
+    return _run_fd_pinned_with_stat(path, fn)[0]
 
 
 def digest_bytes(data: bytes) -> str:
@@ -210,14 +460,63 @@ def digest_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def file_sha256(path: Path | str) -> str:
-    """Return 64-char lowercase hexadecimal SHA-256 of a regular file pinned by descriptor."""
+def _raw_file_sha256(
+    path: Path | str, *, stat_pre_open: os.stat_result | None = None
+) -> tuple[str, os.stat_result]:
+    """Uncached descriptor-pinned regular file SHA-256 and pinned post-read ``fstat``."""
 
     def _hash_fd(fd: int) -> str:
         with io.FileIO(fd, mode="rb", closefd=False) as raw_io:
             return hashlib.file_digest(raw_io, "sha256").hexdigest()
 
-    return _run_fd_pinned(path, _hash_fd)
+    return _run_fd_pinned_with_stat(path, _hash_fd, stat_pre_open=stat_pre_open)
+
+
+def _file_stat_cache_key(path: Path, st: os.stat_result) -> tuple[Any, ...]:
+    if st.st_ino != 0 and st.st_dev != 0:
+        return (
+            "file_sha256",
+            int(st.st_dev),
+            int(st.st_ino),
+            int(st.st_size),
+            int(st.st_mtime_ns),
+            int(st.st_ctime_ns),
+        )
+    return (
+        "file_sha256_path",
+        os.path.realpath(path),
+        int(st.st_size),
+        int(st.st_mtime_ns),
+        int(st.st_ctime_ns),
+    )
+
+
+def file_sha256(path: Path | str) -> str:
+    """Return 64-char lowercase hexadecimal SHA-256 of a regular file pinned by descriptor."""
+    if _BYPASS_DIGEST_CACHE.get():
+        return _raw_file_sha256(path)[0]
+
+    file_path = path if isinstance(path, Path) else Path(path)
+    st = os.stat(file_path)
+    if not stat_mod.S_ISREG(st.st_mode):
+        return _raw_file_sha256(file_path, stat_pre_open=st)[0]
+
+    cache_key = _file_stat_cache_key(file_path, st)
+    if _is_stat_settled(
+        int(st.st_mtime_ns), int(st.st_ctime_ns), now_ns=time.time_ns()
+    ):
+        hit = _stat_cache_get(cache_key)
+        if hit is not _CACHE_MISS:
+            return cast(str, hit)
+
+    digest, fstat_after = _raw_file_sha256(file_path, stat_pre_open=st)
+    if int(fstat_after.st_ctime_ns) == int(st.st_ctime_ns) and _is_stat_settled(
+        int(fstat_after.st_mtime_ns),
+        int(fstat_after.st_ctime_ns),
+        now_ns=time.time_ns(),
+    ):
+        _stat_cache_put(_file_stat_cache_key(file_path, fstat_after), digest)
+    return digest
 
 
 def digest_file(path: Path | str) -> str:
@@ -711,16 +1010,41 @@ def compute_ctd1_digest(
     sqlite_table: str | None = None,
 ) -> Digest:
     """Compute ``Digest('ctd1:sha256', <hex>)`` over a tabular source."""
-    return Digest.parse(
-        digest_table(
-            source,
-            columns=columns,
-            key=key,
-            key_columns=key_columns,
-            profile="ctd1",
-            sqlite_table=sqlite_table,
+
+    def _compute() -> Digest:
+        return Digest.parse(
+            digest_table(
+                source,
+                columns=columns,
+                key=key,
+                key_columns=key_columns,
+                profile="ctd1",
+                sqlite_table=sqlite_table,
+            )
         )
-    )
+
+    if isinstance(source, (str, Path)):
+        source_path = Path(source)
+        wal_path = Path(f"{source_path}-wal")
+        journal_path = Path(f"{source_path}-journal")
+        wal_exists = wal_path.exists()
+        journal_exists = journal_path.exists()
+        watch_paths = [
+            source_path,
+            *([wal_path] if wal_exists else []),
+            *([journal_path] if journal_exists else []),
+        ]
+        namespace = (
+            "ctd1_digest",
+            tuple(columns) if columns is not None else None,
+            tuple(key) if key is not None else None,
+            tuple(key_columns) if key_columns is not None else None,
+            sqlite_table,
+            wal_exists,
+            journal_exists,
+        )
+        return memoize_with_stat_token(namespace, watch_paths, _compute)
+    return _compute()
 
 
 def digest_state(
@@ -1785,11 +2109,11 @@ def compute_h5_dataset_digest(
 ) -> Digest:
     """Compute ``Digest('h5_dataset_v1:sha256', <hex>)`` over a raw HDF5 dataset."""
     h5py = importlib.import_module("h5py")
-    hasher = hashlib.sha256()
-    _update_string(hasher, "h5_dataset_v1")
 
-    if isinstance(path_or_dataset, (str, Path)):
-        with open_h5py_read_only(path_or_dataset, h5py_module=h5py) as h5f:
+    def _compute_from_path(target: Path) -> Digest:
+        hasher = hashlib.sha256()
+        _update_string(hasher, "h5_dataset_v1")
+        with open_h5py_read_only(target, h5py_module=h5py) as h5f:
             _, node = _resolve_h5_member_node(h5f, member)
             if not isinstance(node, h5py.Dataset):
                 raise ValueError(
@@ -1797,13 +2121,23 @@ def compute_h5_dataset_digest(
                     f"got {type(node).__name__}"
                 )
             _hash_h5_dataset_node(hasher, node, chunk_rows=chunk_rows)
-    else:
-        if not isinstance(path_or_dataset, _H5ArrayLike):
-            raise ValueError(
-                f"Expected HDF5 Dataset-like object for h5_dataset_v1:sha256, got {type(path_or_dataset).__name__}"
-            )
-        _hash_h5_dataset_node(hasher, path_or_dataset, chunk_rows=chunk_rows)
+        return Digest("h5_dataset_v1:sha256", hasher.hexdigest())
 
+    if isinstance(path_or_dataset, (str, Path)):
+        target = Path(path_or_dataset)
+        return memoize_with_stat_token(
+            ("h5_dataset_v1", member, chunk_rows),
+            [target],
+            lambda: _compute_from_path(target),
+        )
+
+    hasher = hashlib.sha256()
+    _update_string(hasher, "h5_dataset_v1")
+    if not isinstance(path_or_dataset, _H5ArrayLike):
+        raise ValueError(
+            f"Expected HDF5 Dataset-like object for h5_dataset_v1:sha256, got {type(path_or_dataset).__name__}"
+        )
+    _hash_h5_dataset_node(hasher, path_or_dataset, chunk_rows=chunk_rows)
     return Digest("h5_dataset_v1:sha256", hasher.hexdigest())
 
 
@@ -1821,43 +2155,54 @@ def compute_h5_fixed_digest(
     float columns, index axes, or attributes never collide.
     """
     h5py = importlib.import_module("h5py")
-    hasher = hashlib.sha256()
-    _update_string(hasher, "h5_fixed_v1")
+    target = Path(path)
 
-    with open_h5py_read_only(path, h5py_module=h5py) as h5f:
-        resolved_member, root_node = _resolve_h5_member_node(h5f, member)
-        _update_string(hasher, resolved_member)
-        if isinstance(root_node, h5py.Dataset):
-            _update_string(hasher, "dataset_root")
-            _hash_h5_dataset_node(hasher, root_node, chunk_rows=chunk_rows)
-            return Digest("h5_fixed_v1:sha256", hasher.hexdigest())
+    def _compute() -> Digest:
+        hasher = hashlib.sha256()
+        _update_string(hasher, "h5_fixed_v1")
 
-        if not isinstance(root_node, h5py.Group):
-            raise ValueError(
-                f"Unsupported HDF5 node at {resolved_member!r}: {type(root_node).__name__}"
-            )
+        with open_h5py_read_only(target, h5py_module=h5py) as h5f:
+            resolved_member, root_node = _resolve_h5_member_node(h5f, member)
+            _update_string(hasher, resolved_member)
+            if isinstance(root_node, h5py.Dataset):
+                _update_string(hasher, "dataset_root")
+                _hash_h5_dataset_node(hasher, root_node, chunk_rows=chunk_rows)
+                return Digest("h5_fixed_v1:sha256", hasher.hexdigest())
 
-        def _visit_group(group: Any, rel_prefix: str) -> None:
-            _update_string(hasher, f"group:{rel_prefix}")
-            _hash_h5_attrs(hasher, group)
-            child_names = sorted(str(k) for k in group.keys())
-            _update_string(hasher, f"children:{len(child_names)}")
-            for child_name in child_names:
-                child_rel = f"{rel_prefix}/{child_name}" if rel_prefix else child_name
-                child = group[child_name]
-                if isinstance(child, h5py.Group):
-                    _visit_group(child, child_rel)
-                elif isinstance(child, h5py.Dataset):
-                    _update_string(hasher, f"dataset:{child_rel}")
-                    _hash_h5_dataset_node(hasher, child, chunk_rows=chunk_rows)
-                else:
-                    raise ValueError(
-                        f"Unsupported HDF5 child {child_rel!r} of type {type(child).__name__}"
+            if not isinstance(root_node, h5py.Group):
+                raise ValueError(
+                    f"Unsupported HDF5 node at {resolved_member!r}: {type(root_node).__name__}"
+                )
+
+            def _visit_group(group: Any, rel_prefix: str) -> None:
+                _update_string(hasher, f"group:{rel_prefix}")
+                _hash_h5_attrs(hasher, group)
+                child_names = sorted(str(k) for k in group.keys())
+                _update_string(hasher, f"children:{len(child_names)}")
+                for child_name in child_names:
+                    child_rel = (
+                        f"{rel_prefix}/{child_name}" if rel_prefix else child_name
                     )
+                    child = group[child_name]
+                    if isinstance(child, h5py.Group):
+                        _visit_group(child, child_rel)
+                    elif isinstance(child, h5py.Dataset):
+                        _update_string(hasher, f"dataset:{child_rel}")
+                        _hash_h5_dataset_node(hasher, child, chunk_rows=chunk_rows)
+                    else:
+                        raise ValueError(
+                            f"Unsupported HDF5 child {child_rel!r} of type {type(child).__name__}"
+                        )
 
-        _visit_group(root_node, "")
+            _visit_group(root_node, "")
 
-    return Digest("h5_fixed_v1:sha256", hasher.hexdigest())
+        return Digest("h5_fixed_v1:sha256", hasher.hexdigest())
+
+    return memoize_with_stat_token(
+        ("h5_fixed_v1", member, chunk_rows),
+        [target],
+        _compute,
+    )
 
 
 def compute_output_set_digest(
@@ -2001,50 +2346,70 @@ def _compute_logical_matrices_container_hex(
     chunk_rows: int,
     options: Mapping[str, Any],
 ) -> str:
-    suffix = path.suffix.lower()
-    if suffix == ".b2nd":
-        blosc2 = importlib.import_module("blosc2")
-        arr: Any = blosc2.open(str(path), mode="r")
-        matrix_name = str(options.get("matrix_name") or member or path.stem)
-        hasher = hashlib.sha256()
-        if policy.lookup_policy == "single_int32_zone_number":
-            import numpy as np
+    matrix_name_opt = options.get("matrix_name")
+    matrix_name_key = str(matrix_name_opt) if matrix_name_opt is not None else None
+    mapping_path = Path(f"{path}.mapping")
+    mapping_exists = mapping_path.is_file()
+    watch_paths = [path, *([mapping_path] if mapping_exists else [])]
 
-            shape = tuple(int(d) for d in arr.shape)
-            zone_count = shape[0] if len(shape) >= 1 else 0
-            zone_vec = np.arange(1, zone_count + 1, dtype="<i4")
+    def _compute() -> str:
+        suffix = path.suffix.lower()
+        if suffix == ".b2nd":
+            blosc2 = importlib.import_module("blosc2")
+            arr: Any = blosc2.open(str(path), mode="r")
+            matrix_name = str(matrix_name_opt or member or path.stem)
+            hasher = hashlib.sha256()
+            if policy.lookup_policy == "single_int32_zone_number":
+                import numpy as np
+
+                shape = tuple(int(d) for d in arr.shape)
+                zone_count = shape[0] if len(shape) >= 1 else 0
+                zone_vec = np.arange(1, zone_count + 1, dtype="<i4")
+                _stream_dataset_into_hasher(
+                    hasher,
+                    "lookup/zone_number",
+                    zone_vec,
+                    dtype_policy="preserve",
+                    canonicalize_float_bits=False,
+                    chunk_rows=chunk_rows,
+                )
             _stream_dataset_into_hasher(
                 hasher,
-                "lookup/zone_number",
-                zone_vec,
-                dtype_policy="preserve",
-                canonicalize_float_bits=False,
+                matrix_name,
+                arr[:],
+                dtype_policy=policy.dtype_policy,
+                canonicalize_float_bits=policy.canonicalize_float_bits,
+                include_na_attribute=policy.include_na_attribute,
                 chunk_rows=chunk_rows,
             )
-        _stream_dataset_into_hasher(
-            hasher,
-            matrix_name,
-            arr[:],
-            dtype_policy=policy.dtype_policy,
-            canonicalize_float_bits=policy.canonicalize_float_bits,
-            include_na_attribute=policy.include_na_attribute,
-            chunk_rows=chunk_rows,
-        )
-        return hasher.hexdigest()
-    if path.is_dir():
-        return compute_zarr_logical_matrices_sha256(
+            return hasher.hexdigest()
+        if path.is_dir():
+            return compute_zarr_logical_matrices_sha256(
+                path, policy=policy, chunk_rows=chunk_rows
+            )
+        if suffix in {".nc", ".nc4", ".cdf", ".netcdf"}:
+            xr = importlib.import_module("xarray")
+            with xr.open_dataset(path) as ds:
+                return _compute_zarr_logical_matrices_sha256_from_xarray(
+                    ds,
+                    policy=policy,
+                    chunk_rows=chunk_rows,
+                )
+        return compute_omx_logical_matrices_sha256(
             path, policy=policy, chunk_rows=chunk_rows
         )
-    if suffix in {".nc", ".nc4", ".cdf", ".netcdf"}:
-        xr = importlib.import_module("xarray")
-        with xr.open_dataset(path) as ds:
-            return _compute_zarr_logical_matrices_sha256_from_xarray(
-                ds,
-                policy=policy,
-                chunk_rows=chunk_rows,
-            )
-    return compute_omx_logical_matrices_sha256(
-        path, policy=policy, chunk_rows=chunk_rows
+
+    return memoize_with_stat_token(
+        (
+            "logical_matrices_hex",
+            member,
+            policy,
+            chunk_rows,
+            matrix_name_key,
+            mapping_exists,
+        ),
+        watch_paths,
+        _compute,
     )
 
 
@@ -2248,18 +2613,26 @@ def resolve_default_scheme(
 
     if driver in {"h5_table", "h5", "hdf5"} and member is not None:
         if path is not None and path.is_file():
-            h5py = importlib.import_module("h5py")
-            with open_h5py_read_only(path, h5py_module=h5py) as h5f:
-                _, node = _resolve_h5_member_node(h5f, member)
-                if isinstance(node, h5py.Group) or (
-                    isinstance(node, h5py.Dataset)
-                    and (
-                        node.dtype.names is not None
-                        or node.attrs.get("CLASS") in {b"TABLE", "TABLE"}
-                    )
-                ):
-                    return "h5_fixed_v1:sha256"
-                return "h5_dataset_v1:sha256"
+
+            def _probe_h5_scheme() -> str:
+                h5py = importlib.import_module("h5py")
+                with open_h5py_read_only(path, h5py_module=h5py) as h5f:
+                    _, node = _resolve_h5_member_node(h5f, member)
+                    if isinstance(node, h5py.Group) or (
+                        isinstance(node, h5py.Dataset)
+                        and (
+                            node.dtype.names is not None
+                            or node.attrs.get("CLASS") in {b"TABLE", "TABLE"}
+                        )
+                    ):
+                        return "h5_fixed_v1:sha256"
+                    return "h5_dataset_v1:sha256"
+
+            return memoize_with_stat_token(
+                ("h5_default_scheme", driver, member),
+                [path],
+                _probe_h5_scheme,
+            )
         return "h5_fixed_v1:sha256" if driver == "h5_table" else "h5_dataset_v1:sha256"
 
     if driver == "h5_table":
@@ -2310,12 +2683,13 @@ def verify_digest(
     merged_options["scheme"] = parsed_expected.scheme
     if driver == "shapefile":
         merged_options.setdefault("shapefile_bundle", True)
-    actual = compute_digest(
-        path,
-        driver=driver,
-        member=member,
-        options=merged_options,
-    )
+    with bypass_digest_cache():
+        actual = compute_digest(
+            path,
+            driver=driver,
+            member=member,
+            options=merged_options,
+        )
     return actual == parsed_expected
 
 
@@ -2330,12 +2704,14 @@ __all__ = [
     "LogicalProfileName",
     "build_manifest_v1",
     "build_shapefile_manifest_v1",
+    "bypass_digest_cache",
     "canonical_json_sha256",
     "canonical_json_str",
     "canonicalize_float16_array",
     "canonicalize_float32_array",
     "canonicalize_float64_array",
     "canonicalize_float_array",
+    "clear_digest_cache",
     "compute_array_entry_sha256",
     "compute_ctd1_digest",
     "compute_digest",
@@ -2351,10 +2727,13 @@ __all__ = [
     "digest_table",
     "file_sha256",
     "logical_matrices_scheme_for_policy",
+    "memoize_with_stat_token",
     "normalize_json",
     "normalize_logical_matrices_identity",
     "normalize_table_scalar",
     "open_h5py_read_only",
+    "path_stat_token",
+    "register_stat_cache",
     "resolve_canonicalization_policy",
     "resolve_default_scheme",
     "verify_digest",

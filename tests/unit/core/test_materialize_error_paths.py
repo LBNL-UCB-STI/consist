@@ -9,6 +9,7 @@ from consist.core.materialize import (
     materialize_artifacts_from_sources,
     materialize_ingested_artifact_from_db,
 )
+from consist.core.tracker import Tracker
 from consist.models.artifact import Artifact
 
 
@@ -22,7 +23,7 @@ def _artifact(*, key: str, driver: str = "csv", is_ingested: bool = False) -> Ar
 
 
 def test_materialize_artifacts_blocks_symlink_destination(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = tmp_path / "source.csv"
     source.write_text("x\n1\n", encoding="utf-8")
@@ -32,7 +33,8 @@ def test_materialize_artifacts_blocks_symlink_destination(
     destination = tmp_path / "dest.csv"
     destination.symlink_to(target)
 
-    tracker = SimpleNamespace(resolve_uri=lambda _uri: str(source))
+    tracker = Tracker(run_dir=tmp_path, db_path=None)
+    monkeypatch.setattr(tracker, "resolve_uri", lambda _uri: str(source))
     artifact = _artifact(key="symlinked")
 
     with pytest.raises(ValueError, match="Symlink detected in destination path"):
@@ -42,7 +44,7 @@ def test_materialize_artifacts_blocks_symlink_destination(
 
 
 def test_materialize_artifacts_refuses_overwrite_on_destination_type_mismatch(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = tmp_path / "source.csv"
     source.write_text("value\n1\n", encoding="utf-8")
@@ -50,7 +52,8 @@ def test_materialize_artifacts_refuses_overwrite_on_destination_type_mismatch(
     destination = tmp_path / "destination"
     destination.mkdir()
 
-    tracker = SimpleNamespace(resolve_uri=lambda _uri: str(source))
+    tracker = Tracker(run_dir=tmp_path, db_path=None)
+    monkeypatch.setattr(tracker, "resolve_uri", lambda _uri: str(source))
     artifact = _artifact(key="type_mismatch")
 
     with pytest.raises(RuntimeError, match="Destination type mismatch"):

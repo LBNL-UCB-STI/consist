@@ -1256,7 +1256,6 @@ def test_lazy_callable_archive_root_and_in_run_set_archive_root(
     assert discovered is not None
     assert (discovered / "beam_out" / "events.csv").exists()
     assert res.outputs["events"].recovery_roots == [
-        str(workspace.resolve()),
         str(discovered.resolve()),
     ]
     assert res.outputs["events"].abs_path == str(

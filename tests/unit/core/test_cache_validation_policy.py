@@ -195,6 +195,43 @@ def test_cache_validation_eager_rejects_corrupted_directory_output_when_dir_exis
         assert not t.is_cached
 
 
+def test_cache_validation_eager_rejects_tampered_dir_with_unverified_fresh_witness(
+    tracker,
+) -> None:
+    """
+    An unverified FRESH witness (captured after tampering, never compared to
+    the digest) must not bless a corrupted directory output: eager validation
+    must re-run the manifest check and reject the cache hit.
+    """
+    from consist.core.fs import build_verified_location_row
+
+    dir_path = tracker.run_dir / "outputs" / "skims_unverified_witness.zarr"
+    (dir_path / "nested").mkdir(parents=True, exist_ok=True)
+    member = dir_path / "nested" / "0.0"
+    member.write_bytes(b"original-chunk")
+
+    with tracker.start_run(
+        "seed_unverified_witness",
+        model="model_unverified_witness",
+        cache_mode="overwrite",
+    ):
+        art = tracker.log_output(dir_path, key="skims", artifact_kind="directory")
+
+    # Tamper, then capture an unverified stat witness matching the tampered
+    # tree (simulating row writes that capture witnesses without verification).
+    member.write_bytes(b"mutated-chunk")
+    tampered_row = build_verified_location_row(tracker.fs, art, local_path=dir_path)
+    tracker.db.upsert_artifact_locations([tampered_row])
+
+    with tracker.start_run(
+        "check_unverified_witness",
+        model="model_unverified_witness",
+        cache_mode="reuse",
+        validate_cached_outputs="eager",
+    ) as t:
+        assert not t.is_cached
+
+
 def test_cache_validation_eager_recovers_corrupted_primary_directory_from_recovery_root(
     tracker,
     tmp_path: Path,
@@ -351,3 +388,92 @@ def test_directory_allow_extra_files_preserves_cache_and_input_validation_until_
     )
     assert res3.cache_hit is False
     assert producer_calls == 2
+
+
+def test_cross_workspace_eager_cache_hit_skips_rehash_for_settled_witnesses(
+    tmp_path: Path,
+) -> None:
+    """
+    A consumer Tracker in a separate run_dir sharing the same db_path and mounted
+    outputs hits cache under validate_cached_outputs="eager" with 0 byte hashes
+    when both scalar and directory_manifest outputs have digest_verified=True
+    witnesses.
+    """
+    from collections.abc import Mapping
+    from unittest.mock import patch
+
+    import consist.core.directory_artifacts as directory_artifacts
+    import consist.core.tracker_recovery as tracker_recovery
+    from consist.core.tracker import Tracker
+
+    db_path = tmp_path / "provenance.duckdb"
+    shared_mount = tmp_path / "shared_mount"
+    producer_dir = tmp_path / "producer_runs"
+    consumer_dir = tmp_path / "consumer_runs"
+    shared_mount.mkdir(parents=True, exist_ok=True)
+
+    scalar_path = shared_mount / "scalar.txt"
+    scalar_path.write_text("scalar-payload\n", encoding="utf-8")
+
+    dir_path = shared_mount / "skims_cross_ws.zarr"
+    (dir_path / "nested").mkdir(parents=True, exist_ok=True)
+    (dir_path / "nested" / "0.0").write_bytes(b"chunk-0")
+
+    producer = Tracker(
+        run_dir=producer_dir,
+        db_path=db_path,
+        mounts={"shared": str(shared_mount)},
+    )
+    try:
+        with producer.start_run(
+            "seed_cross_ws",
+            model="model_cross_ws",
+            cache_mode="overwrite",
+        ):
+            scalar_art = producer.log_output(scalar_path, key="scalar")
+            dir_art = producer.log_output(
+                dir_path, key="dir_out", artifact_kind="directory"
+            )
+
+        assert isinstance(dir_art.meta, Mapping)
+        assert "directory_manifest" in dir_art.meta
+
+        for art in (scalar_art, dir_art):
+            rows = producer.db.get_active_artifact_locations(artifact_id=art.id)
+            assert rows
+            assert any(
+                row.witness is not None and row.witness.digest_verified for row in rows
+            )
+    finally:
+        producer.close()
+
+    consumer = Tracker(
+        run_dir=consumer_dir,
+        db_path=db_path,
+        mounts={"shared": str(shared_mount)},
+    )
+    try:
+        with (
+            patch.object(
+                tracker_recovery,
+                "verify_digest",
+                wraps=tracker_recovery.verify_digest,
+            ) as verify_digest_spy,
+            patch.object(
+                directory_artifacts,
+                "build_directory_manifest",
+                wraps=directory_artifacts.build_directory_manifest,
+            ) as build_manifest_spy,
+        ):
+            with consumer.start_run(
+                "consume_cross_ws",
+                model="model_cross_ws",
+                cache_mode="reuse",
+                validate_cached_outputs="eager",
+            ) as t:
+                assert t.is_cached
+
+        assert verify_digest_spy.call_count == 0
+        assert build_manifest_spy.call_count == 0
+    finally:
+        consumer.close()

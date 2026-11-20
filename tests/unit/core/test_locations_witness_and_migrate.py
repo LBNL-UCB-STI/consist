@@ -296,7 +296,21 @@ def test_filestat_now_ns_racy_aging_writable_and_readonly(
         )
         assert len(loc_rows) == 1
         assert loc_rows[0].witness is not None
-        assert loc_rows[0].witness.racy is True
+        assert loc_rows[0].witness.digest_verified is True
+
+        # Reset the persisted witness to digest_verified=False (simulating an
+        # unverified input/advisory witness) so we exercise verify-once settlement.
+        import json
+
+        unverified_json = json.dumps(
+            loc_rows[0].witness.with_digest_verified(False).to_json_dict()
+        )
+        tracker.db.execute(
+            "UPDATE artifact_location SET witness_json = ? WHERE location_id = ?",
+            [unverified_json, str(loc_rows[0].location_id)],
+        )
+        tracker.db._settled_witnesses.clear()
+        tracker.db.bump_location_epoch()
 
         # Snapshot DB copy BEFORE writable settling so we can test read_only=True settling too!
         ro_db_path = tmp_path / "racy_ro_copy.duckdb"
@@ -314,7 +328,7 @@ def test_filestat_now_ns_racy_aging_writable_and_readonly(
         monkeypatch.setattr(tracker_recovery, "verify_digest", _counted_verify)
 
         future_ns = data_path.stat().st_mtime_ns + 3_000_000_000
-        # First call at +3s verifies digest ONCE and settles witness_json in DB
+        # First call verifies digest ONCE and settles digest_verified=True in DB
         resolved = tracker.resolve_artifact_path(art, now_ns=future_ns)
         assert resolved == data_path.resolve()
         assert verify_calls == 1
@@ -323,7 +337,7 @@ def test_filestat_now_ns_racy_aging_writable_and_readonly(
             artifact_id=art.id, digest=art.digest
         )
         assert persisted_after[0].witness is not None
-        assert persisted_after[0].witness.racy is False
+        assert persisted_after[0].witness.digest_verified is True
 
         # 100 subsequent calls execute 0 digest verifications
         for _ in range(100):
@@ -409,7 +423,7 @@ def test_multimember_hdf5_and_symlinked_shapefile_sidecar_witnesses(
         assert after_loc.status == "active"
         assert isinstance(after_loc.witness, FileStat)
         assert after_loc.witness.size > before_size
-        assert after_loc.witness.racy is False
+        assert after_loc.witness.digest_verified is True
 
         # Actually mutating /a marks /a's location stale!
         with h5py.File(h5_path, "a") as hf:

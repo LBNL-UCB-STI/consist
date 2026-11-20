@@ -1055,3 +1055,303 @@ class TestCodeVersion:
 
         assert digest
         assert digest != "unknown_code_version"
+
+
+def _settle_path_mtime(path: Path) -> None:
+    """Backdate mtime slightly past the 20 ms coarse-tick settle guard without sleeping."""
+    targets = [path]
+    if path.is_dir():
+        targets.extend(path.rglob("*"))
+    target_ns = time.time_ns() - 5_000_000_123
+    for p in reversed(targets):
+        os.utime(p, ns=(target_ns, target_ns))
+    time.sleep(0.025)
+
+
+class TestPathDigestMemoization:
+    """Tests stat-validated in-process memoization for file and directory hashing."""
+
+    def test_file_digest_memoizes_across_calls_and_invalidates_on_edits(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from consist import digest as digest_mod
+
+        digest_mod.clear_digest_cache()
+        target = tmp_path / "network.dat"
+        target.write_bytes(b"static-r5-network-v1")
+        _settle_path_mtime(target)
+
+        real_raw_sha256 = digest_mod._raw_file_sha256
+        calls: list[Path] = []
+
+        def _spy_raw_sha256(
+            p: Path | str, *, stat_pre_open: os.stat_result | None = None
+        ) -> tuple[str, os.stat_result]:
+            calls.append(Path(p))
+            return real_raw_sha256(p, stat_pre_open=stat_pre_open)
+
+        monkeypatch.setattr(digest_mod, "_raw_file_sha256", _spy_raw_sha256)
+
+        im_a = IdentityManager(project_root=str(tmp_path), hashing_strategy="full")
+        im_b = IdentityManager(project_root=str(tmp_path), hashing_strategy="full")
+
+        h1 = im_a.digest_path(target)
+        assert len(calls) == 1
+
+        # Repeated calls across both digest_path, compute_file_checksum, and a second
+        # IdentityManager hit the stat-validated memo with zero disk byte reads.
+        assert im_a.digest_path(target) == h1
+        assert im_a.compute_file_checksum(target) == h1
+        assert im_b.digest_path(target) == h1
+        assert len(calls) == 1
+
+        # 1. Equal-length in-place modification invalidates immediately.
+        target.write_bytes(b"static-r5-network-v2")
+        h2 = im_a.digest_path(target)
+        assert h2 != h1
+        assert len(calls) == 2
+
+        # 2. Atomic replacement (new inode, same length) invalidates immediately.
+        _settle_path_mtime(target)
+        h2_settled = im_a.digest_path(target)
+        assert h2_settled == h2
+        replacement = tmp_path / "network.dat.tmp"
+        replacement.write_bytes(b"static-r5-network-v3")
+        replacement.replace(target)
+        h3 = im_a.digest_path(target)
+        assert h3 != h2
+        assert h3 == hashlib.sha256(b"static-r5-network-v3").hexdigest()
+
+    def test_same_millisecond_overwrite_never_returns_stale_cached_digest(
+        self, tmp_path: Path
+    ) -> None:
+        from consist.digest import clear_digest_cache
+
+        clear_digest_cache()
+        im = IdentityManager(project_root=str(tmp_path), hashing_strategy="full")
+        racy = tmp_path / "racy.bin"
+        racy.write_bytes(b"aaaa")
+        d1 = im.digest_path(racy)
+        racy.write_bytes(b"bbbb")
+        d2 = im.digest_path(racy)
+        assert d1 != d2
+
+    def test_directory_and_zarr_digest_memoize_and_invalidate_on_tree_changes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from consist.digest import clear_digest_cache
+
+        clear_digest_cache()
+        cfg_dir = tmp_path / "beam_cfg"
+        (cfg_dir / "sub").mkdir(parents=True)
+        (cfg_dir / "base.conf").write_text("a = 1\n", encoding="utf-8")
+        (cfg_dir / "sub" / "rates.csv").write_text("x,y\n1,2\n", encoding="utf-8")
+        (cfg_dir / ".hidden").write_text("secret\n", encoding="utf-8")
+        _settle_path_mtime(cfg_dir)
+
+        im = IdentityManager(project_root=str(tmp_path), hashing_strategy="full")
+        file_reads = 0
+        orig_update = IdentityManager._update_hash_from_file
+
+        def _spy_update(self, sha, path: Path) -> None:
+            nonlocal file_reads
+            file_reads += 1
+            orig_update(self, sha, path)
+
+        monkeypatch.setattr(IdentityManager, "_update_hash_from_file", _spy_update)
+
+        d_default = im.digest_path(cfg_dir)
+        assert file_reads == 2  # base.conf + sub/rates.csv (.hidden ignored)
+
+        # Repeated digest_path with same options performs 0 file reads.
+        assert im.digest_path(cfg_dir) == d_default
+        assert file_reads == 2
+
+        # Different filter options (ignore_dotfiles=False, allowlist) do not collide.
+        d_with_dotfiles = im.digest_path(cfg_dir, ignore_dotfiles=False)
+        assert d_with_dotfiles != d_default
+        d_csv_only = im.digest_path(cfg_dir, allowlist=["*.csv", "**/*.csv"])
+        assert d_csv_only not in {d_default, d_with_dotfiles}
+
+        reads_before_hit = file_reads
+        assert im.digest_path(cfg_dir, allowlist=["*.csv", "**/*.csv"]) == d_csv_only
+        assert file_reads == reads_before_hit
+
+        # Modifying, adding, and deleting files each invalidate the cached directory digest.
+        (cfg_dir / "sub" / "rates.csv").write_text("x,y\n9,9\n", encoding="utf-8")
+        d_modified = im.digest_path(cfg_dir)
+        assert d_modified != d_default
+
+        _settle_path_mtime(cfg_dir)
+        _ = im.digest_path(cfg_dir)
+        (cfg_dir / "sub" / "extra.csv").write_text("k\n1\n", encoding="utf-8")
+        d_added = im.digest_path(cfg_dir)
+        assert d_added != d_modified
+
+        _settle_path_mtime(cfg_dir)
+        _ = im.digest_path(cfg_dir)
+        (cfg_dir / "sub" / "extra.csv").unlink()
+        d_deleted = im.digest_path(cfg_dir)
+        assert d_deleted == d_modified
+
+        # compute_file_checksum on a non-Zarr directory also memoizes & invalidates.
+        reads_before_checksum = file_reads
+        c1 = im.compute_file_checksum(cfg_dir)
+        assert file_reads > reads_before_checksum
+        _settle_path_mtime(cfg_dir)
+        c1_settled = im.compute_file_checksum(cfg_dir)
+        assert c1_settled == c1
+        reads_after_first = file_reads
+        assert im.compute_file_checksum(cfg_dir) == c1
+        assert file_reads == reads_after_first
+
+        # Zarr store full hashing memoizes and invalidates on chunk edits.
+        zarr_dir = tmp_path / "matrix.zarr"
+        zarr_dir.mkdir()
+        (zarr_dir / ".zarray").write_text('{"shape": [2]}', encoding="utf-8")
+        (zarr_dir / "0").write_bytes(b"chunk-v1")
+        _settle_path_mtime(zarr_dir)
+        z_reads_before = file_reads
+        z1 = im.digest_path(zarr_dir)
+        assert file_reads == z_reads_before + 2  # .zarray + 0
+        assert im.digest_path(zarr_dir) == z1
+        assert im.compute_file_checksum(zarr_dir) == z1
+        assert file_reads == z_reads_before + 2
+        (zarr_dir / "0").write_bytes(b"chunk-v2")
+        z2 = im.digest_path(zarr_dir)
+        assert z2 != z1
+
+    def test_hardlink_shares_file_sha256_cache_and_none_memoizes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from consist import digest as digest_mod
+
+        digest_mod.clear_digest_cache()
+        orig = tmp_path / "orig.bin"
+        orig.write_bytes(b"hardlink-payload")
+        link = tmp_path / "link.bin"
+        os.link(orig, link)
+        _settle_path_mtime(orig)
+
+        real_raw_sha256 = digest_mod._raw_file_sha256
+        calls: list[Path] = []
+
+        def _spy_raw_sha256(
+            p: Path | str, *, stat_pre_open: os.stat_result | None = None
+        ) -> tuple[str, os.stat_result]:
+            calls.append(Path(p))
+            return real_raw_sha256(p, stat_pre_open=stat_pre_open)
+
+        monkeypatch.setattr(digest_mod, "_raw_file_sha256", _spy_raw_sha256)
+        d1 = digest_mod.file_sha256(orig)
+        d2 = digest_mod.file_sha256(link)
+        assert d1 == d2
+        assert len(calls) == 1
+
+        compute_count = 0
+
+        def _return_none() -> None:
+            nonlocal compute_count
+            compute_count += 1
+            return None
+
+        assert (
+            digest_mod.memoize_with_stat_token(("none_test",), [orig], _return_none)
+            is None
+        )
+        assert (
+            digest_mod.memoize_with_stat_token(("none_test",), [orig], _return_none)
+            is None
+        )
+        assert compute_count == 1
+
+    def test_path_stat_token_prunes_excluded_entries_but_detects_subdir_unlinks(
+        self, tmp_path: Path
+    ) -> None:
+        from consist.digest import path_stat_token
+
+        root = tmp_path / "repo"
+        (root / ".git").mkdir(parents=True)
+        (root / "sub").mkdir()
+        (root / "keep.csv").write_text("a\n1\n", encoding="utf-8")
+        (root / "ignore.log").write_text("log1\n", encoding="utf-8")
+        (root / "sub" / "nested.csv").write_text("b\n2\n", encoding="utf-8")
+        _settle_path_mtime(root)
+
+        # Freshly touched dotfile and excluded non-allowlisted file do not unsettle
+        # filtered directory memoization.
+        (root / ".git" / "index.lock").write_text("locked\n", encoding="utf-8")
+        (root / "ignore.log").write_text("log2\n", encoding="utf-8")
+        tok_res = path_stat_token(
+            root, ignore_dotfiles=True, allowlist=("*.csv", "**/*.csv")
+        )
+        assert tok_res is not None
+        assert tok_res[1] is True
+
+        # Unlinking inside a traversed non-dot subdirectory marks settled=False.
+        (root / "sub" / "nested.csv").unlink()
+        tok_after_unlink = path_stat_token(
+            root, ignore_dotfiles=True, allowlist=("*.csv", "**/*.csv")
+        )
+        assert tok_after_unlink is not None
+        assert tok_after_unlink[1] is False
+
+    def test_verification_helpers_bypass_warm_digest_cache(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from consist import digest as digest_mod
+        from consist.core.directory_artifacts import (
+            build_directory_manifest,
+            build_shapefile_bundle_manifest,
+            validate_directory_destination,
+            validate_directory_tree,
+            validate_shapefile_bundle_root,
+        )
+
+        digest_mod.clear_digest_cache()
+        data_file = tmp_path / "payload.bin"
+        data_file.write_bytes(b"hello-world")
+        _settle_path_mtime(data_file)
+        expected = digest_mod.compute_digest(data_file)
+
+        dir_root = tmp_path / "dir_art"
+        dir_root.mkdir()
+        (dir_root / "a.txt").write_text("alpha", encoding="utf-8")
+        _settle_path_mtime(dir_root)
+        dir_manifest = build_directory_manifest(dir_root)
+
+        shp_root = tmp_path / "shp_art"
+        shp_root.mkdir()
+        (shp_root / "roads.shp").write_bytes(b"shp")
+        (shp_root / "roads.dbf").write_bytes(b"dbf")
+        (shp_root / "roads.shx").write_bytes(b"shx")
+        _settle_path_mtime(shp_root)
+        shp_manifest = build_shapefile_bundle_manifest(shp_root / "roads.shp")
+
+        raw_calls: list[Path] = []
+        real_raw_sha256 = digest_mod._raw_file_sha256
+
+        def _spy_raw_sha256(
+            p: Path | str, *, stat_pre_open: os.stat_result | None = None
+        ) -> tuple[str, os.stat_result]:
+            raw_calls.append(Path(p))
+            return real_raw_sha256(p, stat_pre_open=stat_pre_open)
+
+        monkeypatch.setattr(digest_mod, "_raw_file_sha256", _spy_raw_sha256)
+
+        assert digest_mod.verify_digest(data_file, expected)
+        assert data_file in raw_calls
+
+        raw_calls.clear()
+        validate_directory_tree(dir_root, dir_manifest)
+        assert (dir_root / "a.txt") in raw_calls
+
+        raw_calls.clear()
+        assert validate_directory_destination(
+            dir_root, dir_manifest, preserve_existing=True
+        )
+        assert (dir_root / "a.txt") in raw_calls
+
+        raw_calls.clear()
+        validate_shapefile_bundle_root(shp_root, "roads.shp", shp_manifest)
+        assert (shp_root / "roads.shp") in raw_calls

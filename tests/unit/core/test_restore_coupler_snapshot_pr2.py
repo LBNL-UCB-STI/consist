@@ -550,3 +550,177 @@ def test_restore_coupler_snapshot_prune_without_target_root(tmp_path: Path) -> N
         assert result["present_key"].path == present_csv.resolve()
         assert result.outcomes["present_key"].status == "preserved_existing"
         assert result.outcomes["missing_key"].resolvable is False
+
+
+# ---------------------------------------------------------------------------
+# Restore persists the restore target T as an advisory recovery location (C3)
+# ---------------------------------------------------------------------------
+
+
+def _restore_fixture(
+    tmp_path: Path,
+    *,
+    uri: str,
+    rel_parts: tuple[str, ...],
+    payload: str,
+    producer_mounts: Optional[dict] = None,
+):
+    """Producer tracker at ws0 with one snapshot artifact plus a source archive."""
+    db_path = tmp_path / "prov.duckdb"
+    ws0 = tmp_path / "ws0"
+    source_root = tmp_path / "source"
+    ws0.mkdir()
+    (source_root.joinpath(*rel_parts)).parent.mkdir(parents=True)
+    source_root.joinpath(*rel_parts).write_text(payload)
+
+    producer = Tracker(run_dir=ws0, db_path=str(db_path), mounts=producer_mounts)
+    art = _create_persisted_artifact(
+        producer,
+        key="persisted_out",
+        uri=uri,
+        driver="csv",
+        content_hash=payload,
+    )
+    with producer.scenario("prod") as sc:
+        sc.coupler.set("persisted_out", art)
+        sc.capture_coupler_snapshot(phase="post", step_ordinal=1)
+    producer.close()
+    return db_path, ws0, source_root, art
+
+
+def test_restore_persists_target_recovery_root_workspace_uri(tmp_path: Path) -> None:
+    import shutil
+
+    payload = "restore-payload"
+    db_path, ws0, source_root, art = _restore_fixture(
+        tmp_path,
+        uri="workspace://outputs/x.csv",
+        rel_parts=("outputs", "x.csv"),
+        payload=payload,
+    )
+    target_root = tmp_path / "target"
+
+    restorer = Tracker(run_dir=tmp_path / "restore_ws", db_path=str(db_path))
+    with restorer.scenario("resumed") as sc_res:
+        result = sc_res.restore_coupler_snapshot(
+            scenario_run_id="prod",
+            phase="post",
+            target_root=target_root,
+            source_root=source_root,
+        )
+        assert "persisted_out" in result
+        restored_file = target_root / "outputs" / "x.csv"
+        assert restored_file.exists()
+        assert restored_file.read_text() == payload
+        # Not double-prefixed.
+        assert not (target_root / "outputs" / "outputs").exists()
+        hydrated = result["persisted_out"]
+        roots = [
+            str(Path(r).resolve()) for r in restorer.artifact_recovery_roots(hydrated)
+        ]
+        assert str(target_root.resolve()) in roots
+        assert str(source_root.resolve()) in roots
+    restorer.close()
+
+    shutil.rmtree(ws0)
+    shutil.rmtree(source_root)
+
+    fresh = Tracker(run_dir=tmp_path / "fresh_ws", db_path=str(db_path))
+    loaded = fresh.get_artifact(art.id)
+    assert loaded is not None
+    assert loaded.abs_path is None or not Path(loaded.abs_path).exists()
+    dest = fresh.run_dir / "staged" / "x.csv"
+    res = fresh.stage_artifact(
+        loaded, destination=dest, validate_content_hash="if-present"
+    )
+    assert res.status == "staged"
+    assert dest.read_text() == payload
+    fresh.close()
+
+
+def test_restore_persists_target_recovery_root_named_mount_prefix(
+    tmp_path: Path,
+) -> None:
+    import shutil
+
+    payload = "skims-payload"
+    db_path, ws0, source_root, art = _restore_fixture(
+        tmp_path,
+        uri="beam_input://skims.csv",
+        rel_parts=("beam", "input", "skims.csv"),
+        payload=payload,
+        producer_mounts={"beam_input": tmp_path / "ws0" / "beam" / "input"},
+    )
+    target_root = tmp_path / "target"
+
+    restorer = Tracker(
+        run_dir=tmp_path / "restore_ws",
+        db_path=str(db_path),
+        mounts={"beam_input": tmp_path / "restore_ws" / "beam" / "input"},
+    )
+    with restorer.scenario("resumed") as sc_res:
+        result = sc_res.restore_coupler_snapshot(
+            scenario_run_id="prod",
+            phase="post",
+            target_root=target_root,
+            source_root=source_root,
+            remappable_schemes={"beam_input": "beam/input"},
+        )
+        assert "persisted_out" in result
+        restored_file = target_root / "beam" / "input" / "skims.csv"
+        assert restored_file.exists()
+        assert restored_file.read_text() == payload
+        hydrated = result["persisted_out"]
+        roots = [
+            str(Path(r).resolve()) for r in restorer.artifact_recovery_roots(hydrated)
+        ]
+        assert str(target_root.resolve()) in roots
+    restorer.close()
+
+    shutil.rmtree(ws0)
+    shutil.rmtree(source_root)
+
+    fresh = Tracker(run_dir=tmp_path / "fresh_ws", db_path=str(db_path))
+    loaded = fresh.get_artifact(art.id)
+    assert loaded is not None
+    dest = fresh.run_dir / "staged" / "skims.csv"
+    res = fresh.stage_artifact(
+        loaded, destination=dest, validate_content_hash="if-present"
+    )
+    assert res.status == "staged"
+    assert dest.read_text() == payload
+    fresh.close()
+
+
+def test_restore_read_only_db_registers_nothing(tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    payload = "readonly-payload"
+    db_path, ws0, source_root, art = _restore_fixture(
+        tmp_path,
+        uri="workspace://outputs/x.csv",
+        rel_parts=("outputs", "x.csv"),
+        payload=payload,
+    )
+    target_root = tmp_path / "target"
+
+    restorer = Tracker(run_dir=tmp_path / "restore_ws", db_path=str(db_path))
+    with patch.object(restorer.db, "read_only", True):
+        with restorer.scenario("resumed") as sc_res:
+            result = sc_res.restore_coupler_snapshot(
+                scenario_run_id="prod",
+                phase="post",
+                target_root=target_root,
+                source_root=source_root,
+            )
+            assert "persisted_out" in result
+            assert (target_root / "outputs" / "x.csv").exists()
+    restorer.close()
+
+    writer = Tracker(run_dir=tmp_path / "writer_ws", db_path=str(db_path))
+    loaded = writer.get_artifact(art.id)
+    assert loaded is not None
+    roots = [str(Path(r).resolve()) for r in writer.artifact_recovery_roots(loaded)]
+    assert str(target_root.resolve()) not in roots
+    assert str(source_root.resolve()) not in roots
+    writer.close()

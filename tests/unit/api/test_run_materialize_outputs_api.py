@@ -825,7 +825,6 @@ def test_archive_run_outputs_uses_current_configured_mount_for_run_owned_file(
         refreshed = tracker_b.get_run_outputs(run_id)["shared"]
         assert refreshed.uri == artifact.uri
         assert refreshed.recovery_roots == [
-            str(current_workspace.resolve()),
             str(archive_root.resolve()),
         ]
 
@@ -1804,7 +1803,7 @@ def test_archive_run_output_files_rejects_symlink_source_ancestor(
     assert report["source_linked"].metadata_committed is False
 
 
-def test_find_existing_recovery_source_path_default_validator_receives_resolved_path(
+def test_iter_artifact_candidates_canonical_path_is_resolved(
     tracker: Tracker,
 ) -> None:
     output_path = tracker.run_dir / "outputs" / "validator.csv"
@@ -1814,20 +1813,11 @@ def test_find_existing_recovery_source_path_default_validator_receives_resolved_
         artifact = tracker.log_artifact(
             output_path, key="validator", direction="output"
         )
-    run = tracker.get_run("producer_validator_path")
-    assert run is not None
-    seen: list[Path] = []
+    from consist.core.location_resolver import iter_artifact_candidates
 
-    _, source, _ = consist_materialize.find_existing_recovery_source_path(
-        tracker,
-        artifact=artifact,
-        run=run,
-        source_root=None,
-        source_validator=lambda candidate: seen.append(candidate) or True,
-    )
-
-    assert seen == [output_path.resolve()]
-    assert source == output_path.resolve()
+    cands = list(iter_artifact_candidates(tracker, artifact))
+    assert len(cands) >= 1
+    assert cands[0].canonical_path == output_path.resolve()
 
 
 def test_archive_run_output_files_rejects_symlink_recovery_root_before_resolution(
@@ -1900,6 +1890,31 @@ def test_archive_run_output_files_rejects_symlinked_historical_root_before_resol
         artifact = tracker.log_artifact(
             output_path, key="historical_linked", direction="output"
         )
+    output_path.unlink()
+    # The producer row pins the producer workspace instance, so workspace-instance
+    # verification now (correctly) drops the foreign symlinked historical root as
+    # unmounted before symlink detection can fire. Add an instance-permissive row
+    # so the archive source scan still sees the symlinked historical coordinate
+    # and this test keeps exercising symlink rejection before resolution.
+    from consist.location import ArtifactLocationRow
+
+    existing_rows = tracker.db.get_active_artifact_locations(
+        artifact_id=artifact.id, digest=artifact.digest, member=artifact.member
+    )
+    tracker.db.upsert_artifact_locations(
+        [
+            ArtifactLocationRow.create(
+                digest=r.digest,
+                artifact_id=artifact.id,
+                site=r.site,
+                mount_name=r.mount_name,
+                mount_instance_id="",
+                uri=r.uri,
+                member=r.member,
+            )
+            for r in existing_rows
+        ]
+    )
     historical_run = tracker.get_run("producer_archive_historical_linked")
     assert historical_run is not None
     historical_run.meta = {"_physical_run_dir": str(linked_root)}

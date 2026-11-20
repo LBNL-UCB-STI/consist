@@ -59,10 +59,12 @@ signature = SHA256(code_identity || config_identity || bound_inputs || declared_
 
 To avoid re-hashing gigabytes of unchanged data on every step while still catching out-of-band file modifications, `consist.location` provides typed location witnesses:
 
-- **`FileStat`**: Records `(size, mtime_ns, inode)` for a single file.
-- **`DirTreeStat`**: Records directory-level and member-level stat summaries for directory trees and Zarr stores.
+- **`FileStat`**: Records `(size, mtime_ns, inode)` and `digest_verified` for a single file (with no persisted `racy` field).
+- **`DirTreeStat`**: Records directory-level and member-level stat summaries and `digest_verified` for directory trees and Zarr stores (with no persisted `racy` field).
 
 Before executing a step with pre-existing declared output targets, Consist snapshots pre-step stats/digests and raises `StaleOutputError` if a pre-existing output file, directory/Zarr store, or HDF5 member was left untouched on disk.
+
+For coordinate translation, candidate precedence, and witness verification invariants, see [Location Resolver Architecture](location-resolver-architecture.md).
 
 ---
 

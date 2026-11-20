@@ -306,7 +306,7 @@ def _validate_select_only_sql(sql: str) -> None:
         stmts = duckdb.extract_statements(sql)
     except duckdb.Error as exc:
         raise ValueError(f"Invalid SQL query: {exc}") from exc
-    if not (len(stmts) == 1 and stmts[0].type == duckdb.StatementType.SELECT):  # ty: ignore[unresolved-attribute]
+    if not (len(stmts) == 1 and stmts[0].type == duckdb.StatementType.SELECT):  # ty: ignore[missing-attribute]
         raise ValueError(
             "query_df, query_rows, and run_query only permit a single read-only SELECT statement"
         )
@@ -349,6 +349,10 @@ _LIVE_DB_LOCK = threading.Lock()
 _LIVE_DB_MANAGERS: dict[str, weakref.WeakSet[DatabaseManager]] = {}
 _GLOBAL_LOCATION_EPOCH = itertools.count(1)
 _DB_PATH_LOCATION_EPOCH: dict[str, int] = {}
+_GLOBAL_MOUNT_EPOCH = itertools.count(1)
+_DB_PATH_MOUNT_EPOCH: dict[str, int] = {}
+_GLOBAL_RUN_EPOCH = itertools.count(1)
+_DB_PATH_RUN_EPOCH: dict[str, int] = {}
 _TRACKED_RELATION_LOCK = threading.Lock()
 _TRACKED_RELATIONS: dict[
     str,
@@ -697,8 +701,12 @@ class DatabaseManager:
         self._temp_views: dict[str, str] = {}
         self._temp_view_epoch: int = 0
         self.location_epoch: int = next(_GLOBAL_LOCATION_EPOCH)
+        self.mount_epoch: int = next(_GLOBAL_MOUNT_EPOCH)
+        self.run_epoch: int = next(_GLOBAL_RUN_EPOCH)
         self._has_artifact_location_table: Optional[bool] = None
         self._last_seen_location_epoch: Optional[tuple[Any, ...]] = None
+        self._last_seen_mount_epoch: Optional[tuple[Any, ...]] = None
+        self._last_seen_run_epoch: Optional[tuple[Any, ...]] = None
         self._epoch_invalidation_hooks: list[Callable[[], None]] = []
         self._active_coord_witness: dict[
             tuple[str, str, str, str, str],
@@ -706,18 +714,7 @@ class DatabaseManager:
         ] = {}
         self._location_resolution_cache: dict[
             tuple[Any, ...],
-            tuple[
-                tuple[
-                    ArtifactLocationRow,
-                    Optional[Path],
-                    Optional[Path],
-                    Optional[Path],
-                    str,
-                    Optional[Path],
-                    str,
-                ],
-                ...,
-            ],
+            tuple[Any, ...],
         ] = {}
         self._settled_witnesses: dict[uuid.UUID, Witness] = {}
         self._ephemeral_stale_locations: dict[uuid.UUID, LocationStatus] = {}
@@ -1795,9 +1792,20 @@ class DatabaseManager:
                 _ensure_non_null_utc_dt(run.updated_at),
             ],
         )
-        self._historical_mount_cache.clear()
+        mount_changed = False
+        for mount_key in ("mounts", "archive_mounts"):
+            mount_map = meta_dict.get(mount_key)
+            if isinstance(mount_map, Mapping):
+                for scheme, root in mount_map.items():
+                    if isinstance(scheme, str) and isinstance(root, str):
+                        if self._session_known_mounts.get(scheme) != root:
+                            self._session_known_mounts[scheme] = root
+                            self._historical_mount_cache.pop(scheme, None)
+                            mount_changed = True
+        if mount_changed:
+            self.bump_mount_epoch()
+        self.bump_run_epoch()
         self._recorded_run_archive_mounts.clear()
-        self._location_resolution_cache.clear()
 
     def _insert_binding_invocation_locked(
         self,
@@ -4627,6 +4635,65 @@ class DatabaseManager:
         self._last_seen_location_epoch = self.effective_location_epoch
         return nxt
 
+    @property
+    def effective_mount_epoch(self) -> tuple[int, int, int, int, int, int]:
+        path_epoch = (
+            _DB_PATH_MOUNT_EPOCH.get(str(self._resolved_db_path), 0)
+            if self._resolved_db_path is not None
+            else 0
+        )
+        db_m, db_s, wal_m, wal_s = (
+            self._file_stat_stamp(self._resolved_db_path)
+            if self._con_read_only
+            else (0, 0, 0, 0)
+        )
+        return (self.mount_epoch, path_epoch, db_m, db_s, wal_m, wal_s)
+
+    def sync_mount_epoch_caches(self) -> tuple[int, int, int, int, int, int]:
+        cur_epoch = self.effective_mount_epoch
+        if self._last_seen_mount_epoch != cur_epoch:
+            if self._last_seen_mount_epoch is not None:
+                self._historical_mount_cache.clear()
+            self._last_seen_mount_epoch = cur_epoch
+        return cur_epoch
+
+    def bump_mount_epoch(self) -> int:
+        nxt = next(_GLOBAL_MOUNT_EPOCH)
+        self.mount_epoch = nxt
+        if self._resolved_db_path is not None:
+            _DB_PATH_MOUNT_EPOCH[str(self._resolved_db_path)] = nxt
+        self._historical_mount_cache.clear()
+        self._last_seen_mount_epoch = self.effective_mount_epoch
+        return nxt
+
+    @property
+    def effective_run_epoch(self) -> tuple[int, int, int, int, int, int]:
+        path_epoch = (
+            _DB_PATH_RUN_EPOCH.get(str(self._resolved_db_path), 0)
+            if self._resolved_db_path is not None
+            else 0
+        )
+        db_m, db_s, wal_m, wal_s = (
+            self._file_stat_stamp(self._resolved_db_path)
+            if self._con_read_only
+            else (0, 0, 0, 0)
+        )
+        return (self.run_epoch, path_epoch, db_m, db_s, wal_m, wal_s)
+
+    def sync_run_epoch_caches(self) -> tuple[int, int, int, int, int, int]:
+        cur_epoch = self.effective_run_epoch
+        if self._last_seen_run_epoch != cur_epoch:
+            self._last_seen_run_epoch = cur_epoch
+        return cur_epoch
+
+    def bump_run_epoch(self) -> int:
+        nxt = next(_GLOBAL_RUN_EPOCH)
+        self.run_epoch = nxt
+        if self._resolved_db_path is not None:
+            _DB_PATH_RUN_EPOCH[str(self._resolved_db_path)] = nxt
+        self._last_seen_run_epoch = self.effective_run_epoch
+        return nxt
+
     def has_artifact_location_table(self) -> bool:
         if self._has_artifact_location_table is None:
             self._has_artifact_location_table = self.has_table("artifact_location")
@@ -4640,9 +4707,12 @@ class DatabaseManager:
             return True
         if existing is None:
             return False
-        if existing == incoming:
-            return True
-        return not existing.racy and existing.settled() == incoming.settled()
+        inc = (
+            incoming.with_digest_verified(True)
+            if existing.digest_verified and not incoming.digest_verified
+            else incoming
+        )
+        return existing == inc
 
     @staticmethod
     def _same_stat_footprint(w_a: Optional[Witness], w_b: Optional[Witness]) -> bool:
@@ -5141,6 +5211,28 @@ class DatabaseManager:
             if prev is None:
                 rows_to_upsert.append(loc)
                 continue
+            if (
+                loc.witness is not None
+                and not loc.witness.digest_verified
+                and prev.witness is not None
+                and prev.witness.digest_verified
+                and prev.digest == loc.digest
+                and prev.witness.with_digest_verified(False)
+                == loc.witness.with_digest_verified(False)
+            ):
+                loc = replace(loc, witness=loc.witness.with_digest_verified(True))
+                coord = (
+                    loc.site,
+                    loc.mount_name,
+                    loc.mount_instance_id,
+                    loc.uri,
+                    loc.member,
+                )
+                if (
+                    coord in winning_by_coord
+                    and _coerce_uuid(winning_by_coord[coord].location_id) == lid
+                ):
+                    winning_by_coord[coord] = loc
             digest_changed = loc.digest is not None and prev.digest != loc.digest
             aid_changed = loc.artifact_id is not None and prev.artifact_id is None
             witness_changed = not self._witness_matches_or_settled(
@@ -5157,7 +5249,16 @@ class DatabaseManager:
         did_delete = bool(delete_superseded_lids)
         if not stale_lids and not rows_to_upsert:
             if did_delete:
+                prev_active_coord = dict(self._active_coord_witness)
+                for coord in list(prev_active_coord):
+                    if (
+                        coord[1:] in physical_writers
+                        or (coord[1], coord[2], coord[3])
+                        in superseded_container_winners
+                    ):
+                        prev_active_coord.pop(coord, None)
                 self.bump_location_epoch()
+                self._active_coord_witness = prev_active_coord
             for coord, win_loc in winning_by_coord.items():
                 prev_win = existing_by_lid.get(_coerce_uuid(win_loc.location_id))
                 eff_w = (
@@ -5229,9 +5330,21 @@ class DatabaseManager:
             self._ephemeral_stale_locations.pop(lid, None)
             if loc.witness is not None:
                 self._settled_witnesses.pop(lid, None)
+        prev_active_coord = dict(self._active_coord_witness)
+        for coord in list(prev_active_coord):
+            if (
+                coord[1:] in physical_writers
+                or (coord[1], coord[2], coord[3]) in superseded_container_winners
+            ):
+                prev_active_coord.pop(coord, None)
         self.bump_location_epoch()
-        for coord, win_loc in winning_by_coord.items():
-            self._active_coord_witness[coord] = (win_loc.digest, win_loc.witness)
+        self._active_coord_witness = {
+            **prev_active_coord,
+            **{
+                coord: (win_loc.digest, win_loc.witness)
+                for coord, win_loc in winning_by_coord.items()
+            },
+        }
 
     def upsert_artifact_locations(
         self, locations: Sequence[ArtifactLocationRow]
@@ -5420,6 +5533,20 @@ class DatabaseManager:
 
         return list(by_id.values())
 
+    def get_settled_witness(
+        self,
+        location_id: uuid.UUID,
+        row_witness: Optional[Witness] = None,
+    ) -> Optional[Witness]:
+        """Return the settled (content-verified) witness for a location, if any."""
+        lid = _coerce_uuid(location_id)
+        cached = self._settled_witnesses.get(lid)
+        if cached is not None:
+            return cached
+        if row_witness is not None and row_witness.digest_verified:
+            return row_witness
+        return None
+
     def settle_artifact_location_witness(
         self,
         location_id: uuid.UUID,
@@ -5428,10 +5555,22 @@ class DatabaseManager:
         observed_at_ns: Optional[int] = None,
     ) -> None:
         lid = _coerce_uuid(location_id)
-        self._settled_witnesses[lid] = witness
+        verified_witness = witness.with_digest_verified(True)
+        prev_cached = self._settled_witnesses.get(lid)
+        self._settled_witnesses[lid] = verified_witness
         if self.read_only:
             return
-        serialized = witness.to_json()
+        if prev_cached == verified_witness:
+            return
+        existing_row = self.fetchone(
+            "SELECT witness_json FROM artifact_location WHERE location_id = ?",
+            [lid],
+        )
+        if existing_row is not None and existing_row[0] is not None:
+            existing_witness = witness_from_json(existing_row[0])
+            if existing_witness == verified_witness:
+                return
+        serialized = verified_witness.to_json()
         with self.transaction() as cur:
             if observed_at_ns is not None:
                 cur.execute(
@@ -5689,7 +5828,7 @@ class DatabaseManager:
             return
         self._session_known_mounts[mount_name] = root_path
         self._historical_mount_cache.pop(mount_name, None)
-        self.bump_location_epoch()
+        self.bump_mount_epoch()
 
     def record_archive_mount_on_run(
         self, run_id: str, mount_name: str, root_path: str
@@ -5717,12 +5856,13 @@ class DatabaseManager:
                     "UPDATE run SET meta = json_merge_patch(COALESCE(meta, '{}'), ?) WHERE id = ?",
                     [patch_json, run_id],
                 )
-                self._historical_mount_cache.clear()
-                self.bump_location_epoch()
+                self.bump_mount_epoch()
+                self.bump_run_epoch()
         self._recorded_run_archive_mounts.add(cache_key)
 
     def lookup_historical_mount_roots(self, mount_name: str) -> tuple[str, ...]:
         """Lookup historical root paths for a named mount from runs and recorded mounts."""
+        self.sync_mount_epoch_caches()
         cached = self._historical_mount_cache.get(mount_name)
         if cached is not None:
             return cached
@@ -5897,22 +6037,34 @@ class DatabaseManager:
     def evict_recovery_root_locations(
         self,
         *,
-        mount_name: str,
-        mount_instance_id: str,
-        root_uri: str,
+        root_coordinates: Sequence[tuple[str, str, str]],
         retained_ids: Set[uuid.UUID],
     ) -> bool:
-        """Mark ``archive``/``advisory`` locations beneath ``root_uri`` evicted for non-retained artifacts."""
+        """Mark ``archive``/``advisory`` locations beneath ``root_coordinates`` evicted for non-retained artifacts."""
+        coords = list(
+            dict.fromkeys(
+                (str(m_name), str(m_inst), str(r_uri))
+                for m_name, m_inst, r_uri in root_coordinates
+            )
+        )
+        if not coords:
+            return False
+
         retained_coerced = sorted((_coerce_uuid(aid) for aid in retained_ids), key=str)
-        prefix = root_uri if root_uri.endswith("://") else root_uri.rstrip("/") + "/"
+        coord_clauses: list[str] = []
+        params: list[Any] = []
+        for m_name, m_inst, r_uri in coords:
+            prefix = r_uri if r_uri.endswith("://") else r_uri.rstrip("/") + "/"
+            coord_clauses.append(
+                "(mount_name = ? AND mount_instance_id = ? AND (uri = ? OR starts_with(uri, ?)))"
+            )
+            params.extend([m_name, m_inst, r_uri, prefix])
+
         clauses = [
             "site IN ('archive', 'advisory')",
             "status = 'active'",
-            "mount_name = ?",
-            "mount_instance_id = ?",
-            "(uri = ? OR starts_with(uri, ?))",
+            f"({' OR '.join(coord_clauses)})",
         ]
-        params: list[Any] = [mount_name, mount_instance_id, root_uri, prefix]
         if retained_coerced:
             for chunk_start in range(0, len(retained_coerced), 500):
                 ret_chunk = retained_coerced[chunk_start : chunk_start + 500]

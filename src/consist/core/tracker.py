@@ -57,6 +57,7 @@ from consist.core.resolved_binding import (
     _StrictBindingInvocationContext,
     _validate_strict_binding_invocation_context,
 )
+from consist.core.location_resolver import LocationResolver
 from consist.core.tracker_artifact_logging import ArtifactLoggingCoordinator
 from consist.core.tracker_artifact_queries import TrackerArtifactQueryService
 from consist.core.tracker_lifecycle import RunLifecycleCoordinator
@@ -258,64 +259,62 @@ class Tracker:
         overrides[artifact.id] = (artifact._abs_path, abs_path)
 
     def artifact_abs_path_override(
-        self, artifact: Any
+        self, artifact: Artifact
     ) -> Optional[Tuple[Optional[str], Optional[str]]]:
         overrides = self._compat_attr("_artifact_abs_path_overrides")
-        if not overrides or not isinstance(artifact, Artifact):
+        if not overrides:
             return None
         return overrides.get(artifact.id)
 
     def resolve_artifact_path(
         self,
-        artifact: Any,
+        artifact: Artifact,
         *,
         allow_recovery_roots: bool = True,
         ignore_runtime_abs_path: bool = False,
         now_ns: Optional[int] = None,
     ) -> Path:
-        if isinstance(artifact, Artifact):
-            from consist.core.tracker_recovery import (
-                resolve_verified_local_path_with_diagnostics,
-                verify_candidate_against_artifact,
+        from consist.core.tracker_recovery import (
+            resolve_verified_local_path_with_diagnostics,
+            verify_candidate_against_artifact,
+        )
+
+        resolved, saw_mismatch = resolve_verified_local_path_with_diagnostics(
+            self,
+            artifact,
+            allow_recovery_roots=allow_recovery_roots,
+            ignore_runtime_abs_path=ignore_runtime_abs_path,
+            now_ns=now_ns,
+        )
+        if resolved is not None:
+            return resolved
+
+        nominal: Optional[Path] = None
+        try:
+            nominal = Path(self.resolve_uri(artifact.uri))
+        except (ValueError, RuntimeError, OSError, TypeError):
+            nominal = Path(artifact._abs_path) if artifact._abs_path else None
+
+        if saw_mismatch or (
+            nominal is not None
+            and nominal.exists()
+            and artifact.digest is not None
+            and not verify_candidate_against_artifact(nominal, artifact)
+        ):
+            raise FileNotFoundError(
+                f"Artifact {artifact.key!r} failed witness/digest verification "
+                "and has no verified recovery location."
             )
 
-            resolved, saw_mismatch = resolve_verified_local_path_with_diagnostics(
-                self,
-                artifact,
-                allow_recovery_roots=allow_recovery_roots,
-                ignore_runtime_abs_path=ignore_runtime_abs_path,
-                now_ns=now_ns,
-            )
-            if resolved is not None:
-                return resolved
-
-            nominal: Optional[Path] = None
-            try:
-                nominal = Path(self.resolve_uri(artifact.uri))
-            except (ValueError, RuntimeError, OSError, TypeError):
-                nominal = Path(artifact._abs_path) if artifact._abs_path else None
-
-            if saw_mismatch or (
-                nominal is not None
-                and nominal.exists()
-                and artifact.digest is not None
-                and not verify_candidate_against_artifact(nominal, artifact)
-            ):
-                raise FileNotFoundError(
-                    f"Artifact {artifact.key!r} failed witness/digest verification "
-                    "and has no verified recovery location."
-                )
-
-            if not ignore_runtime_abs_path and artifact._abs_path:
-                return Path(artifact._abs_path)
-            if nominal is not None:
-                return nominal
-            return Path(artifact.uri)
-        return Path(self.resolve_uri(str(artifact)))
+        if not ignore_runtime_abs_path and artifact._abs_path:
+            return Path(artifact._abs_path)
+        if nominal is not None:
+            return nominal
+        return Path(artifact.uri)
 
     def ensure_local_artifact_path(
         self,
-        artifact: Any,
+        artifact: Artifact,
         *,
         target_root: Optional[Path | str] = None,
         source_root: Optional[Path | str] = None,
@@ -333,20 +332,39 @@ class Tracker:
             on_missing=on_missing,
         )
 
-    def load_artifact_df(self, artifact: Any, **kwargs: Any) -> Any:
+    def load_artifact_df(self, artifact: Artifact, **kwargs: Any) -> Any:
         from consist.api import load_df
 
         return load_df(artifact, tracker=self, **kwargs)
 
-    def artifact_accessibility(self, artifact: Any) -> str:
-        if isinstance(artifact, Artifact):
-            acc = artifact.accessibility(tracker=self)
-            return "accessible" if acc.accessible else "missing"
-        return "missing"
+    @property
+    def location_resolver(self) -> LocationResolver:
+        """Return the epoch-synchronized ``LocationResolver`` bound to this tracker."""
+        resolver = self._location_resolver
+        if resolver is None or resolver.fs is not self.fs or resolver.db is not self.db:
+            resolver = LocationResolver(
+                self.fs,
+                db=self.db,
+                get_run=self.get_run,
+                get_active_run_id=(
+                    lambda: (
+                        self.current_consist.run.id
+                        if self.current_consist is not None
+                        else None
+                    )
+                ),
+            )
+            self._location_resolver = resolver
+        resolver.sync_epoch()
+        return resolver
 
-    def inspect_artifact_locations(self, artifact: Any) -> list[tuple[str, Path, bool]]:
-        if not isinstance(artifact, Artifact):
-            return []
+    def artifact_accessibility(self, artifact: Artifact) -> str:
+        acc = artifact.accessibility(tracker=self)
+        return "accessible" if acc.accessible else "missing"
+
+    def inspect_artifact_locations(
+        self, artifact: Artifact
+    ) -> list[tuple[str, Path, bool]]:
         from consist.core.tracker_recovery import (
             resolve_verified_local_path,
             verify_candidate_against_artifact,
@@ -375,7 +393,12 @@ class Tracker:
         for index, root in enumerate(roots, start=1):
             if "://" in root and not root.startswith("file://"):
                 continue
-            candidate = (Path(root) / rel).resolve()
+            coord = self.fs.translate_raw_root(root, rel)
+            if not coord.is_resolved or coord.canonical_path is None:
+                lexical = coord.lexical_path or (Path(root) / rel)
+                locations.append((f"recovery_root #{index}", lexical, False))
+                continue
+            candidate = coord.canonical_path
             is_valid = candidate.exists() and verify_candidate_against_artifact(
                 candidate, artifact
             )
@@ -383,40 +406,20 @@ class Tracker:
         return locations
 
     def artifact_recovery_roots(
-        self, artifact: Any, *, resolve: bool = True
+        self, artifact: Artifact, *, resolve: bool = True
     ) -> list[str]:
-        if not isinstance(artifact, Artifact) or artifact.id is None:
+        if artifact.id is None:
             return []
-        db = self._compat_attr("db")
+        db = self.db
         if db is None:
             return []
         rows = db.get_artifact_recovery_locations(artifact.id)
         roots: list[str] = []
+        resolver = self.location_resolver
         for row in rows:
-            extracted = self.fs.extract_recovery_root_from_location_row(
+            extracted = resolver.extract_recovery_root(
                 artifact.uri, row, resolve=resolve
             )
-            if (
-                resolve
-                and extracted is not None
-                and "://" in extracted
-                and not extracted.startswith("file://")
-                and row.mount_name not in self.fs.mounts
-            ):
-                _, rel_prefix = extracted.split("://", 1)
-                clean_prefix = rel_prefix.strip("/")
-                hist_roots = db.lookup_historical_mount_roots(row.mount_name)
-                if hist_roots:
-                    chosen = hist_roots[0]
-                    for hr in hist_roots:
-                        cand_dir = Path(hr) / clean_prefix if clean_prefix else Path(hr)
-                        if cand_dir.exists():
-                            chosen = hr
-                            break
-                    base_root = (
-                        Path(chosen) / clean_prefix if clean_prefix else Path(chosen)
-                    )
-                    extracted = str(base_root.resolve())
             if extracted is not None and extracted not in roots:
                 roots.append(extracted)
         return roots
@@ -754,6 +757,7 @@ class Tracker:
         self._run_artifacts_cache_max_entries: int = 1024
 
         self._runs_by_id: Dict[str, Run] = {}
+        self._location_resolver: LocationResolver | None = None
         self._artifact_facet_parsers: list[
             tuple[str, Callable[[str], Optional[FacetLike]]]
         ] = []

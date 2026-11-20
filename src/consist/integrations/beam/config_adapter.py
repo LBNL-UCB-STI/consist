@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import importlib
 import json
 import logging
@@ -58,6 +59,7 @@ from consist.digest import (
     Digest,
     canonical_json_sha256,
     file_sha256,
+    memoize_with_stat_token,
     normalize_json,
     verify_digest,
 )
@@ -100,9 +102,14 @@ except ImportError:  # pragma: no cover
     NonExistentKey = None
 
 
-_INCLUDE_RE = re.compile(r"^\s*include\s+(?:\"([^\"]+)\"|file\(\"([^\"]+)\"\))")
+_INCLUDE_RE = re.compile(
+    r'^\s*include\s+(?:required\(\s*)?(?:"([^"]+)"|file\(\s*"([^"]+)"\s*\))(?:\s*\))?'
+)
 _MAX_IMPLICIT_PATH_VALUE_LENGTH = 512
 _PATH_PROBE_EXCEPTIONS = (OSError, ValueError, RuntimeError)
+_BEAM_IDENTITY_SCHEMA_VERSION = 2
+_NOOP_DIRECTORY_POLICIES = {"directory_hash", "fingerprint_manifest"}
+_NOOP_DIRECTORY_POLICY_WARNINGS: set[tuple[str, str]] = set()
 
 _DEFAULT_OVERRIDE_RUNTIME_KWARGS: dict[str, str] = {
     "config_dir": "selected_root_dir",
@@ -1366,33 +1373,46 @@ class BeamConfigAdapter:
         return config_path.resolve()
 
     def _collect_conf_files(self, root: Path) -> list[Path]:
-        seen: set[Path] = set()
-        ordered: list[Path] = []
-        queue = [root]
-        while queue:
-            current = queue.pop(0)
-            if current in seen:
-                continue
-            seen.add(current)
-            ordered.append(current)
-            for include in _scan_includes(current):
-                queue.append(include)
-        return ordered
+        return _collect_conf_files(root)
+
+
+def _collect_conf_files(root: Path) -> list[Path]:
+    seen: set[Path] = set()
+    ordered: list[Path] = []
+    queue = [root]
+    while queue:
+        current = queue.pop(0)
+        if current in seen:
+            continue
+        seen.add(current)
+        ordered.append(current)
+        for include in _scan_includes(current):
+            queue.append(include)
+    return ordered
 
 
 def _scan_includes(path: Path) -> list[Path]:
-    includes: list[Path] = []
     if not path.exists():
+        return []
+
+    def _scan() -> list[Path]:
+        includes: list[Path] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            match = _INCLUDE_RE.match(line)
+            if not match:
+                continue
+            rel = match.group(1) or match.group(2)
+            if rel:
+                include_path = (path.parent / rel).resolve()
+                includes.append(include_path)
         return includes
-    for line in path.read_text(encoding="utf-8").splitlines():
-        match = _INCLUDE_RE.match(line)
-        if not match:
-            continue
-        rel = match.group(1) or match.group(2)
-        if rel:
-            include_path = (path.parent / rel).resolve()
-            includes.append(include_path)
-    return includes
+
+    return memoize_with_stat_token(
+        ("beam_scan_includes",),
+        [path],
+        _scan,
+        clone_fn=list,
+    )
 
 
 def _rebind_config_values_parents(node: Any) -> None:
@@ -1433,28 +1453,46 @@ def _load_config_tree(
         raise ImportError("pyhocon is required for BEAM canonicalization.")
     if HOCONConverter is None:
         raise ImportError("pyhocon is required for BEAM canonicalization.")
-    config = ConfigFactory.parse_file(str(path), resolve=False)
-    _rebind_config_values_parents(config)
-    if resolve:
-        if ConfigParser is None:
-            raise ImportError("pyhocon is required for BEAM canonicalization.")
-        if NonExistentKey is None:
-            raise ImportError("pyhocon is required for BEAM canonicalization.")
-        inserted_keys: list[str] = []
-        if env_overrides:
-            for key, value in env_overrides.items():
-                if not key:
-                    continue
-                if config.get(key, NonExistentKey) is not NonExistentKey:
-                    continue
-                config.put(key, value)
-                inserted_keys.append(key)
-        try:
-            ConfigParser.resolve_substitutions(config, accept_unresolved=False)
-        finally:
-            for key in inserted_keys:
-                _remove_config_key(config, key)
-    return json.loads(HOCONConverter.to_json(config))
+    config_factory = ConfigFactory
+    hocon_converter = HOCONConverter
+
+    def _parse_and_resolve() -> dict[str, Any]:
+        config = config_factory.parse_file(str(path), resolve=False)
+        _rebind_config_values_parents(config)
+        if resolve:
+            if ConfigParser is None:
+                raise ImportError("pyhocon is required for BEAM canonicalization.")
+            if NonExistentKey is None:
+                raise ImportError("pyhocon is required for BEAM canonicalization.")
+            inserted_keys: list[str] = []
+            if env_overrides:
+                for key, value in env_overrides.items():
+                    if not key:
+                        continue
+                    if config.get(key, NonExistentKey) is not NonExistentKey:
+                        continue
+                    config.put(key, value)
+                    inserted_keys.append(key)
+            try:
+                ConfigParser.resolve_substitutions(config, accept_unresolved=False)
+            finally:
+                for key in inserted_keys:
+                    _remove_config_key(config, key)
+        return json.loads(hocon_converter.to_json(config))
+
+    conf_files = _collect_conf_files(path)
+    if conf_files and all(conf_file.exists() for conf_file in conf_files):
+        env_overrides_hash = (
+            canonical_json_sha256(dict(env_overrides)) if env_overrides else None
+        )
+        process_env_hash = canonical_json_sha256(dict(os.environ)) if resolve else None
+        return memoize_with_stat_token(
+            ("beam_hocon_tree", resolve, env_overrides_hash, process_env_hash),
+            conf_files,
+            _parse_and_resolve,
+            clone_fn=copy.deepcopy,
+        )
+    return _parse_and_resolve()
 
 
 def _remove_config_key(config: Any, key: str) -> None:
@@ -1717,6 +1755,24 @@ def _policy_for_candidate(
     return BeamReferencePolicy(identity_policy="content_hash", required=True)
 
 
+def _warn_for_noop_directory_policy(
+    *, config_key: str, policy: BeamReferencePolicy
+) -> None:
+    if policy.identity_policy not in _NOOP_DIRECTORY_POLICIES:
+        return
+    warning_key = (config_key, policy.identity_policy)
+    if warning_key in _NOOP_DIRECTORY_POLICY_WARNINGS:
+        return
+    _NOOP_DIRECTORY_POLICY_WARNINGS.add(warning_key)
+    logging.warning(
+        "[Consist][BEAM] Reference policy %s for config key %s computes no "
+        "directory digest and provides no content identity; declare the "
+        "contents as inputs and use delegated_to_artifacts instead.",
+        policy.identity_policy,
+        config_key,
+    )
+
+
 def _is_path_like_config_key(config_key: str) -> bool:
     compact_key = re.sub(r"[^a-z0-9]", "", config_key.lower())
     return any(
@@ -1865,7 +1921,10 @@ def _build_beam_config_identity(
     tracker: Optional["Tracker"],
     extra_scalar_payload: Optional[Mapping[str, Any]] = None,
 ) -> CanonicalConfigIdentity:
-    references: list[ConfigReference] = []
+    # Keep each reference paired with its declared (pre-delegation) policy so
+    # the identity payload hashes declared options rather than effective ones
+    # derived from runtime observations.
+    reference_pairs: list[tuple[ConfigReference, BeamReferencePolicy]] = []
     directories: list[DirectoryIdentity] = []
     for candidate in _collect_path_candidates(
         config_tree,
@@ -1874,6 +1933,10 @@ def _build_beam_config_identity(
         allow_heuristic_refs=allow_heuristic_refs,
     ):
         policy = _policy_for_candidate(candidate, reference_policies)
+        _warn_for_noop_directory_policy(
+            config_key=candidate.config_key,
+            policy=policy,
+        )
         resolved = _resolve_reference(candidate.raw_value, root_dirs)
         exists = bool(resolved is not None and _path_exists(resolved))
         canonical_value = _canonical_path_value(
@@ -1925,54 +1988,68 @@ def _build_beam_config_identity(
                 )
             )
 
-        references.append(
-            ConfigReference(
-                config_key=candidate.config_key,
-                raw_value=candidate.raw_value,
-                canonical_value=canonical_value,
-                status=status,
-                required=required,
-                role=policy.role,
-                identity_policy=cast(ConfigReferenceIdentityPolicy, identity_policy),
-                reason=reason,
-                hash=digest,
-                delegated_artifact_keys=delegated_artifact_keys,
+        reference_pairs.append(
+            (
+                ConfigReference(
+                    config_key=candidate.config_key,
+                    raw_value=candidate.raw_value,
+                    canonical_value=canonical_value,
+                    status=status,
+                    required=required,
+                    role=policy.role,
+                    identity_policy=cast(
+                        ConfigReferenceIdentityPolicy, identity_policy
+                    ),
+                    reason=reason,
+                    hash=digest,
+                    delegated_artifact_keys=delegated_artifact_keys,
+                ),
+                policy,
             )
         )
 
-    references = sorted(
-        references,
-        key=lambda ref: (ref.config_key or "", ref.raw_value, ref.identity_policy),
+    reference_pairs = sorted(
+        reference_pairs,
+        key=lambda item: (
+            item[0].config_key or "",
+            item[0].raw_value,
+            item[0].identity_policy,
+        ),
     )
+    references = [ref for ref, _ in reference_pairs]
     canonical_tree = _canonicalize_config_tree_paths(
         config_tree,
         references=references,
     )
-    reference_payload = [
-        {
-            "config_key": ref.config_key,
-            "canonical_value": ref.canonical_value
-            if ref.canonical_value is not None
-            else ref.raw_value,
-            "status": ref.status,
-            "required": ref.required,
-            "role": ref.role,
-            "identity_policy": ref.identity_policy,
-            "hash": ref.hash,
-            "delegated_artifact_keys": list(ref.delegated_artifact_keys),
-            "reason": ref.reason,
-        }
-        for ref in references
-        if ref.identity_policy not in {"ignored", "output_or_runtime_ignored"}
-    ]
+    reference_payload = []
+    for ref, declared_policy in reference_pairs:
+        if declared_policy.identity_policy in {
+            "ignored",
+            "output_or_runtime_ignored",
+        }:
+            continue
+        reference_payload.append(
+            {
+                "config_key": ref.config_key,
+                "canonical_value": ref.canonical_value
+                if ref.canonical_value is not None
+                else ref.raw_value,
+                "hash": ref.hash,
+                "policy": _reference_policy_options(declared_policy),
+            }
+        )
     scalar_payload: dict[str, Any] = {"config": canonical_tree}
     if extra_scalar_payload is not None:
         scalar_payload["gtfs"] = extra_scalar_payload
     scalar_hash = canonical_json_sha256(scalar_payload)
     reference_hash = canonical_json_sha256({"references": reference_payload})
-    directory_hash = canonical_json_sha256(
-        {"directories": [item.to_meta_dict() for item in directories]}
-    )
+    # The BEAM adapter never computes a directory digest (files hash content;
+    # directory content identity is delegated to named artifact inputs), so
+    # every DirectoryIdentity carries hash=None and this hash is a stable
+    # constant. Directory observations remain diagnostic-only via
+    # CanonicalConfigIdentity.directories / to_meta_dict(). If a directory
+    # digest path is ever added, fold it back into this hash.
+    directory_hash = canonical_json_sha256({"directories": []})
     options_payload = {
         "allow_heuristic_refs": allow_heuristic_refs,
         "path_aliases": {
@@ -1990,7 +2067,7 @@ def _build_beam_config_identity(
     )
     identity_hash = canonical_json_sha256(
         {
-            "identity_schema_version": 1,
+            "identity_schema_version": _BEAM_IDENTITY_SCHEMA_VERSION,
             "adapter_name": adapter_name,
             "adapter_version": adapter_version,
             "primary_config": primary_config_key,
@@ -2004,6 +2081,7 @@ def _build_beam_config_identity(
         adapter_version=adapter_version,
         primary_config=primary_config_key,
         identity_hash=identity_hash,
+        identity_schema_version=_BEAM_IDENTITY_SCHEMA_VERSION,
         scalar_hash=scalar_hash,
         reference_hash=reference_hash,
         directory_hash=directory_hash,
@@ -2390,6 +2468,7 @@ def _canonicalize_gtfs_inputs(
     return canonicalize_gtfs_bundle(
         feed_paths,
         service_date=service_date,
+        include_tables=False,
     )
 
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 import hashlib
 import json
@@ -15,7 +15,6 @@ import uuid
 
 from consist.digest import Digest, is_shapefile_sidecar_filename
 
-_RACY_WINDOW_NS: Final[int] = 2_000_000_000
 _LOCATION_ID_NAMESPACE: Final[uuid.UUID] = uuid.UUID(
     "c0b51570-0005-4000-8000-000000000003"
 )
@@ -27,13 +26,72 @@ _NON_PORTABLE_DIGEST_PREFIXES: Final[tuple[str, ...]] = (
 
 LocationSite: TypeAlias = Literal["workspace", "archive", "advisory", "external"]
 LocationStatus: TypeAlias = Literal["active", "stale", "evicted"]
+CoordinateStatus: TypeAlias = Literal["resolved", "unmounted", "rejected"]
+
+
+@dataclass(frozen=True, slots=True)
+class TranslatedCoordinate:
+    """Result of translating a (mount_name, mount_instance_id, uri) coordinate."""
+
+    status: CoordinateStatus
+    mount_name: str
+    uri: str
+    lexical_path: Path | None = None  # lexical_root / rel_parts (all symlinks visible)
+    mount_canonical_lexical_path: Path | None = (
+        None  # canonical_root / rel_parts (mount root resolved; in-mount symlinks visible)
+    )
+    canonical_path: Path | None = (
+        None  # parent-canonicalized, leaf-preserving (existing resolve_location_coordinate shape)
+    )
+    unmounted_uri: str | None = None  # set when status == "unmounted"
+    rejection_reason: str | None = None  # set when status == "rejected"
+
+    @property
+    def is_resolved(self) -> bool:
+        return self.status == "resolved" and self.lexical_path is not None
+
+    @property
+    def is_rejected(self) -> bool:
+        return self.status == "rejected"
+
+    @property
+    def is_unmounted(self) -> bool:
+        return self.status == "unmounted"
+
+
+def unmounted_coordinate(mount_name: str, uri: str) -> TranslatedCoordinate:
+    """Build the canonical ``unmounted`` coordinate for ``mount_name``/``uri``."""
+    return TranslatedCoordinate(
+        status="unmounted",
+        mount_name=mount_name,
+        uri=uri,
+        unmounted_uri=uri,
+    )
+
+
+def rejected_coordinate(
+    mount_name: str,
+    uri: str,
+    reason: str,
+    *,
+    lexical_path: Path | None = None,
+    mount_canonical_lexical_path: Path | None = None,
+) -> TranslatedCoordinate:
+    """Build the canonical ``rejected`` coordinate with a rejection reason."""
+    return TranslatedCoordinate(
+        status="rejected",
+        mount_name=mount_name,
+        uri=uri,
+        rejection_reason=reason,
+        lexical_path=lexical_path,
+        mount_canonical_lexical_path=mount_canonical_lexical_path,
+    )
 
 
 class WitnessFreshness(str, Enum):
     """Outcome of checking a cached filesystem witness against on-disk stat."""
 
     FRESH = "fresh"
-    RACY_NEEDS_VERIFY = "racy_needs_verify"
     STAT_MISMATCH = "stat_mismatch"
     MISSING = "missing"
 
@@ -43,7 +101,6 @@ class WitnessCheckResult:
     """Detailed result from checking a ``FileStat`` or ``DirTreeStat`` witness."""
 
     freshness: WitnessFreshness
-    can_settle_racy: bool = False
     current_stat: Union["FileStat", "DirTreeStat", None] = None
 
 
@@ -65,7 +122,7 @@ class FileStat:
     mtime_ns: int
     ctime_ns: int
     ino: int
-    racy: bool = False
+    digest_verified: bool = False
 
     def _stat_tuple(self) -> tuple[int, int, int, int]:
         return (self.size, self.mtime_ns, self.ctime_ns, self.ino)
@@ -74,13 +131,12 @@ class FileStat:
     def from_os_stat(
         cls, st: os.stat_result, *, observed_at_ns: int | None = None
     ) -> "FileStat":
-        now_ns = time.time_ns() if observed_at_ns is None else int(observed_at_ns)
+        del observed_at_ns
         return cls(
             size=int(st.st_size),
             mtime_ns=int(st.st_mtime_ns),
             ctime_ns=int(st.st_ctime_ns),
             ino=int(st.st_ino),
-            racy=abs(now_ns - int(st.st_mtime_ns)) < _RACY_WINDOW_NS,
         )
 
     @classmethod
@@ -92,15 +148,15 @@ class FileStat:
             raise ValueError(f"Expected regular file for FileStat witness: {path}")
         return cls.from_os_stat(st, observed_at_ns=observed_at_ns)
 
-    def settled(self) -> "FileStat":
-        if not self.racy:
+    def with_digest_verified(self, verified: bool = True) -> "FileStat":
+        verified_flag = bool(verified)
+        if self.digest_verified is verified_flag:
             return self
-        return FileStat(self.size, self.mtime_ns, self.ctime_ns, self.ino, racy=False)
+        return replace(self, digest_verified=verified_flag)
 
     def check(
         self, path: str | Path, *, now_ns: int | None = None
     ) -> WitnessCheckResult:
-        effective_now_ns = time.time_ns() if now_ns is None else int(now_ns)
         try:
             st = _lstat_leaf(path)
         except FileNotFoundError:
@@ -109,17 +165,10 @@ class FileStat:
             return WitnessCheckResult(freshness=WitnessFreshness.STAT_MISMATCH)
         if not stat.S_ISREG(st.st_mode):
             return WitnessCheckResult(freshness=WitnessFreshness.STAT_MISMATCH)
-        cur = FileStat.from_os_stat(st, observed_at_ns=effective_now_ns)
+        cur = FileStat.from_os_stat(st, observed_at_ns=now_ns)
         if cur._stat_tuple() != self._stat_tuple():
             return WitnessCheckResult(WitnessFreshness.STAT_MISMATCH, current_stat=cur)
-        if not self.racy:
-            return WitnessCheckResult(WitnessFreshness.FRESH, current_stat=self)
-        can_settle = (effective_now_ns - int(st.st_mtime_ns)) >= _RACY_WINDOW_NS
-        return WitnessCheckResult(
-            WitnessFreshness.RACY_NEEDS_VERIFY,
-            can_settle_racy=can_settle,
-            current_stat=self.settled() if can_settle else self,
-        )
+        return WitnessCheckResult(WitnessFreshness.FRESH, current_stat=self)
 
     def to_json_dict(self) -> dict[str, Any]:
         return {
@@ -128,7 +177,7 @@ class FileStat:
             "mtime_ns": self.mtime_ns,
             "ctime_ns": self.ctime_ns,
             "ino": self.ino,
-            "racy": self.racy,
+            "digest_verified": self.digest_verified,
         }
 
     def to_json(self) -> str:
@@ -141,7 +190,7 @@ class FileStat:
             mtime_ns=int(data["mtime_ns"]),
             ctime_ns=int(data["ctime_ns"]),
             ino=int(data["ino"]),
-            racy=bool(data.get("racy", False)),
+            digest_verified=bool(data.get("digest_verified", False)),
         )
 
 
@@ -155,7 +204,7 @@ class DirTreeStat:
     entries: tuple[tuple[str, FileStat], ...]
     subdirs: tuple[str, ...] = ()
     bundle_entry: str | None = None
-    racy: bool = False
+    digest_verified: bool = False
 
     @classmethod
     def _from_parts(
@@ -165,15 +214,10 @@ class DirTreeStat:
         subdirs: Sequence[str] = (),
         bundle_entry: str | None = None,
         root_mtime_ns: int = 0,
-        observed_at_ns: int | None = None,
     ) -> "DirTreeStat":
-        now_ns = time.time_ns() if observed_at_ns is None else int(observed_at_ns)
         sorted_entries = tuple(sorted(entries, key=lambda item: item[0]))
         max_mtime = max(
             (fs.mtime_ns for _, fs in sorted_entries), default=int(root_mtime_ns)
-        )
-        is_racy = any(fs.racy for _, fs in sorted_entries) or (
-            max_mtime > 0 and abs(now_ns - max_mtime) < _RACY_WINDOW_NS
         )
         return cls(
             file_count=len(sorted_entries),
@@ -182,14 +226,13 @@ class DirTreeStat:
             entries=sorted_entries,
             subdirs=tuple(sorted(set(subdirs))),
             bundle_entry=bundle_entry,
-            racy=is_racy,
         )
 
     @classmethod
     def capture_dir(
         cls, root: str | Path, *, observed_at_ns: int | None = None
     ) -> "DirTreeStat":
-        now_ns = time.time_ns() if observed_at_ns is None else int(observed_at_ns)
+        del observed_at_ns
         raw_root = Path(root).expanduser()
         if raw_root.is_symlink():
             raise ValueError(f"Directory witness root cannot be a symlink: {raw_root}")
@@ -222,9 +265,7 @@ class DirTreeStat:
                     _visit(child.path)
                 elif child.is_file(follow_symlinks=False):
                     st = child.stat(follow_symlinks=False)
-                    entries.append(
-                        (rel, FileStat.from_os_stat(st, observed_at_ns=now_ns))
-                    )
+                    entries.append((rel, FileStat.from_os_stat(st)))
                 else:
                     raise ValueError(f"Non-regular directory entry: {child.path}")
 
@@ -233,7 +274,6 @@ class DirTreeStat:
             entries=entries,
             subdirs=subdirs,
             root_mtime_ns=int(root_st.st_mtime_ns),
-            observed_at_ns=now_ns,
         )
 
     @classmethod
@@ -244,7 +284,7 @@ class DirTreeStat:
         entry_name: str | None = None,
         observed_at_ns: int | None = None,
     ) -> "DirTreeStat":
-        now_ns = time.time_ns() if observed_at_ns is None else int(observed_at_ns)
+        del observed_at_ns
         raw = Path(path).expanduser()
         if raw.is_symlink():
             raise ValueError(f"Shapefile bundle path cannot be a symlink: {raw}")
@@ -287,9 +327,7 @@ class DirTreeStat:
             if cand.name.lower() == resolved_entry.lower():
                 has_shp = True
             st = cand.stat(follow_symlinks=False)
-            entries.append(
-                (cand.name, FileStat.from_os_stat(st, observed_at_ns=now_ns))
-            )
+            entries.append((cand.name, FileStat.from_os_stat(st)))
         if not has_shp:
             raise FileNotFoundError(
                 f"Shapefile bundle missing primary entry {resolved_entry!r} in {bundle_root}"
@@ -298,33 +336,33 @@ class DirTreeStat:
             entries=entries,
             bundle_entry=resolved_entry,
             root_mtime_ns=root_mtime_ns,
-            observed_at_ns=now_ns,
         )
 
-    def settled(self) -> "DirTreeStat":
-        if not self.racy and not any(fs.racy for _, fs in self.entries):
+    def with_digest_verified(self, verified: bool = True) -> "DirTreeStat":
+        verified_flag = bool(verified)
+        if self.digest_verified is verified_flag and all(
+            fs.digest_verified is verified_flag for _, fs in self.entries
+        ):
             return self
-        return DirTreeStat(
-            file_count=self.file_count,
-            total_bytes=self.total_bytes,
-            max_mtime_ns=self.max_mtime_ns,
-            entries=tuple((rel, fs.settled()) for rel, fs in self.entries),
-            subdirs=self.subdirs,
-            bundle_entry=self.bundle_entry,
-            racy=False,
+        return replace(
+            self,
+            entries=tuple(
+                (rel, fs.with_digest_verified(verified_flag))
+                for rel, fs in self.entries
+            ),
+            digest_verified=verified_flag,
         )
 
     def check(
         self, path: str | Path, *, now_ns: int | None = None
     ) -> WitnessCheckResult:
-        effective_now_ns = time.time_ns() if now_ns is None else int(now_ns)
         try:
             current = (
                 DirTreeStat.capture_shapefile_bundle(
-                    path, entry_name=self.bundle_entry, observed_at_ns=effective_now_ns
+                    path, entry_name=self.bundle_entry, observed_at_ns=now_ns
                 )
                 if self.bundle_entry is not None
-                else DirTreeStat.capture_dir(path, observed_at_ns=effective_now_ns)
+                else DirTreeStat.capture_dir(path, observed_at_ns=now_ns)
             )
         except FileNotFoundError:
             return WitnessCheckResult(freshness=WitnessFreshness.MISSING)
@@ -345,14 +383,7 @@ class DirTreeStat:
             return WitnessCheckResult(
                 WitnessFreshness.STAT_MISMATCH, current_stat=current
             )
-        if not self.racy:
-            return WitnessCheckResult(WitnessFreshness.FRESH, current_stat=self)
-        can_settle = (effective_now_ns - self.max_mtime_ns) >= _RACY_WINDOW_NS
-        return WitnessCheckResult(
-            WitnessFreshness.RACY_NEEDS_VERIFY,
-            can_settle_racy=can_settle,
-            current_stat=self.settled() if can_settle else self,
-        )
+        return WitnessCheckResult(WitnessFreshness.FRESH, current_stat=self)
 
     def to_json_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -362,7 +393,7 @@ class DirTreeStat:
             "max_mtime_ns": self.max_mtime_ns,
             "entries": [[rel, fs.to_json_dict()] for rel, fs in self.entries],
             "subdirs": list(self.subdirs),
-            "racy": self.racy,
+            "digest_verified": self.digest_verified,
         }
         if self.bundle_entry is not None:
             payload["bundle_entry"] = self.bundle_entry
@@ -394,7 +425,7 @@ class DirTreeStat:
             bundle_entry=str(raw_bundle)
             if isinstance(raw_bundle, str) and raw_bundle
             else None,
-            racy=bool(data.get("racy", False)),
+            digest_verified=bool(data.get("digest_verified", False)),
         )
 
 
