@@ -18,6 +18,7 @@ from consist.digest import (
     _resolve_manifest_root,
     build_manifest_v1,
     build_shapefile_manifest_v1,
+    bypass_digest_cache,
     canonical_json_sha256,
     is_shapefile_sidecar_filename,
 )
@@ -57,7 +58,10 @@ def validate_shapefile_bundle_root(
     )
     if not root_path.is_dir():
         raise ValueError(f"shapefile bundle root must be a directory: {root_path}")
-    actual_entries = build_shapefile_manifest_v1(root_path / shapefile_name)["entries"]
+    with bypass_digest_cache():
+        actual_entries = build_shapefile_manifest_v1(root_path / shapefile_name)[
+            "entries"
+        ]
     _validate_exact_file_entries(
         expected_entries, actual_entries, label="shapefile bundle"
     )
@@ -243,7 +247,8 @@ def validate_directory_tree(
 ) -> None:
     """Raise when ``root`` does not satisfy ``manifest``."""
     expected_entries = _validate_manifest(manifest)
-    actual = build_directory_manifest(root)
+    with bypass_digest_cache():
+        actual = build_directory_manifest(root)
     actual_entries = actual["entries"]
     expected_by_path = {entry["path"]: entry for entry in expected_entries}
     actual_by_path = {entry["path"]: entry for entry in actual_entries}
@@ -428,7 +433,8 @@ def _inspect_existing_directory_destination(
 ) -> list[dict[str, Any]]:
     """Validate existing entries in ``destination_path`` and return missing manifest entries."""
     expected_entries = normalized_manifest["entries"]
-    actual = build_directory_manifest(destination_path)
+    with bypass_digest_cache():
+        actual = build_directory_manifest(destination_path)
     actual_entries = actual["entries"]
     expected_by_path = {entry["path"]: entry for entry in expected_entries}
     actual_by_path = {entry["path"]: entry for entry in actual_entries}

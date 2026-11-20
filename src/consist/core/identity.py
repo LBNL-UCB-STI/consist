@@ -33,6 +33,7 @@ from consist.digest import (
     canonical_json_str,
     compute_digest,
     file_sha256,
+    memoize_with_stat_token,
     normalize_json,
 )
 
@@ -885,12 +886,6 @@ class IdentityManager:
         # --- Directory Handling (e.g. Zarr) ---
         if path.is_dir():
             if self._is_zarr_store(path):
-                if self.hashing_strategy != "fast":
-                    logging.warning(
-                        "[Consist Warning] Performing full content hashing on Zarr store '%s'. "
-                        "This can be slow. Consider using 'fast' hashing_strategy for metadata-based hashing.",
-                        path.name,
-                    )
                 return self._hash_zarr_store(path)
             # For directories, we compute a hash based on the aggregate metadata
             # of all files inside.
@@ -902,9 +897,8 @@ class IdentityManager:
                         stat = p.stat()
                         meta_str += f"{p.name}:{stat.st_size}_{stat.st_mtime_ns}|"
                 return hashlib.sha256(meta_str.encode("utf-8")).hexdigest()
-            else:
-                # Default to full content hashing for directories if not 'fast'.
-                # This can be slow for large directories.
+
+            def _compute_dir_checksum_full() -> str:
                 logging.warning(
                     f"[Consist Warning] Performing full content hashing on directory '{path.name}'. "
                     "This can be slow. Consider using 'fast' hashing_strategy or pre-computed hashes for directories."
@@ -914,6 +908,10 @@ class IdentityManager:
                     if p.is_file():
                         self._update_hash_from_file(sha256, p)
                 return sha256.hexdigest()
+
+            return memoize_with_stat_token(
+                ("dir_checksum_full",), [path], _compute_dir_checksum_full
+            )
 
         # Single File Handling
         if self.hashing_strategy == "fast":
@@ -1014,37 +1012,44 @@ class IdentityManager:
                 return self.compute_file_checksum(resolved)
 
             if allowlist is None and self._is_zarr_store(resolved):
-                if self.hashing_strategy != "fast":
-                    logging.warning(
-                        "[Consist Warning] Performing full content hashing on Zarr store '%s'. "
-                        "This can be slow. Consider using 'fast' hashing_strategy for metadata-based hashing.",
-                        resolved.name,
-                    )
                 return self._hash_zarr_store(resolved)
 
-            sha = hashlib.sha256()
-            for file_path in sorted(resolved.rglob("*")):
-                if not file_path.is_file():
-                    continue
+            allowlist_tuple = tuple(allowlist) if allowlist is not None else None
 
-                rel = file_path.relative_to(resolved).as_posix()
-                if ignore_dotfiles and any(
-                    part.startswith(".") for part in Path(rel).parts
-                ):
-                    continue
-                if allowlist is not None and not any(
-                    fnmatch.fnmatch(rel, pat) for pat in allowlist
-                ):
-                    continue
+            def _compute_digest_path_dir(*, fast: bool) -> str:
+                sha = hashlib.sha256()
+                for file_path in sorted(resolved.rglob("*")):
+                    if not file_path.is_file():
+                        continue
+                    rel = file_path.relative_to(resolved).as_posix()
+                    if ignore_dotfiles and any(
+                        part.startswith(".") for part in Path(rel).parts
+                    ):
+                        continue
+                    if allowlist_tuple is not None and not any(
+                        fnmatch.fnmatch(rel, pat) for pat in allowlist_tuple
+                    ):
+                        continue
+                    if fast:
+                        stat = file_path.stat()
+                        sha.update(
+                            f"{rel}:{stat.st_size}:{stat.st_mtime_ns}".encode("utf-8")
+                        )
+                    else:
+                        sha.update(f"{rel}:".encode("utf-8"))
+                        self._update_hash_from_file(sha, file_path)
+                return sha.hexdigest()
 
-                if self.hashing_strategy == "fast":
-                    stat = file_path.stat()
-                    leaf = f"{rel}:{stat.st_size}:{stat.st_mtime_ns}"
-                    sha.update(leaf.encode("utf-8"))
-                else:
-                    sha.update(f"{rel}:".encode("utf-8"))
-                    self._update_hash_from_file(sha, file_path)
-            return sha.hexdigest()
+            if self.hashing_strategy == "fast":
+                return _compute_digest_path_dir(fast=True)
+
+            return memoize_with_stat_token(
+                ("digest_path_dir_full", bool(ignore_dotfiles), allowlist_tuple),
+                [resolved],
+                lambda: _compute_digest_path_dir(fast=False),
+                ignore_dotfiles=ignore_dotfiles,
+                allowlist=allowlist_tuple,
+            )
         finally:
             self.hashing_strategy = original_strategy
 
@@ -1062,14 +1067,22 @@ class IdentityManager:
         return self._hash_zarr_store_full(path)
 
     def _hash_zarr_store_full(self, path: Path) -> str:
-        sha = hashlib.sha256()
-        for file_path in sorted(path.rglob("*")):
-            if not file_path.is_file():
-                continue
-            rel = file_path.relative_to(path).as_posix()
-            sha.update(f"{rel}:".encode("utf-8"))
-            self._update_hash_from_file(sha, file_path)
-        return sha.hexdigest()
+        def _compute_zarr_full() -> str:
+            logging.warning(
+                "[Consist Warning] Performing full content hashing on Zarr store '%s'. "
+                "This can be slow. Consider using 'fast' hashing_strategy for metadata-based hashing.",
+                path.name,
+            )
+            sha = hashlib.sha256()
+            for file_path in sorted(path.rglob("*")):
+                if not file_path.is_file():
+                    continue
+                rel = file_path.relative_to(path).as_posix()
+                sha.update(f"{rel}:".encode("utf-8"))
+                self._update_hash_from_file(sha, file_path)
+            return sha.hexdigest()
+
+        return memoize_with_stat_token(("zarr_store_full",), [path], _compute_zarr_full)
 
     def _hash_zarr_store_fast(self, path: Path) -> str:
         sha = hashlib.sha256()

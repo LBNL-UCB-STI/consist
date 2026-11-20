@@ -1,22 +1,41 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import io
 import json
 import zipfile
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional, Sequence, get_args, get_origin
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Iterable,
+    Optional,
+    Sequence,
+    get_args,
+    get_origin,
+)
 
 import pandas as pd
 
 from consist.core.config_canonicalization import IngestSpec
-from consist.digest import canonical_json_sha256, digest_bytes
+from consist.digest import (
+    canonical_json_sha256,
+    digest_bytes,
+    file_sha256,
+    memoize_with_stat_token,
+    register_stat_cache,
+)
 from consist.models.gtfs import GTFS_SCHEMA_BY_TABLE_NAME
 
 if TYPE_CHECKING:
     from consist.core.identity import IdentityManager
+
+_GTFS_BUNDLE_CACHE = register_stat_cache(max_entries=4)
 
 GTFS_TABLE_EXTENSIONS = (".txt", ".csv")
 GTFS_BUNDLE_SOURCE_KEY = "consist_gtfs_bundle"
@@ -97,20 +116,48 @@ def _read_member_bytes(source_path: Path, member_name: str) -> bytes:
     return (source_path / member_name).read_bytes()
 
 
-def _read_member_first_line(source_path: Path, member_name: str) -> str:
-    payload = _read_member_bytes(source_path, member_name)
-    text = payload.decode("utf-8-sig", errors="replace")
-    for line in text.splitlines():
+def _first_non_empty_line(text_stream: io.TextIOBase) -> str:
+    for line in text_stream:
         stripped = line.strip()
         if stripped:
             return stripped
     return ""
 
 
-def _looks_like_csv_table(source_path: Path, member_name: str) -> bool:
+def _read_member_first_line(
+    source_path: Path,
+    member_name: str,
+    *,
+    zf: zipfile.ZipFile | None = None,
+) -> str:
+    member_name = _normalize_member_name(member_name)
+    if zf is not None or zipfile.is_zipfile(source_path):
+        with (
+            nullcontext(zf)
+            if zf is not None
+            else zipfile.ZipFile(source_path) as archive
+        ):
+            assert archive is not None
+            with archive.open(member_name) as fh:
+                with io.TextIOWrapper(
+                    fh, encoding="utf-8-sig", errors="replace"
+                ) as text:
+                    return _first_non_empty_line(text)
+    with (source_path / member_name).open(
+        "r", encoding="utf-8-sig", errors="replace"
+    ) as text:
+        return _first_non_empty_line(text)
+
+
+def _looks_like_csv_table(
+    source_path: Path,
+    member_name: str,
+    *,
+    zf: zipfile.ZipFile | None = None,
+) -> bool:
     if not _looks_like_table_name(member_name):
         return False
-    first_line = _read_member_first_line(source_path, member_name)
+    first_line = _read_member_first_line(source_path, member_name, zf=zf)
     if not first_line:
         return False
     if "," in first_line or "\t" in first_line:
@@ -126,31 +173,41 @@ def discover_gtfs_members(source_path: Path) -> list[str]:
 
     Non-table junk files such as license/readme text files are filtered out.
     """
-    if not source_path.exists():
-        raise FileNotFoundError(source_path)
+    path = Path(source_path)
 
-    if source_path.is_dir():
-        members: list[str] = []
-        for file_path in sorted(source_path.rglob("*")):
-            if not file_path.is_file():
-                continue
-            rel = file_path.relative_to(source_path).as_posix()
-            if _looks_like_csv_table(source_path, rel):
-                members.append(_normalize_member_name(rel))
-        return members
+    def _discover() -> list[str]:
+        if not path.exists():
+            raise FileNotFoundError(path)
 
-    if zipfile.is_zipfile(source_path):
-        members = []
-        with zipfile.ZipFile(source_path) as zf:
-            for info in sorted(zf.infolist(), key=lambda item: item.filename):
-                if info.is_dir():
+        if path.is_dir():
+            members: list[str] = []
+            for file_path in sorted(path.rglob("*")):
+                if not file_path.is_file():
                     continue
-                name = _normalize_member_name(info.filename)
-                if _looks_like_csv_table(source_path, name):
-                    members.append(name)
-        return members
+                rel = file_path.relative_to(path).as_posix()
+                if _looks_like_csv_table(path, rel):
+                    members.append(_normalize_member_name(rel))
+            return members
 
-    raise ValueError(f"GTFS source must be a directory or zip file: {source_path}")
+        if zipfile.is_zipfile(path):
+            members = []
+            with zipfile.ZipFile(path) as zf:
+                for info in sorted(zf.infolist(), key=lambda item: item.filename):
+                    if info.is_dir():
+                        continue
+                    name = _normalize_member_name(info.filename)
+                    if _looks_like_csv_table(path, name, zf=zf):
+                        members.append(name)
+            return members
+
+        raise ValueError(f"GTFS source must be a directory or zip file: {path}")
+
+    return memoize_with_stat_token(
+        ("gtfs_discover_members",),
+        [path],
+        _discover,
+        clone_fn=list,
+    )
 
 
 def has_gtfs_core_members(source_path: Path) -> bool:
@@ -219,16 +276,30 @@ def hash_gtfs_member(source_path: Path, member_name: str) -> str:
 
 
 def hash_gtfs_feed(source_path: Path, member_names: Sequence[str]) -> str:
-    payload = {
-        "members": [
+    normalized_names = sorted(_normalize_member_name(name) for name in member_names)
+    if zipfile.is_zipfile(source_path):
+        with zipfile.ZipFile(source_path) as zf:
+            members = []
+            for name in normalized_names:
+                with zf.open(name) as fh:
+                    hasher = hashlib.sha256()
+                    while chunk := fh.read(1024 * 1024):
+                        hasher.update(chunk)
+                    members.append(
+                        {
+                            "name": name,
+                            "sha256": hasher.hexdigest(),
+                        }
+                    )
+    else:
+        members = [
             {
                 "name": name,
-                "sha256": hash_gtfs_member(source_path, name),
+                "sha256": file_sha256(source_path / name),
             }
-            for name in sorted(_normalize_member_name(name) for name in member_names)
-        ],
-    }
-    return canonical_json_sha256(payload)
+            for name in normalized_names
+        ]
+    return canonical_json_sha256({"members": members})
 
 
 def _unwrap_optional(annotation: Any) -> Any:
@@ -483,29 +554,29 @@ def _select_related_rows(
     return selected, manifest
 
 
-def canonicalize_gtfs_bundle(
+def _gtfs_rows_factory(
+    frame_for_ingest: pd.DataFrame, table_content_hash: Optional[str]
+) -> Callable[[str], Iterable[dict[str, Any]]]:
+    private_frame = frame_for_ingest.copy(deep=True)
+
+    def _build(_run_id: Optional[str] = None) -> list[dict[str, Any]]:
+        rows = _frame_to_nullable_records(private_frame)
+        if table_content_hash is not None:
+            for row in rows:
+                row["content_hash"] = table_content_hash
+        return rows
+
+    return _build
+
+
+def _compute_gtfs_bundle(
     feed_paths: Sequence[Path],
     *,
-    identity: Optional[IdentityManager] = None,
-    service_date: Optional[date | datetime | str] = None,
-    feed_keys: Optional[Sequence[str]] = None,
-    source_key: str = GTFS_BUNDLE_SOURCE_KEY,
+    normalized_service_date: Optional[date],
+    feed_keys: Optional[Sequence[str]],
+    source_key: str,
+    include_tables: bool,
 ) -> GtfsCanonicalizationResult:
-    """
-    Canonicalize one or more GTFS feeds into a deterministic bundle identity.
-
-    The canonicalizer keeps raw feed hashes, a bundle hash that respects feed-key
-    namespace boundaries, and an optional service-date slice hash that is computed
-    from the selected active service rows.
-    """
-    del identity
-    if feed_keys is not None and len(feed_keys) != len(feed_paths):
-        raise ValueError("feed_keys must match feed_paths length.")
-
-    normalized_service_date = (
-        _normalize_date(service_date) if service_date is not None else None
-    )
-
     snapshots: list[GtfsFeedSnapshot] = []
     selected_tables: dict[str, list[pd.DataFrame]] = {}
     source_feed_hashes: dict[str, str] = {}
@@ -556,7 +627,7 @@ def canonicalize_gtfs_bundle(
                 member_names=tuple(members),
                 table_hashes=table_hashes,
                 source_feed_hash=raw_hash,
-                tables=tables,
+                tables=tables if include_tables else {},
             )
         )
         manifest_feeds.append(
@@ -618,16 +689,12 @@ def canonicalize_gtfs_bundle(
         if schema_model is None:
             continue
         frame_for_ingest = _ingest_frame(frame)
-        rows = _frame_to_nullable_records(frame_for_ingest)
         table_content_hash = selected_table_hashes.get(table_name)
-        if table_content_hash is not None:
-            for row in rows:
-                row["content_hash"] = table_content_hash
         ingestables.append(
             IngestSpec(
                 table_name=table_name,
                 schema=schema_model,
-                rows=rows,
+                rows=_gtfs_rows_factory(frame_for_ingest, table_content_hash),
                 source_path=snapshots[0].source_path if snapshots else None,
                 source=source_key,
                 content_hash=table_content_hash,
@@ -651,7 +718,56 @@ def canonicalize_gtfs_bundle(
         identity_payload=identity_payload,
         ingestables=ingestables,
         snapshots=tuple(snapshots),
-        selected_tables=combined_selected_frames,
+        selected_tables=combined_selected_frames if include_tables else {},
+    )
+
+
+def canonicalize_gtfs_bundle(
+    feed_paths: Sequence[Path],
+    *,
+    identity: Optional[IdentityManager] = None,
+    service_date: Optional[date | datetime | str] = None,
+    feed_keys: Optional[Sequence[str]] = None,
+    source_key: str = GTFS_BUNDLE_SOURCE_KEY,
+    include_tables: bool = True,
+) -> GtfsCanonicalizationResult:
+    """
+    Canonicalize one or more GTFS feeds into a deterministic bundle identity.
+
+    The canonicalizer keeps raw feed hashes, a bundle hash that respects feed-key
+    namespace boundaries, and an optional service-date slice hash that is computed
+    from the selected active service rows.
+    """
+    del identity
+    if feed_keys is not None and len(feed_keys) != len(feed_paths):
+        raise ValueError("feed_keys must match feed_paths length.")
+
+    normalized_service_date = (
+        _normalize_date(service_date) if service_date is not None else None
+    )
+    feed_path_objs = [Path(p) for p in feed_paths]
+    namespace = (
+        "gtfs_bundle",
+        tuple(fp.as_posix() for fp in feed_path_objs),
+        normalized_service_date.isoformat()
+        if normalized_service_date is not None
+        else None,
+        tuple(str(k) for k in feed_keys) if feed_keys is not None else None,
+        source_key,
+        bool(include_tables),
+    )
+    return memoize_with_stat_token(
+        namespace,
+        feed_path_objs,
+        lambda: _compute_gtfs_bundle(
+            feed_path_objs,
+            normalized_service_date=normalized_service_date,
+            feed_keys=feed_keys,
+            source_key=source_key,
+            include_tables=include_tables,
+        ),
+        clone_fn=copy.deepcopy,
+        cache=_GTFS_BUNDLE_CACHE,
     )
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import csv
 import gzip
 import hashlib
@@ -42,7 +43,7 @@ from consist.core.config_canonicalization import (
 )
 from consist.core.identity import IdentityManager
 from consist.core.queries import ParameterizedSQL
-from consist.digest import canonical_json_sha256, file_sha256
+from consist.digest import canonical_json_sha256, file_sha256, memoize_with_stat_token
 from consist.integrations._config_adapter_shared import (
     OverrideRunHooks as _shared_OverrideRunHooks,
 )
@@ -2040,14 +2041,27 @@ def _load_yaml(
 ) -> Dict[str, Any]:
     _ensure_yaml()
     assert yaml is not None
-    raw_text = path.read_text(encoding="utf-8")
-    rendered_text = _quote_unrendered_flow_keys_with_question_mark(
-        _render_yaml_template_text(raw_text, template_values)
+
+    def _parse() -> Dict[str, Any]:
+        assert yaml is not None
+        raw_text = path.read_text(encoding="utf-8")
+        rendered_text = _quote_unrendered_flow_keys_with_question_mark(
+            _render_yaml_template_text(raw_text, template_values)
+        )
+        data = yaml.safe_load(rendered_text) or {}
+        if isinstance(data, dict):
+            return data
+        return {}
+
+    template_key = (
+        canonical_json_sha256(dict(template_values)) if template_values else None
     )
-    data = yaml.safe_load(rendered_text) or {}
-    if isinstance(data, dict):
-        return data
-    return {}
+    return memoize_with_stat_token(
+        ("activitysim_yaml", template_key),
+        [path],
+        _parse,
+        clone_fn=copy.deepcopy,
+    )
 
 
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:

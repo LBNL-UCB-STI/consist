@@ -2663,3 +2663,161 @@ def test_beam_materialize_hardlink_or_copy_falls_back_on_oserror(
     assert staged.primary_config is not None
     assert staged.primary_config.exists()
     assert (staged.root_dirs[0] / "base.conf").exists()
+
+
+def test_beam_config_adapter_and_gtfs_memoize_unchanged_inputs_across_runs_and_invalidate(
+    tracker, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+    from consist import digest as digest_mod
+    from consist.core import gtfs as gtfs_mod
+
+    digest_mod.clear_digest_cache()
+
+    case_dir, overlay_conf, _ = build_beam_test_configs(tmp_path)
+    r5_dir = case_dir / "r5"
+    r5_dir.mkdir(exist_ok=True)
+    osm_file = r5_dir / "network.osm.pbf"
+    osm_file.write_bytes(b"static-osm-pbf-payload-v1")
+
+    gtfs_zip = _write_gtfs_zip_feed(
+        r5_dir / "agency.zip", route_short_name="1", service_id="S1"
+    )
+    with overlay_conf.open("a", encoding="utf-8") as fh:
+        fh.write('\nbeam.routing.r5.directory = "r5"\n')
+
+    # Age static inputs past the 20 ms settle window so they behave like static HPC inputs.
+    settled_ns = time.time_ns() - 5_000_000_123
+    for p in [case_dir, *case_dir.rglob("*")]:
+        if p.exists():
+            os.utime(p, ns=(settled_ns, settled_ns))
+    time.sleep(0.025)
+
+    hashed_files: list[Path] = []
+    real_raw_sha256 = digest_mod._raw_file_sha256
+
+    def _spy_raw_sha256(
+        path: Path | str, *, stat_pre_open: os.stat_result | None = None
+    ) -> tuple[str, os.stat_result]:
+        hashed_files.append(Path(path))
+        return real_raw_sha256(path, stat_pre_open=stat_pre_open)
+
+    gtfs_member_loads = 0
+    real_load_gtfs = gtfs_mod.load_gtfs_member_df
+
+    def _spy_load_gtfs(*args, **kwargs):
+        nonlocal gtfs_member_loads
+        gtfs_member_loads += 1
+        return real_load_gtfs(*args, **kwargs)
+
+    gtfs_first_line_reads = 0
+    real_first_line = gtfs_mod._read_member_first_line
+
+    def _spy_first_line(*args, **kwargs):
+        nonlocal gtfs_first_line_reads
+        gtfs_first_line_reads += 1
+        return real_first_line(*args, **kwargs)
+
+    from consist.integrations.beam import config_adapter as beam_adapter_mod
+
+    hocon_parses = 0
+    assert beam_adapter_mod.ConfigFactory is not None
+    real_parse_file = beam_adapter_mod.ConfigFactory.parse_file
+
+    def _spy_parse_file(*args, **kwargs):
+        nonlocal hocon_parses
+        hocon_parses += 1
+        return real_parse_file(*args, **kwargs)
+
+    monkeypatch.setattr(digest_mod, "_raw_file_sha256", _spy_raw_sha256)
+    monkeypatch.setattr(gtfs_mod, "load_gtfs_member_df", _spy_load_gtfs)
+    monkeypatch.setattr(gtfs_mod, "_read_member_first_line", _spy_first_line)
+    monkeypatch.setattr(beam_adapter_mod.ConfigFactory, "parse_file", _spy_parse_file)
+
+    adapter = BeamConfigAdapter(primary_config=overlay_conf)
+
+    def _beam_step() -> None:
+        return None
+
+    # Run 1 (Iteration 1): computes content hashes and parses GTFS once.
+    res1 = tracker.run(
+        fn=_beam_step,
+        name="beam_run",
+        run_id="beam_iter_1",
+        adapter=adapter,
+        inputs={"osm": osm_file},
+        config={"iter": 1},
+    )
+    assert not res1.cache_hit
+    first_hash_count = len(hashed_files)
+    first_gtfs_loads = gtfs_member_loads
+    first_gtfs_header_reads = gtfs_first_line_reads
+    first_hocon_parses = hocon_parses
+    assert first_hash_count > 0
+    assert first_gtfs_loads > 0
+    assert first_gtfs_header_reads > 0
+    assert first_hocon_parses == 3  # 1 uncached tree parse (overlay + base + common)
+    assert len(gtfs_mod._GTFS_BUNDLE_CACHE.entries) == 1
+    cached_gtfs = next(iter(gtfs_mod._GTFS_BUNDLE_CACHE.entries.values()))
+    assert cached_gtfs.selected_tables == {}
+    assert cached_gtfs.snapshots[0].tables == {}
+
+    # Run 2 (Cache-hit replay of Iteration 1) and Run 3 (Iteration 2 with unchanged static inputs):
+    # zero redundant file_sha256 byte reads, zero GTFS CSV parses, zero GTFS header reads,
+    # and zero redundant pyhocon parses!
+    res1_replay = tracker.run(
+        fn=_beam_step,
+        name="beam_run",
+        run_id="beam_iter_1_replay",
+        adapter=adapter,
+        inputs={"osm": osm_file},
+        config={"iter": 1},
+    )
+    assert res1_replay.cache_hit
+    assert len(hashed_files) == first_hash_count
+    assert gtfs_member_loads == first_gtfs_loads
+    assert gtfs_first_line_reads == first_gtfs_header_reads
+    assert hocon_parses == first_hocon_parses
+
+    res2 = tracker.run(
+        fn=_beam_step,
+        name="beam_run",
+        run_id="beam_iter_2",
+        adapter=adapter,
+        inputs={"osm": osm_file},
+        config={"iter": 2},
+    )
+    assert not res2.cache_hit
+    assert len(hashed_files) == first_hash_count
+    assert gtfs_member_loads == first_gtfs_loads
+    assert gtfs_first_line_reads == first_gtfs_header_reads
+    assert hocon_parses == first_hocon_parses
+
+    # Modifying a content_hash CSV referenced by BEAM config invalidates the memo and misses cache.
+    sample_csv = case_dir / "inputs" / "sample.csv"
+    sample_csv.write_text("id,value\n1,999\n", encoding="utf-8")
+    res1_after_csv_edit = tracker.run(
+        fn=_beam_step,
+        name="beam_run",
+        run_id="beam_iter_1_after_csv_edit",
+        adapter=adapter,
+        inputs={"osm": osm_file},
+        config={"iter": 1},
+    )
+    assert not res1_after_csv_edit.cache_hit
+    assert len(hashed_files) > first_hash_count
+
+    # Modifying the GTFS zip invalidates canonicalize_gtfs_bundle and misses cache.
+    _write_gtfs_zip_feed(gtfs_zip, route_short_name="2-EXPRESS", service_id="S1")
+
+    gtfs_loads_before = gtfs_member_loads
+    res1_after_gtfs_edit = tracker.run(
+        fn=_beam_step,
+        name="beam_run",
+        run_id="beam_iter_1_after_gtfs_edit",
+        adapter=adapter,
+        inputs={"osm": osm_file},
+        config={"iter": 1},
+    )
+    assert not res1_after_gtfs_edit.cache_hit
+    assert gtfs_member_loads > gtfs_loads_before

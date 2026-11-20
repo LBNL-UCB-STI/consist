@@ -32,6 +32,7 @@ from consist.digest import (
     Digest,
     build_manifest_v1,
     build_shapefile_manifest_v1,
+    bypass_digest_cache,
     compute_digest,
 )
 from consist.models.artifact import Artifact
@@ -393,7 +394,8 @@ class ArtifactManager:
         def _validate_supplied_hash() -> None:
             if not validate_content_hash or digest_state.effective_digest is None:
                 return
-            computed = _compute_on_disk_digest(raise_on_error=True)
+            with bypass_digest_cache():
+                computed = _compute_on_disk_digest(raise_on_error=True)
             if computed is None:
                 raise ValueError(
                     f"content_hash does not match on-disk data for {resolved_abs_path}."

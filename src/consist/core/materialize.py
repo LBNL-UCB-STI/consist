@@ -61,6 +61,7 @@ from consist.core.views import _quote_ident, _validate_identifier
 from consist.digest import (
     DIGEST_DRIVERS,
     Digest,
+    bypass_digest_cache,
     compute_digest,
     file_sha256,
     verify_digest,
@@ -1721,10 +1722,11 @@ def materialize_artifact(
                     if (bundle_root / entry_name).is_file()
                     else fallback_file
                 )
-                if (
-                    build_shapefile_bundle_manifest(entry_cand)["tree_hash"]
-                    != expected_hash
-                ):
+                with bypass_digest_cache():
+                    actual_tree_hash = build_shapefile_bundle_manifest(entry_cand)[
+                        "tree_hash"
+                    ]
+                if actual_tree_hash != expected_hash:
                     return f"{label} hash does not match artifact {artifact.key!r}."
         except (ValueError, OSError) as exc:
             return f"{label} hash does not match artifact {artifact.key!r}: {exc}"
@@ -1778,10 +1780,11 @@ def materialize_artifact(
                         needs_partial = True
                 elif expected_hash:
                     try:
-                        if (
-                            build_directory_manifest(destination).get("tree_hash")
-                            != expected_hash
-                        ):
+                        with bypass_digest_cache():
+                            actual_tree_hash = build_directory_manifest(
+                                destination
+                            ).get("tree_hash")
+                        if actual_tree_hash != expected_hash:
                             return _fail(
                                 "hash_mismatch",
                                 f"Existing destination hash does not match artifact {artifact.key!r}.",
@@ -1932,10 +1935,11 @@ def materialize_artifact(
                 )
             if expected_hash and not source_already_verified:
                 try:
-                    if (
-                        build_directory_manifest(source_path).get("tree_hash")
-                        != expected_hash
-                    ):
+                    with bypass_digest_cache():
+                        actual_tree_hash = build_directory_manifest(source_path).get(
+                            "tree_hash"
+                        )
+                    if actual_tree_hash != expected_hash:
                         return _fail(
                             "hash_mismatch",
                             f"Source hash does not match artifact {artifact.key!r}.",
@@ -2213,9 +2217,11 @@ def _stage_artifact_path(
                     warn_prefix=True,
                 )
             if not overwrite:
-                if _compute_path_checksum(source_path) == _compute_path_checksum(
-                    destination_path
-                ):
+                with bypass_digest_cache():
+                    matches_existing = _compute_path_checksum(
+                        source_path
+                    ) == _compute_path_checksum(destination_path)
+                if matches_existing:
                     return _ok_stage("preserved_existing")
                 return _fail_stage(
                     "failed",

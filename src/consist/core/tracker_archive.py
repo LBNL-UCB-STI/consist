@@ -58,7 +58,12 @@ from consist.core.tracker_recovery import (
     resolve_verified_local_path_with_diagnostics,
     verify_candidate_against_artifact,
 )
-from consist.digest import file_sha256, is_shapefile_sidecar_filename, verify_digest
+from consist.digest import (
+    bypass_digest_cache,
+    file_sha256,
+    is_shapefile_sidecar_filename,
+    verify_digest,
+)
 from consist.location import ArtifactLocationRow, LocationSite
 from consist.models.artifact import Artifact, ArchivedOutputs
 
@@ -1067,7 +1072,11 @@ class TrackerArchiveService(_TrackerServiceBase):
             if source_path.resolve() != destination.resolve():
                 if mode == "copy" or _deferred_directory_source_removals is not None:
                     shutil.copy2(source_path, destination)
-                    if file_sha256(destination) != file_sha256(source_path):
+                    with bypass_digest_cache():
+                        copy_matches = file_sha256(destination) == file_sha256(
+                            source_path
+                        )
+                    if not copy_matches:
                         destination.unlink(missing_ok=True)
                         raise ValueError(
                             f"Archived copy for artifact {artifact.key!r} failed "
@@ -1126,12 +1135,14 @@ class TrackerArchiveService(_TrackerServiceBase):
     @staticmethod
     def _is_matching_archive_file(source_path: Path, destination: Path) -> bool:
         """Return whether two regular files have identical size and SHA-256 content."""
-        return (
+        if not (
             source_path.is_file()
             and destination.is_file()
             and source_path.stat().st_size == destination.stat().st_size
-            and file_sha256(source_path) == file_sha256(destination)
-        )
+        ):
+            return False
+        with bypass_digest_cache():
+            return file_sha256(source_path) == file_sha256(destination)
 
     @staticmethod
     def _is_output_set_parent(artifact: Artifact) -> bool:
@@ -1932,12 +1943,13 @@ class TrackerArchiveService(_TrackerServiceBase):
             raise ValueError(
                 f"OutputSet archive destination has unexpected or missing members: {destination}"
             )
-        for relative_path, member in expected_files.items():
-            path = destination / relative_path
-            if file_sha256(path) != member.content_hash:
-                raise ValueError(
-                    f"OutputSet archive destination member hash mismatch: {path}"
-                )
+        with bypass_digest_cache():
+            for relative_path, member in expected_files.items():
+                path = destination / relative_path
+                if file_sha256(path) != member.content_hash:
+                    raise ValueError(
+                        f"OutputSet archive destination member hash mismatch: {path}"
+                    )
 
     def _validate_output_set_manifest_archive_destination(
         self, plan: _OutputSetArchivePlan
@@ -1948,13 +1960,16 @@ class TrackerArchiveService(_TrackerServiceBase):
             raise ValueError(
                 f"Symlink detected in OutputSet archive destination: {destination}"
             )
-        if destination.exists() and (
-            not destination.is_file()
-            or file_sha256(destination) != plan.manifest_content_hash
-        ):
-            raise FileExistsError(
-                f"OutputSet manifest archive destination already exists: {destination}"
-            )
+        if destination.exists():
+            with bypass_digest_cache():
+                matches = (
+                    destination.is_file()
+                    and file_sha256(destination) == plan.manifest_content_hash
+                )
+            if not matches:
+                raise FileExistsError(
+                    f"OutputSet manifest archive destination already exists: {destination}"
+                )
 
     def _publish_output_set_directory(self, plan: _OutputSetArchivePlan) -> bool:
         """Stage and publish one OutputSet member root without overwriting bytes."""
@@ -1979,19 +1994,20 @@ class TrackerArchiveService(_TrackerServiceBase):
         staging = staging_root / "payload"
         try:
             staging.mkdir()
-            for member in plan.members:
-                target = staging / member.relative_path
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(member.source_path, target)
-                if file_sha256(target) != member.content_hash:
-                    raise ValueError(
-                        f"OutputSet member {member.artifact.key!r} changed while archiving."
-                    )
-            for member in plan.members:
-                if file_sha256(member.source_path) != member.content_hash:
-                    raise ValueError(
-                        f"OutputSet member {member.artifact.key!r} changed while archiving."
-                    )
+            with bypass_digest_cache():
+                for member in plan.members:
+                    target = staging / member.relative_path
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(member.source_path, target)
+                    if file_sha256(target) != member.content_hash:
+                        raise ValueError(
+                            f"OutputSet member {member.artifact.key!r} changed while archiving."
+                        )
+                for member in plan.members:
+                    if file_sha256(member.source_path) != member.content_hash:
+                        raise ValueError(
+                            f"OutputSet member {member.artifact.key!r} changed while archiving."
+                        )
             self._validate_output_set_archive_destination(staging, plan.members)
             if plan.destination.exists() or plan.destination.is_symlink():
                 raise FileExistsError(
@@ -2010,9 +2026,12 @@ class TrackerArchiveService(_TrackerServiceBase):
                 f"Symlink detected in OutputSet archive destination: {destination}"
             )
         if destination.exists():
-            if not destination.is_file() or (
-                file_sha256(destination) != plan.manifest_content_hash
-            ):
+            with bypass_digest_cache():
+                matches = (
+                    destination.is_file()
+                    and file_sha256(destination) == plan.manifest_content_hash
+                )
+            if not matches:
                 raise FileExistsError(
                     f"OutputSet manifest archive destination already exists: {destination}"
                 )
@@ -2031,14 +2050,15 @@ class TrackerArchiveService(_TrackerServiceBase):
             with os.fdopen(descriptor, "wb") as temporary_file:
                 with plan.manifest_source.open("rb") as source_file:
                     shutil.copyfileobj(source_file, temporary_file)
-            if file_sha256(temporary_path) != plan.manifest_content_hash:
-                raise ValueError(
-                    f"OutputSet manifest {plan.manifest.key!r} changed while archiving."
-                )
-            if file_sha256(plan.manifest_source) != plan.manifest_content_hash:
-                raise ValueError(
-                    f"OutputSet manifest {plan.manifest.key!r} changed while archiving."
-                )
+            with bypass_digest_cache():
+                if file_sha256(temporary_path) != plan.manifest_content_hash:
+                    raise ValueError(
+                        f"OutputSet manifest {plan.manifest.key!r} changed while archiving."
+                    )
+                if file_sha256(plan.manifest_source) != plan.manifest_content_hash:
+                    raise ValueError(
+                        f"OutputSet manifest {plan.manifest.key!r} changed while archiving."
+                    )
             if destination.exists() or destination.is_symlink():
                 raise FileExistsError(
                     f"OutputSet manifest archive destination already exists: {destination}"
@@ -2561,33 +2581,36 @@ class TrackerArchiveService(_TrackerServiceBase):
         if verify:
             mismatches: list[str] = []
             try:
-                if content_hash is not None:
-                    if ":" in content_hash:
-                        matched = verify_digest(
+                with bypass_digest_cache():
+                    if content_hash is not None:
+                        if ":" in content_hash:
+                            matched = verify_digest(
+                                expected_path_resolved,
+                                content_hash,
+                                driver=artifact.driver,
+                                member=artifact.member,
+                            )
+                        else:
+                            matched = (
+                                file_sha256(expected_path_resolved) == content_hash
+                            )
+                        if not matched:
+                            mismatches.append("content_hash")
+                    elif has_verifiable_digest:
+                        if artifact.digest is None or not verify_digest(
                             expected_path_resolved,
-                            content_hash,
+                            artifact.digest,
                             driver=artifact.driver,
                             member=artifact.member,
-                        )
+                        ):
+                            mismatches.append("artifact.digest")
+                    elif source_candidate is not None:
+                        if file_sha256(expected_path_resolved) != file_sha256(
+                            source_candidate
+                        ):
+                            mismatches.append("source_root")
                     else:
-                        matched = file_sha256(expected_path_resolved) == content_hash
-                    if not matched:
-                        mismatches.append("content_hash")
-                elif has_verifiable_digest:
-                    if artifact.digest is None or not verify_digest(
-                        expected_path_resolved,
-                        artifact.digest,
-                        driver=artifact.driver,
-                        member=artifact.member,
-                    ):
                         mismatches.append("artifact.digest")
-                elif source_candidate is not None:
-                    if file_sha256(expected_path_resolved) != file_sha256(
-                        source_candidate
-                    ):
-                        mismatches.append("source_root")
-                else:
-                    mismatches.append("artifact.digest")
             except Exception as exc:
                 return result(
                     "failed",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import importlib
 import json
 import logging
@@ -58,6 +59,7 @@ from consist.digest import (
     Digest,
     canonical_json_sha256,
     file_sha256,
+    memoize_with_stat_token,
     normalize_json,
     verify_digest,
 )
@@ -100,7 +102,9 @@ except ImportError:  # pragma: no cover
     NonExistentKey = None
 
 
-_INCLUDE_RE = re.compile(r"^\s*include\s+(?:\"([^\"]+)\"|file\(\"([^\"]+)\"\))")
+_INCLUDE_RE = re.compile(
+    r'^\s*include\s+(?:required\(\s*)?(?:"([^"]+)"|file\(\s*"([^"]+)"\s*\))(?:\s*\))?'
+)
 _MAX_IMPLICIT_PATH_VALUE_LENGTH = 512
 _PATH_PROBE_EXCEPTIONS = (OSError, ValueError, RuntimeError)
 _BEAM_IDENTITY_SCHEMA_VERSION = 2
@@ -1369,33 +1373,46 @@ class BeamConfigAdapter:
         return config_path.resolve()
 
     def _collect_conf_files(self, root: Path) -> list[Path]:
-        seen: set[Path] = set()
-        ordered: list[Path] = []
-        queue = [root]
-        while queue:
-            current = queue.pop(0)
-            if current in seen:
-                continue
-            seen.add(current)
-            ordered.append(current)
-            for include in _scan_includes(current):
-                queue.append(include)
-        return ordered
+        return _collect_conf_files(root)
+
+
+def _collect_conf_files(root: Path) -> list[Path]:
+    seen: set[Path] = set()
+    ordered: list[Path] = []
+    queue = [root]
+    while queue:
+        current = queue.pop(0)
+        if current in seen:
+            continue
+        seen.add(current)
+        ordered.append(current)
+        for include in _scan_includes(current):
+            queue.append(include)
+    return ordered
 
 
 def _scan_includes(path: Path) -> list[Path]:
-    includes: list[Path] = []
     if not path.exists():
+        return []
+
+    def _scan() -> list[Path]:
+        includes: list[Path] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            match = _INCLUDE_RE.match(line)
+            if not match:
+                continue
+            rel = match.group(1) or match.group(2)
+            if rel:
+                include_path = (path.parent / rel).resolve()
+                includes.append(include_path)
         return includes
-    for line in path.read_text(encoding="utf-8").splitlines():
-        match = _INCLUDE_RE.match(line)
-        if not match:
-            continue
-        rel = match.group(1) or match.group(2)
-        if rel:
-            include_path = (path.parent / rel).resolve()
-            includes.append(include_path)
-    return includes
+
+    return memoize_with_stat_token(
+        ("beam_scan_includes",),
+        [path],
+        _scan,
+        clone_fn=list,
+    )
 
 
 def _rebind_config_values_parents(node: Any) -> None:
@@ -1436,28 +1453,46 @@ def _load_config_tree(
         raise ImportError("pyhocon is required for BEAM canonicalization.")
     if HOCONConverter is None:
         raise ImportError("pyhocon is required for BEAM canonicalization.")
-    config = ConfigFactory.parse_file(str(path), resolve=False)
-    _rebind_config_values_parents(config)
-    if resolve:
-        if ConfigParser is None:
-            raise ImportError("pyhocon is required for BEAM canonicalization.")
-        if NonExistentKey is None:
-            raise ImportError("pyhocon is required for BEAM canonicalization.")
-        inserted_keys: list[str] = []
-        if env_overrides:
-            for key, value in env_overrides.items():
-                if not key:
-                    continue
-                if config.get(key, NonExistentKey) is not NonExistentKey:
-                    continue
-                config.put(key, value)
-                inserted_keys.append(key)
-        try:
-            ConfigParser.resolve_substitutions(config, accept_unresolved=False)
-        finally:
-            for key in inserted_keys:
-                _remove_config_key(config, key)
-    return json.loads(HOCONConverter.to_json(config))
+    config_factory = ConfigFactory
+    hocon_converter = HOCONConverter
+
+    def _parse_and_resolve() -> dict[str, Any]:
+        config = config_factory.parse_file(str(path), resolve=False)
+        _rebind_config_values_parents(config)
+        if resolve:
+            if ConfigParser is None:
+                raise ImportError("pyhocon is required for BEAM canonicalization.")
+            if NonExistentKey is None:
+                raise ImportError("pyhocon is required for BEAM canonicalization.")
+            inserted_keys: list[str] = []
+            if env_overrides:
+                for key, value in env_overrides.items():
+                    if not key:
+                        continue
+                    if config.get(key, NonExistentKey) is not NonExistentKey:
+                        continue
+                    config.put(key, value)
+                    inserted_keys.append(key)
+            try:
+                ConfigParser.resolve_substitutions(config, accept_unresolved=False)
+            finally:
+                for key in inserted_keys:
+                    _remove_config_key(config, key)
+        return json.loads(hocon_converter.to_json(config))
+
+    conf_files = _collect_conf_files(path)
+    if conf_files and all(conf_file.exists() for conf_file in conf_files):
+        env_overrides_hash = (
+            canonical_json_sha256(dict(env_overrides)) if env_overrides else None
+        )
+        process_env_hash = canonical_json_sha256(dict(os.environ)) if resolve else None
+        return memoize_with_stat_token(
+            ("beam_hocon_tree", resolve, env_overrides_hash, process_env_hash),
+            conf_files,
+            _parse_and_resolve,
+            clone_fn=copy.deepcopy,
+        )
+    return _parse_and_resolve()
 
 
 def _remove_config_key(config: Any, key: str) -> None:
@@ -2433,6 +2468,7 @@ def _canonicalize_gtfs_inputs(
     return canonicalize_gtfs_bundle(
         feed_paths,
         service_date=service_date,
+        include_tables=False,
     )
 
 
