@@ -40,6 +40,15 @@ The format is based on [Keep a Changelog], and this project adheres to
 
 ### Changed
 
+- Unify artifact location resolution across cache validation, input staging and
+  recovery, output materialization, archival, and CLI diagnostics around a typed
+  `TranslatedCoordinate` / `LocationResolver` engine: a single fail-closed
+  `FileSystemManager.translate_location_coordinate` (containment, symlink
+  safety, and workspace-instance checks), a `MountPrecedenceResolver` shared
+  across batch operations and the coupler restore loop, and one ordered,
+  deduplicated `iter_artifact_candidates` generator replacing the per-site
+  stringly-typed `recovery_roots` enumeration by @zneedell
+  ([#333](https://github.com/LBNL-UCB-STI/consist/pull/333)).
 - Replace ORM provenance models with immutable value-model `Artifact` and `Run`
   records and unified scheme digests, including `Artifact.meta` immutability and
   HDF5 slab streaming optimizations by @zneedell
@@ -58,6 +67,12 @@ The format is based on [Keep a Changelog], and this project adheres to
 
 ### Fixed
 
+- Gate the cache-hit fresh-witness fast path on digest-settled witnesses
+  (verifying each unverified witness once per process) and preserve resolved
+  historical recovery candidates when the workspace primary location is
+  rejected; report symlinked recovery sources as `missing_source` since they
+  are never followed by @zneedell
+  ([#333](https://github.com/LBNL-UCB-STI/consist/pull/333)).
 - Prevent machine-local BEAM reference presence from changing portable cache
   identity by hashing declared reference policies and computed content digests
   instead of runtime status, derived delegation keys, or digest-less directory
