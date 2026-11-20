@@ -1,5 +1,4 @@
 import logging
-import os
 import shutil
 import tempfile
 import uuid
@@ -64,33 +63,8 @@ class CacheDb(Protocol):
 
 @runtime_checkable
 class CacheFs(Protocol):
-    def resolve_historical_path(
-        self,
-        uri: str,
-        original_run_dir: Optional[str],
-        *,
-        mounts_snapshot: Optional[Mapping[str, str]] = None,
-        artifact_mount_root: Optional[str] = None,
-    ) -> str: ...
-
-    def normalize_recovery_roots(
-        self,
-        roots: str | os.PathLike[str] | Sequence[str | os.PathLike[str]] | None,
-        *,
-        resolve: bool = True,
-    ) -> list[str]: ...
-
     def get_remappable_relative_path(
         self, uri: str, *, scheme_prefixes: Optional[Mapping[str, str | Path]] = None
-    ) -> Path | None: ...
-
-    def get_historical_root(
-        self,
-        uri: str,
-        *,
-        original_run_dir: Optional[str],
-        mounts_snapshot: Optional[Dict[str, str]] = None,
-        artifact_mount_root: Optional[str] = None,
     ) -> Path | None: ...
 
 
@@ -1290,12 +1264,6 @@ def validate_cached_run_outputs(
             return False
         if _settled_witness_fresh(cand, tracker.db):
             return True
-        manifest_valid = is_valid_directory_artifact_tree(candidate, art)
-        if manifest_valid is not None:
-            if manifest_valid:
-                _settle_candidate_witness_after_validation(tracker.db, cand, candidate)
-            return manifest_valid
-        return True
         manifest_valid = is_valid_directory_artifact_tree(candidate, art)
         if manifest_valid is not None:
             if manifest_valid:

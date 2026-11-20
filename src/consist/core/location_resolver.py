@@ -392,20 +392,14 @@ def iter_artifact_candidates(
     *,
     relative_path: Path | None = None,
     rows: Sequence[ArtifactLocationRow] | None = None,
-    source_root: str | Path | None = None,
-    explicit_roots: Sequence[str | Path] | None = None,
+    source_root: str | Path | Sequence[str | Path] | None = None,
     historical_run: Run | None = None,
     historical_run_dir: str | Path | None = None,
     include_runtime_abs: bool = False,
     resolver: MountPrecedenceResolver | None = None,
     include_rejected: bool = False,
 ) -> Iterator[ResolvedCandidate]:
-    """Enumerate ordered, deduplicated, containment-checked candidate locations for an artifact.
-
-    ``explicit_roots`` is a test/diagnostic surface for injecting additional
-    candidate roots (``explicit_root`` source); production callers rely on
-    ledger- and mount-derived candidates only.
-    """
+    """Enumerate ordered, deduplicated, containment-checked candidate locations for an artifact."""
     seen_canonical: set[Path] = set()
     res = resolver or MountPrecedenceResolver.from_tracker(tracker)
     if historical_run is not None:
@@ -453,25 +447,15 @@ def iter_artifact_candidates(
         except Exception:
             rel = tracker.fs.get_remappable_relative_path(artifact.uri)
 
-    # 1. Explicit source root
+    # 1. Explicit source roots
     if source_root is not None and rel is not None:
-        yield from _emit(
-            _candidate_from_root(
-                source_root,
-                rel,
-                "explicit_root",
-                artifact,
-                fs=tracker.fs,
-                keep_rejected=include_rejected,
-            )
+        source_roots = (
+            [source_root] if isinstance(source_root, (str, Path)) else list(source_root)
         )
-
-    # 2. Additional explicit roots
-    if explicit_roots is not None and rel is not None:
-        for exp_root in explicit_roots:
+        for src_root in source_roots:
             yield from _emit(
                 _candidate_from_root(
-                    exp_root,
+                    src_root,
                     rel,
                     "explicit_root",
                     artifact,

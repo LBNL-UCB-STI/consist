@@ -1027,7 +1027,7 @@ def test_unsafe_first_explicit_root_does_not_shadow_safe_second(tmp_path: Path) 
     tracker = _stub_tracker_with_recovery_roots(tmp_path / "ws", {})
     cands = list(
         iter_artifact_candidates(
-            tracker, artifact, explicit_roots=[str(bad_root), str(good_root)]
+            tracker, artifact, source_root=[str(bad_root), str(good_root)]
         )
     )
     safe = [c for c in cands if not c.rejected and c.lexical_path == good_leaf]

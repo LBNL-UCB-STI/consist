@@ -3632,11 +3632,16 @@ class DatabaseMaintenance:
                             if pkey not in seen_paths:
                                 seen_paths.add(pkey)
                                 protected_paths.append(extra_cand)
-                loc_cand = base_fs.resolve_location_row_path(
-                    loc,
+                # Existence-only scan: skip workspace-instance verification so
+                # same-scheme historical roots protect their files.
+                loc_coord = base_fs.translate_location_coordinate(
+                    loc.mount_name,
+                    loc.mount_instance_id,
+                    loc.uri,
                     historical_run_dir=hist_rd,
                     verify_workspace_instance=False,
                 )
+                loc_cand = loc_coord.canonical_path if loc_coord.is_resolved else None
                 if loc_cand is not None:
                     pkey = str(loc_cand)
                     if pkey not in seen_paths:
