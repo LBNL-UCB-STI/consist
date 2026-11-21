@@ -337,6 +337,8 @@ result = tracker.exec(
         - materialize
         - ingest
         # Querying and history
+        - query_df
+        - query_rows
         - find_runs
         - run_set
         - find_run
