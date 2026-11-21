@@ -91,7 +91,7 @@ report = check_admission_reference(
 ## Declared digests
 
 Use a declared digest when a workflow has a locally governed canonical identity
-but no prior Consist run. `AdmissionIdentity` (or `FileIdentity` for raw files)
+but no prior Consist run. `Digest` (and its `FileIdentity` alias)
 rejects bare, uppercase, and unsupported identity prefixes before Consist reads
 candidate bytes. A successful report only proves equality with the declaration;
 it does not authenticate the source label or URI, create a trusted `Artifact`,
@@ -122,8 +122,8 @@ boundary using `DeclaredDigestExpectation`:
 ```python
 # Consumer / Admission verification step
 from consist.admission import (
-    AdmissionIdentity,
     DeclaredDigestExpectation,
+    Digest,
     check_expected_identity,
 )
 
@@ -131,7 +131,7 @@ report = check_expected_identity(
     execution_path="inputs/initial_datastore.h5",
     input_role="urbansim_initial_datastore",
     expectation=DeclaredDigestExpectation(
-        identity=AdmissionIdentity.parse(governed_file_identity),
+        identity=Digest.parse(governed_file_identity),
         source_label="UrbanSim initial datastore",
         source_uri="s3://governed-inputs/seattle/initial_datastore.h5",
     ),
@@ -268,13 +268,13 @@ rewrite existing sidecars.
       show_root_heading: true
       show_root_toc_entry: true
 
-::: consist.core.admission.AdmissionIdentity
+::: consist.digest.Digest
     options:
       show_source: false
       show_root_heading: true
       show_root_toc_entry: true
 
-::: consist.core.admission.FileIdentity
+::: consist.admission.FileIdentity
     options:
       show_source: false
       show_root_heading: true
@@ -306,18 +306,6 @@ rewrite existing sidecars.
       show_root_heading: true
       show_root_toc_entry: true
 
-::: consist.core.logical_array_identity.MatrixContainerSummary
-    options:
-      show_source: false
-      show_root_heading: true
-      show_root_toc_entry: true
-
-::: consist.core.logical_array_identity.ArtifactProvenanceSidecar
-    options:
-      show_source: false
-      show_root_heading: true
-      show_root_toc_entry: true
-
 ::: consist.core.logical_array_identity.compute_logical_matrices_sha256
     options:
       show_source: false
@@ -331,12 +319,6 @@ rewrite existing sidecars.
       show_root_toc_entry: true
 
 ::: consist.core.logical_array_identity.compute_zarr_logical_matrices_sha256
-    options:
-      show_source: false
-      show_root_heading: true
-      show_root_toc_entry: true
-
-::: consist.core.logical_array_identity.admission_directory_identity
     options:
       show_source: false
       show_root_heading: true
@@ -366,7 +348,7 @@ These lower-level helpers define how artifact fingerprints are described and
 how the admission-specific full-file identity is computed. Most application
 code should use `check_artifact_identity(...)` instead.
 
-::: consist.core.admission.admission_file_identity
+::: consist.admission.admission_file_identity
     options:
       show_source: false
       show_root_heading: true
