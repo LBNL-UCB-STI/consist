@@ -1,0 +1,4260 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Provenance tracking, intelligent caching, and data virtualization for scientific simulation workflows">
+      
+      
+        <meta name="author" content="Zach Needell">
+      
+      
+        <link rel="canonical" href="https://LBNL-UCB-STI.github.io/consist/0.5.0/superpowers/plans/2026-09-11-command-instrumentation-product-direction/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../../assets/logo-square.png">
+      <meta name="generator" content="zensical-0.0.47">
+    
+    
+      
+        <title>Command Instrumentation: Product Direction and Market Exploration - Consist</title>
+      
+    
+    
+      
+        
+      
+      <link rel="stylesheet" href="../../../assets/stylesheets/modern/main.5e19f6ca.min.css">
+      
+        
+          
+        
+        <link rel="stylesheet" href="../../../assets/stylesheets/modern/palette.dfe2e883.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Libre+Franklin:300,300i,400,400i,500,500i,700,700i%7CJetbrains+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Libre Franklin";--md-code-font:"Jetbrains Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../../..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer" aria-label="Navigation"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#command-instrumentation-product-direction-and-market-exploration" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../../.." title="Consist" class="md-header__button md-logo" aria-label="Consist" data-md-component="logo">
+      
+  <img src="../../../assets/logo-square-dark.png" alt="Consist">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Consist
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Command Instrumentation: Product Direction and Market Exploration
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-sun-moon" viewBox="0 0 24 24"><path d="M12 2v2M14.837 16.385a6 6 0 1 1-7.223-7.222c.624-.147.97.66.715 1.248a4 4 0 0 0 5.26 5.259c.589-.255 1.396.09 1.248.715M16 12a4 4 0 0 0-4-4M19 5l-1.256 1.256M20 12h2"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_2" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to system preference"  type="radio" name="__palette" id="__palette_2">
+    
+      <label class="md-header__button md-icon" title="Switch to system preference" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-moon" viewBox="0 0 24 24"><path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search" aria-label="Search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+        <a href="https://github.com/LBNL-UCB-STI/consist" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2026 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+      
+    </div>
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../.." class="md-tabs__link">
+        
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+      
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../../getting-started/installation/" class="md-tabs__link">
+          
+  
+  Getting Started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+      
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../../concepts/overview/" class="md-tabs__link">
+          
+  
+  Concepts
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+      
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../../usage-guide/" class="md-tabs__link">
+          
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+      
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../../cli-reference/" class="md-tabs__link">
+          
+  
+  Operations
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+      
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../../integrations/" class="md-tabs__link">
+          
+  
+  Integrations
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+      
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../../api/" class="md-tabs__link">
+          
+  
+  API Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+      
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../../examples/" class="md-tabs__link">
+          
+  
+  Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../../.." title="Consist" class="md-nav__button md-logo" aria-label="Consist" data-md-component="logo">
+      
+  <img src="../../../assets/logo-square-dark.png" alt="Consist">
+
+    </a>
+    Consist
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/LBNL-UCB-STI/consist" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2026 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Home
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Getting Started
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Getting Started
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Installation
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../getting-started/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Quickstart
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../getting-started/first-workflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  First Workflow
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../migrating-to-0.5/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Upgrading to Consist 0.5
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Concepts
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Concepts
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../concepts/overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Core Concepts Overview
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../concepts/config-management/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Config, Facets, and Identity Inputs
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../concepts/decorators-and-metadata/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Decorators &amp; Metadata
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../concepts/caching-and-hydration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Caching and Hydration
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../concepts/data-materialization/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Data Storage and Ingestion Strategy
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../concepts/grouped-views/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Grouped Views
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Guides
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Guides
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../usage-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Usage Guide
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../building-domain-tracker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Building a Domain Tracker
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../containers-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Container Integration Guide
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../dlt-loader-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  DLT Loader Integration Guide
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../schema-export/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Schema Export (SQLModel Stubs)
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../mounts-and-portability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Mounts &amp; Portability
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../guides/historical-recovery/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Historical Recovery
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operations
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Operations
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../cli-reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  CLI Reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../db-maintenance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  DB Maintenance Guide
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Troubleshooting Guide
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../../integrations/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Integrations
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_6" id="__nav_6_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Integrations
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../integrations/containers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Containers
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../integrations/dlt_loader/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  DLT Loader
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_6_4" id="__nav_6_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Config Adapters
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_6_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Config Adapters
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../integrations/config_adapters/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Overview
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../integrations/config_adapters_beam/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  BEAM
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../integrations/config_adapters_activitysim/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  ActivitySim
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../integrations/gtfs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  GTFS
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../../api/" class="md-nav__link ">
+              
+  
+  
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+  
+  <span class="md-ellipsis">
+    
+  
+  API Reference
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_7" id="__nav_7_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  API Reference
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/essentials/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  API Essentials
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/advanced/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  API Advanced
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/public_api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Public API (v0.1)
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/api_helpers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  API Helpers
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/tracker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Tracker
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/workflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Workflow Contexts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/step_contracts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Step Contracts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/artifact/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Artifact
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/run/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Run
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/runset/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  RunSet and Alignment
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/indexing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Indexing Helpers
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/admission/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Artifact Admission
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/digest/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Content &amp; Tabular Digests (consist.digest)
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/identity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Identity Manager
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/views/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Views
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/matrix/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Matrix Views
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/materialize/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Materialization
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_8" >
+        
+          
+          <label class="md-nav__link" for="__nav_8" id="__nav_8_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_8_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_8">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Reference
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../examples/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Example Gallery
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../glossary/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Glossary
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  How Consist Works
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../internals/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Internals
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../location-resolver-architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Location Resolver
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../provenance-schema/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Consist provenance schema
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../faq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Frequently Asked Questions (FAQ)
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../llm-skill/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Consist LLM Skill
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../cli-error-style/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  CLI Error Style Guide
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_8_10" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../../advanced/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Advanced
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_8_10" id="__nav_8_10_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_8_10_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_8_10">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Advanced
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../advanced/execution-style-decision-tree/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Which execution style should I use?
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../advanced/manual-lifecycle-and-decorators/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Manual Lifecycle and Decorators
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  
+                    
+                    
+                    
+                      
+                    
+                    
+                      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+                      <div class="md-sidebar-button__wrapper">
+                        <label class="md-sidebar-button" for="__toc"></label>
+                      </div>
+                    
+                  
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#executive-view" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Executive view
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#proposed-user-experience" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Proposed user experience
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#mvp-bootstrap-a-stable-local-project-home" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        MVP bootstrap: a stable local project home
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#deferred-post-pilot-project-configuration-and-convention-discovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Deferred post-pilot: project configuration and convention discovery
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Deferred post-pilot: project configuration and convention discovery">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#configuration-is-not-scientific-identity" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Configuration is not scientific identity
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-consist-would-record" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        What Consist would record
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="What Consist would record">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#required-v1-facts" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Required v1 facts
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#declared-in-place-mutation-simulation-checkpoints-and-persistent-stores" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Declared in-place mutation: simulation checkpoints and persistent stores
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#explicitly-deferred-facts" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Explicitly deferred facts
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#selling-points" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Selling points
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Selling points">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#immediate-value-for-scientists-and-modelers" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Immediate value for scientists and modelers
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#product-and-adoption-value" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Product and adoption value
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#strong-use-cases" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Strong use cases
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#mixed-shape-composition-python-commands-and-existing-consist-applications" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Mixed-shape composition: Python, commands, and existing Consist applications
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Mixed-shape composition: Python, commands, and existing Consist applications">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#four-composition-shapes" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Four composition shapes
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#composition-with-configuration-adapters-and-overrides-trackerexec_with_config_overrides" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Composition with configuration adapters and overrides (<code>tracker.exec_with_config_overrides</code>)
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Composition with configuration adapters and overrides (tracker.exec_with_config_overrides)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#lifecycle-and-semantics" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Lifecycle and Semantics
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#deferred-delegated-execution-envelope" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Deferred: delegated execution envelope
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#deferred-shared-executor-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Deferred: shared executor contract
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#deferred-terminal-flow-artifact-routing" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Deferred: terminal flow artifact routing
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Deferred: terminal flow artifact routing">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#flow-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Flow rules
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#competitive-landscape" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Competitive landscape
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Competitive landscape">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#relevant-external-evidence" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Relevant external evidence
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#relationship-to-the-object-registry" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Relationship to the object registry
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#product-boundaries-and-hard-questions" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Product boundaries and hard questions
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Product boundaries and hard questions">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#avoid-magic-file-discovery-in-v1" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Avoid “magic file discovery” in v1
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#separate-synchronous-execution-from-asynchronous-submission" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Separate synchronous execution from asynchronous submission
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#start-record-only-not-cache-first" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Start record-only, not cache-first
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#treat-logs-as-evidence-with-policy-controls" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Treat logs as evidence with policy controls
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#interruptions-and-abandoned-running-records" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Interruptions and abandoned running records
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#smallest-credible-mvp" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Smallest credible MVP
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Smallest credible MVP">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#in-scope" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        In scope
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#out-of-scope" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Out of scope
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#validation-plan-before-committing-to-implementation" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Validation plan before committing to implementation
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#success-criteria" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Success criteria
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#decision-requested-after-exploration" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Decision requested after exploration
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+                
+
+
+
+  
+
+
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+  
+  
+    
+      
+    
+    <a href="https://github.com/LBNL-UCB-STI/consist/raw/master/docs/superpowers/plans/2026-09-11-command-instrumentation-product-direction.md" title="View source of this page" class="md-content__button md-icon">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-file-code-2" viewBox="0 0 24 24"><path d="M4 12.15V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.706.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2h-3.35"/><path d="M14 2v5a1 1 0 0 0 1 1h5M5 16l-3 3 3 3M9 22l3-3-3-3"/></svg>
+    </a>
+  
+
+
+<h1 id="command-instrumentation-product-direction-and-market-exploration">Command Instrumentation: Product Direction and Market Exploration<a class="headerlink" href="#command-instrumentation-product-direction-and-market-exploration" title="Permanent link">&para;</a></h1>
+<p><strong>Status:</strong> internal product exploration; no implementation decision</p>
+<p><strong>Decision to explore:</strong> Whether Consist should offer a low-friction CLI that
+runs an arbitrary terminal command while recording an explicit provenance
+boundary, and whether this should precede broad shared-artifact-registry work.</p>
+<h2 id="executive-view">Executive view<a class="headerlink" href="#executive-view" title="Permanent link">&para;</a></h2>
+<p><code>consist exec</code> has a credible chance to be Consist's strongest adoption wedge.
+It gives a scientist useful, durable provenance without requiring them to turn a
+working script into a Python callable, write a workflow graph, or first adopt a
+shared catalog. The user declares the inputs and outputs that matter, Consist
+runs the command, and the resulting record is immediately searchable, hash
+bound, and lineage-capable.</p>
+<p>The user-facing pitch is: <strong>prefix the command you already run with <code>consist
+exec</code>, declare what goes in and what must come out, and receive a verified,
+searchable record—plus a clear answer to what changed since the last named
+run—without a refactor, DAG, or pipeline file.</strong></p>
+<p>This is deliberately not a claim that arbitrary shell commands can be made
+fully reproducible by observation alone. A command wrapper should make the
+declared boundary trustworthy, preserve its limits, and provide a path into the
+existing <code>Tracker.run(...)</code>, container, recovery, and future registry surfaces.</p>
+<p>The publication-facing honesty sentence should be equally direct: <strong>Consist
+records what users declare and verifies declared results; it does not guess
+complete dependency capture.</strong> This keeps the internal pilot useful without
+overclaiming automatic reproducibility in JOSS or conference material.</p>
+<p>The proposed prioritization is:</p>
+<ol>
+<li>Validate command instrumentation as an adoption wedge.</li>
+<li>Use explicit artifact roles/names in recorded runs to discover the registry
+   semantics people actually repeat.</li>
+<li>Build shared registry capabilities only when cross-run discovery, aliasing,
+   custody, or handoff are demonstrated needs.</li>
+</ol>
+<p>This sequencing serves the current product goals of low-friction developer
+experience and a lightweight provenance layer. It does not replace the registry
+roadmap; it gives the registry high-quality, real usage evidence and an easier
+on-ramp.</p>
+<h2 id="proposed-user-experience">Proposed user experience<a class="headerlink" href="#proposed-user-experience" title="Permanent link">&para;</a></h2>
+<p>The initial shape should feel like a normal command invocation with an explicit
+provenance envelope:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>consist<span class="w"> </span><span class="nb">exec</span><span class="w"> </span><span class="se">\</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="w">  </span>--name<span class="w"> </span>nc-baseline<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="w">  </span>--input<span class="w"> </span><span class="nv">config</span><span class="o">=</span>configs/baseline.yaml<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="w">  </span>--input<span class="w"> </span><span class="nv">population</span><span class="o">=</span>data/population.parquet<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="w">  </span>--outputs-dir<span class="w"> </span>outputs/<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="w">  </span>--cwd<span class="w"> </span>.<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="w">  </span>--<span class="w"> </span>python<span class="w"> </span>launch_model.py<span class="w"> </span>--config<span class="w"> </span>configs/baseline.yaml
+</span></code></pre></div>
+<p>On success, Consist should create a run record and input/output artifact links.
+It should emit a compact machine-readable execution record, for example under
+the selected run directory, plus normal CLI-readable run and lineage records.
+The final terminal summary should name the run ID, state that every declared
+output was present and recorded, compare it with the most recent successful run
+of the same name in the same project, and print one next inspection command:
+<code>consist show &lt;run-id&gt;</code>. The comparison must name its baseline run ID and say
+which of command/configuration, declared inputs, and declared outputs changed;
+it must never imply that a same name means equivalent scientific intent.</p>
+<p><code>--outputs-dir</code> is an explicit output-boundary declaration, not process tracing.
+It records the regular files newly created or modified beneath that directory by
+their relative paths, using a manifest/logical-output representation where
+appropriate. It does not infer reads, watch unrelated directories, or silently
+collect arbitrary filesystem changes. <code>--output key=PATH</code> remains the precise
+option for one named product.</p>
+<p>Before committing a costly command, users can inspect the boundary without
+creating a run or spawning a child process:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>consist<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>--dry-run<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="w">  </span>--input<span class="w"> </span><span class="nv">config</span><span class="o">=</span>configs/baseline.yaml<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="w">  </span>--outputs-dir<span class="w"> </span>outputs/<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="w">  </span>--<span class="w"> </span>python<span class="w"> </span>launch_model.py<span class="w"> </span>--config<span class="w"> </span>configs/baseline.yaml
+</span></code></pre></div>
+<p>The dry-run report must show the resolved argv and working directory, each
+input's fingerprint, the expected output boundary, code-identity mode, any
+warnings or unresolved paths, and the selected comparison baseline when one
+exists. Existing regular-file argv tokens should appear as <strong>suggested inputs</strong>
+only. They affect neither identity nor lineage unless the user explicitly names
+them with <code>--input</code> or promotes the displayed set with <code>--accept-suggested</code>.
+Suggestions must exclude the executable, <code>-</code>/stdin, URLs, and paths that are
+already declared as outputs; shell-mode commands receive no inferred inputs.</p>
+<p>The command boundary must use argv execution after <code>--</code>, not construct a shell
+string. An explicit <code>--shell</code> mode is available for pipelines, redirection, and
+shell expansion, but it must be loud: record the script string, resolved shell
+executable, and <code>shell=true</code> in the run; warn that argv-level input suggestions
+are unavailable; and never silently change the default parsing or quoting
+semantics.</p>
+<h2 id="mvp-bootstrap-a-stable-local-project-home">MVP bootstrap: a stable local project home<a class="headerlink" href="#mvp-bootstrap-a-stable-local-project-home" title="Permanent link">&para;</a></h2>
+<p><code>consist init</code> should create a minimal <code>.consist/</code> project home with the local
+tracker and run-record locations. From any subdirectory, Consist should walk
+upward to the nearest <code>.consist/</code> directory; explicit tracker/run-directory
+arguments still take precedence. The CLI must report the resolved project root
+in <code>--dry-run</code> and <code>consist show</code> output so users do not have to guess where a
+record was stored.</p>
+<p>This is deliberately a marker and discovery rule, not a configuration language:
+no profiles, command recipes, environment policy, or implicit artifacts belong
+in the MVP. It removes routine tracker-location friction while retaining an
+unambiguous local provenance ledger for terminal and Python work.</p>
+<h2 id="deferred-post-pilot-project-configuration-and-convention-discovery">Deferred post-pilot: project configuration and convention discovery<a class="headerlink" href="#deferred-post-pilot-project-configuration-and-convention-discovery" title="Permanent link">&para;</a></h2>
+<p>Only after the bootstrap has been tested should Consist add a configuration
+file. Pilot evidence must show that repeated operational flags—not incorrect
+artifact declarations—are the material adoption obstacle.</p>
+<p>Command instrumentation needs a project-level convention so that terminal
+commands and Python code join the same local provenance ledger without every
+invocation repeating database, run-directory, and policy flags. Support both a
+language-neutral <code>.consist.toml</code> and <code>[tool.consist]</code> in <code>pyproject.toml</code>;
+prefer the former in mixed-language repositories.</p>
+<div class="language-toml highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="c1"># .consist.toml</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="n">version</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="k">[tracker]</span>
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="n">db_path</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;.consist/provenance.duckdb&quot;</span>
+</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="n">run_dir</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;.consist/runs&quot;</span>
+</span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a>
+</span><span id="__span-2-8"><a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="k">[identity]</span>
+</span><span id="__span-2-9"><a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a><span class="n">code_root</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;.&quot;</span>
+</span><span id="__span-2-10"><a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a><span class="n">require_git</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span>
+</span><span id="__span-2-11"><a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a>
+</span><span id="__span-2-12"><a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a><span class="k">[commands]</span>
+</span><span id="__span-2-13"><a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a><span class="n">log_retention</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;on-failure&quot;</span>
+</span><span id="__span-2-14"><a id="__codelineno-2-14" name="__codelineno-2-14" href="#__codelineno-2-14"></a><span class="n">environment_allowlist</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;PATH&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;LANG&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;OMP_NUM_THREADS&quot;</span><span class="p">]</span>
+</span><span id="__span-2-15"><a id="__codelineno-2-15" name="__codelineno-2-15" href="#__codelineno-2-15"></a><span class="n">default_output_policy</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;require-present&quot;</span>
+</span><span id="__span-2-16"><a id="__codelineno-2-16" name="__codelineno-2-16" href="#__codelineno-2-16"></a>
+</span><span id="__span-2-17"><a id="__codelineno-2-17" name="__codelineno-2-17" href="#__codelineno-2-17"></a><span class="k">[profiles.cluster]</span>
+</span><span id="__span-2-18"><a id="__codelineno-2-18" name="__codelineno-2-18" href="#__codelineno-2-18"></a><span class="n">run_dir</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;/scratch/${USER}/my-project/consist-runs&quot;</span>
+</span><span id="__span-2-19"><a id="__codelineno-2-19" name="__codelineno-2-19" href="#__codelineno-2-19"></a><span class="n">environment_allowlist</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;SLURM_JOB_ID&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;OMP_NUM_THREADS&quot;</span><span class="p">]</span>
+</span></code></pre></div>
+<p>The corresponding Python entrypoint should be explicit and small:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">consist</span><span class="w"> </span><span class="kn">import</span> <span class="n">open_project_tracker</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">open_project_tracker</span><span class="p">()</span>
+</span></code></pre></div>
+<p><code>consist exec</code> and <code>open_project_tracker()</code> must resolve the same effective
+configuration. The intended precedence is:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>explicit CLI/API arguments
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>→ explicit --config / CONSIST_CONFIG
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>→ .consist.local.toml (ignored, machine-specific)
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>→ .consist.toml (committed project convention)
+</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>→ [tool.consist] in pyproject.toml
+</span></code></pre></div>
+<p>Resolve relative paths against the selected config file, never against the
+caller's current directory. Provide <code>consist config show --resolved</code> to display
+the effective non-secret configuration and which source supplied each value.</p>
+<h3 id="configuration-is-not-scientific-identity">Configuration is not scientific identity<a class="headerlink" href="#configuration-is-not-scientific-identity" title="Permanent link">&para;</a></h3>
+<p>The project config establishes operational convention: tracker location, run
+directory, mounts, profiles, log policy, and a safe environment allow-list. It
+must not silently become a cache input or define a second workflow language.
+Each run independently records the identity-bearing facts: declared input
+hashes, exact argv, command-specific configuration files, code identity, and
+selected environment digest. A profile change can be recorded as execution
+metadata; it changes the result identity only when it changes one of those
+declared inputs or execution facts.</p>
+<p>Keep <code>commands</code> limited to defaults and policy. Do not add named command
+recipes, dependency inference, or implicit outputs in this config. Those would
+recreate a workflow DSL and blur the explicit boundary that makes the feature
+trustworthy.</p>
+<h2 id="what-consist-would-record">What Consist would record<a class="headerlink" href="#what-consist-would-record" title="Permanent link">&para;</a></h2>
+<h3 id="required-v1-facts">Required v1 facts<a class="headerlink" href="#required-v1-facts" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Exact argv list, working directory, start/end timestamps, duration, process
+  exit status, and signal/termination outcome when available.</li>
+<li>Declared input paths and output paths, their role keys, and the applicable
+  content or manifest fingerprints.</li>
+<li>Code identity when it can be established safely: repository revision and dirty
+  state, or an explicit identity mode that says it was unavailable. It must not
+  invent caller identity for a non-Python command.</li>
+<li>A selected, allow-listed environment identity as a digest rather than raw
+  secret-bearing environment values.</li>
+<li>Paths to captured stdout/stderr files, with truncation/retention policy made
+  explicit.</li>
+<li>Post-exit output checks. Exit zero alone is not enough: a declared output must
+  exist and pass the normal artifact admission/hash step before the run becomes
+  successful.</li>
+<li>An interruption outcome. The wrapper must record its best observed child
+  signal/exit state on Ctrl-C and leave an actionable, reconcilable running
+  record if the wrapper itself is killed before finalization.</li>
+<li>The comparison baseline (or its absence), its run ID, and field-level
+  classifications for command/configuration, declared inputs, and declared
+  outputs. A comparison is evidence for inspection, not an equivalence claim.</li>
+</ul>
+<h3 id="declared-in-place-mutation-simulation-checkpoints-and-persistent-stores">Declared in-place mutation: simulation checkpoints and persistent stores<a class="headerlink" href="#declared-in-place-mutation-simulation-checkpoints-and-persistent-stores" title="Permanent link">&para;</a></h3>
+<p>Legacy tools and complex simulations frequently update a persistent store or
+checkpoint file at the same path that they consume. A prime example is
+simulation checkpoint-resume workflows (such as ActivitySim's <code>cli_resume</code>
+mode), where a base execution initializes a multi-gigabyte pipeline store
+(<code>pipeline.h5</code> or <code>pipeline.parquet</code>), and subsequent calibration or continuation
+steps run <code>resume_after</code> by updating that store in place.</p>
+<p>Without explicit mutation tracking, client harnesses are forced to write bespoke
+pre- and post-execution inspection logic to hash internal checkpoint tables or
+make defensive copies of large files. Consist provides a clean, native provenance
+shape for this pattern via explicit declared mutation:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>consist<span class="w"> </span><span class="nb">exec</span><span class="w"> </span><span class="se">\</span>
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="w">  </span>--input<span class="w"> </span><span class="nv">config</span><span class="o">=</span>configs/baseline.yaml<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="w">  </span>--mutate<span class="w"> </span><span class="nv">pipeline</span><span class="o">=</span>outputs/pipeline.h5<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="w">  </span>--<span class="w"> </span>python<span class="w"> </span>-m<span class="w"> </span>activitysim<span class="w"> </span>run<span class="w"> </span>-c<span class="w"> </span>configs<span class="w"> </span>-d<span class="w"> </span>data<span class="w"> </span>-o<span class="w"> </span>outputs<span class="w"> </span>--resume-after<span class="w"> </span>trip_mode_choice
+</span></code></pre></div>
+<p>In the Python API, <code>tracker.exec(...)</code> accepts <code>mutate</code> mappings alongside <code>inputs</code> and <code>outputs</code>:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="n">result</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">exec</span><span class="p">(</span>
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;resume_simulation&quot;</span><span class="p">,</span>
+</span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>    <span class="n">argv</span><span class="o">=</span><span class="p">[</span>
+</span><span id="__span-6-4"><a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a>        <span class="s2">&quot;python&quot;</span><span class="p">,</span> <span class="s2">&quot;-m&quot;</span><span class="p">,</span> <span class="s2">&quot;activitysim&quot;</span><span class="p">,</span> <span class="s2">&quot;run&quot;</span><span class="p">,</span>
+</span><span id="__span-6-5"><a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a>        <span class="s2">&quot;-c&quot;</span><span class="p">,</span> <span class="s2">&quot;configs&quot;</span><span class="p">,</span> <span class="s2">&quot;-d&quot;</span><span class="p">,</span> <span class="s2">&quot;data&quot;</span><span class="p">,</span> <span class="s2">&quot;-o&quot;</span><span class="p">,</span> <span class="s2">&quot;outputs&quot;</span><span class="p">,</span>
+</span><span id="__span-6-6"><a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a>        <span class="s2">&quot;--resume-after&quot;</span><span class="p">,</span> <span class="s2">&quot;trip_mode_choice&quot;</span><span class="p">,</span>
+</span><span id="__span-6-7"><a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a>    <span class="p">],</span>
+</span><span id="__span-6-8"><a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a>    <span class="n">inputs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;config&quot;</span><span class="p">:</span> <span class="s2">&quot;configs/settings.yaml&quot;</span><span class="p">},</span>
+</span><span id="__span-6-9"><a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a>    <span class="n">mutate</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;pipeline&quot;</span><span class="p">:</span> <span class="s2">&quot;outputs/pipeline.h5&quot;</span><span class="p">},</span>
+</span><span id="__span-6-10"><a id="__codelineno-6-10" name="__codelineno-6-10" href="#__codelineno-6-10"></a>    <span class="n">outputs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;final_trips&quot;</span><span class="p">:</span> <span class="s2">&quot;outputs/final_trips.csv&quot;</span><span class="p">},</span>
+</span><span id="__span-6-11"><a id="__codelineno-6-11" name="__codelineno-6-11" href="#__codelineno-6-11"></a><span class="p">)</span>
+</span></code></pre></div>
+<p><code>--mutate key=PATH</code> (or <code>mutate={"key": PATH}</code>) means Consist requires and
+fingerprints the pre-state before spawn, then fingerprints and logs the
+post-state as a fresh output artifact after successful exit. The two records
+share a logical role key and URI but represent distinct, immutable artifact
+records in the provenance ledger:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>run_042
+</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>  input   pipeline (pre-state)  → artifact A (before fingerprint)
+</span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>  output  pipeline (post-state) → artifact B (after fingerprint)
+</span></code></pre></div>
+<p>This remains true even when the store bytes are unchanged: Consist creates a
+fresh output artifact record and deduplicates identical content separately in
+storage. It reports that case as <code>pipeline: unchanged (&lt;fingerprint&gt;)</code>, not as an
+absent output or silent no-op. The command must reject a path simultaneously
+declared with <code>--input</code> and <code>--output</code>; <code>--mutate</code> is the unambiguous intent
+declaration.</p>
+<p>Rules for mutation tracking:</p>
+<ul>
+<li>The target must exist before launch. Creation belongs to <code>--output</code>; do not
+  add <code>--mutate-may-create</code> in the initial increment.</li>
+<li>Use full content fingerprints for the transition in the first increment. Fast
+  structural or table-level digests (e.g. for HDF5 groups or Parquet partitions)
+  may be layered in later via driver-specific plugins, but must never be presented
+  as byte-transition evidence without a verified contract.</li>
+<li>Acquire an exclusive advisory lock for the target and fail before spawn when
+  it cannot be acquired. Do not pretend a before/after hash comparison can
+  detect an interleaving writer; it cannot.</li>
+<li>A deleted or unreadable post-state is treated as a failed declared output.</li>
+<li>Generic host-command caching remains disabled. A future safe mutation cache
+  would have to restore the exact pre-state in an isolated workspace and control
+  publication of the post-state.</li>
+</ul>
+<p>The existing run-to-artifact link key does not need to change for this design:
+the pre-state and post-state are separate artifact rows. The existing same-artifact
+input/output conflict check in Consist remains a useful guard against callers
+accidentally reusing one in-memory artifact reference.</p>
+<h3 id="explicitly-deferred-facts">Explicitly deferred facts<a class="headerlink" href="#explicitly-deferred-facts" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Automatic discovery of every read and written file.</li>
+<li>Dependency installation, sandboxing, containerization, or a claim of
+  bit-for-bit replayability.</li>
+<li>Cache reuse by default.</li>
+<li>Automatic parsing of a model's semantic configuration or performance metrics.</li>
+<li>A shared registry, remote service, or artifact custody transfer.</li>
+</ul>
+<p>These are not omissions to conceal. They are the feature's honesty contract:
+the user attests to the computational boundary, and Consist verifies and
+records it.</p>
+<h2 id="selling-points">Selling points<a class="headerlink" href="#selling-points" title="Permanent link">&para;</a></h2>
+<h3 id="immediate-value-for-scientists-and-modelers">Immediate value for scientists and modelers<a class="headerlink" href="#immediate-value-for-scientists-and-modelers" title="Permanent link">&para;</a></h3>
+<ol>
+<li><strong>Preserve a working workflow.</strong> Record a legacy Python, R, Julia, Java,
+   C++, shell, or vendor executable without first refactoring it into a library
+   API. This matters particularly for research models that are expensive or
+   risky to restructure.</li>
+<li><strong>Turn a terminal command into evidence.</strong> A successful run is tied to
+   declared input bytes, expected outputs, the command, and an execution
+   outcome—not merely a notebook cell, a shell history line, or a directory
+   timestamp.</li>
+<li><strong>Recover lineage when the workflow is only partly formalized.</strong> Once a few
+   commands have explicit inputs and outputs, <code>consist lineage</code>, run search, and
+   artifact validation become useful even before there is a DAG.</li>
+<li><strong>Meet multi-language and black-box tools at their natural boundary.</strong> The
+   value applies equally to a simulator binary, an R analysis, an Apptainer
+   launch, a shell script, or a Python program.</li>
+<li><strong>Avoid secret and path leakage by design.</strong> Store a scrubbed/digested
+   environment identity and explicit logs, instead of indiscriminately copying
+   process state.</li>
+<li><strong>Catch plausible-looking failures.</strong> A command that exits zero but omits a
+   declared <code>metrics.parquet</code> is a failed run with a visible reason, rather than
+   a result silently lost in shell history.</li>
+</ol>
+<h3 id="product-and-adoption-value">Product and adoption value<a class="headerlink" href="#product-and-adoption-value" title="Permanent link">&para;</a></h3>
+<ol>
+<li><strong>A short time-to-first-value path.</strong> The first useful interaction is a
+   single prefixed command, not an API migration or workflow rewrite.</li>
+<li><strong>A natural bridge to existing Consist value.</strong> Recorded outputs can use the
+   same artifact hashing, validation, recovery, querying, and portable lineage
+   constructs that native runs use.</li>
+<li><strong>A credible upgrade path.</strong> A repeated command can later become a native
+   <code>Tracker.run(...)</code> wrapper, a container run, a scenario step, or a promoted
+   registry artifact without losing prior provenance.</li>
+<li><strong>Better product discovery than registry-first design.</strong> Repeated names,
+   roles, output types, and handoff patterns expose which registry aliases and
+   policies users actually need.</li>
+</ol>
+<h2 id="strong-use-cases">Strong use cases<a class="headerlink" href="#strong-use-cases" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Use case</th>
+<th>Why the wrapper is strong</th>
+<th>What the user declares</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Legacy regional model launch</td>
+<td>The model remains a script/binary with file-oriented inputs and outputs; refactoring risks changing behavior.</td>
+<td>Config, prepared demand/network inputs, output directory or named final products.</td>
+</tr>
+<tr>
+<td>Calibration or parameter sweep trial</td>
+<td>Each trial needs comparison and provenance, but a full workflow engine is too much for an exploratory loop.</td>
+<td>Baseline inputs, parameter/config file, trial metrics and diagnostics.</td>
+</tr>
+<tr>
+<td>Simulation calibration with config overrides (ActivitySim, MATSim, EnergyPlus)</td>
+<td>Simulations run as CLI commands against dynamically overridden YAML/CSV parameter sets; requires materializing config overlays into CLI flags without custom subprocess wrappers.</td>
+<td>Base config dirs, parameter overrides, data directory, declared outputs (e.g. <code>final_trips.csv</code>).</td>
+</tr>
+<tr>
+<td>R/Julia/Stata/SAS analysis</td>
+<td>Native Consist decorators are not an option, but data-to-report provenance still matters.</td>
+<td>Input tables, script, rendered report and result tables.</td>
+</tr>
+<tr>
+<td>Container or HPC launcher</td>
+<td>The outer command launches a container or scheduler submission; Consist can record the intended boundary and submitted-job evidence.</td>
+<td>Image reference, launch config, submission record; final outputs only when completion is observed.</td>
+</tr>
+<tr>
+<td>Published-result reconstruction</td>
+<td>A user reruns one narrow analysis step and needs a defensible record without adopting an entire original pipeline.</td>
+<td>Source data/config, command, regenerated figure/table.</td>
+</tr>
+<tr>
+<td>Checkpoint-resume simulation &amp; store mutation (ActivitySim pipeline.h5, MATSim events)</td>
+<td>Simulation continuation steps update an existing pipeline or state store in place; copying multi-gigabyte stores obscures lineage and wastes disk.</td>
+<td>Config plus an explicit <code>--mutate</code> target (e.g. <code>pipeline=outputs/pipeline.h5</code>); Consist records the before-to-after transition.</td>
+</tr>
+<tr>
+<td>Cross-repo handoff preparation</td>
+<td>A producer can make a named, verified output discoverable before a shared registry exists.</td>
+<td>Source artifacts, handoff manifest, promoted output candidates.</td>
+</tr>
+</tbody>
+</table>
+<p>The less suitable cases are equally important: interactive GUI work; commands
+whose meaningful effects are hidden remote database mutations; long-running
+scheduler submissions whose completion cannot be observed by the local wrapper;
+and workflows where users need automatic scheduling, dynamic fan-out, or global
+DAG optimization. Those need adapters or workflow engines, not a misleading
+single-command abstraction.</p>
+<h2 id="mixed-shape-composition-python-commands-and-existing-consist-applications">Mixed-shape composition: Python, commands, and existing Consist applications<a class="headerlink" href="#mixed-shape-composition-python-commands-and-existing-consist-applications" title="Permanent link">&para;</a></h2>
+<p>Command instrumentation must compose with native Consist steps through one
+run/artifact model. The public API should therefore be <code>tracker.exec(...)</code> and
+<code>scenario.exec(...)</code>; <code>consist exec</code> is a thin frontend over the same command
+executor, lifecycle, output admission, recovery, and lineage implementation.</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>Scenario: baseline
+</span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>├── Python run: prepare inputs        (cacheable)
+</span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>├── Command exec: run simulator       (record-only in v1)
+</span><span id="__span-8-4"><a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a>└── Python run: validate and summarize (cacheable)
+</span></code></pre></div>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">scenario</span><span class="p">(</span><span class="s2">&quot;baseline&quot;</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="s2">&quot;regional_model&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">sc</span><span class="p">:</span>
+</span><span id="__span-9-2"><a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a>    <span class="n">prepared</span> <span class="o">=</span> <span class="n">sc</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-9-3"><a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a>        <span class="n">prepare_inputs</span><span class="p">,</span>
+</span><span id="__span-9-4"><a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a>        <span class="n">inputs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;raw&quot;</span><span class="p">:</span> <span class="n">raw_input</span><span class="p">},</span>
+</span><span id="__span-9-5"><a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a>        <span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;prepared&quot;</span><span class="p">],</span>
+</span><span id="__span-9-6"><a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a>    <span class="p">)</span>
+</span><span id="__span-9-7"><a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a>
+</span><span id="__span-9-8"><a id="__codelineno-9-8" name="__codelineno-9-8" href="#__codelineno-9-8"></a>    <span class="n">simulation</span> <span class="o">=</span> <span class="n">sc</span><span class="o">.</span><span class="n">exec</span><span class="p">(</span>
+</span><span id="__span-9-9"><a id="__codelineno-9-9" name="__codelineno-9-9" href="#__codelineno-9-9"></a>        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;simulate&quot;</span><span class="p">,</span>
+</span><span id="__span-9-10"><a id="__codelineno-9-10" name="__codelineno-9-10" href="#__codelineno-9-10"></a>        <span class="n">argv</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;./model&quot;</span><span class="p">,</span> <span class="s2">&quot;--config&quot;</span><span class="p">,</span> <span class="s2">&quot;configs/baseline.yaml&quot;</span><span class="p">],</span>
+</span><span id="__span-9-11"><a id="__codelineno-9-11" name="__codelineno-9-11" href="#__codelineno-9-11"></a>        <span class="n">inputs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;prepared&quot;</span><span class="p">:</span> <span class="n">consist</span><span class="o">.</span><span class="n">ref</span><span class="p">(</span><span class="n">prepared</span><span class="p">,</span> <span class="s2">&quot;prepared&quot;</span><span class="p">)},</span>
+</span><span id="__span-9-12"><a id="__codelineno-9-12" name="__codelineno-9-12" href="#__codelineno-9-12"></a>        <span class="n">output_sets</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;model_outputs&quot;</span><span class="p">:</span> <span class="n">model_output_set</span><span class="p">},</span>
+</span><span id="__span-9-13"><a id="__codelineno-9-13" name="__codelineno-9-13" href="#__codelineno-9-13"></a>        <span class="n">execution_options</span><span class="o">=</span><span class="n">CommandExecutionOptions</span><span class="p">(</span><span class="n">cwd</span><span class="o">=</span><span class="n">workspace</span><span class="p">),</span>
+</span><span id="__span-9-14"><a id="__codelineno-9-14" name="__codelineno-9-14" href="#__codelineno-9-14"></a>    <span class="p">)</span>
+</span><span id="__span-9-15"><a id="__codelineno-9-15" name="__codelineno-9-15" href="#__codelineno-9-15"></a>
+</span><span id="__span-9-16"><a id="__codelineno-9-16" name="__codelineno-9-16" href="#__codelineno-9-16"></a>    <span class="n">sc</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-9-17"><a id="__codelineno-9-17" name="__codelineno-9-17" href="#__codelineno-9-17"></a>        <span class="n">summarize</span><span class="p">,</span>
+</span><span id="__span-9-18"><a id="__codelineno-9-18" name="__codelineno-9-18" href="#__codelineno-9-18"></a>        <span class="n">inputs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;outputs&quot;</span><span class="p">:</span> <span class="n">consist</span><span class="o">.</span><span class="n">ref</span><span class="p">(</span><span class="n">simulation</span><span class="p">,</span> <span class="s2">&quot;model_outputs&quot;</span><span class="p">)},</span>
+</span><span id="__span-9-19"><a id="__codelineno-9-19" name="__codelineno-9-19" href="#__codelineno-9-19"></a>        <span class="n">outputs</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;report&quot;</span><span class="p">],</span>
+</span><span id="__span-9-20"><a id="__codelineno-9-20" name="__codelineno-9-20" href="#__codelineno-9-20"></a>    <span class="p">)</span>
+</span></code></pre></div>
+<p>Every independently meaningful computation is a sibling step under the
+scenario header. Artifact references, not raw output paths, express the
+producer-to-consumer lineage; path staging remains an explicit runtime concern
+when an external tool requires a fixed filename. Native Python <code>run(...)</code> steps
+retain their existing per-step cache semantics. Generic command steps are
+record-only until a later cache contract is designed.</p>
+<h3 id="four-composition-shapes">Four composition shapes<a class="headerlink" href="#four-composition-shapes" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Shape</th>
+<th>Representation</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A Python step calls a small helper command, such as a renderer or converter</td>
+<td>One <code>run(...)</code>; store a bounded subprocess observation in its execution metadata.</td>
+<td>The Python function remains the meaningful computation. Adding a run node for every helper command creates lineage noise.</td>
+</tr>
+<tr>
+<td>A command has distinct inputs, outputs, substantial runtime, or reuse value</td>
+<td><code>scenario.exec(...)</code> as a sibling Python/command step.</td>
+<td>The command has a real provenance boundary, with its own exit status, logs, and artifacts.</td>
+</tr>
+<tr>
+<td>A command requires materialized configuration overrides (e.g. simulation calibration)</td>
+<td><code>tracker.exec_with_config_overrides(...)</code></td>
+<td>Evaluates an external CLI simulator against dynamically materialized config overlays without custom subprocess wrappers.</td>
+</tr>
+<tr>
+<td>A terminal-launched Python application already instruments internal work with Consist</td>
+<td>Delegated execution envelope plus child native runs.</td>
+<td>Captures terminal facts without duplicating the internal application's step lineage.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="composition-with-configuration-adapters-and-overrides-trackerexec_with_config_overrides">Composition with configuration adapters and overrides (<code>tracker.exec_with_config_overrides</code>)<a class="headerlink" href="#composition-with-configuration-adapters-and-overrides-trackerexec_with_config_overrides" title="Permanent link">&para;</a></h3>
+<p>In simulation calibration, parameter sweeps, and sensitivity analysis (e.g.,
+ActivitySim, MATSim, EnergyPlus), models are executed as CLI processes, not
+Python callables. In calibration loops, each trial evaluates a candidate
+parameter vector (such as mode choice coefficients or model constants). Consist
+already provides domain configuration adapters (<code>ConfigAdapter</code>,
+<code>ActivitySimConfigAdapter</code>, <code>ConfigOverrides</code>) to parse YAML/CSV configurations,
+compute canonical config hashes, and materialize overrides into isolated
+overlay directories.</p>
+<p>However, <code>tracker.run_with_config_overrides(...)</code> assumes the target is a Python
+callable (<code>fn</code>). Client code in <code>activitysim-calibration</code> was therefore forced
+to write hundreds of lines of custom subprocess wrapping (<code>subprocess.run</code>,
+stderr/stdout capture, exit code inspection, path reconciliation) in
+<code>runner.py</code> and <code>_evaluate_real_activitysim_step</code> just to connect materialized
+configuration directories to CLI invocations.</p>
+<p>Consist bridges this gap by composing command execution directly with
+configuration adapters:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="n">result</span> <span class="o">=</span> <span class="n">tracker</span><span class="o">.</span><span class="n">exec_with_config_overrides</span><span class="p">(</span>
+</span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>    <span class="n">adapter</span><span class="o">=</span><span class="n">adapter</span><span class="p">,</span>
+</span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a>    <span class="n">base_config_dirs</span><span class="o">=</span><span class="p">[</span><span class="n">config_dir</span><span class="p">],</span>
+</span><span id="__span-10-4"><a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a>    <span class="n">overrides</span><span class="o">=</span><span class="n">overrides</span><span class="p">,</span>
+</span><span id="__span-10-5"><a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a>    <span class="n">command</span><span class="o">=</span><span class="p">[</span>
+</span><span id="__span-10-6"><a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a>        <span class="s2">&quot;python&quot;</span><span class="p">,</span> <span class="s2">&quot;-m&quot;</span><span class="p">,</span> <span class="s2">&quot;activitysim&quot;</span><span class="p">,</span> <span class="s2">&quot;run&quot;</span><span class="p">,</span>
+</span><span id="__span-10-7"><a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a>        <span class="s2">&quot;-c&quot;</span><span class="p">,</span> <span class="s2">&quot;</span><span class="si">{selected_root_dir}</span><span class="s2">&quot;</span><span class="p">,</span>
+</span><span id="__span-10-8"><a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a>        <span class="s2">&quot;-c&quot;</span><span class="p">,</span> <span class="s2">&quot;</span><span class="si">{base_config_dirs[0]}</span><span class="s2">&quot;</span><span class="p">,</span>
+</span><span id="__span-10-9"><a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a>        <span class="s2">&quot;-d&quot;</span><span class="p">,</span> <span class="s2">&quot;</span><span class="si">{data_dir}</span><span class="s2">&quot;</span><span class="p">,</span>
+</span><span id="__span-10-10"><a id="__codelineno-10-10" name="__codelineno-10-10" href="#__codelineno-10-10"></a>        <span class="s2">&quot;-o&quot;</span><span class="p">,</span> <span class="s2">&quot;</span><span class="si">{output_dir}</span><span class="s2">&quot;</span><span class="p">,</span>
+</span><span id="__span-10-11"><a id="__codelineno-10-11" name="__codelineno-10-11" href="#__codelineno-10-11"></a>    <span class="p">],</span>
+</span><span id="__span-10-12"><a id="__codelineno-10-12" name="__codelineno-10-12" href="#__codelineno-10-12"></a>    <span class="n">template_vars</span><span class="o">=</span><span class="p">{</span>
+</span><span id="__span-10-13"><a id="__codelineno-10-13" name="__codelineno-10-13" href="#__codelineno-10-13"></a>        <span class="s2">&quot;data_dir&quot;</span><span class="p">:</span> <span class="n">data_dir</span><span class="p">,</span>
+</span><span id="__span-10-14"><a id="__codelineno-10-14" name="__codelineno-10-14" href="#__codelineno-10-14"></a>        <span class="s2">&quot;output_dir&quot;</span><span class="p">:</span> <span class="n">workspace</span> <span class="o">/</span> <span class="s2">&quot;output&quot;</span><span class="p">,</span>
+</span><span id="__span-10-15"><a id="__codelineno-10-15" name="__codelineno-10-15" href="#__codelineno-10-15"></a>    <span class="p">},</span>
+</span><span id="__span-10-16"><a id="__codelineno-10-16" name="__codelineno-10-16" href="#__codelineno-10-16"></a>    <span class="n">inputs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;data&quot;</span><span class="p">:</span> <span class="n">data_dir</span><span class="p">},</span>
+</span><span id="__span-10-17"><a id="__codelineno-10-17" name="__codelineno-10-17" href="#__codelineno-10-17"></a>    <span class="n">outputs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;final_trips&quot;</span><span class="p">:</span> <span class="s2">&quot;output/final_trips.csv&quot;</span><span class="p">},</span>
+</span><span id="__span-10-18"><a id="__codelineno-10-18" name="__codelineno-10-18" href="#__codelineno-10-18"></a>    <span class="n">mutate</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;pipeline&quot;</span><span class="p">:</span> <span class="s2">&quot;output/pipeline.h5&quot;</span><span class="p">},</span>  <span class="c1"># optional checkpoint resume</span>
+</span><span id="__span-10-19"><a id="__codelineno-10-19" name="__codelineno-10-19" href="#__codelineno-10-19"></a><span class="p">)</span>
+</span></code></pre></div>
+<h4 id="lifecycle-and-semantics">Lifecycle and Semantics<a class="headerlink" href="#lifecycle-and-semantics" title="Permanent link">&para;</a></h4>
+<ol>
+<li><strong>Config Canonicalization &amp; Override Materialization</strong>: Consist canonicalizes
+   the base configuration roots and writes the overridden parameters into a
+   managed overlay directory (matching <code>run_with_config_overrides</code>).</li>
+<li><strong>Dynamic Argv Template Substitution</strong>: Consist replaces declared
+   placeholder tokens in the <code>command</code> argv list:</li>
+<li><code>{selected_root_dir}</code>: The path to the materialized overlay configuration
+     directory.</li>
+<li><code>{root_dirs}</code>: The ordered list of all configuration roots (materialized
+     overlay directory followed by base directories).</li>
+<li><code>{materialized_dir}</code>: Alias for <code>{selected_root_dir}</code>.</li>
+<li>Any keys supplied in <code>template_vars</code>.</li>
+<li><strong>Command Execution</strong>: Consist delegates execution to <code>CommandExecutor</code>,
+   managing working directory, environment filtering, process group isolation,
+   and bounded stdout/stderr logging.</li>
+<li><strong>Declared Artifact Checks &amp; Mutation Capture</strong>: On zero process exit,
+   Consist verifies that declared outputs (such as <code>final_trips.csv</code>) exist,
+   computes post-state fingerprints for declared <code>--mutate</code> targets (such as
+   <code>pipeline.h5</code>), and admits them into the provenance ledger.</li>
+<li><strong>Unified Provenance Record</strong>: Consist records a single run record binding:</li>
+<li>The canonical configuration identity and exact parameter override values
+     (via the <code>ConfigAdapter</code>),</li>
+<li>The command execution facts (argv, working directory, exit status,
+     duration, stdout/stderr retention),</li>
+<li>Input artifact digests, output artifact fingerprints, and pre/post
+     mutation transitions.</li>
+</ol>
+<p>This eliminates client-side subprocess runners entirely, decoupling model
+execution from the calibration orchestration loop while preserving complete
+provenance.</p>
+<h3 id="deferred-delegated-execution-envelope">Deferred: delegated execution envelope<a class="headerlink" href="#deferred-delegated-execution-envelope" title="Permanent link">&para;</a></h3>
+<p>Delegated mode is deliberately outside the first pilot, but it is the likely
+dogfooding path for terminal-launched applications that already use Consist
+internally, including PILATES-shaped workflows. The generic pilot must not
+exclude those users by implying this exists today; it should validate opaque
+command recording separately, then design delegation as its own
+security/lifecycle increment.</p>
+<p>An already-instrumented application needs a distinct mode:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a>consist<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>--delegate<span class="w"> </span>--<span class="w"> </span>python<span class="w"> </span>pipeline.py<span class="w"> </span>--scenario<span class="w"> </span>baseline
+</span></code></pre></div>
+<p>The outer command run is an <strong>execution envelope</strong>. It owns argv, working
+directory, process outcome, selected environment identity, and log policy. It
+passes a short-lived, narrowly scoped execution-context reference to the child
+process. The child joins the configured project tracker and creates its normal
+scenario/run tree below that envelope:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="n">tracker</span> <span class="o">=</span> <span class="n">consist</span><span class="o">.</span><span class="n">connect_execution_context</span><span class="p">()</span>
+</span><span id="__span-12-2"><a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>
+</span><span id="__span-12-3"><a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a><span class="k">with</span> <span class="n">tracker</span><span class="o">.</span><span class="n">scenario</span><span class="p">(</span><span class="s2">&quot;baseline&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">sc</span><span class="p">:</span>
+</span><span id="__span-12-4"><a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a>    <span class="n">prepared</span> <span class="o">=</span> <span class="n">sc</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="o">...</span><span class="p">)</span>
+</span><span id="__span-12-5"><a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a>    <span class="n">results</span> <span class="o">=</span> <span class="n">sc</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="o">...</span><span class="p">)</span>
+</span></code></pre></div>
+<p>The context handoff should identify the already-resolved tracker configuration,
+parent/envelope run ID, run-directory policy, and a capability that expires with
+the launch. It must not contain secrets or let an arbitrary process attach to an
+unrelated run. A child process may only join an active envelope selected by the
+parent, and the persisted record must identify this delegated relationship.</p>
+<p>Delegated mode is intentionally not an opaque-output command run. The internal
+children own their outputs and cache identities. The envelope may present an
+aggregate summary or a separately named final handoff artifact, but it must not
+log the same physical outputs again under competing producers. This prevents
+duplicate artifacts, ambiguous lineage, and cache ownership errors.</p>
+<h3 id="deferred-shared-executor-contract">Deferred: shared executor contract<a class="headerlink" href="#deferred-shared-executor-contract" title="Permanent link">&para;</a></h3>
+<p>Do not refactor containers or existing Python execution into a new executor
+protocol to prove the adoption wedge. The prototype can implement a narrow
+<code>tracker.exec(...)</code> by using the existing run lifecycle around argv process
+execution. Once the pilot validates the command contract, consolidate the
+following execution surfaces only if doing so removes demonstrated duplication.</p>
+<p>The target post-pilot shape is a shared <code>ExecutionSpec</code> / <code>ExecutionResult</code> and
+executor protocol rather than permanently maintaining a CLI-specific path:</p>
+<ul>
+<li><code>PythonCallableExecutor</code> backs existing <code>run(...)</code> behavior.</li>
+<li><code>CommandExecutor</code> owns argv process launch, bounded log capture, exit/status
+  recording, and declared output checks.</li>
+<li>Existing container execution becomes another executor implementation where
+  appropriate, retaining its stronger image/mount identity contract.</li>
+</ul>
+<p>All executors feed the same run creation, artifact admission, lifecycle hooks,
+lineage, recovery, and optional OpenLineage emission. This preserves one
+provenance universe while allowing the executor-specific facts to remain
+honest.</p>
+<h3 id="deferred-terminal-flow-artifact-routing">Deferred: terminal flow artifact routing<a class="headerlink" href="#deferred-terminal-flow-artifact-routing" title="Permanent link">&para;</a></h3>
+<p>Flow routing is a follow-on usability pilot, not a prerequisite for the first
+valid command record. Its priority should be decided by observed user friction:
+repeated flag setup, output declaration, or artifact handoff may prove more
+important first.</p>
+<p>Successive terminal commands need the ergonomic equivalent of
+<code>consist.ref(...)</code>, without turning paths or a mutable notion of “latest” into
+provenance. Introduce a scoped terminal <strong>flow</strong> with named artifact slots:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>consist<span class="w"> </span>flow<span class="w"> </span>start<span class="w"> </span>baseline
+</span><span id="__span-13-2"><a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a>
+</span><span id="__span-13-3"><a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a>consist<span class="w"> </span><span class="nb">exec</span><span class="w"> </span><span class="se">\</span>
+</span><span id="__span-13-4"><a id="__codelineno-13-4" name="__codelineno-13-4" href="#__codelineno-13-4"></a><span class="w">  </span>--publish<span class="w"> </span><span class="nv">prepared</span><span class="o">=</span>work/prepared.parquet<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-13-5"><a id="__codelineno-13-5" name="__codelineno-13-5" href="#__codelineno-13-5"></a><span class="w">  </span>--<span class="w"> </span>python<span class="w"> </span>prepare.py<span class="w"> </span>--out<span class="w"> </span>work/prepared.parquet
+</span><span id="__span-13-6"><a id="__codelineno-13-6" name="__codelineno-13-6" href="#__codelineno-13-6"></a>
+</span><span id="__span-13-7"><a id="__codelineno-13-7" name="__codelineno-13-7" href="#__codelineno-13-7"></a>consist<span class="w"> </span><span class="nb">exec</span><span class="w"> </span><span class="se">\</span>
+</span><span id="__span-13-8"><a id="__codelineno-13-8" name="__codelineno-13-8" href="#__codelineno-13-8"></a><span class="w">  </span>--input<span class="w"> </span><span class="nv">prepared</span><span class="o">=</span>@flow:prepared<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-13-9"><a id="__codelineno-13-9" name="__codelineno-13-9" href="#__codelineno-13-9"></a><span class="w">  </span>--stage<span class="w"> </span><span class="nv">prepared</span><span class="o">=</span>work/inputs/prepared.parquet<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-13-10"><a id="__codelineno-13-10" name="__codelineno-13-10" href="#__codelineno-13-10"></a><span class="w">  </span>--publish<span class="w"> </span><span class="nv">simulation</span><span class="o">=</span>work/simulation/<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-13-11"><a id="__codelineno-13-11" name="__codelineno-13-11" href="#__codelineno-13-11"></a><span class="w">  </span>--<span class="w"> </span>./run-model<span class="w"> </span>--input<span class="w"> </span>work/inputs/prepared.parquet<span class="w"> </span>--out<span class="w"> </span>work/simulation/
+</span><span id="__span-13-12"><a id="__codelineno-13-12" name="__codelineno-13-12" href="#__codelineno-13-12"></a>
+</span><span id="__span-13-13"><a id="__codelineno-13-13" name="__codelineno-13-13" href="#__codelineno-13-13"></a>consist<span class="w"> </span><span class="nb">exec</span><span class="w"> </span><span class="se">\</span>
+</span><span id="__span-13-14"><a id="__codelineno-13-14" name="__codelineno-13-14" href="#__codelineno-13-14"></a><span class="w">  </span>--input<span class="w"> </span><span class="nv">simulation</span><span class="o">=</span>@flow:simulation<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-13-15"><a id="__codelineno-13-15" name="__codelineno-13-15" href="#__codelineno-13-15"></a><span class="w">  </span>--stage<span class="w"> </span><span class="nv">simulation</span><span class="o">=</span>work/inputs/simulation<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-13-16"><a id="__codelineno-13-16" name="__codelineno-13-16" href="#__codelineno-13-16"></a><span class="w">  </span>--publish<span class="w"> </span><span class="nv">report</span><span class="o">=</span>work/report.html<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-13-17"><a id="__codelineno-13-17" name="__codelineno-13-17" href="#__codelineno-13-17"></a><span class="w">  </span>--<span class="w"> </span>python<span class="w"> </span>summarize.py<span class="w"> </span>--inputs<span class="w"> </span>work/inputs/simulation<span class="w"> </span>--out<span class="w"> </span>work/report.html
+</span></code></pre></div>
+<p>The selected flow is a scenario-like parent record plus a small durable
+flow-manifest. Each successful <code>--publish</code> adds a slot binding:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-14-1"><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a>flow baseline
+</span><span id="__span-14-2"><a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a>  prepared   → (producing run, artifact ID, content hash)
+</span><span id="__span-14-3"><a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a>  simulation → (producing run, artifact ID, manifest-v1 identity)
+</span><span id="__span-14-4"><a id="__codelineno-14-4" name="__codelineno-14-4" href="#__codelineno-14-4"></a>  report     → (producing run, artifact ID, content hash)
+</span></code></pre></div>
+<p><code>@flow:prepared</code> is a convenience selector only. Before execution it resolves
+to the exact producing run, artifact ID, and verified file/directory manifest;
+the consuming run persists that resolved reference as its input lineage. The
+flow alias itself is not the input identity. Therefore later inspection and
+replay retain the precise bytes consumed even if the slot is subsequently
+rebound.</p>
+<p><code>--stage</code> deliberately separates logical identity from the workspace path a
+tool needs. It uses the normal materialization/hydration rules to place the
+selected artifact at an explicit destination. This avoids treating a raw path
+as proof of provenance and keeps fixed-filename tools practical.</p>
+<h4 id="flow-rules">Flow rules<a class="headerlink" href="#flow-rules" title="Permanent link">&para;</a></h4>
+<ul>
+<li>Flow aliases are local to one named flow, not global registry aliases and not
+  a remote custody claim.</li>
+<li>The initial concept uses single-assignment slots with explicit
+  <code>--replace-slot NAME</code>, retaining the old binding in append-only history. The
+  follow-on pilot must test retries and parameter sweeps before freezing this
+  UX: a keyed/iteration-scoped publication form may be safer than repeatedly
+  overwriting one canonical slot.</li>
+<li>Resolve collisions, missing slots, ambiguous artifact keys, and failed
+  materialization before spawning the command.</li>
+<li>The default selector must never mean “the prior command” or “latest matching
+  output.” Those become wrong after retries, parallel work, or multi-output
+  steps.</li>
+<li>An interactive shell may activate a flow through a short-lived environment
+  variable, but <code>--flow FLOW_ID</code> must work in scripts and CI. The durable
+  manifest, not shell state, is authoritative.</li>
+<li>A flow should expose its exact bindings through <code>consist flow show</code> and let
+  <code>consist show</code>/<code>lineage</code> traverse each resulting ordinary run.</li>
+</ul>
+<p>This is deliberately a thin routing convenience, not a workflow DSL. It has no
+implicit dependency inference, scheduling, fan-out, retry policy, or cache
+policy. It makes terminal composition explicit while preserving the same
+artifact contract used by Python scenarios.</p>
+<h2 id="competitive-landscape">Competitive landscape<a class="headerlink" href="#competitive-landscape" title="Permanent link">&para;</a></h2>
+<p>This is a capability comparison, not a claim that Consist should displace these
+tools. Most competitors are excellent at their intended layer.</p>
+<table>
+<thead>
+<tr>
+<th>Category / examples</th>
+<th>What users get</th>
+<th>Where <code>consist exec</code> differs</th>
+<th>Product implication</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>DVC</strong></td>
+<td>Declarative stages with commands, dependencies, outputs, lockfiles, and reproduction/caching behavior. DVC's model is explicitly a pipeline/stage graph.</td>
+<td>Consist can record a command today without adding or maintaining a project pipeline definition, and can preserve richer local provenance/recovery semantics.</td>
+<td>Do not compete by recreating a DAG engine. Offer a path for commands that are not yet—or never should be—DVC stages.</td>
+</tr>
+<tr>
+<td><strong>MLflow Projects and Tracking</strong></td>
+<td>ML-focused project execution plus tracking of runs, parameters, metrics, code, and artifacts; projects can be invoked from local directories or Git URIs.</td>
+<td>MLflow is strongest when the user adopts its experiment/project model and logs ML-oriented metadata. Consist's niche is general scientific artifacts, explicit lineage, content identity, and non-ML tools.</td>
+<td>Avoid an ML metric dashboard race. Make the command wrapper valuable to a simulator or scientific analysis with no training loop.</td>
+</tr>
+<tr>
+<td><strong>Snakemake / Nextflow</strong></td>
+<td>Declarative workflow languages, scheduling, execution reports, and task-level provenance for established pipelines.</td>
+<td>They require a workflow description and manage task orchestration; Consist would instrument one pre-existing command without becoming the scheduler.</td>
+<td>Position the feature before formalization and at integration boundaries, not as a substitute for mature workflow engines.</td>
+</tr>
+<tr>
+<td><strong>Kedro / Dagster</strong></td>
+<td>Python-oriented pipeline/asset abstractions, catalogs, orchestration, and external-process integration.</td>
+<td>These frameworks own the pipeline model; Dagster can launch shell work inside its orchestration context. Consist should remain usable when there is no framework-owned project.</td>
+<td>Build optional emitters/adapters later rather than imitating framework architecture.</td>
+</tr>
+<tr>
+<td><strong>Makefile plus README</strong></td>
+<td>Lightweight command recipes and human-maintained notes, often adequate for a stable local workflow.</td>
+<td>Neither verifies that declared products exist after a run, fingerprints the exact input/output transition, or provides queryable lineage across reruns.</td>
+<td>Respect this as the low-complexity baseline; prove the added value with missing-output and changed-artifact evidence, not abstract provenance language.</td>
+</tr>
+<tr>
+<td><strong>ReproZip</strong></td>
+<td>System-call-level experiment tracing and packaging for later reproduction, including command line, working directory, and files.</td>
+<td>Its goal is a much heavier portable reproduction bundle. Consist should record an explicit, queryable provenance boundary and only archive/copy artifacts when requested.</td>
+<td>The closest conceptual precedent validates demand, while illustrating why v1 must resist automatic “capture everything” scope.</td>
+</tr>
+<tr>
+<td><strong>OpenLineage</strong></td>
+<td>A standard event model for job/run lifecycle and lineage; it is commonly emitted by orchestrators and integrations.</td>
+<td>It is an interchange/event contract, not a local command runner, artifact verifier, cache identity system, or recovery layer.</td>
+<td>Continue to treat OpenLineage as an optional outbound projection, not the execution core.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="relevant-external-evidence">Relevant external evidence<a class="headerlink" href="#relevant-external-evidence" title="Permanent link">&para;</a></h3>
+<ul>
+<li><a href="https://dvc.org/doc/start/data-pipelines/data-pipelines">DVC pipeline documentation</a>
+  describes stages through command, dependency, and output relationships; that
+  is useful precisely because it is a maintained declarative graph, not an
+  ad-hoc command recorder.</li>
+<li><a href="https://mlflow.org/docs/latest/ml/projects/">MLflow Projects</a> provides a
+  conventional project format and <code>mlflow run</code> for local or Git-based projects;
+  <a href="https://mlflow.org/docs/latest/tracking">MLflow Tracking</a> organizes execution
+  into runs with metadata and artifacts.</li>
+<li><a href="https://snakemake.readthedocs.io/en/v7.0.4/snakefiles/reporting.html">Snakemake reports</a>
+  and <a href="https://www.nextflow.io/docs/stable/developer/nextflow.trace.html">Nextflow trace observers</a>
+  demonstrate the reporting depth available once a workflow engine owns the
+  task lifecycle.</li>
+<li><a href="https://dagster.io/integrations/dagster-shell">Dagster's shell integration</a>
+  launches shell commands from an asset/orchestration context; it confirms the
+  value of external-command boundaries but assumes Dagster ownership.</li>
+<li><a href="https://docs.reprozip.org/en/1.x/glossary.html">ReproZip's glossary</a>
+  describes tracing one or more command lines, while
+  <a href="https://docs.reprozip.org/en/latest/unpacking.html">its unpacking documentation</a>
+  shows its deliberate emphasis on replay bundles and environment handling.</li>
+<li><a href="https://openlineage.io/docs/spec/">OpenLineage's specification</a> defines
+  lifecycle events for a run of a job. It is a useful interoperable emission
+  target, not a substitute for Consist's local artifact contract.</li>
+</ul>
+<h2 id="relationship-to-the-object-registry">Relationship to the object registry<a class="headerlink" href="#relationship-to-the-object-registry" title="Permanent link">&para;</a></h2>
+<p>The two ideas solve different moments in the lifecycle.</p>
+<table>
+<thead>
+<tr>
+<th>Question</th>
+<th>Command instrumentation</th>
+<th>Shared object registry</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Primary user question</td>
+<td>“What exactly happened when I ran this?”</td>
+<td>“Which trusted artifact fills this role, where is it, and may I use it?”</td>
+</tr>
+<tr>
+<td>First value</td>
+<td>A single existing command.</td>
+<td>A community agrees on roles, identity, location, aliases, and admission rules.</td>
+</tr>
+<tr>
+<td>Authority</td>
+<td>Local execution record and explicit artifact links.</td>
+<td>Shared immutable identity, custody/admission evidence, durable locations, and alias policy.</td>
+</tr>
+<tr>
+<td>Main risk</td>
+<td>Overclaiming discovery or reproducibility.</td>
+<td>Premature governance and semantic commitments.</td>
+</tr>
+<tr>
+<td>Natural connection</td>
+<td>Declared output names/roles reveal registry candidates.</td>
+<td>Promoted artifacts can be fed back as explicit inputs to later command records.</td>
+</tr>
+</tbody>
+</table>
+<p>Consist's portable provenance schema intentionally does not make itself an
+artifact registry or a complete execution-observation model. This proposal
+preserves that boundary: the CLI writes local execution and artifact evidence;
+it does not create a remote source of truth, grant a semantic alias, or claim
+custody. A future registry can promote only verified, explicitly selected
+artifacts from these records.</p>
+<h2 id="product-boundaries-and-hard-questions">Product boundaries and hard questions<a class="headerlink" href="#product-boundaries-and-hard-questions" title="Permanent link">&para;</a></h2>
+<h3 id="avoid-magic-file-discovery-in-v1">Avoid “magic file discovery” in v1<a class="headerlink" href="#avoid-magic-file-discovery-in-v1" title="Permanent link">&para;</a></h3>
+<p>File-system tracing, process tracing, or before/after directory diffs cannot
+reliably determine semantic inputs and outputs. They miss remote reads, can
+collect enormous irrelevant trees, blur temporary files with products, and
+create security/privacy concerns. They are reasonable optional diagnostics only
+after the explicit-boundary workflow is valuable.</p>
+<h3 id="separate-synchronous-execution-from-asynchronous-submission">Separate synchronous execution from asynchronous submission<a class="headerlink" href="#separate-synchronous-execution-from-asynchronous-submission" title="Permanent link">&para;</a></h3>
+<p><code>consist exec</code> should initially mean that Consist observed the child process
+finish. <code>sbatch</code>, cloud submission, and queue APIs are separate adapters:
+record the submission as a submitted job, then attach completion/output evidence
+only after a monitor has observed it. A local zero exit from <code>sbatch</code> is not
+model success.</p>
+<h3 id="start-record-only-not-cache-first">Start record-only, not cache-first<a class="headerlink" href="#start-record-only-not-cache-first" title="Permanent link">&para;</a></h3>
+<p>The existing container path already has the right ingredients for a later
+cacheable command contract: exact argv, digested environment identity, declared
+inputs, and declared outputs. But a generic host command has more uncontrolled
+state than a container. A cache mode should remain off until a later design
+defines eligible identity modes, output recovery, mutation policy, and failure
+semantics.</p>
+<p>For the internal pilot only, Consist may explore an explicit
+<code>--reuse-if-verified</code> no-op mode after the comparison contract is proven. It is
+not the default and not a public reproducibility claim. Before declining to
+spawn a command, it must verify exact command and code identity, declared-input
+fingerprints, and the existence and current fingerprints of every declared
+output against a prior successful run. It must name that prior run, record that
+it performed verification rather than execution, and require <code>--force</code> to run
+anyway. It performs no output restoration. Commands with undeclared external
+side effects remain ineligible by user attestation; this is deliberately a
+bounded internal reuse experiment, not generic caching under another name.</p>
+<h3 id="treat-logs-as-evidence-with-policy-controls">Treat logs as evidence with policy controls<a class="headerlink" href="#treat-logs-as-evidence-with-policy-controls" title="Permanent link">&para;</a></h3>
+<p>Logs often include credentials, hostnames, user paths, and large duplicated
+output. Provide an explicit default retention limit, redaction hooks, and an
+opt-out. The run record must state whether output was retained, truncated, or
+omitted; absence must not look like a successful capture.</p>
+<h3 id="interruptions-and-abandoned-running-records">Interruptions and abandoned running records<a class="headerlink" href="#interruptions-and-abandoned-running-records" title="Permanent link">&para;</a></h3>
+<p>The wrapper should create its running record before spawning the child, handle
+Ctrl-C by recording the observed interruption and forwarding termination
+according to a documented process-group policy, and finalize logs/output checks
+when it remains alive. It cannot reliably finalize if it is itself SIGKILLed or
+the host crashes. That residual running record must be visible to existing
+status-reconciliation tooling; the CLI should show the exact recovery command
+instead of treating it as a completed or failed observation without evidence.</p>
+<h2 id="smallest-credible-mvp">Smallest credible MVP<a class="headerlink" href="#smallest-credible-mvp" title="Permanent link">&para;</a></h2>
+<h3 id="in-scope">In scope<a class="headerlink" href="#in-scope" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>consist init</code>, a <code>.consist/</code> project marker, and upward project discovery
+  from nested working directories, while retaining explicit tracker and
+  run-directory overrides.</li>
+<li>A <code>consist exec</code> CLI command with <code>--input key=PATH</code>, <code>--output key=PATH</code>,
+  <code>--outputs-dir PATH</code>, <code>--name</code>, <code>--cwd</code>, <code>--dry-run</code>, <code>--accept-suggested</code>,
+  explicit <code>--shell</code>, and <code>--</code> argv separation. <code>--outputs-dir</code> is the
+  onboarding/default story; keyed <code>--output</code> is the precise downstream handle.</li>
+<li>A narrow public <code>tracker.exec(...)</code> used by the CLI, built directly on the
+  existing run lifecycle. Its command, keyed input/output boundaries,
+  environment, and working-directory parameters should align with
+  <code>run_container(...)</code> where their meanings overlap, without importing image,
+  mount, backend, or cache semantics. <code>scenario.exec(...)</code> follows only after
+  the command contract has passed the pilot.</li>
+<li>A local <code>Tracker</code> lifecycle that creates a running record before spawn,
+  captures process outcome/interruption, hashes declared inputs/outputs, and
+  records stdout/stderr according to policy.</li>
+<li>Success only when the command exits successfully and declared outputs pass
+  existence/admission checks; exit zero with a missing declared output is a
+  failed run.</li>
+<li>A compact comparison to the prior successful run with the same project/name,
+  identifying changes to command/configuration, declared inputs, and declared
+  outputs and naming the baseline run ID.</li>
+<li>Failure records that retain command and process evidence without admitting
+  nonexistent or failed outputs.</li>
+<li>JSON output suitable for scripts, plus normal <code>runs</code>, <code>show</code>, <code>artifacts</code>,
+  <code>lineage</code>, and <code>validate</code> usability.</li>
+<li>Focused docs led by a failed/missing-output and changed-baseline example,
+  followed by R and Julia commands; include an output-directory command and a
+  Python example, but do not lead with Python.</li>
+</ul>
+<h3 id="out-of-scope">Out of scope<a class="headerlink" href="#out-of-scope" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Full filesystem/process tracing, auto-capture of dependencies, scheduler
+  completion monitoring, automatic caching, remote execution, registry
+  promotion, DAG orchestration, a web dashboard, configuration-file discovery,
+  profile resolution, shared executor refactoring, <code>scenario.exec(...)</code>,
+  declared mutation, or delegated context handoff. These designs are retained
+  above as explicit post-pilot increments. The narrowly attested internal
+  <code>--reuse-if-verified</code> experiment is not automatic caching and requires its
+  own admission decision after the comparison pilot.</li>
+<li>Flow-slot routing is a follow-on pilot after the one-command opaque-recording
+  contract is proven; it is not needed to establish first-command value.</li>
+</ul>
+<h2 id="validation-plan-before-committing-to-implementation">Validation plan before committing to implementation<a class="headerlink" href="#validation-plan-before-committing-to-implementation" title="Permanent link">&para;</a></h2>
+<ol>
+<li><strong>Design spike:</strong> build a narrow <code>tracker.exec(...)</code> on the existing run
+   lifecycle, a minimal <code>consist init</code>, and upward <code>.consist/</code> discovery,
+   without a storage-schema migration, full configuration system, or executor
+   refactor. Exercise R/Julia-like external executable fixtures, an
+   output-directory command, a Python script, and an expected-output failure.</li>
+<li><strong>Failure-first and comparison demonstration:</strong> make the expected-output
+   failure a primary example: the process exits zero, <code>metrics.parquet</code> is
+   absent, and Consist records the run as failed with the exact missing-output
+   reason and a pointer to its logs. Then rerun a named command with one changed
+   input/configuration and show the named baseline, changed field, and output
+   result in the compact summary.</li>
+<li><strong>Usability study:</strong> ask 5–8 target users to record a real command. Report
+   the count who create a valid record, the time to first valid record, and each
+   observed declaration failure mode; do not turn this small sample into a noisy
+   percentage claim. Include nested-directory discovery, <code>--outputs-dir</code>, and
+   suggested-input acceptance in the observed setup friction.</li>
+<li><strong>Trust tests:</strong> verify quoting/argv preservation, no shell injection in the
+   default mode; explicit-shell recording; nonzero exit capture; signal
+   interruption; missing output; suggested-input exclusions and explicit
+   promotion; comparison-baseline selection; secret-redaction behavior; dirty
+   Git identity behavior; and wrapper interruption/orphan reconciliation.</li>
+<li><strong>Internal reuse decision:</strong> only after the comparison tests pass, decide
+   whether an internal <code>--reuse-if-verified</code> pilot is worth its separate
+   contract. Test exact identity checks, output re-fingerprinting, explicit
+   <code>--force</code>, a recorded no-op outcome, and rejection for un-attested external
+   side effects. Do not present its results as a public cache guarantee.</li>
+<li><strong>Mutation cost measurement:</strong> measure full pre/post hashing on
+   representative simulation checkpoint stores (such as ActivitySim
+   <code>pipeline.h5</code> / <code>pipeline.parquet</code> from calibration resume trials). Verify
+   transition artifact creation, advisory locking, and whether full SHA-256
+   digests remain performant on multi-gigabyte files.</li>
+<li><strong>Config adapter &amp; override execution test:</strong> validate
+   <code>tracker.exec_with_config_overrides</code> with an external simulator CLI (such as
+   ActivitySim). Assert overlay directory materialization, argv template
+   interpolation (<code>-c {selected_root_dir}</code>), zero-exit checks, declared output
+   admission (<code>final_trips.csv</code>), and single-record binding of config identity
+   with command execution facts.</li>
+<li><strong>Composition increment:</strong> only after opaque command recording passes, run
+   a cacheable Python → command → cacheable Python scenario. Assert sibling
+   parentage, exact artifact lineage, output-set admission, and that a
+   command's record-only status does not disable reuse of adjacent native steps.</li>
+<li><strong>Configuration increment:</strong> only if pilot evidence identifies repeated
+   operational flags as real friction, test config discovery, precedence,
+   relative-path anchoring, profiles, source reporting, and absence of
+   accidental cache misses.</li>
+<li><strong>Flow-routing pilot:</strong> after opaque recording passes, run a three-command
+    terminal flow. Verify exact slot resolution, explicit staging, single-write
+    slots, append-only replacement history, retry/parameter-sweep usability,
+    parallel ambiguity failures, and ordinary artifact lineage from each
+    consumer to its producer.</li>
+<li><strong>Boundary tests:</strong> prove that no cache hit, global registry alias, remote
+    publication, delegated child relationship, or “reproducible” claim appears
+    from v1 records alone. A flow-local alias must never masquerade as a global
+    semantic alias.</li>
+<li><strong>Decision gate:</strong> proceed only if users can create accurate records for
+    their real commands with little setup and the resulting lineage answers a
+    question they otherwise could not answer from shell history and directories.</li>
+</ol>
+<h2 id="success-criteria">Success criteria<a class="headerlink" href="#success-criteria" title="Permanent link">&para;</a></h2>
+<p>The feature is promising if it achieves all of the following in a pilot:</p>
+<ul>
+<li>Report how many of the 5–8 target users create one valid record for a real
+  command without code changes, together with concrete declaration failures and
+  the time to correct them.</li>
+<li>Most pilot records have inputs and outputs that users later judge complete
+  enough to explain the result; incompleteness is visibly represented rather
+  than silently hidden.</li>
+<li>Users use the compact named-run comparison to answer a concrete “what changed
+  since the last baseline?” question, and at least two independently use <code>show</code>
+  to inspect the cited run evidence.</li>
+<li>The failure-first example demonstrates that a zero-exit command with a missing
+  declared product is rejected rather than recorded as a successful result.</li>
+<li>Users can find the same local tracker from a nested directory and can either
+  declare or explicitly accept suggested input paths without mistaking a
+  suggestion for automatic dependency capture.</li>
+<li>At least one repeated role/name pattern provides concrete evidence for a
+  registry alias or admission feature, rather than a hypothetical one.</li>
+<li>No pilot user is misled into thinking Consist captured all dependencies,
+  guaranteed replay, made a scheduler-submitted model run complete, or turned
+  the internal reuse experiment into a general cache guarantee.</li>
+</ul>
+<h2 id="decision-requested-after-exploration">Decision requested after exploration<a class="headerlink" href="#decision-requested-after-exploration" title="Permanent link">&para;</a></h2>
+<p>Authorize a narrowly bounded, internal-first prototype and pilot, with the
+record-only contract above. Its public-facing JOSS and conference story is
+explicit boundaries, verified results, and named-run comparison—not automatic
+dependency capture or caching. Do not authorize registry expansion, generic
+caching, filesystem tracing, full configuration-file discovery, executor
+refactoring, terminal flows, declared mutation, or delegated execution as part
+of that prototype.</p>
+<p>If the pilot passes the usability and trust gates, the next planning document
+should specify the public CLI contract, execution-record schema, log-retention
+policy, and migration path to the existing container and <code>Tracker.run(...)</code>
+implementations.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-circle-arrow-up" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m16 12-4-4-4 4M12 16V8"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 The Regents of the University of California, through Lawrence Berkeley National Laboratory
+
+    </div>
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/LBNL-UCB-STI/consist" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2026 Fonticons, Inc.--><path fill="currentColor" d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate":null,"base":"../../..","features":["announce.dismiss","content.action.view","content.code.annotate","content.code.copy","content.code.select","content.footnote.tooltips","content.tabs.link","content.tooltips","header.autohide","navigation.expand","navigation.footer","navigation.indexes","navigation.path","navigation.sections","navigation.tabs","navigation.top","navigation.tracking","search.highlight","toc.follow"],"search":"../../../assets/javascripts/workers/search.b6b7e04f.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":{"default":"latest","provider":"mike"}}</script>
+    
+    
+      <script src="../../../assets/javascripts/bundle.0df4f2d0.min.js"></script>
+      
+    
+  </body>
+</html>

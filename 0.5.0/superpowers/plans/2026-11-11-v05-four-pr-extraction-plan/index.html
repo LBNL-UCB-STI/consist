@@ -1,0 +1,3748 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Provenance tracking, intelligent caching, and data virtualization for scientific simulation workflows">
+      
+      
+        <meta name="author" content="Zach Needell">
+      
+      
+        <link rel="canonical" href="https://LBNL-UCB-STI.github.io/consist/0.5.0/superpowers/plans/2026-11-11-v05-four-pr-extraction-plan/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../../assets/logo-square.png">
+      <meta name="generator" content="zensical-0.0.47">
+    
+    
+      
+        <title>Consist v0.5 Subtractive Architecture Plan: Four Focused PRs Off main - Consist</title>
+      
+    
+    
+      
+        
+      
+      <link rel="stylesheet" href="../../../assets/stylesheets/modern/main.5e19f6ca.min.css">
+      
+        
+          
+        
+        <link rel="stylesheet" href="../../../assets/stylesheets/modern/palette.dfe2e883.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Libre+Franklin:300,300i,400,400i,500,500i,700,700i%7CJetbrains+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Libre Franklin";--md-code-font:"Jetbrains Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../../..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer" aria-label="Navigation"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#consist-v05-subtractive-architecture-plan-four-focused-prs-off-main" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../../.." title="Consist" class="md-header__button md-logo" aria-label="Consist" data-md-component="logo">
+      
+  <img src="../../../assets/logo-square-dark.png" alt="Consist">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Consist
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Consist v0.5 Subtractive Architecture Plan: Four Focused PRs Off main
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-sun-moon" viewBox="0 0 24 24"><path d="M12 2v2M14.837 16.385a6 6 0 1 1-7.223-7.222c.624-.147.97.66.715 1.248a4 4 0 0 0 5.26 5.259c.589-.255 1.396.09 1.248.715M16 12a4 4 0 0 0-4-4M19 5l-1.256 1.256M20 12h2"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_2" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to system preference"  type="radio" name="__palette" id="__palette_2">
+    
+      <label class="md-header__button md-icon" title="Switch to system preference" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-moon" viewBox="0 0 24 24"><path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search" aria-label="Search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+        <a href="https://github.com/LBNL-UCB-STI/consist" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2026 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+      
+    </div>
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../.." class="md-tabs__link">
+        
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+      
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../../getting-started/installation/" class="md-tabs__link">
+          
+  
+  Getting Started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+      
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../../concepts/overview/" class="md-tabs__link">
+          
+  
+  Concepts
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+      
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../../usage-guide/" class="md-tabs__link">
+          
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+      
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../../cli-reference/" class="md-tabs__link">
+          
+  
+  Operations
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+      
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../../integrations/" class="md-tabs__link">
+          
+  
+  Integrations
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+      
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../../api/" class="md-tabs__link">
+          
+  
+  API Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+      
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../../examples/" class="md-tabs__link">
+          
+  
+  Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../../.." title="Consist" class="md-nav__button md-logo" aria-label="Consist" data-md-component="logo">
+      
+  <img src="../../../assets/logo-square-dark.png" alt="Consist">
+
+    </a>
+    Consist
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/LBNL-UCB-STI/consist" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2026 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Home
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Getting Started
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Getting Started
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Installation
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../getting-started/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Quickstart
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../getting-started/first-workflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  First Workflow
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../migrating-to-0.5/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Upgrading to Consist 0.5
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Concepts
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Concepts
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../concepts/overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Core Concepts Overview
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../concepts/config-management/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Config, Facets, and Identity Inputs
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../concepts/decorators-and-metadata/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Decorators &amp; Metadata
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../concepts/caching-and-hydration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Caching and Hydration
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../concepts/data-materialization/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Data Storage and Ingestion Strategy
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../concepts/grouped-views/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Grouped Views
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Guides
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Guides
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../usage-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Usage Guide
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../building-domain-tracker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Building a Domain Tracker
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../containers-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Container Integration Guide
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../dlt-loader-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  DLT Loader Integration Guide
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../schema-export/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Schema Export (SQLModel Stubs)
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../mounts-and-portability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Mounts &amp; Portability
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../guides/historical-recovery/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Historical Recovery
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Operations
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Operations
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../cli-reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  CLI Reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../db-maintenance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  DB Maintenance Guide
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Troubleshooting Guide
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../../integrations/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Integrations
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_6" id="__nav_6_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Integrations
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../integrations/containers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Containers
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../integrations/dlt_loader/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  DLT Loader
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_6_4" id="__nav_6_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Config Adapters
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_6_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Config Adapters
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../integrations/config_adapters/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Overview
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../integrations/config_adapters_beam/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  BEAM
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../integrations/config_adapters_activitysim/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  ActivitySim
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../integrations/gtfs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  GTFS
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../../api/" class="md-nav__link ">
+              
+  
+  
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+  
+  <span class="md-ellipsis">
+    
+  
+  API Reference
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_7" id="__nav_7_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  API Reference
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/essentials/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  API Essentials
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/advanced/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  API Advanced
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/public_api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Public API (v0.1)
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/api_helpers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  API Helpers
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/tracker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Tracker
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/workflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Workflow Contexts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/step_contracts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Step Contracts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/artifact/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Artifact
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/run/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Run
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/runset/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  RunSet and Alignment
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/indexing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Indexing Helpers
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/admission/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Artifact Admission
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/digest/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Content &amp; Tabular Digests (consist.digest)
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/identity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Identity Manager
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/views/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Views
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/matrix/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Matrix Views
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../api/materialize/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Materialization
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_8" >
+        
+          
+          <label class="md-nav__link" for="__nav_8" id="__nav_8_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Reference
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_8_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_8">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Reference
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../examples/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Example Gallery
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../glossary/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Glossary
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  How Consist Works
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../internals/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Internals
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../location-resolver-architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Location Resolver
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../provenance-schema/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Consist provenance schema
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../faq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Frequently Asked Questions (FAQ)
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../llm-skill/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Consist LLM Skill
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../cli-error-style/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  CLI Error Style Guide
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_8_10" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../../advanced/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Advanced
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_8_10" id="__nav_8_10_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_8_10_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_8_10">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Advanced
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../advanced/execution-style-decision-tree/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Which execution style should I use?
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../advanced/manual-lifecycle-and-decorators/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Manual Lifecycle and Decorators
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  
+                    
+                    
+                    
+                      
+                    
+                    
+                      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+                      <div class="md-sidebar-button__wrapper">
+                        <label class="md-sidebar-button" for="__toc"></label>
+                      </div>
+                    
+                  
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1-guiding-principles-clean-end-state-zero-split-brain" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        1. Guiding Principles: Clean End State, Zero Split-Brain
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-pr-by-pr-engineering-specifications" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        2. PR-by-PR Engineering Specifications
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="2. PR-by-PR Engineering Specifications">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#pr-1-single-connection-native-duckdb-cutover-clean-schema-foundation-sql-pushdown" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        PR 1 — Single-Connection Native DuckDB Cutover + Clean Schema Foundation + SQL Pushdown
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="PR 1 — Single-Connection Native DuckDB Cutover + Clean Schema Foundation + SQL Pushdown">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#deletions-in-pr-1" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Deletions in PR 1
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#design-implementation-blueprint" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Design &amp; Implementation Blueprint
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#code-logic-to-reuse-from-featartifact-triad-v2-fe41548" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Code &amp; Logic to Reuse from <code>feat/artifact-triad-v2</code> (<code>fe41548</code>)
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#anti-patterns-bugs-to-avoid-in-pr-1" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Anti-Patterns &amp; Bugs to Avoid in PR 1
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pr-2-non-orm-artifact-artifactdigesturimember-run-value-models-unified-scheme-digests" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        PR 2 — Non-ORM <code>Artifact</code> (<code>Artifact.digest</code>/<code>uri</code>/<code>member</code>) &amp; <code>Run</code> Value Models + Unified Scheme Digests
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="PR 2 — Non-ORM Artifact (Artifact.digest&#x2f;uri&#x2f;member) &amp; Run Value Models + Unified Scheme Digests">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#deletions-in-pr-2" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Deletions in PR 2
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#design-implementation-blueprint_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Design &amp; Implementation Blueprint
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#code-logic-to-reuse-from-featartifact-triad-v2-fe41548_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Code &amp; Logic to Reuse from <code>feat/artifact-triad-v2</code> (<code>fe41548</code>)
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#anti-patterns-bugs-to-avoid-in-pr-2" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Anti-Patterns &amp; Bugs to Avoid in PR 2
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pr-3-direct-indexed-artifact_location-table-witness-freshness-safe-eviction-lean-consist-migrate" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        PR 3 — Direct Indexed <code>artifact_location</code> Table + Witness Freshness + Safe Eviction + Lean <code>consist migrate</code>
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="PR 3 — Direct Indexed artifact_location Table + Witness Freshness + Safe Eviction + Lean consist migrate">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#deletions-in-pr-3" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Deletions in PR 3
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#design-implementation-blueprint_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Design &amp; Implementation Blueprint
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#code-logic-to-reuse-from-featartifact-triad-v2-fe41548_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Code &amp; Logic to Reuse from <code>feat/artifact-triad-v2</code> (<code>fe41548</code>)
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#anti-patterns-bugs-to-avoid-in-pr-3" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Anti-Patterns &amp; Bugs to Avoid in PR 3
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pr-4-clean-step-binding-artifact-path-dataframe-unified-outputs-ephemeral-mode-lazy-coupler-scrubbed-docs" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        PR 4 — Clean Step Binding (<code>Artifact</code> / <code>Path</code> / <code>DataFrame</code>), Unified <code>outputs=</code>, Ephemeral Mode, Lazy <code>Coupler</code> &amp; Scrubbed Docs
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="PR 4 — Clean Step Binding (Artifact &#x2f; Path &#x2f; DataFrame), Unified outputs=, Ephemeral Mode, Lazy Coupler &amp; Scrubbed Docs">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#deletions-in-pr-4" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Deletions in PR 4
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#design-implementation-blueprint_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Design &amp; Implementation Blueprint
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#code-logic-to-reuse-from-featartifact-triad-v2-fe41548_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Code &amp; Logic to Reuse from <code>feat/artifact-triad-v2</code> (<code>fe41548</code>)
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#anti-patterns-bugs-to-avoid-in-pr-4" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Anti-Patterns &amp; Bugs to Avoid in PR 4
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-summary-of-end-state-codebase-delta-vs-originmain" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        3. Summary of End-State Codebase Delta vs. <code>origin/main</code>
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-per-pr-implementation-review-stacked-pr-protocol" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        4. Per-PR Implementation, Review &amp; Stacked PR Protocol
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+                
+
+
+
+  
+
+
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+  
+  
+    
+      
+    
+    <a href="https://github.com/LBNL-UCB-STI/consist/raw/master/docs/superpowers/plans/2026-11-11-v05-four-pr-extraction-plan.md" title="View source of this page" class="md-content__button md-icon">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-file-code-2" viewBox="0 0 24 24"><path d="M4 12.15V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.706.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2h-3.35"/><path d="M14 2v5a1 1 0 0 0 1 1h5M5 16l-3 3 3 3M9 22l3-3-3-3"/></svg>
+    </a>
+  
+
+
+<h1 id="consist-v05-subtractive-architecture-plan-four-focused-prs-off-main">Consist v0.5 Subtractive Architecture Plan: Four Focused PRs Off <code>main</code><a class="headerlink" href="#consist-v05-subtractive-architecture-plan-four-focused-prs-off-main" title="Permanent link">&para;</a></h1>
+<ul>
+<li><strong>Base Branch</strong>: <code>origin/main</code> (<code>35f9ac0</code>, Consist <code>v0.4.2</code>)</li>
+<li><strong>Implementation Worktree</strong>: <code>/Users/zaneedell/git/consist/.worktrees/v05-stack</code> (clean worktree branched off <code>origin/main</code>, leaving <code>/Users/zaneedell/git/consist</code> untouched at <code>fe41548</code> as a read-only reference quarry)</li>
+<li><strong>Integration Strategy</strong>: Four sequential stacked PRs off <code>main</code> (<code>PR 1</code> -&gt; <code>PR 2</code> -&gt; <code>PR 3</code> -&gt; <code>PR 4</code>), with one commit for initial implementation and one commit per round of addressing review findings on each PR</li>
+<li><strong>Reference Quarry (Archived, Do Not Merge)</strong>: <code>origin/feat/artifact-triad-v2</code> (<code>fe41548</code>, PR #316)</li>
+<li><strong>Audit Baseline</strong>: <a href="file:///Users/zaneedell/git/consist/.agents/teamwork/teamwork_orchestrator_r1/consolidated_report.md">consolidated_report.md</a></li>
+<li><strong>Internal Workspace Mirror (Untracked)</strong>: <code>docs/superpowers/plans/2026-11-11-v05-four-pr-extraction-plan.md</code></li>
+</ul>
+<blockquote>
+<p>[!IMPORTANT]
+This plan is <strong>internal-only</strong>. Do not commit plan/design docs to <code>git</code>, and do not reference internal design docs in PR descriptions or commit messages. Keep <code>origin/feat/artifact-triad-v2</code> (<code>fe41548</code>) intact as a read-only reference branch so validated helpers and tests can be adapted cleanly.</p>
+</blockquote>
+<hr />
+<h2 id="1-guiding-principles-clean-end-state-zero-split-brain">1. Guiding Principles: Clean End State, Zero Split-Brain<a class="headerlink" href="#1-guiding-principles-clean-end-state-zero-split-brain" title="Permanent link">&para;</a></h2>
+<p>Because <code>v0.5</code> will not be deployed to production mid-stack between PR 1 and PR 4—and existing <code>v0.4</code> databases can be migrated cleanly via <code>consist migrate</code>—<strong>we optimize strictly for the cleanest, fastest, least-risky end state rather than carrying <code>v0.4</code> runtime compatibility shims</strong>:</p>
+<ol>
+<li><strong>Subtractive In-Place Replacement (One Mental Model)</strong>:</li>
+<li>Every PR upgrades an existing <code>v0.4.2</code> seam <em>in place</em> and <strong>deletes</strong> superseded <code>v0.4.2</code> code in the <strong>same PR</strong> (including deleting <code>src/consist/core/schema_compat.py</code>'s legacy v0.2/v0.3 runtime backfill shims).</li>
+<li>Never introduce a second persistence class (<code>StoreLedger</code> beside <code>DatabaseManager</code>), a second output/archive engine (<code>engine.seal</code> / <code>PendingOutput</code> beside <code>Tracker</code>), a second run JSON format (<code>store/manifest.py</code> beside <code>consist.json</code>), or a second identity type (<code>AdmissionIdentity</code> beside <code>Digest</code>).</li>
+<li><strong>Clean ~14-Table <code>v0.5</code> Schema + Cold-Safe <code>consist migrate</code> (~350–450 LOC, Not 5,786 LOC)</strong>:</li>
+<li>Avoid <strong>both</strong> <code>v0.4</code> runtime <code>ALTER TABLE</code> shims <strong>and</strong> PR #316's 21-table over-normalization (<code>artifact_location_event</code> append logs + <code>ROW_NUMBER()</code> CTE views + <code>anchor_promotion</code> joins + <code>Kind.HISTORICAL</code> / <code>consist promote</code>).</li>
+<li>Keep <code>config_facet</code>, <code>run_config_kv</code>, <code>artifact_facet</code>, and <code>artifact_kv</code> as direct indexed DuckDB tables populated via <code>executemany</code> (zero wrapper views, zero query rewrites across <code>queries.py</code>/<code>views.py</code>/<code>pivot_facets</code>).</li>
+<li>Store a clean <code>consist_schema(version=2, db_uid=...)</code> header; opening a <code>version=1</code> DB raises <code>DatabaseMigrationRequired("Run 'consist migrate &lt;db_path&gt;'")</code> (subclassing <code>IncompatibleSchemaError</code>) immediately with zero legacy fallback branches in runtime code.</li>
+<li><code>consist migrate &lt;db_path&gt;</code> applies deterministic rules safe for both hot local workspaces and cold/temporarily unmounted HPC archives:<ul>
+<li><strong>Artifact bytes exist on disk</strong> (under <code>--mounts</code> / <code>--run-dir</code>): compute the canonical <code>v0.5</code> <code>Digest</code> via its real scheme driver (or, with <code>--trust-v04-hashes</code> for multi-TB archives, convert already-attested 64-hex <code>v0.4</code> SHA-256 / <code>manifest-v1</code> / <code>logical_matrices</code> hashes without re-reading multi-TB files while always re-hashing non-hex <code>fast</code> hashes), capture <code>FileStat</code> (<code>racy=False</code> when older than 2s), insert an <code>'active'</code> <code>artifact_location</code> row, and—when all inputs of a run have valid <code>v0.5</code> <code>Digest</code>s—recompute the run's native <code>v0.5</code> <code>input_hash</code> and <code>signature</code> (<code>cacheable=True</code> -&gt; <strong>100% live cache hits immediately</strong>, fixing <code>B15</code>).</li>
+<li><strong>Artifact bytes missing or archive currently unmounted</strong>: record <code>digest = None</code> (preserving <code>legacy_v04_hash</code> in <code>artifact.meta</code>), still insert all <code>recovery_roots</code> + <code>container_uri</code> into <code>artifact_location</code> keyed by <code>artifact_id</code> (<code>digest IS NULL</code>) so mounting the archive later immediately restores <code>art.path</code> and cold <code>ViewFactory</code> reads, and mark linked runs <code>cacheable = False</code>. Copy <code>global_tables.*</code> and custom SQL views intact.</li>
+</ul>
+</li>
+<li><strong>Clean End-State Public Contracts</strong>:</li>
+<li><strong><code>Artifact.digest: Digest | None</code>, <code>Artifact.uri: str</code>, <code>Artifact.member: str | None</code></strong>: Canonical scheme-qualified identity (<code>digest.scheme</code>, <code>digest.hex</code>, <code>str(digest) == "&lt;scheme&gt;:&lt;hex&gt;"</code>) and single primary URI + optional container member, replacing untyped <code>Artifact.hash</code> and split <code>container_uri</code>/<code>table_path</code>/<code>array_path</code>.</li>
+<li><strong>First-Class <code>BaseModel</code> / <code>SQLModel</code> User Row Schemas Without ORM Coupling</strong>: Consist's internal provenance models (<code>Artifact</code>, <code>Run</code>, etc.) are pure dataclasses / Pydantic models with zero <code>SQLModel(table=True)</code> or SQLAlchemy <code>Session</code> execution, while user-defined tabular row schemas (<code>Tracker(schemas=[Person])</code>, <code>dlt</code> strict mode, <code>ViewFactory</code>, <code>ibis_view</code>, <code>schema_stub</code>) stay first-class via pure Pydantic <code>model_fields</code> introspection.</li>
+<li><strong>Explicit, Zero-Surprise Step Parameter Binding</strong>:<ul>
+<li>Parameter type annotations always take precedence (<code>def step(x: Artifact):</code> -&gt; <code>Artifact</code> with zero pre-step staging/hydration I/O; <code>def step(x: Path):</code> -&gt; verified staged <code>Path</code> with zero DataFrame load; <code>def step(x: pd.DataFrame):</code> / <code>GeoDataFrame</code> / <code>xr.Dataset</code> / <code>pa.Table</code> -&gt; loaded dataset via <code>consist.load</code>; output <code>out: Path</code> -&gt; injected target <code>Path</code> for <code>outputs={"out": ...}</code>).</li>
+<li>Unannotated input parameters <code>def step(x):</code> default to <code>Artifact</code> (zero eager pre-step I/O, fixing <code>B17</code>), unless the caller explicitly specifies <code>ExecutionOptions(input_binding="paths" | "loaded")</code>.</li>
+</ul>
+</li>
+<li><strong>Strict Acyclic Downward Dependency DAG (Zero Hidden Back-Edges)</strong>:</li>
+<li><strong>Layer 1 — Leaf (<code>consist.digest</code>, <code>consist.types</code>, <code>consist.protocols</code>)</strong>: Stdlib + optional Arrow/Pandas/HDF5 only; zero imports from <code>consist.models.*</code> or <code>consist.core.*</code>. Defines <code>ArtifactResolver</code> protocol + <code>contextvars</code> active-resolver hook (<code>get_active_resolver</code> / <code>bind_active_resolver</code>).</li>
+<li><strong>Layer 2 — Value Models &amp; Witnesses (<code>consist.models.artifact</code>, <code>consist.models.run</code>, <code>consist.location</code>)</strong>: Frozen/plain value objects + <code>FileStat</code>/<code>DirTreeStat</code> witnesses. <strong>Zero</strong> imports of <code>Tracker</code> or <code>DatabaseManager</code>; <strong>zero</strong> live SQL/I/O inside data fields (<code>uri</code>, <code>digest</code>, <code>member</code>, <code>meta</code>) or JSON serialization. Convenience resolution methods (<code>art.path</code>, <code>art.as_path()</code>, <code>art.ensure_local_path()</code>, <code>art.as_df()</code>, <code>art.accessibility()</code>) delegate strictly via weakref/contextvar <code>ArtifactResolver</code> (<code>art.with_resolver(...)</code> via <code>dataclasses.replace</code>—zero <code>object.__setattr__</code>!).</li>
+<li><strong>Layer 3 — Persistence (<code>DatabaseManager</code> in <code>consist.core.persistence</code>)</strong>: <strong>One</strong> class owning the native <code>duckdb.DuckDBPyConnection</code>, schema DDL, indexed SQL queries, cursor tracking, and <code>dlt</code> connection borrowing.</li>
+<li><strong>Layer 4 — Workflow &amp; Surface (<code>Tracker</code>, <code>Coupler</code>, <code>TrackerArchiveService</code>, <code>materialize.py</code>, <code>ViewFactory</code>, <code>cli.py</code>, <code>api.py</code>)</strong>.</li>
+<li><strong>Hard Merge Gates on Every PR</strong>:</li>
+<li><code>scripts/benchmarks/metadata_hot_path_profile.py</code> (20-in / 15-out warm miss &amp; <code>cache.hit.start_run</code>) <code>&lt;= 1.0x</code> of <code>origin/main</code> (<code>&lt;= 235 ms</code> / <code>&lt;= 245 ms</code>), plus sub-millisecond <code>art.path</code>, <code>Coupler.set</code>, and Ephemeral Mode <code>Tracker()</code>.</li>
+<li>Clean-venv smoke test (<code>uv venv</code> with base <code>consist</code> only—no <code>consist[git]</code>, <code>pandas &gt;= 3.0</code>, Python <code>3.11</code> &amp; <code>3.13</code>).</li>
+<li>Architectural &amp; hygiene gates: zero new circular dependencies, zero post-init <code>object.__setattr__</code> / <code>getattr</code> / <code>.__dict__.get</code> hacks on domain/tracker state, and <code>typing_extensions.Protocol</code> + <code>typing_extensions.runtime_checkable</code> across <strong>all</strong> <code>@runtime_checkable</code> protocols in <code>src/consist/</code>.</li>
+</ol>
+<pre class="mermaid"><code>flowchart TD
+    Main["origin/main (v0.4.2, 35f9ac0)"] --&gt; PR1["PR 1: Complete Single-Connection DuckDB Cutover Across All 22 Callers + Clean v0.5 DDL + SQL Pushdown"]
+    PR1 --&gt; PR2["PR 2: Non-ORM Artifact (Artifact.digest/uri/member) &amp; Run Value Models + Layer-1 ArtifactResolver + Unified Scheme Digests"]
+    PR2 --&gt; PR3["PR 3: Direct Indexed artifact_location + Container/Shapefile Witnesses + Safe Scratch Eviction + Lean consist migrate"]
+    PR3 --&gt; PR4["PR 4: Clean Step Binding (Artifact / Path / DataFrame), Unified outputs=, Ephemeral Mode, Lazy Coupler &amp; Scrubbed v0.5 Docs"]</code></pre>
+<hr />
+<h2 id="2-pr-by-pr-engineering-specifications">2. PR-by-PR Engineering Specifications<a class="headerlink" href="#2-pr-by-pr-engineering-specifications" title="Permanent link">&para;</a></h2>
+<h3 id="pr-1-single-connection-native-duckdb-cutover-clean-schema-foundation-sql-pushdown">PR 1 — Single-Connection Native DuckDB Cutover + Clean Schema Foundation + SQL Pushdown<a class="headerlink" href="#pr-1-single-connection-native-duckdb-cutover-clean-schema-foundation-sql-pushdown" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>Estimated Diff Budget</strong>: <code>~ +2,400 / -3,000 src LOC</code> (<strong>net <code>~ -600 LOC</code></strong>)</li>
+<li><strong>Core Objective</strong>: Replace <code>duckdb-engine</code> + SQLAlchemy <code>Engine</code>/<code>Session</code> across <code>DatabaseManager</code> and <strong>all 22 <code>src/consist/</code> callers</strong> with a single thread-locked native <code>duckdb.DuckDBPyConnection</code>, delete <code>schema_compat.py</code> legacy runtime shims, establish clean <code>consist_schema(version=2, db_uid=...)</code> DDL (preserving <code>Artifact</code>/<code>Run</code> Python attribute shapes in PR 1 via <code>DatabaseManager</code> hydration mapping so PR 1 breaks zero model callers), push <code>find_matching_run</code> / <code>find_runs</code> / <code>get_artifacts_for_run</code> to parameterized DuckDB SQL, share the single connection safely with <code>dlt</code> and <code>Ibis</code>, and harden clean-install packaging.</li>
+</ul>
+<h4 id="deletions-in-pr-1">Deletions in PR 1<a class="headerlink" href="#deletions-in-pr-1" title="Permanent link">&para;</a></h4>
+<ul>
+<li>Remove <code>"duckdb-engine&gt;=0.17.0"</code> from <code>pyproject.toml</code> and <code>uv.lock</code>.</li>
+<li>Delete <code>src/consist/core/schema_compat.py</code> (<code>-259 LOC</code> of legacy v0.2/v0.3 runtime <code>ALTER TABLE</code> / backfill shims).</li>
+<li>Delete SQLAlchemy <code>create_engine</code>, <code>NullPool</code>, <code>Session</code>, <code>session_scope</code>, and ORM <code>select(...)</code> execution across <strong>all 22 <code>src/consist/</code> modules</strong>:
+  <code>persistence.py</code>, <code>queries.py</code>, <code>maintenance.py</code>, <code>views.py</code>, <code>stores.py</code>, <code>db_snapshot.py</code>, <code>artifact_schemas.py</code>, <code>command_exec.py</code>, <code>lineage.py</code>, <code>cache.py</code>, <code>core/admission.py</code>, <code>tracker_archive.py</code>, <code>tracker_config_plans.py</code>, <code>matrix.py</code>, <code>netcdf_views.py</code>, <code>openmatrix_views.py</code>, <code>spatial_views.py</code>, <code>cli.py</code>, <code>integrations/containers/api.py</code>, <code>integrations/activitysim/config_adapter.py</code>, <code>integrations/beam/config_adapter.py</code>, <code>tools/queries.py</code>, <code>tools/schema_profile.py</code>, plus <code>api.py</code>/<code>tracker.py</code> (<code>Tracker.engine</code>, <code>Tracker.view</code>, <code>Tracker.register_views</code>, <code>consist.view</code>, <code>consist.register_views</code>, <code>consist.db_session</code>, replacing <code>Tracker.run_query</code>/<code>consist.run_query</code> with native DuckDB query helpers) and <code>tests/conftest.py</code>.</li>
+<li>Delete <code>DatabaseRuntimeOps.execute_with_retry</code> fake cross-process lock-retry sleep loops (<code>src/consist/core/db_runtime.py</code>).</li>
+<li>Delete silent <code>except Exception:</code> swallowers in <code>DatabaseManager</code> (<code>persistence.py</code>) that returned <code>{}</code> / <code>[]</code> / <code>None</code> on database errors.</li>
+</ul>
+<h4 id="design-implementation-blueprint">Design &amp; Implementation Blueprint<a class="headerlink" href="#design-implementation-blueprint" title="Permanent link">&para;</a></h4>
+<ol>
+<li><strong>Single Native Connection, Poison-Safe Re-Entrant Transactions &amp; Subprocess Barrier (<code>DatabaseManager</code>)</strong>:</li>
+<li>Own one <code>duckdb.DuckDBPyConnection</code> (<code>duckdb.connect(str(db_path), read_only=read_only)</code>) guarded by <code>self._lock = threading.RLock()</code> and <code>self._cond = threading.Condition(self._lock)</code> (<code>_suspended: bool</code>).</li>
+<li><strong>Re-entrant transactions without <code>SAVEPOINT</code></strong> (DuckDB does not support SQL <code>SAVEPOINT</code>): track <code>_tx_depth: int = 0</code> and <code>_tx_poisoned: bool = False</code> under <code>self._lock</code>:<ul>
+<li><code>_tx_depth</code> <code>0 -&gt; 1</code> executes <code>BEGIN TRANSACTION</code>.</li>
+<li><code>_tx_depth &gt; 1</code> joins the active transaction on <code>self.connection</code> without issuing SQL; if an inner <code>with db.transaction():</code> exits via exception, set <code>_tx_poisoned = True</code> and re-raise. Exiting depth <code>1 -&gt; 0</code> checks <code>_tx_poisoned</code>: if poisoned (even if an outer caller caught the inner exception), execute <code>ROLLBACK</code> and raise <code>TransactionAbortedError</code> rather than silently committing partial state. Use <code>SELECT</code> checks or <code>ON CONFLICT</code> instead of try/catch write probes inside transactions.</li>
+</ul>
+</li>
+<li><strong>Cursor visibility &amp; lifecycle</strong>:<ul>
+<li>When <code>_tx_depth &gt; 0</code>, execute all queries directly on <code>self.connection</code> under <code>self._lock</code> so nested helpers see uncommitted writes and never trigger DuckDB MVCC write-write conflicts.</li>
+<li>When <code>_tx_depth == 0</code>, <code>relation_query()</code> clones a tracked cursor registered in <code>self._open_cursors</code> so <code>to_df(..., close=True)</code>, <code>db.close()</code>, and <code>suspend_for_subprocesses()</code> reliably close the underlying root cursor even when callers chain <code>.limit()</code> / <code>.filter()</code> (which return new <code>DuckDBPyRelation</code> wrappers in DuckDB <code>1.5.1</code>).</li>
+</ul>
+</li>
+<li><strong><code>suspend_for_subprocesses()</code></strong>: sets <code>_suspended = True</code>, closes <strong>all</strong> tracked cursors in <code>self._open_cursors</code>, closes any cached Ibis cursor backend (<code>TrackerIbisIntegration.close()</code>), executes <code>CHECKPOINT</code> + closes <code>self.connection</code>, and blocks any concurrent thread attempting DB access on <code>self._cond</code> until resumed.</li>
+<li><strong>Schema header check</strong>: on open, inspect <code>consist_schema.version</code>; if <code>version == 1</code> (or legacy unversioned <code>run</code> table), raise <code>DatabaseMigrationRequired("Database uses Consist v0.4 schema (version=1). Run 'consist migrate &lt;db_path&gt;'.")</code> (subclassing <code>IncompatibleSchemaError</code>).</li>
+<li><strong>Clean Native DuckDB Tables (Zero Wrapper Views)</strong>:</li>
+<li>Create core tables via explicit DuckDB SQL DDL:<ul>
+<li><code>consist_schema(version INTEGER PRIMARY KEY, db_uid VARCHAR NOT NULL, updated_at TIMESTAMPTZ)</code></li>
+<li><code>run</code> (including <code>cacheable BOOLEAN NOT NULL DEFAULT TRUE</code>, <code>meta JSON</code>, <code>tags JSON</code>, <code>stage VARCHAR</code>, <code>phase VARCHAR</code>, <code>facet_id VARCHAR</code>, etc.)</li>
+<li><code>artifact(id UUID PRIMARY KEY, key VARCHAR NOT NULL, uri VARCHAR NOT NULL, driver VARCHAR NOT NULL, digest VARCHAR, member VARCHAR, run_id VARCHAR, parent_artifact_id UUID, facet_id VARCHAR, meta JSON, created_at TIMESTAMPTZ)</code> (mapped cleanly to/from <code>Artifact.container_uri</code>, <code>table_path</code>/<code>array_path</code>, and <code>hash</code> inside <code>DatabaseManager</code> until PR 2 upgrades the <code>Artifact</code> class; <code>artifact_content</code> table removed)</li>
+<li><code>run_artifact_link(run_id VARCHAR NOT NULL, artifact_id UUID NOT NULL, direction VARCHAR NOT NULL, role VARCHAR NOT NULL, is_implicit BOOLEAN NOT NULL DEFAULT FALSE, PRIMARY KEY (run_id, artifact_id, direction, role))</code></li>
+<li><code>config_facet</code>, <code>run_config_kv</code>, <code>artifact_facet</code>, <code>artifact_kv</code> (direct indexed tables populated via <code>executemany</code>—zero wrapper views!)</li>
+<li><code>run_binding_invocation</code>, <code>run_coupler_snapshot</code></li>
+<li><code>artifact_schema</code>, <code>artifact_schema_field</code>, <code>artifact_schema_relation</code>, <code>consist_schema_links</code></li>
+<li><code>activitysim</code> / <code>beam</code> config cache tables created via explicit DuckDB DDL from Pydantic <code>model_fields</code> (eliminating SQLAlchemy <code>Session</code> in <code>activitysim/config_adapter.py</code> and <code>beam/config_adapter.py</code>).</li>
+</ul>
+</li>
+<li><strong>Packaging &amp; Clean-Install Hardening (<code>pyproject.toml</code>)</strong>:</li>
+<li>Declare <code>"pytz&gt;=2024.1"</code> and <code>"typing-extensions&gt;=4.12"</code> explicitly in <code>[project].dependencies</code> (retaining <code>"sqlmodel&gt;=0.0.31"</code> for user-defined tabular row schemas).</li>
+<li>Ensure <code>Tracker.start_run()</code> degrades cleanly when optional <code>consist[git]</code> (<code>gitpython</code>) is not installed.</li>
+<li><strong>Parameterized SQL Pushdown &amp; Safe <code>dlt</code> / <code>Ibis</code> / CLI Connection Sharing</strong>:</li>
+<li>Rewrite <code>find_matching_run</code> (<code>WHERE cacheable = TRUE ...</code>), <code>get_artifacts_for_run</code>, <code>get_output_artifacts_for_run</code>, and <code>find_runs</code> (<code>tags</code>, scalar <code>metadata</code> normalizing <code>numbers.Integral</code>/<code>numbers.Real</code> so <code>np.int64</code> never disables SQL <code>LIMIT</code>, <code>limit</code>/<code>offset</code>) into parameterized DuckDB SQL.</li>
+<li>Add <code>Tracker.query_rows(sql, params=None, *, model=...)</code> guarded by DuckDB's <code>extract_statements()</code> read-only SQL validator.</li>
+<li><strong><code>with db.borrow_for_dlt() as conn:</code></strong>: raises <code>RuntimeError</code> if <code>_tx_depth &gt; 0</code>, acquires <code>self._lock</code>, passes <code>conn</code> to <code>dlt.destinations.duckdb(credentials=conn)</code>, and unconditionally executes <code>SET search_path = 'main'</code> in <code>finally:</code> so <code>dlt</code>'s <code>search_path = 'global_tables'</code> mutation never breaks subsequent <code>DatabaseManager</code> queries.</li>
+<li>Open <code>Tracker(..., read_only=True)</code> on read-only CLI commands + extract holder PID on DuckDB lock conflicts (Option 4A); use <code>CREATE OR REPLACE TEMP VIEW</code> in <code>ViewFactory.create_view()</code> and <code>ibis_view()</code> when <code>read_only=True</code>; preserve <code>consist_artifact_id IS NULL</code> (<code>consist_run_id</code> fallback) across <code>views.py</code>, <code>netcdf_views.py</code>, <code>spatial_views.py</code>, and <code>openmatrix_views.py</code>.</li>
+</ol>
+<h4 id="code-logic-to-reuse-from-featartifact-triad-v2-fe41548">Code &amp; Logic to Reuse from <code>feat/artifact-triad-v2</code> (<code>fe41548</code>)<a class="headerlink" href="#code-logic-to-reuse-from-featartifact-triad-v2-fe41548" title="Permanent link">&para;</a></h4>
+<table>
+<thead>
+<tr>
+<th>Quarry Location (<code>fe41548</code>)</th>
+<th>What to Lift / Adapt</th>
+<th>Why It Passed Audit</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="file:///Users/zaneedell/git/consist/src/consist/store/ledger.py#L291-L302"><code>store/ledger.py:291-302</code></a></td>
+<td><code>_validate_select_only_sql</code> via DuckDB <code>extract_statements()</code></td>
+<td>Blocked all 8 adversarial SQL mutation/injection payloads (<code>COPY TO</code>, <code>ATTACH</code>, <code>CALL</code>, <code>PRAGMA</code>, <code>WITH ... INSERT</code>, multi-statement).</td>
+</tr>
+<tr>
+<td><a href="file:///Users/zaneedell/git/consist/src/consist/integrations/dlt_loader.py"><code>integrations/dlt_loader.py</code></a></td>
+<td>Single-connection <code>dlt</code> DuckDB credential borrowing (augmented with <code>SET search_path = 'main'</code> reset)</td>
+<td>Eliminated <code>duckdb-engine</code> vs <code>dlt</code> dual-connection lock contention cleanly.</td>
+</tr>
+<tr>
+<td><a href="file:///Users/zaneedell/git/consist/src/consist/core/queries.py"><code>core/queries.py</code></a> &amp; <a href="file:///Users/zaneedell/git/consist/src/consist/store/ledger.py#L2220-L2345"><code>store/ledger.py:2220-2345</code></a></td>
+<td>Parameterized SQL pushdown for <code>find_matching_run</code>, <code>get_artifacts_for_run</code>, and <code>find_runs</code></td>
+<td><code>33.9x</code>, <code>17.6x</code>, and <code>14.4x</code> speedups verified in isolated A/B benchmarks.</td>
+</tr>
+<tr>
+<td><a href="file:///Users/zaneedell/git/consist/src/consist/cli.py"><code>cli.py</code></a></td>
+<td>Option 4A <code>read_only=True</code> CLI readers, <code>ConsistShell</code> lock release on mutating commands, and PID lock error formatter</td>
+<td>Clean UX under DuckDB single-writer file locks.</td>
+</tr>
+<tr>
+<td><a href="file:///Users/zaneedell/git/consist/tests/stress/conftest.py"><code>tests/stress/conftest.py</code></a> &amp; <a href="file:///Users/zaneedell/git/consist/tests/integration/artifacts"><code>tests/integration/artifacts/</code></a></td>
+<td>Vectorized DuckDB <code>range()</code> 100k-run seeding (<code>288.5s -&gt; 2.90s</code>) and applicable integration tests</td>
+<td>Fast, high-signal scale regression coverage.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="anti-patterns-bugs-to-avoid-in-pr-1">Anti-Patterns &amp; Bugs to Avoid in PR 1<a class="headerlink" href="#anti-patterns-bugs-to-avoid-in-pr-1" title="Permanent link">&para;</a></h4>
+<table>
+<thead>
+<tr>
+<th>Audit ID</th>
+<th>Anti-Pattern / Trap</th>
+<th>Prevention Rule in PR 1</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Split-Brain #3</strong></td>
+<td><code>Tracker</code> -&gt; <code>DatabaseManager</code> (<code>3,156 LOC</code>) -&gt; <code>StoreLedger._hydrate_*</code> (<code>3,672 LOC</code>) + <code>RunQueryService</code></td>
+<td><strong>One</strong> persistence class: <code>DatabaseManager</code> owns the connection, SQL, and hydration directly.</td>
+</tr>
+<tr>
+<td><strong>DuckDB / <code>dlt</code> Traps</strong></td>
+<td>Issuing <code>SAVEPOINT</code> (syntax error in DuckDB <code>1.5.1</code>), leaving <code>search_path = 'global_tables'</code> after <code>dlt</code>, or running duplicate <code>.cursor()</code> inside <code>_tx_depth &gt; 0</code></td>
+<td>Use <code>_tx_depth</code> + <code>_tx_poisoned</code> on <code>self.connection</code>; reset <code>SET search_path = 'main'</code> in <code>borrow_for_dlt()</code>; run in-tx queries on <code>self.connection</code>.</td>
+</tr>
+<tr>
+<td><strong><code>B1</code> (P0)</strong></td>
+<td><code>pandas 3.1</code> missing <code>pytz</code> crashes DuckDB <code>TIMESTAMPTZ</code> <code>.fetchall()</code>, silently swallowed into <code>{}</code> / <code>[]</code> / <code>None</code> by <code>DatabaseManager</code>; undeclared <code>typing-extensions</code>; <code>start_run()</code> crashes without <code>gitpython</code></td>
+<td>Declare <code>"pytz&gt;=2024.1"</code> and <code>"typing-extensions&gt;=4.12"</code> in <code>pyproject.toml</code>; delete <code>DatabaseManager</code> <code>except Exception:</code> swallowers; verify clean-venv installs.</td>
+</tr>
+<tr>
+<td><strong><code>B2</code> (P0)</strong></td>
+<td><code>DatabaseMaintenance.export()</code> unlinks <code>out_path</code> and <code>.wal</code> <em>before</em> checking if <code>out_path</code> aliases <code>db_path</code></td>
+<td>Check <code>out_path.resolve() == db_path.resolve()</code> (and <code>os.path.samefile</code> if <code>out_path.exists()</code>) <em>before</em> any <code>unlink()</code>.</td>
+</tr>
+<tr>
+<td><strong><code>B3</code> (P0)</strong></td>
+<td><code>DatabaseMaintenance.purge(delete_files=True)</code> unlinks shared <code>.h5</code> containers when purging one member, unlinks custom-mount files when <code>mounts={}</code>, and wipes surviving <code>run_coupler_snapshot</code> rows</td>
+<td>Scope <code>run_coupler_snapshot</code> deletes to <code>purged_run_ids</code>; never unlink a physical container file while any surviving <code>artifact</code> row references the same container path or URI.</td>
+</tr>
+<tr>
+<td><strong><code>B14</code> &amp; <code>B16</code> (P1)</strong></td>
+<td><code>suspend_for_subprocesses</code> leaks reader/Ibis cursors; <code>np.int64</code> metadata disables SQL <code>LIMIT</code>; <code>create_view()</code> / <code>ibis_view()</code> crash on <code>read_only=True</code>; <code>config_run_query(..., "table_str")</code> drops table filter; <code>to_df(rel.limit(2), close=True)</code> leaks root cursor</td>
+<td>Track and close root cursors + Ibis backend on suspend/close; coerce <code>numbers.Integral</code>/<code>Real</code>; use <code>TEMP VIEW</code> when <code>read_only=True</code>; handle <code>str</code> targets in <code>config_run_query</code>.</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h3 id="pr-2-non-orm-artifact-artifactdigesturimember-run-value-models-unified-scheme-digests">PR 2 — Non-ORM <code>Artifact</code> (<code>Artifact.digest</code>/<code>uri</code>/<code>member</code>) &amp; <code>Run</code> Value Models + Unified Scheme Digests<a class="headerlink" href="#pr-2-non-orm-artifact-artifactdigesturimember-run-value-models-unified-scheme-digests" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>Estimated Diff Budget</strong>: <code>~ +1,400 / -1,700 src LOC</code> (<strong>net <code>~ -300 LOC</code></strong>)</li>
+<li><strong>Core Objective</strong>: Replace <code>SQLModel(table=True)</code> on <code>Artifact</code>, <code>Run</code>, and all internal Consist provenance models with clean, fast value models; introduce the Layer-1 <code>ArtifactResolver</code> protocol so <code>Artifact</code> has zero upward imports; replace untyped <code>Artifact.hash</code> and <code>container_uri</code>/<code>table_path</code>/<code>array_path</code> with <code>Artifact.digest: Digest | None</code>, <code>Artifact.uri: str</code>, and <code>Artifact.member: str | None</code>; unify <code>consist.digest</code> so <strong>creation, verification, and external admission share one driver function per scheme</strong>; and freeze the canonical <code>v0.5</code> run signature formula.</li>
+</ul>
+<h4 id="deletions-in-pr-2">Deletions in PR 2<a class="headerlink" href="#deletions-in-pr-2" title="Permanent link">&para;</a></h4>
+<ul>
+<li>Delete <code>SQLModel(table=True)</code> inheritance, <code>_sa_instance_state</code>, <code>_private_state</code> / <code>__pydantic_private__</code>, and custom <code>__copy__</code>/<code>__deepcopy__</code> boilerplate across all internal provenance models (<code>models/artifact.py</code>, <code>models/run.py</code>, <code>models/config_facet.py</code>, <code>models/run_config_kv.py</code>, <code>models/artifact_facet.py</code>, <code>models/artifact_kv.py</code>, <code>models/artifact_schema.py</code>, plus removing <code>sqlalchemy.inspect</code> dependencies in <code>dlt_loader.py</code> / <code>artifact_schemas.py</code> / <code>schema_export.py</code> in favor of pure Pydantic <code>model_fields</code> introspection so both <code>BaseModel</code> and <code>SQLModel</code> user row schemas work cleanly).</li>
+<li>Delete raw untyped <code>Artifact.hash</code> and split <code>container_uri</code> / <code>table_path</code> / <code>array_path</code> in favor of <code>Artifact.digest: Digest | None</code>, <code>Artifact.uri: str</code>, and <code>Artifact.member: str | None</code>.</li>
+<li>Delete <code>AdmissionIdentity</code> and parallel scheme-hashing implementations across <code>src/consist/admission.py</code>, <code>src/consist/core/admission.py</code>, <code>logical_array_identity.py</code>, and <code>resolved_binding.py</code> (unifying on <code>Digest</code>).</li>
+<li>Delete dual legacy vs <code>action-v2</code> input-hashing branches in <code>src/consist/core/identity.py</code> in favor of one canonical <code>v0.5</code> content-addressed input/run signature formula.</li>
+</ul>
+<h4 id="design-implementation-blueprint_1">Design &amp; Implementation Blueprint<a class="headerlink" href="#design-implementation-blueprint_1" title="Permanent link">&para;</a></h4>
+<ol>
+<li><strong>Unified <code>consist.digest</code> Leaf Module &amp; <code>ArtifactResolver</code> Protocol (<code>consist.protocols</code>)</strong>:</li>
+<li>Extend existing <code>src/consist/digest.py</code> (<code>1,777 LOC</code> on <code>origin/main</code> owning canonical JSON, <code>ctd1</code>, <code>digest_state</code>, and streaming array canonicalization; split into private <code>_digest_*.py</code> leaf modules if helpful, removing stdlib <code>@runtime_checkable</code> and <code>.__dict__</code> usages):<ul>
+<li><code>@dataclass(frozen=True, slots=True) class Digest</code>: <code>scheme: str</code>, <code>hex: str</code>, <code>__str__ -&gt; f"{self.scheme}:{self.hex}"</code>, and <code>Digest.parse(raw: str) -&gt; Digest</code> splitting via <code>scheme, sep, hex_val = raw.rsplit(":", 1)</code> (preserving colons inside scheme names such as <code>"sha256:file"</code> and <code>"h5_fixed_v1:sha256"</code>, validating 64 lowercase hex chars, and normalizing legacy <code>"sha256:manifest-v1"</code> if encountered).</li>
+<li><strong>Single Driver Registry</strong> (<code>DIGEST_DRIVERS</code>): maps scheme (<code>sha256:file</code>, <code>ctd1:sha256</code>, <code>dir_manifest_v1:sha256</code>, <code>h5_fixed_v1:sha256</code>, <code>h5_dataset_v1:sha256</code>, <code>logical_matrices_canonical_v1:sha256</code>, <code>logical_matrices_f32_v1:sha256</code>, <code>output_set_v1:sha256</code>) to <strong>one</strong> <code>compute_digest(path, *, driver=..., member=None, options=None) -&gt; Digest</code> called identically by <code>ArtifactManager</code>, <code>verify_artifact()</code>, and <code>core/admission.py</code>.</li>
+</ul>
+</li>
+<li>Define <code>ArtifactResolver</code> (<code>from typing_extensions import Protocol, runtime_checkable</code>) and <code>contextvars</code> active-resolver helpers in <code>consist.protocols</code> (Layer 1).</li>
+<li><strong>Self-Contained Immutable <code>Artifact</code> &amp; Plain Value <code>Run</code> Models (Layer 2)</strong>:</li>
+<li><code>Artifact</code> (<code>@dataclass(frozen=True, slots=True)</code>) stores <code>id</code>, <code>key</code>, <code>uri</code>, <code>driver</code>, <code>digest: Digest | None</code>, <code>run_id</code>, <code>parent_artifact_id</code>, <code>member: str | None</code>, <code>facet_id: str | None</code>, <code>created_at: datetime</code>, <code>meta: Mapping[str, Any]</code> (<code>types.MappingProxyType</code> over a defensive copy—truly immutable, not a <code>dict</code> subclass!), and <code>_resolver_ref: weakref.ReferenceType[ArtifactResolver] | None = field(default=None, repr=False, compare=False)</code>.</li>
+<li>Provide clean <code>.with_meta(...)</code>, <code>.with_digest(...)</code>, <code>.with_uri(...)</code>, and <code>.with_resolver(...)</code> helpers via <code>dataclasses.replace</code> (<strong>zero</strong> <code>object.__setattr__</code>!). Rewrite all in-place <code>Artifact</code> mutation sites (<code>artifacts.py</code>, <code>tracker_archive.py</code>, <code>ingestion.py</code>, <code>artifact_schemas.py</code>, <code>output_sets.py</code>, <code>tracker.set_output_meta</code>, <code>workflow.py</code>, <code>ConsistRecord.sync_output_artifact</code>) to replace and return updated <code>Artifact</code> instances in <code>current_consist</code> + DB (and have <code>Tracker</code>'s PR-2 <code>recovery_roots</code> lookup check DB <code>artifact.meta</code> by <code>art.id</code> until PR 3 replaces <code>recovery_roots</code> with <code>artifact_location</code>).</li>
+<li><strong>Zero hidden SQL in data fields or JSON dumps</strong>: <code>art.uri</code>, <code>art.key</code>, <code>art.digest</code>, <code>art.member</code>, <code>art.meta</code>, and <code>ProvenanceWriter</code> (<code>consist.json</code>) read in-memory slots directly in <code>&lt; 1 ms</code> (<code>0</code> SQL queries). Support round-trip serialization of <code>Digest</code> and <code>MappingProxyType</code> in <code>ProvenanceWriter</code> and <code>DatabaseMaintenance.rebuild_from_json</code> (accepting both <code>v0.4</code> and <code>v0.5</code> <code>consist.json</code> files).</li>
+<li><code>art.path</code>, <code>art.as_path()</code>, <code>art.ensure_local_path()</code>, <code>art.as_df()</code>, and <code>art.accessibility()</code> delegate strictly through <code>ArtifactResolver</code> (<code>_resolver_ref()</code> or <code>get_active_resolver()</code>).</li>
+<li><strong>Separate Raw File Digest from Post-<code>dlt</code> SQL Table State &amp; Canonical <code>v0.5</code> Run Signatures</strong>:</li>
+<li>Post-<code>dlt</code> <code>global_tables</code> ingestion never overwrites <code>art.digest</code> or attaches a snake-cased SQL table hash as <code>ctd1:sha256</code> (<code>B8</code> fix); whole-table SQL sorting/hashing during <code>dlt</code> append is kept out of the hot path.</li>
+<li>Freeze the canonical <code>v0.5</code> <code>input_hash</code> (hash of sorted <code>(role, str(artifact.digest))</code> pairs) and <code>signature = sha256(f"{code_hash}:{config_hash}:{input_hash}")</code> in PR 2 so PR 3's <code>consist migrate</code> and PR 4's workflow orchestration share one invariant signature definition.</li>
+</ol>
+<h4 id="code-logic-to-reuse-from-featartifact-triad-v2-fe41548_1">Code &amp; Logic to Reuse from <code>feat/artifact-triad-v2</code> (<code>fe41548</code>)<a class="headerlink" href="#code-logic-to-reuse-from-featartifact-triad-v2-fe41548_1" title="Permanent link">&para;</a></h4>
+<table>
+<thead>
+<tr>
+<th>Quarry Location (<code>fe41548</code>)</th>
+<th>What to Lift / Adapt</th>
+<th>Why It Passed Audit</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="file:///Users/zaneedell/git/consist/src/consist/engine.py#L291-L325"><code>engine.py:291-325</code></a></td>
+<td><code>_run_fd_pinned</code>: <code>(st_dev, st_ino)</code> pre-open / <code>os.fstat</code> / post-read race guard</td>
+<td>Race-free against mid-read file replacement.</td>
+</tr>
+<tr>
+<td><a href="file:///Users/zaneedell/git/consist/src/consist/digest.py#L2603-L2626"><code>digest.py:2603-2626</code></a> &amp; <a href="file:///Users/zaneedell/git/consist/src/consist/digest.py#L2487-L2582"><code>digest.py:2487-2582</code></a></td>
+<td><code>compute_ctd1_digest</code> (Arrow CSV/Parquet canonicalization) and <code>build_manifest_v1</code> (directory manifest) + golden parity corpus</td>
+<td>Passed all cross-format golden parity suites.</td>
+</tr>
+<tr>
+<td><a href="file:///Users/zaneedell/git/consist/src/consist/protocols.py"><code>protocols.py</code></a> (<code>fe41548</code>)</td>
+<td><code>from typing_extensions import Protocol, runtime_checkable</code> + <code>_RaisingPathArtifact</code> regression test (<a href="file:///Users/zaneedell/git/consist/tests/unit/api/test_artifact_type_guards.py#L175-L198"><code>test_artifact_type_guards.py:175-198</code></a>)</td>
+<td>Prevents Python 3.11 <code>isinstance()</code> from evaluating <code>@property</code> descriptors. Apply to <strong>every</strong> <code>@runtime_checkable</code> protocol in <code>src/consist/</code>.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="anti-patterns-bugs-to-avoid-in-pr-2">Anti-Patterns &amp; Bugs to Avoid in PR 2<a class="headerlink" href="#anti-patterns-bugs-to-avoid-in-pr-2" title="Permanent link">&para;</a></h4>
+<table>
+<thead>
+<tr>
+<th>Audit ID</th>
+<th>Anti-Pattern / Trap</th>
+<th>Prevention Rule in PR 2</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Contradiction #1</strong></td>
+<td>Deferred <code>from consist.core...</code> imports inside <code>Artifact.path</code> / <code>as_df()</code> + <code>object.__setattr__(self, "_tracker_ref", ...)</code> causing a 66-module cycle</td>
+<td>Route <code>Artifact</code> convenience methods exclusively through Layer-1 <code>ArtifactResolver</code> protocol + <code>with_resolver()</code> (<code>dataclasses.replace</code>).</td>
+</tr>
+<tr>
+<td><strong><code>B5</code> (P0)</strong></td>
+<td>Counterfeit <code>ctd1:sha256</code> on raw NumPy HDF5 datasets, hashing only <code>block0_values</code> on fixed PyTables groups (SHA-256 collisions on string/float edits!), and unsupported <code>core_state/v1:sha256</code> on <code>OutputSet</code></td>
+<td>Creation and verification call the <strong>exact same</strong> registered scheme function. Fixed PyTables groups hash <strong>all</strong> child datasets/axes (<code>block0_values</code>, <code>block1_values</code>, ..., <code>axis0</code>, <code>axis1</code>, attrs) in sorted order under <code>h5_fixed_v1:sha256</code>.</td>
+</tr>
+<tr>
+<td><strong><code>B8</code> (P1)</strong></td>
+<td><code>ingest_artifact()</code> attaches snake-cased <code>global_tables</code> hash as raw-file <code>ctd1:sha256</code> and slows <code>dlt</code> <code>ingest()</code> by <code>1.69x</code></td>
+<td>Keep <code>art.digest</code> strictly about the artifact's canonical content; do not re-read/sort SQL tables on <code>dlt</code> append.</td>
+</tr>
+<tr>
+<td><strong><code>B11</code> (P1)</strong></td>
+<td><code>Artifact._first_candidate_location()</code> fires live SQL on <code>.primary_location</code> and JSON dumps (<code>flush_json</code> <code>91.9x</code> slower)</td>
+<td><code>Artifact</code> carries <code>uri</code> and <code>member</code> directly in memory; JSON serialization is pure memory access.</td>
+</tr>
+<tr>
+<td><strong><code>B12</code> &amp; <code>B17</code></strong></td>
+<td><code>Contract.ANY_SHARED</code> non-monotonicity; <code>preserve_canonical</code> vs <code>float32_matrices_v1</code> colliding on <code>sha256:logical_matrices:v1</code>; <code>FrozenMeta(dict)</code> mutable via <code>dict.update</code>; <code>Artifact.__eq__</code> checking only <code>id</code></td>
+<td>One <code>Digest(scheme, hex)</code> per artifact, distinct matrix scheme names, <code>types.MappingProxyType</code>, and dataclass value equality.</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h3 id="pr-3-direct-indexed-artifact_location-table-witness-freshness-safe-eviction-lean-consist-migrate">PR 3 — Direct Indexed <code>artifact_location</code> Table + Witness Freshness + Safe Eviction + Lean <code>consist migrate</code><a class="headerlink" href="#pr-3-direct-indexed-artifact_location-table-witness-freshness-safe-eviction-lean-consist-migrate" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>Estimated Diff Budget</strong>: <code>~ +1,200 / -1,100 src LOC</code> (<strong>net <code>~ +100 to -100 LOC</code></strong>)</li>
+<li><strong>Core Objective</strong>: Replace <code>artifact.meta["recovery_roots"]</code> with a single <code>O(1)</code> indexed <code>artifact_location</code> upsert table supporting both verified content-addressed locations and cold/unmounted migrated locations; add <code>FileStat</code> / <code>DirTreeStat</code> witness verification with proper <code>now_ns</code> racy-window expiry, multi-member HDF5 container handling, and shapefile sidecar bundling; wire safe scratch eviction into <code>TrackerArchiveService</code>; and ship a compact (~350–450 LOC) on-disk <code>consist migrate &lt;db_path&gt;</code> command.</li>
+</ul>
+<h4 id="deletions-in-pr-3">Deletions in PR 3<a class="headerlink" href="#deletions-in-pr-3" title="Permanent link">&para;</a></h4>
+<ul>
+<li>Delete <code>artifact.meta["recovery_roots"]</code> across <code>tracker_archive.py</code>, <code>tracker_recovery.py</code>, <code>materialize.py</code>, and <code>views.py</code> completely (zero legacy runtime fallback needed since <code>consist migrate</code> converts <code>recovery_roots</code> into <code>artifact_location</code> rows!).</li>
+<li>Consolidate URI virtualization/resolution onto <code>FileSystemManager</code> (<code>src/consist/core/fs.py</code>); delete duplicate path/URI normalizers across <code>tracker_archive.py</code> and <code>tracker_recovery.py</code>.</li>
+</ul>
+<h4 id="design-implementation-blueprint_2">Design &amp; Implementation Blueprint<a class="headerlink" href="#design-implementation-blueprint_2" title="Permanent link">&para;</a></h4>
+<ol>
+<li><strong>Direct Upserted <code>artifact_location</code> Table (Cold-Archive &amp; Overwrite Safe)</strong>:</li>
+<li>Table <code>artifact_location(location_id UUID PRIMARY KEY, digest VARCHAR, artifact_id UUID, site VARCHAR NOT NULL, mount_name VARCHAR NOT NULL, mount_instance_id VARCHAR NOT NULL, uri VARCHAR NOT NULL, member VARCHAR NOT NULL DEFAULT '', status VARCHAR NOT NULL DEFAULT 'active', witness_json JSON, observed_at_ns BIGINT NOT NULL)</code> with indexes on <code>(digest, status)</code> and <code>(artifact_id, status)</code> plus coordinate uniqueness across <code>(COALESCE(digest, 'id:' || CAST(artifact_id AS VARCHAR)), site, mount_name, mount_instance_id, uri, member)</code>.</li>
+<li><strong>Workspace Instance Scoping (<code>B7</code> fix)</strong>: Populate <code>mount_instance_id = sha256(str(Path(tracker.run_dir).resolve()))[:16]</code> for <code>"workspace"</code> / <code>"runs"</code> mounts so multi-<code>run_dir</code> workflows sharing one <code>provenance.duckdb</code> never collide!</li>
+<li><strong>Overwrite Supersession</strong>: When upserting an <code>'active'</code> row at <code>(site, mount_name, mount_instance_id, uri, member)</code> for <code>digest_new</code>, mark any prior <code>'active'</code> row at the same <code>(site, mount_name, mount_instance_id, uri, member)</code> with <code>digest IS DISTINCT FROM digest_new</code> as <code>status = 'stale'</code>.</li>
+<li>Batch location upserts at run completion (<code>executemany</code>), keeping 20-in/15-out warm runs fast.</li>
+<li><strong>Racy-Safe <code>FileStat</code> &amp; <code>DirTreeStat</code> Witnesses (<code>src/consist/location.py</code>, <code>~350 LOC</code>)</strong>:</li>
+<li>Capture <code>(size, mtime_ns, ctime_ns, ino, racy=abs(observed_at_ns - mtime_ns) &lt; 2_000_000_000)</code>.</li>
+<li><strong>Proper <code>now_ns</code> Aging (<code>B11</code> fix)</strong>: <code>FileStat.check(path, *, now_ns=None)</code> evaluates <code>effective_now_ns = time.time_ns() if now_ns is None else now_ns</code>. When <code>self.racy</code> is <code>True</code> and <code>(size, mtime_ns, ctime_ns, ino)</code> still match: once a digest re-check passes after <code>(effective_now_ns - st.st_mtime_ns) &gt;= _RACY_WINDOW_NS</code>, cache the settled <code>FileStat(racy=False)</code> in the in-memory location cache (and update <code>artifact_location.witness_json</code> if writable) so <code>read_only=True</code> and repeated reads never re-hash settled files!</li>
+<li><strong>Multi-Member Container Witnesses (HDF5)</strong>: When <code>art.member is not None</code> (e.g., <code>/tables/households</code> in <code>out.h5</code>) and another step appends a sibling member to <code>out.h5</code>, the enclosing file's <code>FileStat</code> changes while <code>/tables/households</code>'s <code>h5_fixed_v1:sha256</code> digest is unchanged. On <code>FileStat</code> mismatch for <code>art.member is not None</code>, recompute <code>compute_digest(path, driver=art.driver, member=art.member)</code>: if it still matches <code>art.digest</code>, refresh <code>witness_json</code> to the new <code>FileStat</code> and return <code>path</code>; only mark <code>status='stale'</code> if the member digest changed!</li>
+<li><strong>Shapefile Sidecar Bundle (<code>B13</code> fix)</strong>: Represent <code>.shp</code> witnesses as a <code>DirTreeStat</code> over all existing shapefile sidecars (<code>.shp</code>, <code>.shx</code>, <code>.dbf</code>, <code>.prj</code>, <code>.cpg</code>) using <code>os.path.realpath</code>, and stage/archive all sidecars atomically.</li>
+<li><strong>One Verified Local-Path Resolver &amp; Safe Scratch Eviction (<code>B4</code>, <code>B6</code>, <code>B13</code> fixes)</strong>:</li>
+<li><code>ArtifactResolver</code> (<code>art.path</code>, <code>art.as_path()</code>, <code>art.ensure_local_path()</code>), <code>consist.load()</code>, <code>ViewFactory</code>, and <code>core/admission.py</code> <strong>all</strong> call <code>resolve_verified_local_path(artifact, tracker=...)</code>:<ul>
+<li>Queries <code>WHERE digest = ? AND status = 'active'</code> (falling back to <code>WHERE artifact_id = ? AND status = 'active'</code> when <code>artifact.digest is None</code> on cold migrated DBs), memoized per <code>(db_uid, location_epoch, sorted_mounts_key)</code> (<code>~0.03 ms</code> warm).</li>
+<li>Checks witness freshness: if <code>FRESH</code>, returns immediately; if scratch was overwritten, missing, or a broken symlink, verifies digest or marks <code>'stale'</code> and <strong>falls through automatically to verified archive locations</strong> (staging via <code>stage_verified_source</code> when <code>ensure_local_path</code> / materialization is requested).</li>
+</ul>
+</li>
+<li><strong>Safe Scratch Eviction in <code>TrackerArchiveService</code></strong>:<ul>
+<li><code>archive_artifact(..., mode="move")</code> / <code>archive_run_outputs(..., mode="move")</code> marks the moved workspace <code>artifact_location</code> row <code>status='evicted'</code> and upserts the destination archive location as <code>status='active'</code>.</li>
+<li>Add compact (~40 LOC) <code>tracker.evict_artifact(artifact, *, path=None)</code> requiring explicit witness/digest match before <code>unlink()</code> (never deleting user-edited scratch files!) and requiring <code>&gt;= 1</code> surviving verified <code>'active'</code> archive location or ingested <code>global_tables</code> table.</li>
+</ul>
+</li>
+<li><strong>Compact, Cold-Safe <code>consist migrate &lt;db_path&gt;</code> (~350–450 LOC)</strong>:</li>
+<li>Reads <code>v0.4</code> DB (<code>version=1</code>), builds <code>v0.5</code> DB in <code>&lt;db_path&gt;.v05.tmp</code>, copies <code>global_tables.*</code> and custom SQL views intact, verifies <code>CHECKPOINT</code> succeeds (never swallowing errors before <code>.wal</code> cleanup!), atomically backs up <code>&lt;db_path&gt;</code> to <code>&lt;db_path&gt;.v04.bak</code>, and renames <code>&lt;db_path&gt;.v05.tmp</code> -&gt; <code>&lt;db_path&gt;</code> (plus <code>consist migrate undo &lt;db_path&gt;</code>).</li>
+<li><strong>Deterministic <code>v0.5</code> Promotion</strong>:<ol>
+<li>Backfill <code>run_artifact_link.role</code> from <code>run.meta["input_identity"]</code> role bindings when present, falling back to <code>artifact.key</code>.</li>
+<li>Convert <code>meta["recovery_roots"]</code> + <code>container_uri</code> into <code>artifact_location</code> rows for <strong>every</strong> artifact (preserving <code>artifact_id</code> even when <code>digest IS NULL</code> so unmounted Lustre/NFS archives remain recoverable once mounted!).</li>
+<li>When an artifact resolves on disk under <code>--mounts</code> / <code>--run-dir</code>, compute its real <code>v0.5</code> <code>Digest</code> + <code>FileStat</code> (or with <code>--trust-v04-hashes</code>, convert attested 64-hex <code>v0.4</code> SHA-256 / <code>manifest-v1</code> / <code>logical_matrices</code> hashes + <code>os.stat()</code> <code>FileStat</code> without re-reading multi-TB archives, while always re-hashing non-hex <code>fast</code> hashes).</li>
+<li>For every run whose input artifacts all have valid <code>v0.5</code> <code>Digest</code>s, recompute <code>run.input_hash</code> and <code>run.signature = sha256(f"{code_hash}:{config_hash}:{input_hash}")</code> (<code>cacheable = True</code>, verified by test to achieve 100% live cache-hit parity with fresh <code>v0.5</code> <code>Tracker.run</code>); mark incomplete/cold runs <code>cacheable = False</code>.</li>
+</ol>
+</li>
+</ol>
+<h4 id="code-logic-to-reuse-from-featartifact-triad-v2-fe41548_2">Code &amp; Logic to Reuse from <code>feat/artifact-triad-v2</code> (<code>fe41548</code>)<a class="headerlink" href="#code-logic-to-reuse-from-featartifact-triad-v2-fe41548_2" title="Permanent link">&para;</a></h4>
+<table>
+<thead>
+<tr>
+<th>Quarry Location (<code>fe41548</code>)</th>
+<th>What to Lift / Adapt</th>
+<th>Why It Passed Audit</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="file:///Users/zaneedell/git/consist/src/consist/engine.py#L1936-L2079"><code>engine.py:1936-2079</code></a></td>
+<td><code>stage_verified_source</code>: CoW (<code>clonefile</code>/<code>reflink</code>) -&gt; <code>0o444</code> read-only hardlink (<code>mutable=False</code>) -&gt; byte copy (<code>mutable=True</code>)</td>
+<td>Confirmed mutability-safe across archive-to-scratch staging.</td>
+</tr>
+<tr>
+<td><a href="file:///Users/zaneedell/git/consist/src/consist/core/admission.py#L3273-L3304"><code>core/admission.py:3273-3304</code></a></td>
+<td>Pre-overwrite candidate digest verification before replacing an existing destination file</td>
+<td>Prevents clobbering destination paths with corrupt candidates.</td>
+</tr>
+<tr>
+<td><a href="file:///Users/zaneedell/git/consist/src/consist/location.py#L837-L842"><code>location.py:837-842</code></a></td>
+<td><code>db_uid</code> check before binding cached ledger state across <code>Tracker</code> instances</td>
+<td>Prevents cross-DB location spoofing.</td>
+</tr>
+<tr>
+<td>Commit <code>de584c8</code> (PR #318)</td>
+<td><code>OutputSet</code> parent + member archive-move location updates</td>
+<td>Keeps <code>OutputSet</code> parent <code>.path</code> consistent with moved outputs.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="anti-patterns-bugs-to-avoid-in-pr-3">Anti-Patterns &amp; Bugs to Avoid in PR 3<a class="headerlink" href="#anti-patterns-bugs-to-avoid-in-pr-3" title="Permanent link">&para;</a></h4>
+<table>
+<thead>
+<tr>
+<th>Audit ID</th>
+<th>Anti-Pattern / Trap</th>
+<th>Prevention Rule in PR 3</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Split-Brains #1, #2, #4, #5 &amp; #7</strong></td>
+<td><code>engine.py</code> (<code>PendingOutput</code>/<code>seal</code>/<code>evict</code> — <code>0</code> callers in <code>Tracker</code>), <code>store/manifest.py</code> (<code>1,769 LOC</code>, <code>0</code> callers), <code>migrations/v1/</code> (<code>5,786 LOC</code>), and <code>artifact_location_event</code> window-function view</td>
+<td>Wire <code>artifact_location</code> directly into <code>TrackerArchiveService</code> + <code>materialize.py</code>; use direct indexed <code>UPSERT</code> on <code>artifact_location</code>; keep <code>consist.json</code> via <code>ProvenanceWriter</code>.</td>
+</tr>
+<tr>
+<td><strong>Contradiction #2</strong></td>
+<td><code>artifact_location.digest NOT NULL</code> dropping <code>recovery_roots</code> when cold archives are unmounted during <code>consist migrate</code></td>
+<td>Store <code>artifact_id</code> + nullable <code>digest</code> on <code>artifact_location</code> so unmounted archive locations survive migration and resolve as soon as mounted.</td>
+</tr>
+<tr>
+<td><strong><code>B4</code> &amp; <code>B6</code> (P0)</strong></td>
+<td><code>evict()</code> deleting user-modified scratch files without witness checks; <code>ensure_local_path()</code> / <code>as_path()</code> reading overwritten scratch bytes via <code>include_evicted=True</code></td>
+<td>Verify witness/digest + surviving archive before <code>unlink()</code>; single verified <code>status='active'</code> resolver across all path/load methods.</td>
+</tr>
+<tr>
+<td><strong><code>B7</code> (P0)</strong></td>
+<td>Multi-<code>run_dir</code> <code>workspace://</code> wipeout</td>
+<td>Scope <code>"workspace"</code> / <code>"runs"</code> mounts by <code>mount_instance_id = sha256(resolved_run_dir)[:16]</code>.</td>
+</tr>
+<tr>
+<td><strong><code>B11</code>, <code>B13</code> &amp; <code>B15</code> (P1)</strong></td>
+<td><code>FileStat.check()</code> discarding <code>now_ns</code> (<code>254x–4,300x</code> slower); sibling HDF5 writes marking prior members stale; shapefile sidecars dropped; macOS <code>/tmp</code>-&gt;<code>/private/tmp</code> crashes; <code>migrated_fast_match</code> 100% cache misses; swallowed <code>CHECKPOINT</code></td>
+<td>Expire <code>racy</code> via <code>now_ns</code>; re-verify member digest on HDF5 container stat change; bundle shapefile sidecars; normalize realpaths; recompute native <code>v0.5</code> signatures during <code>migrate</code>; fail fast on <code>CHECKPOINT</code> error.</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h3 id="pr-4-clean-step-binding-artifact-path-dataframe-unified-outputs-ephemeral-mode-lazy-coupler-scrubbed-docs">PR 4 — Clean Step Binding (<code>Artifact</code> / <code>Path</code> / <code>DataFrame</code>), Unified <code>outputs=</code>, Ephemeral Mode, Lazy <code>Coupler</code> &amp; Scrubbed Docs<a class="headerlink" href="#pr-4-clean-step-binding-artifact-path-dataframe-unified-outputs-ephemeral-mode-lazy-coupler-scrubbed-docs" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>Estimated Diff Budget</strong>: <code>~ +950 / -1,450 src LOC</code> (<strong>net <code>~ -500 LOC</code></strong>)</li>
+<li><strong>Core Objective</strong>: Finalize the clean <code>v0.5</code> workflow surface: explicit zero-surprise step parameter binding (<code>Artifact</code> default with <strong>zero</strong> wasted pre-step hydration I/O, <code>: Path</code> for staged input/injected output files, <code>: pd.DataFrame</code> for loaded tables, honoring explicit <code>ExecutionOptions(input_binding=...)</code> on unannotated parameters), unified <code>outputs=</code> (<code>outputs=["key"]</code> and <code>outputs={"key": path_or_spec}</code> with directory/HDF5-safe staleness guards), sub-millisecond <code>Tracker()</code> Ephemeral Mode replacing <code>NoopTracker</code> (<code>-818 LOC</code>), lazy/verified <code>Coupler</code>, curated <code>consist.__all__</code>, and scrubbed <code>v0.5</code> docs + skill.</li>
+</ul>
+<h4 id="deletions-in-pr-4">Deletions in PR 4<a class="headerlink" href="#deletions-in-pr-4" title="Permanent link">&para;</a></h4>
+<ul>
+<li>Delete <code>src/consist/core/noop.py</code> (<code>-818 LOC</code>) and <code>src/consist/core/_coupler_shared.py</code> (<code>-305 LOC</code>).</li>
+<li>Delete duplicate <code>output_paths</code> orchestration code in <code>src/consist/core/tracker_orchestration.py</code> (normalizing <code>output_paths=</code> into <code>outputs=</code> as a thin alias or retiring internal duplication).</li>
+</ul>
+<h4 id="design-implementation-blueprint_3">Design &amp; Implementation Blueprint<a class="headerlink" href="#design-implementation-blueprint_3" title="Permanent link">&para;</a></h4>
+<ol>
+<li><strong>Clean, Zero-Wasted-I/O Step Parameter Binding (<code>run_invocation.py</code> &amp; <code>tracker_orchestration.py</code>)</strong>:</li>
+<li>Resolve annotations <strong>per parameter</strong> (isolating closure <code>NameError</code>s to that parameter instead of aborting <code>get_type_hints()</code> across the whole function, unwrapping <code>typing.Annotated[T, ...]</code> and <code>T | None</code> / <code>Optional[T]</code>, and excluding reserved/injected params <code>ctx</code>, <code>_consist_ctx</code>, <code>runtime_kwargs</code>, and default-valued non-input params):<ul>
+<li><strong><code>def step(x: Artifact):</code></strong>: always pass <code>Artifact</code> with <strong>zero</strong> pre-step <code>"inputs-missing"</code> staging/hydration I/O (<code>B17</code> fix).</li>
+<li><strong><code>def step(x: Path):</code> (or <code>os.PathLike</code>)</strong>: for inputs, stage/verify local file via PR 3's resolver and pass <code>Path</code> (<code>0</code> DataFrame load); for declared <code>outputs={"out": path}</code> matching parameter <code>out: Path</code>, inject the resolved output <code>Path</code>.</li>
+<li><strong><code>def step(x: pd.DataFrame):</code> (or <code>gpd.GeoDataFrame</code>, <code>xr.Dataset</code>, <code>pa.Table</code>)</strong>: load and pass the dataset via <code>consist.load(x)</code>.</li>
+<li><strong>Unannotated <code>def step(x):</code></strong>: if caller explicitly passed <code>ExecutionOptions(input_binding="paths" | "loaded")</code> (or legacy <code>load_inputs=True</code>), honor it for backward compatibility; otherwise default to passing <code>Artifact</code> with <strong>zero</strong> pre-step hydration I/O!</li>
+</ul>
+</li>
+<li><strong>Canonical <code>outputs=</code> (<code>list</code> &amp; <code>dict</code>) With Directory/HDF5/Coarse-Clock Safe Staleness Guard (<code>B9</code> fix)</strong>:</li>
+<li>Support both <code>outputs=["cleaned"]</code> (return-value capture) and <code>outputs={"cleaned": path_or_spec}</code>.</li>
+<li>Mix declared output path specs (including full <code>Path(p).name</code> to preserve multi-dot stems like <code>sim.2020.parquet</code> and distinguish <code>a.csv</code> from <code>b.csv</code>) into <code>config_hash</code> <strong>only when <code>outputs={...}</code> declares path specs</strong>, keeping PR 2/PR 3 run signatures 100% invariant and never polluting user-visible <code>get_run_config()</code> with <code>__consist_declared_outputs__</code>.</li>
+<li><strong>Pre-step staleness guard</strong>: before calling <code>fn</code>, snapshot <code>DirTreeStat</code> for directories/Zarr stores (not top-level <code>os.stat(dir)</code>), pre-step member digest for multi-member HDF5 outputs (<code>OutputArtifactSpec(..., member=...)</code>), or <code>FileStat</code> (+ lazy pre-step digest fallback) for regular files. If a pre-existing target has identical post-step stat AND identical content/member digest (handling coarse filesystem clock ticks where deterministic rewrites keep size/mtime unchanged vs genuinely untouched stale files), raise <code>StaleOutputError(RuntimeError)</code> instead of logging untouched stale disk bytes!</li>
+<li><strong>Sub-Millisecond Ephemeral Mode (<code>Tracker()</code>) vs JSON-Only Mode vs Ghost Mode (<code>B11</code> fix)</strong>:</li>
+<li>Default <code>run_dir: Path | str | None = None</code> on <code>Tracker.__init__</code> and <code>FileSystemManager.__init__</code>.</li>
+<li><strong>Ephemeral Mode (<code>db_path=None, run_dir=None</code>)</strong>: no <code>mkdir</code>, no <code>DatabaseManager</code>, no <code>ProvenanceWriter</code> / <code>consist.json</code>, lightweight <code>FileStat</code> only (<code>~0.1 ms</code> execution even on 50 MB files, replacing all <code>818 LOC</code> of <code>NoopTracker</code>).</li>
+<li><strong>JSON-Only Mode (<code>db_path=None, run_dir=&lt;path&gt;</code>)</strong>: preserves full <code>Digest</code> computation and <code>consist.json</code> writing for DB-less HPC workers reconstructed via <code>rebuild_from_json()</code>.</li>
+<li>Preserve <strong>"Ghost Mode"</strong> terminology in docs strictly for its established Consist meaning (provenance + hot <code>global_tables</code> retained after cold/scratch files are evicted).</li>
+<li><strong>Lazy, Verified <code>Coupler</code> (<code>B10</code> fix)</strong>:</li>
+<li><code>coupler.set(key, path)</code> records an unhashed lazy entry in memory (<code>~0.04 ms</code> for 50 paths; zero synchronous SHA-256 hashing and zero orphan DB rows on <code>set()</code>!).</li>
+<li>When a step consumes <code>coupler[key]</code> (or at <code>scenario</code> header snapshot commit), compute/verify <code>FileStat</code> + real <code>Digest</code> at consumption time—detecting post-<code>set()</code> disk edits and keeping downstream runs 100% cacheable. Zero <code>self._tracker.__dict__.get(...)</code> hacks.</li>
+<li><strong>Clean <code>consist.__all__</code>, LinkML Schema Sync &amp; Scrubbed <code>v0.5</code> Docs/Skill</strong>:</li>
+<li>Curate <code>consist.__all__</code> to the clean <code>v0.5</code> public surface without PR #316's synthetic 205-entry <code>_DEPRECATED_TOP_LEVEL_EXPORTS</code> table.</li>
+<li>Update LinkML <code>provenance.yaml</code> exporter/docs so <code>Digest(scheme, hex)</code> maps cleanly to <code>ConsistArtifactIdentity</code>.</li>
+<li>Adapt PR #318's architecture, quickstart, ephemeral-mode, and migration docs + <code>skills/consist/</code>—explicitly scrubbing all PR #316 leftovers (<code>art.hash</code>, <code>art.anchor</code>, <code>consist promote</code>, <code>consist.store.manifest</code>, <code>artifact.container_uri</code>) so docs, skill, and code teach <strong>one</strong> unified <code>v0.5</code> model.</li>
+</ol>
+<h4 id="code-logic-to-reuse-from-featartifact-triad-v2-fe41548_3">Code &amp; Logic to Reuse from <code>feat/artifact-triad-v2</code> (<code>fe41548</code>)<a class="headerlink" href="#code-logic-to-reuse-from-featartifact-triad-v2-fe41548_3" title="Permanent link">&para;</a></h4>
+<table>
+<thead>
+<tr>
+<th>Quarry Location (<code>fe41548</code>)</th>
+<th>What to Lift / Adapt</th>
+<th>Why It Passed Audit</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Commit <code>626147d</code> (PR #317)</td>
+<td>Deletion of <code>src/consist/core/noop.py</code> (<code>-818 LOC</code>) and <code>src/consist/core/_coupler_shared.py</code> (<code>-305 LOC</code>)</td>
+<td>Cut codebase clone ratio from <code>10.5%</code> to <code>7.5%</code>.</td>
+</tr>
+<tr>
+<td><a href="file:///Users/zaneedell/git/consist/src/consist/core/run_invocation.py"><code>core/run_invocation.py</code></a></td>
+<td>Typed parameter binding dispatch (<code>Artifact</code> / <code>Path</code> / dataset types, with <code>B17</code> lazy-hydration, <code>Annotated</code>, &amp; <code>input_binding</code> precedence fixes)</td>
+<td>Clean, explicit step parameter ergonomics.</td>
+</tr>
+<tr>
+<td>Commits <code>d39890f</code>, <code>de584c8</code>, <code>dc4f342</code> (PR #318)</td>
+<td>Architecture mental-model docs, quickstart, ephemeral-mode tests, and doc-snippet test suite (scrubbed for <code>art.digest</code> / <code>art.uri</code> / <code>consist migrate</code>)</td>
+<td>Aligned with the clean <code>v0.5</code> user experience (<code>Artifact</code> default + <code>: Path</code> + <code>: pd.DataFrame</code>).</td>
+</tr>
+</tbody>
+</table>
+<h4 id="anti-patterns-bugs-to-avoid-in-pr-4">Anti-Patterns &amp; Bugs to Avoid in PR 4<a class="headerlink" href="#anti-patterns-bugs-to-avoid-in-pr-4" title="Permanent link">&para;</a></h4>
+<table>
+<thead>
+<tr>
+<th>Audit ID</th>
+<th>Anti-Pattern / Trap</th>
+<th>Prevention Rule in PR 4</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong><code>B9</code> (P1)</strong></td>
+<td><code>outputs={role: path}</code> logs untouched stale files, uses <code>os.stat(dir)</code> on Zarr directories, drops filename stems (<code>a.csv</code> == <code>b.csv</code>), misses cache on <code>sim.2020.parquet</code>, and leaks <code>__consist_declared_outputs__</code> into <code>get_run_config()</code></td>
+<td>Use <code>DirTreeStat</code> for dirs, member digest for HDF5, full <code>Path(p).name</code> in <code>config_hash</code> only when path outputs are declared, and keep output specs out of <code>run.config</code>.</td>
+</tr>
+<tr>
+<td><strong><code>B10</code> (P1)</strong></td>
+<td><code>Coupler</code> synchronously hashes 50 paths + writes 50 orphan DB rows (<code>7,000x</code> slower), false-hits after post-<code>set()</code> disk edits, and uses <code>self._tracker.__dict__.get(...)</code></td>
+<td>Defer hashing/DB persistence until consumption, re-check <code>FileStat</code> at run start, mint normal cacheable <code>Digest</code>s, and use typed <code>Tracker</code> attributes.</td>
+</tr>
+<tr>
+<td><strong><code>B11</code> (P1) &amp; Naming</strong></td>
+<td><code>Tracker(db_path=None)</code> requiring <code>run_dir</code>, hashing 100 MB + writing JSON logs (<code>46.73 ms</code> vs <code>0.11 ms</code> <code>NoopTracker</code>), or colliding with "Ghost Mode" docs</td>
+<td>Make <code>run_dir=None</code> default; skip hashing/JSON only when <code>db_path=None</code> AND <code>run_dir=None</code> ("Ephemeral Mode"); preserve JSON-Only Mode when <code>run_dir</code> is set.</td>
+</tr>
+<tr>
+<td><strong><code>B17</code> &amp; Doc Drift</strong></td>
+<td>Unannotated <code>def step(raw):</code> triggering eager <code>"inputs-missing"</code> file hydration; breaking explicit <code>ExecutionOptions(input_binding=...)</code>; porting PR #318 docs that still reference <code>art.hash</code> / <code>art.anchor</code> / <code>consist promote</code></td>
+<td>Skip eager hydration for <code>Artifact</code>-bound parameters, honor explicit <code>input_binding=</code> on unannotated params, and scrub all ported docs/skills.</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="3-summary-of-end-state-codebase-delta-vs-originmain">3. Summary of End-State Codebase Delta vs. <code>origin/main</code><a class="headerlink" href="#3-summary-of-end-state-codebase-delta-vs-originmain" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Dimension</th>
+<th style="text-align: right;">PR #316 (<code>fe41548</code>)</th>
+<th style="text-align: right;">Clean 4-PR <code>v0.5</code> Stack</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Net <code>src/consist/</code> LOC vs <code>origin/main</code> (<code>84,937</code>)</td>
+<td style="text-align: right;"><strong><code>+20,527 LOC</code></strong> (<code>105,464</code>)</td>
+<td style="text-align: right;"><strong><code>~ -1,300 LOC</code></strong> (<code>~83,600</code>)</td>
+</tr>
+<tr>
+<td>Persistence classes</td>
+<td style="text-align: right;">3 (<code>DatabaseManager</code> + <code>StoreLedger</code> + <code>RunQueryService</code>)</td>
+<td style="text-align: right;"><strong>1 (<code>DatabaseManager</code>)</strong></td>
+</tr>
+<tr>
+<td>DuckDB tables + views</td>
+<td style="text-align: right;">21 tables + 5 views + 1 table macro</td>
+<td style="text-align: right;"><strong>~14 direct tables, 0 wrapper views</strong></td>
+</tr>
+<tr>
+<td><code>v0.4 -&gt; v0.5</code> migration code</td>
+<td style="text-align: right;"><code>5,786 LOC</code> (<code>Kind.HISTORICAL</code> + <code>promote</code> + <code>anchor_promotion</code>)</td>
+<td style="text-align: right;"><strong><code>~400 LOC</code> (<code>consist migrate</code>, cold-mount &amp; multi-TB safe)</strong></td>
+</tr>
+<tr>
+<td>Unwired <code>engine.py</code> / <code>store/manifest.py</code> dead code</td>
+<td style="text-align: right;"><code>~3,624 LOC</code> (<code>0</code> callers in <code>Tracker</code>)</td>
+<td style="text-align: right;"><strong><code>0 LOC</code></strong></td>
+</tr>
+<tr>
+<td><code>20-in / 15-out</code> warm run (<code>metadata_hot_path_profile.py</code>)</td>
+<td style="text-align: right;"><code>884 ms</code> (<code>3.78x</code> slower)</td>
+<td style="text-align: right;"><strong><code>&lt;= 230 ms</code> (<code>&gt;= 1.0x</code> as fast or faster)</strong></td>
+</tr>
+<tr>
+<td><code>find_matching_run</code> / <code>find_runs</code> SQL queries</td>
+<td style="text-align: right;"><code>33.9x</code> / <code>14.4x</code> faster</td>
+<td style="text-align: right;"><strong><code>33.9x</code> / <code>14.4x</code> faster (preserved)</strong></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="4-per-pr-implementation-review-stacked-pr-protocol">4. Per-PR Implementation, Review &amp; Stacked PR Protocol<a class="headerlink" href="#4-per-pr-implementation-review-stacked-pr-protocol" title="Permanent link">&para;</a></h2>
+<p>For each PR (<code>PR 1</code> -&gt; <code>PR 2</code> -&gt; <code>PR 3</code> -&gt; <code>PR 4</code>) sequentially inside <code>/Users/zaneedell/git/consist/.worktrees/v05-stack</code>:</p>
+<ol>
+<li><strong>Branching &amp; Stacking</strong>:</li>
+<li><code>PR 1</code>: branch <code>v0.5/pr1-native-duckdb</code> off <code>origin/main</code> (<code>35f9ac0</code>), open PR against <code>main</code>.</li>
+<li><code>PR 2</code>: branch <code>v0.5/pr2-value-models-digest</code> off <code>v0.5/pr1-native-duckdb</code>, open stacked PR targeting <code>v0.5/pr1-native-duckdb</code>.</li>
+<li><code>PR 3</code>: branch <code>v0.5/pr3-locations-witness-migrate</code> off <code>v0.5/pr2-value-models-digest</code>, open stacked PR targeting <code>v0.5/pr2-value-models-digest</code>.</li>
+<li><code>PR 4</code>: branch <code>v0.5/pr4-step-binding-ephemeral-docs</code> off <code>v0.5/pr3-locations-witness-migrate</code>, open stacked PR targeting <code>v0.5/pr3-locations-witness-migrate</code>.</li>
+<li><strong>Commit Discipline Per PR</strong>:</li>
+<li><strong>Commit 1</strong>: Initial implementation + test suite passing (<code>ruff check</code>, <code>ruff format --check</code>, <code>pytest</code>).</li>
+<li><strong>Three Parallel Independent Reviewers</strong> inspect the PR with distinct focuses:<ol>
+<li><strong>Correctness, Concurrency &amp; Edge-Case Reviewer</strong> (DuckDB transaction poisoning/cursors, <code>dlt</code> <code>search_path</code>, symlinks/mounts/HDF5/shapefiles, clean-venv without optional extras, Python 3.11 protocols).</li>
+<li><strong>Simplicity &amp; Architecture (<code>/ponytail</code>) Reviewer</strong> (enforces downward layer DAG, net LOC budget, zero 0-caller dead code, zero parallel abstractions, zero post-init <code>object.__setattr__</code> / <code>getattr</code> / <code>.__dict__.get</code>).</li>
+<li><strong>Empirical Performance &amp; Scale Challenger</strong> (runs <code>metadata_hot_path_profile.py</code>, <code>art.path</code>/<code>Coupler</code>/<code>dlt</code>/Ephemeral-mode microbenchmarks, and 100k scale query benchmarks A/B against <code>origin/main</code>).</li>
+</ol>
+</li>
+<li><strong>Commit 2 (and 1 commit per review round if needed)</strong>: Address all valid reviewer findings, re-verify tests/lint/benchmarks, push branch, and open/update the stacked GitHub PR (with zero references to internal design/plan docs in commits or PR descriptions).</li>
+</ol>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-circle-arrow-up" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m16 12-4-4-4 4M12 16V8"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 The Regents of the University of California, through Lawrence Berkeley National Laboratory
+
+    </div>
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/LBNL-UCB-STI/consist" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2026 Fonticons, Inc.--><path fill="currentColor" d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate":null,"base":"../../..","features":["announce.dismiss","content.action.view","content.code.annotate","content.code.copy","content.code.select","content.footnote.tooltips","content.tabs.link","content.tooltips","header.autohide","navigation.expand","navigation.footer","navigation.indexes","navigation.path","navigation.sections","navigation.tabs","navigation.top","navigation.tracking","search.highlight","toc.follow"],"search":"../../../assets/javascripts/workers/search.b6b7e04f.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":{"default":"latest","provider":"mike"}}</script>
+    
+    
+      <script src="../../../assets/javascripts/bundle.0df4f2d0.min.js"></script>
+      
+    
+  </body>
+</html>
