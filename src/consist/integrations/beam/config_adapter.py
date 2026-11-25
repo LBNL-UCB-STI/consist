@@ -648,7 +648,9 @@ class BeamConfigAdapter:
         )
         for ref in reference_identity.references:
             if ref.status.startswith("missing"):
-                if ref.status != "missing_ignored":
+                if ref.status != "missing_ignored" and (
+                    ref.status != "missing_optional" or ref.raw_value
+                ):
                     logging.warning(
                         "[Consist][BEAM] Missing referenced path for config key %s "
                         "(status=%s, policy=%s, canonical=%s): %s. "

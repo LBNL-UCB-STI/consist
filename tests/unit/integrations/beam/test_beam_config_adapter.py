@@ -311,6 +311,37 @@ def test_beam_canonicalize_artifacts_and_rows(tracker, tmp_path: Path, caplog):
     assert any("beam.agentsim.overridePath" in r.message for r in caplog.records)
 
 
+@pytest.mark.parametrize("value", ["", "   ", "missing.csv"])
+def test_beam_optional_reference_warns_only_when_configured(
+    tracker, tmp_path: Path, caplog, value
+):
+    policies = {
+        "beam.agentsim.agents.freight.carrierParkingFilePath": BeamReferencePolicy(
+            identity_policy="content_hash", required=False
+        ),
+        "beam.warmStart.initialLinkstatsFilePath": BeamReferencePolicy(
+            identity_policy="delegated_to_artifacts",
+            required=False,
+            delegated_artifact_keys=("linkstats_warmstart",),
+        ),
+    }
+    primary = _write_identity_config(tmp_path, dict.fromkeys(policies, value))
+    adapter = BeamConfigAdapter(primary_config=primary, reference_policies=policies)
+    canonical = adapter.discover([tmp_path], identity=tracker.identity)
+    with caplog.at_level(logging.WARNING):
+        result = adapter.canonicalize(
+            canonical, tracker=tracker, strict=True, plan_only=True
+        )
+
+    refs = {ref.config_key: ref for ref in result.identity.references}
+    for key, policy in policies.items():
+        ref = refs[key]
+        assert ref.status == "missing_optional"
+        assert ref.identity_policy == policy.identity_policy
+        assert ref.delegated_artifact_keys == policy.delegated_artifact_keys
+        assert (key in caplog.text) is bool(value.strip())
+
+
 def test_beam_canonicalize_discovers_gtfs_bundle_from_r5_directory(
     gtfs_tracker, tmp_path: Path
 ):
@@ -1042,13 +1073,13 @@ def test_beam_content_hash_file_presence_still_changes_identity(
     )
 
 
-def test_beam_missing_delegated_reference_strict_still_raises(tracker, tmp_path: Path):
+@pytest.mark.parametrize("missing_value", ["", "missing-scenario"])
+def test_beam_missing_delegated_reference_strict_still_raises(
+    tracker, tmp_path: Path, missing_value
+):
     config_root = tmp_path / "config"
     key = "beam.exchange.scenario.folder"
-    primary = _write_identity_config(
-        config_root,
-        {key: tmp_path / "missing-scenario"},
-    )
+    primary = _write_identity_config(config_root, {key: missing_value})
     adapter = BeamConfigAdapter(
         primary_config=primary,
         reference_policies={
